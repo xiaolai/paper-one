@@ -16,6 +16,8 @@
  * the anchoring and merge rules be tested without a DOM or a book.
  */
 
+import { compare } from 'foliate-js/epubcfi.js'
+
 /**
  * §01 gives marks two provenances and draws them differently: your own
  * highlight is a gold fill, the companion's is an amber underline. They are one
@@ -95,16 +97,23 @@ export async function bookIdFor(source: File | string): Promise<string> {
  * Sort by CFI, so the Notes list reads in book order rather than in the order
  * the reader happened to make the marks.
  *
- * Compared step by step with NUMBERS compared as numbers. Plain string order
- * looks close enough and is wrong exactly where a book gets long: it walks
- * digit by digit, so `/2/10` sorts before `/2/4` and chapter 10's marks appear
- * among chapter 4's. Any book with more than nine of anything hits it.
+ * The comparison is foliate-js's own `epubcfi.compare`, not one written here.
+ * Two attempts came before it and both were wrong:
  *
- * This is still not foliate's parser — it does not understand assertions, or
- * ranges, or the difference between a step and an offset. It does not need to:
- * every CFI here was produced by `view.getCFI` for a position in one book, and
- * for those, comparing numeric runs numerically and everything else as text is
- * document order. The parser is the answer if that ever stops being true.
+ *   Plain string order walks digit by digit, so `/2/10` sorts before `/2/4`
+ *   and chapter 10's marks appear among chapter 4's. Any book with more than
+ *   nine of anything hits it.
+ *
+ *   Natural order — numeric runs compared as numbers — fixes that and is still
+ *   wrong, because a CFI is not a string with numbers in it. It carries
+ *   ASSERTIONS: `/6/4[chap01ref]!/4` addresses the same place as `/6/4!/4`, and
+ *   the bracketed part must not participate in ordering. `view.getCFI`
+ *   generates assertions whenever the element it anchors to has an id, so this
+ *   is what real books produce, not an exotic case. Checked against
+ *   foliate-js's own test vectors, the hand-rolled version failed two of seven.
+ *
+ * It is a dependency we already ship, under MIT, exporting exactly this. There
+ * was never a reason to reimplement the spec beside it.
  */
 export function compareMarks(a: Mark, b: Mark): number {
   /* The SECTION first, because it is the one part of a mark's position that is
@@ -120,21 +129,26 @@ export function compareMarks(a: Mark, b: Mark): number {
   return order !== 0 ? order : a.createdAt - b.createdAt
 }
 
-/** Natural order over two CFIs: numeric runs numerically, the rest as text. */
+/**
+ * Order two CFIs, tolerating one that will not parse.
+ *
+ * Measured rather than assumed, because the obvious guess is wrong: a malformed
+ * STRING does not throw. `epubcfi.compare` parses `''`, `'not a cfi'` and
+ * `'epubcfi('` alike into a degenerate path that simply sorts first. Only a
+ * non-string throws, and `isMark` already refuses to load one of those.
+ *
+ * So the catch is not load-bearing today — it is a boundary guard for a
+ * comparator that is exported and sorts data coming out of storage, where one
+ * bad row must never take the whole Notes list down with it. Equal, so the
+ * pair falls through to creation time, which is what an unorderable pair has
+ * always done here.
+ */
 export function compareCfi(a: string, b: string): number {
-  const parts = (cfi: string) => cfi.split(/(\d+)/).filter((part) => part !== '')
-  const left = parts(a)
-  const right = parts(b)
-
-  for (let i = 0; i < Math.min(left.length, right.length); i += 1) {
-    const x = left[i] as string
-    const y = right[i] as string
-    if (x === y) continue
-    const bothNumeric = /^\d+$/.test(x) && /^\d+$/.test(y)
-    if (bothNumeric) return Number(x) - Number(y)
-    return x < y ? -1 : 1
+  try {
+    return compare(a, b)
+  } catch {
+    return 0
   }
-  return left.length - right.length
 }
 
 /** Every mark belonging to one book, in book order. */

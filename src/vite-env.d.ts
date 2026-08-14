@@ -22,6 +22,22 @@
  *
  * Upstream: https://github.com/johnfactotum/foliate-js
  */
+/**
+ * The CFI parser, imported by the marks store to ORDER anchors.
+ *
+ * Pure string work, no DOM — which is what lets `lib/marks.ts` use it and still
+ * be unit-tested without a browser environment. Declared narrowly: only the
+ * comparison is used, and widening this invites the rest of the reader engine
+ * into a module that is deliberately engine-agnostic.
+ */
+declare module 'foliate-js/epubcfi.js' {
+  /**
+   * Document order over two CFIs. Negative, zero or positive, like any
+   * comparator. Throws on input it cannot parse.
+   */
+  export function compare(a: string, b: string): number
+}
+
 declare module 'foliate-js/view.js' {
   export interface TocItem {
     readonly label: string

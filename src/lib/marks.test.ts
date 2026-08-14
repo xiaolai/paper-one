@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   MARKS_STORAGE_KEY,
   bookIdFor,
+  compareCfi,
   compareMarks,
   loadMarks,
   marginMarks,
@@ -89,6 +90,45 @@ describe('bookIdFor', () => {
     expect(await bookIdFor(new File(['aaaa'], 'book.pdf'))).not.toBe(
       await bookIdFor(new File(['bbbb'], 'book.pdf')),
     )
+  })
+})
+
+describe('compareCfi', () => {
+  /* Vectors from foliate-js's own `tests/epubcfi-tests.js` (MIT, John
+   * Factotum). They are here because a hand-rolled comparator passed five of
+   * them and failed two — both the ones carrying ASSERTIONS, which is what
+   * `view.getCFI` emits for any element with an id, so the failure was in
+   * ordinary books rather than exotic ones. Kept as a regression guard against
+   * anyone reimplementing this again. */
+  const cases: readonly [string, string, number][] = [
+    ['/6/4!/10', '/6/4!/10', 0],
+    ['/6/4!/2/3:0', '/6/4!/2', 1],
+    ['/6/4!/2/4/6/8/10/3:0', '/6/4!/4', -1],
+    ['/6/4[chap0^]!/1ref^^]!/4[body01^^]/10[para^]^,05^^]', '/6/4!/4/10', 0],
+    [
+      '/6/4[chap0^]!/1ref^^]!/4[body01^^],/10[para^]^,05^^],/15:10[foo^]]',
+      '/6/4!/4/12',
+      -1,
+    ],
+    ['/6/4', '/6/4!/2', -1],
+    ['/6/4!/2', '/6/4!/2!/2', -1],
+  ]
+
+  it('orders CFIs by document position, assertions and all', () => {
+    for (const [a, b, expected] of cases) {
+      expect(Math.sign(compareCfi(a, b))).toBe(Math.sign(expected))
+    }
+  })
+
+  it('never throws on an anchor that will not parse', () => {
+    /* Marks come out of storage, which is a trust boundary: one bad row must
+     * not take the whole Notes list down. Asserting "does not throw, returns a
+     * number" rather than a specific order, because where a malformed CFI sorts
+     * is foliate's business and not a promise Paper should pin. */
+    for (const bad of ['not a cfi', '', 'epubcfi(', 'epubcfi(/6/4', ' ']) {
+      expect(() => compareCfi(bad, 'epubcfi(/6/4!/2)')).not.toThrow()
+      expect(Number.isFinite(compareCfi(bad, 'epubcfi(/6/4!/2)'))).toBe(true)
+    }
   })
 })
 
