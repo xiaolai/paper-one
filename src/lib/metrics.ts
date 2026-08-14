@@ -137,11 +137,20 @@ export interface ProseGrid {
  *   2. the gutter, which holds the ruler hint
  *   3. the measure, only when there is nothing else left to give
  */
-export function proseGrid(stageInner: number): ProseGrid {
+export function proseGrid(stageInner: number, showMargin: boolean): ProseGrid {
   const gap = PROSE_GAP
-  let marginCol = MARGIN_COL
   let gutter = GUTTER
   let measure = MEASURE
+
+  /* The margin column reserves 250px for companion marks. Until there are
+   * marks to put there it collapses — but to the GUTTER's width, not to zero.
+   *
+   * Zero would only move the imbalance: the grid is centred as a whole, so a
+   * 56px gutter and its gap surviving on the left alone push the measure 44px
+   * right of the window's centre, exactly as 250px on the right pushed it 97px
+   * left. Mirroring the gutter puts the measure on the centre line and leaves
+   * the ruler hint its lane. */
+  let marginCol = showMargin ? MARGIN_COL : GUTTER
 
   // Two gaps are always in play: gutter|measure and measure|margin.
   let over = gutter + measure + marginCol + gap * 2 - stageInner

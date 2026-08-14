@@ -27,8 +27,9 @@ export function Reader({ state, dispatch, platform, book }: ReaderProps) {
   const windowWidth = useAvailableWidth()
   const available = windowWidth - (state.pane ? PANE_TRACK : 0)
 
-  // The stage is what is left after the pane, less its own padding.
-  const grid = proseGrid(available - STAGE_PADDING_X * 2)
+  // The stage is what is left after the pane, less its own padding. The margin
+  // column is only reserved once the book has marks to put in it.
+  const grid = proseGrid(available - STAGE_PADDING_X * 2, book.markCount > 0)
   const gridVars = {
     '--stage-pad-x': `${STAGE_PADDING_X}px`,
     '--track-gutter': `${grid.gutter}px`,

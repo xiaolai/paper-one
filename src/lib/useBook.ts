@@ -26,6 +26,15 @@ export interface BookState {
   /** The current spine item's document, for the ruler and selection. */
   readonly doc: Document | null
   readonly error: string | null
+  /**
+   * How many marks the current book has — highlights and pinned companion
+   * notes. Drives whether the reader reserves its margin column.
+   *
+   * Always 0 today: nothing writes marks yet. It is a field rather than a
+   * constant so the margin appears on its own once an annotation store exists,
+   * instead of the layout quietly staying collapsed forever.
+   */
+  readonly markCount: number
 }
 
 export interface Book extends BookState {
@@ -79,6 +88,7 @@ export function useBook(): Book {
     position,
     doc,
     error,
+    markCount: 0,
     open,
     close,
     setToc,
