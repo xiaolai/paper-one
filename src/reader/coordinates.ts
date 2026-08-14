@@ -111,27 +111,20 @@ export function rangeBoxInHost(range: Range, host: HTMLElement): HostRect | null
 }
 
 /**
- * The line box under a host-space y coordinate, measured from real text.
+ * The line box under a point, in the BOOK's own viewport coordinates.
  *
  * The ruler cannot assume a constant 34px step: the handoff warns that
  * headings, images, block quotes and footnotes sit off-grid regardless of what
  * is injected, so the band has to snap to a rect that actually exists. Returns
  * null when the point is not over text, which is the caller's cue to leave the
  * band where it was rather than jump it to the top of the document.
+ *
+ * Book space rather than host space because the band itself now lives inside
+ * the book document — see `rulerBand.ts`. The host-space rect the gutter hint
+ * needs is this rect put through `hostFromBookRect`, so both come from one
+ * measurement instead of the document being probed twice per pointer move.
  */
-export function lineRectAt(
-  doc: Document,
-  host: HTMLElement,
-  hostY: number,
-  hostX: number,
-): HostRect | null {
-  const offset = frameOffset(doc, host)
-  if (!offset || offset.scaleY === 0 || offset.scaleX === 0) return null
-
-  // Back into the book document's own viewport coordinates.
-  const bookX = (hostX - offset.dx) / offset.scaleX
-  const bookY = (hostY - offset.dy) / offset.scaleY
-
+export function lineRectInBook(doc: Document, bookX: number, bookY: number): DOMRect | null {
   const caret = caretRangeAt(doc, bookX, bookY)
   if (!caret) return null
 
@@ -142,16 +135,23 @@ export function lineRectAt(
   const lineRange = doc.createRange()
   lineRange.selectNodeContents(node)
 
-  let best: DOMRect | null = null
   for (const rect of Array.from(lineRange.getClientRects())) {
-    if (bookY >= rect.top && bookY <= rect.bottom) {
-      best = rect
-      break
-    }
+    if (bookY >= rect.top && bookY <= rect.bottom) return rect
   }
-  if (!best) return null
-  return translate(best, offset)
+  return null
 }
+
+/** Put a rect measured in the book's viewport into host coordinates. */
+export function hostFromBookRect(
+  rect: DOMRect,
+  doc: Document,
+  host: HTMLElement,
+): HostRect | null {
+  const offset = frameOffset(doc, host)
+  if (!offset) return null
+  return translate(rect, offset)
+}
+
 
 /**
  * `caretRangeFromPoint` is the WebKit spelling and `caretPositionFromPoint`

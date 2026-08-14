@@ -1,42 +1,29 @@
-/* §12 puts the band at layer 0, BEHIND the text. That is achievable when the
- * prose is host markup, as it was in the prototype — it is not here.
+/* The BAND is not here any more. §12 puts it at layer 0 — behind the text —
+ * which the host cannot reach at any z-index: the book is an iframe whose
+ * document paints an opaque background, so anything drawn behind it is simply
+ * not visible, and the band's parent (`.gutter`) is a stacking context besides.
+ * It used to be drawn ABOVE the text and tinted with `mix-blend-mode: multiply`
+ * to compensate. It is now injected into the book document, where a negative
+ * z-index puts it genuinely underneath — see `rulerBand.ts` and the
+ * `.paper-ruler-band` rule in `bookCss.ts`.
  *
- * Two things block it: the band's parent (`.gutter`) is a z-index:1 stacking
- * context, so a z-index:0 child can never paint below a sibling of that
- * parent; and the book is an iframe whose document paints an opaque
- * background, so anything behind it is invisible regardless of z-index.
- *
- * So the band is drawn ABOVE the text and tints it instead, using multiply so
- * the glyphs keep their contrast rather than being veiled. The faithful fix is
- * to inject the band into the book document beneath its text; that belongs
- * with the annotation layer, which needs the same cross-document machinery. */
-.band {
-  position: absolute;
-  z-index: var(--z-ruler-hint);
-  mix-blend-mode: multiply;
-  background: var(--wash);
-  border-radius: 3px;
-  pointer-events: none;
-  transition: transform var(--motion-ruler);
-}
-
-/* §08 keeps the ruler track under reduced motion, because it is a reading aid
- * rather than decoration — this deliberately overrides the global rule. */
-@media (prefers-reduced-motion: reduce) {
-  .band {
-    transition-duration: 90ms !important;
-  }
-}
+ * The hint stays here. It is chrome BESIDE the text, it belongs in the gutter
+ * the book's iframe does not cover, and it has to be clickable. */
 
 /* §12 layer 8: the hint lives in the gutter, outside the text. */
 .hint {
   position: absolute;
   z-index: var(--z-ruler-hint);
   left: 0;
+  /* Wraps inside the gutter rather than running out of it. The lane is 56px
+   * and this string is about twice that at 11px, so `nowrap` put it straight
+   * across the first words of the line the ruler was pointing at — the one
+   * place it must not cover. */
+  right: 0;
   font-size: 11px;
   line-height: 1.4;
   color: var(--muted);
-  white-space: nowrap;
+  text-wrap: pretty;
   cursor: pointer;
   /* The gutter lane is pointer-events:none so the book keeps its clicks; the
    * hint is the one thing in there that is interactive. */

@@ -26,14 +26,16 @@ interface BookColours {
   markRule: string
   /** §01's companion hue, darkened per theme to clear 4.5:1 on its own tint. */
   amber: string
+  /** The reading ruler's band. `--wash` — one step off the page, never a tint. */
+  band: string
 }
 
 const BOOK_COLOURS: Record<Theme, BookColours> = {
-  paper: { ink: '#17191B', surface: '#FFFFFF', accent: '#1B3A6B', mark: '#F3E6C0', markRule: '#E0BE55', amber: '#9E5A16' },
-  slate: { ink: '#1C2022', surface: '#DFE1DE', accent: '#23456F', mark: '#DCCB92', markRule: '#B99B3F', amber: '#8A4C11' },
-  sepia: { ink: '#2B2117', surface: '#F8F0E1', accent: '#2C5578', mark: '#EEDBA6', markRule: '#C9A44E', amber: '#985614' },
-  sage: { ink: '#1B2419', surface: '#DDE6D8', accent: '#2A4F6B', mark: '#D8CE8C', markRule: '#AE9A3C', amber: '#8F5013' },
-  night: { ink: '#E9EAE8', surface: '#16191C', accent: '#8FB4E8', mark: '#4A3B18', markRule: '#8A6E2C', amber: '#D9A25E' },
+  paper: { ink: '#17191B', surface: '#FFFFFF', accent: '#1B3A6B', mark: '#F3E6C0', markRule: '#E0BE55', amber: '#9E5A16', band: '#F2F3F1' },
+  slate: { ink: '#1C2022', surface: '#DFE1DE', accent: '#23456F', mark: '#DCCB92', markRule: '#B99B3F', amber: '#8A4C11', band: '#CBCFCA' },
+  sepia: { ink: '#2B2117', surface: '#F8F0E1', accent: '#2C5578', mark: '#EEDBA6', markRule: '#C9A44E', amber: '#985614', band: '#EBDFC9' },
+  sage: { ink: '#1B2419', surface: '#DDE6D8', accent: '#2A4F6B', mark: '#D8CE8C', markRule: '#AE9A3C', amber: '#8F5013', band: '#C7D4C1' },
+  night: { ink: '#E9EAE8', surface: '#16191C', accent: '#8FB4E8', mark: '#4A3B18', markRule: '#8A6E2C', amber: '#D9A25E', band: '#1E2226' },
 }
 
 /**
@@ -99,6 +101,20 @@ html {
 
 body {
   margin: 0;
+  /* The containing block for the ruler's band. foliate centres the measure by
+   * giving body its own width and auto side margins, so anchoring the band to
+   * body is what sizes it to the text column. Without this, body is static and
+   * the band resolves its insets against the viewport instead — spanning the
+   * full width of the scroller and running out past the measure on both sides. */
+  position: relative;
+  /* Transparent so the reading ruler's band is visible beneath the text.
+   * The band is a negative-z-index child of body, and negative descendants
+   * paint BEFORE the backgrounds of in-flow blocks — so a body background of
+   * its own (which plenty of EPUBs set) would cover the band completely. The
+   * page colour lives on the html rule above, so nothing is lost by clearing
+   * it here. Note: no backticks in this file's CSS comments — it is a template
+   * literal, and one would end the string. */
+  background: transparent;
   font-family: ${READING_STACK};
   font-size: ${step.size}px;
   line-height: ${step.line}px;
@@ -149,6 +165,34 @@ img, svg, video {
 blockquote {
   margin-inline: calc(var(--paper-line) * 0.75);
   font-style: italic;
+}
+
+/* §12 layer 0 — the reading ruler's band, BEHIND the text.
+ *
+ * z-index: -1 is what puts it there: negative descendants paint after the
+ * stacking context's own background and before in-flow content. Drawn from the
+ * host it could not reach this layer at all, because the book's document paints
+ * an opaque background over anything behind the iframe.
+ *
+ * Inset slightly past the measure on both sides so it reads as a band around
+ * the line rather than a box clipped to the glyphs.
+ *
+ * §08 keeps the ruler's track under reduced motion — it is a reading aid, not
+ * decoration — so the transition is shortened there rather than removed. */
+.paper-ruler-band {
+  position: absolute;
+  z-index: -1;
+  inset-inline: -10px;
+  background: ${c.band};
+  border-radius: 3px;
+  pointer-events: none;
+  transition: top 90ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .paper-ruler-band {
+    transition-duration: 90ms;
+  }
 }
 
 /* §01 Marks: your own highlights are a gold fill in light themes and a rule in
