@@ -170,6 +170,7 @@ export function Reader({
                 <PdfView
                   file={book.source}
                   generation={book.generation}
+                  measure={measureForStep(state.stepIdx)}
                   onToc={book.setToc}
                   onRelocate={book.setPosition}
                   onMeta={book.setMeta}

@@ -116,6 +116,34 @@ export async function readPdfMeta(doc: PdfDocument, fallback: string): Promise<B
 }
 
 /**
+ * One page's text.
+ *
+ * NOT `page.getTextContent()`, which is the obvious call and does not work
+ * here: it async-iterates a ReadableStream internally, and WebKit does not
+ * implement async iteration on streams. It throws
+ * "undefined is not a function (near '...value of readableStream...')" on
+ * every page, which — swallowed — looks exactly like a book with no text in it.
+ *
+ * Draining the stream with an explicit reader is the same thing pdf.js's own
+ * TextLayer does, which is why the selectable text layer worked on these pages
+ * while search found nothing on any of them. Paper ships on WebKit everywhere
+ * except Windows, so this is the load-bearing path, not a fallback.
+ */
+async function pageText(doc: PdfDocument, pageNumber: number): Promise<string> {
+  const page = await doc.getPage(pageNumber)
+  const reader = page.streamTextContent().getReader()
+  let text = ''
+  for (;;) {
+    const { value, done } = await reader.read()
+    if (done) break
+    for (const item of value?.items ?? []) {
+      if ('str' in item) text += `${item.str} `
+    }
+  }
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+/**
  * Every page's text, for search.
  *
  * pdf.js ships a find controller, but it is bound to its own viewer's DOM and
@@ -135,12 +163,12 @@ export async function* searchPdf(
     if (signal.aborted) return
     let text: string
     try {
-      const content = await doc.getPage(page).then((p) => p.getTextContent())
-      text = content.items
-        .map((item) => ('str' in item ? item.str : ''))
-        .join(' ')
-        .replace(/\s+/g, ' ')
-    } catch {
+      text = await pageText(doc, page)
+    } catch (cause) {
+      // A page whose text cannot be read is skipped rather than ending the
+      // search — but it says so. Swallowing this made a search that failed on
+      // every page indistinguishable from one that found nothing.
+      console.error(`Paper: could not read text on page ${page}`, cause)
       continue
     }
 

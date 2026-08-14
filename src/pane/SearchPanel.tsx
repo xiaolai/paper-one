@@ -122,9 +122,13 @@ export function SearchPanel({ book }: SearchPanelProps) {
               {status === 'searching' ? ' · searching…' : ''}
             </span>
           </div>
-          {hits.map((hit) => (
+          {/* Keyed by position as well as anchor. An EPUB CFI is unique per
+              hit, but a PDF's anchor is its page number — several matches on
+              one page share it, and React collapses the duplicates so only the
+              last of them renders. */}
+          {hits.map((hit, index) => (
             <button
-              key={hit.cfi}
+              key={`${hit.cfi}:${index}`}
               type="button"
               className={styles.result}
               onClick={() => book.goTo(hit.cfi)}
