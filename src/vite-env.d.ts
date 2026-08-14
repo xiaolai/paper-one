@@ -124,7 +124,20 @@ declare module 'foliate-js/view.js' {
     next(distance?: number): Promise<void>
     goLeft(): Promise<void>
     goRight(): Promise<void>
+    /**
+     * Resolves `annotation.value` (a CFI) and draws it, or erases it when
+     * `remove` is true. Async upstream; nothing here awaits it, because the
+     * only outcome is a drawing side effect.
+     */
     addAnnotation(annotation: unknown, remove?: boolean): void
+    /**
+     * The CFI for a range within a spine item, or the section's own base CFI
+     * when `range` is omitted. This is how a live selection becomes a durable
+     * anchor — an offset into the rendered layout would not survive a reflow.
+     */
+    getCFI(index: number, range?: Range): string
+    /** Clears the selection in every rendered document. */
+    deselect(): void
     /** Async generator over the whole book. CFIs are navigable via `goTo`. */
     search(options: SearchOptions): AsyncGenerator<SearchYield, void, unknown>
     readonly renderer: Renderer

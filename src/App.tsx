@@ -3,6 +3,7 @@ import { applyMetrics } from './lib/metrics'
 import { usePlatform, usePrefersDark } from './lib/platform'
 import { useAppState } from './lib/state'
 import { useBook } from './lib/useBook'
+import { useMarks } from './lib/useMarks'
 import { BOOKS, coverTint } from './data/fixtures'
 import { TitleBar } from './shell/TitleBar'
 import { WindowShell } from './shell/WindowShell'
@@ -16,6 +17,9 @@ export function App() {
   /* The open book lives here, not in the reader: Contents and Companion read
    * from it and they are panels of the side pane now. */
   const book = useBook()
+  /* Marks outlive the open book — the Notes panel browses every book's — so the
+   * store is keyed by book rather than owned by one. */
+  const marks = useMarks(book.bookId)
 
   useEffect(() => {
     applyMetrics(document.documentElement, platform)
@@ -69,9 +73,23 @@ export function App() {
           coverTint={book.source ? 'var(--tint-b)' : coverTint(0)}
         />
       }
-      pane={<SidePane state={state} dispatch={dispatch} book={book} onGoTo={book.goTo} />}
+      pane={
+        <SidePane
+          state={state}
+          dispatch={dispatch}
+          book={book}
+          marks={marks}
+          onGoTo={book.goTo}
+        />
+      }
     >
-      <Reader state={state} dispatch={dispatch} platform={platform} book={book} />
+      <Reader
+        state={state}
+        dispatch={dispatch}
+        platform={platform}
+        book={book}
+        marks={marks}
+      />
     </WindowShell>
   )
 }

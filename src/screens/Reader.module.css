@@ -78,14 +78,29 @@
  * and the padding below equalises the outer tracks — without it, a widened
  * margin would drag the centred text off the measure.
  */
+/*
+ * MARGIN, not padding, for the bleed.
+ *
+ * The book is a `position: absolute; inset: 0` child of this element, and an
+ * absolutely positioned box resolves its insets against the containing block's
+ * PADDING box — so padding here does not constrain it by a single pixel. The
+ * book stayed the full width of the grid, foliate centred the measure in that,
+ * and once marks widened the margin column the text sat 72px right of its own
+ * track, overlapping the notes. A margin shrinks this element's own box, which
+ * the absolute child does follow.
+ *
+ * This is why the asymmetric path had to be checked in the running app: the
+ * arithmetic in `proseBleed` was right, and asserted by unit tests, while the
+ * CSS carrying it out did nothing.
+ */
 .text {
   grid-column: 1 / -1;
   grid-row: 1;
   min-width: 0;
   min-height: 0;
   position: relative;
-  padding-inline-start: var(--text-bleed-start, 0);
-  padding-inline-end: var(--text-bleed-end, 0);
+  margin-inline-start: var(--text-bleed-start, 0);
+  margin-inline-end: var(--text-bleed-end, 0);
 }
 
 .margin {

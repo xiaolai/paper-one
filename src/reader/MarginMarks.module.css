@@ -1,0 +1,69 @@
+/* §03 margin marks.
+ *
+ * Absolutely positioned within the margin track, which the reader gives
+ * `position: relative` and `overflow: hidden`. Tops come from a translated
+ * Range rect, so they are already in the track's coordinate space.
+ *
+ * The track itself is `pointer-events: none` so drags over it still select the
+ * book underneath; each mark turns them back on for itself.
+ */
+
+.mark {
+  position: absolute;
+  inset-inline: 0;
+  display: block;
+  width: 100%;
+  padding: 4px 8px;
+  border: none;
+  border-inline-start: 2px solid var(--line-3);
+  border-radius: 0 var(--radius-chip, 6px) var(--radius-chip, 6px) 0;
+  background: none;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: start;
+  cursor: pointer;
+  pointer-events: auto;
+  transition: background var(--motion-chrome), color var(--motion-chrome);
+}
+
+.mark:hover {
+  background: var(--wash);
+  color: var(--ink-2);
+}
+
+.mark:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* §01: the companion's provenance is amber in every theme, Night included. */
+.mark[data-kind='companion'] {
+  border-inline-start-color: var(--amber-line);
+  color: var(--amber);
+}
+
+.mark[data-kind='companion']:hover {
+  background: var(--amber-bg);
+}
+
+.kind {
+  display: block;
+  margin-bottom: 2px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--amber);
+}
+
+/* Two lines, then ellipsis. A margin note is a pointer to the note, not the
+ * note itself — the full text is one click away in the Notes panel, and a
+ * column of eight-line notes would compete with the prose it annotates. */
+.body {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}

@@ -11,9 +11,18 @@
  * There are two distinct jobs, and conflating them is the mistake to avoid:
  *
  *   1. Marks ON the text — highlights, the companion's amber underline. These
- *      belong to foliate-js's Overlayer, which draws an SVG INSIDE the book
- *      document and therefore shares the text's coordinate space for free.
- *      Do not reimplement them here.
+ *      belong to foliate-js's Overlayer, which keeps an SVG sized and
+ *      positioned to the book's viewport and draws into it from
+ *      `range.getClientRects()`, so it shares the text's coordinate space for
+ *      free. Do not reimplement them here.
+ *
+ *      Worth knowing, because it is easy to assume otherwise and be wrong in a
+ *      way nothing reports: that SVG is NOT inside the book document. It lives
+ *      in the view's shadow tree in the HOST document, beside the iframe. So
+ *      CSS injected into the book cannot style it — a custom property meant for
+ *      it has to be declared on the host root, from where it inherits through
+ *      the shadow boundary. Setting one in `bookCss` resolves to nothing and
+ *      falls back to the Overlayer's own default, silently.
  *
  *   2. Chrome BESIDE the text — the selection popup, margin companion marks,
  *      the ruler's alignment to a real line. These live in the host document

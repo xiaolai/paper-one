@@ -103,47 +103,11 @@ export const FALLBACK_TOC: readonly TocEntry[] = [
   { label: '15 · Chowder', current: false, marks: 0 },
 ]
 
-export type NoteKind = 'Highlight' | 'AI'
-
-export interface Note {
-  readonly body: string
-  readonly book: string
-  readonly at: string
-  readonly kind: NoteKind
-  readonly comment: string
-}
-
-export const NOTES: readonly Note[] = [
-  {
-    body: 'Whenever I find myself growing grim about the mouth; whenever it is a damp, drizzly November in my soul…',
-    book: 'Moby-Dick', at: 'Ch. 1 · ¶2', kind: 'Highlight',
-    comment: 'The melancholy is seasonal weather, not illness — worth tracking how often Melville returns to this.',
-  },
-  {
-    body: '“Call me Ishmael” leaves the name provisional — the narrator offers a handle, not an identity.',
-    book: 'Moby-Dick', at: 'Ch. 1 · ¶1', kind: 'AI',
-    comment: 'Generated while reading. Cites 3 passages in Chapter 1.',
-  },
-  {
-    body: 'It is not from the benevolence of the butcher, the brewer, or the baker that we expect our dinner…',
-    book: 'The Wealth of Nations', at: 'Bk. I · Ch. 2', kind: 'Highlight',
-    comment: 'The self-interest argument in its original, narrower form.',
-  },
-  {
-    body: 'Attention weights are computed as a scaled dot product, then normalised across the sequence.',
-    book: 'Attention Is All You Need', at: 'p. 4 · §3.2', kind: 'AI',
-    comment: 'Simplified restatement of the scaled dot-product section.',
-  },
-  {
-    body: 'Confine yourself to the present.',
-    book: 'Meditations', at: 'Book VII', kind: 'Highlight', comment: '',
-  },
-  {
-    body: 'The tone shifts sharply after the sermon — from documentary to prophetic.',
-    book: 'Moby-Dick', at: 'Ch. 9', kind: 'AI',
-    comment: 'Pattern noticed across chapters 7–9.',
-  },
-]
+/* The NOTES fixture that used to live here is gone. Notes now reads the real
+ * annotation store (`src/lib/marks.ts`), so the fixture was showing six marks
+ * from four books the reader does not have — and, worse, would have gone on
+ * showing them beside their own. Its `NoteKind` of 'Highlight' | 'AI' also
+ * predated §15, which is explicit that the word is companion, never ai. */
 
 export interface SearchResult {
   readonly book: string

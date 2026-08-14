@@ -3,8 +3,8 @@ import type { Renderer, TocItem, View } from 'foliate-js/view.js'
 import type { Theme } from '../lib/state'
 import { measureForStep } from '../lib/metrics'
 import type { BookMeta, BookNavigator, ReaderPosition } from '../lib/useBook'
-import { bookCss } from './bookCss'
-import { ReaderSession } from './session'
+import { bookCss, markPalette } from './bookCss'
+import { ReaderSession, type MarkAnchor, type SelectionSnapshot } from './session'
 
 export interface FoliateViewProps {
   /**
@@ -27,6 +27,17 @@ export interface FoliateViewProps {
   onError: (generation: number, message: string) => void
   /** Publishes navigation once the book is parsed; null on teardown. */
   onNavigator: (navigator: BookNavigator | null) => void
+  /**
+   * The open book's marks. Read through a ref rather than depended on, so
+   * making a mark redraws the overlay without reopening the book.
+   */
+  marks: readonly MarkAnchor[]
+  /** The book's selection, or null when it collapses. */
+  onSelection: (selection: SelectionSnapshot | null) => void
+  /** A mark was drawn, with the live Range it resolved to. */
+  onMarkDrawn: (cfi: string, range: Range) => void
+  /** A drawn mark was clicked, identified by its CFI. */
+  onMarkActivated: (cfi: string) => void
 }
 
 interface Settings {
@@ -93,6 +104,10 @@ export function FoliateView({
   onMeta,
   onError,
   onNavigator,
+  marks,
+  onSelection,
+  onMarkDrawn,
+  onMarkActivated,
 }: FoliateViewProps) {
   const hostRef = useRef<HTMLDivElement>(null)
   const sessionRef = useRef<ReaderSession | null>(null)
@@ -102,8 +117,34 @@ export function FoliateView({
 
   /* Callbacks and settings live in refs so changing one does not tear the book
    * down and reopen it — reopening loses the reading position. */
-  const handlers = useRef({ onToc, onRelocate, onDocument, onMeta, onError, onNavigator })
-  handlers.current = { onToc, onRelocate, onDocument, onMeta, onError, onNavigator }
+  const handlers = useRef({
+    onToc,
+    onRelocate,
+    onDocument,
+    onMeta,
+    onError,
+    onNavigator,
+    onSelection,
+    onMarkDrawn,
+    onMarkActivated,
+  })
+  handlers.current = {
+    onToc,
+    onRelocate,
+    onDocument,
+    onMeta,
+    onError,
+    onNavigator,
+    onSelection,
+    onMarkDrawn,
+    onMarkActivated,
+  }
+
+  /* The same reason as the handlers, and one more: the session reads this back
+   * whenever a section's overlay is built, which happens as the reader scrolls
+   * — long after any value captured at startup went stale. */
+  const marksRef = useRef(marks)
+  marksRef.current = marks
 
   const settings = useRef<Settings>({ stepIdx, theme, paginated })
   settings.current = { stepIdx, theme, paginated }
@@ -124,6 +165,11 @@ export function FoliateView({
       onMeta: (meta) => h.onMeta(gen, meta),
       onError: (message) => h.onError(gen, message),
       onNavigator: (navigator) => h.onNavigator(navigator),
+      onSelection: (selection) => handlers.current.onSelection(selection),
+      onMarkDrawn: (cfi, range) => handlers.current.onMarkDrawn(cfi, range),
+      onMarkActivated: (cfi) => handlers.current.onMarkActivated(cfi),
+      getMarks: () => marksRef.current,
+      getPalette: () => markPalette(settings.current.theme),
     })
     sessionRef.current = session
 
@@ -134,6 +180,13 @@ export function FoliateView({
         createView: async () => {
           await import('foliate-js/view.js')
           return document.createElement('foliate-view')
+        },
+        // Same module graph as the view, so this costs no extra round trip —
+        // and having it before the first paint is what stops a section
+        // rendering once with no marks and then again with them.
+        loadPainters: async () => {
+          const { Overlayer } = await import('foliate-js/overlayer.js')
+          return { highlight: Overlayer.highlight, underline: Overlayer.underline }
         },
         applySettings: (view: View) => applySettings(view.renderer, settings.current),
       })
@@ -151,9 +204,17 @@ export function FoliateView({
    * renderer does not exist until startup resolves — an effect keyed on `file`
    * alone runs once, finds nothing, and never runs again. */
   useEffect(() => {
-    const renderer = sessionRef.current?.view?.renderer
-    if (!renderer || ready === 0) return
+    const session = sessionRef.current
+    const renderer = session?.view?.renderer
+    if (!session || !renderer || ready === 0) return
     applySettings(renderer, { stepIdx, theme, paginated })
+    /* A theme change reaches the book through `setStyles`, which restyles the
+     * document WITHOUT rebuilding the section — so no `create-overlay` fires
+     * and the marks keep the colour they were painted in. Changing the step or
+     * the flow does rebuild, and re-attaching an already-attached mark replaces
+     * it rather than stacking a second copy, so this is safe to run for all
+     * three rather than only for the one that needs it. */
+    session.redrawMarks()
   }, [stepIdx, theme, paginated, ready])
 
   return <div ref={hostRef} style={{ position: 'absolute', inset: 0 }} />

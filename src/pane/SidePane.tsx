@@ -10,6 +10,7 @@ import {
 import { ICON } from '../lib/metrics'
 import type { AppDispatch, AppState, PaneId } from '../lib/state'
 import type { Book } from '../lib/useBook'
+import type { MarkStore } from '../lib/useMarks'
 import { Companion } from './Companion'
 import { Contents } from './Contents'
 import { Notes } from './Notes'
@@ -48,10 +49,11 @@ export interface SidePaneProps {
   state: AppState
   dispatch: AppDispatch
   book: Book
+  marks: MarkStore
   onGoTo?: (target: string) => void
 }
 
-export function SidePane({ state, dispatch, book, onGoTo }: SidePaneProps) {
+export function SidePane({ state, dispatch, book, marks, onGoTo }: SidePaneProps) {
   /* Falls back to the last pane rather than unmounting. The slot stays mounted
    * at zero width and inert while closed, so keeping the panel rendered is what
    * preserves its scroll position, note filter and search query across a
@@ -78,7 +80,13 @@ export function SidePane({ state, dispatch, book, onGoTo }: SidePaneProps) {
           />
         )}
 
-        {pane === 'notes' && <Notes />}
+        {pane === 'notes' && (
+          <Notes
+            marks={marks}
+            bookId={book.bookId}
+            {...(onGoTo ? { onGoTo } : {})}
+          />
+        )}
 
         {pane === 'search' && <SearchPanel book={book} />}
 

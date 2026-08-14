@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
 import type { TocItem } from 'foliate-js/view.js'
-import type { SearchHit } from '../reader/session'
+import type { MarkAnchor, SearchHit, SessionNavigator } from '../reader/session'
+import { bookIdFor } from './marks'
 
 export type { SearchHit }
 
@@ -29,14 +30,22 @@ export interface BookMeta {
 /** A File when picked or dropped; a URL for a book already on disk. */
 export type BookSource = File | string | null
 
-/** Navigation and search into the open book, published once it is parsed. */
-export interface BookNavigator {
-  goTo: (target: string) => void
-  search: (query: string, signal: AbortSignal) => AsyncGenerator<SearchHit>
-}
+/**
+ * Everything the host can ask of a parsed book, published once it is.
+ *
+ * The same shape the session publishes: this is a re-export rather than a
+ * narrower copy because every method on it has a caller in the host, and a
+ * hand-maintained subset drifts the moment one is added.
+ */
+export type BookNavigator = SessionNavigator
 
 export interface BookState {
   readonly source: BookSource
+  /**
+   * Stable identity for the open book, or null when none is open. Marks are
+   * keyed by it, which is what lets them be found again on the next open.
+   */
+  readonly bookId: string | null
   /**
    * Increments on every `open`. Callbacks carry the generation they were
    * created under, so a `load` or `relocate` arriving late from a torn-down
@@ -49,15 +58,6 @@ export interface BookState {
   /** The current spine item's document, for the ruler and selection. */
   readonly doc: Document | null
   readonly error: string | null
-  /**
-   * How many marks the current book has — highlights and pinned companion
-   * notes. Drives whether the reader reserves its margin column.
-   *
-   * Always 0 today: nothing writes marks yet. It is state rather than a
-   * constant so the margin appears on its own once an annotation store exists,
-   * instead of the layout quietly staying collapsed forever.
-   */
-  readonly markCount: number
 }
 
 export interface Book extends BookState {
@@ -67,8 +67,12 @@ export interface Book extends BookState {
   goTo: (target: string) => void
   /** Search the open book. Yields nothing until a book is parsed. */
   search: (query: string, signal: AbortSignal) => AsyncGenerator<SearchHit>
+  /** Draw a mark in the open book. No-op before the renderer is up. */
+  drawMark: (anchor: MarkAnchor) => void
+  eraseMark: (anchor: MarkAnchor) => void
+  /** Clear the book's own text selection. */
+  deselect: () => void
   setNavigator: (navigator: BookNavigator | null) => void
-  setMarkCount: (count: number) => void
   /** Renderer callbacks. Each takes the generation it was issued under. */
   setToc: (generation: number, toc: readonly TocItem[]) => void
   setPosition: (generation: number, position: ReaderPosition) => void
@@ -107,7 +111,6 @@ export function useBook(): Book {
   const [meta, setMetaState] = useState<BookMeta | null>(null)
   const [doc, setDocState] = useState<Document | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [markCount, setMarkCount] = useState(0)
 
   const navigatorRef = useRef<BookNavigator | null>(null)
   /* Read by the guards below. A ref, not `loaded.generation`, because a stale
@@ -121,7 +124,6 @@ export function useBook(): Book {
     setMetaState(null)
     setDocState(null)
     setError(null)
-    setMarkCount(0)
   }, [])
 
   const open = useCallback(
@@ -147,13 +149,13 @@ export function useBook(): Book {
   return useMemo<Book>(
     () => ({
       source: loaded.source,
+      bookId: loaded.source === null ? null : bookIdFor(loaded.source),
       generation: loaded.generation,
       toc,
       position,
       meta,
       doc,
       error,
-      markCount,
       open,
       close,
       goTo: (target) => navigatorRef.current?.goTo(target),
@@ -162,10 +164,12 @@ export function useBook(): Book {
         if (!nav) return
         yield* nav.search(query, signal)
       },
+      drawMark: (anchor) => navigatorRef.current?.drawMark(anchor),
+      eraseMark: (anchor) => navigatorRef.current?.eraseMark(anchor),
+      deselect: () => navigatorRef.current?.deselect(),
       setNavigator: (navigator) => {
         navigatorRef.current = navigator
       },
-      setMarkCount,
       setToc: (generation, next) => {
         if (current(generation)) setTocState(next)
       },
@@ -182,6 +186,6 @@ export function useBook(): Book {
         if (current(generation)) setError(message)
       },
     }),
-    [loaded, toc, position, meta, doc, error, markCount, open, close, current],
+    [loaded, toc, position, meta, doc, error, open, close, current],
   )
 }

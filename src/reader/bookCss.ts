@@ -18,12 +18,47 @@ import { READING_STEPS } from '../lib/metrics'
 
 /** Token values per theme, mirrored from tokens.css for the book document,
  *  which cannot see the host's custom properties across the iframe boundary. */
-const BOOK_COLOURS: Record<Theme, { ink: string; surface: string; accent: string; mark: string; markRule: string }> = {
-  paper: { ink: '#17191B', surface: '#FFFFFF', accent: '#1B3A6B', mark: '#F3E6C0', markRule: '#E0BE55' },
-  slate: { ink: '#1C2022', surface: '#DFE1DE', accent: '#23456F', mark: '#DCCB92', markRule: '#B99B3F' },
-  sepia: { ink: '#2B2117', surface: '#F8F0E1', accent: '#2C5578', mark: '#EEDBA6', markRule: '#C9A44E' },
-  sage: { ink: '#1B2419', surface: '#DDE6D8', accent: '#2A4F6B', mark: '#D8CE8C', markRule: '#AE9A3C' },
-  night: { ink: '#E9EAE8', surface: '#16191C', accent: '#8FB4E8', mark: '#4A3B18', markRule: '#8A6E2C' },
+interface BookColours {
+  ink: string
+  surface: string
+  accent: string
+  mark: string
+  markRule: string
+  /** §01's companion hue, darkened per theme to clear 4.5:1 on its own tint. */
+  amber: string
+}
+
+const BOOK_COLOURS: Record<Theme, BookColours> = {
+  paper: { ink: '#17191B', surface: '#FFFFFF', accent: '#1B3A6B', mark: '#F3E6C0', markRule: '#E0BE55', amber: '#9E5A16' },
+  slate: { ink: '#1C2022', surface: '#DFE1DE', accent: '#23456F', mark: '#DCCB92', markRule: '#B99B3F', amber: '#8A4C11' },
+  sepia: { ink: '#2B2117', surface: '#F8F0E1', accent: '#2C5578', mark: '#EEDBA6', markRule: '#C9A44E', amber: '#985614' },
+  sage: { ink: '#1B2419', surface: '#DDE6D8', accent: '#2A4F6B', mark: '#D8CE8C', markRule: '#AE9A3C', amber: '#8F5013' },
+  night: { ink: '#E9EAE8', surface: '#16191C', accent: '#8FB4E8', mark: '#4A3B18', markRule: '#8A6E2C', amber: '#D9A25E' },
+}
+
+/**
+ * The colours the Overlayer paints marks with, for one theme.
+ *
+ * Concrete values rather than custom properties: the Overlayer sets `fill` as a
+ * presentation ATTRIBUTE, and `var()` is not valid in one — marks would draw
+ * black. Derived from the same table as the injected stylesheet so the drawn
+ * mark and the CSS one cannot drift apart.
+ *
+ * Night is the exception §05 calls for: a pale fill glares on a dark page, so
+ * the reader's own mark becomes a rule and takes the rule's colour.
+ */
+export function markPalette(theme: Theme): {
+  highlight: string
+  companion: string
+  highlightAsRule: boolean
+} {
+  const c = BOOK_COLOURS[theme]
+  const night = theme === 'night'
+  return {
+    highlight: night ? c.markRule : c.mark,
+    companion: c.amber,
+    highlightAsRule: night,
+  }
 }
 
 /**

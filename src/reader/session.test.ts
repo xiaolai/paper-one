@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { View } from 'foliate-js/view.js'
 import { ReaderSession, readMeta } from './session'
-import type { SessionCallbacks } from './session'
+import type { MarkAnchor, SessionCallbacks } from './session'
 
 /**
  * These are the races the audit found and the earlier fix did not close: a
@@ -25,6 +25,9 @@ interface FakeView extends View {
   removed: number
   listeners: Record<string, ((e: unknown) => void)[]>
   emit: (type: string, detail: unknown) => void
+  /** Every addAnnotation call, so the drawing contract can be asserted. */
+  annotations: { value: string; kind: string; remove: boolean }[]
+  deselected: number
 }
 
 function fakeView(overrides: Partial<Record<'open' | 'init', () => Promise<void>>> = {}): FakeView {
@@ -44,6 +47,15 @@ function fakeView(overrides: Partial<Record<'open' | 'init', () => Promise<void>
     open: overrides.open ?? (() => Promise.resolve()),
     init: overrides.init ?? (() => Promise.resolve()),
     goTo: () => Promise.resolve(),
+    annotations: [] as { value: string; kind: string; remove: boolean }[],
+    deselected: 0,
+    addAnnotation(annotation: { value: string; kind: string }, remove = false) {
+      view.annotations.push({ ...annotation, remove })
+    },
+    getCFI: (index: number) => `cfi(${index})`,
+    deselect() {
+      view.deselected += 1
+    },
     close() {
       view.closed += 1
     },
@@ -55,24 +67,39 @@ function fakeView(overrides: Partial<Record<'open' | 'init', () => Promise<void>
   return view
 }
 
-function callbacks(): SessionCallbacks & { calls: Record<string, unknown[][]> } {
+const PALETTE = { highlight: '#F3E6C0', companion: '#9E5A16', highlightAsRule: false }
+
+function callbacks(
+  marks: readonly MarkAnchor[] = [],
+): SessionCallbacks & { calls: Record<string, unknown[][]> } {
   const calls: Record<string, unknown[][]> = {}
   const rec = (name: string) => (...args: unknown[]) => {
     ;(calls[name] ??= []).push(args)
   }
-  return {
-    calls,
+  /* Annotated rather than cast. `as SessionCallbacks` on the literal below
+   * would let a newly-required callback go unimplemented — which it did, and
+   * the only signal was a TypeError at runtime in one test. */
+  const cb: SessionCallbacks = {
     onToc: rec('onToc'),
     onRelocate: rec('onRelocate'),
     onDocument: rec('onDocument'),
     onMeta: rec('onMeta'),
     onError: rec('onError'),
     onNavigator: rec('onNavigator'),
-  } as SessionCallbacks & { calls: Record<string, unknown[][]> }
+    onSelection: rec('onSelection'),
+    onMarkDrawn: rec('onMarkDrawn'),
+    onMarkActivated: rec('onMarkActivated'),
+    getMarks: () => marks,
+    getPalette: () => PALETTE,
+  }
+  return Object.assign(cb, { calls })
 }
+
+const painters = { highlight: 'HIGHLIGHT', underline: 'UNDERLINE' }
 
 const deps = (view: View) => ({
   createView: () => Promise.resolve(view),
+  loadPainters: () => Promise.resolve(painters),
   applySettings: () => {},
 })
 
@@ -105,6 +132,7 @@ describe('ReaderSession disposal', () => {
         await gate
         return view
       },
+      loadPainters: () => Promise.resolve(painters),
       applySettings: () => {},
     })
 
@@ -235,6 +263,7 @@ describe('ReaderSession disposal', () => {
     const session = new ReaderSession(fakeHost(), cb)
     await session.start('book.epub', {
       createView: () => Promise.reject(new Error('module missing')),
+      loadPainters: () => Promise.resolve(painters),
       applySettings: () => {},
     })
     expect(cb.calls['onError']?.[0]?.[0]).toBe('module missing')
@@ -246,6 +275,7 @@ describe('ReaderSession disposal', () => {
     session.dispose()
     await session.start('book.epub', {
       createView: () => Promise.reject(new Error('module missing')),
+      loadPainters: () => Promise.resolve(painters),
       applySettings: () => {},
     })
     expect(cb.calls['onError'] ?? []).toHaveLength(0)
@@ -258,6 +288,157 @@ describe('ReaderSession disposal', () => {
     await session.start('bad.epub', deps(view))
 
     expect(cb.calls['onError']?.[0]?.[0]).toBe('not an epub')
+    session.dispose()
+    expect(view.closed).toBe(1)
+  })
+})
+
+describe('ReaderSession marks', () => {
+  const anchor = (over: Partial<MarkAnchor> = {}): MarkAnchor => ({
+    cfi: 'epubcfi(/6/4)',
+    sectionIndex: 0,
+    kind: 'highlight',
+    ...over,
+  })
+
+  it('draws only the marks belonging to the section being built', async () => {
+    // foliate offers one overlay per spine item. Handing it a mark from
+    // another section would resolve a CFI that cannot land in this overlay.
+    const view = fakeView()
+    const cb = callbacks([
+      anchor({ cfi: 'here', sectionIndex: 2 }),
+      anchor({ cfi: 'elsewhere', sectionIndex: 5 }),
+    ])
+    const session = new ReaderSession(fakeHost(), cb)
+    await session.start('book.epub', deps(view))
+
+    view.emit('create-overlay', { index: 2 })
+
+    expect(view.annotations).toEqual([{ value: 'here', kind: 'highlight', remove: false }])
+  })
+
+  it('reads the store afresh for every overlay, so a new mark is drawn', async () => {
+    // The store is read through a getter precisely so that a mark made after
+    // startup is not missed when the section is rebuilt.
+    const live: MarkAnchor[] = []
+    const view = fakeView()
+    const session = new ReaderSession(fakeHost(), callbacks(live))
+    await session.start('book.epub', deps(view))
+
+    view.emit('create-overlay', { index: 0 })
+    expect(view.annotations).toHaveLength(0)
+
+    live.push(anchor({ cfi: 'made-later' }))
+    view.emit('create-overlay', { index: 0 })
+    expect(view.annotations.map((a) => a.value)).toEqual(['made-later'])
+  })
+
+  it('paints your mark as a fill and the companion\'s as a rule', async () => {
+    const view = fakeView()
+    const session = new ReaderSession(fakeHost(), callbacks())
+    await session.start('book.epub', deps(view))
+
+    const painted: unknown[] = []
+    const draw = (fn: unknown) => painted.push(fn)
+    view.emit('draw-annotation', { draw, annotation: { kind: 'highlight' }, range: null })
+    view.emit('draw-annotation', { draw, annotation: { kind: 'companion' }, range: null })
+
+    expect(painted).toEqual(['HIGHLIGHT', 'UNDERLINE'])
+  })
+
+  it('paints your mark as a rule in Night, where a fill would glare', async () => {
+    const view = fakeView()
+    const cb = callbacks()
+    cb.getPalette = () => ({ highlight: '#8A6E2C', companion: '#D9A25E', highlightAsRule: true })
+    const session = new ReaderSession(fakeHost(), cb)
+    await session.start('book.epub', deps(view))
+
+    const painted: { fn: unknown; color: unknown }[] = []
+    view.emit('draw-annotation', {
+      draw: (fn: unknown, options: { color: string }) => painted.push({ fn, color: options.color }),
+      annotation: { kind: 'highlight' },
+      range: null,
+    })
+
+    expect(painted).toEqual([{ fn: 'UNDERLINE', color: '#8A6E2C' }])
+  })
+
+  it('reports the live range a mark resolved to', async () => {
+    // The only place that Range is obtainable — the margin marks need it to
+    // sit beside the right line, and there is no public CFI-to-Range resolver.
+    const view = fakeView()
+    const cb = callbacks()
+    const session = new ReaderSession(fakeHost(), cb)
+    await session.start('book.epub', deps(view))
+
+    const range = { id: 'a-range' }
+    view.emit('draw-annotation', {
+      draw: () => {},
+      annotation: { value: 'cfi/9', kind: 'highlight' },
+      range,
+    })
+
+    expect(cb.calls['onMarkDrawn']?.[0]).toEqual(['cfi/9', range])
+  })
+
+  it('erases through the same path it draws', async () => {
+    const view = fakeView()
+    const cb = callbacks()
+    const session = new ReaderSession(fakeHost(), cb)
+    await session.start('book.epub', deps(view))
+
+    const nav = cb.calls['onNavigator']?.[0]?.[0] as {
+      drawMark: (a: MarkAnchor) => void
+      eraseMark: (a: MarkAnchor) => void
+    }
+    nav.drawMark(anchor({ cfi: 'x' }))
+    nav.eraseMark(anchor({ cfi: 'x' }))
+
+    expect(view.annotations).toEqual([
+      { value: 'x', kind: 'highlight', remove: false },
+      { value: 'x', kind: 'highlight', remove: true },
+    ])
+  })
+
+  it('re-attaches marks for live sections when the theme changes', async () => {
+    // The Overlayer's own redraw() reuses the options each mark was added
+    // with, so it repaints the OLD colour. Re-adding is what re-reads it.
+    const view = fakeView()
+    const session = new ReaderSession(fakeHost(), callbacks([anchor({ cfi: 'a' })]))
+    await session.start('book.epub', deps(view))
+
+    view.emit('create-overlay', { index: 0 })
+    view.annotations.length = 0
+    session.redrawMarks()
+
+    expect(view.annotations.map((a) => a.value)).toEqual(['a'])
+  })
+
+  it('draws nothing for a section that has been torn down', async () => {
+    const view = fakeView()
+    const session = new ReaderSession(fakeHost(), callbacks([anchor({ cfi: 'a' })]))
+    await session.start('book.epub', deps(view))
+
+    session.dispose()
+    view.annotations.length = 0
+    session.redrawMarks()
+
+    expect(view.annotations).toHaveLength(0)
+  })
+
+  it('closes the view when the painters fail to load', async () => {
+    // allSettled, not all: a rejected painters promise must not strand a view
+    // that resolved successfully with nothing left holding it.
+    const view = fakeView()
+    const cb = callbacks()
+    const session = new ReaderSession(fakeHost(), cb)
+    await session.start('book.epub', {
+      createView: () => Promise.resolve(view),
+      loadPainters: () => Promise.reject(new Error('overlayer missing')),
+      applySettings: () => {},
+    })
+
+    expect(cb.calls['onError']?.[0]?.[0]).toBe('overlayer missing')
     session.dispose()
     expect(view.closed).toBe(1)
   })

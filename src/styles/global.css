@@ -17,6 +17,27 @@ body {
   box-sizing: border-box;
 }
 
+/*
+ * How strongly a highlight's fill reads over the text.
+ *
+ * This has to live on the HOST root, not in the stylesheet injected into the
+ * book. foliate's Overlayer draws its SVG into the view's shadow tree in THIS
+ * document — beside the book's iframe, not inside it — and reads its opacity
+ * from `var(--overlayer-highlight-opacity, .3)` on the element it creates.
+ * Declared in the book document it resolves to nothing and silently falls back
+ * to .3, where the gold barely registers. Verified by reading the computed
+ * value off the drawn <g>.
+ *
+ * Custom properties inherit through shadow boundaries, which is what lets a
+ * declaration here reach an element the app never touches. .45 is the point
+ * where the fill reads as a fill and the words underneath stay fully legible;
+ * at 1 it would paint over them. Night never uses it — §05 makes its mark a
+ * rule rather than a fill, because a pale fill glares on a dark page.
+ */
+:root {
+  --overlayer-highlight-opacity: 0.45;
+}
+
 #root {
   height: 100%;
 }

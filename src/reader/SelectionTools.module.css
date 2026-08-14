@@ -1,0 +1,69 @@
+/* §10 selection tools.
+ *
+ * A popover, so it takes §12's popover layer. It is positioned against a rect
+ * translated out of the book's iframe, and `translateX(-50%)` is what centres
+ * it on the selection — the caller supplies the selection's centre, not its
+ * left edge, so the popup stays centred as the selection grows.
+ */
+
+.popup {
+  position: absolute;
+  z-index: var(--z-popover);
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 40px;
+  padding: 0 4px;
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  border: 1px solid var(--line-2);
+  box-shadow: var(--shadow-pop);
+  animation: rise var(--motion-popover) both;
+}
+
+/* §08: the popover rises rather than fading in place, and only 4px — enough to
+ * read as arriving, short enough not to be a transition the reader waits on. */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .popup {
+    animation: none;
+  }
+}
+
+.tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 32px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 7px;
+  background: none;
+  color: var(--ink-2);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.tool:hover {
+  background: var(--wash);
+  color: var(--ink);
+}
+
+.tool:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}

@@ -326,27 +326,52 @@
 
 /* --- notes ----------------------------------------------------------- */
 
+/* A container, not a control: the passage, the note and the delete action are
+ * each independently operable, and nesting them inside one button would make
+ * the whole row a single ambiguous target. */
 .note {
   display: block;
   width: 100%;
   text-align: start;
   padding: 12px 14px;
   margin-bottom: 8px;
-  border: none;
+  border: 1px solid transparent;
   border-radius: 14px;
   background: transparent;
   font-family: inherit;
-  cursor: pointer;
 }
 
 .note:hover {
   background: var(--wash);
 }
 
-/* Everything the companion produced carries the amber, forever. */
-.note[data-kind='AI'] {
+/* Everything the companion produced carries the amber, forever. §15: the word
+ * is companion — never ai, assistant or bot — in code as well as in the UI. */
+.note[data-kind='companion'] {
   background: var(--amber-bg);
-  border: 1px solid var(--amber-line);
+  border-color: var(--amber-line);
+}
+
+/* The marked passage, and the control that jumps to it. */
+.noteJump {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  text-align: start;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.noteJump:disabled {
+  cursor: default;
+}
+
+.noteJump:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
 }
 
 .noteBody {
@@ -356,17 +381,77 @@
   color: var(--ink);
 }
 
-.noteComment {
-  padding-top: 8px;
-  font-size: 12px;
-  line-height: 1.6;
+/* §07 disabled: a mark from a book that is not open cannot be jumped to, and
+ * says so by looking unavailable rather than by doing nothing when pressed. */
+.noteJump:disabled .noteBody {
   color: var(--muted);
 }
 
+.noteComment {
+  display: block;
+  width: 100%;
+  padding: 8px 0 0;
+  border: none;
+  background: none;
+  text-align: start;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+  cursor: text;
+}
+
+.noteInput {
+  width: 100%;
+  margin-top: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.6;
+  resize: vertical;
+  min-height: 56px;
+}
+
+.noteInput:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
 .noteSource {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   padding-top: 8px;
   font-size: 11px;
   color: var(--muted);
+}
+
+.noteDelete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.noteDelete:hover {
+  background: var(--line);
+  color: var(--ink-2);
+}
+
+.noteDelete:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .noteKind {

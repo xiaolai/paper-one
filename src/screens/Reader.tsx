@@ -1,4 +1,12 @@
-import { useCallback, useRef, useState, type CSSProperties, type DragEvent } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type DragEvent,
+} from 'react'
 import { Plus } from 'lucide-react'
 import type { Platform } from '../lib/metrics'
 import {
@@ -10,11 +18,16 @@ import {
   proseBleed,
   proseGrid,
 } from '../lib/metrics'
+import { marginMarks, type Mark } from '../lib/marks'
+import type { MarkStore } from '../lib/useMarks'
 import type { AppDispatch, AppState } from '../lib/state'
 import type { Book } from '../lib/useBook'
 import { useAvailableWidth } from '../lib/useAvailableWidth'
 import { FoliateView } from '../reader/FoliateView'
+import { MarginMarks } from '../reader/MarginMarks'
 import { ReadingRuler } from '../reader/ReadingRuler'
+import { SelectionTools } from '../reader/SelectionTools'
+import type { SelectionSnapshot } from '../reader/session'
 import styles from './Reader.module.css'
 
 export interface ReaderProps {
@@ -22,6 +35,7 @@ export interface ReaderProps {
   dispatch: AppDispatch
   platform: Platform
   book: Book
+  marks: MarkStore
 }
 
 /**
@@ -34,10 +48,26 @@ export interface ReaderProps {
  */
 const ACCEPT = '.epub,.mobi,.azw3,.cbz,.fb2,.fbz'
 
-export function Reader({ state, dispatch, platform, book }: ReaderProps) {
+export function Reader({ state, dispatch, platform, book, marks }: ReaderProps) {
   const [dragging, setDragging] = useState(false)
   const stageRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  const [selection, setSelection] = useState<SelectionSnapshot | null>(null)
+  /* The stage element as STATE, not just a ref: the popup and the margin marks
+   * both position against it, and a ref's `.current` landing after the first
+   * render does not re-render them. They would measure against null once and
+   * never again. */
+  const [stage, setStage] = useState<HTMLDivElement | null>(null)
+
+  /**
+   * Live ranges for the marks foliate has drawn, keyed by CFI.
+   *
+   * State, and replaced rather than mutated: the margin re-measures when this
+   * map's identity changes, so mutating one in place would draw the first mark
+   * and then silently ignore every mark after it. A section holds few enough
+   * marks that copying the map is cheaper than the bug.
+   */
+  const [ranges, setRanges] = useState<ReadonlyMap<string, Range>>(() => new Map())
   /* dragenter/dragleave fire for every child crossed, so a plain boolean
    * flickers the highlight while the pointer is still inside the zone. Depth
    * counting is what makes leave mean "left the zone". */
@@ -50,11 +80,16 @@ export function Reader({ state, dispatch, platform, book }: ReaderProps) {
   const paneVisible = state.pane !== null && windowWidth >= PANE_COLLAPSE_W
   const available = windowWidth - (paneVisible ? PANE_TRACK : 0)
 
+  /* What actually goes in the margin: notes and companion marks, not every
+   * highlight. Counting highlights too would open a 250px column to show a
+   * column of dots that repeat what the gold fill on the words already says. */
+  const inMargin = useMemo(() => marginMarks(marks.current), [marks.current])
+
   // The stage is what is left after the pane, less its own padding. The margin
   // column is only reserved once the book has marks to put in it.
   const grid = proseGrid(
     available - STAGE_PADDING_X * 2,
-    book.markCount > 0,
+    inMargin.length > 0,
     measureForStep(state.stepIdx),
   )
   /* foliate centres the book inside its own container, and the container spans
@@ -74,6 +109,72 @@ export function Reader({ state, dispatch, platform, book }: ReaderProps) {
     '--track-margin': `${grid.marginCol}px`,
     '--track-gap': `${grid.gap}px`,
   } as CSSProperties
+
+  /** The mark on the current selection, if that passage is already marked. */
+  const selected = useMemo(
+    () => marks.current.find((mark) => mark.cfi === selection?.cfi) ?? null,
+    [marks.current, selection],
+  )
+
+  /* A section render rebuilds its overlay, which re-resolves every mark in it
+   * — so ranges from the previous document are stale the moment a new one
+   * loads. Clearing on document change is what stops a note from the last
+   * chapter being measured against this one's layout. */
+  useEffect(() => {
+    setRanges(new Map())
+  }, [book.doc])
+
+  const onMarkDrawn = useCallback((cfi: string, range: Range) => {
+    setRanges((prev) => {
+      if (prev.get(cfi) === range) return prev
+      return new Map(prev).set(cfi, range)
+    })
+  }, [])
+
+  const { bookId, drawMark, eraseMark, deselect } = book
+  const chapter = book.position.chapterLabel
+
+  /**
+   * Mark the selection, optionally with a note.
+   *
+   * Drawn immediately rather than waiting for the section to re-render: foliate
+   * only offers marks to an overlay when it builds one, so without this the
+   * highlight would not appear until the reader scrolled away and back.
+   */
+  const mark = useCallback(
+    (note: string) => {
+      if (!selection || !bookId) return
+      const created = marks.add({
+        bookId,
+        cfi: selection.cfi,
+        sectionIndex: selection.sectionIndex,
+        text: selection.text,
+        note,
+        kind: 'highlight',
+        chapter,
+      })
+      drawMark(created)
+      // §07: acting on a selection consumes it. Leaving it up would leave the
+      // popup floating over a passage that has already been dealt with.
+      deselect()
+      setSelection(null)
+    },
+    [selection, bookId, marks, chapter, drawMark, deselect],
+  )
+
+  const unmark = useCallback(
+    (target: Mark) => {
+      eraseMark(target)
+      marks.remove(target.id)
+      setRanges((prev) => {
+        if (!prev.has(target.cfi)) return prev
+        const next = new Map(prev)
+        next.delete(target.cfi)
+        return next
+      })
+    },
+    [eraseMark, marks],
+  )
 
   const { open } = book
   const onDrop = useCallback(
@@ -125,7 +226,10 @@ export function Reader({ state, dispatch, platform, book }: ReaderProps) {
 
             <div
               className={styles.stage}
-              ref={stageRef}
+              ref={(node) => {
+                stageRef.current = node
+                setStage(node)
+              }}
               style={gridVars}
             >
               <div className={styles.gutter}>
@@ -133,7 +237,7 @@ export function Reader({ state, dispatch, platform, book }: ReaderProps) {
                   state={state}
                   dispatch={dispatch}
                   doc={book.doc}
-                  stage={stageRef.current}
+                  stage={stage}
                 />
               </div>
 
@@ -150,12 +254,52 @@ export function Reader({ state, dispatch, platform, book }: ReaderProps) {
                   onMeta={book.setMeta}
                   onError={book.fail}
                   onNavigator={book.setNavigator}
+                  marks={marks.current}
+                  onSelection={setSelection}
+                  onMarkDrawn={onMarkDrawn}
+                  onMarkActivated={(cfi) => {
+                    const hit = marks.current.find((m) => m.cfi === cfi)
+                    if (hit) dispatch({ type: 'openPane', pane: 'notes' })
+                  }}
                 />
               </div>
 
               {/* Rendered only when there is something to put in it; the
                   track collapses to the gutter's width otherwise. */}
-              {book.markCount > 0 && <div className={styles.margin} />}
+              {inMargin.length > 0 && (
+                <div className={styles.margin}>
+                  <MarginMarks
+                    marks={inMargin}
+                    ranges={ranges}
+                    stage={stage}
+                    doc={book.doc}
+                    onSelect={() => dispatch({ type: 'openPane', pane: 'notes' })}
+                  />
+                </div>
+              )}
+
+              <SelectionTools
+                selection={selection}
+                stage={stage}
+                marked={selected !== null}
+                onHighlight={() => mark(selected?.note ?? '')}
+                onNote={() => {
+                  // The note itself is written in the Notes panel, where there
+                  // is room for it. Marking first is what gives it an anchor.
+                  mark(selected?.note ?? '')
+                  dispatch({ type: 'openPane', pane: 'notes' })
+                }}
+                onCopy={() => {
+                  if (selection) void navigator.clipboard?.writeText(selection.text)
+                  deselect()
+                  setSelection(null)
+                }}
+                onRemove={() => {
+                  if (selected) unmark(selected)
+                  deselect()
+                  setSelection(null)
+                }}
+              />
             </div>
 
             <div

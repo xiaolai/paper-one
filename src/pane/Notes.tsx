@@ -1,32 +1,90 @@
-import { useState } from 'react'
-import { NOTES } from '../data/fixtures'
+import { useMemo, useState } from 'react'
+import { Trash2 } from 'lucide-react'
+import type { Mark } from '../lib/marks'
+import { ICON } from '../lib/metrics'
+import type { MarkStore } from '../lib/useMarks'
 import styles from './SidePane.module.css'
-
-type NoteFilter = 'All' | 'Highlights' | 'Companion'
-const FILTERS: readonly NoteFilter[] = ['All', 'Highlights', 'Companion']
 
 /**
  * Notes — the collection view.
  *
  * Distinct from a margin note: this is every mark across every book, browsable
  * and filterable, where a margin note is one annotation anchored to one line.
+ *
+ * §15's lexicon governs the labels here. A **mark** is the highlight, a
+ * **note** is what you wrote on it, and the companion is never "AI" — which is
+ * what the three filters below are named for.
  */
-export function Notes() {
-  const [filter, setFilter] = useState<NoteFilter>('All')
 
-  const notes = NOTES.filter((note) =>
-    filter === 'All'
-      ? true
-      : filter === 'Companion'
-        ? note.kind === 'AI'
-        : note.kind === 'Highlight',
+type NoteFilter = 'All' | 'Marks' | 'Notes' | 'Companion'
+const FILTERS: readonly NoteFilter[] = ['All', 'Marks', 'Notes', 'Companion']
+
+function matches(mark: Mark, filter: NoteFilter): boolean {
+  switch (filter) {
+    case 'All':
+      return true
+    case 'Companion':
+      return mark.kind === 'companion'
+    case 'Notes':
+      return mark.note !== ''
+    case 'Marks':
+      return mark.kind === 'highlight'
+  }
+}
+
+export interface NotesProps {
+  marks: MarkStore
+  /** The open book, so its marks can be shown first. Null when none is open. */
+  bookId: string | null
+  onGoTo?: (target: string) => void
+}
+
+export function Notes({ marks, bookId, onGoTo }: NotesProps) {
+  const [filter, setFilter] = useState<NoteFilter>('All')
+  /** The mark whose note is being written. One at a time, like a text field. */
+  const [editing, setEditing] = useState<string | null>(null)
+
+  const shown = useMemo(
+    () => marks.all.filter((mark) => matches(mark, filter)),
+    [marks.all, filter],
   )
+
+  /* Counted from what exists rather than written as prose: the fixture said
+   * "1,204 highlights · 318 notes" under a list of three. */
+  const noteCount = useMemo(
+    () => marks.all.filter((mark) => mark.note !== '').length,
+    [marks.all],
+  )
+
+  if (marks.all.length === 0) {
+    return (
+      <div className={styles.empty}>
+        <div className={styles.emptyTitle}>Nothing marked yet</div>
+        <div className={styles.emptyBody}>
+          Select a passage in the book and choose Mark. Notes you write on a
+          mark appear beside the line they belong to.
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className={styles.panel}>
       <div className={styles.panelMeta}>
-        <span style={{ flex: 1 }}>1,204 highlights · 318 notes</span>
+        <span style={{ flex: 1 }}>
+          {marks.all.length} {marks.all.length === 1 ? 'mark' : 'marks'} · {noteCount}{' '}
+          {noteCount === 1 ? 'note' : 'notes'}
+        </span>
       </div>
+
+      {/* §11: say what happened and what to do. A store that has quietly
+          stopped saving looks exactly like one that works. */}
+      {!marks.persistent && (
+        <div className={styles.panelMeta}>
+          <span>Marks are not being saved — this device's storage is unavailable.</span>
+        </div>
+      )}
+
       <div className={styles.filters}>
         {FILTERS.map((label) => (
           <button
@@ -40,15 +98,56 @@ export function Notes() {
           </button>
         ))}
       </div>
-      {notes.map((note, index) => (
-        <button key={index} type="button" className={styles.note} data-kind={note.kind}>
-          {note.kind === 'AI' && <div className={styles.noteKind}>Companion</div>}
-          <div className={styles.noteBody}>{note.body}</div>
-          {note.comment && <div className={styles.noteComment}>{note.comment}</div>}
+
+      {shown.map((mark) => (
+        <div key={mark.id} className={styles.note} data-kind={mark.kind}>
+          {mark.kind === 'companion' && <div className={styles.noteKind}>Companion</div>}
+
+          <button
+            type="button"
+            className={styles.noteJump}
+            /* Only the open book can be navigated into. A mark from another
+               book has nowhere to jump to until that book is opened, and a
+               control that silently does nothing is worse than none. */
+            disabled={mark.bookId !== bookId || !onGoTo}
+            onClick={() => onGoTo?.(mark.cfi)}
+          >
+            <span className={styles.noteBody}>{mark.text}</span>
+          </button>
+
+          {editing === mark.id ? (
+            <textarea
+              className={styles.noteInput}
+              defaultValue={mark.note}
+              autoFocus
+              placeholder="Write a note"
+              onBlur={(event) => {
+                marks.setNote(mark.id, event.target.value.trim())
+                setEditing(null)
+              }}
+            />
+          ) : (
+            <button
+              type="button"
+              className={styles.noteComment}
+              onClick={() => setEditing(mark.id)}
+            >
+              {mark.note || 'Add a note'}
+            </button>
+          )}
+
           <div className={styles.noteSource}>
-            {note.book} · {note.at}
+            <span>{mark.chapter || 'Unknown chapter'}</span>
+            <button
+              type="button"
+              className={styles.noteDelete}
+              aria-label="Delete mark"
+              onClick={() => marks.remove(mark.id)}
+            >
+              <Trash2 size={ICON.inline} strokeWidth={ICON.stroke} />
+            </button>
           </div>
-        </button>
+        </div>
       ))}
     </div>
   )
