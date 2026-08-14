@@ -62,5 +62,7 @@ dist/
 *.tsbuildinfo
 .DS_Store
 
-# Development book fixture — regenerate with scripts/make-sample-epub.py
+# Development book fixtures. The EPUB regenerates with
+# scripts/make-sample-epub.py; the PDF with `cupsfilter some.txt > sample.pdf`.
 public/sample.epub
+public/sample.pdf

@@ -103,6 +103,24 @@
   margin-inline-end: var(--text-bleed-end, 0);
 }
 
+/* The PDF reader's stage. No prose grid: a page has fixed proportions, so
+ * there is no measure to hold between a gutter and a margin, and PdfView
+ * centres and scrolls its own pages. */
+.pdfStage {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+/* Shown while the PDF renderer's chunk is fetched. It is half a megabyte, so
+ * on a cold cache there is a real moment here worth naming. */
+.loading {
+  padding: 40px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--muted);
+}
+
 .margin {
   grid-column: 3;
   grid-row: 1;
