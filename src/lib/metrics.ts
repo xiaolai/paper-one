@@ -73,11 +73,14 @@ export const SYS_ZONE_W: Record<Platform, number> = {
 /** §03 pane tab bar, matching the aside tabs. */
 export const PANE_TAB_H = 44
 
-/** §06: the pane collapses below this width. */
+/**
+ * §06: the pane collapses below this width.
+ *
+ * Enforced in `WindowShell`, not merely declared. Left unconsumed it was a
+ * false invariant — the pane stayed open on narrow windows and squeezed the
+ * measure down to whatever was left.
+ */
 export const PANE_COLLAPSE_W = 1024
-
-/** PDF thumbnails need this much available width before they are shown. */
-export const THUMBS_MIN_AVAIL = 900
 
 /**
  * §09 reading steps. Sizes producing a fractional line box are not offered,
@@ -109,6 +112,18 @@ export const DEFAULT_STEP_IDX = 2
 export const MEASURE = 660
 export const GUTTER = 56
 
+/**
+ * The measure for a reading step.
+ *
+ * §09 gives each of the seven sizes its own line width, from 540 at 17px to
+ * 820 at 30px, so that the line stays near 68 characters as the type grows.
+ * Both the host grid and foliate's renderer must read the SAME value or the
+ * book is laid out to one width inside a column sized to another.
+ */
+export function measureForStep(stepIdx: number): number {
+  return READING_STEPS[stepIdx]?.measure ?? MEASURE
+}
+
 /** Third prose column — the margin where companion marks land. */
 export const MARGIN_COL = 250
 export const PROSE_GAP = 32
@@ -137,10 +152,14 @@ export interface ProseGrid {
  *   2. the gutter, which holds the ruler hint
  *   3. the measure, only when there is nothing else left to give
  */
-export function proseGrid(stageInner: number, showMargin: boolean): ProseGrid {
+export function proseGrid(
+  stageInner: number,
+  showMargin: boolean,
+  measureMax: number = MEASURE,
+): ProseGrid {
   const gap = PROSE_GAP
   let gutter = GUTTER
-  let measure = MEASURE
+  let measure = measureMax
 
   /* The margin column reserves 250px for companion marks. Until there are
    * marks to put there it collapses — but to the GUTTER's width, not to zero.
@@ -172,10 +191,29 @@ export function proseGrid(stageInner: number, showMargin: boolean): ProseGrid {
   return { gutter, measure, marginCol, gap }
 }
 
-/** §03 control and row heights. */
-export const CONTROL_ICON = 30
+/**
+ * Padding that keeps the measure centred when the outer tracks are unequal.
+ *
+ * foliate centres the book inside its own container, and that container spans
+ * the whole prose grid. While the gutter and the margin match, the container's
+ * centre IS the measure's centre and nothing is needed. Once marks widen the
+ * margin, the container's centre drifts toward the wider side — so the padding
+ * goes on that same wider side, shrinking the content box from that edge and
+ * pulling its centre back onto the measure.
+ *
+ * Padding the narrow side instead moves the centre the way the imbalance
+ * already did, doubling the error rather than correcting it.
+ */
+export function proseBleed(grid: ProseGrid): { start: number; end: number } {
+  return {
+    start: Math.max(0, grid.gutter - grid.marginCol),
+    end: Math.max(0, grid.marginCol - grid.gutter),
+  }
+}
+
+/** §03 control and row heights. Published as CSS custom properties below so
+ *  stylesheets consume these values rather than repeating them. */
 export const CONTROL_PILL = 34
-export const ROW_COMPACT = 38
 export const ROW_BOOK = 46
 
 /** §03 radii, by role. */
@@ -239,6 +277,21 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
     '--titlebar-h': px(TITLEBAR_H[platform]),
     '--sys-zone-w': px(SYS_ZONE_W[platform]),
     '--pane-tab-h': px(PANE_TAB_H),
+    '--control-pill': px(CONTROL_PILL),
+    '--row-book': px(ROW_BOOK),
+    '--radius-pill': `${RADIUS.pill}px`,
+    '--radius-card': `${RADIUS.card}px`,
+    '--radius-control': `${RADIUS.control}px`,
+    // §12 layer order, published so stylesheets stop restating the numbers.
+    '--z-ruler-band': String(Z.rulerBand),
+    '--z-prose': String(Z.prose),
+    '--z-chrome': String(Z.chrome),
+    '--z-sticky': String(Z.stickyBar),
+    '--z-ruler-hint': String(Z.rulerHint),
+    '--z-popover': String(Z.popover),
+    '--z-menu': String(Z.menu),
+    '--z-scrim': String(Z.scrim),
+    '--z-figure': String(Z.figure),
     '--measure': px(MEASURE),
     '--gutter': px(GUTTER),
     '--motion-chrome': MOTION.chromeFade,

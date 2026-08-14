@@ -41,15 +41,12 @@
 }
 
 /* Elsewhere the titlebar is a real row above this, so there is nothing to
- * clear. The margin mirrors so the card hugs whichever edge it sits on. */
+ * clear — and no padding-top reset is needed, since the base rule sets none.
+ *
+ * The horizontal margin matches --concentric-inset on every platform so the
+ * card occupies exactly PANE_TRACK (PANE_W + 2 × inset). A 10px margin here
+ * made the card 410px wide while the reader always reserved 412px, drifting
+ * the layout by 2px on Windows and Linux only. */
 .card:not([data-platform='macos']) {
-  padding-top: 0;
-}
-
-.card:not([data-platform='macos'])[data-side='left'] {
-  margin: 0 0 10px 10px;
-}
-
-.card:not([data-platform='macos'])[data-side='right'] {
-  margin: 0 10px 10px 0;
+  margin: 0 var(--concentric-inset) 10px var(--concentric-inset);
 }

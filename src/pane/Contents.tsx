@@ -3,7 +3,9 @@ import styles from './SidePane.module.css'
 
 export interface ContentsProps {
   toc: readonly TocItem[]
-  currentChapter: string
+  /** Href of the current entry. Labels repeat across a book — "Chapter 1",
+   *  "Epígrafe" — and matching on them marks every duplicate as current. */
+  currentHref: string
   onGoTo?: (href: string) => void
 }
 
@@ -21,7 +23,7 @@ function flattenToc(items: readonly TocItem[], depth = 0): FlatTocEntry[] {
   ])
 }
 
-export function Contents({ toc, currentChapter, onGoTo }: ContentsProps) {
+export function Contents({ toc, currentHref, onGoTo }: ContentsProps) {
   const entries = flattenToc(toc)
 
   if (entries.length === 0) {
@@ -43,7 +45,7 @@ export function Contents({ toc, currentChapter, onGoTo }: ContentsProps) {
           type="button"
           className={styles.tocRow}
           data-depth={entry.depth}
-          data-current={entry.label === currentChapter}
+          data-current={entry.href === currentHref}
           onClick={() => onGoTo?.(entry.href)}
         >
           <span className={styles.tocLabel}>{entry.label}</span>

@@ -10,6 +10,13 @@ import { DEFAULT_STEP_IDX, READING_STEPS } from './metrics'
  * what makes the state readable next to the design.
  */
 
+/** Topmost first — `dismissTop` walks this order so Esc peels one layer. */
+const LAYER_ORDER = ['figureOpen', 'paletteOpen', 'switcherOpen', 'selectionOpen'] as const
+
+/** Derived from LAYER_ORDER so the action types and the dismiss order cannot
+ *  drift apart — adding a layer in one place now fails to compile in the other. */
+export type Layer = (typeof LAYER_ORDER)[number]
+
 export type Screen = 'library' | 'reader' | 'pdf' | 'cards'
 export type Theme = 'paper' | 'slate' | 'sepia' | 'sage' | 'night'
 /**
@@ -31,8 +38,6 @@ export type PaneId =
   | 'stats'
   | 'import'
   | 'settings'
-export type LibView = 'shelf' | 'wall' | 'index' | 'map'
-export type CardView = 'wall' | 'deck' | 'thread' | 'map'
 export type Side = 'left' | 'right'
 
 /**
@@ -51,8 +56,6 @@ export interface AppState {
   /** Remembered so the pane toggle reopens what was last shown. */
   readonly lastPane: PaneId
   readonly side: Side
-  readonly libView: LibView
-  readonly cardView: CardView
   readonly paletteOpen: boolean
   readonly switcherOpen: boolean
   readonly figureOpen: boolean
@@ -62,11 +65,8 @@ export interface AppState {
   readonly rulerOn: boolean
   readonly rulerPinned: boolean
   readonly ttsOn: boolean
-  readonly bookmarkOn: boolean
   readonly stepIdx: number
   readonly pageLayout: PageLayout
-  readonly noteIdx: number
-  readonly openSection: string | null
 }
 
 export const initialState: AppState = {
@@ -76,8 +76,6 @@ export const initialState: AppState = {
   pane: 'companion',
   lastPane: 'companion',
   side: 'right',
-  libView: 'shelf',
-  cardView: 'wall',
   paletteOpen: false,
   switcherOpen: false,
   figureOpen: false,
@@ -86,11 +84,8 @@ export const initialState: AppState = {
   rulerOn: false,
   rulerPinned: false,
   ttsOn: false,
-  bookmarkOn: false,
   stepIdx: DEFAULT_STEP_IDX,
   pageLayout: 'scrolled',
-  noteIdx: 0,
-  openSection: null,
 }
 
 export type Action =
@@ -101,24 +96,16 @@ export type Action =
   | { type: 'togglePane' }
   | { type: 'closePane' }
   | { type: 'setSide'; side: Side }
-  | { type: 'setLibView'; view: LibView }
-  | { type: 'setCardView'; view: CardView }
-  | { type: 'toggleLayer'; layer: 'paletteOpen' | 'switcherOpen' | 'figureOpen' | 'selectionOpen' }
-  | { type: 'closeLayer'; layer: 'paletteOpen' | 'switcherOpen' | 'figureOpen' | 'selectionOpen' }
+  | { type: 'toggleLayer'; layer: Layer }
+  | { type: 'closeLayer'; layer: Layer }
   /** Esc dismisses the topmost layer only (§11 keyboard map). */
   | { type: 'dismissTop' }
   | { type: 'setChrome'; on: boolean }
   | { type: 'toggleRuler' }
   | { type: 'pinRuler' }
   | { type: 'toggleTts' }
-  | { type: 'toggleBookmark' }
   | { type: 'setStepIdx'; idx: number }
   | { type: 'setPageLayout'; layout: PageLayout }
-  | { type: 'setNoteIdx'; idx: number }
-  | { type: 'toggleSection'; section: string }
-
-/** Topmost first — `dismissTop` walks this order so Esc peels one layer. */
-const LAYER_ORDER = ['figureOpen', 'paletteOpen', 'switcherOpen', 'selectionOpen'] as const
 
 export function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -149,12 +136,6 @@ export function reducer(state: AppState, action: Action): AppState {
     case 'setSide':
       return { ...state, side: action.side }
 
-    case 'setLibView':
-      return { ...state, libView: action.view }
-
-    case 'setCardView':
-      return { ...state, cardView: action.view }
-
     case 'toggleLayer':
       return { ...state, [action.layer]: !state[action.layer] }
 
@@ -181,15 +162,16 @@ export function reducer(state: AppState, action: Action): AppState {
     case 'toggleTts':
       return { ...state, ttsOn: !state.ttsOn }
 
-    case 'toggleBookmark':
-      return { ...state, bookmarkOn: !state.bookmarkOn }
-
     case 'setStepIdx':
       // Clamped rather than validated at the call site: the stepper, the
       // settings slider and the keyboard shortcut all feed this.
+      // Non-finite input is dropped rather than stored: `stepIdx` indexes
+      // READING_STEPS, and NaN survives Math.min/Math.max unchanged, so the
+      // old clamp let NaN straight through to the array lookup.
+      if (!Number.isFinite(action.idx)) return state
       return {
         ...state,
-        stepIdx: Math.min(Math.max(action.idx, 0), READING_STEPS.length - 1),
+        stepIdx: Math.min(Math.max(Math.round(action.idx), 0), READING_STEPS.length - 1),
       }
 
     case 'setPageLayout':
@@ -199,14 +181,6 @@ export function reducer(state: AppState, action: Action): AppState {
         ? { ...state, pageLayout: 'paginated', rulerOn: false, rulerPinned: false }
         : { ...state, pageLayout: 'scrolled' }
 
-    case 'setNoteIdx':
-      return { ...state, noteIdx: action.idx }
-
-    case 'toggleSection':
-      return {
-        ...state,
-        openSection: state.openSection === action.section ? null : action.section,
-      }
   }
 }
 

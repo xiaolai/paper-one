@@ -21,7 +21,7 @@
   top: 0;
   left: 0;
   right: 0;
-  z-index: 4;
+  z-index: var(--z-chrome);
 }
 
 .bar:not([data-platform='macos']) {
@@ -191,4 +191,11 @@
 .paneToggle[data-on='true'] {
   background: transparent;
   color: var(--accent);
+}
+
+/* §07 Disabled — 45% opacity, no pointer events, and the reason stated nearby
+ * rather than hidden in a title attribute alone. */
+.action[data-disabled='true'] {
+  opacity: 0.45;
+  pointer-events: none;
 }

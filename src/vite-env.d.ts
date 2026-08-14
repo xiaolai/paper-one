@@ -49,6 +49,33 @@ declare module 'foliate-js/view.js' {
   }
 
   /** `create-overlay` detail. */
+  /** `search` yields progress markers, per-section groups, individual hits,
+   *  and finally the string 'done'. */
+  export interface SearchExcerpt {
+    readonly pre: string
+    readonly match: string
+    readonly post: string
+  }
+
+  export interface SearchHitRaw {
+    readonly cfi: string
+    readonly excerpt: SearchExcerpt
+  }
+
+  export type SearchYield =
+    | { readonly progress: number }
+    | { readonly label: string; readonly subitems: readonly SearchHitRaw[] }
+    | SearchHitRaw
+    | 'done'
+
+  export interface SearchOptions {
+    readonly query: string
+    readonly index?: number
+    readonly matchCase?: boolean
+    readonly matchDiacritics?: boolean
+    readonly matchWholeWords?: boolean
+  }
+
   export interface CreateOverlayDetail {
     readonly index: number
   }
@@ -98,6 +125,8 @@ declare module 'foliate-js/view.js' {
     goLeft(): Promise<void>
     goRight(): Promise<void>
     addAnnotation(annotation: unknown, remove?: boolean): void
+    /** Async generator over the whole book. CFIs are navigable via `goTo`. */
+    search(options: SearchOptions): AsyncGenerator<SearchYield, void, unknown>
     readonly renderer: Renderer
     readonly book: Book
   }

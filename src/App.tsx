@@ -35,11 +35,8 @@ export function App() {
         dispatch({ type: 'dismissTop' })
         return
       }
-      if (e.key === 'k' && (e.metaKey || e.ctrlKey)) {
-        e.preventDefault()
-        dispatch({ type: 'toggleLayer', layer: 'paletteOpen' })
-        return
-      }
+      // ⌘K is deliberately unbound until the command palette exists. Binding
+      // it to a layer nothing renders swallowed the shortcut silently.
       if (e.key === '\\' && (e.metaKey || e.ctrlKey)) {
         e.preventDefault()
         dispatch({ type: 'togglePane' })
@@ -49,7 +46,14 @@ export function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [dispatch])
 
+  /* Titlebar metadata comes from the OPEN book. It used to read BOOKS[0]
+   * unconditionally, so every book — and the empty state — was presented as
+   * Moby-Dick. The fixture is only a placeholder for when nothing is open. */
   const fixture = BOOKS[0]
+  const title = book.meta?.title || (book.source ? 'Untitled' : (fixture?.title ?? 'Paper'))
+  const subtitle = book.source
+    ? book.position.chapterLabel || book.meta?.author || ''
+    : (fixture?.locationLabel ?? '')
 
   return (
     <WindowShell
@@ -60,12 +64,12 @@ export function App() {
           state={state}
           dispatch={dispatch}
           platform={platform}
-          bookTitle={fixture?.title ?? 'Paper'}
-          bookSubtitle={book.position.chapterLabel || (fixture?.locationLabel ?? '')}
-          coverTint={coverTint(0)}
+          bookTitle={title}
+          bookSubtitle={subtitle}
+          coverTint={book.source ? 'var(--tint-b)' : coverTint(0)}
         />
       }
-      pane={<SidePane state={state} dispatch={dispatch} book={book} />}
+      pane={<SidePane state={state} dispatch={dispatch} book={book} onGoTo={book.goTo} />}
     >
       <Reader state={state} dispatch={dispatch} platform={platform} book={book} />
     </WindowShell>

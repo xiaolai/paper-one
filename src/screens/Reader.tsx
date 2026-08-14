@@ -1,7 +1,15 @@
 import { useCallback, useRef, useState, type CSSProperties, type DragEvent } from 'react'
 import { Plus } from 'lucide-react'
 import type { Platform } from '../lib/metrics'
-import { ICON, PANE_TRACK, STAGE_PADDING_X, proseGrid } from '../lib/metrics'
+import {
+  ICON,
+  PANE_COLLAPSE_W,
+  PANE_TRACK,
+  STAGE_PADDING_X,
+  measureForStep,
+  proseBleed,
+  proseGrid,
+} from '../lib/metrics'
 import type { AppDispatch, AppState } from '../lib/state'
 import type { Book } from '../lib/useBook'
 import { useAvailableWidth } from '../lib/useAvailableWidth'
@@ -16,22 +24,51 @@ export interface ReaderProps {
   book: Book
 }
 
-/** What the reader accepts. §13's empty state names all four. */
-const ACCEPT = '.epub,.pdf,.mobi,.azw3,.cbz,.fb2,.fbz'
+/**
+ * What the reader accepts.
+ *
+ * PDF is deliberately ABSENT. foliate-js has no PDF loader and rejects every
+ * PDF as an unsupported type, so accepting `.pdf` produced a file picker that
+ * offered a format the app then refused. §13's empty state names PDF because
+ * the design ships pdf.js; add `.pdf` back in the same change that wires it.
+ */
+const ACCEPT = '.epub,.mobi,.azw3,.cbz,.fb2,.fbz'
 
 export function Reader({ state, dispatch, platform, book }: ReaderProps) {
   const [dragging, setDragging] = useState(false)
   const stageRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  /* dragenter/dragleave fire for every child crossed, so a plain boolean
+   * flickers the highlight while the pointer is still inside the zone. Depth
+   * counting is what makes leave mean "left the zone". */
+  const dragDepth = useRef(0)
 
   const windowWidth = useAvailableWidth()
-  const available = windowWidth - (state.pane ? PANE_TRACK : 0)
+  /* Must use the SAME predicate as WindowShell. Reserving PANE_TRACK whenever
+   * `state.pane` is set meant that below the §06 collapse threshold — where
+   * the pane is hidden — the reader still gave away 412px to nothing. */
+  const paneVisible = state.pane !== null && windowWidth >= PANE_COLLAPSE_W
+  const available = windowWidth - (paneVisible ? PANE_TRACK : 0)
 
   // The stage is what is left after the pane, less its own padding. The margin
   // column is only reserved once the book has marks to put in it.
-  const grid = proseGrid(available - STAGE_PADDING_X * 2, book.markCount > 0)
+  const grid = proseGrid(
+    available - STAGE_PADDING_X * 2,
+    book.markCount > 0,
+    measureForStep(state.stepIdx),
+  )
+  /* foliate centres the book inside its own container, and the container spans
+   * the whole grid — so the text only lands on the measure track while the
+   * outer tracks are equal. Once marks widen the margin, the difference is
+   * padded onto the WIDER side, shrinking the content box from that edge and
+   * pulling its centre back onto the measure. Padding the narrower side moves
+   * the centre the same way the imbalance already did, doubling the error. */
+  const bleed = proseBleed(grid)
+
   const gridVars = {
     '--stage-pad-x': `${STAGE_PADDING_X}px`,
+    '--text-bleed-start': `${bleed.start}px`,
+    '--text-bleed-end': `${bleed.end}px`,
     '--track-gutter': `${grid.gutter}px`,
     '--track-measure': `${grid.measure}px`,
     '--track-margin': `${grid.marginCol}px`,
@@ -42,6 +79,7 @@ export function Reader({ state, dispatch, platform, book }: ReaderProps) {
   const onDrop = useCallback(
     (event: DragEvent<HTMLDivElement>) => {
       event.preventDefault()
+      dragDepth.current = 0
       setDragging(false)
       const dropped = event.dataTransfer.files.item(0)
       if (dropped) open(dropped)
@@ -102,17 +140,22 @@ export function Reader({ state, dispatch, platform, book }: ReaderProps) {
               <div className={styles.text}>
                 <FoliateView
                   file={book.source}
+                  generation={book.generation}
                   stepIdx={state.stepIdx}
                   theme={state.theme}
                   paginated={state.pageLayout === 'paginated'}
                   onToc={book.setToc}
                   onRelocate={book.setPosition}
                   onDocument={book.setDoc}
+                  onMeta={book.setMeta}
                   onError={book.fail}
+                  onNavigator={book.setNavigator}
                 />
               </div>
 
-              <div className={styles.margin} />
+              {/* Rendered only when there is something to put in it; the
+                  track collapses to the gutter's width otherwise. */}
+              {book.markCount > 0 && <div className={styles.margin} />}
             </div>
 
             <div
@@ -130,16 +173,20 @@ export function Reader({ state, dispatch, platform, book }: ReaderProps) {
           <div
             className={styles.empty}
             data-dragging={dragging}
-            onDragOver={(event) => {
-              event.preventDefault()
+            onDragEnter={() => {
+              dragDepth.current += 1
               setDragging(true)
             }}
-            onDragLeave={() => setDragging(false)}
+            onDragOver={(event) => event.preventDefault()}
+            onDragLeave={() => {
+              dragDepth.current = Math.max(0, dragDepth.current - 1)
+              if (dragDepth.current === 0) setDragging(false)
+            }}
             onDrop={onDrop}
           >
             <h1 className={styles.emptyTitle}>Your library is empty</h1>
             <p className={styles.emptyBody}>
-              Drop an EPUB, PDF, MOBI or CBZ here, or connect a folder to watch.
+              Drop an EPUB, MOBI or CBZ here, or connect a folder to watch.
             </p>
             {book.error && <p className={styles.error}>{book.error}</p>}
             <button

@@ -63,11 +63,21 @@
 }
 
 /* §08: the pane opens on width, not transform, so the reader reflows with it
- * instead of the pane sliding over the text. */
+ * instead of the pane sliding over the text.
+ *
+ * The slot stays mounted at zero width when closed. A transition needs an
+ * interpolable before and after; an unmounted element has neither, so the
+ * animation never ran and the pane simply appeared. */
 .paneSlot {
   display: flex;
   min-height: 0;
+  overflow: hidden;
+  width: var(--pane-track);
   transition: width var(--motion-pane);
+}
+
+.paneSlot[data-open='false'] {
+  width: 0;
 }
 
 .paneSlot[data-side='left'] {

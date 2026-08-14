@@ -74,8 +74,9 @@
  * measure. Widening the scroller is the fix that works for both kinds: the
  * bar lands in the margin either way.
  *
- * The text still lands exactly on the measure track, because the gutter and
- * the margin are equal and foliate centres within the span.
+ * The text lands on the measure track because foliate centres within the span
+ * and the padding below equalises the outer tracks — without it, a widened
+ * margin would drag the centred text off the measure.
  */
 .text {
   grid-column: 1 / -1;
@@ -83,6 +84,8 @@
   min-width: 0;
   min-height: 0;
   position: relative;
+  padding-inline-start: var(--text-bleed-start, 0);
+  padding-inline-end: var(--text-bleed-end, 0);
 }
 
 .margin {
@@ -101,7 +104,7 @@
 
 .footer {
   flex: 0 0 auto;
-  height: 46px;
+  height: var(--row-book);
   padding: 0 18px;
   display: flex;
   align-items: center;
@@ -153,10 +156,10 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 34px;
+  height: var(--control-pill);
   padding: 0 16px;
   border: none;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--accent);
   color: var(--surface);
   font-family: inherit;

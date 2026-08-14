@@ -1,8 +1,19 @@
-/* §12 layer 0: the band sits BEHIND the text, so the words keep full contrast
- * and the band tints the line rather than veiling it. */
+/* §12 puts the band at layer 0, BEHIND the text. That is achievable when the
+ * prose is host markup, as it was in the prototype — it is not here.
+ *
+ * Two things block it: the band's parent (`.gutter`) is a z-index:1 stacking
+ * context, so a z-index:0 child can never paint below a sibling of that
+ * parent; and the book is an iframe whose document paints an opaque
+ * background, so anything behind it is invisible regardless of z-index.
+ *
+ * So the band is drawn ABOVE the text and tints it instead, using multiply so
+ * the glyphs keep their contrast rather than being veiled. The faithful fix is
+ * to inject the band into the book document beneath its text; that belongs
+ * with the annotation layer, which needs the same cross-document machinery. */
 .band {
   position: absolute;
-  z-index: 0;
+  z-index: var(--z-ruler-hint);
+  mix-blend-mode: multiply;
   background: var(--wash);
   border-radius: 3px;
   pointer-events: none;
@@ -20,7 +31,7 @@
 /* §12 layer 8: the hint lives in the gutter, outside the text. */
 .hint {
   position: absolute;
-  z-index: 8;
+  z-index: var(--z-ruler-hint);
   left: 0;
   font-size: 11px;
   line-height: 1.4;

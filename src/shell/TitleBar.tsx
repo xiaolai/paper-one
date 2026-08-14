@@ -1,6 +1,5 @@
 import {
   AudioLines,
-  ChevronDown,
   ListTree,
   Minus,
   PanelLeft,
@@ -11,6 +10,7 @@ import {
   Type,
   X,
 } from 'lucide-react'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { ICON } from '../lib/metrics'
 import type { Platform } from '../lib/metrics'
 import { isTauri } from '../lib/platform'
@@ -54,8 +54,29 @@ export function TitleBar({
   /* §06: chrome fades to 0 and returns on pointer-near — but only in the
    * reader, and never while the switcher is up, since the chip it is anchored
    * to would vanish underneath it. */
-  const chromeOpacity =
-    state.screen === 'reader' && !state.chromeOn && !state.switcherOpen ? 0 : 1
+  const chromeHidden =
+    state.screen === 'reader' && !state.chromeOn && !state.switcherOpen
+
+  /* Hiding with opacity alone left every control invisible but still
+   * focusable and clickable — tabbing through the reader landed on buttons
+   * nobody could see. `inert` takes the whole subtree out of the focus order
+   * and the hit-testing at once; `visibility` is what actually removes it from
+   * the accessibility tree. Opacity stays because §08 wants a 180ms fade, and
+   * `visibility` is transitionable in a way `display` is not. */
+  const chromeStyle = {
+    opacity: chromeHidden ? 0 : 1,
+    visibility: chromeHidden ? ('hidden' as const) : ('visible' as const),
+  }
+
+  /* Windows and Linux draw their own window controls, so they need real
+   * handlers — without them the buttons were decoration that swallowed the
+   * click. macOS never reaches this: AppKit draws the traffic lights. */
+  const appWindow = isTauri() ? getCurrentWindow() : null
+  const WINDOW_BUTTONS = [
+    { key: 'minimise', title: 'Minimise', Icon: Minus, run: () => appWindow?.minimize() },
+    { key: 'maximise', title: 'Maximise', Icon: Square, run: () => appWindow?.toggleMaximize() },
+    { key: 'close', title: 'Close', Icon: X, run: () => appWindow?.close() },
+  ]
 
   return (
     <div
@@ -74,12 +95,15 @@ export function TitleBar({
             LIGHTS.map((fill) => (
               <span key={fill} className={styles.light} style={{ background: fill }} />
             ))
-          : [
-              { key: 'minimise', Icon: Minus },
-              { key: 'maximise', Icon: Square },
-              { key: 'close', Icon: X },
-            ].map(({ key, Icon }) => (
-              <button key={key} type="button" className={styles.windowButton} title={key}>
+          : WINDOW_BUTTONS.map(({ key, title, Icon, run }) => (
+              <button
+                key={key}
+                type="button"
+                className={styles.windowButton}
+                title={title}
+                aria-label={title}
+                onClick={() => void run()}
+              >
                 <Icon size={13} strokeWidth={ICON.stroke} />
               </button>
             ))}
@@ -87,27 +111,26 @@ export function TitleBar({
 
       <div
         className={styles.chipZone}
-        style={{ opacity: chromeOpacity }}
+        style={chromeStyle}
+        inert={chromeHidden}
         data-tauri-drag-region
       >
-        <button
-          type="button"
-          className={styles.chip}
-          title="Switch book"
-          onClick={() => dispatch({ type: 'toggleLayer', layer: 'switcherOpen' })}
-        >
+        {/* Not a button until the switcher overlay exists. It was dispatching
+            `switcherOpen`, which nothing renders — a control that looked live
+            and did nothing on every click. It stays as the book label. */}
+        <div className={styles.chip} role="presentation">
           <span className={styles.chipCover} style={{ background: coverTint }} />
           <span className={styles.chipTitle}>{bookTitle}</span>
           <span className={styles.chipSub}>{bookSubtitle}</span>
-          <ChevronDown
-            size={ICON.inline}
-            strokeWidth={ICON.stroke}
-            style={{ color: 'var(--muted)' }}
-          />
-        </button>
+        </div>
       </div>
 
-      <div className={styles.appZone} data-platform={platform} style={{ opacity: chromeOpacity }}>
+      <div
+        className={styles.appZone}
+        data-platform={platform}
+        style={chromeStyle}
+        inert={chromeHidden}
+      >
         {isReader && (
           <>
             <div className={styles.toggleGroup}>
@@ -128,12 +151,16 @@ export function TitleBar({
                 </button>
               ))}
             </div>
+            {/* §07 disabled: no pointer events and the reason stated, rather
+                than a control that toggles state nothing consumes. TTS is a
+                sidecar the handoff describes but nothing implements yet. */}
             <button
               type="button"
               className={styles.action}
-              title="Listen"
-              data-on={state.ttsOn}
-              onClick={() => dispatch({ type: 'toggleTts' })}
+              title="Listen — not available yet"
+              aria-label="Listen — not available yet"
+              disabled
+              data-disabled="true"
             >
               <AudioLines size={ICON.control} strokeWidth={ICON.stroke} />
             </button>
@@ -147,11 +174,15 @@ export function TitleBar({
             </button>
           </>
         )}
+        {/* §07 disabled: ⌘K dispatches `paletteOpen`, but no palette component
+            is passed to WindowShell yet. */}
         <button
           type="button"
           className={styles.action}
-          title="Search or ask · ⌘K"
-          onClick={() => dispatch({ type: 'toggleLayer', layer: 'paletteOpen' })}
+          title="Search or ask — not available yet"
+          aria-label="Search or ask — not available yet"
+          disabled
+          data-disabled="true"
         >
           <Search size={ICON.control} strokeWidth={ICON.stroke} />
         </button>
