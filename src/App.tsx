@@ -5,6 +5,7 @@ import { applyMetrics } from './lib/metrics'
 import { usePlatform, usePrefersDark } from './lib/platform'
 import { useAppState } from './lib/state'
 import { useBook } from './lib/useBook'
+import { useFileDrop } from './lib/useFileDrop'
 import { useLibrary } from './lib/useLibrary'
 import { useCards } from './lib/useCards'
 import { useMarks } from './lib/useMarks'
@@ -41,6 +42,11 @@ export function App() {
    * each surface growing its own. */
   const pickerRef = useRef<HTMLInputElement>(null)
   const addBooks = useCallback(() => pickerRef.current?.click(), [])
+
+  /* Window-wide, not just over the empty state. A file dropped anywhere the
+   * app does not intercept NAVIGATES the webview to it — the interface is
+   * replaced by WebKit's PDF viewer with no error and no way back. */
+  const { dragging } = useFileDrop(book.open)
 
   useEffect(() => {
     applyMetrics(document.documentElement, platform)
@@ -203,6 +209,7 @@ export function App() {
           marks={marks}
           marking={marking}
           onAddBooks={addBooks}
+          dragging={dragging}
           inert={state.screen === 'library'}
         />
 

@@ -1,11 +1,4 @@
-import {
-  useCallback,
-  useMemo,
-  useRef,
-  useState,
-  type CSSProperties,
-  type DragEvent,
-} from 'react'
+import { useMemo, useState, type CSSProperties } from 'react'
 import { Plus } from 'lucide-react'
 import type { Platform } from '../lib/metrics'
 import {
@@ -40,6 +33,15 @@ export interface ReaderProps {
   /** Opens the file picker, which the window owns — see App. */
   onAddBooks: () => void
   /**
+   * True while a book is being dragged over the WINDOW.
+   *
+   * Owned by App, not by this component. A drop that misses an element which
+   * calls `preventDefault` navigates the webview to the file and replaces the
+   * whole interface, so the handling cannot be scoped to one div here — see
+   * `useFileDrop`. This is only the visual state.
+   */
+  dragging: boolean
+  /**
    * True when another screen is layered over the reader.
    *
    * The reader stays mounted underneath so foliate is not torn down and the
@@ -57,9 +59,9 @@ export function Reader({
   marks,
   marking,
   onAddBooks,
+  dragging,
   inert = false,
 }: ReaderProps) {
-  const [dragging, setDragging] = useState(false)
   /* The stage element as STATE, not just a ref: the popup and the margin marks
    * both position against it, and a ref's `.current` landing after the first
    * render does not re-render them. They would measure against null once and
@@ -67,10 +69,6 @@ export function Reader({
   const [stage, setStage] = useState<HTMLDivElement | null>(null)
 
   const { selection, setSelection, ranges, onMarkDrawn, selected, mark, unmark } = marking
-  /* dragenter/dragleave fire for every child crossed, so a plain boolean
-   * flickers the highlight while the pointer is still inside the zone. Depth
-   * counting is what makes leave mean "left the zone". */
-  const dragDepth = useRef(0)
 
   const windowWidth = useAvailableWidth()
   /* Must use the SAME predicate as WindowShell. Reserving PANE_TRACK whenever
@@ -110,17 +108,7 @@ export function Reader({
   } as CSSProperties
 
 
-  const { open, deselect } = book
-  const onDrop = useCallback(
-    (event: DragEvent<HTMLDivElement>) => {
-      event.preventDefault()
-      dragDepth.current = 0
-      setDragging(false)
-      const dropped = event.dataTransfer.files.item(0)
-      if (dropped) open(dropped)
-    },
-    [open],
-  )
+  const { deselect } = book
 
   return (
     <div className={styles.reader} inert={inert}>
@@ -233,16 +221,6 @@ export function Reader({
           <div
             className={styles.empty}
             data-dragging={dragging}
-            onDragEnter={() => {
-              dragDepth.current += 1
-              setDragging(true)
-            }}
-            onDragOver={(event) => event.preventDefault()}
-            onDragLeave={() => {
-              dragDepth.current = Math.max(0, dragDepth.current - 1)
-              if (dragDepth.current === 0) setDragging(false)
-            }}
-            onDrop={onDrop}
           >
             <h1 className={styles.emptyTitle}>Your library is empty</h1>
             <p className={styles.emptyBody}>
