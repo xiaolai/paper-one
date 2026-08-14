@@ -118,6 +118,15 @@ export interface SessionNavigator {
   eraseMark: (anchor: MarkAnchor) => void
   /** Clear the book's selection — after acting on it, per §07. */
   deselect: () => void
+  /**
+   * §11's ← and →.
+   *
+   * Not optional chrome: a fixed-layout book — every PDF — does not scroll,
+   * so these are the ONLY way through it. A scrolled EPUB hid that for a long
+   * time, because scrolling worked and nobody missed the binding.
+   */
+  next: () => void
+  prev: () => void
 }
 
 export interface SessionDeps {
@@ -302,6 +311,8 @@ export class ReaderSession {
       drawMark: (anchor) => attachMark(view, anchor),
       eraseMark: (anchor) => attachMark(view, anchor, true),
       deselect: () => view.deselect(),
+      next: () => void view.next(),
+      prev: () => void view.prev(),
     })
 
     // Settings go on BEFORE the first paint, so the reader never flashes

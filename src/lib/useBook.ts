@@ -72,6 +72,9 @@ export interface Book extends BookState {
   eraseMark: (anchor: MarkAnchor) => void
   /** Clear the book's own text selection. */
   deselect: () => void
+  /** Turn the page. The only way through a fixed-layout book. */
+  next: () => void
+  prev: () => void
   setNavigator: (navigator: BookNavigator | null) => void
   /** Renderer callbacks. Each takes the generation it was issued under. */
   setToc: (generation: number, toc: readonly TocItem[]) => void
@@ -167,6 +170,8 @@ export function useBook(): Book {
       drawMark: (anchor) => navigatorRef.current?.drawMark(anchor),
       eraseMark: (anchor) => navigatorRef.current?.eraseMark(anchor),
       deselect: () => navigatorRef.current?.deselect(),
+      next: () => navigatorRef.current?.next(),
+      prev: () => navigatorRef.current?.prev(),
       setNavigator: (navigator) => {
         navigatorRef.current = navigator
       },

@@ -103,7 +103,34 @@ export function App() {
         return
       }
 
+      /* Typing comes first. The search field, a note, and the palette all take
+       * arrow keys and a space bar, and turning the page underneath someone
+       * mid-word is worse than not binding the key at all. */
+      const target = event.target as HTMLElement | null
+      const typing =
+        target?.isContentEditable ||
+        target?.tagName === 'INPUT' ||
+        target?.tagName === 'TEXTAREA'
+
       const accel = event.metaKey || event.ctrlKey
+
+      /* §11: ← → turn the page. Unbound until now, which went unnoticed
+       * because a scrolled EPUB scrolls — but a fixed-layout book, which is
+       * every PDF, does not scroll at all. These were its only way through and
+       * it had none, so it opened on one page and stayed there. */
+      if (!accel && !typing) {
+        if (event.key === 'ArrowRight' || event.key === 'PageDown') {
+          event.preventDefault()
+          book.next()
+          return
+        }
+        if (event.key === 'ArrowLeft' || event.key === 'PageUp') {
+          event.preventDefault()
+          book.prev()
+          return
+        }
+      }
+
       if (!accel) return
 
       if (event.key === 'k') {
@@ -132,7 +159,7 @@ export function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [dispatch, marking])
+  }, [dispatch, marking, book])
 
   /* Titlebar metadata comes from the OPEN book. It used to read BOOKS[0]
    * unconditionally, so every book — and the empty state — was presented as
