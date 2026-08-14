@@ -10,7 +10,9 @@
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
     "tauri": "tauri",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "predev": "node scripts/sync-pdfjs-assets.mjs",
+    "prebuild": "node scripts/sync-pdfjs-assets.mjs"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

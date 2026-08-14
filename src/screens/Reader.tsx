@@ -1,6 +1,4 @@
 import {
-  Suspense,
-  lazy,
   useCallback,
   useMemo,
   useRef,
@@ -19,7 +17,6 @@ import {
   proseBleed,
   proseGrid,
 } from '../lib/metrics'
-import { isPdf } from '../lib/formats'
 import { marginMarks } from '../lib/marks'
 import type { MarkStore } from '../lib/useMarks'
 import type { Marking } from '../lib/useMarking'
@@ -32,18 +29,6 @@ import { ReadingRuler } from '../reader/ReadingRuler'
 import { SelectionTools } from '../reader/SelectionTools'
 import styles from './Reader.module.css'
 
-/**
- * Loaded only when a PDF is opened.
- *
- * pdf.js is about half a megabyte of parser before the worker, and importing
- * it statically put all of it in the entry chunk — so opening an EPUB, which
- * is the common case, paid for a renderer it never uses. The bundle went from
- * 286kB to 771kB the moment this was a plain import. foliate is lazy for the
- * same reason; this keeps the two symmetrical.
- */
-const PdfView = lazy(() =>
-  import('../reader/PdfView').then((module) => ({ default: module.PdfView })),
-)
 
 export interface ReaderProps {
   state: AppState
@@ -124,12 +109,6 @@ export function Reader({
     '--track-gap': `${grid.gap}px`,
   } as CSSProperties
 
-  /* A PDF takes a different reader entirely — see `pdf.ts`. It also takes a
-   * different LAYOUT: the prose grid exists to hold a reflowable measure
-   * between a gutter and a margin, and a PDF page has fixed proportions that
-   * the measure does not apply to. So the grid, the ruler and the margin marks
-   * are all EPUB-only rather than being rendered inert over a canvas. */
-  const pdf = book.source !== null && isPdf(book.source)
 
   const { open, deselect } = book
   const onDrop = useCallback(
@@ -164,22 +143,6 @@ export function Reader({
               </div>
             )}
 
-            {pdf && book.source !== null ? (
-              <div className={styles.pdfStage}>
-                <Suspense fallback={<div className={styles.loading}>Opening…</div>}>
-                <PdfView
-                  file={book.source}
-                  generation={book.generation}
-                  measure={measureForStep(state.stepIdx)}
-                  onToc={book.setToc}
-                  onRelocate={book.setPosition}
-                  onMeta={book.setMeta}
-                  onError={book.fail}
-                  onNavigator={book.setNavigator}
-                />
-                </Suspense>
-              </div>
-            ) : (
             <div
               className={styles.stage}
               ref={setStage}
@@ -254,7 +217,6 @@ export function Reader({
                 }}
               />
             </div>
-            )}
 
             <div
               className={styles.footer}

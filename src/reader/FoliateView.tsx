@@ -3,6 +3,7 @@ import type { Renderer, TocItem, View } from 'foliate-js/view.js'
 import type { Theme } from '../lib/state'
 import { measureForStep } from '../lib/metrics'
 import type { BookMeta, BookNavigator, ReaderPosition } from '../lib/useBook'
+import { isPdf } from '../lib/formats'
 import { bookCss, markPalette } from './bookCss'
 import { ReaderSession, type MarkAnchor, type SelectionSnapshot } from './session'
 
@@ -187,6 +188,16 @@ export function FoliateView({
         loadPainters: async () => {
           const { Overlayer } = await import('foliate-js/overlayer.js')
           return { highlight: Overlayer.highlight, underline: Overlayer.underline }
+        },
+        /* foliate has no PDF loader, so a PDF is turned into a Book — one
+         * HTML page per PDF page — and opened through the same view. That is
+         * what gives PDFs marks, search, the ruler and reading aloud for free
+         * rather than needing a second reader that has none of them. Loaded
+         * lazily: pdf.js is half a megabyte and an EPUB must not pay for it. */
+        prepare: async (input) => {
+          if (!isPdf(input)) return input
+          const { makePdf } = await import('./makePdf')
+          return makePdf(input)
         },
         applySettings: (view: View) => applySettings(view.renderer, settings.current),
       })

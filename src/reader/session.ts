@@ -125,6 +125,18 @@ export interface SessionDeps {
   createView: () => Promise<View>
   /** Loaded alongside the view so the painters exist before the first paint. */
   loadPainters: () => Promise<MarkPainters>
+  /**
+   * Turn the source into something `View.open` accepts.
+   *
+   * foliate opens a File or URL by sniffing its type, but it has no PDF loader
+   * — so a PDF is converted into a Book first, one HTML page per PDF page. See
+   * `makePdf`. Everything else passes through unchanged.
+   *
+   * It happens HERE rather than at the call site so that a conversion failure
+   * is reported through the same path as a failed open, and so that a session
+   * disposed mid-conversion still stops before touching a view.
+   */
+  prepare?: (source: File | string) => Promise<unknown>
   applySettings: (view: View) => void
 }
 
@@ -270,7 +282,11 @@ export class ReaderSession {
     })
 
     try {
-      await view.open(source)
+      const target = deps.prepare ? await deps.prepare(source) : source
+      // `prepare` can be slow — a PDF is parsed here — so the latch is
+      // consulted before the view is touched with the result.
+      if (!this.#settle(view)) return
+      await view.open(target as File | string)
     } catch (cause) {
       if (!this.#settle(view)) return
       this.#cb.onError(message(cause, 'This file could not be opened.'))
