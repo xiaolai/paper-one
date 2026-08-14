@@ -129,7 +129,7 @@ declare module 'foliate-js/view.js' {
      * `remove` is true. Async upstream; nothing here awaits it, because the
      * only outcome is a drawing side effect.
      */
-    addAnnotation(annotation: unknown, remove?: boolean): void
+    addAnnotation(annotation: unknown, remove?: boolean): Promise<void>
     /**
      * The CFI for a range within a spine item, or the section's own base CFI
      * when `range` is omitted. This is how a live selection becomes a durable

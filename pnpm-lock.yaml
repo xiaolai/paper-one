@@ -4,6 +4,11 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  foliate-js@1.0.1:
+    hash: 592f76c9c6d9c36456ddca204a91a7469d5a3b267ebb4a9bf018bcec0a811a33
+    path: patches/foliate-js@1.0.1.patch
+
 importers:
 
   .:
@@ -25,7 +30,7 @@ importers:
         version: 2.11.1
       foliate-js:
         specifier: ^1.0.1
-        version: 1.0.1
+        version: 1.0.1(patch_hash=592f76c9c6d9c36456ddca204a91a7469d5a3b267ebb4a9bf018bcec0a811a33)
       lucide-react:
         specifier: ^1.31.0
         version: 1.31.0(react@19.2.8)
@@ -1841,7 +1846,7 @@ snapshots:
     dependencies:
       is-unicode-supported: 2.1.0
 
-  foliate-js@1.0.1:
+  foliate-js@1.0.1(patch_hash=592f76c9c6d9c36456ddca204a91a7469d5a3b267ebb4a9bf018bcec0a811a33):
     dependencies:
       construct-style-sheets-polyfill: 3.1.0
 

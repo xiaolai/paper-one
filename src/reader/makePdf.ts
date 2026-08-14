@@ -176,7 +176,19 @@ function tocItem(item: { title: string; dest: unknown; items?: unknown[] }): Toc
   return { label: item.title, href: JSON.stringify(item.dest), subitems }
 }
 
-export async function makePdf(file: File | string): Promise<PdfBook> {
+export interface PdfHooks {
+  /**
+   * A page has finished painting, text layer and all.
+   *
+   * The overlay for a section is created when its frame LOADS, which for a PDF
+   * is before `paint` has put any text in it — so a mark's CFI resolves against
+   * an empty document and silently draws nothing. This is the caller's cue to
+   * re-attach the marks now that there is text to anchor them to.
+   */
+  onPagePainted?: () => void
+}
+
+export async function makePdf(file: File | string, hooks: PdfHooks = {}): Promise<PdfBook> {
   const task = pdfjs.getDocument({
     ...(typeof file === 'string' ? { url: file } : { data: await file.arrayBuffer() }),
     cMapUrl: `${ASSET_BASE}cmaps/`,
@@ -228,7 +240,12 @@ export async function makePdf(file: File | string): Promise<PdfBook> {
           src = pageSource(width, height)
           sources.set(i, src)
         }
-        return { src, onZoom: ({ doc, scale }) => void paint(page, doc, scale) }
+        return {
+          src,
+          onZoom: ({ doc, scale }) => {
+            void paint(page, doc, scale).then(() => hooks.onPagePainted?.())
+          },
+        }
       },
       createDocument: async () => pageDocument(await pdf.getPage(i + 1)),
       // foliate uses this to weight progress. Pages are equal enough.

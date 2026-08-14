@@ -197,7 +197,12 @@ export function FoliateView({
         prepare: async (input) => {
           if (!isPdf(input)) return input
           const { makePdf } = await import('./makePdf')
-          return makePdf(input)
+          return makePdf(input, {
+            // A PDF page has no text until it is painted, and its overlay is
+            // created before that — so marks are re-attached once there is
+            // something for their anchors to resolve against.
+            onPagePainted: () => sessionRef.current?.redrawMarks(),
+          })
         },
         applySettings: (view: View) => applySettings(view.renderer, settings.current),
       })

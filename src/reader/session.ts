@@ -299,8 +299,8 @@ export class ReaderSession {
     this.#cb.onNavigator({
       goTo: (target) => void view.goTo(target),
       search: (query, signal) => runSearch(view, query, signal),
-      drawMark: (anchor) => void view.addAnnotation(annotationFor(anchor)),
-      eraseMark: (anchor) => void view.addAnnotation(annotationFor(anchor), true),
+      drawMark: (anchor) => attachMark(view, anchor),
+      eraseMark: (anchor) => attachMark(view, anchor, true),
       deselect: () => view.deselect(),
     })
 
@@ -339,7 +339,7 @@ export class ReaderSession {
   #drawSection(view: View, index: number): void {
     for (const anchor of this.#cb.getMarks()) {
       if (anchor.sectionIndex !== index) continue
-      void view.addAnnotation(annotationFor(anchor))
+      attachMark(view, anchor)
     }
   }
 
@@ -410,6 +410,28 @@ export class ReaderSession {
  */
 function annotationFor(anchor: MarkAnchor): { value: string; kind: MarkKind } {
   return { value: anchor.cfi, kind: anchor.kind }
+}
+
+/**
+ * Attach or erase one mark, tolerating an anchor that does not resolve.
+ *
+ * Unlike the silent catches this file has had to remove, this failure is
+ * expected and specific: a CFI addresses a position in a document, and a PDF
+ * page has no text in it until it has been painted. Marks are offered when the
+ * section's overlay is created — before that paint — and offered again once it
+ * lands, which is when they take. Reporting the first attempt would log a line
+ * per mark per page on every book that has any.
+ *
+ * It is narrow on purpose: only the resolution throws are swallowed, and only
+ * because the operation is retried by design.
+ */
+function attachMark(view: View, anchor: MarkAnchor, remove = false): void {
+  try {
+    const pending = view.addAnnotation(annotationFor(anchor), remove)
+    void pending?.catch?.(() => {})
+  } catch {
+    // Threw synchronously — same case, same reasoning.
+  }
 }
 
 /**
