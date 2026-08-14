@@ -127,25 +127,6 @@ blockquote {
   background: color-mix(in srgb, ${c.accent} 24%, transparent);
 }
 
-/* No scrollbar inside the book.
- *
- * WebKit paints overlay scrollbars ON TOP of content rather than reserving a
- * lane for them, and the book document's content box IS the measure — so the
- * bar lands on the last characters of every justified line. Reserving a lane
- * instead (scrollbar-gutter) would silently cut the measure below the 660 §03
- * specifies.
- *
- * Nothing is lost: the wheel, the trackpad, the keyboard and the ruler all
- * still scroll, and progress is reported in the reader's footer. */
-html {
-  scrollbar-width: none;
-}
-
-::-webkit-scrollbar {
-  width: 0;
-  height: 0;
-}
-
 /* Footnote and endnote links are targets for the popover, not destinations. */
 a[epub|type~="noteref"] {
   vertical-align: super;

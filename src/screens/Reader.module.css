@@ -46,15 +46,40 @@
   gap: 0 var(--track-gap);
 }
 
+/* The gutter and margin are OVERLAYS on the same grid row as the book, not
+ * siblings beside it — see `.text` for why. */
 .gutter {
   grid-column: 1;
+  grid-row: 1;
+  z-index: 1;
   position: relative;
   min-height: 0;
+  /* Empty lane: clicks and selection drags belong to the book underneath. */
+  pointer-events: none;
 }
 
-/* The book itself. foliate-js owns everything inside this cell. */
+/*
+ * The book spans the WHOLE grid, not just the measure track.
+ *
+ * foliate's scroll container is this element, and it sets
+ * `body { max-width: <measure>; margin: auto }` — it expects a container wider
+ * than the measure and centres the text itself. Sizing the container to the
+ * measure instead left the scrollbar sitting on the last characters of every
+ * justified line.
+ *
+ * `scrollbar-gutter: stable` does not fix this: per the CSS Overflow spec, a
+ * gutter is only reserved for CLASSIC scrollbars — "when using overlay
+ * scrollbars, the gutter will not be present" — and macOS uses overlay
+ * scrollbars by default. Reserving a lane would also have to come out of the
+ * measure. Widening the scroller is the fix that works for both kinds: the
+ * bar lands in the margin either way.
+ *
+ * The text still lands exactly on the measure track, because the gutter and
+ * the margin are equal and foliate centres within the span.
+ */
 .text {
-  grid-column: 2;
+  grid-column: 1 / -1;
+  grid-row: 1;
   min-width: 0;
   min-height: 0;
   position: relative;
@@ -62,9 +87,12 @@
 
 .margin {
   grid-column: 3;
+  grid-row: 1;
+  z-index: 1;
   position: relative;
   min-height: 0;
   overflow: hidden;
+  pointer-events: none;
 }
 
 /* The reading ruler styles itself — see ReadingRuler.module.css. */

@@ -27,4 +27,7 @@
   color: var(--muted);
   white-space: nowrap;
   cursor: pointer;
+  /* The gutter lane is pointer-events:none so the book keeps its clicks; the
+   * hint is the one thing in there that is interactive. */
+  pointer-events: auto;
 }
