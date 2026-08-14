@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { useCallback, useMemo } from 'react'
 import {
   createMark,
   loadMarks,
@@ -8,9 +8,9 @@ import {
   updateNote as updateNoteIn,
   upsertMark,
   type Mark,
-  type MarkStorage,
   type NewMark,
 } from './marks'
+import { localStore, useStoredCollection } from './useStoredCollection'
 
 /**
  * The annotation store, bound to React.
@@ -38,51 +38,15 @@ export interface MarkStore {
   setNote: (id: string, note: string) => void
 }
 
-function defaultStorage(): MarkStorage | null {
-  try {
-    return window.localStorage
-  } catch {
-    // Throws outright when storage is disabled by policy.
-    return null
-  }
-}
-
-export function useMarks(bookId: string | null, storage = defaultStorage()): MarkStore {
-  /* Loaded once, lazily. Reading storage on every render would re-parse the
-   * whole collection for nothing, and reading it in an effect would render one
-   * frame with no marks — long enough for the margin column to appear and then
-   * collapse again on a book that has them. */
-  const [marks, setMarks] = useState<readonly Mark[]>(() =>
-    storage ? loadMarks(storage) : [],
-  )
-  const [persistent, setPersistent] = useState(true)
-
-  /**
-   * The authoritative collection between renders.
-   *
-   * Every mutation composes from this rather than from the `marks` closed over
-   * at render time, so two marks made in the same tick both survive — the
-   * second would otherwise be computed from a `marks` that predates the first
-   * and silently drop it.
-   *
-   * A state updater cannot do this job instead: persisting belongs to the
-   * mutation, and React may invoke an updater twice in StrictMode, so a write
-   * placed inside one runs twice and stops being a pure function of state.
-   */
-  const latest = useRef<readonly Mark[]>(marks)
-  const storageRef = useRef(storage)
-  storageRef.current = storage
-
-  const apply = useCallback((mutate: (prev: readonly Mark[]) => readonly Mark[]) => {
-    const next = mutate(latest.current)
-    latest.current = next
-    setMarks(next)
-
-    const target = storageRef.current
-    // Never latch back to true: once a write has failed, what is on disk is
-    // already behind, and a later success does not recover what was lost.
-    if (!target || !saveMarks(target, next)) setPersistent(false)
-  }, [])
+export function useMarks(bookId: string | null, storage = localStore()): MarkStore {
+  /* The plumbing — lazy load, the between-renders ref, the write and the
+   * persistence flag — is `useStoredCollection`, shared with cards and the
+   * library. What is left here is what marks specifically mean. */
+  const {
+    items: marks,
+    persistent,
+    apply,
+  } = useStoredCollection<Mark>({ storage, load: loadMarks, save: saveMarks })
 
   const add = useCallback(
     (draft: NewMark) => {

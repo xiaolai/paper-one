@@ -29,8 +29,19 @@ export function isPdf(source: File | string): boolean {
   return source.type === 'application/pdf' || /\.pdf$/i.test(source.name)
 }
 
-/** A file name without its extension, for a PDF that carries no title. */
+/**
+ * A file name without its extension, for a PDF that carries no title.
+ *
+ * The query and the fragment come off first. `isPdf` accepts them — a URL
+ * ending `.pdf?download=1` is a PDF — so a title taken straight from the last
+ * path segment kept them, and the library showed the book as
+ * `attention-is-all-you-need.pdf?download=1`: the extension still on it,
+ * because the pattern that strips it anchors at the end of the string.
+ */
 export function titleFromSource(source: File | string): string {
-  const name = typeof source === 'string' ? source.split('/').pop() || source : source.name
+  const name =
+    typeof source === 'string'
+      ? (source.split(/[?#]/)[0] ?? source).split('/').pop() || source
+      : source.name
   return name.replace(/\.pdf$/i, '')
 }

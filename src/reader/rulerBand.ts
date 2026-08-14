@@ -21,6 +21,31 @@ const BAND_ID = 'paper-ruler-band'
 export const BAND_CLASS = 'paper-ruler-band'
 
 /**
+ * The marker that makes body the containing block for what we inject.
+ *
+ * A class rather than a blanket rule, because `position: relative` on body is
+ * not free: it changes the containing block for any absolutely positioned
+ * content the BOOK'S OWN stylesheet placed against the initial one, which is
+ * how a fixed-layout cover or a pop-up footnote ends up somewhere its author
+ * never put it. Applied only while one of our overlays is actually in the
+ * document, and removed with the last of them, so a reader who never turns the
+ * ruler on gets the book laid out exactly as its author wrote it.
+ */
+export const ANCHOR_CLASS = 'paper-anchored'
+
+/** Add the marker; the overlay about to be appended needs body positioned. */
+function anchor(body: HTMLElement): void {
+  body.classList.add(ANCHOR_CLASS)
+}
+
+/** Drop the marker once nothing of ours is left in the document. */
+function unanchor(doc: Document): void {
+  const held = overlays.get(doc)
+  if (held?.band?.isConnected || held?.spoken?.isConnected) return
+  doc.body?.classList.remove(ANCHOR_CLASS)
+}
+
+/**
  * Offset of a viewport rect within body, which is what an absolutely
  * positioned child of body is placed by.
  *
@@ -37,6 +62,57 @@ function offsetInBody(body: HTMLElement, rect: { top: number; left: number }) {
 }
 
 /**
+ * Our overlays in one document, keyed by role.
+ *
+ * A WeakMap rather than `getElementById`. The ids are ours, but the document is
+ * the READER'S FILE: an EPUB is free to contain an element with any id it
+ * likes, including these. Looked up by id, the band would then take over that
+ * element — restyling it, moving it, and finally REMOVING it when the ruler
+ * went off, silently deleting a piece of the book. Holding the elements we
+ * created means we can only ever touch our own, and the map dies with the
+ * document.
+ */
+type OverlayRole = 'band' | 'spoken'
+const overlays = new WeakMap<Document, Partial<Record<OverlayRole, HTMLElement>>>()
+
+/**
+ * The overlay for one role, created on first use.
+ *
+ * Both overlays are the same object with a different box: an absolutely
+ * positioned, aria-hidden div behind the text, anchored to body. They were two
+ * near-identical copies of this, and the copies had already begun to differ —
+ * only one of them cleaned up after itself.
+ */
+function overlayIn(doc: Document, role: OverlayRole, id: string, className: string): HTMLElement | null {
+  const body = doc.body
+  if (!body) return null
+
+  const held = overlays.get(doc) ?? {}
+  const existing = held[role]
+  // `isConnected` because foliate can replace a section's body under us; a
+  // detached element would be styled forever and never seen.
+  if (existing?.isConnected) return existing
+
+  const element = doc.createElement('div')
+  element.id = id
+  element.className = className
+  // Decorative: it must never be announced, and it must never be a target.
+  element.setAttribute('aria-hidden', 'true')
+  anchor(body)
+  body.append(element)
+  overlays.set(doc, { ...held, [role]: element })
+  return element
+}
+
+function removeOverlay(doc: Document | null, role: OverlayRole): void {
+  if (!doc) return
+  const held = overlays.get(doc)
+  held?.[role]?.remove()
+  if (held) overlays.set(doc, { ...held, [role]: undefined })
+  unanchor(doc)
+}
+
+/**
  * Put the band on a line, creating it if the document does not have one yet.
  *
  * `rectTop` is a viewport coordinate straight from `getClientRects` — the
@@ -44,21 +120,43 @@ function offsetInBody(body: HTMLElement, rect: { top: number; left: number }) {
  * call site where it can be got subtly wrong.
  */
 export function placeBand(doc: Document, rectTop: number, height: number): void {
+  /* No `left` or `width`: the band spans the measure, which its stylesheet
+   * gives it, and writing an inline width here would fight that. `place` skips
+   * the axes it is not given for exactly this reason. */
+  place(doc, 'band', BAND_ID, BAND_CLASS, { top: rectTop, height })
+}
+
+/**
+ * Put one of our overlays where a viewport rect is.
+ *
+ * Both overlays are the same operation with a different box, and they were two
+ * copies of it: create-or-find, convert into body's space, write the styles.
+ * The conversion is the part worth having in one place — it is the step that
+ * goes subtly wrong, and a second copy is a second chance to get it wrong.
+ */
+interface Placement {
+  readonly top: number
+  readonly height: number
+  readonly left?: number
+  readonly width?: number
+}
+
+function place(
+  doc: Document,
+  role: OverlayRole,
+  id: string,
+  className: string,
+  box: Placement,
+): void {
+  const element = overlayIn(doc, role, id, className)
   const body = doc.body
-  if (!body) return
+  if (!element || !body) return
 
-  let band = doc.getElementById(BAND_ID)
-  if (!band) {
-    band = doc.createElement('div')
-    band.id = BAND_ID
-    band.className = BAND_CLASS
-    // Decorative: it must never be announced, and it must never be a target.
-    band.setAttribute('aria-hidden', 'true')
-    body.append(band)
-  }
-
-  band.style.top = `${offsetInBody(body, { top: rectTop, left: 0 }).top}px`
-  band.style.height = `${height}px`
+  const offset = offsetInBody(body, { top: box.top, left: box.left ?? 0 })
+  element.style.top = `${offset.top}px`
+  element.style.height = `${box.height}px`
+  if (box.left !== undefined) element.style.left = `${offset.left}px`
+  if (box.width !== undefined) element.style.width = `${box.width}px`
 }
 
 /**
@@ -70,7 +168,7 @@ export function placeBand(doc: Document, rectTop: number, height: number): void 
  * selection that spans the end of the document.
  */
 export function removeBand(doc: Document | null): void {
-  doc?.getElementById(BAND_ID)?.remove()
+  removeOverlay(doc, 'band')
 }
 
 /** The word being read aloud, drawn the same way and for the same reason. */
@@ -91,25 +189,11 @@ export interface SpokenBox {
  * rect exactly as `getBoundingClientRect` returns it.
  */
 export function placeSpokenWord(doc: Document, box: SpokenBox): void {
-  const body = doc.body
-  if (!body) return
-
-  let word = doc.getElementById(SPOKEN_ID)
-  if (!word) {
-    word = doc.createElement('div')
-    word.id = SPOKEN_ID
-    word.className = SPOKEN_ID
-    word.setAttribute('aria-hidden', 'true')
-    body.append(word)
-  }
-
-  const offset = offsetInBody(body, box)
-  word.style.top = `${offset.top}px`
-  word.style.left = `${offset.left}px`
-  word.style.width = `${box.width}px`
-  word.style.height = `${box.height}px`
+  // All four axes, unlike the band: the ruler tracks a line and spans the
+  // measure, where this tracks one word.
+  place(doc, 'spoken', SPOKEN_ID, SPOKEN_ID, box)
 }
 
 export function removeSpokenWord(doc: Document | null): void {
-  doc?.getElementById(SPOKEN_ID)?.remove()
+  removeOverlay(doc, 'spoken')
 }

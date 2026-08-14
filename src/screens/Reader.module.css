@@ -56,6 +56,13 @@
   min-height: 0;
   /* Empty lane: clicks and selection drags belong to the book underneath. */
   pointer-events: none;
+  /* The size the ruler's hint queries against — see ReadingRuler.module.css.
+   * `proseGrid` yields the gutter before it yields the measure, so this track
+   * can be driven to zero on a narrow window. Layout containment comes with
+   * this, which changes nothing here: the lane is already `position: relative`,
+   * so it was already the containing block for the hint. */
+  container-type: inline-size;
+  container-name: gutter;
 }
 
 /*
@@ -103,23 +110,10 @@
   margin-inline-end: var(--text-bleed-end, 0);
 }
 
-/* The PDF reader's stage. No prose grid: a page has fixed proportions, so
- * there is no measure to hold between a gutter and a margin, and PdfView
- * centres and scrolls its own pages. */
-.pdfStage {
-  flex: 1;
-  min-height: 0;
-  position: relative;
-}
-
-/* Shown while the PDF renderer's chunk is fetched. It is half a megabyte, so
- * on a cold cache there is a real moment here worth naming. */
-.loading {
-  padding: 40px;
-  text-align: center;
-  font-size: 13px;
-  color: var(--muted);
-}
+/* `.pdfStage` and `.loading` were here, for a second reader that no longer
+ * exists: a PDF is now a Book like any other and goes through the same stage,
+ * which is what gives it marks, search and the ruler. Their markup went with
+ * PdfView; these were what was left. */
 
 .margin {
   grid-column: 3;
@@ -132,6 +126,30 @@
 }
 
 /* The reading ruler styles itself — see ReadingRuler.module.css. */
+
+/* A passing message about an action that did not work — see `notice` in
+ * Reader.tsx. Distinct from `.errorBar`, which replaces the reader: this sits
+ * with the footer and leaves the book on screen. */
+.notice {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 24px;
+  font-size: 13px;
+  color: var(--amber);
+}
+
+.noticeDismiss {
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 12px;
+  text-decoration: underline;
+  cursor: pointer;
+}
 
 /* --- footer ---------------------------------------------------------- */
 
@@ -185,20 +203,9 @@
   text-wrap: pretty;
 }
 
+/* §07's primary action, shared — see styles/controls.module.css. */
 .primaryButton {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: var(--control-pill);
-  padding: 0 16px;
-  border: none;
-  border-radius: var(--radius-pill);
-  background: var(--accent);
-  color: var(--surface);
-  font-family: inherit;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
+  composes: primary from '../styles/controls.module.css';
 }
 
 .errorBar {
@@ -210,6 +217,11 @@
 }
 
 .error {
+  /* The default paragraph margins are cleared. This is applied to a <p>, so
+   * the browser's own block margins were added to the padding below and made
+   * the error bar taller than it is written to be — by a different amount in
+   * the bar than in the empty state, since the two sit in different contexts. */
+  margin: 0;
   max-width: 420px;
   padding: 14px;
   border-radius: 10px;

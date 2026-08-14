@@ -1,15 +1,26 @@
+import { THEMES } from '../lib/panes'
 import type { PageLayout, Side, Theme } from '../lib/state'
 import styles from './SidePane.module.css'
 
-/** §05 theme chips — the page colour of each theme, as a literal, because a
- *  swatch has to show the theme it offers rather than the one in use. */
-const THEME_CHIPS: readonly { id: Theme; label: string; fill: string }[] = [
-  { id: 'paper', label: 'Paper', fill: '#FFFFFF' },
-  { id: 'slate', label: 'Slate', fill: '#DFE1DE' },
-  { id: 'sepia', label: 'Sepia', fill: '#F8F0E1' },
-  { id: 'sage', label: 'Sage', fill: '#DDE6D8' },
-  { id: 'night', label: 'Night', fill: '#16191C' },
-]
+/**
+ * §05 theme chips — the page colour of each theme, as a literal, because a
+ * swatch has to show the theme it offers rather than the one in use.
+ *
+ * The fills are this panel's own business and stay here. The ids and labels do
+ * not: they came from a second copy of the theme table that the command palette
+ * also carried, so renaming a theme meant editing two files and noticing. They
+ * now come from `lib/panes`, and the fill map is typed as a total Record so a
+ * new theme without a swatch fails to compile.
+ */
+const THEME_FILLS: Record<Theme, string> = {
+  paper: '#FFFFFF',
+  slate: '#DFE1DE',
+  sepia: '#F8F0E1',
+  sage: '#DDE6D8',
+  night: '#16191C',
+}
+
+const THEME_CHIPS = THEMES.map(({ id, label }) => ({ id, label, fill: THEME_FILLS[id] }))
 
 /**
  * Only what this panel reads and changes.

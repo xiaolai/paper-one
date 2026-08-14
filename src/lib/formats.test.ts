@@ -56,4 +56,16 @@ describe('titleFromSource', () => {
   it('takes the last path segment of a URL', () => {
     expect(titleFromSource('/papers/1706.03762.pdf')).toBe('1706.03762')
   })
+
+  it('drops a query string, which isPdf accepts', () => {
+    // The extension pattern is anchored at the end of the string, so anything
+    // after it left the `.pdf` in the title the reader sees.
+    expect(titleFromSource('https://arxiv.org/papers/1706.03762.pdf?download=1')).toBe(
+      '1706.03762',
+    )
+  })
+
+  it('drops a fragment too', () => {
+    expect(titleFromSource('/papers/1706.03762.pdf#page=3')).toBe('1706.03762')
+  })
 })

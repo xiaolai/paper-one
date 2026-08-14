@@ -45,10 +45,10 @@ export function byNewest(cards: readonly Card[]): Card[] {
   return [...cards].sort((a, b) => b.createdAt - a.createdAt)
 }
 
-export function cardsForBook(cards: readonly Card[], bookId: string | null): Card[] {
-  if (!bookId) return []
-  return byNewest(cards.filter((card) => card.bookId === bookId))
-}
+/* `cardsForBook` was here. Nothing filtered cards by book: every surface shows
+ * all of them, because a card is explicitly cross-book — that is the line §15
+ * draws between a card and a mark. It existed to mirror `marksForBook`, which
+ * is used. */
 
 export function addCard(cards: readonly Card[], card: Card): Card[] {
   return [card, ...cards]
@@ -87,16 +87,24 @@ export function cardFromMark(mark: {
 function isCard(value: unknown): value is Card {
   if (typeof value !== 'object' || value === null) return false
   const c = value as Record<string, unknown>
+  /* Same rule as `isMark`, and for the same reasons: an empty id collides as a
+   * React key and makes `discard(id)` remove two cards, an empty body is a
+   * card with no face, and a non-finite timestamp scrambles the newest-first
+   * order for every other card in the list. */
   return (
     typeof c['id'] === 'string' &&
+    c['id'] !== '' &&
     typeof c['bookId'] === 'string' &&
+    typeof c['body'] === 'string' &&
+    c['body'] !== '' &&
     typeof c['kind'] === 'string' &&
     (CARD_KINDS as readonly string[]).includes(c['kind'] as string) &&
-    typeof c['body'] === 'string' &&
     typeof c['answer'] === 'string' &&
     typeof c['source'] === 'string' &&
     (typeof c['cfi'] === 'string' || c['cfi'] === null) &&
-    typeof c['createdAt'] === 'number'
+    typeof c['createdAt'] === 'number' &&
+    Number.isFinite(c['createdAt']) &&
+    c['createdAt'] >= 0
   )
 }
 

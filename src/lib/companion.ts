@@ -10,10 +10,19 @@
  * is a provenance mark, and marking fabrications as companion output makes the
  * one signal the design relies on a lie.
  *
- * So what ships is the seam: a provider interface, a thread that would hold
- * real answers, and a not-configured state that says what is missing and what
- * would fix it. Wiring a real provider is then a matter of implementing one
- * interface, with the UI already built to display citations it cannot yet get.
+ * So what ships is the seam and the not-configured state: a provider interface,
+ * the message and citation shapes an answer would arrive in, and a panel that
+ * says what is missing and what would fix it.
+ *
+ * Be clear about how much that is, because the comment here used to overstate
+ * it. NOTHING in this build calls `ask`, consumes its stream, or renders a
+ * message — the conversation view does not exist. Wiring a provider is
+ * therefore two pieces of work, not one: implement this interface, and build
+ * the thread that displays what it returns. The types below are a considered
+ * proposal for the second piece, not an implementation of it, and they should
+ * be changed freely if a real provider makes a different shape obvious. What
+ * is here is what `ask` itself needs — a question, a context and citations —
+ * and nothing further.
  */
 
 /** Where a claim came from in the book, so §13's citation rule can be met. */
@@ -24,15 +33,11 @@ export interface Citation {
   readonly label: string
 }
 
-export type CompanionRole = 'you' | 'companion'
-
-export interface CompanionMessage {
-  readonly id: string
-  readonly role: CompanionRole
-  readonly text: string
-  /** Always present for a companion message; empty means it cited nothing. */
-  readonly citations: readonly Citation[]
-}
+/* `CompanionRole` and `CompanionMessage` were declared here and referenced by
+ * nothing — not even by the provider interface below. They described a message
+ * list this build does not have, guessed at before anything needed to render
+ * one, which is the same speculative shape the header now warns about. The
+ * thread's types belong with the thread. */
 
 /** What the companion is allowed to see. It is grounded in this book only. */
 export interface AskContext {

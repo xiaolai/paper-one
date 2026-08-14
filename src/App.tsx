@@ -1,16 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react'
-import { buildCommands, PANE_SHORTCUTS } from './lib/commands'
+import { buildCommands } from './lib/commands'
+import { PANE_SHORTCUTS } from './lib/panes'
 import { ACCEPT_FORMATS } from './lib/formats'
 import { applyMetrics } from './lib/metrics'
 import { usePlatform, usePrefersDark } from './lib/platform'
-import { useAppState } from './lib/state'
+import { NOT_CONFIGURED } from './lib/companion'
+import { hasOpenLayer, useAppState } from './lib/state'
 import { useBook } from './lib/useBook'
 import { useFileDrop } from './lib/useFileDrop'
 import { useLibrary } from './lib/useLibrary'
 import { useCards } from './lib/useCards'
 import { useMarks } from './lib/useMarks'
 import { useMarking } from './lib/useMarking'
-import { BOOKS, coverTint } from './data/fixtures'
+import { coverTint, coverTintFor } from './data/fixtures'
 import { BookSwitcher } from './overlays/BookSwitcher'
 import { CommandPalette } from './overlays/CommandPalette'
 import { TitleBar } from './shell/TitleBar'
@@ -30,7 +32,7 @@ export function App() {
   /* Marks outlive the open book — the Notes panel browses every book's — so the
    * store is keyed by book rather than owned by one. */
   const marks = useMarks(book.bookId)
-  const cards = useCards(book.bookId)
+  const cards = useCards()
   const marking = useMarking(book, marks)
   const library = useLibrary()
   /* Reading aloud follows the spine document: an utterance outlives a section,
@@ -43,10 +45,28 @@ export function App() {
   const pickerRef = useRef<HTMLInputElement>(null)
   const addBooks = useCallback(() => pickerRef.current?.click(), [])
 
+  /**
+   * Open a book AND go to it.
+   *
+   * Every route in — a drop on the window, the switcher, the picker, a cover on
+   * the shelf — goes through here. Only the shelf used to switch screens, so a
+   * book opened any other way loaded into a reader the library was still
+   * covering: the shelf sat there unchanged while the book it had been asked
+   * for finished loading out of sight, which reads as the click having done
+   * nothing at all.
+   */
+  const openBook = useCallback(
+    (source: File | string) => {
+      dispatch({ type: 'goScreen', screen: 'reader' })
+      book.open(source)
+    },
+    [book, dispatch],
+  )
+
   /* Window-wide, not just over the empty state. A file dropped anywhere the
    * app does not intercept NAVIGATES the webview to it — the interface is
    * replaced by WebKit's PDF viewer with no error and no way back. */
-  const { dragging } = useFileDrop(book.open)
+  const { dragging } = useFileDrop(openBook)
 
   useEffect(() => {
     applyMetrics(document.documentElement, platform)
@@ -103,6 +123,8 @@ export function App() {
         return
       }
 
+      const overlayOpen = hasOpenLayer(state)
+
       /* Typing comes first. The search field, a note, and the palette all take
        * arrow keys and a space bar, and turning the page underneath someone
        * mid-word is worse than not binding the key at all. */
@@ -112,13 +134,29 @@ export function App() {
         target?.tagName === 'INPUT' ||
         target?.tagName === 'TEXTAREA'
 
-      const accel = event.metaKey || event.ctrlKey
+      /* The accelerator is ⌘ on macOS and Ctrl elsewhere — not either, anywhere.
+       *
+       * Accepting both meant Control-D, Control-K and Control-\ were swallowed
+       * on macOS, where they are the system's own text-editing keys: Control-D
+       * deletes forward and Control-K kills to end of line, in every text field
+       * in the app. It also meant the combos the palette PRINTS were wrong on
+       * one platform or the other, since those always read ⌘. */
+      const accel = platform === 'macos' ? event.metaKey : event.ctrlKey
+
+      /* Reading keys belong to the reader.
+       *
+       * Guarded on the screen and on the modal layers, because the reader stays
+       * MOUNTED under the library and under every overlay — see the note at its
+       * render. Without the guard, an arrow key pressed while browsing the
+       * shelf, or with the palette open, turned pages in a book nobody could
+       * see, and the reader came back to a different place than they left. */
+      const reading = state.screen !== 'library' && !overlayOpen
 
       /* §11: ← → turn the page. Unbound until now, which went unnoticed
        * because a scrolled EPUB scrolls — but a fixed-layout book, which is
        * every PDF, does not scroll at all. These were its only way through and
        * it had none, so it opened on one page and stayed there. */
-      if (!accel && !typing) {
+      if (!accel && !typing && reading) {
         if (event.key === 'ArrowRight' || event.key === 'PageDown') {
           event.preventDefault()
           book.next()
@@ -127,6 +165,21 @@ export function App() {
         if (event.key === 'ArrowLeft' || event.key === 'PageUp') {
           event.preventDefault()
           book.prev()
+          return
+        }
+
+        /* §11: Space turns the page in a paginated book.
+         *
+         * Only there. In scrolled flow with the ruler on, Space belongs to the
+         * ruler, which pins it and advances a line — see `ReadingRuler`, which
+         * has already had its say by the time this runs and marks the event
+         * handled. With the ruler off, Space is the scroll the reader expects
+         * and nothing here should take it. */
+        if ((event.key === ' ' || event.code === 'Space') && !event.defaultPrevented) {
+          if (state.pageLayout !== 'paginated') return
+          event.preventDefault()
+          if (event.shiftKey) book.prev()
+          else book.next()
           return
         }
       }
@@ -159,16 +212,26 @@ export function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [dispatch, marking, book])
+  }, [
+    dispatch,
+    marking,
+    book,
+    platform,
+    state.screen,
+    state.pageLayout,
+    state.paletteOpen,
+    state.switcherOpen,
+  ])
 
-  /* Titlebar metadata comes from the OPEN book. It used to read BOOKS[0]
-   * unconditionally, so every book — and the empty state — was presented as
-   * Moby-Dick. The fixture is only a placeholder for when nothing is open. */
-  const fixture = BOOKS[0]
-  const title = book.meta?.title || (book.source ? 'Untitled' : (fixture?.title ?? 'Paper'))
-  const subtitle = book.source
-    ? book.position.chapterLabel || book.meta?.author || ''
-    : (fixture?.locationLabel ?? '')
+  /* Titlebar metadata comes from the OPEN book, and from nothing else.
+   *
+   * It used to read BOOKS[0] unconditionally, so every book was presented as
+   * Moby-Dick; that was fixed for the open case and left in place for the
+   * empty one, where it was the same lie in a quieter voice — the titlebar
+   * named a book with a chapter position while the window behind it said the
+   * library was empty. With nothing open the chip says so. */
+  const title = book.meta?.title || (book.source ? 'Untitled' : 'Paper')
+  const subtitle = book.source ? book.position.chapterLabel || book.meta?.author || '' : ''
 
   return (
     <>
@@ -182,7 +245,8 @@ export function App() {
             platform={platform}
             bookTitle={title}
             bookSubtitle={subtitle}
-            coverTint={book.source ? 'var(--tint-b)' : coverTint(0)}
+            // The same tint the shelf gives this book, so the chip and the cover agree.
+            coverTint={book.bookId ? coverTintFor(book.bookId) : coverTint(0)}
             speech={speech}
             hasBook={book.source !== null}
           />
@@ -192,6 +256,7 @@ export function App() {
             {state.paletteOpen && (
               <CommandPalette
                 commands={commands}
+                platform={platform}
                 onDismiss={() => dispatch({ type: 'closeLayer', layer: 'paletteOpen' })}
                 /* The companion has no model configured, so an unmatched query
                  * goes to the panel that says so rather than being answered.
@@ -206,7 +271,7 @@ export function App() {
                 currentBookId={book.bookId}
                 onOpen={(url) => {
                   dispatch({ type: 'closeLayer', layer: 'switcherOpen' })
-                  book.open(url)
+                  openBook(url)
                 }}
                 onDismiss={() => dispatch({ type: 'closeLayer', layer: 'switcherOpen' })}
                 onAddBooks={addBooks}
@@ -222,6 +287,13 @@ export function App() {
             marks={marks}
             cards={cards}
             onGoTo={book.goTo}
+            onDeleteMark={marking.unmark}
+            markFocus={marking.focus}
+            /* The one place the app decides what the companion is. There is no
+               provider in this build — see `lib/companion` — and this is the
+               line that changes when there is. */
+            companion={NOT_CONFIGURED}
+            onAddBooks={addBooks}
           />
         }
       >
@@ -244,13 +316,10 @@ export function App() {
           <Library
             books={library.books}
             platform={platform}
-            onOpen={(url) => {
-              // Opening from the library takes you to what you opened. Staying
-              // on the shelf with a book loading behind it is the one thing a
-              // reader does not want from a click on a cover.
-              dispatch({ type: 'goScreen', screen: 'reader' })
-              book.open(url)
-            }}
+            // Opening from the library takes you to what you opened. Staying
+            // on the shelf with a book loading behind it is the one thing a
+            // reader does not want from a click on a cover.
+            onOpen={openBook}
             onAddBooks={addBooks}
           />
         )}
@@ -263,7 +332,7 @@ export function App() {
         hidden
         onChange={(event) => {
           const picked = event.target.files?.item(0)
-          if (picked) book.open(picked)
+          if (picked) openBook(picked)
           // Reset so picking the same file twice still fires a change.
           event.target.value = ''
         }}

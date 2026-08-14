@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
-import { wordLengthAt } from './speech'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { Speaker, wordLengthAt } from './speech'
 
 /**
  * `collectText` and `rangeAt` are NOT unit-tested here, deliberately.
@@ -16,6 +16,128 @@ import { wordLengthAt } from './speech'
  * highlight landing on the wrong word. What is left below is the part with no
  * DOM in it, which is also the part with the sharp edge.
  */
+
+/**
+ * A stand-in for the platform's speech synthesis.
+ *
+ * Enough of it to drive `Speaker`: utterances are EventTargets, and `cancel`
+ * does what the real one does — it stops the audio but still delivers the
+ * cancelled utterance's `end`, LATE. That late event is the whole reason the
+ * generation counter exists, and it cannot be reproduced any other way.
+ */
+class FakeUtterance extends EventTarget {
+  constructor(readonly text: string) {
+    super()
+  }
+}
+
+class FakeSynth {
+  readonly queued: FakeUtterance[] = []
+  speaking = false
+  paused = false
+
+  speak(utterance: FakeUtterance): void {
+    this.queued.push(utterance)
+    this.speaking = true
+  }
+
+  cancel(): void {
+    this.speaking = false
+  }
+
+  pause(): void {
+    this.paused = true
+  }
+
+  resume(): void {
+    this.paused = false
+  }
+}
+
+describe('Speaker', () => {
+  let synth: FakeSynth
+  const original = globalThis.SpeechSynthesisUtterance
+
+  beforeEach(() => {
+    synth = new FakeSynth()
+    globalThis.SpeechSynthesisUtterance =
+      FakeUtterance as unknown as typeof SpeechSynthesisUtterance
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    globalThis.SpeechSynthesisUtterance = original
+    vi.useRealTimers()
+  })
+
+  const make = () => {
+    const onDone = vi.fn()
+    const onNoBoundaries = vi.fn()
+    const speaker = new Speaker(
+      { onWord: vi.fn(), onDone, onNoBoundaries },
+      synth as unknown as SpeechSynthesis,
+    )
+    return { speaker, onDone, onNoBoundaries }
+  }
+
+  it('reports nothing was queued for a section with no readable text', () => {
+    // A plate or a full-page image. `onDone` fires SYNCHRONOUSLY here, so a
+    // caller that sets its own flag afterwards overwrites it — hence the
+    // boolean rather than a void return.
+    const { speaker, onDone } = make()
+    expect(speaker.speak('   ')).toBe(false)
+    expect(onDone).toHaveBeenCalledTimes(1)
+    expect(synth.queued).toHaveLength(0)
+  })
+
+  it('ignores the end of an utterance that was already cancelled', () => {
+    const { speaker, onDone } = make()
+    speaker.speak('first')
+    const first = synth.queued[0]
+    expect(first).toBeDefined()
+
+    speaker.speak('second')
+    // The cancelled utterance's end, arriving after the new one has started.
+    first?.dispatchEvent(new Event('end'))
+    expect(onDone).not.toHaveBeenCalled()
+
+    synth.queued[1]?.dispatchEvent(new Event('end'))
+    expect(onDone).toHaveBeenCalledTimes(1)
+  })
+
+  it('waits for the voice to start before timing the boundary grace', () => {
+    // A cold voice can take seconds to begin. A timer started at queue time
+    // spends that wait counting down and then concludes, from silence that has
+    // not been given a chance to be broken, that this engine sends no
+    // boundaries — dropping the follow-along for the whole chapter.
+    const { speaker, onNoBoundaries } = make()
+    speaker.speak('first')
+    vi.advanceTimersByTime(10_000)
+    expect(onNoBoundaries).not.toHaveBeenCalled()
+
+    synth.queued[0]?.dispatchEvent(new Event('start'))
+    vi.advanceTimersByTime(10_000)
+    expect(onNoBoundaries).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not blame the current utterance for a stale missing boundary', () => {
+    const { speaker, onNoBoundaries } = make()
+    speaker.speak('first')
+    synth.queued[0]?.dispatchEvent(new Event('start'))
+    speaker.stop()
+    // The first utterance's grace period expiring must not strip the
+    // follow-along from a reading that is no longer the same one.
+    vi.advanceTimersByTime(10_000)
+    expect(onNoBoundaries).not.toHaveBeenCalled()
+  })
+
+  it('treats an error as an end, so the controls come back', () => {
+    const { speaker, onDone } = make()
+    speaker.speak('first')
+    synth.queued[0]?.dispatchEvent(new Event('error'))
+    expect(onDone).toHaveBeenCalledTimes(1)
+  })
+})
 
 describe('wordLengthAt', () => {
   it('measures the word when the engine reports no length', () => {

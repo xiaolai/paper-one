@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   MARKS_STORAGE_KEY,
   bookIdFor,
+  compareMarks,
   loadMarks,
   marginMarks,
   marksForBook,
@@ -29,40 +30,85 @@ function mark(over: Partial<Mark> = {}): Mark {
   }
 }
 
-/** A storage double, with a switch for the failure the reader must be told about. */
-function fakeStorage(initial: string | null = null, failWrites = false): MarkStorage & {
-  value: string | null
-} {
-  const store = {
-    value: initial,
-    getItem: () => store.value,
-    setItem: (_key: string, value: string) => {
-      if (failWrites) throw new Error('QuotaExceededError')
-      store.value = value
+/**
+ * A storage double, with a switch for the failure the reader must be told about.
+ *
+ * It KEYS its entries, unlike the version that ignored the key and kept one
+ * value: that one would have let `saveMarks` and `loadMarks` disagree about
+ * which key to use and still pass the round trip, which is the one thing a
+ * round-trip test exists to catch. `value` reads the marks key so the existing
+ * assertions still read naturally.
+ */
+function fakeStorage(initial: string | null = null, failWrites = false) {
+  const entries = new Map<string, string>()
+  if (initial !== null) entries.set(MARKS_STORAGE_KEY, initial)
+  return {
+    entries,
+    get value(): string | null {
+      return entries.get(MARKS_STORAGE_KEY) ?? null
     },
-  }
-  return store
+    getItem: (key: string) => entries.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      if (failWrites) throw new Error('QuotaExceededError')
+      entries.set(key, value)
+    },
+  } satisfies MarkStorage & { value: string | null; entries: Map<string, string> }
 }
 
 describe('bookIdFor', () => {
-  it('uses the URL for a book already on disk', () => {
-    expect(bookIdFor('https://example.com/moby.epub')).toBe(
+  it('uses the URL for a book already on disk', async () => {
+    expect(await bookIdFor('https://example.com/moby.epub')).toBe(
       'url:https://example.com/moby.epub',
     )
   })
 
-  it('identifies a picked file by name and size, so re-picking it finds its marks', () => {
+  it('identifies a picked file by content, so re-picking it finds its marks', async () => {
     const first = new File(['abcd'], 'moby.epub')
     const second = new File(['abcd'], 'moby.epub')
     // A different File object for the same book on disk — the case that makes
     // object identity useless as a key.
-    expect(bookIdFor(first)).toBe(bookIdFor(second))
+    expect(await bookIdFor(first)).toBe(await bookIdFor(second))
   })
 
-  it('separates different books', () => {
-    expect(bookIdFor(new File(['a'], 'a.epub'))).not.toBe(
-      bookIdFor(new File(['b'], 'b.epub')),
+  it('follows the book rather than the file name', async () => {
+    // Renamed, moved, re-downloaded: same book, same marks.
+    expect(await bookIdFor(new File(['abcd'], 'moby.epub'))).toBe(
+      await bookIdFor(new File(['abcd'], 'moby-dick (1).epub')),
     )
+  })
+
+  it('separates different books', async () => {
+    expect(await bookIdFor(new File(['a'], 'a.epub'))).not.toBe(
+      await bookIdFor(new File(['b'], 'b.epub')),
+    )
+  })
+
+  it('separates same-sized books with the same name', async () => {
+    // The collision the old name-and-size identity had no way to see: one
+    // book's highlights, notes and cards appearing inside another.
+    expect(await bookIdFor(new File(['aaaa'], 'book.pdf'))).not.toBe(
+      await bookIdFor(new File(['bbbb'], 'book.pdf')),
+    )
+  })
+})
+
+describe('compareMarks', () => {
+  it('orders by document position, comparing numbers as numbers', () => {
+    /* Lexicographic order is wrong exactly where a book gets long: it walks
+     * digit by digit, so chapter 10 sorts between chapter 1 and chapter 2 and
+     * the Notes list stops reading in book order. */
+    const marks = [
+      mark({ id: 'ten', cfi: 'epubcfi(/6/10!/4/2)' }),
+      mark({ id: 'four', cfi: 'epubcfi(/6/4!/4/2)' }),
+      mark({ id: 'two', cfi: 'epubcfi(/6/2!/4/2)' }),
+    ]
+    expect([...marks].sort(compareMarks).map((m) => m.id)).toEqual(['two', 'four', 'ten'])
+  })
+
+  it('falls back to creation time for two marks on the same anchor', () => {
+    const first = mark({ id: 'first', createdAt: 1 })
+    const second = mark({ id: 'second', createdAt: 2 })
+    expect([second, first].sort(compareMarks).map((m) => m.id)).toEqual(['first', 'second'])
   })
 })
 
@@ -167,12 +213,21 @@ describe('storage', () => {
     expect(loadMarks(storage)).toEqual(marks)
   })
 
-  it('writes under the versioned key', () => {
+  it('writes under the versioned key, and reads back from the same one', () => {
+    /* Both halves, against ONE storage. The previous version wrote to a
+     * throwaway object and then asserted that a `storage` it had never been
+     * given was still empty — a true statement about nothing, which would have
+     * passed just as well had `saveMarks` and `loadMarks` disagreed about the
+     * key. Since the double now keys its entries, the round trip is the test:
+     * a mismatch loses every mark on reload. */
     const storage = fakeStorage()
-    let seen = ''
-    saveMarks({ getItem: () => null, setItem: (key) => (seen = key) }, [mark()])
-    expect(seen).toBe(MARKS_STORAGE_KEY)
-    expect(storage.value).toBeNull()
+    saveMarks(storage, [mark()])
+    expect([...storage.entries.keys()]).toEqual([MARKS_STORAGE_KEY])
+    expect(loadMarks(storage)).toHaveLength(1)
+
+    storage.entries.set('paper.marks.wrong-key', storage.entries.get(MARKS_STORAGE_KEY) ?? '')
+    storage.entries.delete(MARKS_STORAGE_KEY)
+    expect(loadMarks(storage)).toEqual([])
   })
 
   it('reports a failed write rather than throwing or silently losing it', () => {

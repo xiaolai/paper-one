@@ -10,12 +10,30 @@
  *   app listens for is `create-overlay`. Listening for the documented name
  *   silently never fires, and annotations simply never draw.
  *
+ * The dependency is pinned to an EXACT version in package.json, not a caret
+ * range, and that is load-bearing rather than cautious. `patches/` carries a
+ * patch keyed `foliate-js@1.0.1`, and pnpm matches a patch by name@version: on
+ * `^1.0.1` a routine bump to 1.0.2 resolves happily, the patch silently stops
+ * applying, and PDFs lose highlights, notes and search — the patch is what
+ * gives the fixed-layout renderer an overlay layer at all. Nothing fails; the
+ * feature just goes away. Upgrading is therefore two steps that must happen
+ * together: re-cut the patch with `pnpm patch foliate-js`, then bump both the
+ * dependency and the `patchedDependencies` key.
+ *
  * Upstream: https://github.com/johnfactotum/foliate-js
  */
 declare module 'foliate-js/view.js' {
   export interface TocItem {
     readonly label: string
-    readonly href: string
+    /**
+     * Null for a heading that is not a link.
+     *
+     * foliate emits this deliberately: an EPUB nav can carry a `<span>` as a
+     * grouping heading — "Part One" over its chapters — with no destination of
+     * its own. Typed as a plain string it was passed to `goTo` as though it
+     * were one, which navigates nowhere and looks like a broken row.
+     */
+    readonly href: string | null
     readonly subitems?: readonly TocItem[] | null
   }
 

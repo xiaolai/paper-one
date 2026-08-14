@@ -3,7 +3,6 @@ import {
   addCard,
   byNewest,
   cardFromMark,
-  cardsForBook,
   parseCards,
   removeCard,
   type Card,
@@ -85,12 +84,6 @@ describe('ordering and filtering', () => {
     const input = [card({ id: 'a', createdAt: 1 }), card({ id: 'b', createdAt: 9 })]
     byNewest(input)
     expect(input.map((c) => c.id)).toEqual(['a', 'b'])
-  })
-
-  it('narrows to one book', () => {
-    const all = [card({ id: 'a' }), card({ id: 'b', bookId: 'other' })]
-    expect(cardsForBook(all, 'book-a').map((c) => c.id)).toEqual(['a'])
-    expect(cardsForBook(all, null)).toEqual([])
   })
 })
 

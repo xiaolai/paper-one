@@ -1,5 +1,8 @@
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { PANE_SHORTCUTS, buildCommands, filterCommands, score, type Command } from './commands'
+import { buildCommands, filterCommands, score, type Command } from './commands'
+import { PANE_SHORTCUTS } from './panes'
 import { initialState, type AppState } from './state'
 
 function context(over: Partial<AppState> = {}) {
@@ -87,12 +90,22 @@ describe('PANE_SHORTCUTS', () => {
   })
 
   it('binds every digit to a panel that actually renders', () => {
-    // The invariant, and the reason ⌘4 was unbound until Cards existed: a
-    // shortcut pointing at a panel nothing renders is a keystroke that gets
-    // swallowed to do nothing, which is indistinguishable from a broken key.
-    const commands = buildCommands(context().ctx)
+    /* The invariant, and the reason ⌘4 was unbound until Cards existed: a
+     * shortcut pointing at a panel nothing renders is a keystroke that gets
+     * swallowed to do nothing, which is indistinguishable from a broken key.
+     *
+     * Checked against the RENDERER, not against `buildCommands`. Both derive
+     * from the same PANES table, so asking one about the other could only ever
+     * agree with itself — the missing SidePane branch this is meant to catch
+     * would have passed. Reading the source is the same technique the reader's
+     * layout guard uses, for the same reason: the two things that must agree
+     * live in different files, and nothing else makes them fail together. */
+    const pane = readFileSync(
+      fileURLToPath(new URL('../pane/SidePane.tsx', import.meta.url)),
+      'utf8',
+    )
     for (const shortcut of PANE_SHORTCUTS) {
-      expect(find(commands, `pane:${shortcut.pane}`)).toBeDefined()
+      expect(pane).toContain(`pane === '${shortcut.pane}'`)
     }
   })
 })

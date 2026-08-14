@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Check, Search } from 'lucide-react'
 import { filterCommands, type Command } from '../lib/commands'
-import { ICON } from '../lib/metrics'
+import { comboFor } from '../lib/panes'
+import { ICON, type Platform } from '../lib/metrics'
 import { OverlaySheet } from './OverlaySheet'
 import styles from './Overlay.module.css'
 
@@ -18,23 +19,43 @@ import styles from './Overlay.module.css'
 
 export interface CommandPaletteProps {
   commands: readonly Command[]
+  /** Which accelerator glyph the combos are printed with. */
+  platform: Platform
   onDismiss: () => void
   /** Hand an unmatched query to the companion panel. */
   onAsk: (question: string) => void
 }
 
-export function CommandPalette({ commands, onDismiss, onAsk }: CommandPaletteProps) {
+export function CommandPalette({ commands, platform, onDismiss, onAsk }: CommandPaletteProps) {
   const [query, setQuery] = useState('')
-  const [activeIdx, setActiveIdx] = useState(0)
+  /**
+   * The highlighted command by IDENTITY, not by index.
+   *
+   * An index is only meaningful against the list it was taken from, and this
+   * list is rebuilt whenever the app's state changes — a relocation, a mark, a
+   * pane opening — all of which can happen while the palette is up. The
+   * highlight then belonged to whatever had moved into that row, and Enter ran
+   * it: a stale index cannot address the wrong command if there is no stale
+   * index. Null means the first match, which is what an empty query wants.
+   */
+  const [activeId, setActiveId] = useState<string | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
 
   const matches = useMemo(() => filterCommands(commands, query), [commands, query])
+
+  /* Resolved every render against the CURRENT matches, so it is always a valid
+   * index or 0 — never out of range, and never pointing at a row the reader is
+   * not looking at. */
+  const activeIdx = Math.max(
+    matches.findIndex((command) => command.id === activeId),
+    0,
+  )
 
   /* Typing changes the list under the cursor, so the cursor goes back to the
    * top. Leaving it where it was meant Enter ran whichever command happened to
    * land at that index after the filter — a different one from the highlighted
    * row a moment earlier. */
-  useEffect(() => setActiveIdx(0), [query])
+  useEffect(() => setActiveId(null), [query])
 
   /* Keep the active row in view when the arrows walk past the fold. */
   useEffect(() => {
@@ -54,12 +75,14 @@ export function CommandPalette({ commands, onDismiss, onAsk }: CommandPalettePro
   const onKeyDown = (event: React.KeyboardEvent) => {
     if (event.key === 'ArrowDown') {
       event.preventDefault()
-      setActiveIdx((i) => Math.min(i + 1, Math.max(matches.length - 1, 0)))
+      const next = Math.min(activeIdx + 1, Math.max(matches.length - 1, 0))
+      setActiveId(matches[next]?.id ?? null)
       return
     }
     if (event.key === 'ArrowUp') {
       event.preventDefault()
-      setActiveIdx((i) => Math.max(i - 1, 0))
+      const next = Math.max(activeIdx - 1, 0)
+      setActiveId(matches[next]?.id ?? null)
       return
     }
     if (event.key === 'Enter') {
@@ -117,7 +140,7 @@ export function CommandPalette({ commands, onDismiss, onAsk }: CommandPalettePro
                   type="button"
                   className={styles.row}
                   data-active={index === activeIdx}
-                  onPointerEnter={() => setActiveIdx(index)}
+                  onPointerEnter={() => setActiveId(command.id)}
                   onClick={() => run(command)}
                 >
                   <span className={styles.rowLabel}>{command.label}</span>
@@ -126,7 +149,9 @@ export function CommandPalette({ commands, onDismiss, onAsk }: CommandPalettePro
                       <Check size={ICON.inline} strokeWidth={ICON.stroke} />
                     </span>
                   )}
-                  {command.combo && <span className={styles.combo}>{command.combo}</span>}
+                  {command.combo && (
+                    <span className={styles.combo}>{comboFor(command.combo, platform)}</span>
+                  )}
                 </button>
               </div>
             )

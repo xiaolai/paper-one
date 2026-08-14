@@ -75,6 +75,57 @@ const READING_STACK = [
   'serif',
 ].join(', ')
 
+/**
+ * The host's `@font-face` rules, for injection into the book.
+ *
+ * A book is an iframe with its own document, and `@font-face` does NOT inherit
+ * across that boundary — a face registered in the host is simply unknown
+ * inside it. So every book fell straight through §14's stack to Georgia, and
+ * the bundled Literata that the whole reading typography is specified around
+ * was never once used. Nothing reports it: an unknown family is not an error,
+ * it is just the next entry in the fallback list.
+ *
+ * The rules are read back out of the host's own stylesheets rather than
+ * restated here, so this cannot drift from what `main.tsx` actually imports.
+ * `url()` is absolutised because the book document's base URL is a blob, and a
+ * relative font path would resolve against that and 404.
+ */
+let cachedFaces: string | null = null
+
+export function hostFontFaces(): string {
+  if (cachedFaces) return cachedFaces
+  const faces: string[] = []
+  for (const sheet of Array.from(document.styleSheets)) {
+    let rules: CSSRuleList
+    try {
+      rules = sheet.cssRules
+    } catch {
+      // A cross-origin sheet throws on access. None of ours are, and one that
+      // is cannot be read by anyone, so skipping is the only option.
+      continue
+    }
+    for (const rule of Array.from(rules)) {
+      if (!(rule instanceof CSSFontFaceRule)) continue
+      faces.push(absoluteUrls(rule.cssText, sheet.href ?? document.baseURI))
+    }
+  }
+  const css = faces.join('\n')
+  // Only cached once something was found: a book opened before the font CSS
+  // has landed would otherwise pin the empty result for the session.
+  if (css) cachedFaces = css
+  return css
+}
+
+function absoluteUrls(cssText: string, base: string): string {
+  return cssText.replace(/url\((['"]?)([^'")]+)\1\)/g, (whole, quote: string, href: string) => {
+    try {
+      return `url(${quote}${new URL(href, base).href}${quote})`
+    } catch {
+      return whole
+    }
+  })
+}
+
 export interface BookCssOptions {
   readonly stepIdx: number
   readonly theme: Theme
@@ -90,6 +141,10 @@ export function bookCss({ stepIdx, theme, justify, hyphenate }: BookCssOptions):
   return `
 @namespace epub "http://www.idpf.org/2007/ops";
 
+/* The bundled faces, carried in from the host — see hostFontFaces(). Without
+ * them the stack below falls through to Georgia in every book. */
+${hostFontFaces()}
+
 html {
   color-scheme: ${theme === 'night' ? 'dark' : 'light'};
   color: ${c.ink};
@@ -101,12 +156,6 @@ html {
 
 body {
   margin: 0;
-  /* The containing block for the ruler's band. foliate centres the measure by
-   * giving body its own width and auto side margins, so anchoring the band to
-   * body is what sizes it to the text column. Without this, body is static and
-   * the band resolves its insets against the viewport instead — spanning the
-   * full width of the scroller and running out past the measure on both sides. */
-  position: relative;
   /* Transparent so the reading ruler's band is visible beneath the text.
    * The band is a negative-z-index child of body, and negative descendants
    * paint BEFORE the backgrounds of in-flow blocks — so a body background of
@@ -135,11 +184,14 @@ p {
   margin: 0 0 var(--paper-line);
 }
 
-/* An EPUB that indents its paragraphs should keep doing so; one that does not
- * should not have indentation invented for it. */
-p + p {
-  margin-top: 0;
-}
+/* An adjacent-sibling paragraph rule was here, zeroing margin-top, and it did
+ * nothing the rule above does not already do: the shorthand sets margin-top to
+ * 0 for every paragraph, at the same specificity. Its comment described
+ * indentation, which neither rule touches. All it could still do was override
+ * an author's own adjacent-paragraph spacing on a stylesheet that matched this
+ * specificity exactly — not something the injected sheet should decide.
+ * (And no backticks in here: this is a template literal, as the rule further
+ * down says out loud.) */
 
 h1, h2, h3, h4, h5, h6 {
   font-weight: 600;
@@ -167,6 +219,23 @@ blockquote {
   font-style: italic;
 }
 
+/* The containing block for the ruler's band and the spoken-word box. foliate
+ * centres the measure by giving body its own width and auto side margins, so
+ * anchoring to body is what sizes the band to the text column; static body
+ * would resolve its insets against the viewport instead, spanning the full
+ * width of the scroller and running out past the measure on both sides.
+ *
+ * Conditional, not unconditional. Relative positioning on body also re-parents
+ * any absolutely positioned content the BOOK places against the initial
+ * containing block, and a reader who never switches the ruler on should not
+ * have their book relaid out for a feature they are not using. rulerBand.ts
+ * adds this class with the first overlay it injects and removes it with the
+ * last. And no backticks in here, as the rule below already says: this is a
+ * template literal and one would end the string. */
+.paper-anchored {
+  position: relative;
+}
+
 /* §12 layer 0 — the reading ruler's band, BEHIND the text.
  *
  * z-index: -1 is what puts it there: negative descendants paint after the
@@ -189,9 +258,14 @@ blockquote {
   transition: top 90ms ease;
 }
 
+/* §08 keeps the ruler's track under reduced motion — it is a reading aid, not
+ * decoration — but shortens it. This used to restate 90ms, the same value as
+ * the rule above, so the branch existed and did nothing: a reader who asks for
+ * reduced motion got exactly the animation they asked to be spared. 40ms still
+ * reads as the band moving rather than teleporting. */
 @media (prefers-reduced-motion: reduce) {
   .paper-ruler-band {
-    transition-duration: 90ms;
+    transition-duration: 40ms;
   }
 }
 
@@ -206,13 +280,6 @@ blockquote {
   background: ${c.mark};
   border-radius: 2px;
   pointer-events: none;
-}
-
-/* §01 Marks: your own highlights are a gold fill in light themes and a rule in
- * Night, where a pale fill would glare. */
-.paper-mark {
-  background: ${theme === 'night' ? 'transparent' : c.mark};
-  box-shadow: inset 0 -1px 0 ${c.markRule};
 }
 
 ::selection {

@@ -1,0 +1,28 @@
+/* Controls that appear in more than one place, defined once.
+ *
+ * §07's primary action was written out twice — `.add` on the library's shelf
+ * and `.primaryButton` in the reader — as two byte-identical blocks in two
+ * stylesheets, each maintained by whoever happened to be editing that screen.
+ * They had not drifted yet; a shared accent, radius or height changing in one
+ * of them is how they would.
+ *
+ * A module rather than a global class, so the composing files keep their own
+ * scoping and their own names for it: CSS Modules resolves `composes` at build
+ * time and emits both class names on the element.
+ */
+
+.primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--control-pill);
+  padding: 0 16px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: var(--surface);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}

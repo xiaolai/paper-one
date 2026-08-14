@@ -1,5 +1,12 @@
 import { Plus } from 'lucide-react'
-import { coverTint } from '../data/fixtures'
+import { coverTintFor } from '../data/fixtures'
+import {
+  NOT_REOPENABLE,
+  displayAuthor,
+  displayTitle,
+  isReopenable,
+  rowSuffix,
+} from '../lib/library'
 import type { LibraryEntry } from '../lib/library'
 import { ICON } from '../lib/metrics'
 import type { Platform } from '../lib/metrics'
@@ -22,7 +29,14 @@ import styles from './Library.module.css'
 export interface LibraryProps {
   books: readonly LibraryEntry[]
   platform: Platform
-  /** Null for a book with no reopenable source — see `LibraryEntry.url`. */
+  /**
+   * Open a book by URL.
+   *
+   * It is never called for a book without one — see `isReopenable`, which
+   * disables those rows. The note here used to say the argument could be null,
+   * describing `LibraryEntry.url` rather than this callback, which takes a
+   * string and always has.
+   */
   onOpen: (url: string) => void
   onAddBooks: () => void
 }
@@ -47,8 +61,8 @@ export function Library({ books, platform, onOpen, onAddBooks }: LibraryProps) {
         </div>
       ) : (
         <div className={styles.shelf}>
-          {books.map((book, index) => {
-            const reopenable = book.url !== null
+          {books.map((book) => {
+            const reopenable = isReopenable(book)
             return (
               <button
                 key={book.bookId}
@@ -56,18 +70,16 @@ export function Library({ books, platform, onOpen, onAddBooks }: LibraryProps) {
                 className={styles.book}
                 disabled={!reopenable}
                 data-disabled={!reopenable}
-                title={
-                  reopenable ? `Open ${book.title}` : 'Opened from a file — add it again to reopen'
-                }
+                title={reopenable ? `Open ${displayTitle(book)}` : NOT_REOPENABLE}
                 onClick={() => book.url && onOpen(book.url)}
               >
-                <span className={styles.cover} style={{ background: coverTint(index) }}>
-                  <span className={styles.coverTitle}>{book.title || 'Untitled'}</span>
+                <span className={styles.cover} style={{ background: coverTintFor(book.bookId) }}>
+                  <span className={styles.coverTitle}>{displayTitle(book)}</span>
                 </span>
-                <span className={styles.bookTitle}>{book.title || 'Untitled'}</span>
+                <span className={styles.bookTitle}>{displayTitle(book)}</span>
                 <span className={styles.bookAuthor}>
-                  {book.author || 'Unknown author'}
-                  {reopenable ? '' : ' · add the file again to reopen'}
+                  {displayAuthor(book)}
+                  {rowSuffix(book)}
                 </span>
               </button>
             )

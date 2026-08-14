@@ -28,14 +28,32 @@ interface FakeView extends View {
   /** Every addAnnotation call, so the drawing contract can be asserted. */
   annotations: { value: string; kind: string; remove: boolean }[]
   deselected: number
+  /** Page turns, so a navigator that cannot turn a page is a failing test. */
+  turns: { next: number; prev: number }
 }
+
+/**
+ * The methods the session actually calls on a view.
+ *
+ * Declared and CHECKED, because the cast at the bottom of `fakeView` erases
+ * every guarantee that the fake resembles the real thing. It hid three: the
+ * navigator published `next`, `prev` and `search` straight from a view that
+ * implemented none of them, so every test passed while the buttons those
+ * callbacks are wired to would have thrown on the first click. A structural
+ * check here is what makes the fake fail to compile instead.
+ */
+type ViewCalls = Pick<
+  View,
+  'open' | 'init' | 'close' | 'goTo' | 'next' | 'prev' | 'search' | 'addAnnotation' | 'getCFI' | 'deselect'
+>
 
 function fakeView(overrides: Partial<Record<'open' | 'init', () => Promise<void>>> = {}): FakeView {
   const listeners: Record<string, ((e: unknown) => void)[]> = {}
-  const view = {
+  const view: ViewCalls & Omit<FakeView, keyof View> & Record<string, unknown> = {
     style: {} as CSSStyleDeclaration,
     closed: 0,
     removed: 0,
+    turns: { next: 0, prev: 0 },
     listeners,
     book: { toc: [{ label: 'One', href: 'a.xhtml' }], metadata: { title: 'T', author: 'A' } },
     addEventListener: (type: string, fn: (e: unknown) => void) => {
@@ -47,10 +65,23 @@ function fakeView(overrides: Partial<Record<'open' | 'init', () => Promise<void>
     open: overrides.open ?? (() => Promise.resolve()),
     init: overrides.init ?? (() => Promise.resolve()),
     goTo: () => Promise.resolve(),
+    next: () => {
+      view.turns.next += 1
+      return Promise.resolve()
+    },
+    prev: () => {
+      view.turns.prev += 1
+      return Promise.resolve()
+    },
+    // eslint-disable-next-line require-yield
+    search: async function* () {
+      return
+    },
     annotations: [] as { value: string; kind: string; remove: boolean }[],
     deselected: 0,
-    addAnnotation(annotation: { value: string; kind: string }, remove = false) {
-      view.annotations.push({ ...annotation, remove })
+    addAnnotation(annotation: unknown, remove = false) {
+      view.annotations.push({ ...(annotation as { value: string; kind: string }), remove })
+      return Promise.resolve()
     },
     getCFI: (index: number) => `cfi(${index})`,
     deselect() {
@@ -63,8 +94,8 @@ function fakeView(overrides: Partial<Record<'open' | 'init', () => Promise<void>
       view.removed += 1
     },
     renderer: { setAttribute: () => {}, setStyles: () => {} },
-  } as unknown as FakeView
-  return view
+  }
+  return view as unknown as FakeView
 }
 
 const PALETTE = { highlight: '#F3E6C0', companion: '#9E5A16', highlightAsRule: false }
@@ -113,9 +144,22 @@ describe('ReaderSession disposal', () => {
 
     expect(cb.calls['onToc']).toHaveLength(1)
     expect(cb.calls['onMeta']?.[0]?.[0]).toEqual({ title: 'T', author: 'A' })
-    const nav = cb.calls['onNavigator']?.[0]?.[0] as { goTo: unknown; search: unknown }
+    const nav = cb.calls['onNavigator']?.[0]?.[0] as {
+      goTo: unknown
+      search: unknown
+      next: () => void
+      prev: () => void
+    }
     expect(nav.goTo).toBeTypeOf('function')
     expect(nav.search).toBeTypeOf('function')
+
+    // Called, not merely present. These are what the arrow keys are wired to,
+    // and a published callback that throws on the first press is the failure
+    // this exercises.
+    nav.next()
+    nav.prev()
+    expect(view.turns).toEqual({ next: 1, prev: 1 })
+
     expect(view.closed).toBe(0)
     expect(session.view).toBe(view)
   })
@@ -145,34 +189,67 @@ describe('ReaderSession disposal', () => {
     expect(session.view).toBeNull()
   })
 
+  /**
+   * A promise that settles when the fake reaches the method under test.
+   *
+   * Counting microtask flushes does not work here and is not obviously wrong
+   * when it fails: `start` awaits `Promise.allSettled`, which needs more turns
+   * than the one or two these tests used to spend, so disposal landed BEFORE
+   * `open` was ever called. Both tests passed — proving only what the
+   * already-covered pre-open case proves, while claiming to cover the race
+   * after it. Waiting on entry into the method is exact whatever the internals
+   * do, and the call assertion below makes a regression to vacuity fail. */
+  function entered(): { reached: Promise<void>; enter: () => void } {
+    let enter: () => void = () => {}
+    const reached = new Promise<void>((resolve) => (enter = resolve))
+    return { reached, enter }
+  }
+
   it('closes a view when disposal lands mid-open', async () => {
     let release: () => void = () => {}
     const gate = new Promise<void>((r) => (release = r))
-    const view = fakeView({ open: () => gate })
+    const open = entered()
+    let opens = 0
+    const view = fakeView({
+      open: () => {
+        opens += 1
+        open.enter()
+        return gate
+      },
+    })
     const session = new ReaderSession(fakeHost(), callbacks())
 
     const started = session.start('book.epub', deps(view))
-    await Promise.resolve()
+    await open.reached
     session.dispose()
     release()
     await started
 
+    expect(opens).toBe(1)
     expect(view.closed).toBe(1)
   })
 
   it('closes a view when disposal lands mid-init', async () => {
     let release: () => void = () => {}
     const gate = new Promise<void>((r) => (release = r))
-    const view = fakeView({ init: () => gate })
+    const init = entered()
+    let inits = 0
+    const view = fakeView({
+      init: () => {
+        inits += 1
+        init.enter()
+        return gate
+      },
+    })
     const session = new ReaderSession(fakeHost(), callbacks())
 
     const started = session.start('book.epub', deps(view))
-    await Promise.resolve()
-    await Promise.resolve()
+    await init.reached
     session.dispose()
     release()
     await started
 
+    expect(inits).toBe(1)
     expect(view.closed).toBe(1)
   })
 

@@ -3,6 +3,7 @@ import workerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import viewerCss from 'pdfjs-dist/web/pdf_viewer.css?raw'
 import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist'
 import type { TocItem } from 'foliate-js/view.js'
+import { titleFromSource } from '../lib/formats'
 
 /**
  * A PDF, presented to foliate as a book.
@@ -32,7 +33,7 @@ import type { TocItem } from 'foliate-js/view.js'
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerSrc
 
-/* Staged into `public/pdfjs/` by `scripts/sync-pdfjs-assets.mjs`. pdf.js fetches
+/* Staged into `vendor/pdfjs/` by `scripts/sync-pdfjs-assets.mjs`. pdf.js fetches
  * these by name at run time and degrades QUIETLY without them: CJK pages come
  * out blank, and a PDF that assumes Helvetica rather than embedding it gets
  * substituted metrics. */
@@ -58,6 +59,58 @@ export interface PdfBook {
 }
 
 /**
+ * Containers already carrying the selection fix.
+ *
+ * The text layer's container OUTLIVES the text layer: a repaint clears its
+ * children and builds new spans inside the same element. Binding on every paint
+ * therefore stacked one more pair of listeners per zoom step, all of them alive,
+ * all doing the same work on every pointer event for the rest of the session.
+ */
+const selectionBound = new WeakSet<Element>()
+
+function bindSelectionFix(container: Element, doc: Document): void {
+  if (selectionBound.has(container)) return
+  selectionBound.add(container)
+  container.addEventListener('pointerdown', () => container.classList.add('selecting'))
+  /* Released on the DOCUMENT, not on the container. A drag that ends outside
+   * the text layer — in the page margin, which is where a selection to the end
+   * of the page naturally finishes — never delivers `pointerup` to the
+   * container at all, and the class stays on: from then on every click selects
+   * to the end of the layer. `pointercancel` covers the same for a gesture the
+   * system takes over. */
+  const release = () => container.classList.remove('selecting')
+  doc.addEventListener('pointerup', release)
+  doc.addEventListener('pointercancel', release)
+  /* And when the page loses focus mid-drag — a drag that ends in another
+   * window, or one the system interrupts, delivers no pointer event here at
+   * all, and the class would stay on for the rest of the session. */
+  doc.defaultView?.addEventListener('blur', release)
+}
+
+/**
+ * Render generations, one per page document.
+ *
+ * Zooming or re-rendering starts a fresh paint without stopping the one in
+ * flight. Two paints at different scales then race, and the slower one wins
+ * whenever it finishes last — leaving a canvas drawn at the previous scale
+ * under a text layer positioned for the new one. Each paint takes a generation
+ * and abandons itself the moment a newer one starts.
+ */
+const generations = new WeakMap<Document, number>()
+
+/**
+ * The render in flight for a page document, so a new paint can CANCEL it.
+ *
+ * Abandoning it is not enough, and the difference is a blank page rather than a
+ * stale one. pdf.js serialises rendering per `PDFPageProxy`: a second
+ * `render()` while the first is outstanding waits for it, and an abandoned
+ * first render is still outstanding — nobody is going to await it, so it hands
+ * nothing on and the page never paints at all. Observed exactly that way: the
+ * transform and `--scale-factor` set, no canvas, no text layer, no error.
+ */
+const inFlight = new WeakMap<Document, { cancel: () => void }>()
+
+/**
  * Paint one page into the document foliate has put on screen.
  *
  * Called on first display and again on every zoom, because the canvas is a
@@ -67,6 +120,13 @@ export interface PdfBook {
  * lands at the top-left corner.
  */
 async function paint(page: PDFPageProxy, doc: Document, zoom: number): Promise<void> {
+  const generation = (generations.get(doc) ?? 0) + 1
+  generations.set(doc, generation)
+  const superseded = () => generations.get(doc) !== generation
+
+  // Stop the previous paint before starting this one — see `inFlight`.
+  inFlight.get(doc)?.cancel()
+
   const scale = zoom * devicePixelRatio
   doc.documentElement.style.transform = `scale(${1 / devicePixelRatio})`
   doc.documentElement.style.transformOrigin = 'top left'
@@ -80,7 +140,19 @@ async function paint(page: PDFPageProxy, doc: Document, zoom: number): Promise<v
   const canvas = document.createElement('canvas')
   canvas.width = viewport.width
   canvas.height = viewport.height
-  await page.render({ canvas, viewport }).promise
+  const task = page.render({ canvas, viewport })
+  inFlight.set(doc, task)
+  try {
+    await task.promise
+  } catch (cause) {
+    // A cancelled render rejects; anything else is worth knowing about, and
+    // an unhandled rejection here reaches the window as an uncaught error.
+    if (!superseded()) console.error('Paper: PDF page render failed', cause)
+    return
+  } finally {
+    if (inFlight.get(doc) === task) inFlight.delete(doc)
+  }
+  if (superseded()) return
   doc.querySelector('#canvas')?.replaceChildren(doc.adoptNode(canvas))
 
   const container = doc.querySelector('.textLayer')
@@ -91,15 +163,27 @@ async function paint(page: PDFPageProxy, doc: Document, zoom: number): Promise<v
       container: container as HTMLElement,
       viewport,
     })
-    await textLayer.render()
+    /* Cancelled and caught, like the canvas render above. A superseded text
+     * layer left running keeps positioning spans into a document that is being
+     * repainted underneath it, and its rejection had nowhere to go — it left
+     * the function as an unhandled rejection at the window. */
+    try {
+      await textLayer.render()
+    } catch (cause) {
+      if (!superseded()) console.error('Paper: PDF text layer failed', cause)
+      return
+    }
+    if (superseded()) {
+      textLayer.cancel()
+      return
+    }
 
     /* pdf.js's selection fix: without `.selecting`, a drag that leaves the last
      * span selects to the end of the layer rather than to the pointer. */
     const end = doc.createElement('div')
     end.className = 'endOfContent'
     container.append(end)
-    container.addEventListener('pointerdown', () => container.classList.add('selecting'))
-    container.addEventListener('pointerup', () => container.classList.remove('selecting'))
+    bindSelectionFix(container, doc)
   }
 
   /* pdf.js appends measuring canvases to the HOST document while rendering a
@@ -133,15 +217,30 @@ async function paint(page: PDFPageProxy, doc: Document, zoom: number): Promise<v
  */
 async function pageDocument(page: PDFPageProxy): Promise<Document> {
   const doc = document.implementation.createHTMLDocument()
+  /* The spans go under a `.textLayer` container, exactly as the painted page
+   * puts them. A search hit's CFI addresses child indexes from the root, so a
+   * document whose spans hang directly off `body` produces anchors one level
+   * shallower than the page they are meant to point into. */
+  const layer = doc.createElement('div')
+  layer.className = 'textLayer'
+  doc.body.append(layer)
   const reader = page.streamTextContent().getReader()
   for (;;) {
     const { value, done } = await reader.read()
     if (done) break
     for (const item of value?.items ?? []) {
-      if (!('str' in item) || !item.str) continue
+      if (!('str' in item)) continue
+      /* Mirrors pdf.js's own TextLayer: one span per item, and a <br> where
+       * the item reports an end of line. It matters twice over. A search hit's
+       * CFI addresses child indexes in THIS document, so inserting or omitting
+       * a node shifts every anchor after it — jumping to a late hit lands in
+       * the wrong place. And a bare space where the page has a line break
+       * joins the last word of one line to the first of the next, so a phrase
+       * spanning a line break cannot be found at all. */
       const span = doc.createElement('span')
       span.textContent = item.str
-      doc.body.append(span, doc.createTextNode(' '))
+      layer.append(span)
+      if ('hasEOL' in item && item.hasEOL) layer.append(doc.createElement('br'))
     }
   }
   return doc
@@ -228,7 +327,7 @@ export async function makePdf(file: File | string, hooks: PdfHooks = {}): Promis
   return {
     rendition: { layout: 'pre-paginated' },
     metadata: {
-      title: info?.Title?.trim() || fileName(file),
+      title: info?.Title?.trim() || titleFromSource(file),
       author: info?.Author?.trim() || '',
     },
     toc: outline?.map(tocItem) ?? [],
@@ -257,18 +356,30 @@ export async function makePdf(file: File | string, hooks: PdfHooks = {}): Promis
       size: 1000,
     })),
     isExternal: (uri) => /^\w+:/i.test(uri),
-    resolveHref: async (href) => ({ index: (await destIndex(href)) ?? 0 }),
+    /* A destination that cannot be resolved REFUSES, rather than resolving to
+     * page 0. Falling back sent the reader to the cover — from wherever they
+     * were, with no way back but the history — and did it for exactly the
+     * broken links this file already documents as common in the wild. The
+     * rejection is caught by the caller in `session.ts`, where it does nothing
+     * visible, which is what a dead link should do. */
+    resolveHref: async (href) => {
+      const index = await destIndex(href)
+      if (index === null) throw new Error(`Paper: unresolvable PDF destination ${href}`)
+      return { index }
+    },
     splitTOCHref: async (href) => [await destIndex(href), null],
     getTOCFragment: (doc) => doc.documentElement,
     destroy: () => {
       for (const src of sources.values()) URL.revokeObjectURL(src)
       sources.clear()
-      void task.destroy()
+      // Reported rather than discarded: this is what releases the worker, and a
+      // failure here is a leak that grows one book at a time with nothing on
+      // screen to suggest it.
+      void task.destroy().catch((cause: unknown) => {
+        console.error('Paper: could not destroy the PDF loading task', cause)
+      })
     },
   }
 }
 
-function fileName(file: File | string): string {
-  const name = typeof file === 'string' ? (file.split('/').pop() ?? file) : file.name
-  return name.replace(/\.pdf$/i, '')
-}
+

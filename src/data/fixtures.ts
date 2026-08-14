@@ -65,6 +65,25 @@ export function coverTint(index: number): string {
   return COVER_TINTS[index % COVER_TINTS.length] ?? 'var(--tint-a)'
 }
 
+/**
+ * A book's tint, from the book rather than from where it happens to sit.
+ *
+ * Position is not identity: the shelf is ordered by recency, so a tint taken
+ * from the array index changed colour under a book every time another book was
+ * opened. The tint is standing in for cover artwork — the thing a reader
+ * recognises a book by at a glance — so it has to be as durable as the book.
+ *
+ * A small deterministic hash rather than a stored field: it needs to be stable,
+ * not unpredictable, and nothing has to be migrated for it.
+ */
+export function coverTintFor(bookId: string): string {
+  let hash = 0
+  for (let i = 0; i < bookId.length; i += 1) {
+    hash = (hash * 31 + bookId.charCodeAt(i)) | 0
+  }
+  return coverTint(Math.abs(hash))
+}
+
 /** Library filter chips, with their counts. */
 export const LIBRARY_CHIPS: readonly (readonly [string, string])[] = [
   ['All', '2,418'],

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { byRecency, forgetBook, parseLibrary, recordOpen, type LibraryEntry } from './library'
+import { byRecency, parseLibrary, recordOpen, type LibraryEntry } from './library'
 
 function entry(over: Partial<LibraryEntry> = {}): LibraryEntry {
   return {
@@ -20,12 +20,24 @@ describe('recordOpen', () => {
     expect(after).toHaveLength(2)
   })
 
-  it('lets a later open clear a URL that is no longer how the book is held', () => {
-    // Read from a URL once and picked as a file since: it is not reopenable
-    // now, and saying otherwise would give the switcher a row that fails.
-    const before = [entry({ bookId: 'a', url: '/moby.epub' })]
-    const after = recordOpen(before, entry({ bookId: 'a', url: null }))
-    expect(after[0]?.url).toBeNull()
+  it('takes every field from the newer entry, not just the timestamp', () => {
+    /* The metadata a book was recorded with can improve — a title read from
+     * the file replacing one guessed from its name — and the later open is
+     * the one that is true now.
+     *
+     * This deliberately does NOT test a file-sourced open clearing a URL, which
+     * is what it used to assert: `bookIdFor` prefixes the two kinds, so a file
+     * and a URL never share an id and never meet in this function. The test
+     * passed and demonstrated nothing, because it constructed by hand a pair of
+     * entries production cannot produce. */
+    const before = [entry({ bookId: 'a', title: 'moby', author: '' })]
+    const after = recordOpen(
+      before,
+      entry({ bookId: 'a', title: 'Moby-Dick', author: 'Herman Melville' }),
+    )
+    expect(after).toHaveLength(1)
+    expect(after[0]?.title).toBe('Moby-Dick')
+    expect(after[0]?.author).toBe('Herman Melville')
   })
 })
 
@@ -42,13 +54,6 @@ describe('byRecency', () => {
     const input = [entry({ bookId: 'a', lastOpened: 1 }), entry({ bookId: 'b', lastOpened: 9 })]
     byRecency(input)
     expect(input.map((e) => e.bookId)).toEqual(['a', 'b'])
-  })
-})
-
-describe('forgetBook', () => {
-  it('removes one book and leaves the rest', () => {
-    const after = forgetBook([entry({ bookId: 'a' }), entry({ bookId: 'b' })], 'a')
-    expect(after.map((e) => e.bookId)).toEqual(['b'])
   })
 })
 

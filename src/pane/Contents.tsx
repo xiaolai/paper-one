@@ -10,8 +10,9 @@ export interface ContentsProps {
 }
 
 interface FlatTocEntry {
+  /** Null for a grouping heading with no destination — see `TocItem.href`. */
+  readonly href: string | null
   readonly label: string
-  readonly href: string
   readonly depth: number
 }
 
@@ -41,12 +42,16 @@ export function Contents({ toc, currentHref, onGoTo }: ContentsProps) {
     <div className={styles.tocList}>
       {entries.map((entry, index) => (
         <button
-          key={`${entry.href}-${index}`}
+          key={`${entry.href ?? 'heading'}-${index}`}
           type="button"
           className={styles.tocRow}
           data-depth={entry.depth}
-          data-current={entry.href === currentHref}
-          onClick={() => onGoTo?.(entry.href)}
+          /* A heading with no href is not current and not clickable. It is a
+             label over the rows beneath it — "Part One" — and offering it as a
+             destination gives the reader a row that does nothing. */
+          data-current={entry.href !== null && entry.href === currentHref}
+          disabled={entry.href === null || !onGoTo}
+          onClick={() => entry.href && onGoTo?.(entry.href)}
         >
           <span className={styles.tocLabel}>{entry.label}</span>
         </button>

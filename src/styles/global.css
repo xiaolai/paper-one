@@ -107,6 +107,30 @@ a:hover {
   border-radius: 6px;
 }
 
+/* §07 Disabled — 45% opacity, no pointer events, and the reason stated nearby
+ * rather than hidden in a title attribute alone.
+ *
+ * Global on purpose, and global HERE on purpose. It is a design-system rule
+ * that applies to every disabled control in the app, and a bare attribute
+ * selector is not localized by CSS Modules — so written inside a component's
+ * stylesheet it reaches the whole app anyway, from a file that has no business
+ * doing so and only while that component happens to be mounted. */
+[data-disabled='true'] {
+  opacity: 0.45;
+}
+
+/* Pointer events are removed only where the element is not ALREADY disabled.
+ *
+ * `pointer-events: none` on a `<button disabled>` also removes its tooltip, and
+ * §07 asks for the reason to be stated nearby rather than left implicit — the
+ * titlebar's Listen control carries exactly that explanation in its title, and
+ * the blanket rule made it unhoverable and so unreadable. A native disabled
+ * button already refuses clicks; this is for the elements that are not
+ * buttons, where the attribute is the only thing making them inert. */
+[data-disabled='true']:not(:disabled) {
+  pointer-events: none;
+}
+
 /* Chrome is a fade, never a slide. §08 pins it at 180ms ease. Under reduced
  * motion everything drops except the ruler track, which §08 keeps because it
  * is a reading aid rather than decoration. */

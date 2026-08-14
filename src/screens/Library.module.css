@@ -50,20 +50,9 @@
   color: var(--ink);
 }
 
+/* §07's primary action, shared — see styles/controls.module.css. */
 .add {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: var(--control-pill);
-  padding: 0 16px;
-  border: none;
-  border-radius: var(--radius-pill);
-  background: var(--accent);
-  color: var(--surface);
-  font-family: inherit;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
+  composes: primary from '../styles/controls.module.css';
 }
 
 /* Fluid columns rather than a fixed count: the window is resizable and the

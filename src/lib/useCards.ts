@@ -1,15 +1,15 @@
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { useCallback, useMemo } from 'react'
 import {
   CARDS_STORAGE_KEY,
   addCard,
   byNewest,
-  cardsForBook,
   parseCards,
   removeCard,
   type Card,
   type NewCard,
 } from './cards'
-import { newMarkId, type MarkStorage } from './marks'
+import { newMarkId } from './marks'
+import { localStore, useStoredCollection, writeJson } from './useStoredCollection'
 
 /**
  * The card store, bound to React.
@@ -22,45 +22,47 @@ import { newMarkId, type MarkStorage } from './marks'
 
 export interface CardStore {
   readonly all: readonly Card[]
-  /** The open book's cards, newest first. */
-  readonly current: readonly Card[]
+  /**
+   * False once a write has failed, true again once one succeeds.
+   *
+   * Its own flag rather than the marks store's. Card writes failing used to be
+   * swallowed on the reasoning that the Notes panel's notice covered them — but
+   * that notice only changes when a MARK is written, so a reader could make a
+   * dozen cards, watch them appear, and lose every one on reload with nothing
+   * anywhere having said so.
+   */
+  readonly persistent: boolean
   make: (draft: NewCard) => Card
   discard: (id: string) => void
 }
 
-function defaultStorage(): MarkStorage | null {
-  try {
-    return window.localStorage
-  } catch {
-    return null
-  }
-}
-
-export function useCards(bookId: string | null, storage = defaultStorage()): CardStore {
-  const [cards, setCards] = useState<readonly Card[]>(() => {
-    if (!storage) return []
-    try {
-      return byNewest(parseCards(storage.getItem(CARDS_STORAGE_KEY)))
-    } catch {
-      return []
-    }
+/**
+ * The card store.
+ *
+ * No `bookId`. It used to take one and publish a `current` list filtered to it,
+ * which nothing ever read: every card surface shows `all`, because cards are
+ * explicitly cross-book — that is what distinguishes them from marks. The
+ * parameter and the filtering it drove are gone rather than kept "for
+ * symmetry" with `useMarks`, where the same idea IS used.
+ */
+export function useCards(storage = localStore()): CardStore {
+  const {
+    items: cards,
+    persistent,
+    apply,
+  } = useStoredCollection<Card>({
+    storage,
+    load: (target) => {
+      try {
+        return byNewest(parseCards(target.getItem(CARDS_STORAGE_KEY)))
+      } catch {
+        // A storage that throws on READ — disabled mid-session, or a hostile
+        // stub — must not stop the pane from rendering.
+        return []
+      }
+    },
+    save: (target, next) => writeJson(target, CARDS_STORAGE_KEY, next),
   })
-
-  const latest = useRef<readonly Card[]>(cards)
-  const storageRef = useRef(storage)
-  storageRef.current = storage
-
-  const apply = useCallback((mutate: (prev: readonly Card[]) => Card[]) => {
-    const next = mutate(latest.current)
-    latest.current = next
-    setCards(next)
-    try {
-      storageRef.current?.setItem(CARDS_STORAGE_KEY, JSON.stringify(next))
-    } catch {
-      // Reported to the reader through the Notes panel's persistence notice,
-      // which covers the whole of local storage rather than one store.
-    }
-  }, [])
 
   const make = useCallback(
     (draft: NewCard) => {
@@ -76,10 +78,9 @@ export function useCards(bookId: string | null, storage = defaultStorage()): Car
     [apply],
   )
 
-  const current = useMemo(() => cardsForBook(cards, bookId), [cards, bookId])
 
   return useMemo<CardStore>(
-    () => ({ all: cards, current, make, discard }),
-    [cards, current, make, discard],
+    () => ({ all: cards, persistent, make, discard }),
+    [cards, persistent, make, discard],
   )
 }

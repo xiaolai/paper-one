@@ -81,13 +81,19 @@ export function Companion({ currentChapter, hasBook, provider }: CompanionProps)
   /* Unreachable in this build, and deliberately not a half-written thread: a
    * provider that reports itself configured is the change that brings the
    * conversation UI with it, built against real messages and real citations
-   * rather than against a shape guessed at in advance. */
+   * rather than against a shape guessed at in advance.
+   *
+   * It says so on screen rather than looking like a feature that is loading.
+   * A panel headed "Ask about Chapter 4" with an encouraging line under it,
+   * over a provider whose answers nothing displays, is a promise this build
+   * cannot keep. */
   return (
     <div className={styles.empty}>
-      <div className={styles.emptyTitle}>Ask about {currentChapter || 'this chapter'}</div>
+      <div className={styles.emptyTitle}>Conversation view not built yet</div>
       <div className={styles.emptyBody}>
-        Connected to {provider.name}. The conversation view lands with the
-        provider that needs it.
+        {provider.name} is configured, but nothing here asks it anything yet:
+        this build has the provider seam and none of the thread that would show
+        an answer. Your marks and notes are unaffected.
       </div>
     </div>
   )

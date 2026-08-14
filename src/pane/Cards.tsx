@@ -3,6 +3,7 @@ import { Trash2 } from 'lucide-react'
 import { CARD_KINDS, type CardKind } from '../lib/cards'
 import { ICON } from '../lib/metrics'
 import type { CardStore } from '../lib/useCards'
+import { FilterChips } from './FilterChips'
 import styles from './SidePane.module.css'
 
 /**
@@ -40,6 +41,14 @@ export function Cards({ cards, bookId, onGoTo }: CardsProps) {
           Notes stay raw; cards are made. Mark a passage, then make a card from
           it in Notes.
         </div>
+        {/* The warning belongs here too. This branch is reached in exactly the
+            case that needs it most: a store that cannot write, whose last card
+            was discarded, looks identical to a reader who has never made one. */}
+        {!cards.persistent && (
+          <div className={styles.emptyBody}>
+            Cards are not being saved — this device&apos;s storage is unavailable.
+          </div>
+        )}
       </div>
     )
   }
@@ -52,19 +61,25 @@ export function Cards({ cards, bookId, onGoTo }: CardsProps) {
         </span>
       </div>
 
-      <div className={styles.filters}>
-        {FILTERS.map((label) => (
-          <button
-            key={label}
-            type="button"
-            className={styles.filter}
-            data-on={filter === label}
-            onClick={() => setFilter(label)}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
+      {/* §11: say what happened and what to do. Cards that are not being saved
+          look exactly like cards that are, until the next launch. */}
+      {!cards.persistent && (
+        <div className={styles.panelMeta}>
+          <span>Cards are not being saved — this device&apos;s storage is unavailable.</span>
+        </div>
+      )}
+
+      <FilterChips options={FILTERS} active={filter} onSelect={setFilter} label="Filter cards" />
+
+      {shown.length === 0 && (
+        <div className={styles.empty}>
+          <div className={styles.emptyBody}>
+            {/* Named, for the same reason as Notes: a blank list under a
+                selected chip looks like the cards are gone. */}
+            No {filter === 'All' ? 'cards' : `${filter.toLowerCase()} cards`} yet.
+          </div>
+        </div>
+      )}
 
       {shown.map((card) => (
         <div key={card.id} className={styles.note}>

@@ -59,33 +59,82 @@ export const MARKS_STORAGE_KEY = 'paper.marks.v1'
  * Stable identity for a book across sessions.
  *
  * A File has no durable identifier — the same book re-picked from disk is a
- * different File object — so name and size stand in for one. It is not perfect:
- * two different books with the same name and byte count would collide. The
- * alternative is hashing the whole file on every open, which costs a full read
- * of a 50MB EPUB to disambiguate a case that essentially does not arise.
+ * different File object — so the identity has to come from the content.
+ *
+ * It is derived from the size plus the first and last 64KB rather than from the
+ * name and size, which is what this used to be. Name and size collide in ways
+ * that are not exotic: two files named `book.pdf` in different folders, or the
+ * same title from two sources, and the reader silently gets the other book's
+ * marks, cards and reading position. Revising a file without changing its
+ * length does the same thing in reverse.
+ *
+ * Bounded on purpose: hashing a whole 50MB EPUB on every open to settle this
+ * would be the obvious over-correction. 128KB spans an EPUB's mimetype,
+ * container and opening spine item, or a PDF's header, xref and trailer, which
+ * no two different books share; it costs a couple of milliseconds and is
+ * stable across copying, moving and re-downloading, which an mtime is not.
  *
  * A string source is already a stable URL and is used as-is.
  */
-export function bookIdFor(source: File | string): string {
+const SAMPLE_BYTES = 64 * 1024
+
+export async function bookIdFor(source: File | string): Promise<string> {
   if (typeof source === 'string') return `url:${source}`
-  return `file:${source.name}:${source.size}`
+
+  const head = source.slice(0, SAMPLE_BYTES)
+  const tail = source.slice(Math.max(0, source.size - SAMPLE_BYTES))
+  const sample = new Blob([`${source.size}:`, head, tail])
+  const digest = await crypto.subtle.digest('SHA-256', await sample.arrayBuffer())
+  const hex = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0'))
+  // Half the digest. This is an identity, not a security boundary, and 128 bits
+  // of it makes an accidental collision impossible in a personal library.
+  return `file:${hex.join('').slice(0, 32)}`
 }
 
 /**
  * Sort by CFI, so the Notes list reads in book order rather than in the order
  * the reader happened to make the marks.
  *
- * CFIs are compared as strings, which is *approximately* document order and
- * exactly right for the common case of marks within one spine item. A true
- * comparison needs foliate's CFI parser; string order puts `/2/4` after
- * `/2/10` because it compares digit by digit. Wrong ordering is cosmetic here,
- * so it is not worth pulling the parser across the module boundary — but it is
- * why this is `compareMarks` and not `compareCfi`, so the sharper rule has an
- * obvious home if the Notes list ever needs it.
+ * Compared step by step with NUMBERS compared as numbers. Plain string order
+ * looks close enough and is wrong exactly where a book gets long: it walks
+ * digit by digit, so `/2/10` sorts before `/2/4` and chapter 10's marks appear
+ * among chapter 4's. Any book with more than nine of anything hits it.
+ *
+ * This is still not foliate's parser — it does not understand assertions, or
+ * ranges, or the difference between a step and an offset. It does not need to:
+ * every CFI here was produced by `view.getCFI` for a position in one book, and
+ * for those, comparing numeric runs numerically and everything else as text is
+ * document order. The parser is the answer if that ever stops being true.
  */
 export function compareMarks(a: Mark, b: Mark): number {
+  /* The SECTION first, because it is the one part of a mark's position that is
+   * a plain number and is known to be right. Two CFIs from different spine
+   * items are not comparable as strings at all — they address positions in
+   * different documents — so a book whose sections carry structurally
+   * different CFIs could interleave two chapters' marks. Comparing the section
+   * first makes that unrepresentable, and leaves the CFI to do the only job it
+   * is good at: ordering within one section. */
+  if (a.sectionIndex !== b.sectionIndex) return a.sectionIndex - b.sectionIndex
   if (a.cfi === b.cfi) return a.createdAt - b.createdAt
-  return a.cfi < b.cfi ? -1 : 1
+  const order = compareCfi(a.cfi, b.cfi)
+  return order !== 0 ? order : a.createdAt - b.createdAt
+}
+
+/** Natural order over two CFIs: numeric runs numerically, the rest as text. */
+export function compareCfi(a: string, b: string): number {
+  const parts = (cfi: string) => cfi.split(/(\d+)/).filter((part) => part !== '')
+  const left = parts(a)
+  const right = parts(b)
+
+  for (let i = 0; i < Math.min(left.length, right.length); i += 1) {
+    const x = left[i] as string
+    const y = right[i] as string
+    if (x === y) continue
+    const bothNumeric = /^\d+$/.test(x) && /^\d+$/.test(y)
+    if (bothNumeric) return Number(x) - Number(y)
+    return x < y ? -1 : 1
+  }
+  return left.length - right.length
 }
 
 /** Every mark belonging to one book, in book order. */
@@ -154,16 +203,39 @@ export function createMark(draft: NewMark): Mark {
 function isMark(value: unknown): value is Mark {
   if (typeof value !== 'object' || value === null) return false
   const m = value as Record<string, unknown>
+  /* The right TYPE is not the same as a usable value, and every one of these
+   * three gets through a type check while breaking something specific:
+   *
+   *   empty id       React keys collide, and `remove(id)` deletes both marks
+   *   empty cfi      nothing to resolve, so the mark can never be drawn — it
+   *                  sits in the Notes list forever pointing at nothing
+   *   bad index      a fractional or negative sectionIndex matches no section,
+   *                  so `drawSection` never offers the mark to an overlay
+   *   bad createdAt  NaN/Infinity sorts unpredictably, scrambling the order of
+   *                  every OTHER mark on the same anchor — and a NEGATIVE one
+   *                  is finite, so it passes that check while still sorting
+   *                  before every real mark, which is the same bug wearing a
+   *                  plausible number. These are epoch milliseconds; there is
+   *                  no such thing as one from before 1970 here.
+   *
+   * Dropping the row loses one mark. Keeping it corrupts a list. */
   return (
     typeof m['id'] === 'string' &&
+    m['id'] !== '' &&
     typeof m['bookId'] === 'string' &&
+    m['bookId'] !== '' &&
     typeof m['cfi'] === 'string' &&
+    m['cfi'] !== '' &&
     typeof m['sectionIndex'] === 'number' &&
+    Number.isInteger(m['sectionIndex']) &&
+    m['sectionIndex'] >= 0 &&
     typeof m['text'] === 'string' &&
     typeof m['note'] === 'string' &&
     (m['kind'] === 'highlight' || m['kind'] === 'companion') &&
     typeof m['chapter'] === 'string' &&
-    typeof m['createdAt'] === 'number'
+    typeof m['createdAt'] === 'number' &&
+    Number.isFinite(m['createdAt']) &&
+    m['createdAt'] >= 0
   )
 }
 

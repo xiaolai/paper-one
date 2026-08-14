@@ -16,7 +16,7 @@
   padding: 4px 8px;
   border: none;
   border-inline-start: 2px solid var(--line-3);
-  border-radius: 0 var(--radius-chip, 6px) var(--radius-chip, 6px) 0;
+  border-radius: 0 var(--radius-chip) var(--radius-chip) 0;
   background: none;
   color: var(--muted);
   font-family: inherit;

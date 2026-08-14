@@ -250,6 +250,9 @@ export const MOTION = {
 /** §08 icon ramp. One stroke weight everywhere, never filled, never two-tone. */
 export const ICON = {
   inline: 12,
+  /** The drawn window controls on Windows and Linux — smaller than a control,
+   *  because they sit in a 44px system row rather than in the app's chrome. */
+  window: 13,
   control: 15,
   tab: 17,
   prominent: 19,
@@ -282,6 +285,12 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
     '--radius-pill': `${RADIUS.pill}px`,
     '--radius-card': `${RADIUS.card}px`,
     '--radius-control': `${RADIUS.control}px`,
+    // Published because a stylesheet was already using `--radius-chip` with a
+    // hardcoded fallback, and the fallback was doing all the work: the token
+    // did not exist, so the value here could have changed without anything on
+    // screen following it.
+    '--radius-chip': `${RADIUS.chip}px`,
+    '--radius-mark': `${RADIUS.mark}px`,
     // §12 layer order, published so stylesheets stop restating the numbers.
     '--z-ruler-band': String(Z.rulerBand),
     '--z-prose': String(Z.prose),

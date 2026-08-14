@@ -14,6 +14,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { ICON } from '../lib/metrics'
 import type { Platform } from '../lib/metrics'
 import { isTauri } from '../lib/platform'
+import { PANE_TITLES, comboFor } from '../lib/panes'
 import type { AppDispatch, AppState, PaneId } from '../lib/state'
 import type { Speech } from '../reader/useSpeech'
 import styles from './TitleBar.module.css'
@@ -21,15 +22,19 @@ import styles from './TitleBar.module.css'
 /** Traffic-light fills, in AppKit's order. Preview only — see below. */
 const LIGHTS = ['var(--tl-red)', 'var(--tl-amber)', 'var(--tl-green)'] as const
 
-/* Shortcuts into the pane. They used to toggle a separate 340px card; now
- * they open the pane on that panel, and clicking the active one closes it. */
-const PANE_SHORTCUTS: readonly {
-  key: PaneId
-  label: string
-  Icon: typeof ListTree
-}[] = [
-  { key: 'toc', label: 'Contents', Icon: ListTree },
-  { key: 'companion', label: 'Companion', Icon: Sparkles },
+/**
+ * Shortcuts into the pane. They used to toggle a separate 340px card; now they
+ * open the pane on that panel, and clicking the active one closes it.
+ *
+ * Two panels of the eight, chosen here — but their LABELS come from the shared
+ * registry, not from a third copy of them. The name is `TITLEBAR_PANES` rather
+ * than `PANE_SHORTCUTS`, which is what this was called: that name already
+ * means §11's ⌘1…5 map in `lib/panes`, and two different things under one name
+ * in one codebase is a trap for whoever greps for it next.
+ */
+const TITLEBAR_PANES: readonly { key: PaneId; Icon: typeof ListTree }[] = [
+  { key: 'toc', Icon: ListTree },
+  { key: 'companion', Icon: Sparkles },
 ]
 
 export interface TitleBarProps {
@@ -56,7 +61,7 @@ export function TitleBar({
   hasBook,
 }: TitleBarProps) {
   const isMac = platform === 'macos'
-  const isReader = state.screen === 'reader' || state.screen === 'pdf'
+  const isReader = state.screen === 'reader'
 
   /* §06: chrome fades to 0 and returns on pointer-near — but only in the
    * reader, and never while the switcher is up, since the chip it is anchored
@@ -79,10 +84,24 @@ export function TitleBar({
    * handlers — without them the buttons were decoration that swallowed the
    * click. macOS never reaches this: AppKit draws the traffic lights. */
   const appWindow = isTauri() ? getCurrentWindow() : null
+  /* Each reports its own failure. These are async IPC calls into the window
+   * manager and their promises were discarded, so a rejected minimise or close
+   * — the window already gone, the IPC refused — surfaced as an unhandled
+   * rejection at the window rather than as a line naming the button. */
+  const runWindow = (what: string, action: () => Promise<void> | undefined) => () => {
+    void action()?.catch((cause: unknown) => {
+      console.error(`Paper: window ${what} failed`, cause)
+    })
+  }
   const WINDOW_BUTTONS = [
-    { key: 'minimise', title: 'Minimise', Icon: Minus, run: () => appWindow?.minimize() },
-    { key: 'maximise', title: 'Maximise', Icon: Square, run: () => appWindow?.toggleMaximize() },
-    { key: 'close', title: 'Close', Icon: X, run: () => appWindow?.close() },
+    { key: 'minimise', title: 'Minimise', Icon: Minus, run: runWindow('minimise', () => appWindow?.minimize()) },
+    {
+      key: 'maximise',
+      title: 'Maximise',
+      Icon: Square,
+      run: runWindow('maximise', () => appWindow?.toggleMaximize()),
+    },
+    { key: 'close', title: 'Close', Icon: X, run: runWindow('close', () => appWindow?.close()) },
   ]
 
   return (
@@ -109,9 +128,9 @@ export function TitleBar({
                 className={styles.windowButton}
                 title={title}
                 aria-label={title}
-                onClick={() => void run()}
+                onClick={run}
               >
-                <Icon size={13} strokeWidth={ICON.stroke} />
+                <Icon size={ICON.window} strokeWidth={ICON.stroke} />
               </button>
             ))}
       </div>
@@ -147,12 +166,18 @@ export function TitleBar({
         {isReader && (
           <>
             <div className={styles.toggleGroup}>
-              {PANE_SHORTCUTS.map(({ key, label, Icon }) => (
+              {TITLEBAR_PANES.map(({ key, Icon }) => (
                 <button
                   key={key}
                   type="button"
                   className={styles.action}
-                  title={label}
+                  title={PANE_TITLES[key]}
+                  aria-label={PANE_TITLES[key]}
+                  /* §10: selected state has to be announced, not only drawn.
+                     `data-on` styles it; without the ARIA it is invisible to a
+                     screen reader, which then cannot tell an open panel from a
+                     closed one. */
+                  aria-pressed={state.pane === key}
                   data-on={state.pane === key}
                   onClick={() =>
                     state.pane === key
@@ -199,7 +224,7 @@ export function TitleBar({
         <button
           type="button"
           className={styles.action}
-          title="Search or ask · ⌘K"
+          title={`Search or ask · ${comboFor('⌘K', platform)}`}
           aria-label="Search or ask"
           aria-haspopup="dialog"
           aria-expanded={state.paletteOpen}
@@ -212,6 +237,8 @@ export function TitleBar({
           type="button"
           className={`${styles.action} ${styles.paneToggle}`}
           title={state.pane ? 'Close pane' : 'Open pane'}
+          aria-label={state.pane ? 'Close pane' : 'Open pane'}
+          aria-pressed={state.pane !== null}
           data-on={state.pane !== null}
           onClick={() => dispatch({ type: 'togglePane' })}
         >

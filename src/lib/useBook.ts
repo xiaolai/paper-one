@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { TocItem } from 'foliate-js/view.js'
 import type { MarkAnchor, SearchHit, SessionNavigator } from '../reader/session'
 import { bookIdFor } from './marks'
@@ -114,12 +114,31 @@ export function useBook(): Book {
   const [meta, setMetaState] = useState<BookMeta | null>(null)
   const [doc, setDocState] = useState<Document | null>(null)
   const [error, setError] = useState<string | null>(null)
+  /**
+   * The book's durable identity, resolved from its content.
+   *
+   * State rather than a derived value because `bookIdFor` reads part of the
+   * file — see its note on why identity cannot come from the name. Null until
+   * it resolves, which is a few milliseconds and which every consumer already
+   * handles: no id means no marks and no cards, which is the correct answer
+   * for a book whose identity is not yet known. Showing the PREVIOUS book's id
+   * for those milliseconds would not be.
+   */
+  const [bookId, setBookId] = useState<string | null>(null)
 
   const navigatorRef = useRef<BookNavigator | null>(null)
-  /* Read by the guards below. A ref, not `loaded.generation`, because a stale
-   * callback closes over the render it was created in. */
+  /**
+   * The current generation, advanced SYNCHRONOUSLY by open and close.
+   *
+   * It used to be assigned during render from `loaded.generation`, which left a
+   * window between the call and the next commit where the guards below still
+   * accepted the OLD book's generation as current. Every late callback from a
+   * book being closed — a relocate, a document, a metadata read — passed the
+   * check in that window and wrote itself back over the state that had just
+   * been cleared for its replacement. The ref is the source of truth now, and
+   * `loaded.generation` is a copy of it for rendering.
+   */
   const generationRef = useRef(0)
-  generationRef.current = loaded.generation
 
   const reset = useCallback(() => {
     setTocState([])
@@ -127,12 +146,20 @@ export function useBook(): Book {
     setMetaState(null)
     setDocState(null)
     setError(null)
+    setBookId(null)
   }, [])
 
   const open = useCallback(
     (next: File | string) => {
       reset()
-      setLoaded((prev) => ({ source: next, generation: prev.generation + 1 }))
+      /* Dropped here, not on the next effect. The navigator points at the
+       * PREVIOUS book's renderer until the new session publishes its own, and
+       * anything the reader does in that gap — a search, a page turn, marking
+       * what is on screen — was being sent to the book they just closed. */
+      navigatorRef.current = null
+      generationRef.current += 1
+      const generation = generationRef.current
+      setLoaded({ source: next, generation })
     },
     [reset],
   )
@@ -140,8 +167,31 @@ export function useBook(): Book {
   const close = useCallback(() => {
     reset()
     navigatorRef.current = null
-    setLoaded((prev) => ({ source: null, generation: prev.generation + 1 }))
+    generationRef.current += 1
+    const generation = generationRef.current
+    setLoaded({ source: null, generation })
   }, [reset])
+
+  /* Resolve the identity of whatever is loaded. Guarded by generation rather
+   * than by a local flag, so an id that arrives after the reader has moved on
+   * is discarded instead of being applied to the next book. */
+  useEffect(() => {
+    const source = loaded.source
+    if (source === null) {
+      setBookId(null)
+      return
+    }
+    const generation = loaded.generation
+    void bookIdFor(source)
+      .then((id) => {
+        if (generation === generationRef.current) setBookId(id)
+      })
+      .catch((cause: unknown) => {
+        // Without an id there are no marks and no library entry, so this is
+        // not silent: the reading works, the remembering does not.
+        console.error('Paper: could not identify this book', cause)
+      })
+  }, [loaded])
 
   /** Drop anything issued under a superseded generation. */
   const current = useCallback(
@@ -149,10 +199,65 @@ export function useBook(): Book {
     [],
   )
 
+  /* Every action is stabilised, and none of them close over book state.
+   *
+   * The Book object still changes identity whenever the reading position does —
+   * it carries the position, so it must — but its CALLBACKS no longer do. They
+   * used to be rebuilt inside the same memo, which meant `book.search` was a
+   * new function on every relocate: the search panel's effect depends on it,
+   * so a full-book search aborted and restarted from the beginning every time
+   * the reader turned a page, including the page turn caused by clicking one
+   * of its own results. Everything below reads through `navigatorRef`, so
+   * stable identity costs nothing in correctness. */
+  const goTo = useCallback((target: string) => navigatorRef.current?.goTo(target), [])
+  const search = useCallback(async function* (query: string, signal: AbortSignal) {
+    const nav = navigatorRef.current
+    if (!nav) return
+    yield* nav.search(query, signal)
+  }, [])
+  const drawMark = useCallback((anchor: MarkAnchor) => navigatorRef.current?.drawMark(anchor), [])
+  const eraseMark = useCallback((anchor: MarkAnchor) => navigatorRef.current?.eraseMark(anchor), [])
+  const deselect = useCallback(() => navigatorRef.current?.deselect(), [])
+  const next = useCallback(() => navigatorRef.current?.next(), [])
+  const prev = useCallback(() => navigatorRef.current?.prev(), [])
+  const setNavigator = useCallback((navigator: BookNavigator | null) => {
+    navigatorRef.current = navigator
+  }, [])
+  const setToc = useCallback(
+    (generation: number, value: readonly TocItem[]) => {
+      if (current(generation)) setTocState(value)
+    },
+    [current],
+  )
+  const setPosition = useCallback(
+    (generation: number, value: ReaderPosition) => {
+      if (current(generation)) setPositionState(value)
+    },
+    [current],
+  )
+  const setDoc = useCallback(
+    (generation: number, value: Document | null) => {
+      if (current(generation)) setDocState(value)
+    },
+    [current],
+  )
+  const setMeta = useCallback(
+    (generation: number, value: BookMeta) => {
+      if (current(generation)) setMetaState(value)
+    },
+    [current],
+  )
+  const fail = useCallback(
+    (generation: number, msg: string) => {
+      if (current(generation)) setError(msg)
+    },
+    [current],
+  )
+
   return useMemo<Book>(
     () => ({
       source: loaded.source,
-      bookId: loaded.source === null ? null : bookIdFor(loaded.source),
+      bookId,
       generation: loaded.generation,
       toc,
       position,
@@ -161,36 +266,43 @@ export function useBook(): Book {
       error,
       open,
       close,
-      goTo: (target) => navigatorRef.current?.goTo(target),
-      search: async function* (query, signal) {
-        const nav = navigatorRef.current
-        if (!nav) return
-        yield* nav.search(query, signal)
-      },
-      drawMark: (anchor) => navigatorRef.current?.drawMark(anchor),
-      eraseMark: (anchor) => navigatorRef.current?.eraseMark(anchor),
-      deselect: () => navigatorRef.current?.deselect(),
-      next: () => navigatorRef.current?.next(),
-      prev: () => navigatorRef.current?.prev(),
-      setNavigator: (navigator) => {
-        navigatorRef.current = navigator
-      },
-      setToc: (generation, next) => {
-        if (current(generation)) setTocState(next)
-      },
-      setPosition: (generation, next) => {
-        if (current(generation)) setPositionState(next)
-      },
-      setDoc: (generation, next) => {
-        if (current(generation)) setDocState(next)
-      },
-      setMeta: (generation, next) => {
-        if (current(generation)) setMetaState(next)
-      },
-      fail: (generation, message) => {
-        if (current(generation)) setError(message)
-      },
+      goTo,
+      search,
+      drawMark,
+      eraseMark,
+      deselect,
+      next,
+      prev,
+      setNavigator,
+      setToc,
+      setPosition,
+      setDoc,
+      setMeta,
+      fail,
     }),
-    [loaded, toc, position, meta, doc, error, open, close, current],
+    [
+      loaded,
+      bookId,
+      toc,
+      position,
+      meta,
+      doc,
+      error,
+      open,
+      close,
+      goTo,
+      search,
+      drawMark,
+      eraseMark,
+      deselect,
+      next,
+      prev,
+      setNavigator,
+      setToc,
+      setPosition,
+      setDoc,
+      setMeta,
+      fail,
+    ],
   )
 }

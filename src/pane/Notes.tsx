@@ -1,10 +1,12 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Layers, Trash2 } from 'lucide-react'
 import { cardFromMark } from '../lib/cards'
 import type { Mark } from '../lib/marks'
+import type { MarkFocus } from '../lib/useMarking'
 import { ICON } from '../lib/metrics'
 import type { CardStore } from '../lib/useCards'
 import type { MarkStore } from '../lib/useMarks'
+import { FilterChips } from './FilterChips'
 import styles from './SidePane.module.css'
 
 /**
@@ -34,24 +36,144 @@ function matches(mark: Mark, filter: NoteFilter): boolean {
   }
 }
 
+/**
+ * The note editor, which saves whatever it is holding when it goes away.
+ *
+ * Blur alone was not enough, and the gap was silent: closing the pane, changing
+ * the filter, opening another book or quitting the window all remove a focused
+ * textarea WITHOUT a blur event, so the note the reader had just typed was
+ * discarded with no indication that it had not been kept. It saves on blur, on
+ * unmount, and when the window is hidden or put away.
+ */
+interface NoteEditorProps {
+  initial: string
+  onCommit: (value: string) => void
+  onDone: () => void
+}
+
+function NoteEditor({ initial, onCommit, onDone }: NoteEditorProps) {
+  /**
+   * The latest text, tracked as it is typed.
+   *
+   * Read from here rather than from the element, because by the time the
+   * unmount cleanup runs React has already detached the ref — `field.current`
+   * is null and the save silently keeps nothing, which is the exact failure
+   * this editor exists to prevent, moved one step later. The element is still
+   * needed for the initial value and for blur; it is just not the source of
+   * truth at teardown.
+   */
+  const draft = useRef(initial)
+  /** What is already stored, so an unchanged note is not written again. */
+  const stored = useRef(initial)
+  const commit = useRef(onCommit)
+  commit.current = onCommit
+
+  const save = useCallback(() => {
+    const value = draft.current.trim()
+    if (value === stored.current) return
+    stored.current = value
+    commit.current(value)
+  }, [])
+
+  useEffect(() => {
+    // `pagehide` rather than `beforeunload`: it fires on the path a webview
+    // actually takes when the window goes away, and it is not blocked by the
+    // conditions that make `beforeunload` unreliable.
+    window.addEventListener('pagehide', save)
+    document.addEventListener('visibilitychange', save)
+    return () => {
+      window.removeEventListener('pagehide', save)
+      document.removeEventListener('visibilitychange', save)
+      save()
+    }
+  }, [save])
+
+  return (
+    <textarea
+      className={styles.noteInput}
+      defaultValue={initial}
+      autoFocus
+      placeholder="Write a note"
+      onChange={(event) => {
+        draft.current = event.target.value
+      }}
+      onBlur={() => {
+        save()
+        onDone()
+      }}
+    />
+  )
+}
+
 export interface NotesProps {
   marks: MarkStore
   /** Where a mark becomes a made thing — §15's line between note and card. */
   cards: CardStore
   /** The open book, so its marks can be shown first. Null when none is open. */
   bookId: string | null
+  /**
+   * Removes a mark from the STORE and from the page.
+   *
+   * Deleting used to call `marks.remove` straight, which leaves the drawn
+   * annotation and its cached Range exactly where they were: the note vanished
+   * from this list while its highlight stayed on the text, and the margin went
+   * on showing it, until something else happened to force a redraw.
+   */
+  onDelete: (mark: Mark) => void
+  /**
+   * The mark to reveal, from a click on the page or on a margin note.
+   *
+   * Opening the panel is not showing the mark: the list holds every mark in
+   * every book, so "open Notes" for a reader with any history means landing at
+   * the top of a long list with no indication of which row was being asked
+   * for. This scrolls to it, and opens its editor when the request was to
+   * write rather than to read.
+   */
+  focus?: MarkFocus | null
   onGoTo?: (target: string) => void
 }
 
-export function Notes({ marks, cards, bookId, onGoTo }: NotesProps) {
+export function Notes({ marks, cards, bookId, onDelete, focus, onGoTo }: NotesProps) {
   const [filter, setFilter] = useState<NoteFilter>('All')
   /** The mark whose note is being written. One at a time, like a text field. */
   const [editing, setEditing] = useState<string | null>(null)
+  const rows = useRef(new Map<string, HTMLDivElement>())
 
-  const shown = useMemo(
-    () => marks.all.filter((mark) => matches(mark, filter)),
-    [marks.all, filter],
-  )
+  /* The open book's marks first, which the prop contract promises and this
+   * did not do: `marks.all` is every book's, in store order, so a reader with
+   * any history opened Notes onto somebody else's chapter. Within each group
+   * the store's own order is kept — it is already book order. */
+  const shown = useMemo(() => {
+    const matching = marks.all.filter((mark) => matches(mark, filter))
+    if (!bookId) return matching
+    return [
+      ...matching.filter((mark) => mark.bookId === bookId),
+      ...matching.filter((mark) => mark.bookId !== bookId),
+    ]
+  }, [marks.all, filter, bookId])
+
+  /* Reveal whatever was asked for.
+   *
+   * The filter is cleared first when it would hide the mark: asking to see a
+   * highlight while the list is filtered to Notes would otherwise scroll to a
+   * row that is not rendered, which looks exactly like the click doing
+   * nothing. Keyed on the whole focus object, nonce included, so asking twice
+   * for the same mark works twice. */
+  useEffect(() => {
+    if (!focus) return
+    const target = marks.all.find((mark) => mark.id === focus.id)
+    if (!target) return
+    if (!matches(target, filter)) setFilter('All')
+    if (focus.edit) setEditing(focus.id)
+    // After paint, so the row exists to scroll to when the filter just changed.
+    const frame = requestAnimationFrame(() => {
+      rows.current.get(focus.id)?.scrollIntoView({ block: 'nearest' })
+    })
+    return () => cancelAnimationFrame(frame)
+    // `filter` is deliberately absent: this reacts to a focus request, not to
+    // the reader changing the filter themselves afterwards.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus, marks.all])
 
   /* Counted from what exists rather than written as prose: the fixture said
    * "1,204 highlights · 318 notes" under a list of three. */
@@ -89,23 +211,36 @@ export function Notes({ marks, cards, bookId, onGoTo }: NotesProps) {
         </div>
       )}
 
-      <div className={styles.filters}>
-        {FILTERS.map((label) => (
-          <button
-            key={label}
-            type="button"
-            className={styles.filter}
-            data-on={filter === label}
-            onClick={() => setFilter(label)}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
+      <FilterChips options={FILTERS} active={filter} onSelect={setFilter} label="Filter marks" />
+
+      {shown.length === 0 && marks.all.length > 0 && (
+        <div className={styles.empty}>
+          <div className={styles.emptyBody}>
+            {/* Says which filter is empty. A blank panel under a selected chip
+                reads as the marks having been lost. */}
+            No {filter === 'All' ? 'marks' : filter.toLowerCase()} yet.
+          </div>
+        </div>
+      )}
 
       {shown.map((mark) => (
-        <div key={mark.id} className={styles.note} data-kind={mark.kind}>
-          {mark.kind === 'companion' && <div className={styles.noteKind}>Companion</div>}
+        <div
+          key={mark.id}
+          ref={(node) => {
+            if (node) rows.current.set(mark.id, node)
+            else rows.current.delete(mark.id)
+          }}
+          className={styles.note}
+          data-kind={mark.kind}
+          data-focused={mark.id === focus?.id}
+        >
+          {mark.kind === 'companion' && (
+            // The kind is stated as data as well as text: the amber that means
+            // "the companion wrote this" is keyed on it — see `.noteKind`.
+            <div className={styles.noteKind} data-kind="Companion">
+              Companion
+            </div>
+          )}
 
           <button
             type="button"
@@ -120,15 +255,10 @@ export function Notes({ marks, cards, bookId, onGoTo }: NotesProps) {
           </button>
 
           {editing === mark.id ? (
-            <textarea
-              className={styles.noteInput}
-              defaultValue={mark.note}
-              autoFocus
-              placeholder="Write a note"
-              onBlur={(event) => {
-                marks.setNote(mark.id, event.target.value.trim())
-                setEditing(null)
-              }}
+            <NoteEditor
+              initial={mark.note}
+              onCommit={(value) => marks.setNote(mark.id, value)}
+              onDone={() => setEditing(null)}
             />
           ) : (
             <button
@@ -160,7 +290,7 @@ export function Notes({ marks, cards, bookId, onGoTo }: NotesProps) {
                 className={styles.noteDelete}
                 aria-label="Delete mark"
                 title="Delete mark"
-                onClick={() => marks.remove(mark.id)}
+                onClick={() => onDelete(mark)}
               >
                 <Trash2 size={ICON.inline} strokeWidth={ICON.stroke} />
               </button>

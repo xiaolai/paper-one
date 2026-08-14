@@ -156,6 +156,22 @@ export interface SessionDeps {
   applySettings: (view: View) => void
 }
 
+/**
+ * A prepared book that owns resources of its own.
+ *
+ * `View.close()` closes the RENDERER; it knows nothing about a book object the
+ * app synthesised, so a PDF's object URLs and its pdf.js loading task — worker
+ * and transport included — survived every close and accumulated one set per
+ * book opened. The session owns what it prepared, so it destroys it too.
+ */
+interface Destroyable {
+  destroy: () => void
+}
+
+function destroyable(value: unknown): value is Destroyable {
+  return typeof (value as Destroyable | null)?.destroy === 'function'
+}
+
 export class ReaderSession {
   #disposed = false
   #view: View | null = null
@@ -168,8 +184,19 @@ export class ReaderSession {
    * section that has been scrolled away would resolve CFIs for nothing.
    */
   readonly #sections = new Set<number>()
-  /** Selection listeners, one set per loaded spine document. */
-  #unwatch: (() => void)[] = []
+  /**
+   * Per-document listener teardown, keyed by the document itself.
+   *
+   * A Map rather than an array, because an array only grows: foliate loads a
+   * new document for every section the reader passes through, so a long book
+   * accumulated one closure per section — each retaining its document, and for
+   * a PDF the page canvas with it — until the book was closed. Keying by
+   * document means re-loading one replaces its entry, and a WeakRef is
+   * unnecessary because the entry is dropped explicitly.
+   */
+  readonly #unwatch = new Map<Document, (() => void)[]>()
+  /** A book this session synthesised, which `View.close()` will not release. */
+  #prepared: Destroyable | null = null
   readonly #host: HTMLElement
   readonly #cb: SessionCallbacks
 
@@ -203,11 +230,39 @@ export class ReaderSession {
     return true
   }
 
+  /**
+   * Bring a book up, from nothing on screen to a first page.
+   *
+   * Five steps, each its own method below. They were one 136-line function, and
+   * the length was not the problem — the RESPONSIBILITIES were: acquiring
+   * resources, mounting DOM, binding events, opening the book and publishing an
+   * API each fail differently and each has its own rollback, and reading which
+   * `return` left which of them half-done meant holding all five in your head
+   * at once. The disposal latch is checked between every pair, because each
+   * step contains an await the caller can unmount across.
+   */
   async start(source: File | string, deps: SessionDeps): Promise<void> {
-    /* allSettled, not all: `all` rejects the moment either side fails while the
-     * other keeps going, so a painters failure would strand a perfectly good
-     * view with nothing holding a reference to close it — the same leak this
-     * class exists to prevent, reintroduced one layer up. */
+    const view = await this.#acquire(deps)
+    if (!view) return
+
+    this.#mount(view)
+    this.#bind(view)
+
+    if (!(await this.#openBook(view, source, deps))) return
+
+    this.#publish(view, deps)
+    await this.#display(view)
+  }
+
+  /**
+   * The view and the painters, or null if either failed.
+   *
+   * `allSettled`, not `all`: `all` rejects the moment either side fails while
+   * the other keeps going, so a painters failure would strand a perfectly good
+   * view with nothing holding a reference to close it — the same leak this
+   * class exists to prevent, reintroduced one layer up.
+   */
+  async #acquire(deps: SessionDeps): Promise<View | null> {
     const [built, painted] = await Promise.allSettled([
       deps.createView(),
       deps.loadPainters(),
@@ -217,32 +272,53 @@ export class ReaderSession {
       if (!this.#disposed) {
         this.#cb.onError(message(built.reason, 'The reader failed to start.'))
       }
-      return
+      return null
     }
     const view = built.value
-    if (!this.#settle(view)) return
+    if (!this.#settle(view)) return null
 
     if (painted.status === 'rejected') {
       // The view is settled, so dispose() will close it — the same contract as
       // a failed open, where the book stays closable.
       this.#cb.onError(message(painted.reason, 'The reader failed to start.'))
-      return
+      return null
     }
     this.#painters = painted.value
+    return view
+  }
 
+  /** Put the view in the host, filling it. */
+  #mount(view: View): void {
     view.style.position = 'absolute'
     view.style.inset = '0'
     this.#host.replaceChildren(view)
+  }
 
-    /* Both listeners consult the latch before touching shared state. A closing
-     * view still emits these, and without the guard a dying book overwrites the
-     * document and position of the one that replaced it. */
+  /**
+   * Subscribe to everything the view emits.
+   *
+   * Every listener consults the latch before touching shared state. A closing
+   * view still emits these, and without the guard a dying book overwrites the
+   * document and position of the one that replaced it.
+   */
+  #bind(view: View): void {
     view.addEventListener('load', (event) => {
       if (this.#disposed) return
       const { doc, index } = (event as CustomEvent<{ doc: Document; index: number }>).detail
+      // A section re-loaded is the same document with fresh content, so its
+      // previous listeners are dropped before new ones go on — otherwise every
+      // return to a section doubles them.
+      this.#resetWatchers(doc)
       this.#watchSelection(doc, view, index)
       this.#watchKeys(doc)
       this.#watchDrops(doc)
+      /* The overlay for this section dies with its document, so the section
+       * leaves the live set at the same moment. Without this the set only ever
+       * grew: a redraw after a theme change then re-resolved a CFI into every
+       * section the reader had ever passed through, against overlays that no
+       * longer exist — work that rises with the length of the reading session
+       * and accomplishes nothing after the first few. */
+      this.#onTeardown(doc, () => this.#sections.delete(index))
       this.#cb.onDocument(doc)
     })
 
@@ -286,6 +362,7 @@ export class ReaderSession {
       const { value } = (event as CustomEvent<{ value: string }>).detail
       this.#cb.onMarkActivated(value)
     })
+
     view.addEventListener('relocate', (event) => {
       if (this.#disposed) return
       const detail = (event as CustomEvent<{
@@ -298,39 +375,70 @@ export class ReaderSession {
         chapterHref: detail.tocItem?.href ?? '',
       })
     })
+  }
 
+  /** Parse the source and open it. False means stop — failed or disposed. */
+  async #openBook(view: View, source: File | string, deps: SessionDeps): Promise<boolean> {
     try {
       const target = deps.prepare ? await deps.prepare(source) : source
+      // Held so disposal can release it — see `Destroyable`.
+      if (target !== source && destroyable(target)) {
+        /* Unless disposal already happened while the PDF was being parsed, in
+         * which case nothing will ever read this field again and the book has
+         * to be released here. It is the expensive case, too: parsing is the
+         * slow step, so the race is likeliest exactly when the object being
+         * dropped owns a worker and a set of object URLs. */
+        if (this.#disposed) destroyQuietly(target)
+        else this.#prepared = target
+      }
       // `prepare` can be slow — a PDF is parsed here — so the latch is
       // consulted before the view is touched with the result.
-      if (!this.#settle(view)) return
+      if (!this.#settle(view)) return false
       await view.open(target as File | string)
     } catch (cause) {
-      if (!this.#settle(view)) return
+      if (!this.#settle(view)) return false
       this.#cb.onError(message(cause, 'This file could not be opened.'))
-      return
+      return false
     }
-    if (!this.#settle(view)) return
+    return this.#settle(view)
+  }
 
+  /** Hand the book's contents and its navigation to the host. */
+  #publish(view: View, deps: SessionDeps): void {
     this.#cb.onToc(view.book.toc ?? [])
     this.#cb.onMeta(readMeta(view.book))
     this.#cb.onNavigator({
-      goTo: (target) => void view.goTo(target),
+      /* Every navigation reports its own failure. These are async and were
+       * discarded, so a target that will not resolve — a dead link in a table
+       * of contents, a PDF destination pointing at a page that is not there —
+       * surfaced as an unhandled rejection at the window rather than as a line
+       * saying which link it was. Nothing is shown to the reader: a link that
+       * goes nowhere should do nothing, not raise a dialog. */
+      goTo: (target) => void view.goTo(target).catch(reportNavigation('goTo', target)),
       search: (query, signal) => runSearch(view, query, signal),
-      drawMark: (anchor) => attachMark(view, anchor),
-      eraseMark: (anchor) => attachMark(view, anchor, true),
+      // Reported, unlike the speculative offers made when an overlay is
+      // created: this one is a direct response to the reader marking something,
+      // so a failure is a mark that silently did not appear.
+      drawMark: (anchor) => attachMark(view, anchor, { report: true }),
+      eraseMark: (anchor) => attachMark(view, anchor, { remove: true, report: true }),
       deselect: () => view.deselect(),
-      next: () => void view.next(),
-      prev: () => void view.prev(),
+      next: () => void view.next()?.catch?.(reportNavigation('next')),
+      prev: () => void view.prev()?.catch?.(reportNavigation('prev')),
     })
 
     // Settings go on BEFORE the first paint, so the reader never flashes
     // foliate's defaults on the way to the configured layout.
     deps.applySettings(view)
+  }
 
-    // `open` parses the book and attaches a renderer but navigates nowhere.
-    // Without this the view stays empty with a populated table of contents and
-    // no iframe, reporting no error to explain it.
+  /**
+   * Show the first section.
+   *
+   * `open` parses the book and attaches a renderer but navigates NOWHERE.
+   * Without this the view stays empty with a populated table of contents and no
+   * iframe, reporting no error to explain it.
+   */
+  async #display(view: View): Promise<void> {
     try {
       await view.init({ lastLocation: null, showTextStart: true })
     } catch (cause) {
@@ -399,7 +507,7 @@ export class ReaderSession {
     doc.addEventListener('keyup', publish)
     doc.addEventListener('selectionchange', clearIfCollapsed)
 
-    this.#unwatch.push(() => {
+    this.#onTeardown(doc, () => {
       doc.removeEventListener('pointerup', publish)
       doc.removeEventListener('keyup', publish)
       doc.removeEventListener('selectionchange', clearIfCollapsed)
@@ -426,21 +534,47 @@ export class ReaderSession {
   #watchKeys(doc: Document): void {
     const onKey = (event: KeyboardEvent) => {
       if (this.#disposed) return
-      window.dispatchEvent(
-        new KeyboardEvent('keydown', {
-          key: event.key,
-          code: event.code,
-          metaKey: event.metaKey,
-          ctrlKey: event.ctrlKey,
-          shiftKey: event.shiftKey,
-          altKey: event.altKey,
-          bubbles: true,
-          cancelable: true,
-        }),
-      )
+
+      /* Typing inside the book stays inside the book.
+       *
+       * The host's keymap guards on `event.target` being a field — and the
+       * forwarded event's target is the WINDOW, so that guard cannot see a
+       * field inside the iframe. An EPUB with a form in it, or any content the
+       * book itself makes editable, would have every arrow key turn the page
+       * out from under the cursor. The check has to happen here, where the real
+       * target is still available. */
+      const target = event.target as HTMLElement | null
+      if (
+        target?.isContentEditable ||
+        target?.tagName === 'INPUT' ||
+        target?.tagName === 'TEXTAREA'
+      ) {
+        return
+      }
+
+      const forwarded = new KeyboardEvent('keydown', {
+        key: event.key,
+        code: event.code,
+        metaKey: event.metaKey,
+        ctrlKey: event.ctrlKey,
+        shiftKey: event.shiftKey,
+        altKey: event.altKey,
+        bubbles: true,
+        cancelable: true,
+      })
+      window.dispatchEvent(forwarded)
+
+      /* Carry the cancellation back across the boundary.
+       *
+       * `preventDefault` on the copy does nothing to the original, so a key the
+       * host handled ALSO kept its default inside the book: PageDown turned the
+       * page and scrolled the document it had just left, and Space did both at
+       * once. The two documents have to agree about whether the key was
+       * consumed, and this is the only place that knows. */
+      if (forwarded.defaultPrevented) event.preventDefault()
     }
     doc.addEventListener('keydown', onKey)
-    this.#unwatch.push(() => doc.removeEventListener('keydown', onKey))
+    this.#onTeardown(doc, () => doc.removeEventListener('keydown', onKey))
   }
 
   /**
@@ -479,11 +613,46 @@ export class ReaderSession {
     doc.addEventListener('dragenter', allow)
     doc.addEventListener('dragover', allow)
     doc.addEventListener('drop', onDrop)
-    this.#unwatch.push(() => {
+    this.#onTeardown(doc, () => {
       doc.removeEventListener('dragenter', allow)
       doc.removeEventListener('dragover', allow)
       doc.removeEventListener('drop', onDrop)
     })
+  }
+
+  /**
+   * Register teardown for one document, replacing any it already had.
+   *
+   * foliate re-loads a section every time the reader returns to it, and each
+   * load re-runs the watchers. Without replacing, the same document
+   * accumulates duplicate listeners — every keystroke forwarded twice, every
+   * page turn advancing two spreads — and every superseded closure keeps its
+   * document alive.
+   *
+   * `pagehide` releases the entry as the document goes away, so a book read
+   * end to end does not carry every section it passed through.
+   */
+  #onTeardown(doc: Document, off: () => void): void {
+    const existing = this.#unwatch.get(doc)
+    if (existing) {
+      this.#unwatch.set(doc, [...existing, off])
+      return
+    }
+    this.#unwatch.set(doc, [off])
+    doc.defaultView?.addEventListener(
+      'pagehide',
+      () => {
+        for (const fn of this.#unwatch.get(doc) ?? []) fn()
+        this.#unwatch.delete(doc)
+      },
+      { once: true },
+    )
+  }
+
+  /** Drop the listeners a document had, before re-registering them. */
+  #resetWatchers(doc: Document): void {
+    for (const off of this.#unwatch.get(doc) ?? []) off()
+    this.#unwatch.delete(doc)
   }
 
   /** Idempotent, and safe at any point in startup. */
@@ -493,14 +662,39 @@ export class ReaderSession {
     this.#cb.onDocument(null)
     this.#cb.onNavigator(null)
     this.#cb.onSelection(null)
-    for (const off of this.#unwatch) off()
-    this.#unwatch = []
+    for (const offs of this.#unwatch.values()) for (const off of offs) off()
+    this.#unwatch.clear()
     this.#sections.clear()
     this.#painters = null
+    const prepared = this.#prepared
+    this.#prepared = null
+    if (prepared) destroyQuietly(prepared)
     const built = this.#view
     this.#view = null
     if (built) closeQuietly(built)
     this.#host.replaceChildren()
+  }
+}
+
+/**
+ * Release a prepared book, reporting a failure rather than hiding it.
+ *
+ * Best effort because a half-open document must not stop the rest of teardown —
+ * but loud, because what is being released here is a worker and a set of object
+ * URLs, and a silent failure to release them is a leak that grows one book at a
+ * time with nothing on screen to suggest it.
+ */
+function reportNavigation(what: string, target?: string): (cause: unknown) => void {
+  return (cause) => {
+    console.warn(`Paper: ${what}${target ? ` ${target}` : ''} failed`, cause)
+  }
+}
+
+function destroyQuietly(prepared: Destroyable): void {
+  try {
+    prepared.destroy()
+  } catch (cause) {
+    console.error('Paper: failed to destroy the prepared book', cause)
   }
 }
 
@@ -522,15 +716,28 @@ function annotationFor(anchor: MarkAnchor): { value: string; kind: MarkKind } {
  * lands, which is when they take. Reporting the first attempt would log a line
  * per mark per page on every book that has any.
  *
- * It is narrow on purpose: only the resolution throws are swallowed, and only
- * because the operation is retried by design.
+ * Which is why `report` exists rather than the catch being unconditional. That
+ * reasoning covers the speculative offer and NOTHING else: when the reader
+ * marks a passage, or removes one, a failure means the mark they just made did
+ * not appear, there is no retry coming, and swallowing it leaves them looking
+ * at a page that quietly disagrees with the notes panel.
  */
-function attachMark(view: View, anchor: MarkAnchor, remove = false): void {
+interface AttachOptions {
+  readonly remove?: boolean
+  readonly report?: boolean
+}
+
+function attachMark(view: View, anchor: MarkAnchor, options: AttachOptions = {}): void {
+  const { remove = false, report = false } = options
+  const fail = (cause: unknown) => {
+    if (report) console.error(`Paper: could not ${remove ? 'erase' : 'draw'} a mark`, cause)
+  }
   try {
     const pending = view.addAnnotation(annotationFor(anchor), remove)
-    void pending?.catch?.(() => {})
-  } catch {
+    void pending?.catch?.(fail)
+  } catch (cause) {
     // Threw synchronously — same case, same reasoning.
+    fail(cause)
   }
 }
 

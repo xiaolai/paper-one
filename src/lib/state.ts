@@ -10,17 +10,48 @@ import { DEFAULT_STEP_IDX, READING_STEPS } from './metrics'
  * what makes the state readable next to the design.
  */
 
-/** Topmost first — `dismissTop` walks this order so Esc peels one layer. */
-const LAYER_ORDER = ['figureOpen', 'paletteOpen', 'switcherOpen', 'selectionOpen'] as const
+/**
+ * Topmost first — `dismissTop` walks this order so Esc peels one layer.
+ *
+ * `figureOpen` and `selectionOpen` used to be here too. Nothing opened either
+ * one and nothing rendered either one: they were §12's layer list transcribed
+ * into state ahead of the surfaces that would use it, so Esc walked past two
+ * layers that could not exist, and every guard elsewhere in the app had to name
+ * them. A layer earns a place here when something raises it.
+ */
+const LAYER_ORDER = ['paletteOpen', 'switcherOpen'] as const
 
 /** Derived from LAYER_ORDER so the action types and the dismiss order cannot
  *  drift apart — adding a layer in one place now fails to compile in the other. */
 export type Layer = (typeof LAYER_ORDER)[number]
 
-export type Screen = 'library' | 'reader' | 'pdf' | 'cards'
+/**
+ * The layers that take the whole window, of which at most one can be open.
+ *
+ * They were free to stack, and the result disagreed with itself: opening the
+ * palette over the switcher left the switcher painted on top — it renders
+ * later — while Esc closed the palette, because `dismissTop` walks
+ * LAYER_ORDER and the palette is higher in it. So the layer the reader could
+ * see was not the layer their keystrokes reached, and dismissing the one on
+ * screen took two presses of Esc with nothing visibly happening on the first.
+ *
+ */
+const MODAL_LAYERS: readonly Layer[] = ['paletteOpen', 'switcherOpen']
+
+/**
+ * The two screens there are.
+ *
+ * `pdf` and `cards` were here and unreachable: a PDF is opened by the reader
+ * like any other book — that is the whole point of `makePdf` — and cards are a
+ * panel of the side pane, not a screen. They cost more than a dead branch,
+ * because a predicate that names one drifts from a predicate that does not:
+ * the titlebar counted `pdf` as a reading screen while the chrome fade beside
+ * it did not, so the two disagreed about what the reader was looking at.
+ */
+export type Screen = 'library' | 'reader'
 export type Theme = 'paper' | 'slate' | 'sepia' | 'sage' | 'night'
 /**
- * The seven panels of the single side pane.
+ * The panels of the single side pane — see `lib/panes` for their metadata.
  *
  * Contents and Companion used to live in a separate 340px leading card, which
  * meant two surfaces competing for the same job. One pane holds every tool;
@@ -59,13 +90,10 @@ export interface AppState {
   readonly side: Side
   readonly paletteOpen: boolean
   readonly switcherOpen: boolean
-  readonly figureOpen: boolean
-  readonly selectionOpen: boolean
   /** Chrome fades to 0 and returns on pointer-near (§06). */
   readonly chromeOn: boolean
   readonly rulerOn: boolean
   readonly rulerPinned: boolean
-  readonly ttsOn: boolean
   readonly stepIdx: number
   readonly pageLayout: PageLayout
 }
@@ -79,12 +107,9 @@ export const initialState: AppState = {
   side: 'right',
   paletteOpen: false,
   switcherOpen: false,
-  figureOpen: false,
-  selectionOpen: false,
   chromeOn: false,
   rulerOn: false,
   rulerPinned: false,
-  ttsOn: false,
   stepIdx: DEFAULT_STEP_IDX,
   pageLayout: 'scrolled',
 }
@@ -104,7 +129,6 @@ export type Action =
   | { type: 'setChrome'; on: boolean }
   | { type: 'toggleRuler' }
   | { type: 'pinRuler' }
-  | { type: 'toggleTts' }
   | { type: 'setStepIdx'; idx: number }
   | { type: 'setPageLayout'; layout: PageLayout }
 
@@ -137,8 +161,13 @@ export function reducer(state: AppState, action: Action): AppState {
     case 'setSide':
       return { ...state, side: action.side }
 
-    case 'toggleLayer':
-      return { ...state, [action.layer]: !state[action.layer] }
+    case 'toggleLayer': {
+      // Closing needs no ceremony; opening a modal layer retires the others.
+      if (state[action.layer]) return { ...state, [action.layer]: false }
+      if (!MODAL_LAYERS.includes(action.layer)) return { ...state, [action.layer]: true }
+      const closed = Object.fromEntries(MODAL_LAYERS.map((layer) => [layer, false]))
+      return { ...state, ...closed, [action.layer]: true }
+    }
 
     case 'closeLayer':
       return { ...state, [action.layer]: false }
@@ -159,9 +188,6 @@ export function reducer(state: AppState, action: Action): AppState {
 
     case 'pinRuler':
       return { ...state, rulerPinned: true }
-
-    case 'toggleTts':
-      return { ...state, ttsOn: !state.ttsOn }
 
     case 'setStepIdx':
       // Clamped rather than validated at the call site: the stepper, the
@@ -191,7 +217,13 @@ export function useAppState(): [AppState, AppDispatch] {
   return useReducer(reducer, initialState)
 }
 
-/** True when any dismissible layer is up — used to trap Esc and the scrim. */
+/**
+ * True when any dismissible layer is up.
+ *
+ * Exported for the guards that must not act through an overlay — the reading
+ * keys in App and the ruler's Space in ReadingRuler. Both used to list the
+ * layers by hand, which is how they came to name two that no longer exist.
+ */
 export function hasOpenLayer(state: AppState): boolean {
   return LAYER_ORDER.some((layer) => state[layer])
 }

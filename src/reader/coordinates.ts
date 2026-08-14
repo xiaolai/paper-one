@@ -128,17 +128,115 @@ export function lineRectInBook(doc: Document, bookX: number, bookY: number): DOM
   const caret = caretRangeAt(doc, bookX, bookY)
   if (!caret) return null
 
-  // Expand the caret to the whole line by walking to the text node's rects and
-  // picking the one containing the point.
   const node = caret.startContainer
   if (node.nodeType !== Node.TEXT_NODE) return null
-  const lineRange = doc.createRange()
-  lineRange.selectNodeContents(node)
 
-  for (const rect of Array.from(lineRange.getClientRects())) {
-    if (bookY >= rect.top && bookY <= rect.bottom) return rect
+  /* Measure the whole line, not the caret's own text node.
+   *
+   * A line is rarely one text node. `Hello <em>world</em> again` is three, and
+   * a footnote marker or an inline <span> splits one more; `getClientRects` on
+   * a single node returns only ITS fragment. The band then covers a few words
+   * of the line instead of the line, and its height comes from whichever
+   * fragment the pointer happened to be over — a superscript marker gives a
+   * band a third of the height of the text it is meant to be under.
+   *
+   * So the scope is the containing block, and the rects that share the pointer's
+   * line are merged back into one. */
+  const view = doc.defaultView
+  const scope = doc.createRange()
+  scope.selectNodeContents(blockAncestor(node, view) ?? node)
+
+  const rects = Array.from(scope.getClientRects()).filter((rect) => rect.height > 0)
+  /* Seeded by the fragment under the pointer, then widened to every fragment
+   * that OVERLAPS it vertically. Taking only the fragments containing the
+   * pointer's own y excludes the ones that sit off the baseline — a superscript
+   * footnote marker, a smaller inline caption — so the band stopped short of
+   * text that is plainly on the same line. */
+  const seed = rects.find((rect) => bookY >= rect.top && bookY <= rect.bottom)
+  if (!seed) return null
+  const online = rects.filter((rect) => rect.bottom > seed.top && rect.top < seed.bottom)
+
+  let { top, bottom, left, right } = seed
+  for (const rect of online) {
+    top = Math.min(top, rect.top)
+    bottom = Math.max(bottom, rect.bottom)
+    left = Math.min(left, rect.left)
+    right = Math.max(right, rect.right)
+  }
+  return new DOMRect(left, top, right - left, bottom - top)
+}
+
+/**
+ * The nearest ancestor that lays out its children as lines.
+ *
+ * Stops at the first non-inline box: that is the element whose client rects are
+ * one-per-line, which is what a line measurement needs. Falls back to the
+ * parent element when computed styles are unavailable, which is better than
+ * walking to the body and measuring the whole chapter as one rect.
+ */
+export function blockAncestor(node: Node, view: Window | null): Element | null {
+  let element = node.parentElement
+  if (!view) return element
+  while (element) {
+    const display = view.getComputedStyle(element).display
+    if (!display.startsWith('inline') && display !== 'ruby' && display !== 'contents') {
+      return element
+    }
+    element = element.parentElement
   }
   return null
+}
+
+/**
+ * What of the book is actually on screen, in host coordinates.
+ *
+ * Needed because a Range's client rects are NOT clipped to the viewport. In a
+ * paginated book the whole spine item is laid out in columns, so a passage four
+ * pages ahead still resolves to a rect — one with the same vertical position as
+ * the line under the reader's eye and a horizontal offset several viewport
+ * widths away. Translated and used blind, every note in the chapter stacks into
+ * the margin at once, and nothing about the rect says it came from a page that
+ * is not being shown.
+ *
+ * The frame's own box is NOT that answer, which is the trap here. Measured in a
+ * paginated book: the iframe is 1320px wide inside a 1028px stage, with the
+ * overflow clipped by an ancestor. So a rect can sit inside the frame and still
+ * be somewhere the reader cannot see, and clipping to the frame alone lets the
+ * next page's marks through. The visible region is the frame INTERSECTED with
+ * the host — and in host coordinates the host is simply its own box at the
+ * origin, so the intersection is a clamp.
+ */
+export function frameBoxInHost(doc: Document, host: HTMLElement): HostRect | null {
+  const frame = doc.defaultView?.frameElement as HTMLElement | null
+  if (!frame) return null
+  const frameBox = frame.getBoundingClientRect()
+  const hostBox = host.getBoundingClientRect()
+
+  const top = Math.max(frameBox.top - hostBox.top, 0)
+  const left = Math.max(frameBox.left - hostBox.left, 0)
+  const bottom = Math.min(frameBox.bottom - hostBox.top, hostBox.height)
+  const right = Math.min(frameBox.right - hostBox.left, hostBox.width)
+
+  /* Disjoint: the frame is entirely outside the host. An EMPTY rect, not null —
+   * null is this function's "there is no frame to measure", which callers read
+   * as "do not clip". Returning it here would invert the answer and show every
+   * mark in the chapter at the exact moment none of them are visible. Nothing
+   * overlaps a zero-area rect, which is the correct answer. */
+  if (bottom <= top || right <= left) {
+    return { top, left, width: 0, height: 0, bottom: top, right: left }
+  }
+
+  return { top, left, width: right - left, height: bottom - top, bottom, right }
+}
+
+/** Whether two host-space rects overlap at all. */
+export function overlaps(rect: HostRect, box: HostRect): boolean {
+  return (
+    rect.right > box.left &&
+    rect.left < box.right &&
+    rect.bottom > box.top &&
+    rect.top < box.bottom
+  )
 }
 
 /** Put a rect measured in the book's viewport into host coordinates. */
@@ -174,7 +272,12 @@ function caretRangeAt(doc: Document, x: number, y: number): Range | null {
   }
   if (typeof standard.caretPositionFromPoint === 'function') {
     const position = standard.caretPositionFromPoint(x, y)
-    if (!position) return null
+    /* The NODE is checked, not just the position. A caret position at the very
+     * edge of a document can come back with a null `offsetNode`, and passing
+     * that to `setStart` throws "Argument 1 ('node') to Range.setStart must be
+     * an instance of Node" — from inside a pointer handler, where it becomes an
+     * uncaught error rather than a missed measurement. */
+    if (!position?.offsetNode) return null
     const range = doc.createRange()
     range.setStart(position.offsetNode, position.offset)
     range.collapse(true)

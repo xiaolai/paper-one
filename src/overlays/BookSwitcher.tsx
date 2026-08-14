@@ -1,6 +1,14 @@
 import { useMemo, useState } from 'react'
 import { Search } from 'lucide-react'
-import { coverTint } from '../data/fixtures'
+import { coverTintFor } from '../data/fixtures'
+import {
+  NOT_REOPENABLE,
+  displayAuthor,
+  displayTitle,
+  isReopenable,
+  matchesQuery,
+  rowSuffix,
+} from '../lib/library'
 import type { LibraryEntry } from '../lib/library'
 import { ICON } from '../lib/metrics'
 import { OverlaySheet } from './OverlaySheet'
@@ -36,14 +44,13 @@ export function BookSwitcher({
 }: BookSwitcherProps) {
   const [query, setQuery] = useState('')
 
-  const shown = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    if (!q) return books
-    return books.filter(
-      (book) =>
-        book.title.toLowerCase().includes(q) || book.author.toLowerCase().includes(q),
-    )
-  }, [books, query])
+  /* Matched on what the row DISPLAYS — see `matchesQuery`. Filtering the raw
+   * fields meant a row reading "Untitled · Unknown author" could not be found
+   * by typing either of those words. */
+  const shown = useMemo(
+    () => books.filter((book) => matchesQuery(book, query)),
+    [books, query],
+  )
 
   return (
     <OverlaySheet label="Switch book" onDismiss={onDismiss}>
@@ -70,9 +77,9 @@ export function BookSwitcher({
         ) : shown.length === 0 ? (
           <div className={styles.empty}>No book matches “{query.trim()}”.</div>
         ) : (
-          shown.map((book, index) => {
+          shown.map((book) => {
             const isCurrent = book.bookId === currentBookId
-            const reopenable = book.url !== null
+            const reopenable = isReopenable(book)
             return (
               <button
                 key={book.bookId}
@@ -85,24 +92,20 @@ export function BookSwitcher({
                     ? 'Already open'
                     : reopenable
                       ? undefined
-                      : 'Opened from a file — add it again to reopen'
+                      : NOT_REOPENABLE
                 }
                 onClick={() => book.url && onOpen(book.url)}
               >
                 <span
                   className={styles.cover}
-                  style={{ background: coverTint(index) }}
+                  style={{ background: coverTintFor(book.bookId) }}
                   aria-hidden
                 />
                 <span className={styles.rowLabel}>
-                  {book.title || 'Untitled'}
+                  {displayTitle(book)}
                   <span className={styles.rowSub}>
-                    {book.author || 'Unknown author'}
-                    {isCurrent
-                      ? ' · open'
-                      : reopenable
-                        ? ''
-                        : ' · add the file again to reopen'}
+                    {displayAuthor(book)}
+                    {rowSuffix(book, isCurrent)}
                   </span>
                 </span>
               </button>

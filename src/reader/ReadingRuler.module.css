@@ -29,3 +29,16 @@
    * hint is the one thing in there that is interactive. */
   pointer-events: auto;
 }
+
+/* A collapsed gutter has no room for it.
+ *
+ * `left: 0; right: 0` in a zero-width parent does not make the box disappear —
+ * it makes it one character wide, and the text then overflows onto the first
+ * words of every line it is sitting beside, which is the one place the ruler's
+ * own chrome must never be. Hidden entirely below the width where the string
+ * can be read; the band in the book is unaffected and goes on working. */
+@container gutter (max-width: 40px) {
+  .hint {
+    display: none;
+  }
+}

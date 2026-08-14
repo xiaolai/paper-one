@@ -1,4 +1,5 @@
-import type { AppDispatch, AppState, PaneId, Theme } from './state'
+import { PANES, THEMES } from './panes'
+import type { AppDispatch, AppState } from './state'
 
 /**
  * Everything the command palette can do, as data.
@@ -40,38 +41,12 @@ export interface CommandContext {
   openSwitcher: () => void
 }
 
-const PANES: readonly { id: PaneId; label: string; combo?: string }[] = [
-  { id: 'toc', label: 'Contents', combo: '⌘1' },
-  { id: 'notes', label: 'Notes', combo: '⌘2' },
-  { id: 'search', label: 'Search', combo: '⌘3' },
-  { id: 'cards', label: 'Cards', combo: '⌘4' },
-  { id: 'companion', label: 'Companion' },
-  { id: 'stats', label: 'Reading', combo: '⌘5' },
-  { id: 'import', label: 'Add books' },
-  { id: 'settings', label: 'Settings' },
-]
-
-/** §11 binds ⌘1…5 to "Contents, notes, search, cards, stats". */
-export const PANE_SHORTCUTS: readonly { combo: string; digit: string; pane: PaneId }[] =
-  PANES.filter((pane) => pane.combo).map((pane) => ({
-    combo: pane.combo ?? '',
-    digit: (pane.combo ?? '').slice(-1),
-    pane: pane.id,
-  }))
-
-const THEMES: readonly { id: Theme; label: string }[] = [
-  { id: 'paper', label: 'Paper' },
-  { id: 'slate', label: 'Slate' },
-  { id: 'sepia', label: 'Sepia' },
-  { id: 'sage', label: 'Sage' },
-  { id: 'night', label: 'Night' },
-]
-
 export function buildCommands(ctx: CommandContext): Command[] {
   const { state, dispatch } = ctx
   const commands: Command[] = []
 
   for (const pane of PANES) {
+    if (pane.inPalette === false) continue
     const open = state.pane === pane.id
     commands.push({
       id: `pane:${pane.id}`,

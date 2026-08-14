@@ -13,7 +13,10 @@
   display: flex;
   align-items: center;
   gap: 2px;
-  height: 40px;
+  /* Set from POPUP_H in SelectionTools.tsx, which positions against it: two
+   * copies of this number drift, and the popup then sits its own height away
+   * from the line it belongs to. */
+  height: var(--popup-h);
   padding: 0 4px;
   border-radius: var(--radius-control);
   background: var(--surface);

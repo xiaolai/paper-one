@@ -15,7 +15,7 @@ import type { MarkStore } from '../lib/useMarks'
 import type { Marking } from '../lib/useMarking'
 import type { AppDispatch, AppState } from '../lib/state'
 import type { Book } from '../lib/useBook'
-import { useAvailableWidth } from '../lib/useAvailableWidth'
+import { useAvailableWidth, useElementWidth } from '../lib/useAvailableWidth'
 import { FoliateView } from '../reader/FoliateView'
 import { MarginMarks } from '../reader/MarginMarks'
 import { ReadingRuler } from '../reader/ReadingRuler'
@@ -68,27 +68,44 @@ export function Reader({
    * never again. */
   const [stage, setStage] = useState<HTMLDivElement | null>(null)
 
+  /**
+   * A passing message about an action that did not work.
+   *
+   * Separate from `book.error` on purpose, and the separation is load-bearing:
+   * a book error means the book is not readable, and the branch below replaces
+   * the whole reader with it. Routing a failed CLIPBOARD WRITE through that
+   * channel therefore threw the reader off the screen — book intact, nothing
+   * wrong with it — over a copy that did not land. A failed action says so and
+   * gets out of the way.
+   */
+  const [notice, setNotice] = useState<string | null>(null)
+
   const { selection, setSelection, ranges, onMarkDrawn, selected, mark, unmark } = marking
 
   const windowWidth = useAvailableWidth()
   /* Must use the SAME predicate as WindowShell. Reserving PANE_TRACK whenever
    * `state.pane` is set meant that below the §06 collapse threshold — where
-   * the pane is hidden — the reader still gave away 412px to nothing. */
+   * the pane is hidden — the reader still gave away 412px to nothing.
+   *
+   * This is only the FIRST render's estimate, because the stage has no box to
+   * measure until it is attached. Everything after that is measured from the
+   * stage itself: the pane's width is ANIMATED over 220ms, so arithmetic from
+   * the binary open/closed state describes a layout that does not exist yet —
+   * closing the pane widened the tracks immediately, while the pane was still
+   * occupying its space, and the measure was clipped until the animation
+   * caught up with the numbers. */
   const paneVisible = state.pane !== null && windowWidth >= PANE_COLLAPSE_W
-  const available = windowWidth - (paneVisible ? PANE_TRACK : 0)
+  const estimated = windowWidth - (paneVisible ? PANE_TRACK : 0) - STAGE_PADDING_X * 2
+  const measured = useElementWidth(stage)
+  const available = measured ?? estimated
 
   /* What actually goes in the margin: notes and companion marks, not every
    * highlight. Counting highlights too would open a 250px column to show a
    * column of dots that repeat what the gold fill on the words already says. */
   const inMargin = useMemo(() => marginMarks(marks.current), [marks.current])
 
-  // The stage is what is left after the pane, less its own padding. The margin
-  // column is only reserved once the book has marks to put in it.
-  const grid = proseGrid(
-    available - STAGE_PADDING_X * 2,
-    inMargin.length > 0,
-    measureForStep(state.stepIdx),
-  )
+  // The margin column is only reserved once the book has marks to put in it.
+  const grid = proseGrid(available, inMargin.length > 0, measureForStep(state.stepIdx))
   /* foliate centres the book inside its own container, and the container spans
    * the whole grid — so the text only lands on the measure track while the
    * outer tracks are equal. Once marks widen the margin, the difference is
@@ -115,10 +132,12 @@ export function Reader({
       <div className={styles.column} data-platform={platform}>
         {book.source ? (
           <>
-            {/* A book that will not open has to say so. Rendering the stage
-                anyway leaves an empty column, which reads as "this book has no
-                text" rather than "this book failed to load". */}
-            {book.error && (
+            {/* A book that will not open has to say so, and INSTEAD of the
+                reader rather than above it. Rendering the stage anyway left a
+                failed view, an empty margin, a live selection popup and a
+                progress footer under the message — an interface that looks
+                like a book is open, reporting that one is not. */}
+            {book.error ? (
               <div className={styles.errorBar}>
                 <p className={styles.error}>{book.error}</p>
                 <button
@@ -129,94 +148,142 @@ export function Reader({
                   Choose another book
                 </button>
               </div>
-            )}
+            ) : (
+              <>
+                <div
+                  className={styles.stage}
+                  ref={setStage}
+                  style={gridVars}
+                >
+                  <div className={styles.gutter}>
+                    <ReadingRuler
+                      state={state}
+                      dispatch={dispatch}
+                      doc={book.doc}
+                      stage={stage}
+                    />
+                  </div>
 
-            <div
-              className={styles.stage}
-              ref={setStage}
-              style={gridVars}
-            >
-              <div className={styles.gutter}>
-                <ReadingRuler
-                  state={state}
-                  dispatch={dispatch}
-                  doc={book.doc}
-                  stage={stage}
-                />
-              </div>
+                  <div className={styles.text}>
+                    <FoliateView
+                      file={book.source}
+                      generation={book.generation}
+                      stepIdx={state.stepIdx}
+                      theme={state.theme}
+                      paginated={state.pageLayout === 'paginated'}
+                      onToc={book.setToc}
+                      onRelocate={book.setPosition}
+                      onDocument={book.setDoc}
+                      onMeta={book.setMeta}
+                      onError={book.fail}
+                      onNavigator={book.setNavigator}
+                      marks={marks.current}
+                      onSelection={setSelection}
+                      onMarkDrawn={onMarkDrawn}
+                      onFileDropped={book.open}
+                      onMarkActivated={(cfi) => {
+                        /* The mark is already in hand, so Notes is told WHICH
+                           one. Opening the panel is not showing the mark: the
+                           list holds every mark in every book, and landing at
+                           the top of it leaves the reader to find the one they
+                           just clicked. */
+                        const hit = marks.current.find((m) => m.cfi === cfi)
+                        if (!hit) return
+                        marking.focusMark(hit.id)
+                        dispatch({ type: 'openPane', pane: 'notes' })
+                      }}
+                    />
+                  </div>
 
-              <div className={styles.text}>
-                <FoliateView
-                  file={book.source}
-                  generation={book.generation}
-                  stepIdx={state.stepIdx}
-                  theme={state.theme}
-                  paginated={state.pageLayout === 'paginated'}
-                  onToc={book.setToc}
-                  onRelocate={book.setPosition}
-                  onDocument={book.setDoc}
-                  onMeta={book.setMeta}
-                  onError={book.fail}
-                  onNavigator={book.setNavigator}
-                  marks={marks.current}
-                  onSelection={setSelection}
-                  onMarkDrawn={onMarkDrawn}
-                  onFileDropped={book.open}
-                  onMarkActivated={(cfi) => {
-                    const hit = marks.current.find((m) => m.cfi === cfi)
-                    if (hit) dispatch({ type: 'openPane', pane: 'notes' })
-                  }}
-                />
-              </div>
+                  {/* Rendered only when there is something to put in it; the
+                      track collapses to the gutter's width otherwise. */}
+                  {inMargin.length > 0 && (
+                    <div className={styles.margin}>
+                      <MarginMarks
+                        marks={inMargin}
+                        ranges={ranges}
+                        stage={stage}
+                        doc={book.doc}
+                        position={book.position}
+                        onSelect={(picked) => {
+                          marking.focusMark(picked.id)
+                          dispatch({ type: 'openPane', pane: 'notes' })
+                        }}
+                      />
+                    </div>
+                  )}
 
-              {/* Rendered only when there is something to put in it; the
-                  track collapses to the gutter's width otherwise. */}
-              {inMargin.length > 0 && (
-                <div className={styles.margin}>
-                  <MarginMarks
-                    marks={inMargin}
-                    ranges={ranges}
+                  <SelectionTools
+                    selection={selection}
                     stage={stage}
-                    doc={book.doc}
-                    onSelect={() => dispatch({ type: 'openPane', pane: 'notes' })}
+                    marked={selected !== null}
+                    position={book.position}
+                    onHighlight={() => mark(selected?.note ?? '')}
+                    onNote={() => {
+                      /* The note itself is written in the Notes panel, where
+                         there is room for it. Marking first is what gives it an
+                         anchor — and the editor for THAT mark opens with the
+                         panel, rather than leaving the reader to find the row
+                         and click "Add a note" a second time. */
+                      const created = mark(selected?.note ?? '')
+                      const target = created ?? selected
+                      if (target) marking.focusMark(target.id, true)
+                      dispatch({ type: 'openPane', pane: 'notes' })
+                    }}
+                    onCopy={() => {
+                      /* Reported when it fails. Clipboard access can be absent
+                         or refused, and the popup dismissed itself either way —
+                         so a copy that did not happen looked exactly like one
+                         that did, until the reader pasted nothing. */
+                      const text = selection?.text
+                      const clipboard = navigator.clipboard
+                      if (text && clipboard) {
+                        void clipboard.writeText(text).catch((cause: unknown) => {
+                          console.error('Paper: could not copy the selection', cause)
+                          setNotice('That could not be copied to the clipboard.')
+                        })
+                      } else if (text) {
+                        setNotice('This device has no clipboard available.')
+                      }
+                      deselect()
+                      setSelection(null)
+                    }}
+                    onRemove={() => {
+                      if (selected) unmark(selected)
+                      deselect()
+                      setSelection(null)
+                    }}
                   />
                 </div>
-              )}
 
-              <SelectionTools
-                selection={selection}
-                stage={stage}
-                marked={selected !== null}
-                onHighlight={() => mark(selected?.note ?? '')}
-                onNote={() => {
-                  // The note itself is written in the Notes panel, where there
-                  // is room for it. Marking first is what gives it an anchor.
-                  mark(selected?.note ?? '')
-                  dispatch({ type: 'openPane', pane: 'notes' })
-                }}
-                onCopy={() => {
-                  if (selection) void navigator.clipboard?.writeText(selection.text)
-                  deselect()
-                  setSelection(null)
-                }}
-                onRemove={() => {
-                  if (selected) unmark(selected)
-                  deselect()
-                  setSelection(null)
-                }}
-              />
-            </div>
+                {/* §11: say what happened. It sits over the footer rather than
+                    displacing the text, and it dismisses itself — the reader
+                    has already moved on to whatever they meant to paste. */}
+                {notice && (
+                  <div className={styles.notice} role="status">
+                    <span>{notice}</span>
+                    <button
+                      type="button"
+                      className={styles.noticeDismiss}
+                      onClick={() => setNotice(null)}
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                )}
 
-            <div
-              className={styles.footer}
-              style={{ opacity: state.chromeOn || state.pane ? 1 : 0 }}
-            >
-              <span>{book.position.chapterLabel}</span>
-              {book.position.chapterLabel && <span>·</span>}
-              <span style={{ fontVariantNumeric: 'tabular-nums' }}>
-                {Math.round(book.position.fraction * 100)}%
-              </span>
-            </div>
+                <div
+                  className={styles.footer}
+                  style={{ opacity: state.chromeOn || state.pane ? 1 : 0 }}
+                >
+                  <span>{book.position.chapterLabel}</span>
+                  {book.position.chapterLabel && <span>·</span>}
+                  <span style={{ fontVariantNumeric: 'tabular-nums' }}>
+                    {Math.round(book.position.fraction * 100)}%
+                  </span>
+                </div>
+              </>
+            )}
           </>
         ) : (
           <div

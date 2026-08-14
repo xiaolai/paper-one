@@ -168,15 +168,23 @@ export function FoliateView({
     // The generation this mount belongs to, so every callback reports the book
     // it actually loaded rather than whichever is current when it resolves.
     const gen = generation
-    const h = handlers.current
 
+    /* Read through the ref on every call, never snapshotted.
+     *
+     * `const h = handlers.current` captured five of them for the LIFETIME of
+     * the session — which is the one thing the callback-ref pattern above
+     * exists to prevent. A parent that re-rendered with a new `onRelocate`
+     * (which happens on any state change that rebuilds the closure) went on
+     * being reported to the old one for as long as the book stayed open, while
+     * the four callbacks below it, written the other way, followed correctly.
+     * Two conventions in one object literal, and only one of them right. */
     const session = new ReaderSession(host, {
-      onToc: (toc) => h.onToc(gen, toc),
-      onRelocate: (position) => h.onRelocate(gen, position),
-      onDocument: (doc) => h.onDocument(gen, doc),
-      onMeta: (meta) => h.onMeta(gen, meta),
-      onError: (message) => h.onError(gen, message),
-      onNavigator: (navigator) => h.onNavigator(navigator),
+      onToc: (toc) => handlers.current.onToc(gen, toc),
+      onRelocate: (position) => handlers.current.onRelocate(gen, position),
+      onDocument: (doc) => handlers.current.onDocument(gen, doc),
+      onMeta: (meta) => handlers.current.onMeta(gen, meta),
+      onError: (message) => handlers.current.onError(gen, message),
+      onNavigator: (navigator) => handlers.current.onNavigator(navigator),
       onSelection: (selection) => handlers.current.onSelection(selection),
       onMarkDrawn: (cfi, range) => handlers.current.onMarkDrawn(cfi, range),
       onMarkActivated: (cfi) => handlers.current.onMarkActivated(cfi),
@@ -220,6 +228,17 @@ export function FoliateView({
       })
       .then(() => {
         if (!session.disposed) setReady((n) => n + 1)
+      })
+      /* `start` reports the failures it expects through `onError`; anything
+       * that reaches here is one it did not — a settings call that threw, a
+       * callback of ours that did. Unhandled, those surfaced only as an
+       * unhandled rejection at the window, leaving the reader looking at an
+       * empty stage with nothing said about it. */
+      .catch((cause: unknown) => {
+        console.error('Paper: the reader failed to start', cause)
+        if (!session.disposed) {
+          handlers.current.onError(gen, 'The reader failed to start.')
+        }
       })
 
     return () => {
