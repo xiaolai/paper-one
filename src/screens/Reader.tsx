@@ -161,6 +161,7 @@ export function Reader({
                   marks={marks.current}
                   onSelection={setSelection}
                   onMarkDrawn={onMarkDrawn}
+                  onFileDropped={book.open}
                   onMarkActivated={(cfi) => {
                     const hit = marks.current.find((m) => m.cfi === cfi)
                     if (hit) dispatch({ type: 'openPane', pane: 'notes' })

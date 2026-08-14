@@ -89,6 +89,7 @@ function callbacks(
     onSelection: rec('onSelection'),
     onMarkDrawn: rec('onMarkDrawn'),
     onMarkActivated: rec('onMarkActivated'),
+    onFileDropped: rec('onFileDropped'),
     getMarks: () => marks,
     getPalette: () => PALETTE,
   }

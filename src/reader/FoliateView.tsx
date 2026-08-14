@@ -39,6 +39,14 @@ export interface FoliateViewProps {
   onMarkDrawn: (cfi: string, range: Range) => void
   /** A drawn mark was clicked, identified by its CFI. */
   onMarkActivated: (cfi: string) => void
+  /**
+   * A book was dropped onto the book itself.
+   *
+   * The window's own drop handling cannot see this: the reader is iframes once
+   * a book is open, and a drop over one goes to that document. Unhandled, the
+   * webview navigates to the file and the app is gone.
+   */
+  onFileDropped: (file: File) => void
 }
 
 interface Settings {
@@ -109,6 +117,7 @@ export function FoliateView({
   onSelection,
   onMarkDrawn,
   onMarkActivated,
+  onFileDropped,
 }: FoliateViewProps) {
   const hostRef = useRef<HTMLDivElement>(null)
   const sessionRef = useRef<ReaderSession | null>(null)
@@ -128,6 +137,7 @@ export function FoliateView({
     onSelection,
     onMarkDrawn,
     onMarkActivated,
+    onFileDropped,
   })
   handlers.current = {
     onToc,
@@ -139,6 +149,7 @@ export function FoliateView({
     onSelection,
     onMarkDrawn,
     onMarkActivated,
+    onFileDropped,
   }
 
   /* The same reason as the handlers, and one more: the session reads this back
@@ -169,6 +180,7 @@ export function FoliateView({
       onSelection: (selection) => handlers.current.onSelection(selection),
       onMarkDrawn: (cfi, range) => handlers.current.onMarkDrawn(cfi, range),
       onMarkActivated: (cfi) => handlers.current.onMarkActivated(cfi),
+      onFileDropped: (file) => handlers.current.onFileDropped(file),
       getMarks: () => marksRef.current,
       getPalette: () => markPalette(settings.current.theme),
     })

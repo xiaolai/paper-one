@@ -107,6 +107,13 @@ export interface SessionCallbacks {
   onSelection: (selection: SelectionSnapshot | null) => void
   /** A drawn mark was clicked, identified by its CFI. */
   onMarkActivated: (cfi: string) => void
+  /**
+   * A book was dropped ON the book — see `#watchDrops`.
+   *
+   * The host cannot see this one: the reader is full of iframes once a book is
+   * open, and a drop lands in whichever document is under the pointer.
+   */
+  onFileDropped: (file: File) => void
 }
 
 export interface SessionNavigator {
@@ -235,6 +242,7 @@ export class ReaderSession {
       const { doc, index } = (event as CustomEvent<{ doc: Document; index: number }>).detail
       this.#watchSelection(doc, view, index)
       this.#watchKeys(doc)
+      this.#watchDrops(doc)
       this.#cb.onDocument(doc)
     })
 
@@ -433,6 +441,49 @@ export class ReaderSession {
     }
     doc.addEventListener('keydown', onKey)
     this.#unwatch.push(() => doc.removeEventListener('keydown', onKey))
+  }
+
+  /**
+   * Intercept a book dropped onto the book.
+   *
+   * Without this the webview NAVIGATES to the dropped file and the whole
+   * application is replaced by WebKit's PDF viewer — an <embed> at a file://
+   * URL, no titlebar, no pane, no reader, no error, no way back. The host
+   * already prevents that at the window, but a drop over an iframe is
+   * delivered to THAT document and never reaches the window at all. So the
+   * first drop onto an empty reader worked and the second, onto the open book,
+   * did not.
+   *
+   * `dragover` is the load-bearing prevention: without it there is no drop
+   * event and the navigation happens regardless of what the drop handler says.
+   *
+   * The file is handed over directly rather than re-dispatched. A DragEvent
+   * cannot carry its dataTransfer across a synthetic re-dispatch, and the
+   * documents are same-origin, so passing the File itself is both simpler and
+   * the only thing that actually works.
+   */
+  #watchDrops(doc: Document): void {
+    const allow = (event: DragEvent) => {
+      if (!Array.from(event.dataTransfer?.types ?? []).includes('Files')) return
+      event.preventDefault()
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+    }
+    const onDrop = (event: DragEvent) => {
+      // Unconditional: a dropped URL navigates away just as a file does.
+      event.preventDefault()
+      if (this.#disposed) return
+      const file = event.dataTransfer?.files?.item(0)
+      if (file) this.#cb.onFileDropped(file)
+    }
+
+    doc.addEventListener('dragenter', allow)
+    doc.addEventListener('dragover', allow)
+    doc.addEventListener('drop', onDrop)
+    this.#unwatch.push(() => {
+      doc.removeEventListener('dragenter', allow)
+      doc.removeEventListener('dragover', allow)
+      doc.removeEventListener('drop', onDrop)
+    })
   }
 
   /** Idempotent, and safe at any point in startup. */
