@@ -47,13 +47,24 @@ function applySettings(renderer: Renderer, settings: Settings): void {
    * track where the ruler hint and companion marks live — so letting foliate
    * add its own would double-count it and leave the measure short of the
    * 660/620 the design specifies. */
-  renderer.setAttribute('margin', '0')
-  renderer.setAttribute('gap', '0')
+  /* These values MUST carry a unit.
+   *
+   * foliate interpolates each attribute straight into a CSS custom property
+   * and builds its grid from them:
+   *
+   *   grid-template-columns: … minmax(0, calc(var(--_max-width) - var(--_gap))) …
+   *
+   * `calc()` cannot subtract a bare number from a length, so a unitless "0"
+   * makes that declaration invalid, the whole grid-template-columns is
+   * dropped, and the tracks fall back to auto — sizing to content instead of
+   * to the measure. Symptom: the book renders about 420px wide inside a 660px
+   * column, with every attribute apparently set correctly and no error
+   * anywhere. foliate's own defaults are "7%", "48px" and "720px"; matching
+   * that shape is the contract. */
+  renderer.setAttribute('margin', '0px')
+  renderer.setAttribute('gap', '0px')
   renderer.setAttribute('max-column-count', '1')
-  // A bare number, not "620px": foliate documents these as pixel values and
-  // parses them as numbers, so a unit suffix yields NaN and it silently falls
-  // back to its 720px default — which reads as "the measure is ignored".
-  renderer.setAttribute('max-inline-size', String(MEASURE))
+  renderer.setAttribute('max-inline-size', `${MEASURE}px`)
   renderer.setAttribute('flow', settings.paginated ? 'paginated' : 'scrolled')
   renderer.setStyles?.(
     bookCss({
