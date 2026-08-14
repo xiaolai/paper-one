@@ -15,6 +15,7 @@ import { ICON } from '../lib/metrics'
 import type { Platform } from '../lib/metrics'
 import { isTauri } from '../lib/platform'
 import type { AppDispatch, AppState, PaneId } from '../lib/state'
+import type { Speech } from '../reader/useSpeech'
 import styles from './TitleBar.module.css'
 
 /** Traffic-light fills, in AppKit's order. Preview only — see below. */
@@ -38,6 +39,10 @@ export interface TitleBarProps {
   bookTitle: string
   bookSubtitle: string
   coverTint: string
+  /** Reading aloud — the Listen control drives this directly. */
+  speech: Speech
+  /** False with no book open: there is nothing to read aloud. */
+  hasBook: boolean
 }
 
 export function TitleBar({
@@ -47,6 +52,8 @@ export function TitleBar({
   bookTitle,
   bookSubtitle,
   coverTint,
+  speech,
+  hasBook,
 }: TitleBarProps) {
   const isMac = platform === 'macos'
   const isReader = state.screen === 'reader' || state.screen === 'pdf'
@@ -157,16 +164,25 @@ export function TitleBar({
                 </button>
               ))}
             </div>
-            {/* §07 disabled: no pointer events and the reason stated, rather
-                than a control that toggles state nothing consumes. TTS is a
-                sidecar the handoff describes but nothing implements yet. */}
+            {/* Live where the engine can do it. §07 keeps the disabled state
+                for the case that remains real — a WebView built without Web
+                Speech — rather than for a feature that is simply unwritten. */}
             <button
               type="button"
               className={styles.action}
-              title="Listen — not available yet"
-              aria-label="Listen — not available yet"
-              disabled
-              data-disabled="true"
+              title={
+                !speech.available
+                  ? 'Listen — this build has no speech engine'
+                  : speech.speaking
+                    ? 'Stop reading aloud'
+                    : 'Read this chapter aloud'
+              }
+              aria-label="Read aloud"
+              aria-pressed={speech.speaking}
+              data-on={speech.speaking}
+              disabled={!speech.available || !hasBook}
+              data-disabled={!speech.available || !hasBook}
+              onClick={() => (speech.speaking ? speech.stop() : speech.start())}
             >
               <AudioLines size={ICON.control} strokeWidth={ICON.stroke} />
             </button>

@@ -15,6 +15,7 @@ import { TitleBar } from './shell/TitleBar'
 import { WindowShell } from './shell/WindowShell'
 import { Reader } from './screens/Reader'
 import { SidePane } from './pane/SidePane'
+import { useSpeech } from './reader/useSpeech'
 
 export function App() {
   const platform = usePlatform()
@@ -28,6 +29,9 @@ export function App() {
   const marks = useMarks(book.bookId)
   const marking = useMarking(book, marks)
   const library = useLibrary()
+  /* Reading aloud follows the spine document: an utterance outlives a section,
+   * and would otherwise go on reading words that are no longer on screen. */
+  const speech = useSpeech(book.doc)
 
   /* One file picker for the window. The reader's empty state, the palette and
    * the switcher all ask for books, and one input serves all three rather than
@@ -143,6 +147,8 @@ export function App() {
             bookTitle={title}
             bookSubtitle={subtitle}
             coverTint={book.source ? 'var(--tint-b)' : coverTint(0)}
+            speech={speech}
+            hasBook={book.source !== null}
           />
         }
         overlays={

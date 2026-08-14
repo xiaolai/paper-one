@@ -7,6 +7,7 @@ import {
   Settings as SettingsIcon,
   Sparkles,
 } from 'lucide-react'
+import { NOT_CONFIGURED } from '../lib/companion'
 import { ICON } from '../lib/metrics'
 import type { AppDispatch, AppState, PaneId } from '../lib/state'
 import type { Book } from '../lib/useBook'
@@ -77,6 +78,7 @@ export function SidePane({ state, dispatch, book, marks, onGoTo }: SidePaneProps
           <Companion
             currentChapter={book.position.chapterLabel}
             hasBook={book.source !== null}
+            provider={NOT_CONFIGURED}
           />
         )}
 

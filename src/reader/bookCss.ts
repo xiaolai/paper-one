@@ -195,6 +195,19 @@ blockquote {
   }
 }
 
+/* The word being read aloud. Behind the text like the ruler's band, and for
+ * the same reason — a fill over the glyphs would obscure the one word the
+ * reader is being asked to follow. It takes the mark colour rather than a
+ * colour of its own: §01 has no token for speech, and inventing one would be
+ * a colour the themes do not re-value. */
+.paper-spoken-word {
+  position: absolute;
+  z-index: -1;
+  background: ${c.mark};
+  border-radius: 2px;
+  pointer-events: none;
+}
+
 /* §01 Marks: your own highlights are a gold fill in light themes and a rule in
  * Night, where a pale fill would glare. */
 .paper-mark {

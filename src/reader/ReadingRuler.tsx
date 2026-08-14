@@ -45,9 +45,12 @@ export function ReadingRuler({ state, dispatch, doc, stage }: ReadingRulerProps)
    * same rect. Measuring twice would let the two drift apart by a frame. */
   const settle = useCallback(
     (rect: DOMRect, target: Document, host: HTMLElement) => {
+      // Viewport coordinates throughout: `placeBand` converts into body's own
+      // space, which is what stays put while the text scrolls under it.
+      placeBand(target, rect.top, rect.height)
       const scrollY = target.defaultView?.scrollY ?? 0
-      // Document coordinates, not viewport: the band scrolls with its line.
-      placeBand(target, rect.top + scrollY, rect.height)
+      // The remembered line is in document space, so a re-measure after a
+      // scroll can convert it back to a viewport point to probe with.
       setLine({ top: rect.top + scrollY, height: rect.height })
       setHintAt(hostFromBookRect(rect, target, host))
     },

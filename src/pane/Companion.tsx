@@ -1,4 +1,5 @@
-import { AlignLeft, ArrowUp, Pin, Quote } from 'lucide-react'
+import { ArrowUp } from 'lucide-react'
+import { NOT_CONFIGURED_REASON, type CompanionProvider } from '../lib/companion'
 import { ICON } from '../lib/metrics'
 import styles from './SidePane.module.css'
 
@@ -6,19 +7,24 @@ export interface CompanionProps {
   currentChapter: string
   /** False when no book is open — the companion has nothing to be grounded in. */
   hasBook: boolean
+  provider: CompanionProvider
 }
 
 /**
  * The companion.
  *
  * Everything it produces is amber, everywhere, forever — that is the whole
- * provenance rule, and it is why the summary card, its label and every reply
- * carry the amber tokens rather than the accent. It never speaks unprompted.
+ * provenance rule, and it is why a reply and its label carry the amber tokens
+ * rather than the accent. It never speaks unprompted.
+ *
+ * There is no thread here because there is nothing to put in one. The panel
+ * used to render a fixed exchange about Moby-Dick — a question the reader never
+ * asked and an answer nothing produced — under whatever chapter heading was
+ * live, so opening any other book showed invented quotations attributed to it.
+ * Amber is a provenance mark; using it on fabrications is the one thing that
+ * makes it worthless. The state below says what is missing instead.
  */
-export function Companion({ currentChapter, hasBook }: CompanionProps) {
-  /* No fabricated content. The thread used to render a hardcoded Moby-Dick
-   * exchange under whatever chapter heading was live, so opening any other
-   * book showed it invented quotations about that book. */
+export function Companion({ currentChapter, hasBook, provider }: CompanionProps) {
   if (!hasBook) {
     return (
       <div className={styles.empty}>
@@ -31,79 +37,58 @@ export function Companion({ currentChapter, hasBook }: CompanionProps) {
     )
   }
 
-  return (
-    <>
-      <div className={styles.companionHead}>grounded in this book only</div>
-
-      <div className={styles.thread}>
-        <div className={styles.summary}>
-          <div className={styles.summaryLabel}>
-            <AlignLeft size={11} strokeWidth={ICON.stroke} />
-            {currentChapter ? `${currentChapter} · summary` : 'Chapter summary'}
+  if (!provider.configured) {
+    return (
+      <>
+        <div className={styles.companionHead}>grounded in this book only</div>
+        <div className={styles.empty}>
+          <div className={styles.emptyTitle}>The companion is not available</div>
+          <div className={styles.emptyBody}>
+            {NOT_CONFIGURED_REASON} Everything it produced would be marked amber
+            and cite the passage it came from
+            {currentChapter ? ` in ${currentChapter}` : ''} — your highlights and
+            notes work as usual in the meantime.
           </div>
-          <div className={styles.summaryBody}>
-            The companion never speaks unprompted. Ask about this chapter, or use
-            the palette, and everything it produces is marked amber.
-          </div>
-          <div className={styles.cited}>0 passages cited</div>
         </div>
 
-        <div className={styles.askRow}>
-          <div className={styles.ask}>What does “hypos” mean here?</div>
-        </div>
-
-        <div className={styles.replyRow}>
-          <div className={styles.reply}>
-            Short for{' '}
-            <em style={{ fontFamily: "'Crimson Pro Variable', serif", fontSize: 15 }}>
-              hypochondria
-            </em>
-            , which in 1851 meant low spirits rather than imagined illness.
-          </div>
-          <div className={styles.replyMeta}>
-            <span className={styles.replyMetaItem}>
-              <Quote size={11} strokeWidth={ICON.stroke} />¶2 · line 6
-            </span>
-            {/* §07 disabled rather than a span that looks clickable: pinning
-                needs the annotation store, which does not exist yet. */}
+        {/* §07: the composer stays visible and disabled rather than vanishing.
+            The reader should be able to see where asking will happen, and the
+            placeholder is the reason it cannot happen yet. */}
+        <div className={styles.footerActions}>
+          <div className={styles.composer} data-disabled="true">
+            <input
+              className={styles.composerInput}
+              placeholder={NOT_CONFIGURED_REASON}
+              aria-label="Ask the companion about this chapter"
+              disabled
+            />
             <button
               type="button"
-              className={styles.replyMetaItem}
+              className={styles.send}
+              title="Send"
+              aria-label="Send"
               disabled
               data-disabled="true"
-              title="Pin to margin — not available yet"
             >
-              <Pin size={11} strokeWidth={ICON.stroke} />
-              Pin to margin
+              <ArrowUp size={13} strokeWidth={ICON.stroke} />
             </button>
           </div>
         </div>
-      </div>
+      </>
+    )
+  }
 
-      <div className={styles.footerActions}>
-        {/* Every affordance below is disabled per §07 until a model is wired.
-            They were live-looking controls that did nothing on click — the
-            companion cannot answer anything yet. */}
-        <div className={styles.suggestions}>
-          <button type="button" className={styles.suggestion} disabled data-disabled="true">
-            Simplify this page
-          </button>
-          <button type="button" className={styles.suggestion} disabled data-disabled="true">
-            Summarise to here
-          </button>
-        </div>
-        <div className={styles.composer} data-disabled="true">
-          <input
-            className={styles.composerInput}
-            placeholder="Asking needs a model — not configured yet"
-            aria-label="Ask the companion about this chapter"
-            disabled
-          />
-          <button type="button" className={styles.send} title="Send" disabled data-disabled="true">
-            <ArrowUp size={13} strokeWidth={ICON.stroke} />
-          </button>
-        </div>
+  /* Unreachable in this build, and deliberately not a half-written thread: a
+   * provider that reports itself configured is the change that brings the
+   * conversation UI with it, built against real messages and real citations
+   * rather than against a shape guessed at in advance. */
+  return (
+    <div className={styles.empty}>
+      <div className={styles.emptyTitle}>Ask about {currentChapter || 'this chapter'}</div>
+      <div className={styles.emptyBody}>
+        Connected to {provider.name}. The conversation view lands with the
+        provider that needs it.
       </div>
-    </>
+    </div>
   )
 }

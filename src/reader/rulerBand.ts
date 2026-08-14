@@ -21,13 +21,29 @@ const BAND_ID = 'paper-ruler-band'
 export const BAND_CLASS = 'paper-ruler-band'
 
 /**
+ * Offset of a viewport rect within body, which is what an absolutely
+ * positioned child of body is placed by.
+ *
+ * Both rects are viewport-relative, so the difference is invariant under
+ * scrolling — no scroll term is needed, and adding one is how this goes wrong.
+ * Body must be offset on BOTH axes: foliate centres the measure by giving body
+ * side margins, which makes the horizontal offset obvious, while the vertical
+ * one is zero often enough to look unnecessary and then is not. Measured at
+ * 51px into a chapter, which put every spoken word a line and a half low.
+ */
+function offsetInBody(body: HTMLElement, rect: { top: number; left: number }) {
+  const box = body.getBoundingClientRect()
+  return { top: rect.top - box.top, left: rect.left - box.left }
+}
+
+/**
  * Put the band on a line, creating it if the document does not have one yet.
  *
- * `top` and `height` are in the book's DOCUMENT coordinates — viewport
- * coordinates would slide the band up the page as the reader scrolls, because
- * the band scrolls with the text it is positioned against.
+ * `rectTop` is a viewport coordinate straight from `getClientRects` — the
+ * conversion into body's space happens here, in one place, rather than at each
+ * call site where it can be got subtly wrong.
  */
-export function placeBand(doc: Document, top: number, height: number): void {
+export function placeBand(doc: Document, rectTop: number, height: number): void {
   const body = doc.body
   if (!body) return
 
@@ -41,7 +57,7 @@ export function placeBand(doc: Document, top: number, height: number): void {
     body.append(band)
   }
 
-  band.style.top = `${top}px`
+  band.style.top = `${offsetInBody(body, { top: rectTop, left: 0 }).top}px`
   band.style.height = `${height}px`
 }
 
@@ -55,4 +71,45 @@ export function placeBand(doc: Document, top: number, height: number): void {
  */
 export function removeBand(doc: Document | null): void {
   doc?.getElementById(BAND_ID)?.remove()
+}
+
+/** The word being read aloud, drawn the same way and for the same reason. */
+const SPOKEN_ID = 'paper-spoken-word'
+
+export interface SpokenBox {
+  readonly top: number
+  readonly left: number
+  readonly width: number
+  readonly height: number
+}
+
+/**
+ * Put the follow-along highlight on the word being spoken.
+ *
+ * Unlike the ruler's band this needs a left and a width too: the ruler tracks a
+ * line and spans the measure, where this tracks one word. `box` is a viewport
+ * rect exactly as `getBoundingClientRect` returns it.
+ */
+export function placeSpokenWord(doc: Document, box: SpokenBox): void {
+  const body = doc.body
+  if (!body) return
+
+  let word = doc.getElementById(SPOKEN_ID)
+  if (!word) {
+    word = doc.createElement('div')
+    word.id = SPOKEN_ID
+    word.className = SPOKEN_ID
+    word.setAttribute('aria-hidden', 'true')
+    body.append(word)
+  }
+
+  const offset = offsetInBody(body, box)
+  word.style.top = `${offset.top}px`
+  word.style.left = `${offset.left}px`
+  word.style.width = `${box.width}px`
+  word.style.height = `${box.height}px`
+}
+
+export function removeSpokenWord(doc: Document | null): void {
+  doc?.getElementById(SPOKEN_ID)?.remove()
 }
