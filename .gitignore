@@ -71,3 +71,7 @@ public/pdfjs/
 # scripts/make-sample-epub.py; the PDF with `cupsfilter some.txt > sample.pdf`.
 public/sample.epub
 public/sample.pdf
+# Whatever book is dropped in for testing. Books are the user's, not the
+# repository's — none of them belong in version control.
+public/*.pdf
+public/*.epub
