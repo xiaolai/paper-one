@@ -50,6 +50,19 @@ export interface TitleBarProps {
   hasBook: boolean
 }
 
+/**
+ * KNOWN DEBT: this component is about 200 lines and holds more than one job —
+ * window IPC, the platform's own controls, the chrome fade, the reading
+ * shortcuts, speech and the palette. An audit flagged it and it was left
+ * deliberately.
+ *
+ * The reason is that nothing here is WRONG, and the split is not obvious: the
+ * window controls are genuinely separable, but the rest share `state`,
+ * `dispatch` and the chrome-fade styling, so extracting them mostly moves
+ * props around. Splitting it is worth doing when a second surface needs one of
+ * these groups — at that point the seam is decided by a real caller instead of
+ * by guesswork.
+ */
 export function TitleBar({
   state,
   dispatch,
@@ -214,7 +227,12 @@ export function TitleBar({
             <button
               type="button"
               className={styles.action}
-              title="Typography · theme, typeface, size"
+              /* Says what the panel actually holds. It promised "theme,
+                 typeface, size" and offers only the theme: nothing in the app
+                 dispatches `setStepIdx`, and there is no typeface control at
+                 all, so two thirds of that tooltip named features a reader
+                 could go looking for and never find. */
+              title="Appearance · theme, flow, ruler"
               onClick={() => dispatch({ type: 'openPane', pane: 'settings' })}
             >
               <Type size={ICON.control} strokeWidth={ICON.stroke} />
