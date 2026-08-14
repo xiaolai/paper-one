@@ -1,0 +1,158 @@
+/* The reader.
+ *
+ * §03: gutter 56 / measure 660 / margin 250, gap 32. With the companion column
+ * open the measure narrows to 620 and the gutter to 40, the margin collapses,
+ * and the gap closes to 22. The gutter and margin are HOST columns — companion
+ * marks and the ruler hint live there, outside the text, which is why they are
+ * grid tracks rather than padding on the book.
+ */
+
+.reader {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.column {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Clears the overlay titlebar so the text starts below the traffic lights. */
+.column[data-platform='macos'] {
+  padding-top: var(--titlebar-h);
+}
+
+.stage {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: grid;
+  justify-content: center;
+  margin: 0 auto;
+  width: 100%;
+  padding: 12px var(--stage-pad-x) 0;
+  /* Track widths come from `proseGrid()` in metrics.ts, not from minmax():
+   * grid cannot express which track should yield first, and left to itself it
+   * shrinks the measure and keeps the margin column. */
+  grid-template-columns: var(--track-gutter) var(--track-measure) var(--track-margin);
+  /* The row must be told to fill. A grid's implicit row is auto-height, so the
+   * book's `height: 100%` resolves against zero and the column renders blank
+   * with no error anywhere — it simply is not there. */
+  grid-template-rows: minmax(0, 1fr);
+  gap: 0 var(--track-gap);
+}
+
+.gutter {
+  grid-column: 1;
+  position: relative;
+  min-height: 0;
+}
+
+/* The book itself. foliate-js owns everything inside this cell. */
+.text {
+  grid-column: 2;
+  min-width: 0;
+  min-height: 0;
+  position: relative;
+}
+
+.margin {
+  grid-column: 3;
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* The reading ruler styles itself — see ReadingRuler.module.css. */
+
+/* --- footer ---------------------------------------------------------- */
+
+.footer {
+  flex: 0 0 auto;
+  height: 46px;
+  padding: 0 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--muted);
+  transition: opacity var(--motion-chrome);
+}
+
+/* --- empty state ----------------------------------------------------- */
+
+.empty {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 40px;
+  text-align: center;
+}
+
+.empty[data-dragging='true'] {
+  background: var(--accent-bg);
+}
+
+.emptyTitle {
+  font-family: 'Crimson Pro Variable', 'Crimson Pro', Georgia, serif;
+  font-size: 44px;
+  font-weight: 400;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+  margin: 0;
+}
+
+.emptyBody {
+  max-width: 420px;
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--muted);
+  text-wrap: pretty;
+}
+
+.primaryButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 16px;
+  border: none;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--surface);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.errorBar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 24px;
+}
+
+.error {
+  max-width: 420px;
+  padding: 14px;
+  border-radius: 10px;
+  background: var(--amber-bg);
+  border: 1px solid var(--amber-line);
+  color: var(--amber);
+  font-size: 13px;
+  line-height: 1.6;
+  text-align: start;
+}

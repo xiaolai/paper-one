@@ -1,0 +1,31 @@
+[package]
+name = "app"
+version = "0.1.0"
+description = "Paper — an ebook reader with a companion"
+authors = ["Paper"]
+license = ""
+repository = ""
+edition = "2021"
+rust-version = "1.77.2"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+# macos-private-api is required for `titleBarStyle: "Overlay"` to honour
+# `trafficLightPosition`; without it the position is silently ignored.
+tauri = { version = "2.11.3", features = ["macos-private-api"] }
+tauri-plugin-log = "2"
+# Automation bridge for e2e testing. Registered only in debug builds (see
+# lib.rs); kept a normal dependency rather than a dev-dependency because
+# dev-dependencies do not apply to a binary's own debug profile.
+tauri-plugin-mcp-bridge = "0.12"

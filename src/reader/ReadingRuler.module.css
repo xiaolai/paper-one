@@ -1,0 +1,30 @@
+/* §12 layer 0: the band sits BEHIND the text, so the words keep full contrast
+ * and the band tints the line rather than veiling it. */
+.band {
+  position: absolute;
+  z-index: 0;
+  background: var(--wash);
+  border-radius: 3px;
+  pointer-events: none;
+  transition: transform var(--motion-ruler);
+}
+
+/* §08 keeps the ruler track under reduced motion, because it is a reading aid
+ * rather than decoration — this deliberately overrides the global rule. */
+@media (prefers-reduced-motion: reduce) {
+  .band {
+    transition-duration: 90ms !important;
+  }
+}
+
+/* §12 layer 8: the hint lives in the gutter, outside the text. */
+.hint {
+  position: absolute;
+  z-index: 8;
+  left: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted);
+  white-space: nowrap;
+  cursor: pointer;
+}

@@ -1,0 +1,101 @@
+/* Paper — global reset and chrome-wide rules.
+ * Ported from the `<style>` block in `dev-docs/design/Paper.dc.html`.
+ */
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  /* The desktop shell sits on --wash; the literal is the Paper-theme value and
+   * only shows for the instant before the theme attribute is applied. */
+  background: var(--wash, #F2F3F1);
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+#root {
+  height: 100%;
+}
+
+/* Design system §02: Instrument Sans instructs. The prototype listed the
+ * system UI face ahead of it, but §02 assigns all interface chrome to
+ * Instrument Sans, and the handoff README makes the design system the
+ * tiebreaker where the two disagree. */
+body {
+  font-family: 'Instrument Sans Variable', 'Instrument Sans', system-ui,
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 15px;
+  color: var(--ink, #17191B);
+}
+
+a {
+  color: var(--accent, #1B3A6B);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--ink, #17191B);
+}
+
+/* Scrollbars stay invisible until the pointer is over the scrolling element,
+ * so a pane at rest shows no furniture. */
+::-webkit-scrollbar {
+  width: 15px;
+  height: 15px;
+}
+
+::-webkit-scrollbar:horizontal {
+  display: none;
+  height: 0;
+}
+
+::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 999px;
+  border: 4px solid transparent;
+  background-clip: content-box;
+}
+
+*:hover::-webkit-scrollbar-thumb {
+  background: var(--line-3, #D6D8D3);
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--muted, #5F666C);
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::selection {
+  background: var(--accent-line, #DDE2EA);
+}
+
+/* §07: focus is on :focus-visible only, so pointer users never see it, and it
+ * sits outside the element rather than replacing the border. */
+:focus-visible {
+  outline: 3px solid var(--accent, #1B3A6B);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* Chrome is a fade, never a slide. §08 pins it at 180ms ease. Under reduced
+ * motion everything drops except the ruler track, which §08 keeps because it
+ * is a reading aid rather than decoration. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

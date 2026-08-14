@@ -55,3 +55,12 @@ error.log
 
 # Scratch space for companion HTML artifacts and working notes.
 dev-docs/
+
+# --- Application build artifacts ---
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store
+
+# Development book fixture — regenerate with scripts/make-sample-epub.py
+public/sample.epub

@@ -1,0 +1,79 @@
+/* Paper — colour and elevation tokens.
+ *
+ * Copied verbatim from `dev-docs/design/Paper.dc.html`. The design handoff is
+ * explicit that this block is the whole colour system: every colour in the app
+ * resolves through these names, so a theme is a set of values and nothing else.
+ * Do not add a colour here that a theme does not re-value, and do not inline a
+ * hex anywhere else in the app.
+ *
+ * The amber was darkened per theme during the design pass to clear 4.5:1
+ * contrast. Do NOT revert it to #A9631C — see design system §10, which
+ * publishes measured (not estimated) ratios for five pairs across five themes.
+ */
+
+:root {
+  --ink:#17191B; --ink-2:#3D4348; --muted:#5F666C;
+  --surface:#FFFFFF; --bg:#FBFBFA; --wash:#F2F3F1;
+  --line:#EDEEEB; --line-2:#E3E4E1; --line-3:#D6D8D3;
+  --accent:#1B3A6B; --accent-bg:#EEF1F6; --accent-line:#DDE2EA;
+  --amber:#9E5A16; --amber-bg:#FBF6EE; --amber-line:#E7D6BE;
+  --mark:#F3E6C0; --mark-rule:#E0BE55; --mark-ink:#9A8455; --ok:#7C9A6B;
+  --tint-a:#F4F1EA; --tint-b:#EEF1F4; --tint-c:#F1F0F4; --tint-d:#EFF2F1; --tint-e:#F0E4D2;
+  --shadow-window: 0 1px 2px rgba(20,24,28,.04), 0 12px 32px -20px rgba(20,24,28,.22);
+  --shadow-card: 0 1px 2px rgba(20,24,28,.05), 0 14px 34px -22px rgba(20,24,28,.26);
+  --shadow-pop: 0 24px 60px -28px rgba(20,24,28,.5);
+  --shadow-pill: 0 1px 2px rgba(20,24,28,.07);
+  --shadow-knob: 0 1px 3px rgba(20,24,28,.16);
+  --shadow-thumb: 0 1px 1px rgba(20,24,28,.1);
+  --scrim: rgba(20,24,28,.35);
+  --tl-red: #F4655A; --tl-amber: #F5BD4F; --tl-green: #61C555; --tl-rim: rgba(23,25,27,.14);
+}
+
+[data-theme="slate"] {
+  --ink:#1C2022; --ink-2:#3A4044; --muted:#5C6367;
+  --surface:#DFE1DE; --bg:#D6D9D5; --wash:#CBCFCA;
+  --line:#C6CAC5; --line-2:#B8BDB8; --line-3:#A6ABA6;
+  --accent:#23456F; --accent-bg:#CFD7DF; --accent-line:#B4BFCB;
+  --amber:#8A4C11; --amber-bg:#DDD8CB; --amber-line:#C6B79C;
+  --mark:#DCCB92; --mark-rule:#B99B3F; --mark-ink:#6F6034; --ok:#6A8858;
+  --tint-a:#D2CFC6; --tint-b:#C9D0D5; --tint-c:#CFCCD4; --tint-d:#CBD3CC; --tint-e:#D6C9AE;
+}
+
+[data-theme="sage"] {
+  --ink:#1B2419; --ink-2:#37432F; --muted:#5A6653;
+  --surface:#DDE6D8; --bg:#D3DECD; --wash:#C7D4C1;
+  --line:#C6D2BF; --line-2:#B6C4AE; --line-3:#A2B29A;
+  --accent:#2A4F6B; --accent-bg:#CDDCDE; --accent-line:#B3C6C9;
+  --amber:#8F5013; --amber-bg:#DDDCC3; --amber-line:#C3BE97;
+  --mark:#D8CE8C; --mark-rule:#AE9A3C; --mark-ink:#6A6231; --ok:#5F8050;
+  --tint-a:#D2D2C0; --tint-b:#C6D3D2; --tint-c:#CCCFC9; --tint-d:#C8D6C4; --tint-e:#D5CFA9;
+}
+
+[data-theme="sepia"] {
+  --ink:#2B2117; --ink-2:#4A3B2A; --muted:#7A6A54;
+  --surface:#F8F0E1; --bg:#F3EAD9; --wash:#EBDFC9;
+  --line:#E5D9C2; --line-2:#DCCDB0; --line-3:#C9B694;
+  --accent:#2C5578; --accent-bg:#E7E9E4; --accent-line:#CFD6D2;
+  --amber:#985614; --amber-bg:#F3E7D2; --amber-line:#DCC49E;
+  --mark:#EEDBA6; --mark-rule:#C9A44E; --mark-ink:#8A7443; --ok:#6E8C5C;
+  --tint-a:#EEE3CE; --tint-b:#E3E5DE; --tint-c:#E9E1D5; --tint-d:#E4E6D9; --tint-e:#EDDCBB;
+}
+
+[data-theme="night"] {
+  --ink:#E9EAE8; --ink-2:#C2C7C9; --muted:#8B9196;
+  --surface:#16191C; --bg:#101315; --wash:#1E2226;
+  --line:#24282C; --line-2:#2F343A; --line-3:#3C4248;
+  --accent:#8FB4E8; --accent-bg:#1A2431; --accent-line:#2B3A4E;
+  --amber:#D9A25E; --amber-bg:#241C12; --amber-line:#3B2E1D;
+  --mark:#4A3B18; --mark-rule:#8A6E2C; --mark-ink:#C9B380; --ok:#86A874;
+  --tint-a:#2A2620; --tint-b:#1F262E; --tint-c:#262330; --tint-d:#202A26; --tint-e:#2E2716;
+  /* Night is the only theme that re-values elevation: a light-theme shadow
+   * disappears on a dark page. */
+  --shadow-window: 0 1px 2px rgba(0,0,0,.5), 0 12px 32px -20px rgba(0,0,0,.8);
+  --shadow-card: 0 1px 2px rgba(0,0,0,.5), 0 14px 34px -22px rgba(0,0,0,.75);
+  --shadow-pop: 0 24px 60px -28px rgba(0,0,0,.9);
+  --shadow-pill: 0 1px 2px rgba(0,0,0,.55);
+  --shadow-knob: 0 1px 3px rgba(0,0,0,.6);
+  --shadow-thumb: 0 1px 1px rgba(0,0,0,.55);
+  --scrim: rgba(0,0,0,.6);
+}

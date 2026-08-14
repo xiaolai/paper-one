@@ -1,0 +1,46 @@
+/* Every leading column in Paper is this card.
+ *
+ * §05: "Contents, Companion, PDF thumbnails and library Collections are one
+ * component with different contents: --bg surface, shadow-card, and a
+ * concentric inset — child radius = parent radius − inset ... Never style one
+ * of these columns directly."
+ *
+ * The concentric RULE is kept; the prototype's derived value is not. Its
+ * 20 − 6 = 14 was concentric with a simulated 20px window card drawn in a
+ * browser. Against a real window the parent is the OS's own corner, so the
+ * radius comes from `--leading-card-radius`, measured off macOS 26 (see
+ * metrics.ts).
+ */
+
+.card {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+  border-radius: var(--leading-card-radius);
+  /* Keeps scrolling content off the rounded bottom corners. At this radius a
+   * list running flush to the edge collides with the curve. */
+  padding-bottom: 12px;
+}
+
+/* macOS: the card runs the full height of the window and slides under the
+ * overlay titlebar, so its top inset clears the traffic lights.
+ *
+ * padding-top subtracts the card's own margin. The inset must clear the
+ * titlebar measured from the WINDOW's top, but padding is measured from the
+ * CARD's top — which already sits `--concentric-inset` down. Using the full
+ * titlebar height overshoots by exactly that inset and pushes the first
+ * control visibly low. */
+.card[data-platform='macos'] {
+  margin: var(--concentric-inset);
+  padding-top: calc(var(--titlebar-h) - var(--concentric-inset));
+}
+
+/* Elsewhere the titlebar is a real row above this, so there is nothing to
+ * clear. */
+.card:not([data-platform='macos']) {
+  margin: 0 0 10px 10px;
+  padding-top: 0;
+}
