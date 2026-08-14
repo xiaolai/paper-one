@@ -10,6 +10,53 @@
 #[cfg(debug_assertions)]
 const MCP_BRIDGE_PORT: u16 = 31415;
 
+/// Put the menu-bar icon up and make it toggle the window.
+///
+/// The asset is named `tray-iconTemplate@2x.png` deliberately: macOS keys the
+/// automatic light/dark tint off the `Template` filename suffix. A file named
+/// `tray-icon@2x.png` is drawn verbatim in full colour and will not adapt to
+/// the menu bar. `icon_as_template(true)` is the matching half of that.
+#[cfg(desktop)]
+fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    use tauri::{
+        image::Image,
+        tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+        Manager,
+    };
+
+    let icon = Image::from_bytes(include_bytes!("../icons/tray-iconTemplate@2x.png"))?;
+
+    TrayIconBuilder::with_id("main")
+        .icon(icon)
+        .icon_as_template(true)
+        .tooltip("Paper")
+        // Left click is the direct action. Enabling a left-click menu as well
+        // would fire both, which reads as the window flickering.
+        .show_menu_on_left_click(false)
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                if let Some(window) = tray.app_handle().get_webview_window("main") {
+                    let showing =
+                        window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false);
+                    if showing {
+                        let _ = window.hide();
+                    } else {
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                }
+            }
+        })
+        .build(app)?;
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[allow(unused_mut)]
@@ -21,6 +68,10 @@ pub fn run() {
                     .build(),
             )?;
         }
+
+        #[cfg(desktop)]
+        setup_tray(app.handle())?;
+
         Ok(())
     });
 

@@ -7,6 +7,9 @@ fn main() {
     println!("cargo:rerun-if-changed=icons/icon.png");
     println!("cargo:rerun-if-changed=icons/icon.ico");
     println!("cargo:rerun-if-changed=icons/icon.svg");
+    println!("cargo:rerun-if-changed=icons/tray-iconTemplate.png");
+    println!("cargo:rerun-if-changed=icons/tray-iconTemplate@2x.png");
+    println!("cargo:rerun-if-changed=icons/tray-icon-source.svg");
     println!("cargo:rerun-if-changed=tauri.conf.json");
 
     tauri_build::build()
