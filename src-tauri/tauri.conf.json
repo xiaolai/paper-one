@@ -50,6 +50,12 @@
     ],
     "android": {
       "debugApplicationIdSuffix": ".debug"
+    },
+    "macOS": {
+      "infoPlist": "Info.plist",
+      "files": {
+        "Resources/Assets.car": "icons/Assets.car"
+      }
     }
   }
 }

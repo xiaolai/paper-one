@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Paper — icon layer 1 of 2: the gutter rule.
+
+  Geometry is the design's own, on its 640 artboard, scaled 1.6x to the 1024
+  canvas Icon Composer expects. Unlike `icon.svg` there is no squircle and no
+  100px gutter: a `.icon` layer is drawn edge to edge and macOS applies the
+  shape, the inset and the mask itself. Baking our own would inset it twice.
+
+  No text elements — Icon Composer rejects SVG assets containing them
+  ("svg-contains-text"). Everything here is already a path or a rect.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <g transform="scale(1.6)">
+    <rect x="152" y="168" width="34" height="304" rx="17" fill="#1B3A6B"/>
+  </g>
+</svg>
