@@ -2,15 +2,24 @@
 #
 # Capture the app's window by its CGWindowID.
 #
-# The Tauri MCP's `webview_screenshot` is the normal way to see the app, and it
-# should stay the default: it captures the webview itself, so it cannot pick up
-# another window and it works across Spaces. But it runs INSIDE the webview, so
-# it needs the main thread — and it times out exactly when something is wrong
-# enough to be worth looking at. A PDF decoding a scanned page on pdf.js's JS
-# fallback pegs that thread for seconds at a time, and every screenshot fails.
+# THE LAST RESORT, not the first. The order is:
 #
-# This is the fallback for that case. It goes through the window server, so a
-# busy or wedged webview does not affect it.
+#   1. The Tauri MCP's `webview_screenshot`. It captures the webview itself, so
+#      it cannot pick up another window and it works across Spaces.
+#
+#   2. AppleScript, then retry:
+#        osascript -e 'tell application "System Events" to set frontmost of \
+#          (first process whose unix id is PID) to true'
+#      Most failures are the window being occluded, and that costs far more
+#      than a screenshot — WebKit suspends requestAnimationFrame for a hidden
+#      window, which is where pdf.js parks its page render, so the book loads
+#      and then shows a blank canvas with no error. Activating fixes the
+#      capture and the rendering together.
+#
+#   3. This script, when the main thread is genuinely wedged — a scanned PDF
+#      decoding on pdf.js's JS fallback will do that for seconds at a time, and
+#      `webview_screenshot` runs inside the webview, so it times out. This goes
+#      through the window server instead and is unaffected.
 #
 # It captures by WINDOW ID, never by region. `screencapture -R x,y,w,h` grabs
 # whatever is composited in that rectangle — which, when the app is not
