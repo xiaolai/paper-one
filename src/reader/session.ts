@@ -234,6 +234,7 @@ export class ReaderSession {
       if (this.#disposed) return
       const { doc, index } = (event as CustomEvent<{ doc: Document; index: number }>).detail
       this.#watchSelection(doc, view, index)
+      this.#watchKeys(doc)
       this.#cb.onDocument(doc)
     })
 
@@ -395,6 +396,43 @@ export class ReaderSession {
       doc.removeEventListener('keyup', publish)
       doc.removeEventListener('selectionchange', clearIfCollapsed)
     })
+  }
+
+  /**
+   * Forward the book's keystrokes to the host.
+   *
+   * The book is an iframe with its own document, and clicking a page to read it
+   * puts focus inside that document — where every subsequent keystroke stays.
+   * A listener on the host window never sees them, so the ENTIRE keyboard map
+   * stopped working the moment the reader touched the thing they were reading:
+   * not just ← and →, but ⌘K, ⌘\, ⌘1…5 and Esc.
+   *
+   * It shows up worst on a fixed-layout book, where the arrows are the only way
+   * to turn a page and scrolling cannot cover for them — a PDF simply stayed on
+   * page one.
+   *
+   * Re-dispatching rather than handling here keeps one keymap in the app. The
+   * session has no business knowing what any key means; it only makes sure the
+   * event reaches the place that does.
+   */
+  #watchKeys(doc: Document): void {
+    const onKey = (event: KeyboardEvent) => {
+      if (this.#disposed) return
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: event.key,
+          code: event.code,
+          metaKey: event.metaKey,
+          ctrlKey: event.ctrlKey,
+          shiftKey: event.shiftKey,
+          altKey: event.altKey,
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+    }
+    doc.addEventListener('keydown', onKey)
+    this.#unwatch.push(() => doc.removeEventListener('keydown', onKey))
   }
 
   /** Idempotent, and safe at any point in startup. */
