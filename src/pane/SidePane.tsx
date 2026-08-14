@@ -77,22 +77,6 @@ export function SidePane({ state, dispatch, book, onGoTo }: SidePaneProps) {
 
   return (
     <>
-      <div className={styles.rail}>
-        {RAIL.map(({ id, label, Icon }) => (
-          <button
-            key={id}
-            type="button"
-            className={styles.railButton}
-            title={label}
-            aria-label={label}
-            data-on={pane === id}
-            onClick={() => dispatch({ type: 'openPane', pane: id })}
-          >
-            <Icon size={ICON.tab} strokeWidth={ICON.stroke} />
-          </button>
-        ))}
-      </div>
-
       <div className={styles.paneTitle}>{PANE_TITLES[pane]}</div>
 
       <div className={styles.body}>
@@ -259,6 +243,25 @@ export function SidePane({ state, dispatch, book, onGoTo }: SidePaneProps) {
             </div>
           </div>
         )}
+      </div>
+
+      {/* The rail sits at the foot of the pane. It is the pane's own
+          navigation, not the window's, so it reads better anchored to the
+          surface it switches than stacked under the titlebar with it. */}
+      <div className={styles.rail}>
+        {RAIL.map(({ id, label, Icon }) => (
+          <button
+            key={id}
+            type="button"
+            className={styles.railButton}
+            title={label}
+            aria-label={label}
+            data-on={pane === id}
+            onClick={() => dispatch({ type: 'openPane', pane: id })}
+          >
+            <Icon size={ICON.tab} strokeWidth={ICON.stroke} />
+          </button>
+        ))}
       </div>
     </>
   )

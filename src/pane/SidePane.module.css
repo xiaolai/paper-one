@@ -1,6 +1,10 @@
-/* The single side pane. §03: a 44px tab bar at its head, then one of seven
- * panels. The bar carries all seven tools, so the panel title moves to its own
- * row — seven 34px targets plus a label do not fit across 400px. */
+/* The single side pane: a title, one of seven panels, and the tab bar at the
+ * foot. §03 puts the bar at the head; it sits at the foot here because it is
+ * the pane's own navigation rather than the window's, and because the panel
+ * title plus seven 34px targets do not fit across 400px on one row.
+ *
+ * The rail is rendered last in the DOM as well as painted last, so tab order
+ * runs title → content → tabs. */
 
 .rail {
   flex: 0 0 auto;
@@ -122,13 +126,16 @@
   background: var(--wash);
 }
 
-/* §07: selected is persistent and reads as a left rule plus a raised card,
- * which is what distinguishes it from hover. */
+/* Selected is persistent, unlike hover, and reads as a raised card.
+ *
+ * §07 specifies "a left rule and a raised card" for a selected list row. The
+ * rule is dropped here: against a floating card the lift already separates
+ * selection from hover, and the accent bar was doing the same job twice. */
 .tocRow[data-current='true'] {
   background: var(--surface);
   color: var(--ink);
   font-weight: 600;
-  box-shadow: inset 3px 0 0 var(--accent), var(--shadow-pill);
+  box-shadow: var(--shadow-pill);
 }
 
 .tocLabel {
