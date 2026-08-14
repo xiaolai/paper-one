@@ -1,12 +1,4 @@
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type CSSProperties,
-  type DragEvent,
-} from 'react'
+import { useCallback, useMemo, useRef, useState, type CSSProperties, type DragEvent } from 'react'
 import { Plus } from 'lucide-react'
 import type { Platform } from '../lib/metrics'
 import {
@@ -18,8 +10,9 @@ import {
   proseBleed,
   proseGrid,
 } from '../lib/metrics'
-import { marginMarks, type Mark } from '../lib/marks'
+import { marginMarks } from '../lib/marks'
 import type { MarkStore } from '../lib/useMarks'
+import type { Marking } from '../lib/useMarking'
 import type { AppDispatch, AppState } from '../lib/state'
 import type { Book } from '../lib/useBook'
 import { useAvailableWidth } from '../lib/useAvailableWidth'
@@ -27,7 +20,6 @@ import { FoliateView } from '../reader/FoliateView'
 import { MarginMarks } from '../reader/MarginMarks'
 import { ReadingRuler } from '../reader/ReadingRuler'
 import { SelectionTools } from '../reader/SelectionTools'
-import type { SelectionSnapshot } from '../reader/session'
 import styles from './Reader.module.css'
 
 export interface ReaderProps {
@@ -36,38 +28,28 @@ export interface ReaderProps {
   platform: Platform
   book: Book
   marks: MarkStore
+  marking: Marking
+  /** Opens the file picker, which the window owns — see App. */
+  onAddBooks: () => void
 }
 
-/**
- * What the reader accepts.
- *
- * PDF is deliberately ABSENT. foliate-js has no PDF loader and rejects every
- * PDF as an unsupported type, so accepting `.pdf` produced a file picker that
- * offered a format the app then refused. §13's empty state names PDF because
- * the design ships pdf.js; add `.pdf` back in the same change that wires it.
- */
-const ACCEPT = '.epub,.mobi,.azw3,.cbz,.fb2,.fbz'
-
-export function Reader({ state, dispatch, platform, book, marks }: ReaderProps) {
+export function Reader({
+  state,
+  dispatch,
+  platform,
+  book,
+  marks,
+  marking,
+  onAddBooks,
+}: ReaderProps) {
   const [dragging, setDragging] = useState(false)
-  const stageRef = useRef<HTMLDivElement>(null)
-  const inputRef = useRef<HTMLInputElement>(null)
-  const [selection, setSelection] = useState<SelectionSnapshot | null>(null)
   /* The stage element as STATE, not just a ref: the popup and the margin marks
    * both position against it, and a ref's `.current` landing after the first
    * render does not re-render them. They would measure against null once and
    * never again. */
   const [stage, setStage] = useState<HTMLDivElement | null>(null)
 
-  /**
-   * Live ranges for the marks foliate has drawn, keyed by CFI.
-   *
-   * State, and replaced rather than mutated: the margin re-measures when this
-   * map's identity changes, so mutating one in place would draw the first mark
-   * and then silently ignore every mark after it. A section holds few enough
-   * marks that copying the map is cheaper than the bug.
-   */
-  const [ranges, setRanges] = useState<ReadonlyMap<string, Range>>(() => new Map())
+  const { selection, setSelection, ranges, onMarkDrawn, selected, mark, unmark } = marking
   /* dragenter/dragleave fire for every child crossed, so a plain boolean
    * flickers the highlight while the pointer is still inside the zone. Depth
    * counting is what makes leave mean "left the zone". */
@@ -110,73 +92,7 @@ export function Reader({ state, dispatch, platform, book, marks }: ReaderProps) 
     '--track-gap': `${grid.gap}px`,
   } as CSSProperties
 
-  /** The mark on the current selection, if that passage is already marked. */
-  const selected = useMemo(
-    () => marks.current.find((mark) => mark.cfi === selection?.cfi) ?? null,
-    [marks.current, selection],
-  )
-
-  /* A section render rebuilds its overlay, which re-resolves every mark in it
-   * — so ranges from the previous document are stale the moment a new one
-   * loads. Clearing on document change is what stops a note from the last
-   * chapter being measured against this one's layout. */
-  useEffect(() => {
-    setRanges(new Map())
-  }, [book.doc])
-
-  const onMarkDrawn = useCallback((cfi: string, range: Range) => {
-    setRanges((prev) => {
-      if (prev.get(cfi) === range) return prev
-      return new Map(prev).set(cfi, range)
-    })
-  }, [])
-
-  const { bookId, drawMark, eraseMark, deselect } = book
-  const chapter = book.position.chapterLabel
-
-  /**
-   * Mark the selection, optionally with a note.
-   *
-   * Drawn immediately rather than waiting for the section to re-render: foliate
-   * only offers marks to an overlay when it builds one, so without this the
-   * highlight would not appear until the reader scrolled away and back.
-   */
-  const mark = useCallback(
-    (note: string) => {
-      if (!selection || !bookId) return
-      const created = marks.add({
-        bookId,
-        cfi: selection.cfi,
-        sectionIndex: selection.sectionIndex,
-        text: selection.text,
-        note,
-        kind: 'highlight',
-        chapter,
-      })
-      drawMark(created)
-      // §07: acting on a selection consumes it. Leaving it up would leave the
-      // popup floating over a passage that has already been dealt with.
-      deselect()
-      setSelection(null)
-    },
-    [selection, bookId, marks, chapter, drawMark, deselect],
-  )
-
-  const unmark = useCallback(
-    (target: Mark) => {
-      eraseMark(target)
-      marks.remove(target.id)
-      setRanges((prev) => {
-        if (!prev.has(target.cfi)) return prev
-        const next = new Map(prev)
-        next.delete(target.cfi)
-        return next
-      })
-    },
-    [eraseMark, marks],
-  )
-
-  const { open } = book
+  const { open, deselect } = book
   const onDrop = useCallback(
     (event: DragEvent<HTMLDivElement>) => {
       event.preventDefault()
@@ -186,21 +102,6 @@ export function Reader({ state, dispatch, platform, book, marks }: ReaderProps) 
       if (dropped) open(dropped)
     },
     [open],
-  )
-
-  const picker = (
-    <input
-      ref={inputRef}
-      type="file"
-      accept={ACCEPT}
-      hidden
-      onChange={(event) => {
-        const picked = event.target.files?.item(0)
-        if (picked) open(picked)
-        // Reset so picking the same file twice still fires a change.
-        event.target.value = ''
-      }}
-    />
   )
 
   return (
@@ -226,10 +127,7 @@ export function Reader({ state, dispatch, platform, book, marks }: ReaderProps) 
 
             <div
               className={styles.stage}
-              ref={(node) => {
-                stageRef.current = node
-                setStage(node)
-              }}
+              ref={setStage}
               style={gridVars}
             >
               <div className={styles.gutter}>
@@ -336,14 +234,13 @@ export function Reader({ state, dispatch, platform, book, marks }: ReaderProps) 
             <button
               type="button"
               className={styles.primaryButton}
-              onClick={() => inputRef.current?.click()}
+              onClick={onAddBooks}
             >
               <Plus size={ICON.control} strokeWidth={ICON.stroke} />
               Add books
             </button>
           </div>
         )}
-        {picker}
       </div>
     </div>
   )

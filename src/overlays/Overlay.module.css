@@ -1,0 +1,178 @@
+/* §12 layer 30 — the scrim, and the sheet that sits on it.
+ *
+ * Both anchor to `.window`, which holds the reader AND the pane. That matters:
+ * anchored to the reader's own column the scrim would dim the text and leave
+ * the pane at full brightness beside it, which reads as the pane being the
+ * thing in front rather than the overlay.
+ */
+
+.scrim {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-scrim);
+  background: var(--scrim);
+  animation: fade var(--motion-popover) both;
+}
+
+/* The sheet sits above its own scrim. One step, not a new layer: §12 has
+ * nothing between 30 and 40, and the figure viewer owns 40. */
+.sheet {
+  position: absolute;
+  z-index: var(--z-scrim);
+  top: 96px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(640px, calc(100% - 96px));
+  max-height: min(560px, calc(100% - 160px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  border: 1px solid var(--line-2);
+  box-shadow: var(--shadow-pop);
+  animation: rise var(--motion-popover) both;
+}
+
+@keyframes fade {
+  from { opacity: 0 }
+  to { opacity: 1 }
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scrim,
+  .sheet {
+    animation: none;
+  }
+}
+
+/* --- the query field ------------------------------------------------- */
+
+.field {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 16px;
+  height: 52px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+}
+
+.input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: none;
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 15px;
+}
+
+.input::placeholder {
+  color: var(--muted);
+}
+
+/* --- results --------------------------------------------------------- */
+
+.list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px;
+}
+
+.group {
+  padding: 10px 10px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  border: none;
+  border-radius: var(--radius-control);
+  background: none;
+  color: var(--ink-2);
+  font-family: inherit;
+  font-size: 13px;
+  text-align: start;
+  cursor: pointer;
+}
+
+/* The active row is keyboard-driven, so it is styled by attribute rather than
+ * by :hover — the pointer and the arrow keys must not disagree about which row
+ * Enter will run. */
+.row[data-active='true'] {
+  background: var(--wash);
+  color: var(--ink);
+}
+
+.rowLabel {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowSub {
+  display: block;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* §07: colour never carries meaning alone, so an active setting is ticked as
+ * well as tinted. */
+.rowOn {
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.combo {
+  flex: 0 0 auto;
+  font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.row[data-disabled='true'] {
+  cursor: default;
+  color: var(--muted);
+}
+
+.empty {
+  padding: 28px 16px;
+  text-align: center;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+.cover {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 34px;
+  border-radius: 3px;
+  border: 1px solid var(--line-2);
+}

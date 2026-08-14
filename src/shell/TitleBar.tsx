@@ -115,14 +115,20 @@ export function TitleBar({
         inert={chromeHidden}
         data-tauri-drag-region
       >
-        {/* Not a button until the switcher overlay exists. It was dispatching
-            `switcherOpen`, which nothing renders — a control that looked live
-            and did nothing on every click. It stays as the book label. */}
-        <div className={styles.chip} role="presentation">
+        {/* Live again: the switcher overlay exists now, so the chip opens it
+            rather than being a label that swallowed every click. */}
+        <button
+          type="button"
+          className={styles.chip}
+          title="Switch book"
+          aria-haspopup="dialog"
+          aria-expanded={state.switcherOpen}
+          onClick={() => dispatch({ type: 'toggleLayer', layer: 'switcherOpen' })}
+        >
           <span className={styles.chipCover} style={{ background: coverTint }} />
           <span className={styles.chipTitle}>{bookTitle}</span>
           <span className={styles.chipSub}>{bookSubtitle}</span>
-        </div>
+        </button>
       </div>
 
       <div
@@ -174,15 +180,15 @@ export function TitleBar({
             </button>
           </>
         )}
-        {/* §07 disabled: ⌘K dispatches `paletteOpen`, but no palette component
-            is passed to WindowShell yet. */}
         <button
           type="button"
           className={styles.action}
-          title="Search or ask — not available yet"
-          aria-label="Search or ask — not available yet"
-          disabled
-          data-disabled="true"
+          title="Search or ask · ⌘K"
+          aria-label="Search or ask"
+          aria-haspopup="dialog"
+          aria-expanded={state.paletteOpen}
+          data-on={state.paletteOpen}
+          onClick={() => dispatch({ type: 'toggleLayer', layer: 'paletteOpen' })}
         >
           <Search size={ICON.control} strokeWidth={ICON.stroke} />
         </button>
