@@ -12,8 +12,25 @@ import { DEFAULT_STEP_IDX, READING_STEPS } from './metrics'
 
 export type Screen = 'library' | 'reader' | 'pdf' | 'cards'
 export type Theme = 'paper' | 'slate' | 'sepia' | 'sage' | 'night'
-export type PaneId = 'notes' | 'search' | 'stats' | 'import' | 'settings'
-export type AsidePanel = 'toc' | 'companion'
+/**
+ * The seven panels of the single side pane.
+ *
+ * Contents and Companion used to live in a separate 340px leading card, which
+ * meant two surfaces competing for the same job. One pane holds every tool;
+ * the reader stays the only permanent full-width surface.
+ *
+ * `notes` and `import` rather than "annotation" and "add": §15's lexicon is
+ * explicit that the word is Note, not annotation, and the pane title is
+ * "Add books".
+ */
+export type PaneId =
+  | 'toc'
+  | 'companion'
+  | 'notes'
+  | 'search'
+  | 'stats'
+  | 'import'
+  | 'settings'
 export type LibView = 'shelf' | 'wall' | 'index' | 'map'
 export type CardView = 'wall' | 'deck' | 'thread' | 'map'
 export type Side = 'left' | 'right'
@@ -34,7 +51,6 @@ export interface AppState {
   /** Remembered so the pane toggle reopens what was last shown. */
   readonly lastPane: PaneId
   readonly side: Side
-  readonly asidePanel: AsidePanel | null
   readonly libView: LibView
   readonly cardView: CardView
   readonly paletteOpen: boolean
@@ -57,10 +73,9 @@ export const initialState: AppState = {
   screen: 'reader',
   theme: 'paper',
   themeFollowsOs: true,
-  pane: null,
-  lastPane: 'notes',
+  pane: 'companion',
+  lastPane: 'companion',
   side: 'right',
-  asidePanel: 'companion',
   libView: 'shelf',
   cardView: 'wall',
   paletteOpen: false,
@@ -86,7 +101,6 @@ export type Action =
   | { type: 'togglePane' }
   | { type: 'closePane' }
   | { type: 'setSide'; side: Side }
-  | { type: 'setAside'; panel: AsidePanel | null }
   | { type: 'setLibView'; view: LibView }
   | { type: 'setCardView'; view: CardView }
   | { type: 'toggleLayer'; layer: 'paletteOpen' | 'switcherOpen' | 'figureOpen' | 'selectionOpen' }
@@ -134,9 +148,6 @@ export function reducer(state: AppState, action: Action): AppState {
 
     case 'setSide':
       return { ...state, side: action.side }
-
-    case 'setAside':
-      return { ...state, asidePanel: action.panel }
 
     case 'setLibView':
       return { ...state, libView: action.view }

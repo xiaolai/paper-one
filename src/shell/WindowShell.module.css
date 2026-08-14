@@ -1,11 +1,15 @@
 /* The desktop shell.
  *
- * Two floating cards on a --wash field, side by side: the window card holds
- * the chrome and whichever screen is up, and the side pane is its SIBLING
- * rather than a child — verified against the prototype's DOM, where the pane
- * hangs off the outer flex row and only its `order` decides which edge it
- * lands on. Nesting it inside the window card would put a 20px radius inside
- * a 20px radius and lose the two-card reading.
+ * One reading surface and one side pane. The pane lives INSIDE the window
+ * rather than beside it, which has two consequences worth stating:
+ *
+ *   1. The titlebar spans the whole window for free. When the pane sat outside
+ *      it, the bar stopped where the reader stopped — leaving the strip above
+ *      the pane undraggable and, on Windows and Linux, putting the close
+ *      button hundreds of pixels inside the window's trailing edge.
+ *   2. The pane is a leading card like any other side column (§05), so it
+ *      shares LeadingCard rather than carrying its own background, margin and
+ *      radius.
  */
 
 .root {
@@ -27,19 +31,9 @@
 
 /*
  * Fills the OS window. It deliberately does NOT carry the prototype's 10px
- * inset, 20px radius and --shadow-window.
- *
- * In the mockup those simulate the application window itself — the design
- * system calls --shadow-window "The window card itself", drawn on a --wash
- * field standing in for the desktop. That is a browser page pretending to be
- * a macOS window. Here the real window already has corners, a border and a
- * shadow from the OS, so drawing them again inset by 10px produces two nested
- * rounded frames.
- *
- * Consequence worth knowing: §05's concentric inset math (child radius =
- * parent radius − inset, 20 − 6 = 14) assumed the 20px card as the parent.
- * The leading cards keep their 6px/14px treatment, which now reads as a card
- * floating near the window edge rather than one nested concentrically.
+ * inset, 20px radius and --shadow-window: those simulate the application
+ * window itself, drawn on a --wash field standing in for the desktop. The real
+ * window already has corners, a border and a shadow from the OS.
  */
 .window {
   flex: 1;
@@ -53,6 +47,7 @@
   position: relative;
 }
 
+/* The row holding the reader and the pane. */
 .shell {
   flex: 1;
   min-height: 0;
@@ -67,42 +62,18 @@
   flex-direction: column;
 }
 
-/* --- side pane ------------------------------------------------------ */
-
-.pane {
-  flex: 0 0 auto;
-  min-height: 0;
+/* §08: the pane opens on width, not transform, so the reader reflows with it
+ * instead of the pane sliding over the text. */
+.paneSlot {
   display: flex;
-  /* §08: the pane opens on width, not transform, so the reader reflows with
-   * it instead of sliding over the text. */
+  min-height: 0;
   transition: width var(--motion-pane);
 }
 
-/* The wash gutter now lives entirely on the pane. In the prototype it was
- * split between the window card's padding and the pane's, but with the window
- * running edge to edge the pane has to carry all of it or the two panels touch. */
-.pane[data-side='left'] {
+.paneSlot[data-side='left'] {
   order: -1;
-  padding: 10px;
 }
 
-.pane[data-side='right'] {
+.paneSlot[data-side='right'] {
   order: 1;
-  padding: 10px;
-}
-
-.pane[data-open='false'] {
-  padding: 0;
-}
-
-.paneBody {
-  flex: 0 0 var(--pane-w);
-  width: var(--pane-w);
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  background: var(--surface);
-  border-radius: var(--card-radius);
-  box-shadow: var(--shadow-card);
-  overflow: hidden;
 }

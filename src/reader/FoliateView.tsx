@@ -1,13 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import type { RelocateDetail, Renderer, TocItem, View } from 'foliate-js/view.js'
 import type { Theme } from '../lib/state'
-import { MEASURE, MEASURE_WITH_ASIDE } from '../lib/metrics'
+import { MEASURE } from '../lib/metrics'
+import type { ReaderPosition } from '../lib/useBook'
 import { bookCss } from './bookCss'
-
-export interface ReaderPosition {
-  readonly fraction: number
-  readonly chapterLabel: string
-}
 
 export interface FoliateViewProps {
   /**
@@ -18,8 +14,6 @@ export interface FoliateViewProps {
   stepIdx: number
   theme: Theme
   paginated: boolean
-  /** True when the aside card is open, which narrows the measure to 620. */
-  asideOpen: boolean
   onToc: (toc: readonly TocItem[]) => void
   onRelocate: (position: ReaderPosition) => void
   /** Called with each spine item's document as it loads, for the ruler and
@@ -32,7 +26,6 @@ interface Settings {
   stepIdx: number
   theme: Theme
   paginated: boolean
-  asideOpen: boolean
 }
 
 /**
@@ -60,10 +53,7 @@ function applySettings(renderer: Renderer, settings: Settings): void {
   // A bare number, not "620px": foliate documents these as pixel values and
   // parses them as numbers, so a unit suffix yields NaN and it silently falls
   // back to its 720px default — which reads as "the measure is ignored".
-  renderer.setAttribute(
-    'max-inline-size',
-    String(settings.asideOpen ? MEASURE_WITH_ASIDE : MEASURE),
-  )
+  renderer.setAttribute('max-inline-size', String(MEASURE))
   renderer.setAttribute('flow', settings.paginated ? 'paginated' : 'scrolled')
   renderer.setStyles?.(
     bookCss({
@@ -80,7 +70,6 @@ export function FoliateView({
   stepIdx,
   theme,
   paginated,
-  asideOpen,
   onToc,
   onRelocate,
   onDocument,
@@ -97,8 +86,8 @@ export function FoliateView({
   const handlers = useRef({ onToc, onRelocate, onDocument, onError })
   handlers.current = { onToc, onRelocate, onDocument, onError }
 
-  const settings = useRef<Settings>({ stepIdx, theme, paginated, asideOpen })
-  settings.current = { stepIdx, theme, paginated, asideOpen }
+  const settings = useRef<Settings>({ stepIdx, theme, paginated })
+  settings.current = { stepIdx, theme, paginated }
 
   useEffect(() => {
     const host = hostRef.current
@@ -203,8 +192,8 @@ export function FoliateView({
   useEffect(() => {
     const renderer = viewRef.current?.renderer
     if (!renderer || ready === 0) return
-    applySettings(renderer, { stepIdx, theme, paginated, asideOpen })
-  }, [stepIdx, theme, paginated, asideOpen, ready])
+    applySettings(renderer, { stepIdx, theme, paginated })
+  }, [stepIdx, theme, paginated, ready])
 
   return <div ref={hostRef} style={{ position: 'absolute', inset: 0 }} />
 }

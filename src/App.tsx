@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { applyMetrics } from './lib/metrics'
 import { usePlatform, usePrefersDark } from './lib/platform'
 import { useAppState } from './lib/state'
+import { useBook } from './lib/useBook'
 import { BOOKS, coverTint } from './data/fixtures'
 import { TitleBar } from './shell/TitleBar'
 import { WindowShell } from './shell/WindowShell'
@@ -12,6 +13,9 @@ export function App() {
   const platform = usePlatform()
   const prefersDark = usePrefersDark()
   const [state, dispatch] = useAppState()
+  /* The open book lives here, not in the reader: Contents and Companion read
+   * from it and they are panels of the side pane now. */
+  const book = useBook()
 
   useEffect(() => {
     applyMetrics(document.documentElement, platform)
@@ -45,7 +49,7 @@ export function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [dispatch])
 
-  const book = BOOKS[0]
+  const fixture = BOOKS[0]
 
   return (
     <WindowShell
@@ -56,14 +60,14 @@ export function App() {
           state={state}
           dispatch={dispatch}
           platform={platform}
-          bookTitle={book?.title ?? 'Paper'}
-          bookSubtitle={book?.locationLabel ?? ''}
+          bookTitle={fixture?.title ?? 'Paper'}
+          bookSubtitle={book.position.chapterLabel || (fixture?.locationLabel ?? '')}
           coverTint={coverTint(0)}
         />
       }
-      pane={<SidePane state={state} dispatch={dispatch} />}
+      pane={<SidePane state={state} dispatch={dispatch} book={book} />}
     >
-      <Reader state={state} dispatch={dispatch} platform={platform} />
+      <Reader state={state} dispatch={dispatch} platform={platform} book={book} />
     </WindowShell>
   )
 }

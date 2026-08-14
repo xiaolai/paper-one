@@ -1,18 +1,22 @@
 import type { ReactNode } from 'react'
-import type { Platform } from '../lib/metrics'
+import { PANE_W, type Platform } from '../lib/metrics'
 import type { AppState } from '../lib/state'
+import { LeadingCard } from './LeadingCard'
 import styles from './WindowShell.module.css'
 
 export interface WindowShellProps {
   state: AppState
   platform: Platform
-  /** The titlebar, which overlays the window card on macOS. */
+  /**
+   * The titlebar. It lives inside the window, which now holds the side pane
+   * too, so it spans the whole window rather than stopping at the reader.
+   */
   titleBar: ReactNode
-  /** Layers anchored to the window card: switcher, palette, figure viewer. */
+  /** Layers anchored to the window: switcher, palette, figure viewer. */
   overlays?: ReactNode
   /** The active screen. */
   children: ReactNode
-  /** The 400px side pane, rendered as a sibling card on the wash. */
+  /** The single side pane — every tool lives in here. */
   pane: ReactNode
 }
 
@@ -34,12 +38,16 @@ export function WindowShell({
           {overlays}
           <div className={styles.shell}>
             <div className={styles.content}>{children}</div>
+
+            {paneOpen && (
+              <div className={styles.paneSlot} data-side={state.side}>
+                <LeadingCard platform={platform} width={PANE_W} side={state.side}>
+                  {pane}
+                </LeadingCard>
+              </div>
+            )}
           </div>
         </div>
-      </div>
-
-      <div className={styles.pane} data-side={state.side} data-open={paneOpen}>
-        {paneOpen && <div className={styles.paneBody}>{pane}</div>}
       </div>
     </div>
   )

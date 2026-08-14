@@ -14,14 +14,16 @@ import {
 import { ICON } from '../lib/metrics'
 import type { Platform } from '../lib/metrics'
 import { isTauri } from '../lib/platform'
-import type { AppDispatch, AppState, AsidePanel } from '../lib/state'
+import type { AppDispatch, AppState, PaneId } from '../lib/state'
 import styles from './TitleBar.module.css'
 
 /** Traffic-light fills, in AppKit's order. Preview only — see below. */
 const LIGHTS = ['var(--tl-red)', 'var(--tl-amber)', 'var(--tl-green)'] as const
 
-const ASIDE_TOGGLES: readonly {
-  key: AsidePanel
+/* Shortcuts into the pane. They used to toggle a separate 340px card; now
+ * they open the pane on that panel, and clicking the active one closes it. */
+const PANE_SHORTCUTS: readonly {
+  key: PaneId
   label: string
   Icon: typeof ListTree
 }[] = [
@@ -109,18 +111,17 @@ export function TitleBar({
         {isReader && (
           <>
             <div className={styles.toggleGroup}>
-              {ASIDE_TOGGLES.map(({ key, label, Icon }) => (
+              {PANE_SHORTCUTS.map(({ key, label, Icon }) => (
                 <button
                   key={key}
                   type="button"
                   className={styles.action}
                   title={label}
-                  data-on={state.asidePanel === key}
+                  data-on={state.pane === key}
                   onClick={() =>
-                    dispatch({
-                      type: 'setAside',
-                      panel: state.asidePanel === key ? null : key,
-                    })
+                    state.pane === key
+                      ? dispatch({ type: 'closePane' })
+                      : dispatch({ type: 'openPane', pane: key })
                   }
                 >
                   <Icon size={ICON.control} strokeWidth={ICON.stroke} />

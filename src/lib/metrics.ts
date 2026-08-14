@@ -20,11 +20,11 @@ export const LINE = 34
 /** §03 side pane. Fixed width, left or right by user choice. */
 export const PANE_W = 400
 
-/** §03 aside card. Contents and Companion share it, one at a time. */
-export const ASIDE_W = 340
-
-/** §03 concentric inset. Nested card radius = parent radius − inset (20 → 14). */
+/** §03 concentric inset. Nested card radius = parent radius − inset. */
 export const CONCENTRIC_INSET = 6
+
+/** What the pane costs in the row, including its concentric margins. */
+export const PANE_TRACK = PANE_W + CONCENTRIC_INSET * 2
 
 /** Radius of the window card and the pane card. */
 export const CARD_RADIUS = 20
@@ -83,8 +83,7 @@ export const THUMBS_MIN_AVAIL = 900
  * §09 reading steps. Sizes producing a fractional line box are not offered,
  * because the ruler and the scroll snapping both break on one.
  *
- * `measure` is the text column at that step; the companion column narrows it
- * (see `MEASURE_WITH_ASIDE`).
+ * `measure` is the text column at that step.
  */
 export interface ReadingStep {
   readonly size: number
@@ -106,48 +105,16 @@ export const READING_STEPS: readonly ReadingStep[] = [
 /** Index into READING_STEPS for the 21/34/660 default. */
 export const DEFAULT_STEP_IDX = 2
 
-/** §03 reading measure and margin gutter, with and without the companion. */
+/** §03 reading measure and margin gutter. */
 export const MEASURE = 660
-export const MEASURE_WITH_ASIDE = 620
 export const GUTTER = 56
-export const GUTTER_WITH_ASIDE = 40
 
 /** Third prose column — the margin where companion marks land. */
 export const MARGIN_COL = 250
 export const PROSE_GAP = 32
-export const PROSE_GAP_WITH_ASIDE = 22
 
 /** Horizontal padding on the prose grid. */
 export const STAGE_PADDING_X = 24
-
-/**
- * Stage width needed to lay the aside-open grid out at full measure:
- * 40 gutter + 22 gap + 620 measure + 22 gap + 0 margin column, plus padding.
- */
-export const STAGE_MIN_WITH_ASIDE =
-  GUTTER_WITH_ASIDE +
-  PROSE_GAP_WITH_ASIDE +
-  MEASURE_WITH_ASIDE +
-  PROSE_GAP_WITH_ASIDE +
-  STAGE_PADDING_X * 2
-
-/** What the aside card costs, including its concentric margins. */
-export const ASIDE_TRACK = ASIDE_W + CONCENTRIC_INSET * 2
-
-/**
- * Minimum available width (window minus the side pane) before the aside card
- * may open.
- *
- * DERIVED, not the prototype's magic 880. The measure track is
- * `minmax(0, 620px)`, whose minimum is zero — so when the aside and the pane
- * are both open on a window too narrow for the full grid, the track silently
- * shrinks instead of overflowing and the reading measure quietly stops being
- * the measure. Nothing reports this; the text just gets narrower. Withholding
- * the aside is the design's own answer (§06 collapses leading chrome before it
- * compromises the text), and deriving the threshold keeps it honest if any of
- * the metrics above change.
- */
-export const ASIDE_MIN_AVAIL = STAGE_MIN_WITH_ASIDE + ASIDE_TRACK
 
 export interface ProseGrid {
   readonly gutter: number
@@ -170,17 +137,11 @@ export interface ProseGrid {
  *   2. the gutter, which holds the ruler hint
  *   3. the measure, only when there is nothing else left to give
  */
-export function proseGrid(stageInner: number, asideOpen: boolean): ProseGrid {
-  const gap = asideOpen ? PROSE_GAP_WITH_ASIDE : PROSE_GAP
-  const gutterMax = asideOpen ? GUTTER_WITH_ASIDE : GUTTER
-  const measureMax = asideOpen ? MEASURE_WITH_ASIDE : MEASURE
-  // With the companion column open the margin collapses; its marks move into
-  // the companion itself.
-  const marginMax = asideOpen ? 0 : MARGIN_COL
-
-  let marginCol = marginMax
-  let gutter = gutterMax
-  let measure = measureMax
+export function proseGrid(stageInner: number): ProseGrid {
+  const gap = PROSE_GAP
+  let marginCol = MARGIN_COL
+  let gutter = GUTTER
+  let measure = MEASURE
 
   // Two gaps are always in play: gutter|measure and measure|margin.
   let over = gutter + measure + marginCol + gap * 2 - stageInner
@@ -261,7 +222,7 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
   const vars: Record<string, string> = {
     '--line-box': px(LINE),
     '--pane-w': px(PANE_W),
-    '--aside-w': px(ASIDE_W),
+    '--pane-track': px(PANE_TRACK),
     '--card-radius': px(CARD_RADIUS),
     '--card-radius-inner': px(CARD_RADIUS - CONCENTRIC_INSET),
     '--leading-card-radius': px(LEADING_CARD_RADIUS),

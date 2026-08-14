@@ -2,29 +2,45 @@ import { useState } from 'react'
 import {
   ChartNoAxesColumn,
   Highlighter,
+  List,
   Plus,
   Search,
   Settings as SettingsIcon,
+  Sparkles,
 } from 'lucide-react'
 import { ICON } from '../lib/metrics'
 import type { AppDispatch, AppState, PaneId, Theme } from '../lib/state'
+import type { Book } from '../lib/useBook'
 import { NOTES, SEARCH_RESULTS } from '../data/fixtures'
+import { Companion } from './Companion'
+import { Contents } from './Contents'
 import styles from './SidePane.module.css'
 
+/**
+ * The seven tools, in rail order.
+ *
+ * Contents and Companion used to live in a separate 340px card beside the
+ * reader. One pane holds all seven, so there is a single place to look for a
+ * tool and a single surface competing with the text.
+ */
 const RAIL: readonly { id: PaneId; label: string; Icon: typeof Search }[] = [
+  { id: 'toc', label: 'Contents', Icon: List },
+  { id: 'companion', label: 'Companion', Icon: Sparkles },
   { id: 'notes', label: 'Notes', Icon: Highlighter },
   { id: 'search', label: 'Search', Icon: Search },
-  { id: 'stats', label: 'Stats', Icon: ChartNoAxesColumn },
+  { id: 'stats', label: 'Reading', Icon: ChartNoAxesColumn },
   { id: 'import', label: 'Add books', Icon: Plus },
   { id: 'settings', label: 'Settings', Icon: SettingsIcon },
 ]
 
 const PANE_TITLES: Record<PaneId, string> = {
+  toc: 'Contents',
+  companion: 'Companion',
   notes: 'Notes',
   search: 'Search',
   stats: 'Reading',
-  settings: 'Settings',
   import: 'Add books',
+  settings: 'Settings',
 }
 
 /** §05 theme chips — the page colour of each theme, as a literal, because a
@@ -40,9 +56,11 @@ const THEME_CHIPS: readonly { id: Theme; label: string; fill: string }[] = [
 export interface SidePaneProps {
   state: AppState
   dispatch: AppDispatch
+  book: Book
+  onGoTo?: (href: string) => void
 }
 
-export function SidePane({ state, dispatch }: SidePaneProps) {
+export function SidePane({ state, dispatch, book, onGoTo }: SidePaneProps) {
   const [noteFilter, setNoteFilter] = useState<'All' | 'Highlights' | 'Companion'>('All')
   const [query, setQuery] = useState('')
 
@@ -66,17 +84,28 @@ export function SidePane({ state, dispatch }: SidePaneProps) {
             type="button"
             className={styles.railButton}
             title={label}
+            aria-label={label}
             data-on={pane === id}
             onClick={() => dispatch({ type: 'openPane', pane: id })}
           >
             <Icon size={ICON.tab} strokeWidth={ICON.stroke} />
           </button>
         ))}
-        <span className={styles.railSpacer} />
-        <span className={styles.railTitle}>{PANE_TITLES[pane]}</span>
       </div>
 
+      <div className={styles.paneTitle}>{PANE_TITLES[pane]}</div>
+
       <div className={styles.body}>
+        {pane === 'toc' && (
+          <Contents
+            toc={book.toc}
+            currentChapter={book.position.chapterLabel}
+            {...(onGoTo ? { onGoTo } : {})}
+          />
+        )}
+
+        {pane === 'companion' && <Companion currentChapter={book.position.chapterLabel} />}
+
         {pane === 'notes' && (
           <div className={styles.panel}>
             <div className={styles.panelMeta}>

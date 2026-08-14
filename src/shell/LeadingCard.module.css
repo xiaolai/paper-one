@@ -1,9 +1,11 @@
-/* Every leading column in Paper is this card.
+/* Every side column in Paper is this card.
  *
  * §05: "Contents, Companion, PDF thumbnails and library Collections are one
  * component with different contents: --bg surface, shadow-card, and a
- * concentric inset — child radius = parent radius − inset ... Never style one
- * of these columns directly."
+ * concentric inset ... Never style one of these columns directly."
+ *
+ * The side pane is one of them. It used to be styled separately — a different
+ * background, margin and radius — which is exactly what that rule forbids.
  *
  * The concentric RULE is kept; the prototype's derived value is not. Its
  * 20 − 6 = 14 was concentric with a simulated 20px window card drawn in a
@@ -39,8 +41,15 @@
 }
 
 /* Elsewhere the titlebar is a real row above this, so there is nothing to
- * clear. */
+ * clear. The margin mirrors so the card hugs whichever edge it sits on. */
 .card:not([data-platform='macos']) {
-  margin: 0 0 10px 10px;
   padding-top: 0;
+}
+
+.card:not([data-platform='macos'])[data-side='left'] {
+  margin: 0 0 10px 10px;
+}
+
+.card:not([data-platform='macos'])[data-side='right'] {
+  margin: 0 10px 10px 0;
 }
