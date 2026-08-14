@@ -187,29 +187,95 @@ declare module 'foliate-js/view.js' {
 
 declare module 'foliate-js/overlayer.js' {
   /**
-   * An SVG living inside the BOOK document, sized to the viewport and drawn
-   * from `range.getClientRects()`. Anything anchored to text belongs here,
-   * because it shares the text's coordinate space for free. Host-side chrome
-   * (the selection popup, the margin marks) does not, and needs the rect
+   * A rect as a painter consumes it — the shape, not a DOMRect.
+   *
+   * ALL SIX edges, because the painters disagree about which they read:
+   * `highlight` destructures `left/top/width/height`, while `underline`,
+   * `strikethrough` and `squiggly` read `right` and `bottom`. Typed with only
+   * the first four, a hand-built rect was type-correct and produced `NaN`
+   * coordinates in any line painter it reached. Anything constructing one must
+   * fill them all; `DOMRect` already does.
+   */
+  export interface PaintRect {
+    readonly left: number
+    readonly top: number
+    readonly right: number
+    readonly bottom: number
+    readonly width: number
+    readonly height: number
+  }
+
+  /**
+   * One options shape for all five painters, which is a KNOWN simplification.
+   *
+   * Upstream they are not alike: `underline` and `strikethrough` take a stroke
+   * `width`, `squiggly` takes more, `outline` takes `radius` — and none of them
+   * take the `doc` and `at` that Paper adds for the highlight. Modelled
+   * honestly, this would be a generic with per-painter options.
+   *
+   * It is deliberately not. Paper calls exactly two of the five, and neither
+   * uses the options this omits, so the generic would exist to describe calls
+   * nobody makes. The cost of the shortcut is that a future call to `squiggly`
+   * type-checks while silently dropping its parameters — worth knowing before
+   * reaching for one, which is why this is written down rather than fixed.
+   */
+  export type MarkPainter = (
+    rects: readonly PaintRect[],
+    options?: {
+      color?: string
+      doc?: Document | null
+      /** The element the marked text is in — see `balanceRects`. */
+      at?: Element | null
+      writingMode?: string
+    },
+  ) => SVGElement
+
+  /**
+   * An SVG sized to the book's viewport and drawn from
+   * `range.getClientRects()`, so it shares the text's coordinate space for
+   * free. Anything anchored to text belongs here; host-side chrome (the
+   * selection popup, the margin marks) does not, and needs the rect
    * translation in `src/reader/coordinates.ts`.
+   *
+   * It lives in the view's shadow tree in the HOST document, BESIDE the
+   * iframe — not inside the book, which this comment used to claim. The
+   * difference is load-bearing twice over: CSS injected into the book cannot
+   * style it, so its custom properties have to be declared on the host root
+   * (see `styles/global.css`), and because it is painted OVER the text rather
+   * than behind it, its blend mode decides whether a mark obscures the words.
    */
   export class Overlayer {
     readonly element: SVGSVGElement
+    /**
+     * Store an annotation and paint it.
+     *
+     * Worth knowing, because Paper depends on it: `add` computes
+     * `range.getClientRects()`, hands those to `draw`, and STORES THE ORIGINALS
+     * — so `hitTest` answers against the rects foliate measured, not against
+     * whatever the painter drew. A painter that moves or merges its rects makes
+     * the clickable area diverge from the visible one. See `markGeometry.ts`.
+     */
     add(
       key: string,
       range: Range | (() => Range),
-      draw: unknown,
-      options?: Record<string, unknown>,
+      draw: MarkPainter,
+      options?: Parameters<MarkPainter>[1],
     ): void
     remove(key: string): void
     redraw(): void
     hitTest(event: { x: number; y: number }): [string, Range] | []
 
-    static highlight: unknown
-    static underline: unknown
-    static strikethrough: unknown
-    static squiggly: unknown
-    static outline: unknown
+    /**
+     * The painters. Each turns rects into an SVG group; `add` calls the one it
+     * is given as `draw(rects, options)`, passing `options` through untouched —
+     * which is how Paper smuggles the book document to `highlight` so the band
+     * can be measured against the font it will sit on.
+     */
+    static highlight: MarkPainter
+    static underline: MarkPainter
+    static strikethrough: MarkPainter
+    static squiggly: MarkPainter
+    static outline: MarkPainter
   }
 }
 

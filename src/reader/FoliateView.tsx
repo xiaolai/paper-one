@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Renderer, TocItem, View } from 'foliate-js/view.js'
+import type { MarkPainter } from 'foliate-js/overlayer.js'
 import type { Theme } from '../lib/state'
 import { measureForStep } from '../lib/metrics'
 import type { BookMeta, BookNavigator, ReaderPosition } from '../lib/useBook'
 import { isPdf } from '../lib/formats'
 import { bookCss, markPalette } from './bookCss'
+import { balanceRects } from './markGeometry'
 import { ReaderSession, type MarkAnchor, type SelectionSnapshot } from './session'
 
 export interface FoliateViewProps {
@@ -207,7 +209,20 @@ export function FoliateView({
         // rendering once with no marks and then again with them.
         loadPainters: async () => {
           const { Overlayer } = await import('foliate-js/overlayer.js')
-          return { highlight: Overlayer.highlight, underline: Overlayer.underline }
+          return {
+            /* foliate's own painter, handed rects that have been moved onto
+             * the words first. Composed rather than replaced: the SVG it
+             * builds is what reads the blend-mode and opacity properties, and
+             * reimplementing it here would fork that quietly. */
+            // Options are OPTIONAL in foliate's painter contract; requiring
+            // them here would have thrown on any caller that omitted them.
+            highlight: ((rects, options = {}) =>
+              Overlayer.highlight(
+                balanceRects(rects, options.doc ?? null, options.at ?? null),
+                options,
+              )) satisfies MarkPainter,
+            underline: Overlayer.underline,
+          }
         },
         /* foliate has no PDF loader, so a PDF is turned into a Book — one
          * HTML page per PDF page — and opened through the same view. That is

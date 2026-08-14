@@ -157,6 +157,15 @@ export interface SessionDeps {
 }
 
 /**
+ * `Node.ELEMENT_NODE`, spelled as its value.
+ *
+ * This module's tests run in plain node with no DOM — see `session.test.ts` —
+ * so the `Node` global is not there to read the constant off. The suite caught
+ * it immediately, which is the argument for keeping those tests DOM-free.
+ */
+const ELEMENT_NODE = 1
+
+/**
  * A prepared book that owns resources of its own.
  *
  * `View.close()` closes the RENDERER; it knows nothing about a book object the
@@ -195,6 +204,9 @@ export class ReaderSession {
    * unnecessary because the entry is dropped explicitly.
    */
   readonly #unwatch = new Map<Document, (() => void)[]>()
+  /** Which spine item each live document is, so a per-document redraw can find
+   *  the one section it needs to touch. */
+  readonly #indexOf = new WeakMap<Document, number>()
   /** A book this session synthesised, which `View.close()` will not release. */
   #prepared: Destroyable | null = null
   readonly #host: HTMLElement
@@ -318,7 +330,11 @@ export class ReaderSession {
        * section the reader had ever passed through, against overlays that no
        * longer exist — work that rises with the length of the reading session
        * and accomplishes nothing after the first few. */
+      this.#indexOf.set(doc, index)
       this.#onTeardown(doc, () => this.#sections.delete(index))
+
+      this.#redrawWhenFontsLand(doc)
+
       this.#cb.onDocument(doc)
     })
 
@@ -338,6 +354,8 @@ export class ReaderSession {
         draw: (fn: unknown, options?: Record<string, unknown>) => void
         annotation: { value?: string; kind?: MarkKind }
         range: Range
+        /** foliate emits this; it is the document the rects were measured in. */
+        doc?: Document
       }>).detail
       const painters = this.#painters
       if (!painters) return
@@ -345,6 +363,23 @@ export class ReaderSession {
         this.#cb.onMarkDrawn(detail.annotation.value, detail.range)
       }
       const palette = this.#cb.getPalette()
+      /* The book document travels with the draw options so the highlight
+       * painter can read the font the rects were measured in — see
+       * `balanceRects`. Taken from the range rather than added to the event
+       * type, because the range is already in hand and cannot disagree. */
+      /* From the EVENT, not rebuilt from the range. `startContainer` can be a
+       * Document when a range spans a whole node, and `ownerDocument` on a
+       * Document is null — so the reconstruction lost exactly the case it was
+       * meant to cover. */
+      const doc = detail.doc ?? detail.range?.startContainer?.ownerDocument ?? null
+      /* The element the marked words are in, so the band is measured against
+       * the font they are actually drawn in rather than the book's default —
+       * a mark in a heading or a code span is not body text. */
+      const container = detail.range?.startContainer ?? null
+      const at =
+        container && container.nodeType === ELEMENT_NODE
+          ? (container as Element)
+          : (container?.parentElement ?? null)
       // §01: your own mark is a gold fill, the companion's is an amber
       // underline. The kind rides along on the annotation so the painter does
       // not have to look the mark up again.
@@ -353,7 +388,7 @@ export class ReaderSession {
       } else if (palette.highlightAsRule) {
         detail.draw(painters.underline, { color: palette.highlight })
       } else {
-        detail.draw(painters.highlight, { color: palette.highlight })
+        detail.draw(painters.highlight, { color: palette.highlight, doc, at })
       }
     })
 
@@ -647,6 +682,48 @@ export class ReaderSession {
       },
       { once: true },
     )
+  }
+
+  /**
+   * Redraw this document's marks once its webfont has actually arrived.
+   *
+   * A mark's band is positioned against the font's metrics — see
+   * `balanceRects` — and a section renders before the face loads, so the first
+   * paint measures the fallback. Without a redraw the band keeps the
+   * fallback's geometry for as long as the section is on screen.
+   *
+   * BOTH signals, because neither alone is enough. `fonts.ready` can already
+   * be fulfilled at the moment this runs: it is read inside foliate's `load`
+   * callback, before the iframe has rendered anything, so the set may be idle
+   * and the promise resolves immediately — before the face the render is about
+   * to request has even been asked for. `loadingdone` fires when a later cycle
+   * finishes, which is the one that matters. Redrawing twice is harmless;
+   * `addAnnotation` replaces rather than stacks.
+   */
+  #redrawWhenFontsLand(doc: Document): void {
+    const fonts = doc.fonts
+    if (!fonts) return
+
+    const redraw = () => {
+      /* This document's own section, not every live one. The liveness check
+       * alone was not enough: a font settling in any still-mounted section
+       * redrew all of them, which for a book with marks in three rendered
+       * sections is three times the CFI resolution for one font event. */
+      if (this.#disposed || !this.#unwatch.has(doc)) return
+      const view = this.#view
+      const index = this.#indexOf.get(doc)
+      if (!view || index === undefined || !this.#sections.has(index)) return
+      this.#drawSection(view, index)
+    }
+
+    fonts.addEventListener('loadingdone', redraw)
+    this.#onTeardown(doc, () => fonts.removeEventListener('loadingdone', redraw))
+
+    /* No catch. `FontFaceSet.ready` does not reject — a document torn down
+     * mid-load simply never settles it — so a catch here could only ever
+     * swallow a failure thrown by `redrawMarks` itself, which is the opposite
+     * of what a teardown guard is for. */
+    void fonts.ready.then(redraw)
   }
 
   /** Drop the listeners a document had, before re-registering them. */
