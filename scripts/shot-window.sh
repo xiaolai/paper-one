@@ -38,19 +38,39 @@ set -euo pipefail
 out="${1:-/tmp/paper-window.png}"
 pid="${2:-}"
 
+# Anchored to THIS checkout, and refusing to guess between candidates.
+#
+# `target/debug/app` matches any Tauri project's dev binary, and `head -1`
+# then picked whichever happened to be listed first — so with two Tauri apps
+# running, this captured the other one and presented it as Paper. That is the
+# same wrong-window failure the header describes, arrived at from the other
+# end. The pattern now includes this repository's own path, and more than one
+# match is an error rather than a coin toss.
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 if [[ -z "$pid" ]]; then
-  pid="$(pgrep -f 'target/debug/app' | head -1 || true)"
+  matches="$(pgrep -f "$repo/src-tauri/target/debug/app" || true)"
+  if [[ -z "$matches" ]]; then
+    matches="$(pgrep -x 'Paper' || true)"
+  fi
+  count="$(printf '%s' "$matches" | grep -c . || true)"
+  if [[ "$count" -gt 1 ]]; then
+    echo "shot-window: several candidates ($(echo $matches)). Pass the pid you want." >&2
+    exit 1
+  fi
+  pid="$matches"
 fi
 if [[ -z "$pid" ]]; then
-  pid="$(pgrep -x 'Paper' | head -1 || true)"
-fi
-if [[ -z "$pid" ]]; then
-  echo "shot-window: no running app found. Start it, or pass a pid." >&2
+  echo "shot-window: no running app found for $repo. Start it, or pass a pid." >&2
   exit 1
 fi
 
-swift_src="$(mktemp -t winid).swift"
-trap 'rm -f "$swift_src"' EXIT
+# A directory, not `mktemp -t winid` with `.swift` glued on: that creates one
+# file and then writes — and cleans up — a DIFFERENT one, leaving the original
+# behind in /tmp on every run.
+swift_dir="$(mktemp -d -t paper-winid)"
+trap 'rm -rf "$swift_dir"' EXIT
+swift_src="$swift_dir/winid.swift"
 cat > "$swift_src" <<'SWIFT'
 import CoreGraphics
 import Foundation

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Stage pdf.js's runtime data files into `public/pdfjs/`.
+ * Stage pdf.js's runtime data files into `vendor/pdfjs/`.
  *
  * pdf.js does not bundle these. It fetches them at run time from URLs it is
  * given, and without them it degrades quietly rather than failing:
@@ -35,7 +35,7 @@
  * Runs from `predev` and `prebuild`, so a fresh clone gets it without anyone
  * having to know it exists.
  */
-import { cp, mkdir, rm, access } from 'node:fs/promises'
+import { cp, mkdir, rm, rename, access } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
@@ -49,31 +49,75 @@ const target = join(root, 'vendor', 'pdfjs')
 const require = createRequire(import.meta.url)
 const pdfjsRoot = join(dirname(require.resolve('pdfjs-dist/package.json')))
 
+/**
+ * Every one of these is required, and each one's absence breaks something
+ * specific and silent:
+ *
+ *   cmaps           CJK text renders as blank boxes
+ *   standard_fonts  a PDF with no embedded fonts renders as blank boxes
+ *   wasm            scanned pages — JPEG 2000 and JBIG2 — render as nothing
+ *   iccs            colour-managed images render with the wrong colours
+ *
+ * None of them report anything, which is why a missing directory is a failure
+ * here rather than a skip. Waving one through as "optional" is how the reader
+ * ends up with an empty page and no explanation.
+ */
 const DIRECTORIES = ['cmaps', 'standard_fonts', 'wasm', 'iccs']
 
 async function main() {
-  await rm(target, { recursive: true, force: true })
-  await mkdir(target, { recursive: true })
+  /* Staged beside the target and moved into place, rather than clearing the
+   * target first.
+   *
+   * `predev` and `prebuild` both run this, and a dev server can be starting
+   * while a build runs. Deleting the live tree up front left every consumer
+   * with no assets at all for as long as the copy took — and an interrupted
+   * run left them with half a tree, which looks exactly like a working one
+   * until a scanned page comes up blank. The window where the tree is
+   * incomplete is now a single rename. */
+  /* Staging is per RUN, not per script. `predev` and `prebuild` can overlap —
+   * starting a build while a dev server boots is ordinary — and a single shared
+   * `.staging` path meant the second run deleted the first one's half-copied
+   * tree and then renamed the remains into place. The pid keeps them apart. */
+  const staging = `${target}.staging.${process.pid}`
+  await rm(staging, { recursive: true, force: true })
+  await mkdir(staging, { recursive: true })
 
-  const copied = []
+  const missing = []
   for (const name of DIRECTORIES) {
     const from = join(pdfjsRoot, name)
     try {
       await access(from)
     } catch {
-      // A future pdf.js may drop one of these. Skipping is correct; failing
-      // the build over an optional data directory is not.
+      missing.push(name)
       continue
     }
-    await cp(from, join(target, name), { recursive: true })
-    copied.push(name)
+    await cp(from, join(staging, name), { recursive: true })
   }
 
-  if (copied.length === 0) {
-    // Every one missing means the resolution is wrong, not that pdf.js changed.
-    throw new Error(`sync-pdfjs-assets: nothing copied from ${pdfjsRoot}`)
+  if (missing.length > 0) {
+    await rm(staging, { recursive: true, force: true })
+    throw new Error(
+      `sync-pdfjs-assets: ${missing.join(', ')} not found in ${pdfjsRoot}. ` +
+        'Either the resolution is wrong or pdf.js has moved them; both need ' +
+        'a fix here, not a silent skip.',
+    )
   }
-  console.log(`sync-pdfjs-assets: staged ${copied.join(', ')} into vendor/pdfjs/`)
+
+  /* The old tree is moved ASIDE and deleted afterwards, so the gap between
+   * "the live tree is gone" and "the new one is in place" is two renames rather
+   * than a delete plus a copy. A consumer reading during the swap sees the old
+   * tree or the new one; interrupting between them leaves the new one. */
+  const retired = `${target}.retired.${process.pid}`
+  await rm(retired, { recursive: true, force: true })
+  try {
+    await rename(target, retired)
+  } catch (cause) {
+    // ENOENT is the first run: there is nothing to retire.
+    if ((cause instanceof Error ? cause.code : '') !== 'ENOENT') throw cause
+  }
+  await rename(staging, target)
+  await rm(retired, { recursive: true, force: true })
+  console.log(`sync-pdfjs-assets: staged ${DIRECTORIES.join(', ')} into vendor/pdfjs/`)
 }
 
 await main()

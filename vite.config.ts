@@ -1,6 +1,6 @@
 import { cp } from 'node:fs/promises'
 import { createReadStream } from 'node:fs'
-import { extname, join, normalize } from 'node:path'
+import { extname, join, normalize, resolve } from 'node:path'
 import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 
@@ -33,6 +33,13 @@ function pdfjsAssets(): Plugin {
     '.bcmap': 'application/octet-stream',
   }
 
+  /** Set from `configResolved` — see `closeBundle`. */
+  let building = false
+  /** The build's own output directory, absolute. Taken from the resolved
+   *  config rather than assumed to be `./dist`, which is wrong the moment
+   *  anything passes `--outDir`. */
+  let outDir = join(process.cwd(), 'dist')
+
   return {
     name: 'paper:pdfjs-assets',
     configureServer(server) {
@@ -50,14 +57,46 @@ function pdfjsAssets(): Plugin {
         if (rel.startsWith('..')) return next()
         const file = join(source, rel)
         if (process.env['PAPER_LOG_PDFJS']) console.log('[pdfjs] ' + rel)
-        res.setHeader('Content-Type', types[extname(file)] ?? 'application/octet-stream')
-        createReadStream(file)
-          .on('error', () => next())
-          .pipe(res)
+        const stream = createReadStream(file)
+        /* A missing asset is a 404 from THIS handler, not a fall-through.
+         *
+         * `next()` after the pdf.js content type was already set handed the
+         * request to Vite, which answered with the SPA's index.html — so
+         * pdf.js received an HTML page labelled `application/wasm` and failed
+         * somewhere deep in its decoder, with nothing anywhere naming the file
+         * that was missing. This is how a `vendor/pdfjs` that had not been
+         * staged presented itself: scanned pages rendering blank. */
+        stream.on('error', (cause: NodeJS.ErrnoException) => {
+          console.error(`[pdfjs] ${rel}: ${cause.code ?? cause.message}`)
+          res.statusCode = cause.code === 'ENOENT' ? 404 : 500
+          res.setHeader('Content-Type', 'text/plain')
+          res.end(`pdf.js asset unavailable: ${rel}. Run scripts/sync-pdfjs-assets.mjs.`)
+        })
+        stream.once('open', () => {
+          // Set on open, so the error path above can still choose its own.
+          res.setHeader('Content-Type', types[extname(file)] ?? 'application/octet-stream')
+          stream.pipe(res)
+        })
       })
     },
+    configResolved(config) {
+      building = config.command === 'build'
+      outDir = resolve(config.root, config.build.outDir)
+    },
     async closeBundle() {
-      await cp(source, join(process.cwd(), 'dist', 'pdfjs'), { recursive: true })
+      /* Only when this run was a BUILD.
+       *
+       * Vite calls `closeBundle` when the dev server shuts down as well, so
+       * stopping `pnpm dev` — with Ctrl-C, or by Tauri exiting — copied the
+       * vendored assets into `dist/pdfjs`. That directory belongs to the last
+       * production build, so quitting the dev server left a build tree
+       * carrying assets from a different moment than the code beside them.
+       *
+       * Guarded here rather than with `apply: 'build'`, which would be the
+       * obvious move and is wrong: it would take `configureServer` with it and
+       * leave the dev server unable to serve `/pdfjs/` at all. */
+      if (!building) return
+      await cp(source, join(outDir, 'pdfjs'), { recursive: true })
     },
   }
 }
