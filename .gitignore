@@ -64,8 +64,8 @@ dist/
 
 # pdf.js runtime data, copied out of node_modules by
 # scripts/sync-pdfjs-assets.mjs on predev/prebuild. A copy of a dependency,
-# not authored content.
-public/pdfjs/
+# not authored content. Outside public/ on purpose — see vite.config.ts.
+vendor/pdfjs/
 
 # Development book fixtures. The EPUB regenerates with
 # scripts/make-sample-epub.py; the PDF with `cupsfilter some.txt > sample.pdf`.

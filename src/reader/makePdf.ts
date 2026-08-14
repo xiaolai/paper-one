@@ -194,6 +194,11 @@ export async function makePdf(file: File | string, hooks: PdfHooks = {}): Promis
     cMapUrl: `${ASSET_BASE}cmaps/`,
     cMapPacked: true,
     standardFontDataUrl: `${ASSET_BASE}standard_fonts/`,
+    /* Required for scanned books, which are JBIG2 or JPEG 2000 images with a
+     * text layer over them. Without these every page fails to decode and the
+     * book renders blank — pdf.js reports it as a warning, not an error. */
+    wasmUrl: `${ASSET_BASE}wasm/`,
+    iccUrl: `${ASSET_BASE}iccs/`,
   })
   const pdf: PDFDocumentProxy = await task.promise
 
