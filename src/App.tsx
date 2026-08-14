@@ -6,6 +6,7 @@ import { usePlatform, usePrefersDark } from './lib/platform'
 import { useAppState } from './lib/state'
 import { useBook } from './lib/useBook'
 import { useLibrary } from './lib/useLibrary'
+import { useCards } from './lib/useCards'
 import { useMarks } from './lib/useMarks'
 import { useMarking } from './lib/useMarking'
 import { BOOKS, coverTint } from './data/fixtures'
@@ -13,6 +14,7 @@ import { BookSwitcher } from './overlays/BookSwitcher'
 import { CommandPalette } from './overlays/CommandPalette'
 import { TitleBar } from './shell/TitleBar'
 import { WindowShell } from './shell/WindowShell'
+import { Library } from './screens/Library'
 import { Reader } from './screens/Reader'
 import { SidePane } from './pane/SidePane'
 import { useSpeech } from './reader/useSpeech'
@@ -27,6 +29,7 @@ export function App() {
   /* Marks outlive the open book — the Notes panel browses every book's — so the
    * store is keyed by book rather than owned by one. */
   const marks = useMarks(book.bookId)
+  const cards = useCards(book.bookId)
   const marking = useMarking(book, marks)
   const library = useLibrary()
   /* Reading aloud follows the spine document: an utterance outlives a section,
@@ -184,10 +187,14 @@ export function App() {
             dispatch={dispatch}
             book={book}
             marks={marks}
+            cards={cards}
             onGoTo={book.goTo}
           />
         }
       >
+        {/* The reader stays mounted under every screen. Unmounting it tears
+            foliate down mid-flight and loses the reading position — see the
+            note on Library's own stacking. */}
         <Reader
           state={state}
           dispatch={dispatch}
@@ -196,7 +203,23 @@ export function App() {
           marks={marks}
           marking={marking}
           onAddBooks={addBooks}
+          inert={state.screen === 'library'}
         />
+
+        {state.screen === 'library' && (
+          <Library
+            books={library.books}
+            platform={platform}
+            onOpen={(url) => {
+              // Opening from the library takes you to what you opened. Staying
+              // on the shelf with a book loading behind it is the one thing a
+              // reader does not want from a click on a cover.
+              dispatch({ type: 'goScreen', screen: 'reader' })
+              book.open(url)
+            }}
+            onAddBooks={addBooks}
+          />
+        )}
       </WindowShell>
 
       <input

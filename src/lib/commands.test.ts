@@ -76,15 +76,24 @@ describe('buildCommands', () => {
 })
 
 describe('PANE_SHORTCUTS', () => {
-  it('binds only digits that have a panel behind them', () => {
-    expect(PANE_SHORTCUTS.map((s) => s.digit)).toEqual(['1', '2', '3', '5'])
+  it('binds §11\'s ⌘1…5 to contents, notes, search, cards and stats', () => {
+    expect(PANE_SHORTCUTS.map((s) => [s.digit, s.pane])).toEqual([
+      ['1', 'toc'],
+      ['2', 'notes'],
+      ['3', 'search'],
+      ['4', 'cards'],
+      ['5', 'stats'],
+    ])
   })
 
-  it('leaves ⌘4 unbound, because there is no cards panel', () => {
-    // §11 reserves it for cards. Binding it now would be a shortcut that
-    // silently does nothing — the same defect as a button dispatching into
-    // a layer nothing renders.
-    expect(PANE_SHORTCUTS.find((s) => s.digit === '4')).toBeUndefined()
+  it('binds every digit to a panel that actually renders', () => {
+    // The invariant, and the reason ⌘4 was unbound until Cards existed: a
+    // shortcut pointing at a panel nothing renders is a keystroke that gets
+    // swallowed to do nothing, which is indistinguishable from a broken key.
+    const commands = buildCommands(context().ctx)
+    for (const shortcut of PANE_SHORTCUTS) {
+      expect(find(commands, `pane:${shortcut.pane}`)).toBeDefined()
+    }
   })
 })
 

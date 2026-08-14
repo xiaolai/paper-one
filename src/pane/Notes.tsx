@@ -1,7 +1,9 @@
 import { useMemo, useState } from 'react'
-import { Trash2 } from 'lucide-react'
+import { Layers, Trash2 } from 'lucide-react'
+import { cardFromMark } from '../lib/cards'
 import type { Mark } from '../lib/marks'
 import { ICON } from '../lib/metrics'
+import type { CardStore } from '../lib/useCards'
 import type { MarkStore } from '../lib/useMarks'
 import styles from './SidePane.module.css'
 
@@ -34,12 +36,14 @@ function matches(mark: Mark, filter: NoteFilter): boolean {
 
 export interface NotesProps {
   marks: MarkStore
+  /** Where a mark becomes a made thing — §15's line between note and card. */
+  cards: CardStore
   /** The open book, so its marks can be shown first. Null when none is open. */
   bookId: string | null
   onGoTo?: (target: string) => void
 }
 
-export function Notes({ marks, bookId, onGoTo }: NotesProps) {
+export function Notes({ marks, cards, bookId, onGoTo }: NotesProps) {
   const [filter, setFilter] = useState<NoteFilter>('All')
   /** The mark whose note is being written. One at a time, like a text field. */
   const [editing, setEditing] = useState<string | null>(null)
@@ -138,14 +142,29 @@ export function Notes({ marks, bookId, onGoTo }: NotesProps) {
 
           <div className={styles.noteSource}>
             <span>{mark.chapter || 'Unknown chapter'}</span>
-            <button
-              type="button"
-              className={styles.noteDelete}
-              aria-label="Delete mark"
-              onClick={() => marks.remove(mark.id)}
-            >
-              <Trash2 size={ICON.inline} strokeWidth={ICON.stroke} />
-            </button>
+            <span style={{ display: 'flex', gap: 2 }}>
+              {/* Notes stay raw; cards are made. This is the only place the
+                  one becomes the other, which is what keeps the distinction
+                  §15 draws visible rather than nominal. */}
+              <button
+                type="button"
+                className={styles.noteDelete}
+                aria-label="Make a card"
+                title="Make a card"
+                onClick={() => cards.make(cardFromMark(mark))}
+              >
+                <Layers size={ICON.inline} strokeWidth={ICON.stroke} />
+              </button>
+              <button
+                type="button"
+                className={styles.noteDelete}
+                aria-label="Delete mark"
+                title="Delete mark"
+                onClick={() => marks.remove(mark.id)}
+              >
+                <Trash2 size={ICON.inline} strokeWidth={ICON.stroke} />
+              </button>
+            </span>
           </div>
         </div>
       ))}

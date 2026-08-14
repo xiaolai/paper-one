@@ -60,6 +60,8 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
+  /* The containing block for a screen layered over the reader — see Library. */
+  position: relative;
 }
 
 /* §08: the pane opens on width, not transform, so the reader reflows with it

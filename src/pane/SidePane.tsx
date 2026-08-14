@@ -1,6 +1,7 @@
 import {
   ChartNoAxesColumn,
   Highlighter,
+  Layers,
   List,
   Plus,
   Search,
@@ -11,9 +12,11 @@ import { NOT_CONFIGURED } from '../lib/companion'
 import { ICON } from '../lib/metrics'
 import type { AppDispatch, AppState, PaneId } from '../lib/state'
 import type { Book } from '../lib/useBook'
+import type { CardStore } from '../lib/useCards'
 import type { MarkStore } from '../lib/useMarks'
 import { Companion } from './Companion'
 import { Contents } from './Contents'
+import { Cards } from './Cards'
 import { Notes } from './Notes'
 import { SearchPanel } from './SearchPanel'
 import { Settings } from './Settings'
@@ -34,6 +37,7 @@ const RAIL: readonly { id: PaneId; label: string; Icon: typeof Search }[] = [
   { id: 'toc', label: 'Contents', Icon: List },
   { id: 'companion', label: 'Companion', Icon: Sparkles },
   { id: 'notes', label: 'Notes', Icon: Highlighter },
+  { id: 'cards', label: 'Cards', Icon: Layers },
   { id: 'search', label: 'Search', Icon: Search },
   { id: 'stats', label: 'Reading', Icon: ChartNoAxesColumn },
   { id: 'import', label: 'Add books', Icon: Plus },
@@ -51,10 +55,11 @@ export interface SidePaneProps {
   dispatch: AppDispatch
   book: Book
   marks: MarkStore
+  cards: CardStore
   onGoTo?: (target: string) => void
 }
 
-export function SidePane({ state, dispatch, book, marks, onGoTo }: SidePaneProps) {
+export function SidePane({ state, dispatch, book, marks, cards, onGoTo }: SidePaneProps) {
   /* Falls back to the last pane rather than unmounting. The slot stays mounted
    * at zero width and inert while closed, so keeping the panel rendered is what
    * preserves its scroll position, note filter and search query across a
@@ -85,9 +90,14 @@ export function SidePane({ state, dispatch, book, marks, onGoTo }: SidePaneProps
         {pane === 'notes' && (
           <Notes
             marks={marks}
+            cards={cards}
             bookId={book.bookId}
             {...(onGoTo ? { onGoTo } : {})}
           />
+        )}
+
+        {pane === 'cards' && (
+          <Cards cards={cards} bookId={book.bookId} {...(onGoTo ? { onGoTo } : {})} />
         )}
 
         {pane === 'search' && <SearchPanel book={book} />}

@@ -34,6 +34,7 @@ export type PaneId =
   | 'toc'
   | 'companion'
   | 'notes'
+  | 'cards'
   | 'search'
   | 'stats'
   | 'import'

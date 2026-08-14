@@ -44,19 +44,14 @@ const PANES: readonly { id: PaneId; label: string; combo?: string }[] = [
   { id: 'toc', label: 'Contents', combo: '⌘1' },
   { id: 'notes', label: 'Notes', combo: '⌘2' },
   { id: 'search', label: 'Search', combo: '⌘3' },
+  { id: 'cards', label: 'Cards', combo: '⌘4' },
   { id: 'companion', label: 'Companion' },
   { id: 'stats', label: 'Reading', combo: '⌘5' },
   { id: 'import', label: 'Add books' },
   { id: 'settings', label: 'Settings' },
 ]
 
-/**
- * §11 binds ⌘1…5 to "Contents, notes, search, cards, stats".
- *
- * Cards — ⌘4 — is deliberately absent: there is no cards panel, and binding a
- * shortcut to a panel that does not exist is the same silent no-op as a button
- * that dispatches into nothing. It returns with the panel.
- */
+/** §11 binds ⌘1…5 to "Contents, notes, search, cards, stats". */
 export const PANE_SHORTCUTS: readonly { combo: string; digit: string; pane: PaneId }[] =
   PANES.filter((pane) => pane.combo).map((pane) => ({
     combo: pane.combo ?? '',
@@ -167,6 +162,19 @@ export function buildCommands(ctx: CommandContext): Command[] {
       run: mark,
     })
   }
+
+  commands.push({
+    id: 'screen:library',
+    label: state.screen === 'library' ? 'Back to the reader' : 'Go to the library',
+    group: 'Book',
+    keywords: 'shelf books home',
+    on: state.screen === 'library',
+    run: () =>
+      dispatch({
+        type: 'goScreen',
+        screen: state.screen === 'library' ? 'reader' : 'library',
+      }),
+  })
 
   commands.push({
     id: 'book:open',

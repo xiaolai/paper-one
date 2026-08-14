@@ -31,6 +31,14 @@ export interface ReaderProps {
   marking: Marking
   /** Opens the file picker, which the window owns — see App. */
   onAddBooks: () => void
+  /**
+   * True when another screen is layered over the reader.
+   *
+   * The reader stays mounted underneath so foliate is not torn down and the
+   * reading position survives — but a surface nobody can see must not still be
+   * in the focus order, or Tab walks into a book that is not on screen.
+   */
+  inert?: boolean
 }
 
 export function Reader({
@@ -41,6 +49,7 @@ export function Reader({
   marks,
   marking,
   onAddBooks,
+  inert = false,
 }: ReaderProps) {
   const [dragging, setDragging] = useState(false)
   /* The stage element as STATE, not just a ref: the popup and the margin marks
@@ -105,7 +114,7 @@ export function Reader({
   )
 
   return (
-    <div className={styles.reader}>
+    <div className={styles.reader} inert={inert}>
       <div className={styles.column} data-platform={platform}>
         {book.source ? (
           <>

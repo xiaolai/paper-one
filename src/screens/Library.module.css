@@ -1,0 +1,168 @@
+/* The library screen.
+ *
+ * A full-width surface like the reader, so it takes the same titlebar clearance
+ * on macOS where the bar overlays the window.
+ */
+
+/*
+ * Layered OVER the reader rather than replacing it.
+ *
+ * Swapping the two unmounts the reader, which tears foliate down mid-flight:
+ * its paginator keeps a ResizeObserver that fires after the iframe document is
+ * gone and throws on a null documentElement. It also throws away the reading
+ * position and re-parses the book on the way back, which is the same reason the
+ * side pane stays mounted at zero width rather than unmounting.
+ *
+ * Covering it keeps the reader at its full size, so it never sees a resize to
+ * zero either — which is what `display: none` would have done instead.
+ */
+.library {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  background: var(--surface);
+}
+
+.library[data-platform='macos'] {
+  padding-top: var(--titlebar-h);
+}
+
+.head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 24px 40px 20px;
+}
+
+.title {
+  margin: 0;
+  font-family: 'Crimson Pro Variable', 'Crimson Pro', Georgia, serif;
+  font-size: 38px;
+  font-weight: 400;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+}
+
+.add {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--control-pill);
+  padding: 0 16px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: var(--surface);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* Fluid columns rather than a fixed count: the window is resizable and the
+ * pane takes 412px out of it when open, so a fixed grid would either overflow
+ * or strand a column of whitespace. */
+.shelf {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 28px 20px;
+  padding: 4px 40px 40px;
+}
+
+.book {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0;
+  border: none;
+  background: none;
+  text-align: start;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.book:disabled {
+  cursor: default;
+}
+
+.book:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+  border-radius: 4px;
+}
+
+/* 2:3, the proportion of a trade paperback. A cover image would replace the
+ * title inside it; until covers are extracted, the tint and the title are what
+ * make one book distinguishable from another at a glance. */
+.cover {
+  display: flex;
+  align-items: flex-end;
+  aspect-ratio: 2 / 3;
+  padding: 12px;
+  margin-bottom: 8px;
+  border-radius: 4px;
+  box-shadow: var(--shadow-card);
+  transition: transform var(--motion-chrome);
+}
+
+.book:hover:not(:disabled) .cover {
+  transform: translateY(-2px);
+}
+
+.coverTitle {
+  font-family: 'Crimson Pro Variable', 'Crimson Pro', Georgia, serif;
+  font-size: 15px;
+  line-height: 1.2;
+  color: var(--ink-2);
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.bookTitle {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bookAuthor {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 60px 40px;
+  text-align: center;
+}
+
+.emptyTitle {
+  font-family: 'Crimson Pro Variable', 'Crimson Pro', Georgia, serif;
+  font-size: 28px;
+  color: var(--ink);
+}
+
+.emptyBody {
+  max-width: 380px;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--muted);
+  text-wrap: pretty;
+}
