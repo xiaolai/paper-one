@@ -446,11 +446,17 @@ describe('the manual gesture checklist', () => {
    * evidence about gestures it has never touched. Three values, one of which is
    * honest about having run nothing.
    */
-  it('declares its run status as one of the three allowed values', () => {
+  it('declares its run status as one of the allowed values', () => {
     const match = checklist.match(/^\|\s*Status\s*\|\s*([^|]+?)\s*\|/m)
 
     expect(match).not.toBeNull()
-    expect(['NOT RUN', 'PASS', 'FAIL']).toContain(match[1])
+    /* PARTIAL was added when the first rows were actually run: a checklist
+     * with some rows performed and some not is the normal state during a
+     * feature, and forcing it to claim NOT RUN or PASS would make it lie in
+     * one direction or the other. Still a bare enum with no prose, because
+     * the whole point of the assertion is that the status cannot be padded
+     * into something that reads as done. */
+    expect(['NOT RUN', 'PARTIAL', 'PASS', 'FAIL']).toContain(match[1])
   })
 
   /*
