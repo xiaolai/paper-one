@@ -144,7 +144,13 @@ function foliatePdfStub(): Plugin {
 }
 
 // Tauri drives the dev server, so the port is fixed and failures must be loud
-// rather than silently hopping to 1421 — a moved port shows up as a white window.
+// rather than silently hopping to 14202 — a moved port shows up as a white window.
+//
+// 14201 rather than Vite's usual 1420: that default is what every other Tauri
+// project on this machine also picks, so two of them running at once meant
+// whichever bound first won and the second silently attached to the wrong app.
+// `devUrl` in `src-tauri/tauri.conf.json` must move with it or the window loads
+// nothing, with no error to say why — the same pairing the MCP bridge port has.
 const host = process.env.TAURI_DEV_HOST
 
 export default defineConfig({
@@ -157,10 +163,10 @@ export default defineConfig({
 
   clearScreen: false,
   server: {
-    port: 1420,
+    port: 14201,
     strictPort: true,
     host: host || false,
-    hmr: host ? { protocol: 'ws', host, port: 1421 } : undefined,
+    hmr: host ? { protocol: 'ws', host, port: 14202 } : undefined,
     watch: { ignored: ['**/src-tauri/**'] },
   },
 
