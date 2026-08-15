@@ -17,10 +17,7 @@
   "pnpm": {
     "onlyBuiltDependencies": [
       "esbuild"
-    ],
-    "patchedDependencies": {
-      "foliate-js@1.0.1": "patches/foliate-js@1.0.1.patch"
-    }
+    ]
   },
   "dependencies": {
     "@fontsource-variable/crimson-pro": "^5.3.0",
@@ -28,7 +25,7 @@
     "@fontsource-variable/literata": "^5.3.0",
     "@fontsource/ibm-plex-mono": "^5.3.0",
     "@tauri-apps/api": "^2.9.0",
-    "foliate-js": "1.0.1",
+    "foliate-js": "github:xiaolai/foliate-js#cee73ad2de97bf4ee7a2cd189a32fb791400bb8e",
     "lucide-react": "^1.31.0",
     "pdfjs-dist": "6.2.108",
     "react": "^19.2.0",

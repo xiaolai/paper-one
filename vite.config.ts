@@ -101,12 +101,54 @@ function pdfjsAssets(): Plugin {
   }
 }
 
+/**
+ * Cut foliate's own PDF loader out of the module graph.
+ *
+ * `view.js` does `await import('./pdf.js')` when it sniffs a PDF, and that
+ * module statically imports `./vendor/pdfjs/pdf.mjs` — a directory upstream
+ * deliberately does NOT ship, because it expects each consumer to vendor
+ * pdf.js there itself. Rollup follows the dynamic import while bundling and
+ * fails on the missing file, and Vite reads the templated `new URL()` on the
+ * line above it as a glob (`vendor/pdfjs/*`) and rejects that too.
+ *
+ * Paper never reaches it. `prepare` in `FoliateView` turns a PDF into a Book
+ * with `makePdf` before `View.open` is ever called, so foliate is never handed
+ * a PDF to sniff. Stubbed rather than aliased to an empty module so that if
+ * that ever stops being true it throws with a name in it, instead of opening
+ * a book with no pages.
+ *
+ * This could not have shown up before Paper moved to the fork: the npm build
+ * of foliate-js had `pdf.js` stripped out of the package altogether. It is
+ * also invisible to `pnpm dev` — only a real build walks the import.
+ */
+function foliatePdfStub(): Plugin {
+  const stub = '\0paper:foliate-pdf-stub'
+  return {
+    name: 'paper:foliate-pdf-stub',
+    // Without `pre` this never runs: a plugin with no `enforce` is consulted
+    // AFTER `vite:resolve`, which has already claimed `./pdf.js` and ended the
+    // chain. The stub silently does nothing and the build fails as if it were
+    // not there at all.
+    enforce: 'pre',
+    resolveId(source, importer) {
+      return source === './pdf.js' && importer?.includes('foliate-js') ? stub : null
+    },
+    load(id) {
+      if (id !== stub) return null
+      return 'export const makePDF = () => {\n'
+        + "  throw new Error('foliate-js/pdf.js is stubbed — Paper converts PDFs "
+        + "with makePdf() before View.open, so this path should be unreachable')\n"
+        + '}\n'
+    },
+  }
+}
+
 // Tauri drives the dev server, so the port is fixed and failures must be loud
 // rather than silently hopping to 1421 — a moved port shows up as a white window.
 const host = process.env.TAURI_DEV_HOST
 
 export default defineConfig({
-  plugins: [react(), pdfjsAssets()],
+  plugins: [react(), pdfjsAssets(), foliatePdfStub()],
 
   // foliate-js ships as unbundled ESM source whose modules import each other by
   // relative path. Pre-bundling it rewrites those specifiers and breaks the

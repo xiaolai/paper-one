@@ -10,17 +10,15 @@
  *   app listens for is `create-overlay`. Listening for the documented name
  *   silently never fires, and annotations simply never draw.
  *
- * The dependency is pinned to an EXACT version in package.json, not a caret
- * range, and that is load-bearing rather than cautious. `patches/` carries a
- * patch keyed `foliate-js@1.0.1`, and pnpm matches a patch by name@version: on
- * `^1.0.1` a routine bump to 1.0.2 resolves happily, the patch silently stops
- * applying, and PDFs lose highlights, notes and search — the patch is what
- * gives the fixed-layout renderer an overlay layer at all. Nothing fails; the
- * feature just goes away. Upgrading is therefore two steps that must happen
- * together: re-cut the patch with `pnpm patch foliate-js`, then bump both the
- * dependency and the `patchedDependencies` key.
+ * These describe OUR FORK, `github:xiaolai/foliate-js`, pinned to a SHA — not
+ * anything on npm. The registry's `foliate-js` was published by an unrelated
+ * account and had quietly rewritten `Overlayer.add`; declarations checked
+ * against it described that rewrite rather than the library. `MarkPainter` is
+ * where that surfaced, and the note on it is worth reading before trusting any
+ * other shape in this file.
  *
  * Upstream: https://github.com/johnfactotum/foliate-js
+ * Fork:     https://github.com/xiaolai/foliate-js (branch `paper`)
  */
 /**
  * The CFI parser, imported by the marks store to ORDER anchors.
@@ -219,8 +217,22 @@ declare module 'foliate-js/overlayer.js' {
    * type-checks while silently dropping its parameters — worth knowing before
    * reaching for one, which is why this is written down rather than fixed.
    */
+  /**
+   * The rects a painter is handed are a `DOMRectList`, NOT an array.
+   *
+   * `Overlayer.add` passes `range.getClientRects()` straight through, and it
+   * has done since foliate's first commit. This was declared as an array for
+   * as long as Paper depended on the unofficial npm build of foliate-js, whose
+   * publisher had rewritten `add` to map the rects into plain objects and
+   * concatenate them into a real array. That rewrite is not upstream, so the
+   * declaration described a stranger's fork rather than the library.
+   *
+   * Typed as `Iterable`, a painter can no longer reach for `filter`, `map` or
+   * `length` without converting first — which is the whole guarantee, since
+   * the version that could compiled cleanly and threw at the first highlight.
+   */
   export type MarkPainter = (
-    rects: readonly PaintRect[],
+    rects: Iterable<PaintRect>,
     options?: {
       color?: string
       doc?: Document | null

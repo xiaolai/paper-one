@@ -216,9 +216,12 @@ export function FoliateView({
              * reimplementing it here would fork that quietly. */
             // Options are OPTIONAL in foliate's painter contract; requiring
             // them here would have thrown on any caller that omitted them.
+            // `rects` arrives as a `DOMRectList` — foliate hands over
+            // `range.getClientRects()` untouched — so it is materialised
+            // before the geometry sees it. See `MarkPainter`.
             highlight: ((rects, options = {}) =>
               Overlayer.highlight(
-                balanceRects(rects, options.doc ?? null, options.at ?? null),
+                balanceRects(Array.from(rects), options.doc ?? null, options.at ?? null),
                 options,
               )) satisfies MarkPainter,
             underline: Overlayer.underline,
