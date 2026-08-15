@@ -54,7 +54,14 @@ CLAUDE.md
 error.log
 
 # Scratch space for companion HTML artifacts and working notes.
-dev-docs/
+dev-docs/*
+
+# …except the manual gesture checklist, which is not a working note. It is the
+# ONLY cover for every gesture in the selection feature — no lane at any level
+# reaches trusted pointer input — and `scripts/word-snap-live.test.mjs` asserts
+# it exists and is complete. Left untracked, that test is red on any checkout
+# but this one, and the checklist's recorded status could never be reviewed.
+!dev-docs/manual-selection-checklist.md
 
 # --- Application build artifacts ---
 node_modules/

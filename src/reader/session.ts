@@ -1,6 +1,17 @@
-import type { TocItem, View } from 'foliate-js/view.js'
+import type {
+  CreateOverlayDetail,
+  DrawAnnotationDetail,
+  LoadDetail,
+  RelocateDetail,
+  TocItem,
+  View,
+} from 'foliate-js/view.js'
 import type { MarkKind } from '../lib/marks'
 import type { BookMeta, ReaderPosition } from '../lib/useBook'
+import { deferSnap } from './wordSnap/deferredSnap'
+import { watchGestureProvenance } from './wordSnap/gestureProvenance'
+import { createReflowGuard } from './wordSnap/invalidate'
+import { rangeText } from './wordSnap/rangeText'
 
 /**
  * The reader's lifecycle, as a plain object.
@@ -181,6 +192,19 @@ function destroyable(value: unknown): value is Destroyable {
   return typeof (value as Destroyable | null)?.destroy === 'function'
 }
 
+/**
+ * Whether a range still describes something in the document.
+ *
+ * BOTH ends, because a range with one live boundary and one dead one is not a
+ * half-success — it is a selection nobody can see, and `applySnap` refuses to
+ * write one for the same reason. `isConnected` is transitive: a text node whose
+ * grandparent was replaced still points at its own parent and is still
+ * disconnected, which is exactly the shape `replaceChildren()` leaves behind.
+ */
+function connectedRange(range: Range): boolean {
+  return range.startContainer.isConnected && range.endContainer.isConnected
+}
+
 export class ReaderSession {
   #disposed = false
   #view: View | null = null
@@ -207,6 +231,19 @@ export class ReaderSession {
   /** Which spine item each live document is, so a per-document redraw can find
    *  the one section it needs to touch. */
   readonly #indexOf = new WeakMap<Document, number>()
+
+  /**
+   * The document whose selection is currently on screen, or null.
+   *
+   * Session-level because a fixed-layout spread has TWO live documents, each
+   * running its own `#watchSelection`. This used to be a `published` boolean
+   * inside each closure, so both could believe they owned the popup: selecting
+   * in the left page then the right left the left one still flagged, and the
+   * next repaint or collapse over there took down the right page's newer
+   * selection. Ownership is single by construction now — publishing transfers
+   * it, and only the holder may clear.
+   */
+  #selectionOwner: Document | null = null
   /** A book this session synthesised, which `View.close()` will not release. */
   #prepared: Destroyable | null = null
   readonly #host: HTMLElement
@@ -316,7 +353,7 @@ export class ReaderSession {
   #bind(view: View): void {
     view.addEventListener('load', (event) => {
       if (this.#disposed) return
-      const { doc, index } = (event as CustomEvent<{ doc: Document; index: number }>).detail
+      const { doc, index } = (event as CustomEvent<LoadDetail>).detail
       // A section re-loaded is the same document with fresh content, so its
       // previous listeners are dropped before new ones go on — otherwise every
       // return to a section doubles them.
@@ -343,20 +380,19 @@ export class ReaderSession {
      * which is why the store is read through a getter rather than captured. */
     view.addEventListener('create-overlay', (event) => {
       if (this.#disposed) return
-      const { index } = (event as CustomEvent<{ index: number }>).detail
+      const { index } = (event as CustomEvent<CreateOverlayDetail>).detail
       this.#sections.add(index)
       this.#drawSection(view, index)
     })
 
     view.addEventListener('draw-annotation', (event) => {
       if (this.#disposed) return
-      const detail = (event as CustomEvent<{
-        draw: (fn: unknown, options?: Record<string, unknown>) => void
-        annotation: { value?: string; kind?: MarkKind }
-        range: Range
-        /** foliate emits this; it is the document the rects were measured in. */
-        doc?: Document
-      }>).detail
+      /* The shared declaration, not a copy. These shapes were written out
+       * inline here and declared again in `vite-env.d.ts`, and the two had
+       * already drifted — this one made `annotation.value` optional where the
+       * declaration requires it, which is the difference between a guard that
+       * is load-bearing and one that is noise. */
+      const detail = (event as CustomEvent<DrawAnnotationDetail>).detail
       const painters = this.#painters
       if (!painters) return
       if (detail.annotation?.value && detail.range) {
@@ -400,10 +436,7 @@ export class ReaderSession {
 
     view.addEventListener('relocate', (event) => {
       if (this.#disposed) return
-      const detail = (event as CustomEvent<{
-        fraction: number
-        tocItem?: { label?: string; href?: string } | null
-      }>).detail
+      const detail = (event as CustomEvent<RelocateDetail>).detail
       this.#cb.onRelocate({
         fraction: detail.fraction,
         chapterLabel: detail.tocItem?.label ?? '',
@@ -509,11 +542,26 @@ export class ReaderSession {
   /**
    * Report the book's selection to the host.
    *
-   * Split across two triggers on purpose. `selectionchange` fires continuously
-   * while a drag is in progress, so publishing a snapshot from it would make
-   * the popup chase the pointer; it is used only to CLEAR, which is what makes
-   * a click-to-dismiss feel immediate. The snapshot itself is published when
-   * the gesture ends — pointerup for the mouse, keyup for shift-arrow.
+   * Split across three triggers on purpose. `selectionchange` fires
+   * continuously while a drag is in progress, so publishing a snapshot from it
+   * would make the popup chase the pointer; it is used only to CLEAR, which is
+   * what makes a click-to-dismiss feel immediate and is why that path is never
+   * deferred. The snapshot itself is published when the gesture ends — and the
+   * two gestures end differently:
+   *
+   * - **pointerup** hands the selection to the deferred snap, and the snapshot
+   *   is published when that settles. A drag is what word snapping is for, and
+   *   the deferral is WI-8's: writing a wider selection while foliate's
+   *   paginator still has its pointer flag up turns the page
+   *   (`paginator.js:586`). It publishes whether or not the snap wrote
+   *   anything: provenance decides whether the selection is WIDENED, never
+   *   whether it is reported, and a pointer gesture that published nothing
+   *   would leave the reader with no toolbar to mark or copy from. Only a
+   *   CANCELLED snap publishes nothing — a section torn down or a PDF page
+   *   repainted, where there is no longer a gesture to report.
+   * - **keyup** publishes immediately and unsnapped. Shift+arrow is
+   *   character-granular, and taking that away is the one thing the keyboard
+   *   selection has over the mouse's.
    */
   #watchSelection(doc: Document, view: View, index: number): void {
     const selectionOf = (): Range | null => {
@@ -522,29 +570,130 @@ export class ReaderSession {
       return selection.getRangeAt(0)
     }
 
-    const publish = () => {
+    /** Whether THIS document's snapshot is the one on screen, so a repaint
+     *  knows whether it has a popup to take down. Asked of `#selectionOwner`
+     *  rather than kept per document — see that field — and not asked of the
+     *  host, because publishing `null` on every repaint would churn the popup
+     *  state continuously through a pinch. */
+    const owns = () => this.#selectionOwner === doc
+
+    /**
+     * Publish one range — always one the caller has just read, never one
+     * captured before a mutation.
+     *
+     * That is the whole reason this takes an argument. `setBaseAndExtent`
+     * DETACHES a previously issued `Range` (measured in WebKit): the captured
+     * one keeps returning the old text while the live selection returns the
+     * snapped text, so a `publish` that read its range once and used it either
+     * side of the snap would store a cfi and a text describing a selection the
+     * reader never made. `applySnap` returns the range it read AFTER the write
+     * for exactly this call.
+     *
+     * The text is not `range.toString()` either — see `rangeText`, which spells
+     * block boundaries and drops the invisible characters that must not reach
+     * stored mark text.
+     */
+    const publish = (range: Range | null) => {
       if (this.#disposed) return
-      const range = selectionOf()
-      const text = range?.toString().trim() ?? ''
-      if (!range || !text) {
+      /* A range whose ends have LEFT the document describes a page that no
+       * longer exists. On a PDF that is what a zoom does — `makePdf`'s `paint`
+       * calls `replaceChildren()` on the text layer — and WI-8's deferral means
+       * a snap can settle just after it, holding a range over nodes nobody can
+       * see. Publishing it would put the popup over a re-laid-out page pointing
+       * at nothing, which is worse than publishing nothing. */
+      const live = range && connectedRange(range) ? range : null
+      const text = live ? rangeText(live) : ''
+      if (!live || !text) {
+        /* Ownership goes with the popup: once null is published there is
+         * nothing on screen for anyone to own. The guard against one page of a
+         * spread taking down the other page's newer selection belongs at the
+         * REPAINT site, which asks `owns()` before calling here at all — not in
+         * this function, which must keep emitting null for every caller that
+         * reaches it or a collapsed selection stops dismissing the popup. */
+        this.#selectionOwner = null
         this.#cb.onSelection(null)
         return
       }
-      this.#cb.onSelection({ cfi: view.getCFI(index, range), sectionIndex: index, text, range })
+      this.#selectionOwner = doc
+      this.#cb.onSelection({ cfi: view.getCFI(index, live), sectionIndex: index, text, range: live })
     }
+
+    const publishLive = () => publish(selectionOf())
 
     const clearIfCollapsed = () => {
       if (this.#disposed) return
-      if (!selectionOf()) this.#cb.onSelection(null)
+      // Through `publish`, so the "is a popup up?" flag comes down with it. A
+      // clear that went straight to the callback would leave the flag saying
+      // `true`, and the next repaint would clear an already-cleared popup.
+      if (!selectionOf()) publish(null)
     }
 
-    doc.addEventListener('pointerup', publish)
-    doc.addEventListener('keyup', publish)
+    /**
+     * Where the selection came from, kept per document alongside the
+     * publishers.
+     *
+     * The snap reads it when it runs — never when it is scheduled — so a
+     * selection replaced between the gesture and the macrotask is not snapped,
+     * and a shift+arrow selection followed by a context-click is not either.
+     * Both are bound here rather than beside the snap so that every listener in
+     * this section lives and dies through the one teardown path — see
+     * `#onTeardown`, which is also where the pending snap is cancelled.
+     *
+     * Its `pointerup` listener is a second one on this document, and on a PDF
+     * page `bindSelectionFix` adds a third (`makePdf.ts:82`). None of the three
+     * may depend on running first, and none does: this one only lowers a flag,
+     * and scheduling a macrotask cannot be observed by either of the others.
+     */
+    const provenance = watchGestureProvenance(doc)
+    const snap = deferSnap(doc, {
+      isPointerProduced: provenance.isPointerProduced,
+      onSettled: (application) => publish(application.range),
+    })
+
+    /**
+     * A PDF page repainting underneath all of this.
+     *
+     * `makePdf`'s `paint` takes a render generation at the top of every zoom or
+     * re-render and finishes by calling `replaceChildren()` on the `.textLayer`
+     * — so both the pending snap and the published snapshot are about to be
+     * describing nodes that have left the document. Neither is recoverable, and
+     * a selection that is silently re-anchored to whatever now sits at those
+     * offsets is the outcome this exists to prevent: the snap is dropped, and
+     * the popup comes down.
+     *
+     * Not a `MutationObserver`: the generation already exists, is already what
+     * `paint` consults, and — unlike an observer — is reachable from the only
+     * test lane this repository has. The notification fires when the repaint
+     * STARTS, which is a moment before the nodes go, so this may not decide
+     * anything by asking whether they are still attached; at that moment they
+     * always are.
+     *
+     * An EPUB section never repaints this way, so its guard is never bumped and
+     * none of this ever runs for one.
+     */
+    const offReflow = createReflowGuard(doc).onReflow(() => {
+      snap.cancel()
+      if (owns()) publish(null)
+    })
+
+    doc.addEventListener('pointerup', snap.schedule)
+    doc.addEventListener('keyup', publishLive)
     doc.addEventListener('selectionchange', clearIfCollapsed)
 
     this.#onTeardown(doc, () => {
-      doc.removeEventListener('pointerup', publish)
-      doc.removeEventListener('keyup', publish)
+      provenance.unbind()
+      /* Not a DOM listener, so the listener-count assertions cannot see it: a
+       * section returned to twice would otherwise leave two watchers reacting
+       * to one repaint, each retaining this session and its document. */
+      offReflow()
+      /* Before the listeners come off, and covering both the section going away
+       * and the whole session being disposed: `dispose()` runs every teardown
+       * list it holds. A timer left armed here fires into a document nobody is
+       * reading and writes to its selection — the publish would be caught by
+       * the disposal latch, but the mutation would already have happened. */
+      snap.cancel()
+      doc.removeEventListener('pointerup', snap.schedule)
+      doc.removeEventListener('keyup', publishLive)
       doc.removeEventListener('selectionchange', clearIfCollapsed)
     })
   }
@@ -666,6 +815,14 @@ export class ReaderSession {
    *
    * `pagehide` releases the entry as the document goes away, so a book read
    * end to end does not carry every section it passed through.
+   *
+   * That `pagehide` listener is itself torn down, and it is the FIRST entry in
+   * the list so that every path which releases a document releases it too. It
+   * used to be the one listener nothing removed: a section reload runs
+   * `#resetWatchers`, which drops the map entry, and the next `#onTeardown`
+   * then registered a second `pagehide` on the same window — one more per
+   * return to a section, each retaining this session and its document, while
+   * every other listener in the file was scrupulously balanced.
    */
   #onTeardown(doc: Document, off: () => void): void {
     const existing = this.#unwatch.get(doc)
@@ -673,15 +830,13 @@ export class ReaderSession {
       this.#unwatch.set(doc, [...existing, off])
       return
     }
-    this.#unwatch.set(doc, [off])
-    doc.defaultView?.addEventListener(
-      'pagehide',
-      () => {
-        for (const fn of this.#unwatch.get(doc) ?? []) fn()
-        this.#unwatch.delete(doc)
-      },
-      { once: true },
-    )
+    const view = doc.defaultView
+    const onPageHide = () => {
+      for (const fn of this.#unwatch.get(doc) ?? []) fn()
+      this.#unwatch.delete(doc)
+    }
+    this.#unwatch.set(doc, [() => view?.removeEventListener('pagehide', onPageHide), off])
+    view?.addEventListener('pagehide', onPageHide, { once: true })
   }
 
   /**
@@ -719,11 +874,15 @@ export class ReaderSession {
     fonts.addEventListener('loadingdone', redraw)
     this.#onTeardown(doc, () => fonts.removeEventListener('loadingdone', redraw))
 
-    /* No catch. `FontFaceSet.ready` does not reject — a document torn down
-     * mid-load simply never settles it — so a catch here could only ever
-     * swallow a failure thrown by `redrawMarks` itself, which is the opposite
-     * of what a teardown guard is for. */
-    void fonts.ready.then(redraw)
+    /* `FontFaceSet.ready` does not reject — a document torn down mid-load
+     * simply never settles it. But `.then(redraw)` is a NEW promise, and it
+     * rejects if `redraw` throws, which this used to leave unhandled at the
+     * window. Reported, not swallowed: the point of the original "no catch"
+     * note was that a failure in `redrawMarks` must not disappear, and a catch
+     * that logs keeps that while giving the rejection somewhere to go. */
+    void fonts.ready
+      .then(redraw)
+      .catch((cause: unknown) => console.error('Paper: redraw after fonts loaded failed', cause))
   }
 
   /** Drop the listeners a document had, before re-registering them. */
@@ -732,24 +891,37 @@ export class ReaderSession {
     this.#unwatch.delete(doc)
   }
 
-  /** Idempotent, and safe at any point in startup. */
+  /**
+   * Idempotent, and safe at any point in startup.
+   *
+   * Every step is isolated, and the resource-releasing half runs in a `finally`.
+   * `#disposed` latches on entry, so a single throwing host callback or teardown
+   * function used to abort the rest of this method permanently: the next call
+   * returned at the guard, and the listeners, the prepared book, the view and
+   * the host were never released. The one thing teardown must not do is stop
+   * halfway, so nothing here is allowed to propagate.
+   */
   dispose(): void {
     if (this.#disposed) return
     this.#disposed = true
-    this.#cb.onDocument(null)
-    this.#cb.onNavigator(null)
-    this.#cb.onSelection(null)
-    for (const offs of this.#unwatch.values()) for (const off of offs) off()
-    this.#unwatch.clear()
-    this.#sections.clear()
-    this.#painters = null
-    const prepared = this.#prepared
-    this.#prepared = null
-    if (prepared) destroyQuietly(prepared)
-    const built = this.#view
-    this.#view = null
-    if (built) closeQuietly(built)
-    this.#host.replaceChildren()
+    try {
+      quietly('onDocument', () => this.#cb.onDocument(null))
+      quietly('onNavigator', () => this.#cb.onNavigator(null))
+      quietly('onSelection', () => this.#cb.onSelection(null))
+      for (const offs of this.#unwatch.values())
+        for (const off of offs) quietly('teardown', off)
+    } finally {
+      this.#unwatch.clear()
+      this.#sections.clear()
+      this.#painters = null
+      const prepared = this.#prepared
+      this.#prepared = null
+      if (prepared) destroyQuietly(prepared)
+      const built = this.#view
+      this.#view = null
+      if (built) closeQuietly(built)
+      quietly('host cleanup', () => this.#host.replaceChildren())
+    }
   }
 }
 
@@ -772,6 +944,24 @@ function destroyQuietly(prepared: Destroyable): void {
     prepared.destroy()
   } catch (cause) {
     console.error('Paper: failed to destroy the prepared book', cause)
+  }
+}
+
+/**
+ * Run one step of teardown without letting it stop the rest.
+ *
+ * `dispose()` latches `#disposed` on entry, so a step that throws used to make
+ * teardown unfinishable rather than merely incomplete — the next call returned
+ * at the guard and the remaining listeners, the book, the view and the host
+ * were never released. Reported rather than swallowed: a host callback that
+ * throws during teardown is a real defect, and the leak it used to cause was
+ * invisible precisely because nothing said anything.
+ */
+function quietly(what: string, step: () => void): void {
+  try {
+    step()
+  } catch (cause) {
+    console.error(`Paper: ${what} threw during teardown`, cause)
   }
 }
 
@@ -819,19 +1009,38 @@ function attachMark(view: View, anchor: MarkAnchor, options: AttachOptions = {})
 }
 
 /**
- * Closed views, so a view is never closed twice.
+ * What was closed on a view, so it is never closed twice for the same state —
+ * and IS closed again when startup built something new underneath.
  *
  * Both `dispose()` and the post-await `#settle()` can legitimately reach the
  * same view: dispose closes what it holds, then the in-flight startup resolves
  * and hands the very same view back. The old `try/catch` hid the second close
  * rather than preventing it — and a swallowed double-close is precisely the
  * kind of thing that looks fine until foliate starts throwing on it.
+ *
+ * Keying on the view ALONE was too coarse, and leaked. `dispose()` can close a
+ * view while its `open()`/`init()` is still in flight; that startup then builds
+ * a renderer AFTER the close, and the `#settle()` call that would have released
+ * it was suppressed as a duplicate. The renderer and its iframes survived the
+ * session. So the record is the renderer that was closed, and a later call with
+ * a DIFFERENT renderer — including one where there was none before — is real
+ * work rather than a repeat.
  */
-const CLOSED = new WeakSet<object>()
+const CLOSED = new WeakMap<object, unknown>()
+
+/** `renderer` is a getter that throws before `open()` has built one. */
+function rendererOf(view: View): unknown {
+  try {
+    return view.renderer ?? null
+  } catch {
+    return null
+  }
+}
 
 function closeQuietly(view: View): void {
-  if (CLOSED.has(view)) return
-  CLOSED.add(view)
+  const renderer = rendererOf(view)
+  if (CLOSED.has(view) && CLOSED.get(view) === renderer) return
+  CLOSED.set(view, renderer)
   try {
     view.close()
   } catch {
@@ -855,20 +1064,46 @@ async function* runSearch(
   signal: AbortSignal,
 ): AsyncGenerator<SearchHit> {
   let label = ''
-  for await (const result of view.search({ query })) {
-    if (signal.aborted) return
-    if (result === 'done') return
-    if (typeof result !== 'object' || result === null) continue
-    if ('progress' in result) continue
-    if ('subitems' in result) {
-      label = result.label ?? ''
-      for (const hit of result.subitems) {
-        if (signal.aborted) return
-        yield toHit(hit, label)
+  /* Checked BEFORE the iterator exists. `view.search()` clears foliate's own
+   * results and starts walking the book, so entering it on an already-aborted
+   * signal threw away the results still on screen and began work whose every
+   * outcome is discarded. The caller aborts on each keystroke, so this is the
+   * common path, not the rare one. */
+  if (signal.aborted) return
+
+  const results = view.search({ query })
+  /* Closed on the way out, however we leave. A `for await` that returns early
+   * does call `results.return()`, but an abort arriving while we are parked on
+   * the next result is not observed until that result arrives — so the search
+   * runs on after cancellation. Racing the iterator against the abort lets the
+   * cancellation win immediately, and `finally` closes the generator foliate
+   * gave us rather than leaving it walking the book. */
+  const aborted = new Promise<'aborted'>((resolve) => {
+    if (signal.aborted) resolve('aborted')
+    else signal.addEventListener('abort', () => resolve('aborted'), { once: true })
+  })
+
+  try {
+    for (;;) {
+      const step = await Promise.race([results.next(), aborted])
+      if (step === 'aborted' || step.done) return
+      const result = step.value
+      if (signal.aborted) return
+      if (result === 'done') return
+      if (typeof result !== 'object' || result === null) continue
+      if ('progress' in result) continue
+      if ('subitems' in result) {
+        label = result.label ?? ''
+        for (const hit of result.subitems) {
+          if (signal.aborted) return
+          yield toHit(hit, label)
+        }
+        continue
       }
-      continue
+      if ('cfi' in result) yield toHit(result, label)
     }
-    if ('cfi' in result) yield toHit(result, label)
+  } finally {
+    await results.return?.(undefined)
   }
 }
 

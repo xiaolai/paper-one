@@ -1,4 +1,5 @@
 import { useCallback, useMemo } from 'react'
+import { upsertOverlapping } from './markMatch'
 import {
   createMark,
   loadMarks,
@@ -6,7 +7,6 @@ import {
   removeMark as removeFrom,
   saveMarks,
   updateNote as updateNoteIn,
-  upsertMark,
   type Mark,
   type NewMark,
 } from './marks'
@@ -51,7 +51,11 @@ export function useMarks(bookId: string | null, storage = localStore()): MarkSto
   const add = useCallback(
     (draft: NewMark) => {
       const mark = createMark(draft)
-      apply((prev) => upsertMark(prev, mark))
+      /* Overlapping, not byte-identical. A mark is reached by any selection
+       * that covers part of it, so the row a new mark replaces is the row that
+       * selection resolved to — otherwise re-marking a passage the reader was
+       * just told is marked writes a second, overlapping row. */
+      apply((prev) => upsertOverlapping(prev, mark))
       return mark
     },
     [apply],

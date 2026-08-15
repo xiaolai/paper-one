@@ -230,6 +230,24 @@ describe('parseMarks', () => {
     expect(parseMarks('{"marks":[]}')).toEqual([])
   })
 
+  /* Everything downstream addresses a mark by id and assumes one row per id:
+   * `remove` drops every match and `setNote` rewrites every match. Nothing
+   * enforced it, so a store carrying a duplicate id — a legacy write, a merge
+   * across devices — turned one delete into several, across books. The ids
+   * here differ in book and anchor precisely so a leak would be visible. */
+  it('keeps one row per id, so a by-id delete cannot take another book with it', () => {
+    const dupe = [
+      { ...mark(), id: 'shared', bookId: 'book-a', cfi: 'epubcfi(/6/4!/4/2,/1:0,/1:5)' },
+      { ...mark(), id: 'shared', bookId: 'book-b', cfi: 'epubcfi(/6/8!/4/2,/1:9,/1:14)' },
+      { ...mark(), id: 'other', bookId: 'book-a' },
+    ]
+    const parsed = parseMarks(JSON.stringify(dupe))
+    expect(parsed).toHaveLength(2)
+    expect(parsed.map((m) => m.id)).toEqual(['shared', 'other'])
+    // First wins — the oldest surviving row, not the later probable corruption.
+    expect(parsed[0]?.bookId).toBe('book-a')
+  })
+
   it('drops rows that fail validation and keeps the rest', () => {
     // Storage is a trust boundary: one bad row must not cost the reader every
     // other mark they have made.

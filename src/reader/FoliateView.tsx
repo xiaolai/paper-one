@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { Renderer, TocItem, View } from 'foliate-js/view.js'
 import type { MarkPainter } from 'foliate-js/overlayer.js'
 import type { Theme } from '../lib/state'
@@ -128,20 +128,18 @@ export function FoliateView({
   const [ready, setReady] = useState(0)
 
   /* Callbacks and settings live in refs so changing one does not tear the book
-   * down and reopen it — reopening loses the reading position. */
-  const handlers = useRef({
-    onToc,
-    onRelocate,
-    onDocument,
-    onMeta,
-    onError,
-    onNavigator,
-    onSelection,
-    onMarkDrawn,
-    onMarkActivated,
-    onFileDropped,
-  })
-  handlers.current = {
+   * down and reopen it — reopening loses the reading position.
+   *
+   * Built ONCE and committed in a layout effect, for two reasons. The object
+   * used to be written out twice, so adding a callback to one copy and not the
+   * other produced exactly the stale handler this file warns about further
+   * down. And assigning during render published values from a render React may
+   * still abandon: under a concurrent or discarded render the live session
+   * could read a callback belonging to a tree that never committed. A layout
+   * effect runs after commit and before the session-creating effect below, so
+   * the session never sees an uncommitted value and never sees a missing one.
+   */
+  const currentHandlers = {
     onToc,
     onRelocate,
     onDocument,
@@ -153,15 +151,23 @@ export function FoliateView({
     onMarkActivated,
     onFileDropped,
   }
+  const handlers = useRef(currentHandlers)
 
   /* The same reason as the handlers, and one more: the session reads this back
    * whenever a section's overlay is built, which happens as the reader scrolls
    * — long after any value captured at startup went stale. */
   const marksRef = useRef(marks)
-  marksRef.current = marks
-
   const settings = useRef<Settings>({ stepIdx, theme, paginated })
-  settings.current = { stepIdx, theme, paginated }
+
+  /* All three refs commit together, after render — see the note on `handlers`.
+   * `useLayoutEffect` rather than `useEffect` because it runs before the
+   * session-creating effect below, so startup reads current values rather than
+   * the ones this component mounted with. */
+  useLayoutEffect(() => {
+    handlers.current = currentHandlers
+    marksRef.current = marks
+    settings.current = { stepIdx, theme, paginated }
+  })
 
   useEffect(() => {
     const host = hostRef.current
@@ -239,7 +245,13 @@ export function FoliateView({
             // A PDF page has no text until it is painted, and its overlay is
             // created before that — so marks are re-attached once there is
             // something for their anchors to resolve against.
-            onPagePainted: () => sessionRef.current?.redrawMarks(),
+            /* `session`, not `sessionRef.current`. A PDF page can finish
+             * painting after its book has been replaced, and the ref by then
+             * holds the NEW session — so a late paint from a disposed book
+             * redrew the marks of whatever is on screen now. `redrawMarks`
+             * already ignores a disposed session, so capturing it directly is
+             * both narrower and self-cancelling. */
+            onPagePainted: () => session.redrawMarks(),
           })
         },
         applySettings: (view: View) => applySettings(view.renderer, settings.current),
@@ -272,15 +284,25 @@ export function FoliateView({
     const session = sessionRef.current
     const renderer = session?.view?.renderer
     if (!session || !renderer || ready === 0) return
-    applySettings(renderer, { stepIdx, theme, paginated })
-    /* A theme change reaches the book through `setStyles`, which restyles the
-     * document WITHOUT rebuilding the section — so no `create-overlay` fires
-     * and the marks keep the colour they were painted in. Changing the step or
-     * the flow does rebuild, and re-attaching an already-attached mark replaces
-     * it rather than stacking a second copy, so this is safe to run for all
-     * three rather than only for the one that needs it. */
-    session.redrawMarks()
-  }, [stepIdx, theme, paginated, ready])
+    /* Guarded exactly as startup guards the same call. `start` treats
+     * `applySettings` as fallible and routes its failure through `onError`;
+     * here it was bare, so a renderer that threw on a settings change escaped
+     * the effect and unmounted the React tree — the reader vanished instead of
+     * the theme failing to change. */
+    try {
+      applySettings(renderer, { stepIdx, theme, paginated })
+      /* A theme change reaches the book through `setStyles`, which restyles the
+       * document WITHOUT rebuilding the section — so no `create-overlay` fires
+       * and the marks keep the colour they were painted in. Changing the step or
+       * the flow does rebuild, and re-attaching an already-attached mark replaces
+       * it rather than stacking a second copy, so this is safe to run for all
+       * three rather than only for the one that needs it. */
+      session.redrawMarks()
+    } catch (cause) {
+      console.error('Paper: applying reader settings failed', cause)
+      handlers.current.onError(generation, 'That setting could not be applied.')
+    }
+  }, [stepIdx, theme, paginated, ready, generation])
 
   return <div ref={hostRef} style={{ position: 'absolute', inset: 0 }} />
 }

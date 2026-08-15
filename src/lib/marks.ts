@@ -263,7 +263,32 @@ export function parseMarks(raw: string | null): Mark[] {
     return []
   }
   if (!Array.isArray(parsed)) return []
-  return parsed.filter(isMark)
+  return dedupeById(parsed.filter(isMark))
+}
+
+/**
+ * One row per id, keeping the first.
+ *
+ * Everything downstream addresses a mark BY ID and assumes that is unique:
+ * `remove` drops every row matching an id and `setNote` rewrites every one of
+ * them. Nothing enforced it. A store carrying duplicate ids — a legacy write, a
+ * hand-edited value, a merge across two devices — therefore turned one delete
+ * into several, across books, silently. Enforced here because this is the only
+ * door stored data comes through, so a single check makes the assumption true
+ * for every caller rather than asking each of them to defend itself.
+ *
+ * First wins: it is the oldest surviving row, and a later duplicate is the more
+ * likely corruption.
+ */
+function dedupeById(marks: readonly Mark[]): Mark[] {
+  const seen = new Set<string>()
+  const kept: Mark[] = []
+  for (const mark of marks) {
+    if (seen.has(mark.id)) continue
+    seen.add(mark.id)
+    kept.push(mark)
+  }
+  return kept
 }
 
 /**

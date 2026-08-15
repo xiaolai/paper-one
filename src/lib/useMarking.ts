@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { findMark } from './markMatch'
 import type { Mark } from './marks'
 import type { SelectionSnapshot } from '../reader/session'
 import type { Book } from './useBook'
@@ -87,9 +88,44 @@ export function useMarking(book: Book, marks: MarkStore): Marking {
     })
   }, [])
 
+  /**
+   * Drop one anchor's cached range.
+   *
+   * The map's contract is "ranges for the marks foliate has drawn", so every
+   * erase has to take the entry with it. Shared because it is needed from two
+   * places that had drifted apart: `unmark` did it, and replacing an
+   * overlapping mark in `mark` did not — leaving a Range pointing at DOM that
+   * had just been erased, which the margin then measured.
+   */
+  const forgetRange = useCallback((cfi: string) => {
+    setRanges((prev) => {
+      if (!prev.has(cfi)) return prev
+      const next = new Map(prev)
+      next.delete(cfi)
+      return next
+    })
+  }, [])
+
+  /**
+   * The mark under the selection — by OVERLAP, not by a byte-identical CFI.
+   *
+   * Byte equality asked whether the reader had reproduced an anchor exactly,
+   * which is not a question a gesture can answer: selecting part of a marked
+   * paragraph found nothing and offered to mark it again, and snapping the
+   * selection to whole words widened every anchor, putting marks made before
+   * that change out of reach of the gesture that made them. `findMark` carries
+   * the rule, and the tie-break when a selection covers two marks.
+   */
   const selected = useMemo(
-    () => marks.current.find((candidate) => candidate.cfi === selection?.cfi) ?? null,
-    [marks.current, selection],
+    () =>
+      selection && bookId
+        ? findMark(marks.current, {
+            cfi: selection.cfi,
+            sectionIndex: selection.sectionIndex,
+            bookId,
+          })
+        : null,
+    [marks.current, selection, bookId],
   )
 
   /**
@@ -110,6 +146,16 @@ export function useMarking(book: Book, marks: MarkStore): Marking {
         kind: 'highlight',
         chapter,
       })
+      /* The overlay of the mark this one replaced goes with it. The store drops
+       * the superseded row — `marks.add` resolves the same mark `selected`
+       * did, from the same selection — but foliate has already drawn it at its
+       * own anchor, and a highlight nothing in the store accounts for stays on
+       * the page until the section is rebuilt. Skipped when the anchors match,
+       * because there the new drawing lands exactly on the old one. */
+      if (selected && selected.cfi !== created.cfi) {
+        eraseMark(selected)
+        forgetRange(selected.cfi)
+      }
       drawMark(created)
       // §07: acting on a selection consumes it. Leaving it up would leave the
       // popup floating over a passage that has already been dealt with.
@@ -117,7 +163,7 @@ export function useMarking(book: Book, marks: MarkStore): Marking {
       setSelection(null)
       return created
     },
-    [selection, bookId, marks, chapter, drawMark, deselect],
+    [selection, bookId, marks, chapter, drawMark, eraseMark, selected, deselect, forgetRange],
   )
 
   const [focus, setFocus] = useState<MarkFocus | null>(null)
@@ -129,16 +175,18 @@ export function useMarking(book: Book, marks: MarkStore): Marking {
 
   const unmark = useCallback(
     (target: Mark) => {
-      eraseMark(target)
+      /* The row always goes. The DRAWING only goes when the mark belongs to the
+       * book on screen: `eraseMark` and the range cache both address the
+       * current renderer, and a CFI is only unique within a section of one
+       * book. Unmarking another book's note — from a list that spans books —
+       * used to erase whatever the current book happened to have at the same
+       * anchor, and drop its cached range with it. */
       marks.remove(target.id)
-      setRanges((prev) => {
-        if (!prev.has(target.cfi)) return prev
-        const next = new Map(prev)
-        next.delete(target.cfi)
-        return next
-      })
+      if (target.bookId !== bookId) return
+      eraseMark(target)
+      forgetRange(target.cfi)
     },
-    [eraseMark, marks],
+    [eraseMark, marks, bookId, forgetRange],
   )
 
   return useMemo<Marking>(

@@ -4,6 +4,7 @@ import viewerCss from 'pdfjs-dist/web/pdf_viewer.css?raw'
 import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist'
 import type { TocItem } from 'foliate-js/view.js'
 import { titleFromSource } from '../lib/formats'
+import { createReflowGuard } from './wordSnap/invalidate'
 
 /**
  * A PDF, presented to foliate as a book.
@@ -88,17 +89,6 @@ function bindSelectionFix(container: Element, doc: Document): void {
 }
 
 /**
- * Render generations, one per page document.
- *
- * Zooming or re-rendering starts a fresh paint without stopping the one in
- * flight. Two paints at different scales then race, and the slower one wins
- * whenever it finishes last — leaving a canvas drawn at the previous scale
- * under a text layer positioned for the new one. Each paint takes a generation
- * and abandons itself the moment a newer one starts.
- */
-const generations = new WeakMap<Document, number>()
-
-/**
  * The render in flight for a page document, so a new paint can CANCEL it.
  *
  * Abandoning it is not enough, and the difference is a blank page rather than a
@@ -119,10 +109,16 @@ const inFlight = new WeakMap<Document, { cancel: () => void }>()
  * the spans are positioned in units of it, and without it every one of them
  * lands at the top-left corner.
  */
-async function paint(page: PDFPageProxy, doc: Document, zoom: number): Promise<void> {
-  const generation = (generations.get(doc) ?? 0) + 1
-  generations.set(doc, generation)
-  const superseded = () => generations.get(doc) !== generation
+async function paint(page: PDFPageProxy, doc: Document, zoom: number): Promise<boolean> {
+  /* The render generation, and the announcement that this page is being rebuilt
+   * under whatever is anchored into it — see `createReflowGuard`, which holds
+   * both and explains why they are one thing. Taking it here rather than after
+   * the render is deliberate: `replaceChildren()` below detaches every node a
+   * selection points at, and the reader's pending word snap has to hear about
+   * that BEFORE it happens, not after. */
+  const reflow = createReflowGuard(doc)
+  const generation = reflow.bump()
+  const superseded = () => !reflow.isValid(generation)
 
   // Stop the previous paint before starting this one — see `inFlight`.
   inFlight.get(doc)?.cancel()
@@ -141,28 +137,43 @@ async function paint(page: PDFPageProxy, doc: Document, zoom: number): Promise<v
   canvas.width = viewport.width
   canvas.height = viewport.height
   const task = page.render({ canvas, viewport })
+
+  /* What a LATER paint must cancel to stop this one — see `inFlight`.
+   *
+   * A paint has two cancellable stages, and this used to name only the first:
+   * `inFlight` was cleared as soon as the canvas settled, so for the whole text
+   * stage the map held nothing and a new paint's `inFlight.get(doc)?.cancel()`
+   * found nothing to cancel. The superseded text layer went on appending spans
+   * into the same `.textLayer` the new paint had just emptied, and the page
+   * ended up carrying two renders' worth of text, positioned at two scales.
+   * Ownership therefore passes from the canvas task to the text layer with no
+   * gap between them, and only the single `finally` below gives it up. */
+  let active: { cancel: () => void } = task
   inFlight.set(doc, task)
   try {
-    await task.promise
-  } catch (cause) {
-    // A cancelled render rejects; anything else is worth knowing about, and
-    // an unhandled rejection here reaches the window as an uncaught error.
-    if (!superseded()) console.error('Paper: PDF page render failed', cause)
-    return
-  } finally {
-    if (inFlight.get(doc) === task) inFlight.delete(doc)
-  }
-  if (superseded()) return
-  doc.querySelector('#canvas')?.replaceChildren(doc.adoptNode(canvas))
+    try {
+      await task.promise
+    } catch (cause) {
+      // A cancelled render rejects; anything else is worth knowing about, and
+      // an unhandled rejection here reaches the window as an uncaught error.
+      if (!superseded()) console.error('Paper: PDF page render failed', cause)
+      return false
+    }
+    if (superseded()) return false
+    doc.querySelector('#canvas')?.replaceChildren(doc.adoptNode(canvas))
 
-  const container = doc.querySelector('.textLayer')
-  if (container) {
+    const container = doc.querySelector('.textLayer')
+    if (!container) return false
     container.replaceChildren()
     const textLayer = new pdfjs.TextLayer({
       textContentSource: page.streamTextContent(),
       container: container as HTMLElement,
       viewport,
     })
+    if (inFlight.get(doc) === active) {
+      active = textLayer
+      inFlight.set(doc, textLayer)
+    }
     /* Cancelled and caught, like the canvas render above. A superseded text
      * layer left running keeps positioning spans into a document that is being
      * repainted underneath it, and its rejection had nowhere to go — it left
@@ -171,11 +182,11 @@ async function paint(page: PDFPageProxy, doc: Document, zoom: number): Promise<v
       await textLayer.render()
     } catch (cause) {
       if (!superseded()) console.error('Paper: PDF text layer failed', cause)
-      return
+      return false
     }
     if (superseded()) {
       textLayer.cancel()
-      return
+      return false
     }
 
     /* pdf.js's selection fix: without `.selecting`, a drag that leaves the last
@@ -184,18 +195,9 @@ async function paint(page: PDFPageProxy, doc: Document, zoom: number): Promise<v
     end.className = 'endOfContent'
     container.append(end)
     bindSelectionFix(container, doc)
-  }
-
-  /* pdf.js appends measuring canvases to the HOST document while rendering a
-   * text layer and does not remove them. Unhidden they stack up over the
-   * reader, one per page painted. */
-  for (const stray of document.querySelectorAll('.hiddenCanvasElement')) {
-    Object.assign((stray as HTMLElement).style, {
-      position: 'absolute',
-      width: '0',
-      height: '0',
-      display: 'none',
-    })
+    return true
+  } finally {
+    if (inFlight.get(doc) === active) inFlight.delete(doc)
   }
 }
 
@@ -237,9 +239,17 @@ async function pageDocument(page: PDFPageProxy): Promise<Document> {
        * the wrong place. And a bare space where the page has a line break
        * joins the last word of one line to the first of the next, so a phrase
        * spanning a line break cannot be found at all. */
-      const span = doc.createElement('span')
-      span.textContent = item.str
-      layer.append(span)
+      /* Appended only when the item has text, because that is what pdf.js's
+       * own TextLayer does — it builds a span for every item but appends it
+       * behind `hasText`, i.e. `item.str !== ''`. Appending unconditionally
+       * put a node in this document that the painted page does not have, and
+       * every CFI child index after it was off by one: a search hit past an
+       * empty item resolved into the wrong text, or failed to resolve. */
+      if (item.str !== '') {
+        const span = doc.createElement('span')
+        span.textContent = item.str
+        layer.append(span)
+      }
       if ('hasEOL' in item && item.hasEOL) layer.append(doc.createElement('br'))
     }
   }
@@ -248,8 +258,14 @@ async function pageDocument(page: PDFPageProxy): Promise<Document> {
 
 /** The blank page document, into which `paint` draws. */
 function pageSource(width: number, height: number): string {
+  /* No `lang`. It was hardcoded to English, which is an assertion rather than a
+   * default: a Chinese or Japanese PDF was announced as English to the platform,
+   * and language-dependent behaviour — selection granularity, hyphenation,
+   * screen-reader pronunciation — followed the wrong language. Omitting it
+   * leaves the language undetermined, which is the truth here, and lets a
+   * future caller supply one from the PDF's own metadata. */
   const html = `<!DOCTYPE html>
-<html lang="en">
+<html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=${width}, height=${height}">
 <style>
@@ -272,7 +288,13 @@ function tocItem(item: { title: string; dest: unknown; items?: unknown[] }): Toc
   const subitems = item.items?.length
     ? item.items.map((child) => tocItem(child as Parameters<typeof tocItem>[0]))
     : null
-  return { label: item.title, href: JSON.stringify(item.dest), subitems }
+  /* A destinationless heading gets `href: null`, which is foliate's own signal
+   * for a grouping row that is not a link — `TocItem.href` is declared nullable
+   * for exactly this. `JSON.stringify(null)` returns the STRING "null", so an
+   * unlinked heading used to arrive looking perfectly navigable and then failed
+   * when the reader clicked it, with `goTo("null")` resolving nothing. */
+  const href = item.dest == null ? null : JSON.stringify(item.dest)
+  return { label: item.title, href, subitems }
 }
 
 export interface PdfHooks {
@@ -347,7 +369,20 @@ export async function makePdf(file: File | string, hooks: PdfHooks = {}): Promis
         return {
           src,
           onZoom: ({ doc, scale }) => {
-            void paint(page, doc, scale).then(() => hooks.onPagePainted?.())
+            /* Only a paint that finished AND is still current re-attaches the
+             * marks. `paint` catches cancellation and failure and resolves
+             * either way, so `.then(hook)` fired for a superseded page too —
+             * re-resolving anchors against a text layer that had just been
+             * replaced. The terminal catch is for the hook itself: this
+             * promise is not awaited anywhere, so a throw in `redrawMarks`
+             * reached the window as an unhandled rejection. */
+            void paint(page, doc, scale)
+              .then((painted) => {
+                if (painted) hooks.onPagePainted?.()
+              })
+              .catch((cause: unknown) => {
+                console.error('Paper: painting a PDF page failed', cause)
+              })
           },
         }
       },

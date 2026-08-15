@@ -34,6 +34,31 @@ declare module 'foliate-js/epubcfi.js' {
    * comparator. Throws on input it cannot parse.
    */
   export function compare(a: string, b: string): number
+
+  /**
+   * One end of a CFI as a CFI of its own — the start, or the end with `toEnd`.
+   *
+   * A range CFI carries both its ends in one string, and comparing two RANGES
+   * needs them separately: `lib/markMatch.ts` asks whether a mark and a
+   * selection cover any of the same text, which is a question about four
+   * points. Given a CFI that is already a single point, both ends are itself.
+   *
+   * Two failure modes, both measured against the fork rather than assumed, and
+   * both load-bearing where this is used.
+   *
+   * A string that addresses nothing — `''`, `'not a cfi'`, `'epubcfi(garbage)'`
+   * — collapses to the literal `'epubcfi()'` for either `toEnd` instead of
+   * throwing. That is why `markMatch.ts` screens on that sentinel rather than
+   * on foliate's `isCFI`, whose regex `/^epubcfi\((.*)\)$/` accepts all three.
+   *
+   * A range missing one of its ends (`'epubcfi(/6/4!/4/2,/1:5)'`) throws only
+   * when the MISSING end is asked for: `collapse(cfi)` returns
+   * `'epubcfi(/6/4!/4/2/1:5)'`, and `collapse(cfi, true)` throws `TypeError`.
+   * So the `try` around the pair is still load-bearing, but the start alone
+   * never trips it — a caller that only collapses starts gets a plausible CFI
+   * back from input that is not a valid range.
+   */
+  export function collapse(cfi: string, toEnd?: boolean): string
 }
 
 declare module 'foliate-js/view.js' {
@@ -112,10 +137,26 @@ declare module 'foliate-js/view.js' {
     readonly index: number
   }
 
+  /**
+   * What foliate resolves and draws.
+   *
+   * `value` is required and must be a string, because `addAnnotation` calls
+   * `value.startsWith(SEARCH_PREFIX)` on it before anything else — so an
+   * annotation without one throws at the first line rather than failing to
+   * draw. Typed as `unknown` this was invisible: any object compiled, and the
+   * error only appeared at runtime. Anything else on the object is carried
+   * through untouched and handed back in `draw-annotation`, which is how
+   * Paper's own `kind` survives the round trip.
+   */
+  export interface Annotation {
+    readonly value: string
+    readonly [carried: string]: unknown
+  }
+
   /** `draw-annotation` detail — call `draw` with an Overlayer draw function. */
   export interface DrawAnnotationDetail {
     readonly draw: (fn: unknown, options?: Record<string, unknown>) => void
-    readonly annotation: unknown
+    readonly annotation: Annotation
     readonly doc: Document
     readonly range: Range
   }
@@ -161,7 +202,7 @@ declare module 'foliate-js/view.js' {
      * `remove` is true. Async upstream; nothing here awaits it, because the
      * only outcome is a drawing side effect.
      */
-    addAnnotation(annotation: unknown, remove?: boolean): Promise<void>
+    addAnnotation(annotation: Annotation, remove?: boolean): Promise<void>
     /**
      * The CFI for a range within a spine item, or the section's own base CFI
      * when `range` is omitted. This is how a live selection becomes a durable
