@@ -153,6 +153,19 @@ export interface SessionCallbacks {
   onRelocate: (position: ReaderPosition) => void
   onDocument: (doc: Document | null) => void
   onMeta: (meta: BookMeta) => void
+  /**
+   * The book's own jacket, or null when it declares none.
+   *
+   * Published as a BLOB rather than written anywhere, because the session has
+   * no business knowing where covers are kept — the same boundary that keeps it
+   * from touching the mark store. It arrives once per open, beside the
+   * metadata, which is the only moment the parsed book is in hand.
+   *
+   * Separate from `BookMeta` because that is plain data that gets STORED, and a
+   * jacket must never enter the row: `library.json` is rewritten on every
+   * position save.
+   */
+  onCover: (cover: Blob | null) => void
   onError: (message: string) => void
   onNavigator: (navigator: SessionNavigator | null) => void
   /**
@@ -609,6 +622,14 @@ export class ReaderSession {
   #publish(view: View, deps: SessionDeps): void {
     this.#cb.onToc(view.book.toc ?? [])
     this.#cb.onMeta(readMeta(view.book))
+    /* Not awaited, and not allowed to fail the open. Pulling a cover out means
+     * unzipping an image, which for a large book takes long enough to be worth
+     * not blocking the first paint on — and a malformed manifest that throws
+     * here is a book without a picture, not a book that failed to open. */
+    void (async () => {
+      const cover = await view.book?.getCover?.().catch(() => null)
+      if (!this.#disposed) this.#cb.onCover(cover ?? null)
+    })()
     this.#cb.onNavigator({
       /* Every navigation reports its own failure. These are async and were
        * discarded, so a target that will not resolve — a dead link in a table

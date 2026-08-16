@@ -1,0 +1,78 @@
+import { useEffect, useState } from 'react'
+import { coverTintFor } from '../lib/bookAccent'
+import { tauriVaultFs } from '../lib/bookVault'
+import { coverUrl } from '../lib/coverArt'
+import type { LibraryEntry } from '../lib/library'
+
+/**
+ * A book's jacket, or the tint that stands in for one.
+ *
+ * Its own component because loading a cover is asynchronous and has to be
+ * CLEANED UP, and a shelf that does that inline gets it wrong: a blob URL is a
+ * document-lifetime reference, so one leaked per cell per render is a leak that
+ * grows with scrolling and never shrinks. Keeping it here means the revoke sits
+ * next to the create, in the same effect, with no way to add a cell that
+ * forgets.
+ *
+ * The tint is not a placeholder to be replaced later — it is the answer for a
+ * book that genuinely has no artwork, which is most PDFs. It shows immediately
+ * and stays if no jacket arrives, so a shelf never flashes empty rectangles on
+ * the way to being drawn.
+ */
+export function BookCover({
+  book,
+  title,
+  className,
+  titleClassName,
+}: {
+  book: LibraryEntry
+  title: string
+  className?: string | undefined
+  titleClassName?: string | undefined
+}) {
+  const [url, setUrl] = useState<string | null>(null)
+  const at = book.cover
+
+  useEffect(() => {
+    if (!at) {
+      setUrl(null)
+      return
+    }
+    let revoked = false
+    let mine: string | null = null
+    void coverUrl(tauriVaultFs, at).then((next) => {
+      if (!next) return
+      /* The cell may have been unmounted, or pointed at another book, while the
+       * bytes were being read. Revoking immediately rather than setting state is
+       * what keeps a fast scroll from leaving a trail of live URLs behind it. */
+      if (revoked) {
+        URL.revokeObjectURL(next)
+        return
+      }
+      mine = next
+      setUrl(next)
+    })
+    return () => {
+      revoked = true
+      if (mine) URL.revokeObjectURL(mine)
+      setUrl(null)
+    }
+  }, [at])
+
+  return (
+    <span className={className} style={{ background: coverTintFor(book.bookId) }}>
+      {url ? (
+        <img
+          src={url}
+          alt=""
+          /* EMPTY alt, deliberately. The title is right beneath it in the same
+           * button, so a screen reader announcing the jacket would read the book
+           * twice — and "cover of X" is decoration, not information. */
+          style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+        />
+      ) : (
+        <span className={titleClassName}>{title}</span>
+      )}
+    </span>
+  )
+}

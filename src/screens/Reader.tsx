@@ -309,6 +309,7 @@ export function Reader({
                       onRelocate={book.setPosition}
                       onDocument={book.setDoc}
                       onMeta={book.setMeta}
+                      onCover={book.setCover}
                       onError={book.fail}
                       onNavigator={book.setNavigator}
                       marks={marks.current}

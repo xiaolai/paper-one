@@ -192,6 +192,7 @@ function callbacks(
     onRelocate: rec('onRelocate'),
     onDocument: rec('onDocument'),
     onMeta: rec('onMeta'),
+    onCover: rec('onCover'),
     onError: rec('onError'),
     onNavigator: rec('onNavigator'),
     onSelection: rec('onSelection'),

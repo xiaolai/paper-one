@@ -17,6 +17,7 @@ import { useMarks } from './lib/useMarks'
 import { useMarking } from './lib/useMarking'
 import { coverTintFor } from './lib/bookAccent'
 import { ownBook, readOwnedBook, tauriVaultFs } from './lib/bookVault'
+import { saveCover } from './lib/coverArt'
 import { inTauri } from './lib/appStorage'
 import { BookSwitcher } from './overlays/BookSwitcher'
 import { CommandPalette } from './overlays/CommandPalette'
@@ -156,8 +157,8 @@ export function App({ storage }: AppProps) {
   /* Remember every book that opens, so the switcher lists what this reader has
    * actually read rather than a fixture shelf. Keyed on the metadata arriving,
    * because that is when there is a title worth showing. */
-  const { bookId, meta, source } = book
-  const { record, remember, rememberOwned, positionOf } = library
+  const { bookId, meta, source, cover } = book
+  const { record, remember, rememberOwned, rememberJacket, positionOf } = library
   useEffect(() => {
     if (!bookId || !meta) return
     record({
@@ -227,6 +228,36 @@ export function App({ storage }: AppProps) {
       cancelled = true
     }
   }, [bookId, meta, source, rememberOwned])
+
+  /* File the book's own jacket, once.
+   *
+   * `cover` arrives as a Blob because the session has no business knowing where
+   * covers are kept; this is the layer that does. It is downscaled on the way in
+   * rather than on the way out — a publisher's jacket is routinely 1600px wide
+   * and the shelf draws it at a couple of hundred, and decoding the full image
+   * per cell would do that on every render rather than once ever.
+   *
+   * Only when the row does not already have one. A book reopened weekly should
+   * not re-encode its cover weekly.
+   */
+  useEffect(() => {
+    if (!bookId || !cover || !inTauri()) return
+    if (library.books.find((b) => b.bookId === bookId)?.cover) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const at = await saveCover(tauriVaultFs, bookId, { getCover: async () => cover })
+        if (at && !cancelled) rememberJacket(bookId, at)
+      } catch (cause) {
+        // A book without a picture, not a book that failed. The shelf falls
+        // back to the derived tint, which is what it drew for everything before.
+        console.error('Paper: could not keep the cover', cause)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [bookId, cover, library.books, rememberJacket])
 
   /* Remember where the reader is, so the next open starts there.
    *

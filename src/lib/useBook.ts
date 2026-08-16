@@ -149,6 +149,9 @@ export interface Book extends BookState {
   setDoc: (generation: number, doc: Document | null) => void
   setFixedLayout: (generation: number, fixed: boolean) => void
   setMeta: (generation: number, meta: BookMeta) => void
+  /** The book's jacket, or null when it declares none. Never stored as-is. */
+  cover: Blob | null
+  setCover: (generation: number, cover: Blob | null) => void
   fail: (generation: number, message: string) => void
 }
 
@@ -185,6 +188,7 @@ export function useBook(): Book {
   const [toc, setTocState] = useState<readonly TocItem[]>([])
   const [position, setPositionState] = useState<ReaderPosition>(NOWHERE)
   const [meta, setMetaState] = useState<BookMeta | null>(null)
+  const [cover, setCoverState] = useState<Blob | null>(null)
   const [doc, setDocState] = useState<Document | null>(null)
   const [fixedLayout, setFixedLayoutState] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -218,6 +222,7 @@ export function useBook(): Book {
     setTocState([])
     setPositionState(NOWHERE)
     setMetaState(null)
+    setCoverState(null)
     setDocState(null)
     setFixedLayoutState(false)
     setError(null)
@@ -324,6 +329,12 @@ export function useBook(): Book {
     },
     [current],
   )
+  const setCover = useCallback(
+    (generation: number, value: Blob | null) => {
+      if (current(generation)) setCoverState(value)
+    },
+    [current],
+  )
   const setMeta = useCallback(
     (generation: number, value: BookMeta) => {
       if (current(generation)) setMetaState(value)
@@ -365,6 +376,8 @@ export function useBook(): Book {
       setDoc,
       setFixedLayout,
       setMeta,
+      cover,
+      setCover,
       fail,
     }),
     [
@@ -397,6 +410,8 @@ export function useBook(): Book {
       setDoc,
       setFixedLayout,
       setMeta,
+      cover,
+      setCover,
       fail,
     ],
   )

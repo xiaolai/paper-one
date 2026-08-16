@@ -1,6 +1,5 @@
 import { useMemo, useState } from 'react'
 import { Plus } from 'lucide-react'
-import { coverTintFor } from '../lib/bookAccent'
 import {
   NOT_REOPENABLE,
   displayAuthor,
@@ -12,6 +11,7 @@ import {
 import type { LibraryEntry, LibraryOrder } from '../lib/library'
 import { ICON } from '../lib/metrics'
 import type { Platform } from '../lib/metrics'
+import { BookCover } from './BookCover'
 import styles from './Library.module.css'
 
 /**
@@ -101,9 +101,12 @@ export function Library({ books, platform, onOpen, onAddBooks }: LibraryProps) {
                 title={reopenable ? `Open ${displayTitle(book)}` : NOT_REOPENABLE}
                 onClick={() => isReopenable(book) && onOpen(book)}
               >
-                <span className={styles.cover} style={{ background: coverTintFor(book.bookId) }}>
-                  <span className={styles.coverTitle}>{displayTitle(book)}</span>
-                </span>
+                <BookCover
+                  book={book}
+                  title={displayTitle(book)}
+                  className={styles.cover}
+                  titleClassName={styles.coverTitle}
+                />
                 <span className={styles.bookTitle}>{displayTitle(book)}</span>
                 <span className={styles.bookAuthor}>
                   {displayAuthor(book)}

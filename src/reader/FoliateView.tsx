@@ -41,6 +41,8 @@ export interface FoliateViewProps {
    *  selection handling, and again with null when the view is torn down. */
   onDocument: (generation: number, doc: Document | null) => void
   onMeta: (generation: number, meta: BookMeta) => void
+  /** The book's jacket, or null — see `SessionCallbacks.onCover`. */
+  onCover: (generation: number, cover: Blob | null) => void
   onError: (generation: number, message: string) => void
   /** Publishes navigation once the book is parsed; null on teardown. */
   onNavigator: (navigator: BookNavigator | null) => void
@@ -221,6 +223,7 @@ export function FoliateView({
   onRelocate,
   onDocument,
   onMeta,
+  onCover,
   onError,
   onNavigator,
   marks,
@@ -254,6 +257,7 @@ export function FoliateView({
     onRelocate,
     onDocument,
     onMeta,
+    onCover,
     onError,
     onNavigator,
     onSelection,
@@ -309,6 +313,7 @@ export function FoliateView({
       onRelocate: (position) => handlers.current.onRelocate(gen, position),
       onDocument: (doc) => handlers.current.onDocument(gen, doc),
       onMeta: (meta) => handlers.current.onMeta(gen, meta),
+      onCover: (cover) => handlers.current.onCover(gen, cover),
       onError: (message) => handlers.current.onError(gen, message),
       onNavigator: (navigator) => handlers.current.onNavigator(navigator),
       onSelection: (selection) => handlers.current.onSelection(selection),

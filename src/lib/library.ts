@@ -101,6 +101,16 @@ export interface LibraryEntry {
    * choosing not to ship.
    */
   readonly vault?: string | null
+  /**
+   * The book's own jacket, filed under `$APPDATA/covers/` — or absent.
+   *
+   * Absent means "no artwork", which is most PDFs and a fair number of EPUBs,
+   * and the shelf falls back to the derived tint it drew for everything before
+   * covers existed. A FILENAME rather than the image, because this row is
+   * rewritten on every position save and a base64 jacket would be paid for on
+   * every page turn.
+   */
+  readonly cover?: string | null
 }
 
 export const LIBRARY_STORAGE_KEY = 'paper.library.v1'
@@ -214,6 +224,20 @@ export function rememberPosition(
  * Returns its input BY IDENTITY when nothing moves, so a caller can skip a
  * write without comparing rows itself.
  */
+export function rememberCover(
+  entries: readonly LibraryEntry[],
+  bookId: string,
+  cover: string,
+): readonly LibraryEntry[] {
+  const at = entries.findIndex((entry) => entry.bookId === bookId)
+  if (at === -1) return entries
+  const entry = entries[at]
+  if (!entry || entry.cover === cover) return entries
+  const next = [...entries]
+  next[at] = { ...entry, cover }
+  return next
+}
+
 export function rememberVault(
   entries: readonly LibraryEntry[],
   bookId: string,

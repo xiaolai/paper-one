@@ -6,6 +6,7 @@ import {
   parseLibrary,
   recordOpen,
   rememberPosition,
+  rememberCover,
   rememberVault,
   type LibraryEntry,
 } from './library'
@@ -27,6 +28,8 @@ export interface Library {
   remember: (bookId: string, position: string) => void
   /** Record that Paper's own copy landed — see `rememberVault`. */
   rememberOwned: (bookId: string, vault: string) => void
+  /** Record the book's jacket once it is filed — see `rememberCover`. */
+  rememberJacket: (bookId: string, cover: string) => void
   /** The saved position for a book, or null. Stable across renders. */
   positionOf: (bookId: string | null) => string | null
   /** Move a row from a superseded book id — see `idMigration`. */
@@ -74,6 +77,14 @@ export function useLibrary(storage = localStore()): Library {
     [],
   )
 
+  const rememberJacket = useCallback(
+    (bookId: string, cover: string) => {
+      if (rememberCover(booksRef.current, bookId, cover) === booksRef.current) return
+      apply((prev) => [...rememberCover(prev, bookId, cover)])
+    },
+    [apply],
+  )
+
   const rememberOwned = useCallback(
     (bookId: string, vault: string) => {
       // Identity check first, like `remember`: this fires on every open and
@@ -117,7 +128,7 @@ export function useLibrary(storage = localStore()): Library {
    * a button. It comes back with the button, tested against what that button
    * actually needs rather than against what seemed likely in advance. */
   return useMemo<Library>(
-    () => ({ books, record, remember, rememberOwned, positionOf, rekey }),
-    [books, record, remember, rememberOwned, positionOf, rekey],
+    () => ({ books, record, remember, rememberOwned, rememberJacket, positionOf, rekey }),
+    [books, record, remember, rememberOwned, rememberJacket, positionOf, rekey],
   )
 }
