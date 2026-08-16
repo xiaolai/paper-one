@@ -136,9 +136,19 @@ export function App({ storage, fs, initialBooks }: AppProps) {
    */
   const removedWhileOpen = useRef(new Map<string, number>())
   const removals = useRef(0)
+  /** The tick when the current book was ASKED FOR — see `openBook`. */
+  const openedAt = useRef<{ source: File | string; at: number } | null>(null)
 
   const openBook = useCallback(
     (source: File | string, path: string | null = null) => {
+      /* THE BASELINE IS STAMPED HERE, at the moment the reader asks for the
+       * book — not in the intake effect, which does not run until the file has
+       * been hashed and parsed. That window is seconds for a large book, and a
+       * removal inside it landed BEFORE the effect started: read as a removal
+       * the reader had since changed their mind about, and the book was
+       * resurrected under its new id with its tags and marks left in the trash
+       * under the old one. */
+      openedAt.current = { source, at: removals.current }
       dispatch({ type: 'goScreen', screen: 'reader' })
       // Set before the open, so the record effect below cannot fire on the new
       // book while this still holds the previous one's path.
@@ -500,9 +510,11 @@ export function App({ storage, fs, initialBooks }: AppProps) {
      * unconditionally there undid a removal made in the seconds between opening
      * a book and it finishing parsing. A fresh open produces a new `File`, or a
      * different path, so identity is exactly the right test. */
-    /* Captured SYNCHRONOUSLY, before anything can await. Everything below asks
-     * whether a removal arrived after this point. */
-    const startedAt = removals.current
+    /* From the OPEN, not from here: this effect does not run until the book has
+     * been hashed and parsed, and a removal during that window belongs to the
+     * reader's current intent rather than a previous one. Falls back to now for
+     * a book that arrived without going through `openBook`. */
+    const startedAt = openedAt.current?.source === source ? openedAt.current.at : removals.current
     const removedSince = (...ids: readonly string[]): boolean =>
       ids.some((id) => (removedWhileOpen.current.get(id) ?? 0) > startedAt)
     let cancelled = false
@@ -600,7 +612,11 @@ export function App({ storage, fs, initialBooks }: AppProps) {
           return
         }
       }
-      if (cancelled || removedWhileOpen.current.has(bookId)) return
+      /* The SAME question as everywhere else: did a removal arrive after the
+       * reader asked for this book. Membership was the old flag scheme, and it
+       * never forgot — so removing the open book and then deliberately opening
+       * the same file again was refused for the rest of the session. */
+      if (cancelled || removedSince(bookId, legacy)) return
       /* `add`, which FOLDS a fresh parse into what the reader owns rather than
        * replacing it — see `mergeParsed`. Phase 3 spread the parse over the row
        * and erased the reader's tags on every reopen.
