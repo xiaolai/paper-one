@@ -2,10 +2,14 @@ import { describe, expect, it } from 'vitest'
 import {
   byRecency,
   inOrder,
+  shelfView,
   sortTitle,
+  tagCounts,
   isReopenable,
   parseLibrary,
   forgetBook,
+  inScope,
+  matchesQuery,
   recordOpen,
   rememberVault,
   rememberPosition,
@@ -410,5 +414,111 @@ describe('forgetBook', () => {
 
   it('empties a shelf of one', () => {
     expect(forgetBook([entry({ bookId: 'a' })], 'a')).toEqual([])
+  })
+})
+
+
+/**
+ * Searching, scoping, and the order the two are applied in.
+ *
+ * The order is the part that is silent when wrong: scope before query means a
+ * search inside a collection stays inside it, and ordering last means "first
+ * alphabetically" is first among what is SHOWN rather than first in the library.
+ */
+describe('matchesQuery', () => {
+  it('matches what the row displays', () => {
+    expect(matchesQuery(entry({ title: 'Moby-Dick' }), 'moby')).toBe(true)
+    expect(matchesQuery(entry({ author: 'Herman Melville' }), 'melville')).toBe(true)
+  })
+
+  /* Searching for a series or a publisher and finding nothing, when the shelf
+   * is visibly grouped by exactly that, reads as the search being broken. */
+  it('matches the fields the shelf groups by', () => {
+    expect(matchesQuery(entry({ series: 'Discworld' }), 'discworld')).toBe(true)
+    expect(matchesQuery(entry({ publisher: 'Penguin' }), 'penguin')).toBe(true)
+    expect(matchesQuery(entry({ subjects: ['Philosophy'] }), 'philos')).toBe(true)
+  })
+
+  it('matches everything on an empty query', () => {
+    expect(matchesQuery(entry(), '   ')).toBe(true)
+  })
+
+  it('does not match an unrelated term', () => {
+    expect(matchesQuery(entry({ title: 'Moby-Dick' }), 'zebra')).toBe(false)
+  })
+
+  /* A row written before the metadata fields existed has none of them, and must
+   * not throw its way out of a search. */
+  it('survives a row with none of the new fields', () => {
+    expect(matchesQuery(entry(), 'discworld')).toBe(false)
+  })
+})
+
+describe('inScope', () => {
+  it('lets everything through with no scope', () => {
+    expect(inScope(entry(), null)).toBe(true)
+  })
+
+  it('restricts to a tag', () => {
+    expect(inScope(entry({ subjects: ['Ethics'] }), { label: 'Ethics', tag: 'Ethics' })).toBe(true)
+    expect(inScope(entry({ subjects: ['Poetry'] }), { label: 'Ethics', tag: 'Ethics' })).toBe(false)
+  })
+
+  it('restricts to a series', () => {
+    const scope = { label: 'Discworld', series: 'Discworld' }
+    expect(inScope(entry({ series: 'Discworld' }), scope)).toBe(true)
+    expect(inScope(entry({ series: 'Dune' }), scope)).toBe(false)
+  })
+})
+
+describe('shelfView', () => {
+  const shelf = [
+    entry({ bookId: 'a', title: 'Ethics', subjects: ['Philosophy'], lastOpened: 3 }),
+    entry({ bookId: 'b', title: 'Poems', subjects: ['Poetry'], lastOpened: 2 }),
+    entry({ bookId: 'c', title: 'Ethics II', subjects: ['Philosophy'], lastOpened: 1 }),
+  ]
+
+  it('applies the scope before the query, so a search stays inside it', () => {
+    const view = shelfView(shelf, { scope: { label: 'Poetry', tag: 'Poetry' }, query: 'ethics' })
+    expect(view).toEqual([])
+  })
+
+  it('orders what survived, not the whole library', () => {
+    const view = shelfView(shelf, { scope: { label: 'Philosophy', tag: 'Philosophy' }, order: 'title' })
+    expect(view.map((e) => e.title)).toEqual(['Ethics', 'Ethics II'])
+  })
+
+  it('is the whole shelf with no scope and no query', () => {
+    expect(shelfView(shelf)).toHaveLength(3)
+  })
+})
+
+describe('tagCounts', () => {
+  const shelf = [
+    entry({ bookId: 'a', subjects: ['Philosophy', 'Ethics'] }),
+    entry({ bookId: 'b', subjects: ['Philosophy'] }),
+    entry({ bookId: 'c' }),
+  ]
+
+  it('counts each tag, most used first', () => {
+    expect(tagCounts(shelf)).toEqual([
+      { tag: 'Philosophy', count: 2 },
+      { tag: 'Ethics', count: 1 },
+    ])
+  })
+
+  /* Counted WITHIN the scope, so the numbers describe what the reader can
+   * actually reach rather than what exists somewhere else. */
+  it('counts within the scope it is given', () => {
+    expect(tagCounts(shelf, { label: 'Ethics', tag: 'Ethics' })).toEqual([
+      { tag: 'Ethics', count: 1 },
+      { tag: 'Philosophy', count: 1 },
+    ])
+  })
+
+  /* Two tags with the same count would otherwise swap places on a redraw. */
+  it('breaks a tie by name, so the order is stable', () => {
+    const tied = [entry({ bookId: 'a', subjects: ['Zebra', 'Apple'] })]
+    expect(tagCounts(tied).map((t) => t.tag)).toEqual(['Apple', 'Zebra'])
   })
 })

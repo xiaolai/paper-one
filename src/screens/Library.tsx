@@ -1,14 +1,15 @@
-import { useMemo, useState } from 'react'
+import { useDeferredValue, useMemo, useState } from 'react'
 import { Plus, X } from 'lucide-react'
 import {
   NOT_REOPENABLE,
   displayAuthor,
   displayTitle,
-  inOrder,
   isReopenable,
   rowSuffix,
+  shelfView,
+  tagCounts,
 } from '../lib/library'
-import type { LibraryEntry, LibraryOrder } from '../lib/library'
+import type { LibraryEntry, LibraryOrder, Scope } from '../lib/library'
 import { ICON } from '../lib/metrics'
 import type { Platform } from '../lib/metrics'
 import { BookCover } from './BookCover'
@@ -61,7 +62,23 @@ export function Library({ books, platform, onOpen, onAddBooks, onRemove }: Libra
    * all proportion to what happens. But it is also one pixel from Open, and a
    * misclick that silently empties a row is worse than one extra click. */
   const [confirming, setConfirming] = useState<string | null>(null)
-  const shelf = useMemo(() => inOrder(books, order), [books, order])
+  const [query, setQuery] = useState('')
+  /* The SCOPE — Decision 2. A collection restricts what is in play, and the
+   * search then runs inside it rather than beside it. Held here for now; the
+   * collections that produce one arrive in WI-3.6, and every consumer below is
+   * already written against it so none of them has to change then. */
+  const [scope, setScope] = useState<Scope | null>(null)
+
+  /* Deferred, not debounced. `useDeferredValue` lets the keystroke paint
+   * immediately and re-filters at React's leisure, which is the behaviour a
+   * debounce is usually approximating — and unlike a debounce it has no timer to
+   * tune and cannot drop the final keystroke. */
+  const deferredQuery = useDeferredValue(query)
+  const shelf = useMemo(
+    () => shelfView(books, { scope, query: deferredQuery, order }),
+    [books, scope, deferredQuery, order],
+  )
+  const tags = useMemo(() => tagCounts(books, scope), [books, scope])
 
   return (
     <div className={styles.library} data-platform={platform}>
@@ -96,11 +113,63 @@ export function Library({ books, platform, onOpen, onAddBooks, onRemove }: Libra
         </button>
       </div>
 
-      {books.length === 0 ? (
+      {books.length > 0 && (
+        <div className={styles.filters}>
+          <input
+            type="search"
+            className={styles.search}
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search title, author, series, tag"
+            aria-label="Search the library"
+          />
+          {/* Counts are DERIVED and counted within the scope, so they describe
+              what the reader can actually reach. The chips these replace were a
+              prototype constant reading `All 2,418`. */}
+          {tags.length > 0 && (
+            <div className={styles.chips}>
+              {scope && (
+                <button
+                  type="button"
+                  className={styles.chip}
+                  data-active="true"
+                  onClick={() => setScope(null)}
+                >
+                  {scope.label} ✕
+                </button>
+              )}
+              {!scope &&
+                tags.slice(0, 8).map(({ tag, count }) => (
+                  <button
+                    key={tag}
+                    type="button"
+                    className={styles.chip}
+                    onClick={() => setScope({ label: tag, tag })}
+                  >
+                    {tag} <span className={styles.chipCount}>{count}</span>
+                  </button>
+                ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {shelf.length === 0 ? (
         <div className={styles.empty}>
-          <div className={styles.emptyTitle}>Your library is empty</div>
+          <div className={styles.emptyTitle}>
+            {/* NAMES ITS SCOPE. "No books" inside a collection with a full
+                library behind it is the most confusing state this design can
+                produce — Decision 2 calls it out for exactly this reason. */}
+            {books.length === 0
+              ? 'Your library is empty'
+              : scope
+                ? `Nothing in ${scope.label} matches`
+                : 'Nothing matches'}
+          </div>
           <div className={styles.emptyBody}>
-            Books you open appear here, with everything you have marked in them.
+            {books.length === 0
+              ? 'Books you open appear here, with everything you have marked in them.'
+              : 'Try a different search, or clear the filter.'}
           </div>
         </div>
       ) : (

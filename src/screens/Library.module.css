@@ -245,3 +245,63 @@
     transition: none;
   }
 }
+
+/* Search and the tag chips. One row above the grid, wrapping on a narrow
+   window rather than scrolling sideways — a shelf is browsed by eye and a
+   horizontally scrolled filter bar hides its own options. */
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  padding: 0 var(--stage-pad-x, 24px) 12px;
+}
+
+.search {
+  flex: 1 1 260px;
+  min-width: 0;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--rule, rgb(0 0 0 / 0.12));
+  border-radius: 999px;
+  background: var(--surface, transparent);
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+}
+
+.search:focus-visible {
+  outline: 2px solid var(--focus, currentColor);
+  outline-offset: 1px;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--rule, rgb(0 0 0 / 0.12));
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.chip[data-active='true'] {
+  border-color: transparent;
+  background: var(--accent-soft, rgb(0 0 0 / 0.08));
+}
+
+.chipCount {
+  opacity: 0.55;
+  font-variant-numeric: tabular-nums;
+}

@@ -404,10 +404,92 @@ export function rowSuffix(entry: LibraryEntry, isCurrent = false): string {
 export function matchesQuery(entry: LibraryEntry, query: string): boolean {
   const q = query.trim().toLowerCase()
   if (!q) return true
+  /* Matched on what the row DISPLAYS first, so what a reader sees is what they
+   * can search for. The rest are fields the shelf shows or groups by, added
+   * once WI-3.1 stopped discarding them — searching for a series or a publisher
+   * and finding nothing, when the shelf is visibly grouped by exactly that, is
+   * the kind of gap that reads as the search being broken. */
   return (
     displayTitle(entry).toLowerCase().includes(q) ||
-    displayAuthor(entry).toLowerCase().includes(q)
+    displayAuthor(entry).toLowerCase().includes(q) ||
+    (entry.series?.toLowerCase().includes(q) ?? false) ||
+    (entry.publisher?.toLowerCase().includes(q) ?? false) ||
+    (entry.subjects?.some((tag) => tag.toLowerCase().includes(q)) ?? false)
   )
+}
+
+/**
+ * A restriction on which books are in play at all — see Decision 2.
+ *
+ * A COLLECTION IS A SCOPE, not a saved query, and this is the shape of that:
+ * one predicate applied before anything else, so the shelf, the search, the
+ * counts and the sort all operate inside the same restricted set rather than
+ * each deciding separately. Calibre's manual draws exactly this distinction —
+ * a search restricts the list, a virtual library restricts the list AND what
+ * you can then filter by.
+ *
+ * `null` is the whole library. It exists ahead of the collections that will
+ * produce these, deliberately: a matcher retrofitted for scope later is a
+ * rewrite of every caller, and every caller is already being written now.
+ */
+export interface Scope {
+  readonly label: string
+  /** Which books are inside. A tag the book carries, or a series it is in. */
+  readonly tag?: string
+  readonly series?: string
+}
+
+export function inScope(entry: LibraryEntry, scope: Scope | null): boolean {
+  if (!scope) return true
+  if (scope.series) return entry.series === scope.series
+  if (scope.tag) return entry.subjects?.includes(scope.tag) ?? false
+  return true
+}
+
+/**
+ * The shelf a reader is actually looking at: scoped, matched, then ordered.
+ *
+ * One function because the ORDER of those three matters and getting it wrong is
+ * silent. Scope before query means a search inside a collection stays inside it;
+ * ordering last means the sort sees only what survived, so "first alphabetically"
+ * means first among what is shown rather than first in the library.
+ */
+export function shelfView(
+  entries: readonly LibraryEntry[],
+  { scope = null, query = '', order = 'recent' }: {
+    scope?: Scope | null
+    query?: string
+    order?: LibraryOrder
+  } = {},
+): LibraryEntry[] {
+  return inOrder(
+    entries.filter((entry) => inScope(entry, scope) && matchesQuery(entry, query)),
+    order,
+  )
+}
+
+/**
+ * Every tag on the shelf with how many books carry it, most-used first.
+ *
+ * Derived rather than stored, and counted WITHIN the scope it is given, so the
+ * numbers describe what the reader can actually reach. The chips this replaces
+ * were `['All', '2,418']` — a prototype constant that would have been shown to
+ * a reader with four books.
+ */
+export function tagCounts(
+  entries: readonly LibraryEntry[],
+  scope: Scope | null = null,
+): { tag: string; count: number }[] {
+  const counts = new Map<string, number>()
+  for (const entry of entries) {
+    if (!inScope(entry, scope)) continue
+    for (const tag of entry.subjects ?? []) counts.set(tag, (counts.get(tag) ?? 0) + 1)
+  }
+  return [...counts]
+    .map(([tag, count]) => ({ tag, count }))
+    // Count first, then name, so the order is stable rather than depending on
+    // insertion — two tags with the same count would otherwise swap on a redraw.
+    .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag))
 }
 
 /** Same trust-boundary rule as marks: drop a bad row, keep the rest. */
