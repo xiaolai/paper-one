@@ -1,5 +1,5 @@
-import type { Theme } from '../lib/state'
-import { READING_STEPS } from '../lib/metrics'
+import type { Theme, Typeface } from '../lib/state'
+import { readingStep } from '../lib/metrics'
 
 /**
  * The stylesheet injected into the book document.
@@ -64,16 +64,28 @@ export function markPalette(theme: Theme): {
 }
 
 /**
- * §14 fallback chain. Literata leads for Latin, Cyrillic and Greek; the
- * per-script Noto faces and the CJK packs are appended as they are embedded.
+ * §14 fallback chain, per face.
+ *
+ * Every leading family here MUST be one `main.tsx` imports, and the variable
+ * name must match the `@font-face` rule that Fontsource ships — `hostFontFaces`
+ * copies those rules into the book verbatim. Get the name wrong and there is no
+ * error of any kind: an unknown family is simply skipped, the chain falls
+ * through to Georgia or the platform's own, and the book looks plausible while
+ * being set in something nobody chose. That already happened once, to the whole
+ * app, for as long as it took someone to look closely at a serif.
+ *
+ * Each chain keeps a same-class fallback and then a generic, so a script
+ * Fontsource does not cover degrades within its own genre rather than to a
+ * serif in the middle of a sans-set book.
  */
-const READING_STACK = [
-  "'Literata Variable'",
-  'Literata',
-  "'Charis SIL'",
-  'Georgia',
-  'serif',
-].join(', ')
+const READING_STACKS: Record<Typeface, string> = {
+  // Literata leads for Latin, Cyrillic and Greek; the per-script Noto faces and
+  // the CJK packs are appended as they are embedded.
+  literata: "'Literata Variable', Literata, 'Charis SIL', Georgia, serif",
+  crimson: "'Crimson Pro Variable', 'Crimson Pro', Georgia, serif",
+  instrument: "'Instrument Sans Variable', 'Instrument Sans', system-ui, sans-serif",
+  plex: "'IBM Plex Mono', ui-monospace, Menlo, monospace",
+}
 
 /**
  * The host's `@font-face` rules, for injection into the book.
@@ -129,14 +141,21 @@ function absoluteUrls(cssText: string, base: string): string {
 export interface BookCssOptions {
   readonly stepIdx: number
   readonly theme: Theme
+  readonly typeface: Typeface
   readonly justify: boolean
   readonly hyphenate: boolean
 }
 
-export function bookCss({ stepIdx, theme, justify, hyphenate }: BookCssOptions): string {
-  const step = READING_STEPS[stepIdx] ?? READING_STEPS[2]
-  if (!step) throw new Error('READING_STEPS is empty')
+export function bookCss({
+  stepIdx,
+  theme,
+  typeface,
+  justify,
+  hyphenate,
+}: BookCssOptions): string {
+  const step = readingStep(stepIdx)
   const c = BOOK_COLOURS[theme]
+  const stack = READING_STACKS[typeface]
 
   return `
 @namespace epub "http://www.idpf.org/2007/ops";
@@ -164,7 +183,7 @@ body {
    * it here. Note: no backticks in this file's CSS comments — it is a template
    * literal, and one would end the string. */
   background: transparent;
-  font-family: ${READING_STACK};
+  font-family: ${stack};
   font-size: ${step.size}px;
   line-height: ${step.line}px;
   text-align: ${justify ? 'justify' : 'start'};

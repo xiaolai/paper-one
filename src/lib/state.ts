@@ -50,6 +50,17 @@ const MODAL_LAYERS: readonly Layer[] = ['paletteOpen', 'switcherOpen']
  */
 export type Screen = 'library' | 'reader'
 export type Theme = 'paper' | 'slate' | 'sepia' | 'sage' | 'night'
+
+/**
+ * The face the BOOK is set in. Interface type never changes — §09 is explicit
+ * that it does not scale or vary with the reading settings.
+ *
+ * Exactly the four families `main.tsx` bundles, and no more. A fifth entry here
+ * would name a family no `@font-face` rule describes, and an unknown family is
+ * not an error — it is silently the next entry in the fallback chain, which is
+ * how every book rendered in Georgia for a month while claiming Literata.
+ */
+export type Typeface = 'literata' | 'crimson' | 'instrument' | 'plex'
 /**
  * The panels of the single side pane — see `lib/panes` for their metadata.
  *
@@ -95,6 +106,24 @@ export interface AppState {
   readonly rulerOn: boolean
   readonly rulerPinned: boolean
   readonly stepIdx: number
+  readonly typeface: Typeface
+  /**
+   * Whether the book's scrollbar is drawn. Off by default.
+   *
+   * Off hides the bar without disabling scrolling — the wheel, the trackpad,
+   * Space and the arrow keys are all untouched, which is what makes this a
+   * default rather than a removal.
+   */
+  readonly scrollbarOn: boolean
+  /**
+   * The progress rule down the reading area's leading edge. Off by default.
+   *
+   * Separate from `scrollbarOn` although both are edge marks, because they
+   * answer different questions: a scrollbar says how much of THIS SECTION is
+   * off screen, and this says how far through the BOOK you are. Turning one on
+   * is not a reason to turn the other off.
+   */
+  readonly progressLineOn: boolean
   readonly pageLayout: PageLayout
 }
 
@@ -111,6 +140,10 @@ export const initialState: AppState = {
   rulerOn: false,
   rulerPinned: false,
   stepIdx: DEFAULT_STEP_IDX,
+  // §14's face, and the one the whole reading typography is specified around.
+  typeface: 'literata',
+  scrollbarOn: false,
+  progressLineOn: false,
   pageLayout: 'scrolled',
 }
 
@@ -130,6 +163,9 @@ export type Action =
   | { type: 'toggleRuler' }
   | { type: 'pinRuler' }
   | { type: 'setStepIdx'; idx: number }
+  | { type: 'setTypeface'; typeface: Typeface }
+  | { type: 'toggleScrollbar' }
+  | { type: 'toggleProgressLine' }
   | { type: 'setPageLayout'; layout: PageLayout }
 
 export function reducer(state: AppState, action: Action): AppState {
@@ -200,6 +236,15 @@ export function reducer(state: AppState, action: Action): AppState {
         ...state,
         stepIdx: Math.min(Math.max(Math.round(action.idx), 0), READING_STEPS.length - 1),
       }
+
+    case 'setTypeface':
+      return { ...state, typeface: action.typeface }
+
+    case 'toggleScrollbar':
+      return { ...state, scrollbarOn: !state.scrollbarOn }
+
+    case 'toggleProgressLine':
+      return { ...state, progressLineOn: !state.progressLineOn }
 
     case 'setPageLayout':
       // §06: the ruler does not exist in paginated flow, so switching layout

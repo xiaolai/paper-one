@@ -121,6 +121,27 @@ export const MEASURE = 660
 export const GUTTER = 56
 
 /**
+ * The step at an index, or the default when there is no such step.
+ *
+ * One fallback, in one place, because there were three call sites doing this
+ * lookup by hand and two of them named DIFFERENT fallbacks — `MEASURE` in
+ * `measureForStep`, `READING_STEPS[2]` in `bookCss`. Those agree only because
+ * the default step's measure happens to be 660: moving either number would
+ * have laid the book out to one size inside a column sized for another, and
+ * nothing would have reported it.
+ *
+ * The reducer already clamps what it stores, so an out-of-range index should
+ * not reach here at all. It stays defensive anyway — `stepIdx` also arrives
+ * from props, and an index that names no step must resolve to the default
+ * rather than to `undefined` several frames later.
+ */
+export function readingStep(stepIdx: number): ReadingStep {
+  const step = READING_STEPS[stepIdx] ?? READING_STEPS[DEFAULT_STEP_IDX]
+  if (!step) throw new Error('READING_STEPS is empty')
+  return step
+}
+
+/**
  * The measure for a reading step.
  *
  * §09 gives each of the seven sizes its own line width, from 540 at 17px to
@@ -129,7 +150,7 @@ export const GUTTER = 56
  * book is laid out to one width inside a column sized to another.
  */
 export function measureForStep(stepIdx: number): number {
-  return READING_STEPS[stepIdx]?.measure ?? MEASURE
+  return readingStep(stepIdx).measure
 }
 
 /** Third prose column — the margin where companion marks land. */

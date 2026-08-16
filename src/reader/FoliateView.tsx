@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { Renderer, TocItem, View } from 'foliate-js/view.js'
 import type { MarkPainter } from 'foliate-js/overlayer.js'
-import type { Theme } from '../lib/state'
+import type { Theme, Typeface } from '../lib/state'
 import { measureForStep } from '../lib/metrics'
 import type { BookMeta, BookNavigator, ReaderPosition } from '../lib/useBook'
 import { isPdf } from '../lib/formats'
@@ -20,6 +20,8 @@ export interface FoliateViewProps {
   generation: number
   stepIdx: number
   theme: Theme
+  /** The face the BOOK is set in — never the interface's. */
+  typeface: Typeface
   paginated: boolean
   /**
    * Where this book was last left, or null to open at the start.
@@ -63,6 +65,7 @@ export interface FoliateViewProps {
 interface Settings {
   stepIdx: number
   theme: Theme
+  typeface: Typeface
   paginated: boolean
 }
 
@@ -98,6 +101,7 @@ function applySettings(renderer: Renderer, settings: Settings): void {
     bookCss({
       stepIdx: settings.stepIdx,
       theme: settings.theme,
+      typeface: settings.typeface,
       justify: true,
       hyphenate: true,
     }),
@@ -117,6 +121,7 @@ export function FoliateView({
   generation,
   stepIdx,
   theme,
+  typeface,
   paginated,
   lastLocation,
   onToc,
@@ -167,7 +172,7 @@ export function FoliateView({
    * whenever a section's overlay is built, which happens as the reader scrolls
    * — long after any value captured at startup went stale. */
   const marksRef = useRef(marks)
-  const settings = useRef<Settings>({ stepIdx, theme, paginated })
+  const settings = useRef<Settings>({ stepIdx, theme, typeface, paginated })
   /* Through a ref for the same reason, and for one that is specific to it: the
    * saved position is derived from the book's content id, which resolves a few
    * milliseconds AFTER the reader mounts. A prop read at mount is read before
@@ -181,7 +186,7 @@ export function FoliateView({
   useLayoutEffect(() => {
     handlers.current = currentHandlers
     marksRef.current = marks
-    settings.current = { stepIdx, theme, paginated }
+    settings.current = { stepIdx, theme, typeface, paginated }
     lastLocationRef.current = lastLocation
   })
 
@@ -307,7 +312,7 @@ export function FoliateView({
      * the effect and unmounted the React tree — the reader vanished instead of
      * the theme failing to change. */
     try {
-      applySettings(renderer, { stepIdx, theme, paginated })
+      applySettings(renderer, { stepIdx, theme, typeface, paginated })
       /* A theme change reaches the book through `setStyles`, which restyles the
        * document WITHOUT rebuilding the section — so no `create-overlay` fires
        * and the marks keep the colour they were painted in. Changing the step or
@@ -319,7 +324,7 @@ export function FoliateView({
       console.error('Paper: applying reader settings failed', cause)
       handlers.current.onError(generation, 'That setting could not be applied.')
     }
-  }, [stepIdx, theme, paginated, ready, generation])
+  }, [stepIdx, theme, typeface, paginated, ready, generation])
 
   return <div ref={hostRef} style={{ position: 'absolute', inset: 0 }} />
 }

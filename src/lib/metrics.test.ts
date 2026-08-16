@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  DEFAULT_STEP_IDX,
   GUTTER,
   MARGIN_COL,
   MEASURE,
@@ -8,6 +9,7 @@ import {
   measureForStep,
   proseBleed,
   proseGrid,
+  readingStep,
 } from './metrics'
 
 /** Where the measure track's centre falls inside the whole prose grid. */
@@ -101,5 +103,31 @@ describe('measureForStep', () => {
     expect(measureForStep(-1)).toBe(MEASURE)
     expect(measureForStep(99)).toBe(MEASURE)
     expect(measureForStep(Number.NaN)).toBe(MEASURE)
+  })
+})
+
+describe('readingStep', () => {
+  it('returns the step at the index', () => {
+    READING_STEPS.forEach((step, i) => {
+      expect(readingStep(i)).toBe(step)
+    })
+  })
+
+  /* The reason this function exists. Three call sites each wrote their own
+   * `READING_STEPS[i] ?? fallback`, and two of them named DIFFERENT fallbacks —
+   * `MEASURE` here, `READING_STEPS[2]` in bookCss. They agree today only
+   * because the default step's measure happens to equal MEASURE, so moving
+   * either number would have silently split the size the book is laid out to
+   * from the width of the column it is laid out into. */
+  it('falls back to the default step, not to undefined', () => {
+    for (const bad of [-1, 99, Number.NaN, Number.POSITIVE_INFINITY, 2.5]) {
+      expect(readingStep(bad)).toBe(READING_STEPS[DEFAULT_STEP_IDX])
+    }
+  })
+
+  it('agrees with measureForStep everywhere, in range and out', () => {
+    for (const idx of [-1, 0, 1, 2, 3, 4, 5, 6, 7, 99, Number.NaN]) {
+      expect(measureForStep(idx)).toBe(readingStep(idx).measure)
+    }
   })
 })

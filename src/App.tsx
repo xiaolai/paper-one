@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { buildCommands } from './lib/commands'
 import { PANE_SHORTCUTS } from './lib/panes'
 import { ACCEPT_FORMATS } from './lib/formats'
-import { applyMetrics } from './lib/metrics'
+import { DEFAULT_STEP_IDX, applyMetrics } from './lib/metrics'
 import { positionRecorder, type PositionRecorder } from './lib/positionRecorder'
 import { usePlatform, usePrefersDark } from './lib/platform'
 import { NOT_CONFIGURED } from './lib/companion'
@@ -278,6 +278,31 @@ export function App() {
         marking.mark('')
         return
       }
+      /* §09's reading sizes, on the combo every reader already knows.
+       *
+       * Both spellings of each key, because the shifted and unshifted forms
+       * arrive as different `key` values: ⌘+ on a US layout is ⌘⇧= and reports
+       * '+', while ⌘= reports '='. Binding one of the pair gives a shortcut
+       * that works or not depending on whether the reader held shift.
+       *
+       * The reducer clamps, so pressing on at either end of the ramp is a
+       * no-op rather than something to guard here. */
+      if (event.key === '=' || event.key === '+') {
+        event.preventDefault()
+        dispatch({ type: 'setStepIdx', idx: state.stepIdx + 1 })
+        return
+      }
+      if (event.key === '-' || event.key === '_') {
+        event.preventDefault()
+        dispatch({ type: 'setStepIdx', idx: state.stepIdx - 1 })
+        return
+      }
+      if (event.key === '0') {
+        event.preventDefault()
+        dispatch({ type: 'setStepIdx', idx: DEFAULT_STEP_IDX })
+        return
+      }
+
       const shortcut = PANE_SHORTCUTS.find((entry) => entry.digit === event.key)
       if (shortcut) {
         event.preventDefault()
@@ -294,6 +319,7 @@ export function App() {
     state.screen,
     state.paletteOpen,
     state.switcherOpen,
+    state.stepIdx,
   ])
 
   /* Titlebar metadata comes from the OPEN book, and from nothing else.

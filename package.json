@@ -25,7 +25,7 @@
     "@fontsource-variable/literata": "^5.3.0",
     "@fontsource/ibm-plex-mono": "^5.3.0",
     "@tauri-apps/api": "^2.9.0",
-    "foliate-js": "github:xiaolai/foliate-js#c165a8170d2a69eb5c2a5f2ac2b77a5c49d9d8e1",
+    "foliate-js": "github:xiaolai/foliate-js#e3fde49acc53f6bc649c7f411dc6cbe6465cc182",
     "lucide-react": "^1.31.0",
     "pdfjs-dist": "6.2.108",
     "react": "^19.2.0",

@@ -46,6 +46,37 @@
   gap: 0 var(--track-gap);
 }
 
+/*
+ * How far through the BOOK the reader is, down the leading edge.
+ *
+ * At the stage's very edge — `inset-inline-start: 0` on the padding box, so it
+ * sits outside the 24px the scroll port respects and shares a lane with
+ * nothing. That is the point: it reads as a property of the page rather than as
+ * a control on it, and 3px is the width at which a colour is an edge and not a
+ * bar. Logical rather than `left`, so it follows the reading direction.
+ *
+ * Not on §12's layer list, and it does not need to be: x = 0…3 is territory
+ * nothing else in the reading area reaches — the scroll port starts at 24 and
+ * the prose grid well after that — so there is no stacking question to answer.
+ */
+.progressTrack {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  width: 3px;
+  /* The unread part. A token rather than a tint of the book's own colour, so
+     the track reads the same on all five themes and only the fill carries hue. */
+  background: var(--line-2);
+}
+
+.progressFill {
+  width: 100%;
+  /* Deliberately not §08's page-turn timing. That token is 0ms because a page
+     turn should be instant; this is a continuous value being reported, and
+     snapping it makes a 1% move look like a glitch rather than progress. */
+  transition: height 120ms linear;
+}
+
 /* The gutter and margin are OVERLAYS on the same grid row as the book, not
  * siblings beside it — see `.text` for why. */
 .gutter {
@@ -108,6 +139,52 @@
   position: relative;
   margin-inline-start: var(--text-bleed-start, 0);
   margin-inline-end: var(--text-bleed-end, 0);
+}
+
+/*
+ * In scrolled flow the book element is also the SCROLL PORT, and a scroll port
+ * sized to the prose grid puts its scrollbar at the prose grid's edge.
+ *
+ * Measured, at a 1332px window with the pane open: the stage ran 0→920 and this
+ * element 72→848 — exactly gutter + gap + measure + gap + margin. The bar sat
+ * 72px inside the reading area, beside the last characters of every line,
+ * reading as part of the page rather than as chrome.
+ *
+ * So in scrolled flow it leaves the track flow and spans the stage. `inset-
+ * inline` is the stage's own padding rather than 0, because an absolute box
+ * resolves against the PADDING box: with the pane open the stage's edge is the
+ * pane's card, and a bar hard against it would break §03's spacing.
+ *
+ * The text does not move. The stage centres the grid, so the grid's centre and
+ * the stage's centre are the same point, and widening this element about that
+ * point leaves the measure exactly where `proseGrid` put it — confirmed by the
+ * numbers above: (24 + 896) / 2 and 72 + 56 + 32 + 600 / 2 are both 460.
+ *
+ * The bleed CANNOT come with it. It is a margin here because the book is an
+ * absolutely positioned child that ignores this element's padding — see above —
+ * and a margin would narrow the port again, which is the whole thing being
+ * fixed. It moves inside the port instead, as padding on foliate's `#container`
+ * through `--paper-scroll-pad-*`. A scrollbar sits on the border box, so
+ * padding there places the column and leaves the bar at the edge.
+ *
+ * Paginated flow keeps the rule above untouched: it has no scroll port, so it
+ * has nothing to gain here and a layout to lose.
+ */
+.text[data-flow='scrolled'] {
+  position: absolute;
+  /* Both placements dropped, and this is the load-bearing line.
+   *
+   * `position: absolute` alone does NOT take a grid item out of the grid. Per
+   * CSS Grid, an absolutely positioned grid child whose grid placement is
+   * DEFINITE is contained by its grid area — so `inset-inline: 24px` measured
+   * from the edges of tracks 1…3, and the element came out NARROWER than the
+   * margin version it replaced: 96→824 against 72→848, measured in the app.
+   * Only an `auto` placement falls back to the grid container's padding box. */
+  grid-column: auto;
+  grid-row: auto;
+  inset-block: 12px 0;
+  inset-inline: var(--stage-pad-x, 24px);
+  margin-inline: 0;
 }
 
 /* `.pdfStage` and `.loading` were here, for a second reader that no longer

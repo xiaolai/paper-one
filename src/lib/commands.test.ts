@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { buildCommands, filterCommands, score, type Command } from './commands'
+import { DEFAULT_STEP_IDX, READING_STEPS } from './metrics'
 import { PANE_SHORTCUTS } from './panes'
 import { initialState, type AppState } from './state'
 
@@ -75,6 +76,114 @@ describe('buildCommands', () => {
     const { ctx, dispatched } = context({ pane: null })
     find(buildCommands(ctx), 'pane:notes')?.run()
     expect(dispatched).toEqual([{ type: 'openPane', pane: 'notes' }])
+  })
+
+  describe('reading size', () => {
+    it('steps one §09 size at a time, in the direction it names', () => {
+      const { ctx, dispatched } = context({ stepIdx: 3 })
+      find(buildCommands(ctx), 'reading:bigger')?.run()
+      find(buildCommands(ctx), 'reading:smaller')?.run()
+      expect(dispatched).toEqual([
+        { type: 'setStepIdx', idx: 4 },
+        { type: 'setStepIdx', idx: 2 },
+      ])
+    })
+
+    /* Same rule the ruler follows above: a command that cannot do anything is
+     * not offered. At the largest size "Larger" would dispatch an index the
+     * reducer clamps straight back, giving a palette row that visibly runs and
+     * visibly changes nothing. */
+    it('is not offered at the end of the ramp it would run off', () => {
+      const biggest = buildCommands(context({ stepIdx: READING_STEPS.length - 1 }).ctx)
+      expect(find(biggest, 'reading:bigger')).toBeUndefined()
+      expect(find(biggest, 'reading:smaller')).toBeDefined()
+
+      const smallest = buildCommands(context({ stepIdx: 0 }).ctx)
+      expect(find(smallest, 'reading:smaller')).toBeUndefined()
+      expect(find(smallest, 'reading:bigger')).toBeDefined()
+    })
+
+    it('offers the default size only when that is not already the size', () => {
+      const moved = buildCommands(context({ stepIdx: 5 }).ctx)
+      expect(find(moved, 'reading:size-default')).toBeDefined()
+      find(moved, 'reading:size-default')?.run()
+
+      const atDefault = buildCommands(context({ stepIdx: DEFAULT_STEP_IDX }).ctx)
+      expect(find(atDefault, 'reading:size-default')).toBeUndefined()
+    })
+
+    it('names the size it would move to, in the §09 pixel sizes', () => {
+      const commands = buildCommands(context({ stepIdx: 2 }).ctx)
+      expect(find(commands, 'reading:bigger')?.label).toContain(`${READING_STEPS[3]!.size}`)
+      expect(find(commands, 'reading:smaller')?.label).toContain(`${READING_STEPS[1]!.size}`)
+    })
+  })
+})
+
+/**
+ * The invariant `commands.ts` claims in its own header — "the palette shows the
+ * same combo the handler binds, and neither can quietly stop matching the
+ * other" — and which nothing enforced until the size shortcuts were added.
+ *
+ * Read from App's SOURCE rather than by dispatching a synthetic KeyboardEvent,
+ * for the reason the ⌘1…5 test above gives: the two things that must agree live
+ * in different files, and a test that asks the registry about itself can only
+ * ever agree with itself. A combo advertised in the palette and bound nowhere
+ * is a row that prints a keystroke which does nothing.
+ */
+describe('advertised combos are bound', () => {
+  const app = readFileSync(fileURLToPath(new URL('../App.tsx', import.meta.url)), 'utf8')
+
+  /**
+   * What a printed combo requires the handler to bind.
+   *
+   * Explicit rather than derived from the glyph, because the two are genuinely
+   * not the same string and pretending otherwise is how this test first failed
+   * against correct code. The palette prints ⌘− with a true minus (U+2212),
+   * which is right for a page of type and is not a key any keyboard reports;
+   * `KeyboardEvent.key` gives a hyphen-minus. And a key with a shifted twin has
+   * to bind BOTH — ⌘+ on a US layout is ⌘⇧= and reports '+', while ⌘= reports
+   * '=' — or the shortcut works only for readers who happened to hold shift.
+   *
+   * Panel digits are absent on purpose: ⌘1…5 is bound from PANE_SHORTCUTS, and
+   * the test above already checks that table against the renderer.
+   */
+  const KEYS_FOR_COMBO: Record<string, readonly string[]> = {
+    '⌘K': ['k'],
+    '⌘\\': ['\\\\'],
+    '⌘D': ['d'],
+    '⌘+': ['=', '+'],
+    '⌘−': ['-', '_'],
+    '⌘0': ['0'],
+  }
+
+  it('binds every combo the palette prints', () => {
+    const advertised = new Set(
+      buildCommands({ ...context().ctx, markSelection: () => {} })
+        .map((command) => command.combo)
+        .filter((combo): combo is string => combo !== undefined)
+        .filter((combo) => !/^⌘[1-5]$/.test(combo)),
+    )
+    expect(advertised.size).toBeGreaterThan(0)
+
+    for (const combo of advertised) {
+      const keys = KEYS_FOR_COMBO[combo]
+      // A new combo with no entry here is the failure, not an exemption: it
+      // means the palette prints a keystroke this test cannot confirm exists.
+      expect(keys, `no expected key for ${combo}`).toBeDefined()
+      for (const key of keys ?? []) {
+        expect(app, `${combo} prints, but App binds no '${key}'`).toContain(`'${key}'`)
+      }
+    }
+  })
+
+  it('advertises every reading-size key it binds, so none is a secret', () => {
+    // The other direction. A bound key with no command is a keystroke that
+    // works and that nothing tells the reader about.
+    const sized = buildCommands(context({ stepIdx: 3 }).ctx).map((c) => c.combo)
+    expect(sized).toContain('⌘+')
+    expect(sized).toContain('⌘−')
+    expect(sized).toContain('⌘0')
   })
 })
 

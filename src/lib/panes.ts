@@ -1,4 +1,4 @@
-import type { PaneId, Theme } from './state'
+import type { PaneId, Theme, Typeface } from './state'
 
 /**
  * The side pane's panels — one registry, for everyone who names them.
@@ -65,6 +65,25 @@ export const THEMES: readonly { id: Theme; label: string }[] = [
   { id: 'sepia', label: 'Sepia' },
   { id: 'sage', label: 'Sage' },
   { id: 'night', label: 'Night' },
+]
+
+/**
+ * The faces a book can be set in — the four `main.tsx` bundles, and no others.
+ *
+ * A registry rather than two lists, for the reason the themes above give. The
+ * `note` is what a reader needs in order to CHOOSE, which for type is not the
+ * name: three of these four are unfamiliar outside typography, and a picker
+ * that offers four proper nouns and no guidance is a coin toss.
+ *
+ * Adding a family here without importing it in `main.tsx` produces a book set
+ * in Georgia and reports nothing — an unknown family is not an error, it is the
+ * next entry in the fallback chain. See `READING_STACKS`.
+ */
+export const TYPEFACES: readonly { id: Typeface; label: string; note: string }[] = [
+  { id: 'literata', label: 'Literata', note: 'Serif, for reading' },
+  { id: 'crimson', label: 'Crimson Pro', note: 'Serif, lighter' },
+  { id: 'instrument', label: 'Instrument Sans', note: 'Sans' },
+  { id: 'plex', label: 'IBM Plex Mono', note: 'Monospaced' },
 ]
 
 /** Labels by id, for the pane header and anywhere else that names one. */

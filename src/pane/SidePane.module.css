@@ -475,6 +475,101 @@
   color: var(--muted);
 }
 
+/* A row that holds its own controls rather than being one. `.settingRow` is a
+   button everywhere else, and inheriting its pointer and hover would promise a
+   click target that is not there — the two steppers are the targets. */
+.settingStatic {
+  cursor: default;
+}
+
+.settingStatic:hover {
+  background: transparent;
+}
+
+.stepper {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.stepperButton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: var(--radius-control, 10px);
+  background: var(--wash);
+  font-family: inherit;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.stepperButton:hover:not(:disabled) {
+  background: var(--line-2);
+}
+
+/* Disabled, not hidden: the ends of §09's ramp are part of what the control
+   tells the reader, and a button that vanishes at the limit reads as a bug. */
+.stepperButton:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.stepperValue {
+  min-width: 42px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  text-align: center;
+  color: var(--ink);
+}
+
+.typefaceList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 0;
+}
+
+.typefaceRow {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--ink);
+  text-align: start;
+  cursor: pointer;
+}
+
+.typefaceRow:hover {
+  background: var(--wash);
+}
+
+.typefaceRow[data-on='true'] {
+  background: var(--accent-bg);
+}
+
+/* The sample carries the face; 17px is §09's smallest reading step, so the
+   preview is drawn no smaller than the book could ever be set. */
+.typefaceSample {
+  flex: 1;
+  font-size: 17px;
+  line-height: 1.3;
+}
+
+.typefaceNote {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
 .themeGrid {
   display: grid;
   grid-template-columns: repeat(5, 1fr);

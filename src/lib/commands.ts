@@ -1,4 +1,5 @@
-import { PANES, THEMES } from './panes'
+import { DEFAULT_STEP_IDX, READING_STEPS, readingStep } from './metrics'
+import { PANES, THEMES, TYPEFACES } from './panes'
 import type { AppDispatch, AppState } from './state'
 
 /**
@@ -91,7 +92,30 @@ export function buildCommands(ctx: CommandContext): Command[] {
       on: state.rulerOn,
       run: () => dispatch({ type: 'toggleRuler' }),
     })
+
+    // Same guard, same reason: a paged book has no scroll port to draw one in.
+    commands.push({
+      id: 'reading:scrollbar',
+      label: state.scrollbarOn ? 'Hide the scrollbar' : 'Show the scrollbar',
+      group: 'Reading',
+      keywords: 'scroll bar gutter position',
+      on: state.scrollbarOn,
+      run: () => dispatch({ type: 'toggleScrollbar' }),
+    })
   }
+
+  /* Outside the flow guard above, unlike the scrollbar. Progress through the
+   * book is the same quantity in either flow — `fraction` arrives on relocate
+   * whichever way the book is laid out — so guarding it would hide a command
+   * that works. */
+  commands.push({
+    id: 'reading:progress',
+    label: state.progressLineOn ? 'Hide the progress rule' : 'Show the progress rule',
+    group: 'Reading',
+    keywords: 'progress bar edge colour color how far',
+    on: state.progressLineOn,
+    run: () => dispatch({ type: 'toggleProgressLine' }),
+  })
 
   commands.push({
     id: 'reading:flow',
@@ -105,6 +129,46 @@ export function buildCommands(ctx: CommandContext): Command[] {
       }),
   })
 
+  /* §09's seven reading sizes, one step at a time.
+   *
+   * Omitted at the end of the ramp for the same reason the ruler is omitted in
+   * paginated flow: the reducer clamps an out-of-range index straight back, so
+   * "Larger" at 30px would be a row that runs and changes nothing. The label
+   * names the size it would MOVE TO, because a stepper the reader cannot see
+   * while the palette is open has to say where it is going. */
+  if (state.stepIdx < READING_STEPS.length - 1) {
+    commands.push({
+      id: 'reading:bigger',
+      label: `Larger type — ${readingStep(state.stepIdx + 1).size}px`,
+      group: 'Reading',
+      combo: '⌘+',
+      keywords: 'size text bigger increase zoom',
+      run: () => dispatch({ type: 'setStepIdx', idx: state.stepIdx + 1 }),
+    })
+  }
+
+  if (state.stepIdx > 0) {
+    commands.push({
+      id: 'reading:smaller',
+      label: `Smaller type — ${readingStep(state.stepIdx - 1).size}px`,
+      group: 'Reading',
+      combo: '⌘−',
+      keywords: 'size text smaller decrease zoom',
+      run: () => dispatch({ type: 'setStepIdx', idx: state.stepIdx - 1 }),
+    })
+  }
+
+  if (state.stepIdx !== DEFAULT_STEP_IDX) {
+    commands.push({
+      id: 'reading:size-default',
+      label: `Default type size — ${readingStep(DEFAULT_STEP_IDX).size}px`,
+      group: 'Reading',
+      combo: '⌘0',
+      keywords: 'size text reset',
+      run: () => dispatch({ type: 'setStepIdx', idx: DEFAULT_STEP_IDX }),
+    })
+  }
+
   for (const theme of THEMES) {
     commands.push({
       id: `theme:${theme.id}`,
@@ -113,6 +177,21 @@ export function buildCommands(ctx: CommandContext): Command[] {
       keywords: 'colour color appearance',
       on: state.theme === theme.id,
       run: () => dispatch({ type: 'setTheme', theme: theme.id }),
+    })
+  }
+
+  /* The book's face, in the same group as the themes and for the same reason:
+   * both are Appearance, and both are a choice from a fixed registry. The
+   * label names the face rather than describing it — a palette row is read by
+   * someone who already knows which one they want. */
+  for (const face of TYPEFACES) {
+    commands.push({
+      id: `typeface:${face.id}`,
+      label: `Typeface — ${face.label}`,
+      group: 'Appearance',
+      keywords: `font family type ${face.note.toLowerCase()}`,
+      on: state.typeface === face.id,
+      run: () => dispatch({ type: 'setTypeface', typeface: face.id }),
     })
   }
 

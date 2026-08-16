@@ -10,6 +10,7 @@ import {
   proseBleed,
   proseGrid,
 } from '../lib/metrics'
+import { bookAccent } from '../lib/bookAccent'
 import { marginMarks } from '../lib/marks'
 import type { MarkStore } from '../lib/useMarks'
 import type { Marking } from '../lib/useMarking'
@@ -123,10 +124,28 @@ export function Reader({
    * the centre the same way the imbalance already did, doubling the error. */
   const bleed = proseBleed(grid)
 
+  /* Derived from the book, not drawn at random — see `bookAccent`. Null with no
+   * book open, which is also what stops the rule rendering. */
+  const accent = bookAccent(book.bookId, state.theme === 'night')
+
   const gridVars = {
     '--stage-pad-x': `${STAGE_PADDING_X}px`,
     '--text-bleed-start': `${bleed.start}px`,
     '--text-bleed-end': `${bleed.end}px`,
+    /* The same two numbers again, for the same job, reaching a different
+     * element. In scrolled flow the book element is the scroll port and spans
+     * the stage, so the bleed cannot narrow it — it is applied INSIDE the port
+     * instead, as padding on foliate's `#container`. These names are the fork's
+     * hooks; the shadow root is closed and a custom property is the only thing
+     * that crosses it. Inert in paginated flow, where the fork reads them only
+     * under `:host([flow="scrolled"])`. */
+    '--paper-scroll-pad-start': `${bleed.start}px`,
+    '--paper-scroll-pad-end': `${bleed.end}px`,
+    /* §06: the bar is off by default. `none` hides it without disabling the
+     * scrolling itself — wheel, trackpad, Space and the arrow keys all still
+     * work, which is what makes hiding it a reasonable default rather than a
+     * removed capability. */
+    '--paper-scrollbar-width': state.scrollbarOn ? 'auto' : 'none',
     '--track-gutter': `${grid.gutter}px`,
     '--track-measure': `${grid.measure}px`,
     '--track-margin': `${grid.marginCol}px`,
@@ -164,6 +183,22 @@ export function Reader({
                   ref={setStage}
                   style={gridVars}
                 >
+                  {/* The book's own edge. Rendered before everything else so it
+                      sits at the back of the stage; it is at x=0, where nothing
+                      else in the reading area reaches, so it needs no layer of
+                      its own under §12. */}
+                  {state.progressLineOn && accent && (
+                    <div className={styles.progressTrack} aria-hidden="true">
+                      <div
+                        className={styles.progressFill}
+                        style={{
+                          height: `${Math.min(1, Math.max(0, book.position.fraction)) * 100}%`,
+                          background: accent,
+                        }}
+                      />
+                    </div>
+                  )}
+
                   <div className={styles.gutter}>
                     <ReadingRuler
                       state={state}
@@ -173,12 +208,13 @@ export function Reader({
                     />
                   </div>
 
-                  <div className={styles.text}>
+                  <div className={styles.text} data-flow={state.pageLayout}>
                     <FoliateView
                       file={book.source}
                       generation={book.generation}
                       stepIdx={state.stepIdx}
                       theme={state.theme}
+                      typeface={state.typeface}
                       paginated={state.pageLayout === 'paginated'}
                       lastLocation={lastLocation}
                       onToc={book.setToc}

@@ -178,12 +178,20 @@ export function SidePane({
             themeFollowsOs={state.themeFollowsOs}
             pageLayout={state.pageLayout}
             rulerOn={state.rulerOn}
+            scrollbarOn={state.scrollbarOn}
+            progressLineOn={state.progressLineOn}
             side={state.side}
+            stepIdx={state.stepIdx}
+            typeface={state.typeface}
             onTheme={(theme) => dispatch({ type: 'setTheme', theme })}
             onFollowOs={(follows) => dispatch({ type: 'setThemeFollowsOs', follows })}
             onPageLayout={(layout) => dispatch({ type: 'setPageLayout', layout })}
             onToggleRuler={() => dispatch({ type: 'toggleRuler' })}
+            onToggleScrollbar={() => dispatch({ type: 'toggleScrollbar' })}
+            onToggleProgressLine={() => dispatch({ type: 'toggleProgressLine' })}
             onSide={(side) => dispatch({ type: 'setSide', side })}
+            onStepIdx={(idx) => dispatch({ type: 'setStepIdx', idx })}
+            onTypeface={(typeface) => dispatch({ type: 'setTypeface', typeface })}
           />
         )}
 

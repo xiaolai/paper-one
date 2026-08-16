@@ -227,12 +227,12 @@ export function TitleBar({
             <button
               type="button"
               className={styles.action}
-              /* Says what the panel actually holds. It promised "theme,
-                 typeface, size" and offers only the theme: nothing in the app
-                 dispatches `setStepIdx`, and there is no typeface control at
-                 all, so two thirds of that tooltip named features a reader
-                 could go looking for and never find. */
-              title="Appearance · theme, flow, ruler"
+              /* Says what the panel actually holds, and no more. It once
+                 promised "theme, typeface, size" while offering only the
+                 theme — a tooltip naming features a reader could go looking
+                 for and never find. All three are real now, so all three are
+                 named; nothing here may be added ahead of its control. */
+              title="Appearance · theme, typeface, size, flow, ruler"
               onClick={() => dispatch({ type: 'openPane', pane: 'settings' })}
             >
               <Type size={ICON.control} strokeWidth={ICON.stroke} />
