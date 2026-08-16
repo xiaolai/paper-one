@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   byRecency,
   inOrder,
+  sortTitle,
   isReopenable,
   parseLibrary,
   recordOpen,
@@ -242,5 +243,93 @@ describe('parseLibrary', () => {
   it('reads back a stored position unchanged', () => {
     const cfi = 'epubcfi(/6/14!/4/2/6,/1:0,/1:12)'
     expect(parseLibrary(JSON.stringify([entry({ position: cfi })]))[0]?.position).toBe(cfi)
+  })
+})
+
+
+/**
+ * The title a shelf alphabetises by is not the title it shows.
+ *
+ * `file-as` exists because sorting on the displayed title is wrong in every
+ * language with articles. foliate has been parsing it all along; Paper sorted on
+ * `title` because the field was discarded before it reached the row.
+ */
+describe('sortTitle', () => {
+  it('files a book under its declared sort title', () => {
+    expect(sortTitle(entry({ title: 'The Hobbit', sortAs: 'Hobbit, The' }))).toBe('Hobbit, The')
+  })
+
+  /* Stated as an ordering, and paired so the two keys DISAGREE.
+   *
+   * The first version of this case used Grendel, which sorts before The Hobbit
+   * whichever key is used — so it passed just as happily with the field ignored.
+   * Ivanhoe is the pair that separates them: by the displayed title it comes
+   * first (I before T), by the sort title it comes second (I after H). */
+  it('files The Hobbit under H, so it precedes Ivanhoe', () => {
+    const shelf = [
+      entry({ bookId: 'a', title: 'Ivanhoe' }),
+      entry({ bookId: 'b', title: 'The Hobbit', sortAs: 'Hobbit, The' }),
+    ]
+    expect(inOrder(shelf, 'title').map((e) => e.title)).toEqual(['The Hobbit', 'Ivanhoe'])
+  })
+
+  /* A book declaring no `file-as` must sort exactly as it did before this
+   * existed. The field changes the order only where the book asked it to. */
+  it('falls back to the displayed title', () => {
+    expect(sortTitle(entry({ title: 'Moby-Dick' }))).toBe('Moby-Dick')
+  })
+
+  it('falls back again for a book with no title at all', () => {
+    expect(sortTitle(entry({ title: '' }))).toBe('Untitled')
+  })
+})
+
+/**
+ * A row written before any of these fields existed.
+ *
+ * The compatibility case, and the reason every new field is optional: the store
+ * on a reader's disk right now has none of them, and a shelf that dropped those
+ * rows would lose the library to gain a feature.
+ */
+describe('rows written before the metadata fields existed', () => {
+  const legacy = JSON.stringify([
+    {
+      bookId: 'url:/old.epub',
+      title: 'Old',
+      author: 'A',
+      url: '/old.epub',
+      lastOpened: 1,
+      position: null,
+    },
+  ])
+
+  it('survives parsing, rather than being dropped', () => {
+    expect(parseLibrary(legacy)).toHaveLength(1)
+  })
+
+  it('sorts by its displayed title, having no sort title', () => {
+    const [row] = parseLibrary(legacy)
+    expect(row && sortTitle(row)).toBe('Old')
+  })
+
+  it('carries the new fields when a book does declare them', () => {
+    const rich = JSON.stringify([
+      {
+        bookId: 'url:/new.epub',
+        title: 'New',
+        author: 'B',
+        url: '/new.epub',
+        lastOpened: 2,
+        position: null,
+        series: 'Discworld',
+        seriesIndex: 5,
+        subjects: ['Fantasy'],
+      },
+    ])
+    expect(parseLibrary(rich)[0]).toMatchObject({
+      series: 'Discworld',
+      seriesIndex: 5,
+      subjects: ['Fantasy'],
+    })
   })
 })

@@ -49,6 +49,32 @@ export interface BookMeta {
    * parsing it all along while `readMeta` discarded it.
    */
   readonly identifier: string
+  /**
+   * The title to ALPHABETISE by — `dc:title`'s `file-as`, or Calibre's
+   * `title_sort`. Empty when the book declares none.
+   *
+   * It exists because sorting on the displayed title is wrong in every
+   * language that has articles: `The Hobbit` belongs under H. foliate has been
+   * parsing this all along and Paper sorted on `title` anyway.
+   */
+  readonly sortAs: string
+  /** The series this book belongs to, and where in it. */
+  readonly series: string
+  readonly seriesIndex: number | null
+  /**
+   * The publisher's own subject tags — `dc:subject`.
+   *
+   * Free tags, already in the file, on most commercially produced books. They
+   * are what seeds the tag vocabulary rather than asking a reader to invent one
+   * from nothing.
+   */
+  readonly subjects: readonly string[]
+  readonly publisher: string
+  /** As the book declares it. NOT parsed into a date — see `readMeta`. */
+  readonly published: string
+  readonly languages: readonly string[]
+  readonly description: string
+  readonly subtitle: string
 }
 
 /** A File when picked or dropped; a URL for a book already on disk. */

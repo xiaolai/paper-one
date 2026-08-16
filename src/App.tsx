@@ -15,7 +15,7 @@ import { useLibrary } from './lib/useLibrary'
 import { useCards } from './lib/useCards'
 import { useMarks } from './lib/useMarks'
 import { useMarking } from './lib/useMarking'
-import { coverTint, coverTintFor } from './data/fixtures'
+import { coverTintFor } from './lib/bookAccent'
 import { BookSwitcher } from './overlays/BookSwitcher'
 import { CommandPalette } from './overlays/CommandPalette'
 import { TitleBar } from './shell/TitleBar'
@@ -160,6 +160,20 @@ export function App({ storage }: AppProps) {
       // Device-local. `recordOpen` carries a known path through an open that
       // does not have one, so a drop or a URL cannot erase it.
       path: openedPath,
+      /* What the book says about itself, kept rather than discarded.
+       *
+       * foliate parses every one of these on every open and Paper narrowed them
+       * away between the parse and the row, so a shelf that could have sorted by
+       * series and filtered by subject had title and author to work with. All of
+       * it is capped in `readMeta` — this is a stranger's file. */
+      sortAs: meta.sortAs,
+      series: meta.series,
+      seriesIndex: meta.seriesIndex,
+      subjects: meta.subjects,
+      publisher: meta.publisher,
+      published: meta.published,
+      languages: meta.languages,
+      description: meta.description,
     })
   }, [bookId, meta, source, record, openedPath])
 
@@ -443,7 +457,7 @@ export function App({ storage }: AppProps) {
             bookTitle={title}
             bookSubtitle={subtitle}
             // The same tint the shelf gives this book, so the chip and the cover agree.
-            coverTint={book.bookId ? coverTintFor(book.bookId) : coverTint(0)}
+            coverTint={coverTintFor(book.bookId ?? '')}
             speech={speech}
             hasBook={book.source !== null}
           />

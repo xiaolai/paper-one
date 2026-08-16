@@ -1510,11 +1510,76 @@ export function readMeta(book: { metadata?: unknown }): BookMeta {
     }
     return ''
   }
+  const belongsTo = (md['belongsTo'] ?? {}) as Record<string, unknown>
+  const series = firstOf(belongsTo['series'])
   return {
-    title: text(md['title']),
-    author: text(md['author']),
+    title: cap(text(md['title'])),
+    author: cap(text(md['author'])),
     // Loosely typed like the rest: foliate resolves the OPF's unique-identifier
     // and hands back a string, but a malformed package can put anything here.
-    identifier: typeof md['identifier'] === 'string' ? md['identifier'] : '',
+    identifier: cap(typeof md['identifier'] === 'string' ? md['identifier'] : ''),
+    sortAs: cap(text(md['sortAs'])),
+    series: cap(text(series?.['name'] ?? series)),
+    /* A position, not an index into anything: EPUB allows `1.5` for a novella
+     * between two books, so this is a float and NaN must not survive as one. */
+    seriesIndex: finiteOrNull(series?.['position']),
+    subjects: list(md['subject'], text),
+    publisher: cap(text(md['publisher'])),
+    /* Kept as the STRING the book declared, not parsed into a date. EPUB dates
+     * are only loosely specified — `2011`, `2011-03`, and a full timestamp are
+     * all legal — and `new Date('2011')` silently invents a January 1st in
+     * whatever timezone the reader happens to be in. Sorting can compare these
+     * lexically, which is correct for ISO-shaped values and no worse than a
+     * fabricated day for the rest. */
+    published: cap(text(md['published'])),
+    languages: list(md['language'], text),
+    description: cap(text(md['description']), MAX_LONG),
+    subtitle: cap(text(md['subtitle'])),
   }
+}
+
+/**
+ * Caps on metadata, because a book is a file a stranger wrote.
+ *
+ * Every field below travels straight from an untrusted OPF into a store that is
+ * read whole, parsed whole and rewritten whole on every position save. Without
+ * a bound, a book declaring a megabyte-long description or forty thousand
+ * subjects would bloat that store permanently — and it would still be there
+ * after the book was removed from the shelf, because the row outlives the open.
+ *
+ * The numbers are chosen to be past anything real rather than to be tight. A
+ * genuine title is not 500 characters and a genuine book is not in 32
+ * languages; the point is only that there IS a ceiling.
+ */
+const MAX_FIELD = 500
+const MAX_LONG = 4000
+const MAX_LIST = 32
+
+function cap(value: string, limit = MAX_FIELD): string {
+  return value.length > limit ? value.slice(0, limit) : value
+}
+
+/** foliate hands back an object, an array of them, or nothing. */
+function firstOf(value: unknown): Record<string, unknown> | null {
+  const one = Array.isArray(value) ? value[0] : value
+  return one && typeof one === 'object' ? (one as Record<string, unknown>) : null
+}
+
+function finiteOrNull(value: unknown): number | null {
+  const n = typeof value === 'string' ? parseFloat(value) : value
+  return typeof n === 'number' && Number.isFinite(n) ? n : null
+}
+
+/** A bounded list of non-empty strings, deduplicated, order preserved. */
+function list(value: unknown, text: (v: unknown) => string): readonly string[] {
+  const raw = Array.isArray(value) ? value : value == null ? [] : [value]
+  const out: string[] = []
+  for (const item of raw) {
+    const one = cap(text(item))
+    // Deduplicated because an OPF may repeat a subject per language, and a tag
+    // shown twice on a row looks like a bug in the reader rather than the book.
+    if (one && !out.includes(one)) out.push(one)
+    if (out.length >= MAX_LIST) break
+  }
+  return out
 }

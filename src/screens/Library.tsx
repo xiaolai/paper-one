@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { Plus } from 'lucide-react'
-import { coverTintFor } from '../data/fixtures'
+import { coverTintFor } from '../lib/bookAccent'
 import {
   NOT_REOPENABLE,
   displayAuthor,

@@ -227,7 +227,7 @@ describe('ReaderSession disposal', () => {
     await session.start('book.epub', deps(view))
 
     expect(cb.calls['onToc']).toHaveLength(1)
-    expect(cb.calls['onMeta']?.[0]?.[0]).toEqual({ title: 'T', author: 'A', identifier: '' })
+    expect(cb.calls['onMeta']?.[0]?.[0]).toMatchObject({ title: 'T', author: 'A' })
     const nav = cb.calls['onNavigator']?.[0]?.[0] as {
       goTo: unknown
       search: unknown
@@ -2237,9 +2237,33 @@ describe('ReaderSession publishes the selection', () => {
   })
 })
 
+/**
+ * Every metadata field a book declared nothing for.
+ *
+ * Spread into the three cases below so each one states only what it is about.
+ * Before this, each restated the entire `BookMeta` shape, so widening that type
+ * failed three tests that had no opinion about the new fields — a shape assertion
+ * pretending to be a behaviour assertion.
+ */
+const NO_META = {
+  title: '',
+  author: '',
+  identifier: '',
+  sortAs: '',
+  series: '',
+  seriesIndex: null,
+  subjects: [],
+  publisher: '',
+  published: '',
+  languages: [],
+  description: '',
+  subtitle: '',
+}
+
 describe('readMeta', () => {
   it('reads plain strings', () => {
     expect(readMeta({ metadata: { title: 'Moby-Dick', author: 'Melville' } })).toEqual({
+      ...NO_META,
       title: 'Moby-Dick',
       author: 'Melville',
       identifier: '',
@@ -2258,7 +2282,7 @@ describe('readMeta', () => {
   })
 
   it('returns empty strings rather than undefined when metadata is absent', () => {
-    expect(readMeta({})).toEqual({ title: '', author: '', identifier: '' })
+    expect(readMeta({})).toEqual(NO_META)
   })
 
   /* The work's own identifier, which foliate parses out of the OPF and this
@@ -2269,6 +2293,93 @@ describe('readMeta', () => {
     expect(
       readMeta({ metadata: { title: 'T', identifier: 'urn:uuid:9f2a' } }).identifier,
     ).toBe('urn:uuid:9f2a')
+  })
+
+  /**
+   * The fields foliate has been parsing all along while Paper discarded them.
+   *
+   * Every one of these comes out of an OPF a stranger wrote, so the cases below
+   * are half "does it read the field" and half "what happens when the field is
+   * hostile". The second half is the one that matters for a store which is read
+   * whole and rewritten on every position save.
+   */
+  describe('the fields a library is built out of', () => {
+    it('reads a series and its position', () => {
+      const md = { belongsTo: { series: { name: 'Discworld', position: 5 } } }
+      expect(readMeta({ metadata: md })).toMatchObject({ series: 'Discworld', seriesIndex: 5 })
+    })
+
+    /* EPUB allows a fractional position for a novella between two books, so
+     * this is a float rather than an index into anything. */
+    it('keeps a fractional series position', () => {
+      const md = { belongsTo: { series: { name: 'S', position: 1.5 } } }
+      expect(readMeta({ metadata: md }).seriesIndex).toBe(1.5)
+    })
+
+    it('takes the first when a book declares several series', () => {
+      const md = { belongsTo: { series: [{ name: 'First' }, { name: 'Second' }] } }
+      expect(readMeta({ metadata: md }).series).toBe('First')
+    })
+
+    /* A position that is not a number must not survive as NaN: it would
+     * serialise to `null` through JSON and compare false against itself. */
+    it('refuses a non-numeric series position', () => {
+      const md = { belongsTo: { series: { name: 'S', position: 'later' } } }
+      expect(readMeta({ metadata: md }).seriesIndex).toBeNull()
+    })
+
+    it('reads subjects, publisher, languages and the sort title', () => {
+      const md = {
+        subject: ['Philosophy', 'Ethics'],
+        publisher: 'Penguin',
+        language: ['en'],
+        sortAs: 'Hobbit, The',
+      }
+      expect(readMeta({ metadata: md })).toMatchObject({
+        subjects: ['Philosophy', 'Ethics'],
+        publisher: 'Penguin',
+        languages: ['en'],
+        sortAs: 'Hobbit, The',
+      })
+    })
+
+    /* An OPF may repeat a subject once per language. Shown twice on a row that
+     * reads as a bug in the reader rather than in the book. */
+    it('deduplicates repeated subjects', () => {
+      expect(readMeta({ metadata: { subject: ['Ethics', 'Ethics'] } }).subjects).toEqual(['Ethics'])
+    })
+
+    it('accepts a single subject that is not in a list', () => {
+      expect(readMeta({ metadata: { subject: 'Ethics' } }).subjects).toEqual(['Ethics'])
+    })
+
+    /* The date is kept as the string the book declared. EPUB dates are loosely
+     * specified — `2011`, `2011-03`, and a full timestamp are all legal — and
+     * parsing invents a January 1st in the reader's own timezone. */
+    it('does not parse the published date into a date', () => {
+      expect(readMeta({ metadata: { published: '2011' } }).published).toBe('2011')
+    })
+
+    it('caps a hostile field rather than storing it whole', () => {
+      const huge = 'x'.repeat(50_000)
+      const meta = readMeta({ metadata: { title: huge, description: huge } })
+      expect(meta.title).toHaveLength(500)
+      expect(meta.description).toHaveLength(4000)
+    })
+
+    it('caps a hostile list rather than storing every entry', () => {
+      const many = Array.from({ length: 5_000 }, (_, i) => `tag-${i}`)
+      expect(readMeta({ metadata: { subject: many } }).subjects).toHaveLength(32)
+    })
+
+    it('survives a book that declares none of them', () => {
+      expect(readMeta({ metadata: { title: 'T' } })).toMatchObject({
+        series: '',
+        seriesIndex: null,
+        subjects: [],
+        languages: [],
+      })
+    })
   })
 
   it('treats a malformed identifier as no identifier', () => {

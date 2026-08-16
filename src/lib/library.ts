@@ -62,6 +62,30 @@ export interface LibraryEntry {
    * best. Anything that syncs must strip it.
    */
   readonly path: string | null
+  /**
+   * What the book declared about itself, beyond title and author.
+   *
+   * EVERY FIELD IS OPTIONAL, and that is load-bearing rather than lazy: rows
+   * written before this existed carry none of them and must keep working
+   * untouched. `parseLibrary` leaves an absent field absent rather than dropping
+   * the row, the same way it already treats `position` and `path`.
+   *
+   * All of it is bounded on the way in — see `readMeta`'s caps. A book is a file
+   * a stranger wrote, and this store is read whole, parsed whole and rewritten
+   * whole on every position save.
+   *
+   * foliate has been parsing all of it on every open since before Paper had a
+   * shelf; the fields were discarded between the parse and the row. Recovering
+   * them is what makes series, tags, real sorting and filtering possible at all.
+   */
+  readonly sortAs?: string
+  readonly series?: string
+  readonly seriesIndex?: number | null
+  readonly subjects?: readonly string[]
+  readonly publisher?: string
+  readonly published?: string
+  readonly languages?: readonly string[]
+  readonly description?: string
 }
 
 export const LIBRARY_STORAGE_KEY = 'paper.library.v1'
@@ -90,7 +114,7 @@ export function inOrder(
   order: LibraryOrder,
 ): LibraryEntry[] {
   if (order === 'recent') return byRecency(entries)
-  const key = order === 'title' ? displayTitle : displayAuthor
+  const key = order === 'title' ? sortTitle : displayAuthor
   return [...entries].sort(
     (a, b) =>
       key(a).localeCompare(key(b), undefined, { numeric: true, sensitivity: 'base' }) ||
@@ -244,6 +268,26 @@ export function displayTitle(entry: LibraryEntry): string {
 
 export function displayAuthor(entry: LibraryEntry): string {
   return entry.author || 'Unknown author'
+}
+
+/**
+ * The title to ALPHABETISE by, which is not the title to show.
+ *
+ * `dc:title`'s `file-as` — or Calibre's `title_sort` — exists precisely because
+ * sorting on the displayed title is wrong in every language with articles: `The
+ * Hobbit` belongs under H, and a shelf that files it under T is not sorted, it
+ * is ordered by a string beginning with a word nobody thinks of as part of the
+ * name.
+ *
+ * foliate has been parsing this all along. Paper sorted on `title` because the
+ * field was discarded before it reached the row, not because anyone chose to.
+ *
+ * Falls back to the displayed title, so a book declaring no `file-as` sorts
+ * exactly as it did before — this changes the order only where the book itself
+ * asked for a different one.
+ */
+export function sortTitle(entry: LibraryEntry): string {
+  return entry.sortAs || displayTitle(entry)
 }
 
 /** Whether clicking the row can actually open the book — see the header. */
