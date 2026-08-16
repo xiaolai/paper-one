@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { buildCommands } from './lib/commands'
 import { PANE_SHORTCUTS } from './lib/panes'
 import { DEFAULT_STEP_IDX, applyMetrics } from './lib/metrics'
-import { pickBooks, pickFolder, readBookAt, tauriDirOps } from './lib/bookFiles'
+import { pickBooks, pickFolder, readBookAt, tauriDirOps, tauriWatchOps } from './lib/bookFiles'
 import { legacyBookIdFor } from './lib/idMigration'
 import { positionRecorder, type PositionRecorder } from './lib/positionRecorder'
 import { usePlatform, usePrefersDark, usePrefersReducedMotion } from './lib/platform'
@@ -21,6 +21,7 @@ import type { LibraryEntry } from './lib/library'
 import { useCollections } from './lib/useCollections'
 import { saveCover } from './lib/coverArt'
 import { importFolder, summarise, type ImportProgress } from './lib/importFolder'
+import { WATCHED_FOLDER_KEY, watchFolder } from './lib/watchedFolder'
 import { inTauri } from './lib/appStorage'
 import { BookSwitcher } from './overlays/BookSwitcher'
 import { CommandPalette } from './overlays/CommandPalette'
@@ -105,6 +106,75 @@ export function App({ storage }: AppProps) {
         console.error('Paper: the book picker failed', cause)
       })
   }, [openBook])
+
+  /**
+   * The watched folder — one, not a list.
+   *
+   * A reader with books in five places wants those books imported, not five
+   * watchers running; and the second folder is what turns a setting into a
+   * management screen. It becomes a list when somebody actually has two.
+   */
+  const [watched, setWatched] = useState<string | null>(() => {
+    try {
+      return storage?.getItem(WATCHED_FOLDER_KEY) || null
+    } catch {
+      return null
+    }
+  })
+
+  const connectFolder = useCallback(() => {
+    void (async () => {
+      const folder = await pickFolder().catch(() => null)
+      if (!folder) return
+      try {
+        storage?.setItem(WATCHED_FOLDER_KEY, folder)
+      } catch {
+        // A watch that cannot be remembered still works for this session.
+      }
+      setWatched(folder)
+    })()
+  }, [storage])
+
+  const disconnectFolder = useCallback(() => {
+    try {
+      /* Written EMPTY rather than removed: `MarkStorage` has `getItem`/`setItem`
+       * and no `removeItem`, and widening that interface for one caller means
+       * changing every implementation of it — including the file-backed store
+       * and the localStorage fallback. An empty string is read back as absent by
+       * the initialiser above, which is the same outcome for less surface. */
+      storage?.setItem(WATCHED_FOLDER_KEY, '')
+    } catch {
+      // Nothing to do: the state below is what stops the watcher either way.
+    }
+    setWatched(null)
+  }, [storage])
+
+  /* The watcher itself. Torn down and rebuilt when the folder changes, which is
+   * rare — and it must be torn down, or connecting a second folder leaves the
+   * first one importing forever with nothing referring to it. */
+  useEffect(() => {
+    if (!watched || !inTauri()) return
+    let watcher: { stop: () => void } | null = null
+    let stopped = false
+    void watchFolder(
+      { ...tauriVaultFs, ...tauriDirOps },
+      tauriWatchOps,
+      watched,
+      (outcomes) => setImportNotice(summarise(outcomes)),
+    )
+      .then((live) => {
+        if (stopped) live.stop()
+        else watcher = live
+      })
+      .catch((cause: unknown) => {
+        console.error('Paper: could not watch that folder', cause)
+        setImportNotice('That folder could not be watched.')
+      })
+    return () => {
+      stopped = true
+      watcher?.stop()
+    }
+  }, [watched])
 
   /** Reopen a book the shelf knows the location of. */
   const openStored = useCallback(
@@ -717,6 +787,9 @@ export function App({ storage }: AppProps) {
             onAddFolder={addFolder}
             importing={importing}
             importNotice={importNotice}
+            watchedFolder={watched}
+            onConnectFolder={connectFolder}
+            onDisconnectFolder={disconnectFolder}
             onAddBooks={addBooks}
           />
         )}

@@ -20,6 +20,7 @@
     "fs:allow-write-file",
     "fs:allow-remove",
     "fs:allow-read-dir",
+    "fs:allow-watch",
     "fs:allow-mkdir",
     "fs:allow-exists",
     "fs:allow-rename",

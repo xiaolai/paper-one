@@ -1,5 +1,5 @@
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
-import { readDir, readFile } from '@tauri-apps/plugin-fs'
+import { readDir, readFile, watch } from '@tauri-apps/plugin-fs'
 import { ACCEPT_FORMATS } from './formats'
 
 /**
@@ -107,4 +107,28 @@ export const tauriDirOps = {
    * it takes an absolute path and passes no base directory. It only works for a
    * path the dialog granted. */
   readOutside: (path: string) => readFile(path),
+}
+
+
+/**
+ * Tauri's folder watcher, narrowed to what `watchFolder` needs.
+ *
+ * `watch` needs the `watch` CARGO FEATURE as well as the `fs:allow-watch`
+ * permission. Without the feature the plugin still builds, this import still
+ * resolves, and the call fails at runtime — which is the exact failure shape
+ * this project keeps meeting, where every check is green and the app is not.
+ * Both are set; see `Cargo.toml` and the capability file.
+ */
+export const tauriWatchOps = {
+  watch: async (path: string, onEvent: () => void, options: { recursive: boolean }) => {
+    const unwatch = await watch(path, () => onEvent(), {
+      recursive: options.recursive,
+      /* Tauri debounces too, and this is NOT the settle window — it only stops
+       * the bridge relaying every filesystem tick. The window that decides when
+       * a copy has finished lives in `watchFolder`, where it can be reasoned
+       * about and tested. */
+      delayMs: 300,
+    })
+    return () => void unwatch()
+  },
 }

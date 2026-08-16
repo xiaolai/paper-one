@@ -427,7 +427,7 @@ export function Reader({
           >
             <h1 className={styles.emptyTitle}>Your library is empty</h1>
             <p className={styles.emptyBody}>
-              Drop an EPUB, PDF, MOBI or CBZ here.
+              Drop an EPUB, PDF, MOBI or CBZ here, or connect a folder to watch.
             </p>
             {book.error && <p className={styles.error}>{book.error}</p>}
             <button

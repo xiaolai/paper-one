@@ -28,7 +28,10 @@ tauri-plugin-log = "2"
 # Reopening a book, and the reader's own work outliving the webview's storage.
 # A picked `File` is a handle to bytes granted for one session, and localStorage
 # has a quota and no backup — see docs/plans/phase-02-native-storage-and-library.md.
-tauri-plugin-fs = "2"
+# `watch` is a FEATURE FLAG, not a default. Without it the plugin builds, the
+# JS `watch()` import resolves, and the call fails at runtime — the failure mode
+# this project keeps meeting, where every check is green and the app is not.
+tauri-plugin-fs = { version = "2", features = ["watch"] }
 tauri-plugin-dialog = "2"
 # The dialog grants a chosen path into the fs scope for that RUNTIME only, so a
 # stored path is unreadable after a relaunch and the shelf cannot reopen the
