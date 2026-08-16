@@ -1,18 +1,16 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import { Check, FolderPlus, Globe, Plus, Tag, X } from 'lucide-react'
 import {
-  NOT_REOPENABLE,
+  allTags,
   displayAuthor,
   displayTitle,
-  allTags,
-  isReopenable,
-  statusOf,
-  rowSuffix,
   shelfFor,
+  statusOf,
   tagCounts,
   tagKey,
 } from '../lib/library'
-import type { LibraryEntry, LibraryOrder } from '../lib/library'
+import type { LibraryOrder } from '../lib/library'
+import type { IndexedBook } from '../lib/bookIndex'
 import { withTag, withoutTag } from '../lib/searchQuery'
 import { ICON } from '../lib/metrics'
 import type { Platform } from '../lib/metrics'
@@ -35,11 +33,11 @@ import styles from './Library.module.css'
  */
 
 export interface LibraryProps {
-  books: readonly LibraryEntry[]
+  books: readonly IndexedBook[]
   platform: Platform
   /** Open a row. Takes the ENTRY, not a url: a book can be reopened from a
    *  stored path as well, and only the caller knows how to read one. */
-  onOpen: (entry: LibraryEntry) => void
+  onOpen: (entry: IndexedBook) => void
   onAddBooks: () => void
   /**
    * Take a book off the shelf.
@@ -49,7 +47,7 @@ export interface LibraryProps {
    * and the marks and the reading position survive — they are keyed by content,
    * so adding the book again finds them waiting.
    */
-  onRemove: (entry: LibraryEntry) => void
+  onRemove: (entry: IndexedBook) => void
   /** Add or remove one of the reader's own tags. Publisher subjects are fixed. */
   onTag: (bookId: string, tag: string) => void
   onUntag: (bookId: string, tag: string) => void
@@ -62,7 +60,7 @@ export interface LibraryProps {
    * takes a deliberate click on a specific book — never automatic, never on
    * import, never in bulk.
    */
-  onLookUp: (entry: LibraryEntry) => void
+  onLookUp: (entry: IndexedBook) => void
   /** Add a whole folder — see `importFolder`. */
   onAddFolder: () => void
   /** Live import progress, or null when none is running. */
@@ -343,16 +341,13 @@ export function Library({
           virtualising ? { paddingBlockStart: win.padTop, paddingBlockEnd: win.padBottom } : undefined
         }>
           {visible.map((book) => {
-            const reopenable = isReopenable(book)
             return (
               <div key={book.bookId} className={styles.cell}>
               <button
                 type="button"
                 className={styles.book}
-                disabled={!reopenable}
-                data-disabled={!reopenable}
-                title={reopenable ? `Open ${displayTitle(book)}` : NOT_REOPENABLE}
-                onClick={() => isReopenable(book) && onOpen(book)}
+                title={`Open ${displayTitle(book)}`}
+                onClick={() => onOpen(book)}
               >
                 <BookCover
                   book={book}
@@ -363,7 +358,6 @@ export function Library({
                 <span className={styles.bookTitle}>{displayTitle(book)}</span>
                 <span className={styles.bookAuthor}>
                   {displayAuthor(book)}
-                  {rowSuffix(book)}
                 </span>
                 {/* A bar only where there is something true to draw. A book
                     never opened has no fraction, and a zero-width bar under

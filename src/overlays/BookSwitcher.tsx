@@ -1,15 +1,8 @@
 import { useMemo, useState } from 'react'
 import { Search } from 'lucide-react'
 import { coverTintFor } from '../lib/bookAccent'
-import {
-  NOT_REOPENABLE,
-  displayAuthor,
-  displayTitle,
-  isReopenable,
-  matchesQuery,
-  rowSuffix,
-} from '../lib/library'
-import type { LibraryEntry } from '../lib/library'
+import type { IndexedBook } from '../lib/bookIndex'
+import { displayAuthor, displayTitle, matchesQuery } from '../lib/library'
 import { ICON } from '../lib/metrics'
 import { OverlaySheet } from './OverlaySheet'
 import styles from './Overlay.module.css'
@@ -17,22 +10,27 @@ import styles from './Overlay.module.css'
 /**
  * The book switcher, behind the titlebar chip.
  *
- * It lists books this reader has actually opened, not a fixture shelf. That
- * makes it honest and also makes it thin: a book picked or dropped as a File
- * cannot be reopened, because a File is a handle to bytes granted for that
- * session and there is no path to keep. Those rows are shown — the reader knows
- * they read the book, and its marks are still in Notes — but disabled, with the
- * reason stated, per §07. Anything else would be a row that does nothing when
- * clicked.
+ * It lists books this reader has actually opened, not a fixture shelf.
+ *
+ * EVERY ROW OPENS. It used to be thin for a reason that no longer exists: a book
+ * picked or dropped as a File could not be reopened, because a File is a handle
+ * to bytes granted for one session — so those rows were shown but disabled, with
+ * the reason stated. Paper now keeps its own copy of every book in the book's own
+ * folder, so there is no such thing as a row that cannot be opened, and the
+ * disabled state, its explanation and the concept behind them are all gone.
+ *
+ * It stays GLOBAL, and deliberately: this is navigation, not browsing. A reader
+ * reaching for it wants any book, not any book within whatever tag the shelf
+ * happens to be scoped to.
  */
 
 export interface BookSwitcherProps {
-  books: readonly LibraryEntry[]
+  books: readonly IndexedBook[]
   /** The open book, so it can be marked rather than offered. */
   currentBookId: string | null
   /** Open a row. Takes the ENTRY, not a url: a book can be reopened from a
    *  stored path as well, and only the caller knows how to read one. */
-  onOpen: (entry: LibraryEntry) => void
+  onOpen: (entry: IndexedBook) => void
   onDismiss: () => void
   onAddBooks: () => void
 }
@@ -81,22 +79,15 @@ export function BookSwitcher({
         ) : (
           shown.map((book) => {
             const isCurrent = book.bookId === currentBookId
-            const reopenable = isReopenable(book)
             return (
               <button
                 key={book.bookId}
                 type="button"
                 className={styles.row}
-                disabled={isCurrent || !reopenable}
-                data-disabled={isCurrent || !reopenable}
-                title={
-                  isCurrent
-                    ? 'Already open'
-                    : reopenable
-                      ? undefined
-                      : NOT_REOPENABLE
-                }
-                onClick={() => isReopenable(book) && onOpen(book)}
+                disabled={isCurrent}
+                data-disabled={isCurrent}
+                title={isCurrent ? 'Already open' : undefined}
+                onClick={() => onOpen(book)}
               >
                 <span
                   className={styles.cover}
@@ -107,7 +98,6 @@ export function BookSwitcher({
                   {displayTitle(book)}
                   <span className={styles.rowSub}>
                     {displayAuthor(book)}
-                    {rowSuffix(book, isCurrent)}
                   </span>
                 </span>
               </button>

@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react'
 import { coverTintFor } from '../lib/bookAccent'
 import { tauriVaultFs } from '../lib/bookVault'
 import { coverUrl } from '../lib/coverArt'
-import type { LibraryEntry } from '../lib/library'
+import type { IndexedBook } from '../lib/bookIndex'
+import { coverPathIn } from '../lib/bookFolder'
 
 /**
  * A book's jacket, or the tint that stands in for one.
@@ -25,13 +26,16 @@ export function BookCover({
   className,
   titleClassName,
 }: {
-  book: LibraryEntry
+  book: IndexedBook
   title: string
   className?: string | undefined
   titleClassName?: string | undefined
 }) {
   const [url, setUrl] = useState<string | null>(null)
-  const at = book.cover
+  /* DERIVED, not stored. A cover lives at a known path inside the book's own
+   * folder, so there is no field to keep in step and no way for a row to claim
+   * a jacket that is not there — which is what a stale `cover` field did. */
+  const at = coverPathIn(book.bookId)
 
   useEffect(() => {
     if (!at) {

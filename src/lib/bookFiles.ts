@@ -1,4 +1,5 @@
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
+import { tauriVaultFs } from './bookVault'
 import { readDir, readFile, watch } from '@tauri-apps/plugin-fs'
 import { ACCEPT_FORMATS } from './formats'
 
@@ -137,3 +138,14 @@ export const tauriWatchOps = {
     return () => void unwatch()
   },
 }
+
+
+/**
+ * The filesystem a library needs: bytes, directories, and the reader's own
+ * files when a folder has been picked.
+ *
+ * One object rather than two spread together at each call site, because the
+ * pieces are always used together and spreading them was already producing
+ * `{ ...tauriVaultFs, ...tauriDirOps }` in three places.
+ */
+export const libraryFs = { ...tauriVaultFs, ...tauriDirOps }

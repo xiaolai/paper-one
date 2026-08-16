@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { buildCommands } from './lib/commands'
 import { PANE_SHORTCUTS } from './lib/panes'
 import { DEFAULT_STEP_IDX, applyMetrics } from './lib/metrics'
-import { pickBooks, pickFolder, readBookAt, tauriDirOps, tauriWatchOps } from './lib/bookFiles'
+import { pickBooks, pickFolder, tauriWatchOps } from './lib/bookFiles'
 import { legacyBookIdFor } from './lib/idMigration'
 import { positionRecorder, type PositionRecorder } from './lib/positionRecorder'
 import { usePlatform, usePrefersDark, usePrefersReducedMotion } from './lib/platform'
@@ -16,9 +16,12 @@ import { useCards } from './lib/useCards'
 import { useMarks } from './lib/useMarks'
 import { useMarking } from './lib/useMarking'
 import { coverTintFor } from './lib/bookAccent'
-import { disownBook, ownBook, readOwnedBook, tauriVaultFs } from './lib/bookVault'
-import type { LibraryEntry } from './lib/library'
-import { saveCover } from './lib/coverArt'
+import { readOwnedBook } from './lib/bookVault'
+import type { IndexedBook } from './lib/bookIndex'
+import type { IndexFs } from './lib/bookIndex'
+import type { DirFs } from './lib/importFolder'
+import { downscaleCover } from './lib/coverArt'
+import { contentPathIn, coverPathIn, folderOf } from './lib/bookFolder'
 import {
   importFolder,
   summarise,
@@ -46,9 +49,19 @@ export interface AppProps {
    * below already take a storage argument for exactly this reason.
    */
   storage: MarkStorage | null
+  /**
+   * The library's filesystem, or null outside Tauri.
+   *
+   * Separate from `storage` because they move different things: that one is a
+   * JSON store for marks and cards, this one is bytes and directories for the
+   * books themselves.
+   */
+  fs: IndexFs | null
+  /** The shelf, read at boot so no frame renders an empty library. */
+  initialBooks: readonly IndexedBook[]
 }
 
-export function App({ storage }: AppProps) {
+export function App({ storage, fs, initialBooks }: AppProps) {
   const platform = usePlatform()
   const prefersDark = usePrefersDark()
   /* The one thing that can stop a page turn sliding. Not a setting — see the
@@ -63,7 +76,7 @@ export function App({ storage }: AppProps) {
   const marks = useMarks(book.bookId, storage)
   const cards = useCards(storage)
   const marking = useMarking(book, marks)
-  const library = useLibrary(storage)
+  const library = useLibrary(fs, initialBooks)
   /* Reading aloud follows the spine document: an utterance outlives a section,
    * and would otherwise go on reading words that are no longer on screen. */
   const speech = useSpeech(book.doc)
@@ -112,8 +125,7 @@ export function App({ storage }: AppProps) {
       })
   }, [openBook])
 
-  const { record, remember, rememberOwned, rememberJacket, forget, applyFound, shelve, positionOf } =
-    library
+  const { add, update, remove, positionOf } = library
 
   /**
    * Put what an import produced onto the shelf.
@@ -125,31 +137,25 @@ export function App({ storage }: AppProps) {
    */
   const shelveImported = useCallback(
     (outcomes: readonly ImportOutcome[]) => {
-      shelve(
-        outcomes
-          .filter((one) => one.status !== 'failed' && one.bookId && one.name)
-          .map((one) => ({
-              bookId: one.bookId!,
-              /* The FILENAME, until the book is opened. Parsing every book to
-               * learn its title would make importing a folder as slow as reading
-               * one, and the row corrects itself on first open. */
-              title: one.name!.replace(/\.[^.]+$/, ''),
-              author: '',
-              url: null,
-              lastOpened: Date.now(),
-              position: null,
-              workId: null,
-              path: one.path,
-              // The path the VAULT chose. Rebuilding it from the filename
-              // recorded a `.EPUB` that is not on disk — `extensionFor`
-              // lowercases.
-              ...(one.vault ? { vault: one.vault } : {}),
-          })),
-      )
+      for (const one of outcomes) {
+        if (one.status === 'failed' || !one.bookId || !one.name) continue
+        /* Every non-failed outcome, including duplicates. `add` folds into an
+         * existing record rather than replacing it, so a book already on the
+         * shelf keeps its tags and its place — and a book whose bytes are in the
+         * library with no record gets one, which is the case that was invisible
+         * forever before. */
+        add(one.bookId, {
+          /* The FILENAME, until the book is opened. Parsing three hundred books
+           * to learn three hundred titles would make importing a folder as slow
+           * as reading one, and the record corrects itself on first open. */
+          title: one.name.replace(/\.[^.]+$/, ''),
+          author: '',
+          addedAt: Date.now(),
+          ...(one.path ? { origin: one.path } : {}),
+        })
+      }
     },
-    // Stable: `shelve` is a `useCallback` over a stable `apply`, and the
-    // already-on-the-shelf question is answered inside the mutation.
-    [shelve],
+    [add],
   )
 
   /**
@@ -202,7 +208,7 @@ export function App({ storage }: AppProps) {
     let watcher: { stop: () => void } | null = null
     let stopped = false
     void watchFolder(
-      { ...tauriVaultFs, ...tauriDirOps },
+      fs as unknown as DirFs,
       tauriWatchOps,
       watched,
       (outcomes) => {
@@ -232,53 +238,35 @@ export function App({ storage }: AppProps) {
     }
   }, [watched, shelveImported])
 
-  /** Reopen a book the shelf knows the location of. */
+  /**
+   * Open a book the library holds.
+   *
+   * THREE BRANCHES BECAME ONE. Phase 3 tried the vault, then the reader's
+   * original path, then a URL, each with its own failure handling — because a
+   * row could name any combination of the three and might be right about none of
+   * them. A book is a folder now, so there is exactly one place to look and its
+   * name is the book's id.
+   *
+   * The filename carries the EXTENSION, not the title. `isPdf` routes on it, so
+   * handing foliate `Moby-Dick` with no suffix sent every PDF to the wrong
+   * reader, which rejects it as an unsupported type.
+   */
   const openStored = useCallback(
-    (entry: { url: string | null; path: string | null; vault?: string | null; title?: string }) => {
-      /* Paper's own copy FIRST, and the reader's original only as a fallback.
-       *
-       * The copy is under `$APPDATA`, which is in scope permanently, so this
-       * path does not depend on a dialog grant having been restored. The
-       * original is tried after it for books shelved before the vault existed —
-       * they are copied in on this open, by the effect below. */
-      if (entry.vault) {
-        const at = entry.vault
-        /* The name must carry an EXTENSION, and a title does not. `isPdf` routes
-         * on it, so `readOwnedBook(..., 'Moby-Dick')` sent every PDF to foliate,
-         * which rejects it as an unsupported type. The vault path always has the
-         * right extension because `vaultPath` put it there. */
-        const named = `${entry.title || 'book'}.${at.slice(at.lastIndexOf('.') + 1)}`
-        void readOwnedBook(tauriVaultFs, at, named)
-          .then((file) => openBook(file, entry.path ?? null))
-          .catch((cause: unknown) => {
-            console.error('Paper: could not read our own copy', at, cause)
-            const original = entry.path
-            if (!original) return
-            /* CAUGHT, because the fallback can fail too. Without this a book
-             * whose vault copy is missing AND whose original has moved produced
-             * an unhandled rejection at the window rather than a message. */
-            void readBookAt(original)
-              .then((file) => openBook(file, original))
-              .catch((second: unknown) => {
-                console.error('Paper: could not reopen', original, second)
-              })
-          })
-        return
-      }
-      if (entry.path) {
-        const at = entry.path
-        void readBookAt(at)
-          .then((file) => openBook(file, at))
-          .catch((cause: unknown) => {
-            // Moved, renamed, on an unmounted volume. The row stays; the reader
-            // is told rather than left clicking something that does nothing.
-            console.error('Paper: could not reopen', at, cause)
-          })
-        return
-      }
-      if (entry.url) openBook(entry.url)
+    (entry: IndexedBook) => {
+      if (!fs) return
+      const name = `${entry.title || 'book'}.${entry.ext || 'epub'}`
+      void readOwnedBook(fs, contentPathIn(entry.bookId, name), name)
+        .then((file) => openBook(file, entry.origin ?? null))
+        .catch((cause: unknown) => {
+          /* The folder is there and its content is not, which means an import
+           * that did not finish. The record stays — its tags and position are
+           * still the reader's — and they are told rather than left clicking
+           * something that does nothing. */
+          console.error('Paper: could not read the stored book', entry.bookId, cause)
+          setImportNotice('That book could not be opened. Try adding it again.')
+        })
     },
-    [openBook],
+    [openBook, fs],
   )
 
   /* Window-wide, not just over the empty state. A file dropped anywhere the
@@ -313,8 +301,10 @@ export function App({ storage }: AppProps) {
    * attached yet. Collapsing them is what made removing the open book start a
    * cover write for a book that no longer existed. */
   const openRow = bookId ? library.books.find((one) => one.bookId === bookId) : undefined
-  const vaultOfOpenBook = openRow ? openRow.vault ?? null : undefined
-  const coverOfOpenBook = openRow ? openRow.cover ?? null : undefined
+  /* Whether the library HAS this book, which is the only question left. Phase 3
+   * asked two more — where the bytes are and where the jacket is — and kept a
+   * field for each; a book is a folder now, so both are derived from its id. */
+  const isShelved = Boolean(openRow)
 
 
   /**
@@ -329,24 +319,30 @@ export function App({ storage }: AppProps) {
    * says one thing, because from here they are one thing.
    */
   const lookUp = useCallback(
-    (entry: LibraryEntry) => {
+    (entry: IndexedBook) => {
       void (async () => {
         const found = await lookupMetadata({ title: entry.title, author: entry.author })
         if (!found) {
           setImportNotice('Nothing found for that book.')
           return
         }
-        /* `applyFound`, not `record`. A lookup is a slow call against a row
-         * captured when the reader clicked: `recordOpen` would RECREATE a book
-         * removed in the meantime, revert one changed since, and move it to the
-         * top of a shelf ordered by recency. This patches by id and no-ops when
-         * the book has gone. */
-        applyFound(entry.bookId, found)
+        /* `update`, which no-ops when the book has gone. A lookup is a slow
+         * call against a record captured when the reader clicked, so by the time
+         * it answers the book may have been removed — and anything that WROTE
+         * unconditionally would bring it back. `openedAt` is untouched: a lookup
+         * is not a read, and the shelf is ordered by recency. */
+        update(entry.bookId, (record) => ({
+          ...record,
+          ...(found.title ? { title: found.title } : {}),
+          ...(found.author ? { author: found.author } : {}),
+          ...(found.publisher ? { publisher: found.publisher } : {}),
+          ...(found.published ? { published: found.published } : {}),
+          ...(found.subjects?.length ? { subjects: found.subjects } : {}),
+        }))
         setImportNotice(`Updated from ${found.source}.`)
       })()
     },
-    // The stable callback, for the same reason `shelveImported` takes `record`.
-    [applyFound],
+    [update],
   )
 
 
@@ -371,7 +367,7 @@ export function App({ storage }: AppProps) {
       setImporting({ done: 0, total: 0, current: '' })
       try {
         const outcomes = await importFolder(
-          { ...tauriVaultFs, ...tauriDirOps },
+          fs as unknown as DirFs,
           folder,
           { onProgress: setImporting },
         )
@@ -384,152 +380,118 @@ export function App({ storage }: AppProps) {
         setImporting(null)
       }
     })()
-  }, [record])
+  }, [shelveImported])
 
 
   /**
-   * Take a book off the shelf, and give up our copy of it.
+   * Take a book off the shelf.
    *
-   * TWO FILES, ONE OF THEM OURS. The row goes and Paper's copy under `$APPDATA`
-   * is deleted; the reader's own file, wherever they keep it, is not touched.
-   * That distinction only became expressible once the vault existed — before it
-   * there was one file and it belonged to the reader, so "remove" could not be
-   * offered honestly at all.
+   * ONE RENAME, into the trash. Phase 3's removal touched three places — a row,
+   * the bytes, the cover — any of which could fail alone, and two of which did.
+   * A book is a folder, so removing it is moving that folder.
    *
-   * The row goes FIRST and the copy after. The shelf is what the reader is
-   * looking at, and a removal that waits on a disk operation to redraw feels
-   * broken; a copy that fails to delete is wasted disk, not a wrong answer.
-   *
-   * Marks and reading position survive on purpose — they are keyed by content,
-   * so adding the book again finds them waiting.
+   * THE PROMISE IS EXACT and unchanged: the file the reader imported is not
+   * touched. What moves is Paper's own copy, along with the tags, the position
+   * and the marks that live beside it — recoverable, because a trash is a
+   * visible directory rather than hidden state, and because re-adding the same
+   * bytes lands on the same folder name.
    */
-  const removeBook = useCallback(
-    (entry: LibraryEntry) => {
-      forget(entry.bookId)
-      if (entry.vault && inTauri()) void disownBook(tauriVaultFs, entry.vault)
-      if (entry.cover && inTauri()) void disownBook(tauriVaultFs, entry.cover)
-    },
-    [forget],
-  )
+  const removeBook = useCallback((entry: IndexedBook) => remove(entry.bookId), [remove])
 
   useEffect(() => {
     if (!bookId || !meta) return
-    record({
-      bookId,
+    /* `add`, which FOLDS a fresh parse into what the reader owns rather than
+     * replacing it — see `mergeParsed`. Phase 3 spread the parse over the row
+     * and erased the reader's tags on every reopen.
+     *
+     * `openedAt` is set here because this is the moment a book is opened, and
+     * the shelf is ordered by it. */
+    add(bookId, {
       title: meta.title,
       author: meta.author,
-      // A File cannot be reopened later — there is no path to keep — so only a
-      // URL source records one. The switcher shows the difference.
-      url: typeof source === 'string' ? source : null,
-      lastOpened: Date.now(),
-      // An open knows nothing about where the reader will be. `recordOpen`
-      // carries the saved position through rather than letting this erase it.
-      position: null,
-      // The work's own identifier, when the book declares one. Nothing reads it
-      // yet; it is captured here because recovering it later means re-opening
-      // every book on the shelf.
-      workId: meta.identifier || null,
-      // Device-local. `recordOpen` carries a known path through an open that
-      // does not have one, so a drop or a URL cannot erase it.
-      path: openedPath,
-      /* What the book says about itself, kept rather than discarded.
-       *
-       * foliate parses every one of these on every open and Paper narrowed them
-       * away between the parse and the row, so a shelf that could have sorted by
-       * series and filtered by subject had title and author to work with. All of
-       * it is capped in `readMeta` — this is a stranger's file. */
-      sortAs: meta.sortAs,
-      series: meta.series,
-      seriesIndex: meta.seriesIndex,
-      subjects: meta.subjects,
-      publisher: meta.publisher,
-      published: meta.published,
-      languages: meta.languages,
-      description: meta.description,
+      openedAt: Date.now(),
+      addedAt: Date.now(),
+      ...(meta.sortAs ? { sortAs: meta.sortAs } : {}),
+      ...(meta.series ? { series: meta.series } : {}),
+      ...(meta.seriesIndex === null ? {} : { seriesIndex: meta.seriesIndex }),
+      ...(meta.subjects.length ? { subjects: meta.subjects } : {}),
+      ...(meta.publisher ? { publisher: meta.publisher } : {}),
+      ...(meta.published ? { published: meta.published } : {}),
+      ...(meta.languages.length ? { languages: meta.languages } : {}),
+      ...(meta.description ? { description: meta.description } : {}),
+      ...(openedPath ? { origin: openedPath } : {}),
+      ...(source instanceof File ? { ext: source.name.split('.').pop() ?? '' } : {}),
     })
-  }, [bookId, meta, source, record, openedPath])
+  }, [bookId, meta, source, add, openedPath])
 
-  /* Take our own copy of the book, so the shelf stops depending on someone
-   * else's filesystem.
+  /* Put the book's bytes in its own folder.
    *
-   * Runs after the record effect above rather than inside it: the copy is
-   * asynchronous and the row has to exist before there is anything to attach a
-   * vault path to. It is also how a book shelved BEFORE the vault existed gets
-   * one — there is no migration sweep at startup, because that would turn a cold
-   * launch into a disk copy of the whole library. A book is copied the next time
-   * it is opened, and never again after that.
+   * `content.<ext>` beside `book.json`, so the whole book is one directory to
+   * back up, replicate, or hand to somebody. The reader's original file is never
+   * moved, written to or deleted.
    *
-   * Silent on failure by design. A copy that does not land leaves the row
-   * pointing at the reader's own file, which is exactly where it pointed before
-   * this existed; telling someone their book opened but was not filed away is
-   * noise about a fallback that worked.
+   * NO ATTACHMENT STEP. Phase 3 wrote the bytes and then recorded WHERE they
+   * went, which is two operations that could disagree — and did: a copy landing
+   * after a book switch left a file with no row, and a row could name a copy
+   * that was not there. The folder is named by the book's own id, so its
+   * location is not a fact to be stored.
+   *
+   * Silent on failure by design. A copy that does not land leaves the reader
+   * able to read the book they just opened; telling them it was not filed away
+   * is noise about something they did not ask for.
    */
   useEffect(() => {
-    if (!bookId || !meta || !inTauri()) return
+    if (!bookId || !isShelved || !fs) return
     if (!(source instanceof File)) return
-    /* ALREADY HELD, so there is nothing to do — checked before the bytes are
-     * touched. `ownBook` is idempotent and would discover this itself, but only
-     * after `arrayBuffer()` had copied the whole book into memory. Reopening a
-     * 40MB book from the vault was allocating and reading it a second time to
-     * learn that it was already there. */
-    if (vaultOfOpenBook) return
     void (async () => {
       try {
+        const at = contentPathIn(bookId, source.name)
+        // Checked before the bytes are touched: `arrayBuffer()` copies the whole
+        // book into memory, and reopening a 40MB book should not do that to
+        // discover it is already here.
+        if (await fs.exists(at)) return
         const bytes = new Uint8Array(await source.arrayBuffer())
-        const entry = await ownBook(tauriVaultFs, bookId, source.name, bytes)
-        /* Attached UNCONDITIONALLY, with no cancellation guard.
-         *
-         * There was one, and it made an orphan: switching books mid-copy
-         * suppressed the attachment but not the write, so the file landed with
-         * no row referring to it — and for a dropped book, which has no original
-         * path, the row stayed marked never-reopenable even though its copy was
-         * sitting on disk. The row is keyed by `bookId` and does not care which
-         * book happens to be open when the copy finishes. */
-        rememberOwned(bookId, entry.path)
+        await fs.mkdir(folderOf(bookId))
+        await fs.writeFile(at, bytes)
       } catch (cause) {
         console.error('Paper: could not keep our own copy of the book', cause)
       }
     })()
-  }, [bookId, meta, source, vaultOfOpenBook, rememberOwned])
+  }, [bookId, isShelved, source, fs])
 
   /* File the book's own jacket, once.
    *
    * `cover` arrives as a Blob because the session has no business knowing where
-   * covers are kept; this is the layer that does. It is downscaled on the way in
-   * rather than on the way out — a publisher's jacket is routinely 1600px wide
-   * and the shelf draws it at a couple of hundred, and decoding the full image
-   * per cell would do that on every render rather than once ever.
+   * covers are kept; this is the layer that does. Downscaled on the way IN — a
+   * publisher's jacket is routinely 1600px and the shelf draws it at a couple of
+   * hundred, so decoding the full image per cell would do it on every render
+   * rather than once ever.
    *
-   * Only when the row does not already have one. A book reopened weekly should
-   * not re-encode its cover weekly.
+   * Also no attachment step, and for the same reason: `cover.webp` inside the
+   * book's folder is a known path, so there is nothing to record and nothing
+   * that can go stale.
    */
   useEffect(() => {
-    if (!bookId || !cover || !inTauri()) return
-    /* A PRIMITIVE, not the array. Depending on `library.books` restarted an
-     * in-flight encode on every unrelated mutation — a position save, a tag, a
-     * vault path landing — and cancellation only suppressed the attachment, so
-     * the work was redone and the previous result thrown away each time.
-     *
-     * `coverOfOpenBook` is `undefined` for a row that does not exist, which the
-     * old `?.cover` guard read as "no cover yet, go and write one": removing the
-     * open book therefore triggered a fresh cover write for a book that had just
-     * been deleted. `null` and `undefined` now mean different things. */
-    if (coverOfOpenBook !== null) return
+    if (!bookId || !cover || !isShelved || !fs) return
     let cancelled = false
     void (async () => {
       try {
-        const at = await saveCover(tauriVaultFs, bookId, { getCover: async () => cover })
-        if (at && !cancelled) rememberJacket(bookId, at)
+        const at = coverPathIn(bookId)
+        if (await fs.exists(at)) return
+        const small = await downscaleCover(cover)
+        if (!small || cancelled) return
+        await fs.mkdir(folderOf(bookId))
+        await fs.writeFile(at, new Uint8Array(await small.arrayBuffer()))
       } catch (cause) {
-        // A book without a picture, not a book that failed. The shelf falls
-        // back to the derived tint, which is what it drew for everything before.
+        // A book without a picture, not a book that failed. The shelf falls back
+        // to the derived tint, which is what it drew for everything before.
         console.error('Paper: could not keep the cover', cause)
       }
     })()
     return () => {
       cancelled = true
     }
-  }, [bookId, cover, coverOfOpenBook, rememberJacket])
+  }, [bookId, cover, isShelved, fs])
 
   /* Remember where the reader is, so the next open starts there.
    *
@@ -544,13 +506,18 @@ export function App({ storage }: AppProps) {
    * component first rendered with — the exact staleness FoliateView's handler
    * refs exist to prevent. It happens to be stable today; that is a property of
    * `useLibrary` this file must not depend on silently. */
-  const rememberRef = useRef(remember)
-  rememberRef.current = remember
+  const rememberRef = useRef(update)
+  rememberRef.current = update
 
   const saver = useRef<PositionRecorder | null>(null)
   if (saver.current === null) {
     saver.current = positionRecorder({
-      write: (id, at, fraction) => rememberRef.current(id, at, fraction),
+      write: (id, at, fraction) =>
+        rememberRef.current(id, (record) =>
+          record.position === at && record.progress === fraction
+            ? record
+            : { ...record, position: at, progress: Math.min(1, Math.max(0, fraction)) },
+        ),
     })
   }
 
@@ -596,7 +563,6 @@ export function App({ storage }: AppProps) {
    */
   const { rekey: rekeyMarks } = marks
   const { rekey: rekeyCards } = cards
-  const { rekey: rekeyLibrary } = library
   useEffect(() => {
     if (!bookId || !source) return
     let live = true
@@ -605,18 +571,18 @@ export function App({ storage }: AppProps) {
         if (!live || legacy === bookId) return
         rekeyMarks(legacy, bookId)
         rekeyCards(legacy, bookId)
-        rekeyLibrary(legacy, bookId)
+        /* The LIBRARY is not rekeyed here any more, and cannot be: a book's id
+         * names its folder, so moving a book to a new id is a directory rename
+         * rather than a field update. That belongs to the migration, which is
+         * the one place allowed to move folders — see phase 4's WI-4.8. */
       })
       .catch((cause: unknown) => {
-        // Nothing is lost by failing — the rows stay under the old id and the
-        // next open tries again. Silence would make a migration that never
-        // runs look like a reader who never had any marks.
-        console.error('Paper: could not migrate this book\'s earlier marks', cause)
+        console.error('Paper: could not check the legacy book id', cause)
       })
     return () => {
       live = false
     }
-  }, [bookId, source, rekeyMarks, rekeyCards, rekeyLibrary])
+  }, [bookId, source, rekeyMarks, rekeyCards])
 
   const commands = useMemo(
     () =>
@@ -901,7 +867,9 @@ export function App({ storage }: AppProps) {
             onRemove={removeBook}
             onTag={library.tag}
             onUntag={library.untag}
-            onSetFinished={library.setFinished}
+            onSetFinished={(bookId, finished) =>
+              update(bookId, (record) => ({ ...record, finished }))
+            }
             onLookUp={lookUp}
             onAddFolder={addFolder}
             importing={importing}

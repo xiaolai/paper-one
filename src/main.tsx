@@ -15,7 +15,9 @@ import './styles/tokens.css'
 import './styles/global.css'
 
 import { App } from './App'
-import { openAppStorage } from './lib/appStorage'
+import { inTauri, openAppStorage } from './lib/appStorage'
+import { loadShelf } from './lib/bookIndex'
+import { libraryFs } from './lib/bookFiles'
 import { installFatalHandlers } from './lib/reportFatal'
 
 installFatalHandlers()
@@ -39,9 +41,18 @@ if (!host) throw new Error('#root is missing from index.html')
  * lines here would be the wrong trade. */
 async function boot(root: HTMLElement): Promise<void> {
   const storage = await openAppStorage()
+  /* THE SHELF IS AWAITED TOO, for the same reason the store is: rendering first
+   * and filling in afterwards gives every reader one frame of an empty library,
+   * and this one would be a frame of "Your library is empty" over a full one.
+   *
+   * `loadShelf` reads the index — one file — or rescans when it is missing or
+   * disagrees with the folders. Outside Tauri there is no filesystem and the
+   * shelf starts empty, which is the honest answer in a browser. */
+  const fs = inTauri() ? libraryFs : null
+  const initialBooks = fs ? (await loadShelf(fs).catch(() => ({ books: [] }))).books : []
   createRoot(root).render(
     <StrictMode>
-      <App storage={storage} />
+      <App storage={storage} fs={fs} initialBooks={initialBooks} />
     </StrictMode>,
   )
 }
