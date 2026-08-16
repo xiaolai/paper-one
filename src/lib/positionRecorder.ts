@@ -22,7 +22,14 @@
 
 export interface PositionRecorder {
   /** The reader moved. Null for either argument means there is nothing to save. */
-  record: (bookId: string | null, cfi: string | null) => void
+  /**
+   * The reader moved. Null for the id or the CFI means nothing to save.
+   *
+   * `fraction` travels WITH the CFI rather than being written separately,
+   * because it is the same event and the same write — and because a fraction
+   * saved on its own cadence would disagree with the position it describes.
+   */
+  record: (bookId: string | null, cfi: string | null, fraction?: number) => void
   /** Write anything outstanding now — before the position stops being reachable. */
   flush: () => void
   /** Drop the timer without writing. For teardown, after a flush. */
@@ -30,7 +37,7 @@ export interface PositionRecorder {
 }
 
 export interface PositionRecorderOptions {
-  write: (bookId: string, cfi: string) => void
+  write: (bookId: string, cfi: string, fraction: number) => void
   /** How long a position may sit unwritten while the reader keeps moving. */
   delayMs?: number
   schedule?: (fn: () => void, ms: number) => number
@@ -40,6 +47,7 @@ export interface PositionRecorderOptions {
 interface Pending {
   readonly bookId: string
   readonly cfi: string
+  readonly fraction: number
 }
 
 export function positionRecorder({
@@ -62,10 +70,10 @@ export function positionRecorder({
     const due = pending
     pending = null
     clear()
-    if (due) write(due.bookId, due.cfi)
+    if (due) write(due.bookId, due.cfi, due.fraction)
   }
 
-  const record = (bookId: string | null, cfi: string | null) => {
+  const record = (bookId: string | null, cfi: string | null, fraction = 0) => {
     /* Nothing to save — but possibly something to SAVE FIRST. This is the state
      * the book store enters the instant a book is closed or replaced: it clears
      * the id and the position synchronously, several frames before the next
@@ -81,7 +89,7 @@ export function positionRecorder({
     // passing through the null state above must not file one under the other.
     if (pending && pending.bookId !== bookId) flush()
 
-    pending = { bookId, cfi }
+    pending = { bookId, cfi, fraction }
     /* Started once and left to run, rather than restarted on every call. A
      * restart here would turn this into a debounce and hold the write back for
      * as long as the reader kept reading. */

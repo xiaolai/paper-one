@@ -9,6 +9,8 @@ import {
   parseLibrary,
   allTags,
   forgetBook,
+  markFinished,
+  statusOf,
   inScope,
   tagBook,
   untagBook,
@@ -580,5 +582,78 @@ describe('reader tags', () => {
   it('deduplicates across both lists, reader first', () => {
     const row = entry({ bookId: 'a', subjects: ['Shared', 'Theirs'], tags: ['Shared', 'Mine'] })
     expect(allTags(row)).toEqual(['Shared', 'Mine', 'Theirs'])
+  })
+})
+
+
+/**
+ * Where a book stands.
+ *
+ * Derived, except the one part that cannot be: finishing is a judgement and a
+ * fraction is a measurement. A book read to 94% with the endnotes skipped is
+ * finished; one at 100% because the reader jumped to the index is not.
+ */
+describe('statusOf', () => {
+  it('is unread with no recorded position', () => {
+    expect(statusOf(entry({ position: null }))).toBe('unread')
+  })
+
+  it('is reading once there is a position', () => {
+    expect(statusOf(entry({ position: 'epubcfi(/6/4)' }))).toBe('reading')
+  })
+
+  it('is finished when the reader says so, whatever the fraction', () => {
+    expect(statusOf(entry({ position: 'epubcfi(/6/4)', progress: 0.94, finished: true }))).toBe(
+      'finished',
+    )
+  })
+
+  /* And a book sitting at 100% is NOT finished on that basis alone — the reader
+   * may simply have jumped to the index. */
+  it('is not finished merely because the fraction reached the end', () => {
+    expect(statusOf(entry({ position: 'x', progress: 1 }))).toBe('reading')
+  })
+})
+
+describe('markFinished', () => {
+  it('marks and unmarks', () => {
+    const shelf = [entry({ bookId: 'a' })]
+    const done = markFinished(shelf, 'a', true)
+    expect(done[0]?.finished).toBe(true)
+    expect(markFinished(done, 'a', false)[0]?.finished).toBe(false)
+  })
+
+  it('returns its input when nothing changes', () => {
+    const shelf = [entry({ bookId: 'a' })]
+    expect(markFinished(shelf, 'a', false)).toBe(shelf)
+    expect(markFinished(shelf, 'missing', true)).toBe(shelf)
+  })
+})
+
+describe('rememberPosition with a fraction', () => {
+  it('records the fraction beside the position', () => {
+    const shelf = [entry({ bookId: 'a' })]
+    expect(rememberPosition(shelf, 'a', 'cfi', 0.42)[0]?.progress).toBe(0.42)
+  })
+
+  /* A fraction outside 0–1 says the renderer is confused, not that the reader
+   * is 400% through a book. */
+  it('clamps a nonsensical fraction', () => {
+    const shelf = [entry({ bookId: 'a' })]
+    expect(rememberPosition(shelf, 'a', 'cfi', 4)[0]?.progress).toBe(1)
+    expect(rememberPosition(shelf, 'a', 'cfi', -1)[0]?.progress).toBe(0)
+    expect(rememberPosition(shelf, 'a', 'cfi', NaN)[0]?.progress).toBeUndefined()
+  })
+
+  it('keeps the previous fraction when none is given', () => {
+    const shelf = [entry({ bookId: 'a', progress: 0.3 })]
+    expect(rememberPosition(shelf, 'a', 'other')[0]?.progress).toBe(0.3)
+  })
+
+  /* Identity when neither the position nor the fraction moved, so the caller
+   * can still skip the write — this runs while the reader is reading. */
+  it('returns its input when nothing moved', () => {
+    const shelf = [entry({ bookId: 'a', position: 'cfi', progress: 0.5 })]
+    expect(rememberPosition(shelf, 'a', 'cfi', 0.5)).toBe(shelf)
   })
 })

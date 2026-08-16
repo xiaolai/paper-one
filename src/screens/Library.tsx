@@ -1,11 +1,12 @@
 import { useDeferredValue, useMemo, useState } from 'react'
-import { Plus, Tag, X } from 'lucide-react'
+import { Check, Plus, Tag, X } from 'lucide-react'
 import {
   NOT_REOPENABLE,
   displayAuthor,
   displayTitle,
   allTags,
   isReopenable,
+  statusOf,
   rowSuffix,
   shelfView,
   tagCounts,
@@ -55,6 +56,8 @@ export interface LibraryProps {
   /** Add or remove one of the reader's own tags. Publisher subjects are fixed. */
   onTag: (bookId: string, tag: string) => void
   onUntag: (bookId: string, tag: string) => void
+  /** The reader's judgement that a book is done. */
+  onSetFinished: (bookId: string, finished: boolean) => void
 }
 
 const ORDERS: readonly { id: LibraryOrder; label: string }[] = [
@@ -74,6 +77,7 @@ export function Library({
   onRemoveCollection,
   onTag,
   onUntag,
+  onSetFinished,
 }: LibraryProps) {
   const [order, setOrder] = useState<LibraryOrder>('recent')
   /* Which row is asking to be confirmed, by id.
@@ -249,6 +253,28 @@ export function Library({
                   {displayAuthor(book)}
                   {rowSuffix(book)}
                 </span>
+                {/* A bar only where there is something true to draw. A book
+                    never opened has no fraction, and a zero-width bar under
+                    every unread book is a row of noise that says nothing. */}
+                {statusOf(book) !== 'unread' && (
+                  <span
+                    className={styles.progress}
+                    data-finished={statusOf(book) === 'finished'}
+                    /* The number is on the label rather than in the text: a bar
+                       is legible at a glance and a percentage under every cover
+                       is forty numbers nobody reads. */
+                    aria-label={
+                      statusOf(book) === 'finished'
+                        ? 'Finished'
+                        : `${Math.round((book.progress ?? 0) * 100)}% read`
+                    }
+                  >
+                    <span
+                      className={styles.progressFill}
+                      style={{ inlineSize: `${Math.round((book.finished ? 1 : book.progress ?? 0) * 100)}%` }}
+                    />
+                  </span>
+                )}
               </button>
               {/* OUTSIDE the open button, not inside it. A button nested in a
                   button is invalid, and browsers resolve it by dropping the
@@ -285,6 +311,19 @@ export function Library({
                 }}
               >
                 <Tag size={ICON.control} strokeWidth={ICON.stroke} />
+              </button>
+              <button
+                type="button"
+                className={styles.finishButton}
+                aria-label={
+                  statusOf(book) === 'finished'
+                    ? `Mark ${displayTitle(book)} unread`
+                    : `Mark ${displayTitle(book)} finished`
+                }
+                data-finished={statusOf(book) === 'finished'}
+                onClick={() => onSetFinished(book.bookId, statusOf(book) !== 'finished')}
+              >
+                <Check size={ICON.control} strokeWidth={ICON.stroke} />
               </button>
               {tagging === book.bookId && (
                 <form

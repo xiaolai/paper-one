@@ -307,7 +307,7 @@ export function App({ storage }: AppProps) {
   const saver = useRef<PositionRecorder | null>(null)
   if (saver.current === null) {
     saver.current = positionRecorder({
-      write: (id, at) => rememberRef.current(id, at),
+      write: (id, at, fraction) => rememberRef.current(id, at, fraction),
     })
   }
 
@@ -330,10 +330,14 @@ export function App({ storage }: AppProps) {
     }
   }, [])
 
-  const { cfi } = book.position
+  const { cfi, fraction } = book.position
   useEffect(() => {
-    saver.current?.record(bookId, cfi)
-  }, [bookId, cfi])
+    /* The fraction travels WITH the CFI, on the same throttled write. Saving it
+     * separately would put a progress bar and the position it describes on two
+     * different cadences, and they would disagree for as long as the reader kept
+     * reading. */
+    saver.current?.record(bookId, cfi, fraction)
+  }, [bookId, cfi, fraction])
 
   /* Carry a reader's existing work across the change of book identity.
    *
@@ -655,6 +659,7 @@ export function App({ storage }: AppProps) {
             onRemoveCollection={collections.remove}
             onTag={library.tag}
             onUntag={library.untag}
+            onSetFinished={library.setFinished}
             onAddBooks={addBooks}
           />
         )}

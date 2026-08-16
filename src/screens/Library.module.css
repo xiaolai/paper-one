@@ -380,3 +380,59 @@
     transition: none;
   }
 }
+
+/* Progress. Drawn only for a book that has been opened — a zero-width bar under
+   every unread book is a row of noise that says nothing. */
+.progress {
+  display: block;
+  block-size: 3px;
+  margin-block-start: 6px;
+  border-radius: 999px;
+  background: var(--rule, rgb(0 0 0 / 0.1));
+  overflow: hidden;
+}
+
+.progressFill {
+  display: block;
+  block-size: 100%;
+  background: currentColor;
+  opacity: 0.45;
+}
+
+.progress[data-finished='true'] .progressFill {
+  opacity: 0.28;
+}
+
+.finishButton {
+  position: absolute;
+  inset-block-start: 6px;
+  inset-inline-end: 70px;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--surface-raised, rgb(0 0 0 / 0.55));
+  color: var(--text-on-raised, #fff);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.cell:hover .finishButton,
+.finishButton:focus-visible {
+  opacity: 1;
+}
+
+/* Stays visible once set, because it is now state rather than an affordance. */
+.finishButton[data-finished='true'] {
+  opacity: 1;
+  background: var(--accent, #2b6b4f);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .finishButton {
+    transition: none;
+  }
+}

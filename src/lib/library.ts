@@ -125,6 +125,24 @@ export interface LibraryEntry {
    * looking for.
    */
   readonly tags?: readonly string[]
+  /**
+   * How far through, 0–1, recorded when the position was.
+   *
+   * Stored rather than computed, and that is the whole reason it exists as a
+   * field: `position` is a CFI, and turning a CFI into a percentage means
+   * resolving it against the book, which means OPENING the book. A shelf cannot
+   * open forty books to draw forty progress bars. foliate publishes this on
+   * every relocate, so it costs one number on a write that was happening anyway.
+   */
+  readonly progress?: number
+  /**
+   * The reader says they are done, whatever the fraction says.
+   *
+   * Separate from `progress` because finishing is a judgement and a fraction is
+   * a measurement: a book read to 94% with the endnotes skipped is finished, and
+   * one sitting at 100% because the reader jumped to the index is not.
+   */
+  readonly finished?: boolean
 }
 
 export const LIBRARY_STORAGE_KEY = 'paper.library.v1'
@@ -217,14 +235,51 @@ export function rememberPosition(
   entries: readonly LibraryEntry[],
   bookId: string,
   position: string,
+  progress?: number,
 ): readonly LibraryEntry[] {
   const at = entries.findIndex((entry) => entry.bookId === bookId)
   if (at === -1) return entries
   const entry = entries[at]
-  if (!entry || entry.position === position) return entries
+  const next7 = clampProgress(progress) ?? entry?.progress
+  if (!entry || (entry.position === position && entry.progress === next7)) return entries
   const next = [...entries]
-  next[at] = { ...entry, position }
+  next[at] = { ...entry, position, ...(next7 === undefined ? {} : { progress: next7 }) }
   return next
+}
+
+/** 0–1, or undefined. A fraction outside that says the renderer is confused. */
+function clampProgress(value: number | undefined): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined
+  return Math.min(1, Math.max(0, value))
+}
+
+/** Mark a book read, or unread. The reader's judgement, not a measurement. */
+export function markFinished(
+  entries: readonly LibraryEntry[],
+  bookId: string,
+  finished: boolean,
+): readonly LibraryEntry[] {
+  const at = entries.findIndex((entry) => entry.bookId === bookId)
+  const entry = at === -1 ? null : entries[at]
+  if (!entry || (entry.finished ?? false) === finished) return entries
+  const next = [...entries]
+  next[at] = { ...entry, finished }
+  return next
+}
+
+export type ReadingStatus = 'unread' | 'reading' | 'finished'
+
+/**
+ * Where a book stands, in one word.
+ *
+ * Derived rather than stored, except for the one part that cannot be: `finished`
+ * is a judgement the reader makes and nothing about a position can infer it. The
+ * rest falls out — a book with no recorded position has not been started, and a
+ * book with one has.
+ */
+export function statusOf(entry: LibraryEntry): ReadingStatus {
+  if (entry.finished) return 'finished'
+  return entry.position ? 'reading' : 'unread'
 }
 
 /**

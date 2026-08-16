@@ -8,6 +8,7 @@ import {
   rememberPosition,
   forgetBook,
   rememberCover,
+  markFinished,
   tagBook,
   untagBook,
   rememberVault,
@@ -28,7 +29,7 @@ export interface Library {
   readonly books: readonly LibraryEntry[]
   record: (entry: LibraryEntry) => void
   /** Where the reader left off. Ignored for a book not on the shelf. */
-  remember: (bookId: string, position: string) => void
+  remember: (bookId: string, position: string, progress?: number) => void
   /** Record that Paper's own copy landed — see `rememberVault`. */
   rememberOwned: (bookId: string, vault: string) => void
   /** Record the book's jacket once it is filed — see `rememberCover`. */
@@ -38,6 +39,8 @@ export interface Library {
   /** Add one of the READER's own tags — never a publisher's subject. */
   tag: (bookId: string, tag: string) => void
   untag: (bookId: string, tag: string) => void
+  /** The reader's judgement that a book is done — see `markFinished`. */
+  setFinished: (bookId: string, finished: boolean) => void
   /** The saved position for a book, or null. Stable across renders. */
   positionOf: (bookId: string | null) => string | null
   /** Move a row from a superseded book id — see `idMigration`. */
@@ -85,6 +88,14 @@ export function useLibrary(storage = localStore()): Library {
     [],
   )
 
+  const setFinished = useCallback(
+    (bookId: string, finished: boolean) => {
+      if (markFinished(booksRef.current, bookId, finished) === booksRef.current) return
+      apply((prev) => [...markFinished(prev, bookId, finished)])
+    },
+    [apply],
+  )
+
   const tag = useCallback(
     (bookId: string, value: string) => {
       if (tagBook(booksRef.current, bookId, value) === booksRef.current) return
@@ -128,20 +139,20 @@ export function useLibrary(storage = localStore()): Library {
   )
 
   const remember = useCallback(
-    (bookId: string, position: string) => {
+    (bookId: string, position: string, progress?: number) => {
       /* Checked before applying, not inside the mutation. `apply` persists
        * whatever the mutation returns — a full serialisation of the shelf —
        * even when it returns the collection unchanged, and this runs while the
        * reader is reading. `rememberPosition` returning its input by identity
        * is what makes the check a comparison rather than a diff. */
-      if (rememberPosition(booksRef.current, bookId, position) === booksRef.current) return
+      if (rememberPosition(booksRef.current, bookId, position, progress) === booksRef.current) return
       /* Copied unconditionally on the way out. The guard above reads the render
        * value and the mutation below reads `apply`'s own, and the two differ
        * between an apply and the render that follows it — so the inner call can
        * legitimately find nothing to change. Forcing a new array costs one
        * redundant write in that window; not forcing one would drop a real
        * position on the floor, and only the second failure is silent. */
-      apply((prev) => [...rememberPosition(prev, bookId, position)])
+      apply((prev) => [...rememberPosition(prev, bookId, position, progress)])
     },
     [apply],
   )
@@ -169,9 +180,10 @@ export function useLibrary(storage = localStore()): Library {
       forget,
       tag,
       untag,
+      setFinished,
       positionOf,
       rekey,
     }),
-    [books, record, remember, rememberOwned, rememberJacket, forget, tag, untag, positionOf, rekey],
+    [books, record, remember, rememberOwned, rememberJacket, forget, tag, untag, setFinished, positionOf, rekey],
   )
 }
