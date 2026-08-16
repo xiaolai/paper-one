@@ -305,3 +305,78 @@
   opacity: 0.55;
   font-variant-numeric: tabular-nums;
 }
+
+/* Tagging, on the cell. Same reveal-on-hover rule as remove: a shelf covered in
+   affordances reads as a management screen rather than a place to read. */
+.tagButton {
+  position: absolute;
+  inset-block-start: 6px;
+  inset-inline-end: 38px;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--surface-raised, rgb(0 0 0 / 0.55));
+  color: var(--text-on-raised, #fff);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.cell:hover .tagButton,
+.tagButton:focus-visible {
+  opacity: 1;
+}
+
+.tagForm {
+  position: absolute;
+  inset-block-start: 36px;
+  inset-inline: 6px;
+}
+
+.tagInput {
+  width: 100%;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--rule, rgb(0 0 0 / 0.2));
+  border-radius: 999px;
+  background: var(--surface, #fff);
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+}
+
+.tagRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-block-start: 4px;
+}
+
+.bookTag {
+  padding: 1px 7px;
+  border: 1px solid var(--rule, rgb(0 0 0 / 0.12));
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 10px;
+  opacity: 0.75;
+  cursor: pointer;
+}
+
+/* The reader's own tags read as theirs. A publisher's subject is a fact about
+   the book and cannot be removed, so it must not look like it can. */
+.bookTag[data-mine='true'] {
+  border-color: transparent;
+  background: var(--accent-soft, rgb(0 0 0 / 0.08));
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tagButton {
+    transition: none;
+  }
+}

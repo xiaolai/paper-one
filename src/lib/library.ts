@@ -111,6 +111,20 @@ export interface LibraryEntry {
    * every page turn.
    */
   readonly cover?: string | null
+  /**
+   * The READER's own tags, distinct from `subjects`.
+   *
+   * Two fields rather than one merged list, and the separation is load-bearing:
+   * `subjects` come out of the book and are replaced wholesale every time it is
+   * re-opened, so a reader's tag folded in there would be silently erased by
+   * re-reading the book it was attached to. These are only ever written by a
+   * person and never by a parse.
+   *
+   * They are searched and counted TOGETHER — see `allTags` — because the
+   * distinction is about provenance and lifetime, not about what a reader is
+   * looking for.
+   */
+  readonly tags?: readonly string[]
 }
 
 export const LIBRARY_STORAGE_KEY = 'paper.library.v1'
@@ -414,7 +428,7 @@ export function matchesQuery(entry: LibraryEntry, query: string): boolean {
     displayAuthor(entry).toLowerCase().includes(q) ||
     (entry.series?.toLowerCase().includes(q) ?? false) ||
     (entry.publisher?.toLowerCase().includes(q) ?? false) ||
-    (entry.subjects?.some((tag) => tag.toLowerCase().includes(q)) ?? false)
+    allTags(entry).some((tag) => tag.toLowerCase().includes(q))
   )
 }
 
@@ -442,8 +456,59 @@ export interface Scope {
 export function inScope(entry: LibraryEntry, scope: Scope | null): boolean {
   if (!scope) return true
   if (scope.series) return entry.series === scope.series
-  if (scope.tag) return entry.subjects?.includes(scope.tag) ?? false
+  if (scope.tag) return allTags(entry).includes(scope.tag)
   return true
+}
+
+/**
+ * Every tag on a book, whoever put it there.
+ *
+ * The publisher's `subjects` and the reader's own `tags`, deduplicated. They are
+ * stored apart because they have different lifetimes — subjects are replaced by
+ * a re-parse and a reader's tag must survive one — but nothing downstream cares
+ * which is which, so everything downstream sees one list.
+ */
+export function allTags(entry: LibraryEntry): readonly string[] {
+  const own = entry.tags ?? []
+  const declared = entry.subjects ?? []
+  if (own.length === 0) return declared
+  return [...own, ...declared.filter((tag) => !own.includes(tag))]
+}
+
+/**
+ * Add a reader's tag to a book.
+ *
+ * Normalised on the way in — trimmed, capped, and refused when it duplicates a
+ * tag the book already carries under any provenance. Returned by identity when
+ * nothing changes, like every other writer here.
+ */
+export function tagBook(
+  entries: readonly LibraryEntry[],
+  bookId: string,
+  raw: string,
+): readonly LibraryEntry[] {
+  const tag = raw.trim().slice(0, 60)
+  if (!tag) return entries
+  const at = entries.findIndex((entry) => entry.bookId === bookId)
+  const entry = at === -1 ? null : entries[at]
+  if (!entry || allTags(entry).includes(tag)) return entries
+  const next = [...entries]
+  next[at] = { ...entry, tags: [...(entry.tags ?? []), tag] }
+  return next
+}
+
+/** Take a reader's tag off a book. A publisher's subject cannot be removed. */
+export function untagBook(
+  entries: readonly LibraryEntry[],
+  bookId: string,
+  tag: string,
+): readonly LibraryEntry[] {
+  const at = entries.findIndex((entry) => entry.bookId === bookId)
+  const entry = at === -1 ? null : entries[at]
+  if (!entry || !(entry.tags ?? []).includes(tag)) return entries
+  const next = [...entries]
+  next[at] = { ...entry, tags: (entry.tags ?? []).filter((one) => one !== tag) }
+  return next
 }
 
 /**
@@ -483,7 +548,7 @@ export function tagCounts(
   const counts = new Map<string, number>()
   for (const entry of entries) {
     if (!inScope(entry, scope)) continue
-    for (const tag of entry.subjects ?? []) counts.set(tag, (counts.get(tag) ?? 0) + 1)
+    for (const tag of allTags(entry)) counts.set(tag, (counts.get(tag) ?? 0) + 1)
   }
   return [...counts]
     .map(([tag, count]) => ({ tag, count }))

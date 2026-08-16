@@ -1,9 +1,10 @@
 import { useDeferredValue, useMemo, useState } from 'react'
-import { Plus, X } from 'lucide-react'
+import { Plus, Tag, X } from 'lucide-react'
 import {
   NOT_REOPENABLE,
   displayAuthor,
   displayTitle,
+  allTags,
   isReopenable,
   rowSuffix,
   shelfView,
@@ -12,6 +13,8 @@ import {
 import type { LibraryEntry, LibraryOrder, Scope } from '../lib/library'
 import { ICON } from '../lib/metrics'
 import type { Platform } from '../lib/metrics'
+import type { Collection } from '../lib/collections'
+import { scopeOf } from '../lib/collections'
 import { BookCover } from './BookCover'
 import styles from './Library.module.css'
 
@@ -45,6 +48,13 @@ export interface LibraryProps {
    * so adding the book again finds them waiting.
    */
   onRemove: (entry: LibraryEntry) => void
+  /** The reader's saved scopes — see `collections.ts`. */
+  collections: readonly Collection[]
+  onSaveCollection: (scope: Scope) => void
+  onRemoveCollection: (id: string) => void
+  /** Add or remove one of the reader's own tags. Publisher subjects are fixed. */
+  onTag: (bookId: string, tag: string) => void
+  onUntag: (bookId: string, tag: string) => void
 }
 
 const ORDERS: readonly { id: LibraryOrder; label: string }[] = [
@@ -53,7 +63,18 @@ const ORDERS: readonly { id: LibraryOrder; label: string }[] = [
   { id: 'author', label: 'Author' },
 ]
 
-export function Library({ books, platform, onOpen, onAddBooks, onRemove }: LibraryProps) {
+export function Library({
+  books,
+  platform,
+  onOpen,
+  onAddBooks,
+  onRemove,
+  collections,
+  onSaveCollection,
+  onRemoveCollection,
+  onTag,
+  onUntag,
+}: LibraryProps) {
   const [order, setOrder] = useState<LibraryOrder>('recent')
   /* Which row is asking to be confirmed, by id.
    *
@@ -62,6 +83,9 @@ export function Library({ books, platform, onOpen, onAddBooks, onRemove }: Libra
    * all proportion to what happens. But it is also one pixel from Open, and a
    * misclick that silently empties a row is worse than one extra click. */
   const [confirming, setConfirming] = useState<string | null>(null)
+  /** Which row has its tag input open, by id. */
+  const [tagging, setTagging] = useState<string | null>(null)
+  const [draftTag, setDraftTag] = useState('')
   const [query, setQuery] = useState('')
   /* The SCOPE — Decision 2. A collection restricts what is in play, and the
    * search then runs inside it rather than beside it. Held here for now; the
@@ -129,15 +153,43 @@ export function Library({ books, platform, onOpen, onAddBooks, onRemove }: Libra
           {tags.length > 0 && (
             <div className={styles.chips}>
               {scope && (
-                <button
-                  type="button"
-                  className={styles.chip}
-                  data-active="true"
-                  onClick={() => setScope(null)}
-                >
-                  {scope.label} ✕
-                </button>
+                <>
+                  <button
+                    type="button"
+                    className={styles.chip}
+                    data-active="true"
+                    onClick={() => setScope(null)}
+                  >
+                    {scope.label} ✕
+                  </button>
+                  {/* Only when it is not already saved — offering to save a
+                      collection that exists is a control that appears to do
+                      nothing, which is worse than an absent one. */}
+                  {!collections.some((one) => one.tag === scope.tag && one.series === scope.series) && (
+                    <button
+                      type="button"
+                      className={styles.chip}
+                      onClick={() => onSaveCollection(scope)}
+                    >
+                      Save as collection
+                    </button>
+                  )}
+                </>
               )}
+              {!scope &&
+                collections.map((one) => (
+                  <button
+                    key={one.id}
+                    type="button"
+                    className={styles.chip}
+                    data-saved="true"
+                    onClick={() => setScope(scopeOf(one))}
+                    onAuxClick={() => onRemoveCollection(one.id)}
+                    title={`${one.label} — middle-click to unsave`}
+                  >
+                    {one.label}
+                  </button>
+                ))}
               {!scope &&
                 tags.slice(0, 8).map(({ tag, count }) => (
                   <button
@@ -223,6 +275,61 @@ export function Library({ books, platform, onOpen, onAddBooks, onRemove }: Libra
               >
                 {confirming === book.bookId ? 'Remove?' : <X size={ICON.control} strokeWidth={ICON.stroke} />}
               </button>
+              <button
+                type="button"
+                className={styles.tagButton}
+                aria-label={`Tag ${displayTitle(book)}`}
+                onClick={() => {
+                  setDraftTag('')
+                  setTagging((at) => (at === book.bookId ? null : book.bookId))
+                }}
+              >
+                <Tag size={ICON.control} strokeWidth={ICON.stroke} />
+              </button>
+              {tagging === book.bookId && (
+                <form
+                  className={styles.tagForm}
+                  onSubmit={(event) => {
+                    event.preventDefault()
+                    onTag(book.bookId, draftTag)
+                    setDraftTag('')
+                  }}
+                >
+                  <input
+                    className={styles.tagInput}
+                    value={draftTag}
+                    onChange={(event) => setDraftTag(event.target.value)}
+                    placeholder="Add a tag"
+                    aria-label={`Add a tag to ${displayTitle(book)}`}
+                    autoFocus
+                    onKeyDown={(event) => {
+                      if (event.key === 'Escape') setTagging(null)
+                    }}
+                  />
+                </form>
+              )}
+              {/* The reader's OWN tags carry a remove control; a publisher's
+                  subject does not, because it is a fact about the book rather
+                  than a choice, and it comes back on the next open anyway. */}
+              {allTags(book).length > 0 && (
+                <div className={styles.tagRow}>
+                  {allTags(book).slice(0, 4).map((tag) => {
+                    const mine = (book.tags ?? []).includes(tag)
+                    return (
+                      <button
+                        key={tag}
+                        type="button"
+                        className={styles.bookTag}
+                        data-mine={mine}
+                        title={mine ? `Remove the tag ${tag}` : `Show everything tagged ${tag}`}
+                        onClick={() => (mine ? onUntag(book.bookId, tag) : setScope({ label: tag, tag }))}
+                      >
+                        {tag}
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
               </div>
             )
           })}

@@ -8,6 +8,8 @@ import {
   rememberPosition,
   forgetBook,
   rememberCover,
+  tagBook,
+  untagBook,
   rememberVault,
   type LibraryEntry,
 } from './library'
@@ -33,6 +35,9 @@ export interface Library {
   rememberJacket: (bookId: string, cover: string) => void
   /** Take a book off the shelf. The reader's own file is not touched. */
   forget: (bookId: string) => void
+  /** Add one of the READER's own tags — never a publisher's subject. */
+  tag: (bookId: string, tag: string) => void
+  untag: (bookId: string, tag: string) => void
   /** The saved position for a book, or null. Stable across renders. */
   positionOf: (bookId: string | null) => string | null
   /** Move a row from a superseded book id — see `idMigration`. */
@@ -78,6 +83,22 @@ export function useLibrary(storage = localStore()): Library {
         ? booksRef.current.find((entry) => entry.bookId === bookId)?.position ?? null
         : null,
     [],
+  )
+
+  const tag = useCallback(
+    (bookId: string, value: string) => {
+      if (tagBook(booksRef.current, bookId, value) === booksRef.current) return
+      apply((prev) => [...tagBook(prev, bookId, value)])
+    },
+    [apply],
+  )
+
+  const untag = useCallback(
+    (bookId: string, value: string) => {
+      if (untagBook(booksRef.current, bookId, value) === booksRef.current) return
+      apply((prev) => [...untagBook(prev, bookId, value)])
+    },
+    [apply],
   )
 
   const forget = useCallback(
@@ -139,7 +160,18 @@ export function useLibrary(storage = localStore()): Library {
    * a button. It comes back with the button, tested against what that button
    * actually needs rather than against what seemed likely in advance. */
   return useMemo<Library>(
-    () => ({ books, record, remember, rememberOwned, rememberJacket, forget, positionOf, rekey }),
-    [books, record, remember, rememberOwned, rememberJacket, forget, positionOf, rekey],
+    () => ({
+      books,
+      record,
+      remember,
+      rememberOwned,
+      rememberJacket,
+      forget,
+      tag,
+      untag,
+      positionOf,
+      rekey,
+    }),
+    [books, record, remember, rememberOwned, rememberJacket, forget, tag, untag, positionOf, rekey],
   )
 }

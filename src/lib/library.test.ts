@@ -7,8 +7,11 @@ import {
   tagCounts,
   isReopenable,
   parseLibrary,
+  allTags,
   forgetBook,
   inScope,
+  tagBook,
+  untagBook,
   matchesQuery,
   recordOpen,
   rememberVault,
@@ -520,5 +523,62 @@ describe('tagCounts', () => {
   it('breaks a tie by name, so the order is stable', () => {
     const tied = [entry({ bookId: 'a', subjects: ['Zebra', 'Apple'] })]
     expect(tagCounts(tied).map((t) => t.tag)).toEqual(['Apple', 'Zebra'])
+  })
+})
+
+
+/**
+ * The reader's own tags, kept apart from the publisher's.
+ *
+ * Two fields rather than one merged list, and the separation is load-bearing:
+ * `subjects` are replaced wholesale every time the book is re-opened, so a
+ * reader's tag folded in there would be erased by re-reading the book it was
+ * attached to.
+ */
+describe('reader tags', () => {
+  it('adds a tag without touching the declared subjects', () => {
+    const shelf = [entry({ bookId: 'a', subjects: ['Philosophy'] })]
+    const [row] = tagBook(shelf, 'a', 'To reread')
+    expect(row?.tags).toEqual(['To reread'])
+    expect(row?.subjects).toEqual(['Philosophy'])
+  })
+
+  /* The case the split exists for: re-opening a book replaces `subjects`, and
+   * the reader's tag has to be there afterwards. */
+  it('survives the declared subjects being replaced', () => {
+    const tagged = tagBook([entry({ bookId: 'a', subjects: ['Old'] })], 'a', 'Mine')
+    const reparsed = tagged.map((row) => ({ ...row, subjects: ['New'] }))
+    expect(allTags(reparsed[0]!)).toEqual(['Mine', 'New'])
+  })
+
+  it('refuses a tag the book already carries under either provenance', () => {
+    const shelf = [entry({ bookId: 'a', subjects: ['Philosophy'] })]
+    expect(tagBook(shelf, 'a', 'Philosophy')).toBe(shelf)
+    const own = tagBook(shelf, 'a', 'Mine')
+    expect(tagBook(own, 'a', 'Mine')).toBe(own)
+  })
+
+  it('trims and caps, and refuses an empty tag', () => {
+    const shelf = [entry({ bookId: 'a' })]
+    expect(tagBook(shelf, 'a', '   ')).toBe(shelf)
+    expect(tagBook(shelf, 'a', '  spaced  ')[0]?.tags).toEqual(['spaced'])
+    expect(tagBook(shelf, 'a', 'x'.repeat(200))[0]?.tags?.[0]).toHaveLength(60)
+  })
+
+  /* A publisher's subject is a fact about the book, not a choice — and it comes
+   * back on the next open anyway, so removing it would be theatre. */
+  it('cannot remove a declared subject', () => {
+    const shelf = [entry({ bookId: 'a', subjects: ['Philosophy'] })]
+    expect(untagBook(shelf, 'a', 'Philosophy')).toBe(shelf)
+  })
+
+  it('removes one of the reader own tags', () => {
+    const tagged = tagBook([entry({ bookId: 'a' })], 'a', 'Mine')
+    expect(untagBook(tagged, 'a', 'Mine')[0]?.tags).toEqual([])
+  })
+
+  it('deduplicates across both lists, reader first', () => {
+    const row = entry({ bookId: 'a', subjects: ['Shared', 'Theirs'], tags: ['Shared', 'Mine'] })
+    expect(allTags(row)).toEqual(['Shared', 'Mine', 'Theirs'])
   })
 })

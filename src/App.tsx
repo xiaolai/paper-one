@@ -18,6 +18,7 @@ import { useMarking } from './lib/useMarking'
 import { coverTintFor } from './lib/bookAccent'
 import { disownBook, ownBook, readOwnedBook, tauriVaultFs } from './lib/bookVault'
 import type { LibraryEntry } from './lib/library'
+import { useCollections } from './lib/useCollections'
 import { saveCover } from './lib/coverArt'
 import { inTauri } from './lib/appStorage'
 import { BookSwitcher } from './overlays/BookSwitcher'
@@ -160,6 +161,7 @@ export function App({ storage }: AppProps) {
    * because that is when there is a title worth showing. */
   const { bookId, meta, source, cover } = book
   const { record, remember, rememberOwned, rememberJacket, forget, positionOf } = library
+  const collections = useCollections(storage)
 
   /**
    * Take a book off the shelf, and give up our copy of it.
@@ -648,6 +650,11 @@ export function App({ storage }: AppProps) {
             // reader does not want from a click on a cover.
             onOpen={openStored}
             onRemove={removeBook}
+            collections={collections.all}
+            onSaveCollection={collections.save}
+            onRemoveCollection={collections.remove}
+            onTag={library.tag}
+            onUntag={library.untag}
             onAddBooks={addBooks}
           />
         )}
