@@ -21,7 +21,7 @@ import type { IndexedBook } from './lib/bookIndex'
 import type { IndexFs } from './lib/bookIndex'
 import type { DirFs } from './lib/importFolder'
 import { downscaleCover } from './lib/coverArt'
-import { contentPathIn, coverPathIn, folderOf } from './lib/bookFolder'
+import { contentPathIn, coverPathIn, folderOf, recordPath } from './lib/bookFolder'
 import {
   importFolder,
   summarise,
@@ -119,6 +119,8 @@ export function App({ storage, fs, initialBooks }: AppProps) {
    * effect's inputs do not change when a row is removed.
    */
   const removedWhileOpen = useRef(new Set<string>())
+  /** Which source the marker above was last cleared for — see the intake effect. */
+  const clearedFor = useRef<File | string | null>(null)
 
   const openBook = useCallback(
     (source: File | string, path: string | null = null) => {
@@ -142,7 +144,7 @@ export function App({ storage, fs, initialBooks }: AppProps) {
       })
   }, [openBook])
 
-  const { add, update, remove, positionOf, rekeyBook } = library
+  const { add, update, remove, positionOf } = library
 
   /**
    * Put what an import produced onto the shelf.
@@ -467,12 +469,17 @@ export function App({ storage, fs, initialBooks }: AppProps) {
    */
   useEffect(() => {
     if (!bookId || !meta) return
-    /* CLEARED FOR THIS BOOK ONLY, and here rather than in `openBook`, because
-     * this is the point at which the reader is unambiguously asking for THIS
-     * book: its id is known and its parse has landed. Clearing the whole set on
-     * any open meant opening a second book wiped the first one's marker while
-     * its intake was still in flight, which is the race this exists to close. */
-    removedWhileOpen.current.delete(bookId)
+    /* CLEARED FOR THIS BOOK, ONCE PER OPEN.
+     *
+     * Keyed on the SOURCE, because this effect also runs when the parse lands —
+     * and metadata arriving is not the reader asking for the book back. Clearing
+     * unconditionally there undid a removal made in the seconds between opening
+     * a book and it finishing parsing. A fresh open produces a new `File`, or a
+     * different path, so identity is exactly the right test. */
+    if (clearedFor.current !== source) {
+      removedWhileOpen.current.delete(bookId)
+      clearedFor.current = source
+    }
     let cancelled = false
     void (async () => {
       if (source instanceof File && fs) {
@@ -502,12 +509,19 @@ export function App({ storage, fs, initialBooks }: AppProps) {
           console.error('Paper: could not keep our own copy of the book', cause)
         }
         /* CHECKED AGAIN, because the write above is the long part — a 40MB book
-         * off a network volume — and a removal during it left the folder that
-         * `mkdir` had just recreated sitting there holding nothing but content.
-         * `scanBooks` skips it, so it is invisible rather than wrong, but it is
-         * still the removed book's bytes back on disk. */
-        if (removedWhileOpen.current.has(bookId) && fs) {
-          await fs.removeDir(folderOf(bookId)).catch(() => {})
+         * off a network volume — and a removal during it leaves the folder that
+         * `mkdir` recreated sitting there holding nothing but content.
+         *
+         * ONLY THE FILE THIS EFFECT WROTE, and only once the record is gone,
+         * which is what proves the removal finished and this folder is the shell
+         * we made. Removing the DIRECTORY here was catastrophic: lose the race
+         * the other way and it deletes the live book — content, record, tags,
+         * position and marks — before `trashBook` has moved anything, so there
+         * is no copy to recover. A stray file is worth incomparably less than
+         * the chance of that. */
+        if (removedWhileOpen.current.has(bookId) && fs && source instanceof File) {
+          const at = contentPathIn(bookId, source.name)
+          if (!(await fs.exists(recordPath(bookId)))) await fs.remove(at).catch(() => {})
           return
         }
       }
@@ -657,16 +671,18 @@ export function App({ storage, fs, initialBooks }: AppProps) {
         if (!live || legacy === bookId) return
         rekeyMarks(legacy, bookId)
         rekeyCards(legacy, bookId)
-        /* THE LIBRARY TOO, which was left out on the reasoning that moving a
-         * book to a new id is a directory rename and therefore the migration's
-         * business. The migration cannot do it: the new id is a hash of the
-         * book's content, and it is computed here, on open, precisely because
-         * hashing every book at startup is what the lazy migration avoids.
+        /* THE LIBRARY IS STILL NOT REKEYED, and this is a KNOWN GAP rather
+         * than a decision that is finished. A book's id names its folder, so
+         * carrying it across is a directory rename — and a rename that has to
+         * fold two records, survive a partial failure, and not race the marks
+         * being migrated out of the same folder is a migration, not a line in an
+         * effect. Written as one during an audit round it was the most dangerous
+         * code on the branch, so it was taken back out.
          *
-         * Leaving it out did not leave the book alone — it gave the reader a
-         * SECOND row for it, with no tags and no position, while the ones they
-         * had stayed on a shelf entry pointing at the old folder. */
-        rekeyBook(legacy, bookId)
+         * What the reader sees until it is done properly: opening a book stored
+         * under the previous id scheme adds a SECOND row, without the tags or
+         * the position held by the first. Nothing is lost — the old row and its
+         * folder are untouched — but the shelf shows the book twice. */
       })
       .catch((cause: unknown) => {
         console.error('Paper: could not check the legacy book id', cause)
@@ -674,7 +690,7 @@ export function App({ storage, fs, initialBooks }: AppProps) {
     return () => {
       live = false
     }
-  }, [bookId, source, rekeyMarks, rekeyCards, rekeyBook])
+  }, [bookId, source, rekeyMarks, rekeyCards])
 
   const commands = useMemo(
     () =>

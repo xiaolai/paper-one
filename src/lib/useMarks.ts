@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { writeQueue } from './writeQueue'
-import { folderOf, marksPathIn, readMarks, writeMarks } from './bookFolder'
+import { folderOf, readMarks, writeMarks } from './bookFolder'
 import { scanAllMarks, type IndexFs } from './bookIndex'
 import { upsertOverlapping } from './markMatch'
 import {
@@ -116,6 +116,16 @@ export function useMarks(bookId: string | null, fs: IndexFs | null): MarkStore {
   const apply = useCallback(
     (mutate: (prev: readonly Mark[]) => readonly Mark[]) => {
       if (!bookId) return
+      /* NOT YET READ, so there is nothing to write a snapshot OVER.
+       *
+       * The read is asynchronous and a highlight made before it lands would
+       * persist `[] + the new mark`, erasing everything already in the file. The
+       * change goes to disk as a change instead — read, modify, write, on the
+       * queue — which is exactly what an edit to a book that is not open does. */
+      if (loaded.bookId !== bookId) {
+        applyElsewhereRef.current?.(bookId, mutate)
+        return
+      }
       const next = mutate(latest.current)
       if (next === latest.current) return
       latest.current = next
@@ -175,6 +185,12 @@ export function useMarks(bookId: string | null, fs: IndexFs | null): MarkStore {
    * queue as everything else. `all` is updated so the row stays changed; the
    * open book's list is untouched, because by definition this is not it.
    */
+  /* `apply` needs `applyElsewhere` and `applyElsewhere` does not need `apply`,
+   * but the one that is declared first cannot name the other. A ref rather than
+   * a reorder, because the reading order — the open book first, then everything
+   * else — is the one that explains the file. */
+  const applyElsewhereRef = useRef<((id: string, mutate: (prev: readonly Mark[]) => readonly Mark[]) => void) | null>(null)
+
   const applyElsewhere = useCallback(
     (targetId: string, mutate: (prev: readonly Mark[]) => readonly Mark[]) => {
       if (!fs) return
@@ -184,6 +200,10 @@ export function useMarks(bookId: string | null, fs: IndexFs | null): MarkStore {
          * changes part of it. Coalescing two — delete a mark, then recolour
          * another — drops the first, and the row it belonged to reappears. */
         .append(targetId, async () => {
+          // The same guard the open book's writes carry: `writeMarks` creates
+          // the folder it writes into, so a change landing after a removal put a
+          // marks-only directory back where the book had been.
+          if (!(await fs.exists(folderOf(targetId)))) return
           const before = parseMarks(JSON.stringify(await readMarks(fs, targetId)))
           const next = mutate(before)
           if (next === before) return
@@ -197,6 +217,8 @@ export function useMarks(bookId: string | null, fs: IndexFs | null): MarkStore {
     },
     [fs],
   )
+
+  applyElsewhereRef.current = applyElsewhere
 
   /** Route a change to whichever book the mark belongs to. */
   const applyToMark = useCallback(
@@ -247,25 +269,29 @@ export function useMarks(bookId: string | null, fs: IndexFs | null): MarkStore {
     (from: string, to: string) => {
       if (!fs || from === to) return
       void readMarks(fs, from)
-        .then(async (raw) => {
+        .then((raw) => {
           const moved = parseMarks(JSON.stringify(raw))
           if (moved.length === 0) return
-          /* BY ID, because this ran on every open and only ever COPIED: the old
-           * file stayed where it was, so each reopen appended the same marks
-           * again and a reader who opened a migrated book five times had five of
-           * every highlight. */
+          /* BY ID, and the set grows as it goes — a source holding two marks
+           * with one id would otherwise let both through. This ran on every open
+           * and only ever COPIED, so before the deduplication a reader who
+           * opened a migrated book five times had five of every highlight.
+           *
+           * THE SOURCE IS LEFT WHERE IT IS. Removing it after calling `apply` —
+           * which only QUEUES the write — deleted the original before the copy
+           * was durable, and the queued write can be skipped, superseded or fail.
+           * Deduplication is what makes leaving it harmless: a second open merges
+           * the same marks and changes nothing. The old file costs a few
+           * kilobytes until the folder it is in is dealt with properly. */
           apply((prev) => {
             const held = new Set(prev.map((mark) => mark.id))
-            const fresh = moved
-              .filter((mark) => !held.has(mark.id))
-              .map((mark) => ({ ...mark, bookId: to }))
+            const fresh: Mark[] = []
+            for (const mark of moved) {
+              if (held.has(mark.id)) continue
+              held.add(mark.id)
+              fresh.push({ ...mark, bookId: to })
+            }
             return fresh.length === 0 ? prev : [...prev, ...fresh]
-          })
-          /* And the source is REMOVED, once they are safely merged — which is
-           * what makes this a move. Failing here is survivable now that the
-           * merge deduplicates, so it is logged rather than thrown. */
-          await fs.remove(marksPathIn(from)).catch((cause: unknown) => {
-            console.error('Paper: could not clear the old marks file', cause)
           })
         })
         .catch(() => {

@@ -130,4 +130,21 @@ describe('writeQueue', () => {
     await last
     expect(ran).toEqual(['running', 'change', 'snapshot-2'])
   })
+
+  /* A thrown value that happens to be falsy is still a failure. Testing the
+   * error's truthiness resolved `throw undefined` as a success, so a write that
+   * failed reported that it had saved. */
+  it('rejects when a task throws something falsy', async () => {
+    const q = writeQueue()
+    let settled = 'neither'
+    await q
+      .push('k', async () => {
+        throw undefined
+      })
+      .then(
+        () => (settled = 'resolved'),
+        () => (settled = 'rejected'),
+      )
+    expect(settled).toBe('rejected')
+  })
 })

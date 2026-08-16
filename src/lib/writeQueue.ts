@@ -39,7 +39,7 @@ export interface WriteQueue {
 
 interface Waiting {
   readonly task: Task
-  readonly settle: (error?: unknown) => void
+  readonly settle: (failure?: { error: unknown }) => void
   readonly mode: Mode
 }
 
@@ -70,7 +70,7 @@ export function writeQueue(): WriteQueue {
          * a promise that had already rejected and never ran. A disk that is
          * momentarily full would have silently stopped saving that book's marks
          * for the rest of the session. */
-        next.settle(error)
+        next.settle({ error })
       }
     }
     running.delete(key)
@@ -78,7 +78,12 @@ export function writeQueue(): WriteQueue {
 
   const enqueue = (key: string, task: Task, mode: Mode): Promise<void> =>
     new Promise<void>((resolve, reject) => {
-      const settle = (error?: unknown) => (error ? reject(error) : resolve())
+      /* WRAPPED, because the truthiness of the error is not the question being
+       * asked. `throw undefined` and `throw 0` are legal, and testing the value
+       * resolved them as successes — a write that failed reporting that it had
+       * saved. The presence of the wrapper is the signal. */
+      const settle = (failure?: { error: unknown }) =>
+        failure ? reject(failure.error as Error) : resolve()
       const line = pending.get(key) ?? []
       if (mode === 'replace') {
         /* ONLY OTHER WHOLE-STATE WRITES ARE SUPERSEDED. Clearing the line

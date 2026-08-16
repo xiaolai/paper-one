@@ -116,7 +116,17 @@ export async function restoreBook(fs: TrashFs, bookId: string): Promise<boolean>
      * clears it on the ordinary schedule rather than never — removing the stamp
      * early is what would strand it, because that sweep keeps whatever it cannot
      * age. */
-    if (allMoved) await fs.removeDir(trashOf(bookId)).catch(() => {})
+    if (allMoved) {
+      await fs.removeDir(trashOf(bookId)).catch(() => {})
+    } else {
+      /* RE-STAMPED, so what could not move gets a fresh fortnight rather than
+       * the remainder of the old one. A restore attempted a day before expiry
+       * otherwise reported success and then let the sweep delete the very files
+       * it had failed to bring back. */
+      await fs
+        .writeFile(`${trashOf(bookId)}/.removed`, new TextEncoder().encode(String(Date.now())))
+        .catch(() => {})
+    }
     return true
   } catch {
     return false

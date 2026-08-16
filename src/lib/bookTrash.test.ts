@@ -235,6 +235,27 @@ describe('restoring when something is in the way', () => {
     expect(await emptyExpired(fs, Date.now() + (TRASH_DAYS + 1) * DAY)).toEqual(['book_a'])
   })
 
+  /**
+   * And that stamp is a FRESH one.
+   *
+   * A restore attempted a day before expiry otherwise reported success and then
+   * let the sweep delete the files it had just failed to bring back — the
+   * reader asked for their book and lost the rest of it instead.
+   */
+  it('gives what it left behind a fresh fortnight', async () => {
+    const fs = fakeFs(shelved())
+    await trashBook(fs, 'book_a')
+    const DAY = 24 * 60 * 60 * 1000
+    // Aged almost to expiry.
+    const old = Date.now() - (TRASH_DAYS - 1) * DAY
+    fs.store.set(`${trashOf('book_a')}/.removed`, new TextEncoder().encode(String(old)))
+    fs.store.set(`${folderOf('book_a')}/marks.json`, new TextEncoder().encode('[]'))
+    await restoreBook(fs, 'book_a')
+    // Two days later the old stamp would have expired. The new one has not.
+    expect(await emptyExpired(fs, Date.now() + 2 * DAY)).toEqual([])
+    expect(fs.store.has(`${trashOf('book_a')}/marks.json`)).toBe(true)
+  })
+
   it('does not delete an entry whose move failed', async () => {
     const fs = fakeFs(shelved())
     await trashBook(fs, 'book_a')
