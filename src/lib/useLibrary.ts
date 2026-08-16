@@ -3,6 +3,7 @@ import { mergeParsed, readBook, updateBook, writeBook, type BookRecord } from '.
 import { writeIndex, type IndexFs, type IndexedBook } from './bookIndex'
 import { restoreBook, trashBook } from './bookTrash'
 import { tagKey } from './library'
+import { writeQueue } from './writeQueue'
 
 /**
  * The library, bound to React.
@@ -27,7 +28,15 @@ import { tagKey } from './library'
 export interface Library {
   readonly books: readonly IndexedBook[]
   /** Add a book, or fold a fresh parse into one already here — see `mergeParsed`. */
-  add: (bookId: string, record: BookRecord) => void
+  /**
+   * Add a book, or fold a fresh parse into one already here — see `mergeParsed`.
+   *
+   * `sparse` marks a record that is a PLACEHOLDER rather than a parse: an
+   * import knows a filename and nothing else, so it must not be allowed to
+   * overwrite a real title, author and subjects. Without it a watched folder
+   * degraded every existing record to its filename on startup.
+   */
+  add: (bookId: string, record: BookRecord, sparse?: boolean) => void
   /** Change one book. The only mutator, because a book is one file. */
   update: (bookId: string, change: (record: BookRecord) => BookRecord) => void
   /** Take a book off the shelf. Its folder goes to the trash, not away. */
@@ -42,6 +51,15 @@ export interface Library {
 export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] = []): Library {
   const [books, setBooks] = useState<readonly IndexedBook[]>(initial)
 
+  /* ONE WRITE AT A TIME. Every write here goes to a fixed `<path>.writing`
+   * neighbour and renames it into place — atomic for one write, a collision for
+   * two, because the second uses the same temporary file. A position save
+   * landing while a tag is being written is exactly that shape.
+   *
+   * The index is one key, so its rewrites also serialise: two commits could
+   * otherwise both write it and the older one land last. */
+  const queue = useRef(writeQueue())
+
   /* The list as it is right now, for callbacks that run outside a render — a
    * throttled position save, or an import finishing several awaits after the
    * component that started it was drawn. */
@@ -50,20 +68,26 @@ export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] =
 
   /** State first, then the folder, then the index. */
   const commit = useCallback(
-    (next: readonly IndexedBook[], write: (target: IndexFs) => Promise<unknown>) => {
+    (key: string, next: readonly IndexedBook[], write: (target: IndexFs) => Promise<unknown>) => {
       latest.current = next
       setBooks(next)
       if (!fs) return
-      void (async () => {
-        try {
+      void queue.current
+        .push(key, async () => {
           await write(fs)
-          // The index LAST, and rewritten whole. It is a cache: a failure here
-          // costs a rescan on the next launch, never a book.
-          await writeIndex(fs, latest.current)
-        } catch (cause) {
+        })
+        .then(() =>
+          /* The index LAST, and on its own key so a book's write is never held
+           * up by it. Rewritten whole from `latest.current`, which is the newest
+           * state by the time this runs — a cache should describe where things
+           * ended up, not where one write thought they were going. */
+          queue.current.push('index', async () => {
+            await writeIndex(fs, latest.current)
+          }),
+        )
+        .catch((cause: unknown) => {
           console.error('Paper: could not save the library', cause)
-        }
-      })()
+        })
     },
     [fs],
   )
@@ -80,20 +104,26 @@ export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] =
       if (next === record) return
       const list = [...latest.current]
       list[at] = { ...next, bookId }
-      commit(list, (target) =>
-        /* Read-modify-write against the FOLDER rather than writing the
-         * in-memory copy: another write may have landed since this one was
-         * queued, and the file is the truth. */
-        updateBook(target, bookId, () => next),
+      commit(bookId, list, (target) =>
+        /* THE CHANGE, not the result. Passing `() => next` wrote the in-memory
+         * record back — and that copy can be stale, because it came from an
+         * index that may be one write behind after a crash. Handing the function
+         * over means it is applied to whatever is actually on disk. */
+        updateBook(target, bookId, change),
       )
     },
     [commit],
   )
 
   const add = useCallback(
-    (bookId: string, record: BookRecord) => {
+    (bookId: string, record: BookRecord, sparse = false) => {
       const at = latest.current.findIndex((one) => one.bookId === bookId)
       const previous = at === -1 ? null : latest.current[at]
+      /* A PLACEHOLDER over a real record does nothing. An import supplies a
+       * filename for a title and an empty author; `mergeParsed` treats what it
+       * is given as the book's own account of itself, which is right for a
+       * parse and destructive for a guess. */
+      if (sparse && previous) return
       /* A fresh parse folded into what the reader owns. The book is the
        * authority on its own metadata; the reader is the authority on their
        * tags, their place in it, and whether they are done. */
@@ -104,7 +134,7 @@ export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] =
         at === -1
           ? [entry, ...latest.current]
           : latest.current.map((one, i) => (i === at ? entry : one))
-      commit(list, async (target) => {
+      commit(bookId, list, async (target) => {
         /* RESTORED, not overwritten, when a removed copy is waiting. The id is
          * the bytes, so re-adding a book Paper had removed lands on the same
          * folder name — and its tags, position and marks are still in there.
@@ -124,7 +154,7 @@ export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] =
       if (list.length === latest.current.length) return
       /* ONE RENAME. Phase 3's removal touched three places — a row, the bytes,
        * the cover — any of which could fail alone, and two of which did. */
-      commit(list, (target) => trashBook(target as never, bookId))
+      commit(bookId, list, (target) => trashBook(target as never, bookId))
     },
     [commit],
   )

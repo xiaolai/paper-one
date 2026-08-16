@@ -19,13 +19,31 @@
  */
 
 import type { VaultFs } from './bookVault'
-import { BOOKS_DIR, parseRecord, recordPath, type BookRecord } from './bookFolder'
+import { BOOKS_DIR, folderOf, parseRecord, recordPath, type BookRecord } from './bookFolder'
 
 export const INDEX_FILE = 'index.json'
 
 /** A book as the shelf needs it: its record, plus the id naming its folder. */
 export interface IndexedBook extends BookRecord {
   readonly bookId: string
+  /**
+   * Whether the book's bytes are actually there.
+   *
+   * DERIVED on scan, never stored — a stored flag is one more thing that can
+   * disagree with the folder, which is the failure this whole phase exists to
+   * remove. It is what lets the shelf say "this one will not open", which phase
+   * 4 deleted on the premise that a book which is its own folder always opens.
+   * That premise is false for a record whose content was never written.
+   */
+  readonly hasContent?: boolean
+}
+
+/** Does this folder hold a content file? One `exists` per known extension. */
+async function hasContentFile(fs: IndexFs, folder: string): Promise<boolean> {
+  for (const ext of ['epub', 'pdf', 'mobi', 'azw3', 'cbz', 'fb2', 'fbz', 'bin']) {
+    if (await fs.exists(`${BOOKS_DIR}/${folder}/content.${ext}`)) return true
+  }
+  return false
 }
 
 export interface IndexFs extends VaultFs {
@@ -35,6 +53,21 @@ export interface IndexFs extends VaultFs {
 interface StoredIndex {
   readonly version: 1
   readonly books: readonly IndexedBook[]
+  /**
+   * The folder names this index was built from.
+   *
+   * A COUNT was not enough, and the gap is not exotic: a book added and another
+   * removed between two launches leaves the count identical, so a stale index
+   * describing neither was trusted. Comparing the SET catches that, and it costs
+   * the directory listing that was already being read to count.
+   *
+   * It still does not catch a `book.json` edited without the index being
+   * rewritten, which happens only on a crash between the two — and that is why
+   * `updateBook` applies changes to the record ON DISK rather than to whatever
+   * the index handed the caller. A stale index can then be out of date; it
+   * cannot cause a stale write.
+   */
+  readonly folders?: readonly string[]
 }
 
 /**
@@ -89,7 +122,20 @@ export async function scanBooks(fs: IndexFs): Promise<IndexedBook[]> {
     try {
       const bytes = await fs.readFile(`${BOOKS_DIR}/${entry.name}/book.json`)
       const record = parseRecord(new TextDecoder().decode(bytes))
-      if (record) books.push({ ...record, bookId: entry.name })
+      if (!record) continue
+      /* THE RECORD'S OWN ID, not the directory name. `safeId` is not reversible
+       * — `book:abc` is stored in `book_abc` — so taking the id from the folder
+       * renamed every book on any rescan, and marks are keyed by it. The folder
+       * name is the fallback for records written before the id was stored, which
+       * is the same wrong answer as before and no worse. */
+      const bookId = record.bookId || entry.name
+      /* WHETHER THERE ARE BYTES, derived here rather than stored. A record with
+       * no content is a folder that is not a book yet — a half-written import,
+       * or a migrated row whose copy never existed — and the shelf has to be
+       * able to say so. `scanBooks` already skips a folder with no record for
+       * exactly this reasoning; this is the same rule applied to the other half. */
+      const hasContent = await hasContentFile(fs, entry.name)
+      books.push({ ...record, bookId, hasContent })
     } catch {
       continue
     }
@@ -112,34 +158,44 @@ export async function scanBooks(fs: IndexFs): Promise<IndexedBook[]> {
 export async function loadShelf(fs: IndexFs): Promise<{ books: IndexedBook[]; rescanned: boolean }> {
   const cached = await readIndex(fs)
   if (cached) {
-    const folders = await countFolders(fs)
-    if (folders === cached.length) return { books: [...cached], rescanned: false }
+    const folders = await folderNames(fs)
+    const known = new Set(cached.books.map((one) => folderOf(one.bookId).slice(BOOKS_DIR.length + 1)))
+    const agrees = folders.length === known.size && folders.every((name) => known.has(name))
+    if (agrees) return { books: [...cached.books], rescanned: false }
   }
   const books = await scanBooks(fs)
   await writeIndex(fs, books).catch(() => {})
   return { books, rescanned: true }
 }
 
-async function readIndex(fs: IndexFs): Promise<readonly IndexedBook[] | null> {
+async function readIndex(
+  fs: IndexFs,
+): Promise<{ books: readonly IndexedBook[]; folders?: readonly string[] } | null> {
   try {
-    return parseIndex(new TextDecoder().decode(await fs.readFile(INDEX_FILE)))
+    const raw = new TextDecoder().decode(await fs.readFile(INDEX_FILE))
+    const books = parseIndex(raw)
+    return books ? { books } : null
   } catch {
     return null
   }
 }
 
-async function countFolders(fs: IndexFs): Promise<number> {
+async function folderNames(fs: IndexFs): Promise<string[]> {
   try {
-    return (await fs.readDir(BOOKS_DIR)).filter((one) => one.isDirectory).length
+    return (await fs.readDir(BOOKS_DIR)).filter((one) => one.isDirectory).map((one) => one.name)
   } catch {
-    return 0
+    return []
   }
 }
 
 /** Write the cache. Atomic, like every other write here. */
 export async function writeIndex(fs: IndexFs, books: readonly IndexedBook[]): Promise<void> {
   const writing = `${INDEX_FILE}.writing`
-  const payload: StoredIndex = { version: 1, books }
+  const payload: StoredIndex = {
+    version: 1,
+    books,
+    folders: books.map((one) => folderOf(one.bookId).slice(BOOKS_DIR.length + 1)),
+  }
   try {
     await fs.writeFile(writing, new TextEncoder().encode(JSON.stringify(payload)))
     await fs.rename(writing, INDEX_FILE)

@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest'
 import type { IndexedBook } from './bookIndex'
 import {
   allTags,
+  CANNOT_OPEN,
   byRecency,
+  canOpen,
   inOrder,
   inScope,
   matchesQuery,
@@ -309,5 +311,54 @@ describe('statusOf', () => {
    * have jumped to the index. */
   it('is not finished merely because the fraction reached the end', () => {
     expect(statusOf(entry({ position: 'x', progress: 1 }))).toBe('reading')
+  })
+})
+
+
+/**
+ * The concept WI-4.7 deleted on a false premise.
+ *
+ * "A book that is its own folder is always openable" is true for a book Paper
+ * wrote, and false for a record whose content was never there — which is exactly
+ * what migrating a phase-3 library produced. Derived now rather than stored, so
+ * unlike the field it replaces it cannot disagree with the disk.
+ */
+describe('canOpen', () => {
+  it('opens a book whose bytes are there', () => {
+    expect(canOpen(entry({ hasContent: true }))).toBe(true)
+  })
+
+  it('does not open a record with no bytes and no original', () => {
+    expect(canOpen(entry({ hasContent: false }))).toBe(false)
+  })
+
+  /* `origin` is the reader's own file and IS a way back — a fallback rather
+   * than a first choice, since it depends on their file still being there. */
+  it('opens one with no bytes but a path back to the file', () => {
+    expect(canOpen(entry({ hasContent: false, origin: '/books/moby.epub' }))).toBe(true)
+  })
+
+  /* A record from before `hasContent` was derived says nothing about content,
+   * and assuming the worst would empty an existing shelf. */
+  it('assumes a record that says nothing is fine', () => {
+    expect(canOpen(entry())).toBe(true)
+  })
+
+  it('has something to say on the row', () => {
+    expect(CANNOT_OPEN).toContain('add the file again')
+  })
+})
+
+describe('allTags folds the publisher subjects against each other', () => {
+  /* The earlier version folded declared subjects against the READER's tags and
+   * not against each other — and returned them untouched when the reader had
+   * added none. A book whose publisher listed both spellings drew two chips. */
+  it('folds two case-variant subjects into one', () => {
+    expect(allTags(entry({ subjects: ['Fiction', 'fiction'] }))).toEqual(['Fiction'])
+  })
+
+  it('folds across both lists at once', () => {
+    const row = entry({ tags: ['Sea'], subjects: ['sea', 'Classics', 'CLASSICS'] })
+    expect(allTags(row)).toEqual(['Sea', 'Classics'])
   })
 })

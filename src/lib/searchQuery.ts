@@ -72,9 +72,15 @@ export function parseQuery(raw: string, key: (tag: string) => string): ParsedQue
 export function withTag(raw: string, tag: string, key: (t: string) => string): string {
   const { tags } = parseQuery(raw, key)
   if (tags.some((one) => key(one) === key(tag))) return raw
-  // Quoted only when it needs to be. `tag:Sea` reads better than `tag:"Sea"`,
-  // and the reader is going to see this.
-  const term = /\s/.test(tag) ? `tag:"${tag}"` : `tag:${tag}`
+  if (!tag.trim()) return raw
+  /* Quoted only when it needs to be — `tag:Sea` reads better than `tag:"Sea"`,
+   * and the reader is going to see this. A quote INSIDE the tag is dropped
+   * rather than escaped: the parser has no escape sequence, so inventing one
+   * here would produce a term it cannot read back, and a tag containing a
+   * double quote is vanishingly rare against the cost of a query that silently
+   * stops round-tripping. */
+  const safe = tag.replace(/"/g, '')
+  const term = /\s/.test(safe) ? `tag:"${safe}"` : `tag:${safe}`
   return raw.trim() ? `${term} ${raw.trim()}` : term
 }
 

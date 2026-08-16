@@ -463,14 +463,12 @@ export function App({ storage, fs, initialBooks }: AppProps) {
    * moved, written to or deleted.
    *
    * NO ATTACHMENT STEP. Phase 3 wrote the bytes and then recorded WHERE they
-   * went, which is two operations that could disagree — and did: a copy landing
-   * after a book switch left a file with no row, and a row could name a copy
-   * that was not there. The folder is named by the book's own id, so its
-   * location is not a fact to be stored.
+   * went, which is two operations that could disagree — and did. The folder is
+   * named by the book's own id, so its location is not a fact to be stored.
    *
-   * Silent on failure by design. A copy that does not land leaves the reader
-   * able to read the book they just opened; telling them it was not filed away
-   * is noise about something they did not ask for.
+   * Written to a temporary neighbour and renamed, like every other write here:
+   * a crash partway must not leave a truncated `content.epub`, because `exists`
+   * would then call it the book forever.
    */
   useEffect(() => {
     if (!bookId || !isShelved || !fs) return
@@ -484,7 +482,14 @@ export function App({ storage, fs, initialBooks }: AppProps) {
         if (await fs.exists(at)) return
         const bytes = new Uint8Array(await source.arrayBuffer())
         await fs.mkdir(folderOf(bookId))
-        await fs.writeFile(at, bytes)
+        const writing = `${at}.writing`
+        try {
+          await fs.writeFile(writing, bytes)
+          await fs.rename(writing, at)
+        } catch (cause) {
+          await fs.remove(writing).catch(() => {})
+          throw cause
+        }
       } catch (cause) {
         console.error('Paper: could not keep our own copy of the book', cause)
       }

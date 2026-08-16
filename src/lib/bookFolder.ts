@@ -35,6 +35,19 @@ export const TRASH_DIR = 'trash'
 
 /** What `book.json` holds. Every field optional except the two a shelf needs. */
 export interface BookRecord {
+  /**
+   * The book's canonical id, stored rather than inferred.
+   *
+   * A folder is named `safeId(bookId)`, which replaces every character outside
+   * `[a-zA-Z0-9]` — so `book:abc` becomes `book_abc` and the mapping is NOT
+   * reversible. Reading the id back off the directory name therefore renamed
+   * every book on any rescan, and marks are keyed by it.
+   *
+   * Optional only because records written before this existed do not have it;
+   * `scanBooks` falls back to the folder name for those, which is the same
+   * wrong answer it always gave and no worse.
+   */
+  readonly bookId?: string
   readonly title: string
   readonly author: string
   readonly sortAs?: string
@@ -128,6 +141,7 @@ export function parseRecord(raw: string | null): BookRecord | null {
   // this is the one field that falls back rather than failing the record.
   const title = text(r['title']) ?? ''
   return {
+    ...(text(r['bookId']) ? { bookId: text(r['bookId'])! } : {}),
     title,
     author: text(r['author']) ?? '',
     ...(text(r['sortAs']) ? { sortAs: text(r['sortAs'])! } : {}),
@@ -182,7 +196,10 @@ export async function writeBook(
   const writing = `${path}.writing`
   await fs.mkdir(folderOf(bookId))
   try {
-    await fs.writeFile(writing, new TextEncoder().encode(JSON.stringify(record, null, 2)))
+    // Stamped on every write, so the record always knows its own id even if the
+    // caller passed one that was not in it.
+    const stamped: BookRecord = { ...record, bookId }
+    await fs.writeFile(writing, new TextEncoder().encode(JSON.stringify(stamped, null, 2)))
     await fs.rename(writing, path)
   } catch (cause) {
     await fs.remove(writing).catch(() => {})
@@ -206,11 +223,21 @@ export async function updateBook(
   bookId: string,
   change: (record: BookRecord) => BookRecord,
 ): Promise<boolean> {
+  /* THE CHANGE IS APPLIED TO WHAT IS ON DISK, which is the point of taking a
+   * function rather than a value. A caller holding an in-memory copy may be
+   * behind — the index it came from can be one write stale after a crash — and
+   * writing that copy back would undo whatever landed in between. */
   const current = await readBook(fs, bookId)
   if (!current) return false
   const next = change(current)
   if (next === current) return true
   await writeBook(fs, bookId, next)
+  /* CHECKED AGAIN AFTER THE WRITE, because a removal can rename the folder
+   * between the read above and the write — and `writeBook` calls `mkdir`, so it
+   * would happily recreate the folder containing nothing but this record. That
+   * is a book resurrected as an empty shell, which is worse than the write
+   * simply being lost. Undone rather than left. */
+  if (!(await fs.exists(folderOf(bookId)))) return false
   return true
 }
 

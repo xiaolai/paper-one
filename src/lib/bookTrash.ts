@@ -62,8 +62,18 @@ export async function trashBook(fs: TrashFs, bookId: string): Promise<boolean> {
 export async function restoreBook(fs: TrashFs, bookId: string): Promise<boolean> {
   try {
     if (!(await fs.exists(trashOf(bookId)))) return false
-    await fs.remove(`${trashOf(bookId)}/.removed`).catch(() => {})
+    /* REFUSED when the live folder already exists, because a rename onto a
+     * non-empty destination fails — and the caller then carried on and wrote a
+     * fresh record over the top, leaving the trashed tags and marks stranded
+     * where nothing would look for them again. Saying so lets the caller keep
+     * what is already live instead. */
+    if (await fs.exists(folderOf(bookId))) return false
     await fs.rename(trashOf(bookId), folderOf(bookId))
+    /* The stamp is removed AFTER the rename, not before. Before, a failing
+     * rename left the folder in the trash with no age — and `emptyExpired`
+     * errs towards keeping anything it cannot age, so it would have sat there
+     * forever. */
+    await fs.remove(`${folderOf(bookId)}/.removed`).catch(() => {})
     return true
   } catch {
     return false

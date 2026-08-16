@@ -68,9 +68,13 @@ async function boot(root: HTMLElement): Promise<void> {
    */
   if (fs && storage) {
     try {
+      /* PARSED SEPARATELY. One `try` around both meant a malformed marks value
+       * stopped every valid library row migrating — and the migration itself
+       * already treats unreadable marks as none, so the strict read was the only
+       * thing standing between a reader and their books. */
       const outcomes = await migrateToFolders(fs, {
-        rows: JSON.parse(storage.getItem('paper.library.v1') ?? '[]') as [],
-        marks: JSON.parse(storage.getItem('paper.marks.v1') ?? '[]'),
+        rows: readJson(storage.getItem('paper.library.v1'), []) as [],
+        marks: readJson(storage.getItem('paper.marks.v1'), []),
       })
       const said = summariseMigration(outcomes)
       if (said) console.info(`Paper: ${said}`)
@@ -95,6 +99,16 @@ async function boot(root: HTMLElement): Promise<void> {
       <App storage={storage} fs={fs} initialBooks={initialBooks} />
     </StrictMode>,
   )
+}
+
+/** Parse, or the fallback. A store that will not read is a store with nothing in it. */
+function readJson(raw: string | null, fallback: unknown): unknown {
+  if (!raw) return fallback
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return fallback
+  }
 }
 
 void boot(host)

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { writeQueue } from './writeQueue'
 import { readMarks, writeMarks } from './bookFolder'
 import { scanAllMarks, type IndexFs } from './bookIndex'
 import { upsertOverlapping } from './markMatch'
@@ -20,6 +21,9 @@ import {
  * highlights a line and then force-quits should still have the highlight, and
  * the payload is small enough that debouncing would buy nothing.
  */
+
+/** One shared empty list, so a book with no marks does not re-render on identity. */
+const EMPTY: readonly Mark[] = []
 
 export interface MarkStore {
   /** Every mark, across every book — what the Notes panel browses. Empty
@@ -65,16 +69,32 @@ export function useMarks(bookId: string | null, fs: IndexFs | null): MarkStore {
    * loads: the overlay is built on the `load` event and reads the marks then, so
    * a read that resolves a few frames into the open is indistinguishable from
    * one that resolved before it. */
-  const [current, setCurrent] = useState<readonly Mark[]>([])
+  /* HELD WITH THEIR BOOK, not beside it.
+   *
+   * A bare list kept the previous book's marks until the new book's read
+   * resolved — so the reader could be shown, and the overlay could DRAW,
+   * another book's highlights. Pairing them means a mismatch is simply an empty
+   * list, and a read that resolves after the reader has moved on is discarded
+   * because its id no longer matches. */
+  const [loaded, setLoaded] = useState<{ bookId: string | null; marks: readonly Mark[] }>({
+    bookId: null,
+    marks: [],
+  })
+  const current = loaded.bookId === bookId ? loaded.marks : EMPTY
   const [persistent, setPersistent] = useState(true)
   const [all, setAll] = useState<readonly Mark[]>([])
 
   const latest = useRef<readonly Mark[]>(current)
   latest.current = current
 
+  /* One write at a time per book — see `writeQueue`. Every write goes to the
+   * same `marks.json.writing` neighbour, so a reader highlighting three
+   * passages in a second had three writes racing for one temporary file. */
+  const queue = useRef(writeQueue())
+
   useEffect(() => {
     if (!bookId || !fs) {
-      setCurrent([])
+      setLoaded({ bookId: null, marks: [] })
       return
     }
     let live = true
@@ -82,10 +102,10 @@ export function useMarks(bookId: string | null, fs: IndexFs | null): MarkStore {
       .then((raw) => {
         // Parsed through the same validator the shared store used: this is a
         // file on disk, and a mark with no CFI cannot be drawn.
-        if (live) setCurrent(parseMarks(JSON.stringify(raw)))
+        if (live) setLoaded({ bookId, marks: parseMarks(JSON.stringify(raw)) })
       })
       .catch(() => {
-        if (live) setCurrent([])
+        if (live) setLoaded({ bookId, marks: [] })
       })
     return () => {
       live = false
@@ -95,12 +115,22 @@ export function useMarks(bookId: string | null, fs: IndexFs | null): MarkStore {
   /** Change this book's marks, then write its file. */
   const apply = useCallback(
     (mutate: (prev: readonly Mark[]) => readonly Mark[]) => {
+      if (!bookId) return
       const next = mutate(latest.current)
       if (next === latest.current) return
       latest.current = next
-      setCurrent(next)
-      if (!bookId || !fs) return
-      void writeMarks(fs, bookId, next)
+      setLoaded({ bookId, marks: next })
+      /* `all` kept in step, so a Notes row does not revert to the old value the
+       * moment it is edited. It only holds what a scan put there, so a book the
+       * scan never reached is left alone rather than half-updated. */
+      setAll((prev) =>
+        prev.length === 0 ? prev : [...next, ...prev.filter((mark) => mark.bookId !== bookId)],
+      )
+      if (!fs) return
+      void queue.current
+        .push(bookId, async () => {
+          await writeMarks(fs, bookId, next)
+        })
         .then(() => setPersistent(true))
         .catch((cause: unknown) => {
           /* SURFACED, not swallowed. Losing a mark loses the reader's own words,
@@ -127,6 +157,51 @@ export function useMarks(bookId: string | null, fs: IndexFs | null): MarkStore {
       .catch(() => setAll([]))
   }, [fs])
 
+  /**
+   * Change a mark that belongs to a book which is NOT open.
+   *
+   * Notes lists every book's marks, so a reader can edit or delete one from a
+   * book they are not reading — and every mutation here acted on the open
+   * book's list, so those were silent no-ops: the row appeared to change and
+   * reverted on the next render.
+   *
+   * Reads that book's file, changes it, writes it back, on the same per-book
+   * queue as everything else. `all` is updated so the row stays changed; the
+   * open book's list is untouched, because by definition this is not it.
+   */
+  const applyElsewhere = useCallback(
+    (targetId: string, mutate: (prev: readonly Mark[]) => readonly Mark[]) => {
+      if (!fs) return
+      void queue.current
+        .push(targetId, async () => {
+          const before = parseMarks(JSON.stringify(await readMarks(fs, targetId)))
+          const next = mutate(before)
+          if (next === before) return
+          await writeMarks(fs, targetId, next)
+          setAll((prev) => [...next, ...prev.filter((mark) => mark.bookId !== targetId)])
+        })
+        .catch((cause: unknown) => {
+          console.error('Paper: could not save that book\'s marks', cause)
+          setPersistent(false)
+        })
+    },
+    [fs],
+  )
+
+  /** Route a change to whichever book the mark belongs to. */
+  const applyToMark = useCallback(
+    (id: string, mutate: (prev: readonly Mark[]) => readonly Mark[]) => {
+      const mine = latest.current.some((mark) => mark.id === id)
+      if (mine || !bookId) {
+        if (mine) apply(mutate)
+        return
+      }
+      const owner = all.find((mark) => mark.id === id)?.bookId
+      if (owner && owner !== bookId) applyElsewhere(owner, mutate)
+    },
+    [apply, all, bookId, applyElsewhere],
+  )
+
   const add = useCallback(
     (draft: NewMark) => {
       const mark = createMark(draft)
@@ -140,11 +215,14 @@ export function useMarks(bookId: string | null, fs: IndexFs | null): MarkStore {
     [apply],
   )
 
-  const remove = useCallback((id: string) => apply((prev) => removeFrom(prev, id)), [apply])
+  const remove = useCallback(
+    (id: string) => applyToMark(id, (prev) => removeFrom(prev, id)),
+    [applyToMark],
+  )
 
   const setNote = useCallback(
-    (id: string, note: string) => apply((prev) => updateNoteIn(prev, id, note)),
-    [apply],
+    (id: string, note: string) => applyToMark(id, (prev) => updateNoteIn(prev, id, note)),
+    [applyToMark],
   )
 
   /**

@@ -236,3 +236,63 @@ describe('summariseMigration', () => {
     expect(summariseMigration([{ bookId: 'a', status: 'already' }])).toBeNull()
   })
 })
+
+
+/**
+ * A row Paper has no bytes for, and no way back to them.
+ *
+ * Phase 3 only began keeping its own copies near the end, so most rows in a real
+ * library have no `vault` — and phase 4 dropped the `url` that used to open
+ * those. Writing a record anyway put books on the shelf that could never open,
+ * and marked them `already` so the migration would never revisit them.
+ */
+describe('a row with nothing behind it', () => {
+  it('is left in the previous library rather than shelved', async () => {
+    const fs = fakeFs({})
+    const out = await migrateToFolders(fs, {
+      rows: [row({ vault: null, cover: null, path: null })],
+      marks: [],
+    })
+    expect(out[0]?.status).toBe('skipped')
+    expect(out[0]?.reason).toContain('no stored copy')
+    expect(fs.files.size).toBe(0)
+  })
+
+  /* Skipped rather than failed, so a later run can pick it up — and so the
+   * reader is not told something broke when nothing did. */
+  it('is retried on a later run', async () => {
+    const fs = fakeFs({})
+    const rows = [row({ vault: null, cover: null, path: null })]
+    await migrateToFolders(fs, { rows, marks: [] })
+    const again = await migrateToFolders(fs, { rows, marks: [] })
+    expect(again[0]?.status).toBe('skipped')
+  })
+
+  /* `origin` is a way back, so this one still migrates. */
+  it('migrates a row that still knows where its file was', async () => {
+    const fs = fakeFs({})
+    const out = await migrateToFolders(fs, { rows: [row({ vault: null, cover: null })], marks: [] })
+    expect(out[0]?.status).toBe('migrated')
+    expect((await readBook(fs, 'book_a'))?.origin).toBeTruthy()
+  })
+
+  it('says so in the summary, without calling it a failure', () => {
+    expect(
+      summariseMigration([
+        { bookId: 'a', status: 'migrated' },
+        { bookId: 'b', status: 'skipped' },
+      ]),
+    ).toBe('1 book moved, 1 had no stored copy')
+  })
+})
+
+describe('the record knows its own id', () => {
+  /* `safeId` is not reversible — `book:abc` lives in `book_abc` — so a rescan
+   * that read the id off the directory renamed every book, and marks are keyed
+   * by it. */
+  it('stores the canonical id, not the sanitised folder name', async () => {
+    const fs = fakeFs(legacy)
+    await migrateToFolders(fs, { rows: [row({ bookId: 'book:abc' })], marks: [] })
+    expect((await readBook(fs, 'book:abc'))?.bookId).toBe('book:abc')
+  })
+})

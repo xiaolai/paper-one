@@ -6,11 +6,14 @@
  * folder, `bookFolder` owns its file, and `useLibrary` owns the verbs.
  *
  * This file was 838 lines and 31 exports. Most of that was the cost of a flat
- * store: nine mutators for one entity, a parser with six field validators, and
- * an entire concept — `isReopenable`, `NOT_REOPENABLE`, `rowSuffix` — that
- * existed only because a row could point at bytes that were not there. A book
- * that is its own folder is always openable, so the concept did not need
- * reworking. It needed deleting.
+ * store: nine mutators for one entity, and a parser with six field validators.
+ *
+ * ONE DELETION WAS WRONG AND IS BACK. `isReopenable` went on the reasoning that
+ * a book which is its own folder is always openable — true for a book Paper
+ * wrote, false for a record whose content was never there, which is exactly what
+ * migrating a phase-3 library produces. It returns as `canOpen`, DERIVED from
+ * the scan rather than stored, so unlike the field it replaces it cannot
+ * disagree with the disk.
  */
 
 import type { IndexedBook } from './bookIndex'
@@ -96,11 +99,21 @@ export function tagKey(tag: string): string {
  * downstream cares which is which.
  */
 export function allTags(book: IndexedBook): readonly string[] {
-  const own = book.tags ?? []
-  const declared = book.subjects ?? []
-  if (own.length === 0) return declared
-  const keys = new Set(own.map(tagKey))
-  return [...own, ...declared.filter((tag) => !keys.has(tagKey(tag)))]
+  /* ONE PASS OVER BOTH LISTS, folding as it goes. The earlier version folded the
+   * declared subjects against the reader's tags and not against EACH OTHER — and
+   * returned them untouched when the reader had added none. A book whose
+   * publisher listed `Fiction` and `fiction` therefore drew two chips, which is
+   * the exact duplicate the fold exists to prevent, in the one place it was not
+   * applied. */
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const tag of [...(book.tags ?? []), ...(book.subjects ?? [])]) {
+    const key = tagKey(tag)
+    if (!key || seen.has(key)) continue
+    seen.add(key)
+    out.push(tag)
+  }
+  return out
 }
 
 /** Whether a book matches free text, on the fields the shelf shows or groups by. */
@@ -193,6 +206,26 @@ export function tagCounts(
   }
   return [...counts.values()].sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag))
 }
+
+/**
+ * Whether clicking this row can actually open the book.
+ *
+ * THIS CONCEPT WAS DELETED IN WI-4.7 AND SHOULD NOT HAVE BEEN. The reasoning
+ * was that a book which is its own folder is always openable — true for a book
+ * Paper wrote, and false for a record whose content was never there. A phase-3
+ * library migrated into folders produced exactly that: rows for books whose
+ * bytes were never stored, on a shelf with nothing able to say so.
+ *
+ * It is DERIVED now rather than a stored field, which is the difference from the
+ * `isReopenable` that existed before: `hasContent` comes off the scan, and
+ * `origin` is the reader's own file, so nothing here can disagree with the disk.
+ */
+export function canOpen(book: IndexedBook): boolean {
+  return book.hasContent !== false || Boolean(book.origin)
+}
+
+/** §11: say what happened and what to do, in one line. */
+export const CANNOT_OPEN = 'Paper has no copy of this one — add the file again'
 
 export type ReadingStatus = 'unread' | 'reading' | 'finished'
 

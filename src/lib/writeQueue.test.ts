@@ -1,0 +1,75 @@
+import { describe, expect, it } from 'vitest'
+import { writeQueue } from './writeQueue'
+
+/**
+ * Two writes to one file must not overlap, because they share a temporary path.
+ *
+ * And three writes queued behind one in flight should not all run: each persists
+ * the whole collection, so the first two would write stale data and the third
+ * would write what the second already had.
+ */
+
+const defer = () => {
+  let resolve!: () => void
+  const promise = new Promise<void>((r) => {
+    resolve = r
+  })
+  return { promise, resolve }
+}
+
+describe('writeQueue', () => {
+  it('runs one task at a time for a key', async () => {
+    const q = writeQueue()
+    const first = defer()
+    let running = 0
+    let overlapped = false
+    const task = (gate?: Promise<void>) => async () => {
+      running += 1
+      if (running > 1) overlapped = true
+      if (gate) await gate
+      running -= 1
+    }
+    const a = q.push('k', task(first.promise))
+    const b = q.push('k', task())
+    first.resolve()
+    await Promise.all([a, b])
+    expect(overlapped).toBe(false)
+  })
+
+  /* The coalescing rule: only the newest waiting value is worth writing. */
+  it('drops a superseded write rather than running it', async () => {
+    const q = writeQueue()
+    const gate = defer()
+    const ran: string[] = []
+    void q.push('k', async () => {
+      ran.push('first')
+      await gate.promise
+    })
+    void q.push('k', async () => void ran.push('second'))
+    const last = q.push('k', async () => void ran.push('third'))
+    gate.resolve()
+    await last
+    expect(ran).toEqual(['first', 'third'])
+  })
+
+  it('keeps different keys independent', async () => {
+    const q = writeQueue()
+    const ran: string[] = []
+    await Promise.all([
+      q.push('a', async () => void ran.push('a')),
+      q.push('b', async () => void ran.push('b')),
+    ])
+    expect(ran.sort()).toEqual(['a', 'b'])
+  })
+
+  /* A failing write must not wedge the key forever. */
+  it('carries on after a task throws', async () => {
+    const q = writeQueue()
+    const ran: string[] = []
+    await q.push('k', async () => {
+      throw new Error('disk full')
+    }).catch(() => {})
+    await q.push('k', async () => void ran.push('after'))
+    expect(ran).toEqual(['after'])
+  })
+})

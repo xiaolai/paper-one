@@ -67,7 +67,7 @@ interface LegacyRow {
 
 export interface MigrationOutcome {
   readonly bookId: string
-  readonly status: 'migrated' | 'already' | 'failed'
+  readonly status: 'migrated' | 'already' | 'failed' | 'skipped'
   readonly reason?: string
   /** How many of the shared store's marks were filed under this book. */
   readonly marks?: number
@@ -170,8 +170,28 @@ export async function migrateToFolders(
       // crash midway leaves a folder that is simply not a book yet, rather than
       // a book missing its content.
       const legacyContent = typeof row.vault === 'string' ? row.vault : null
-      if (legacyContent) {
-        await copy(fs, legacyContent, contentPathIn(bookId, name))
+      const copied = legacyContent
+        ? await copy(fs, legacyContent, contentPathIn(bookId, name))
+        : false
+      /* A ROW WITH NO BYTES AND NO WAY BACK TO THEM IS NOT MIGRATED.
+       *
+       * Phase 3 only began keeping its own copies near the end, so most rows in
+       * a real library have no `vault` — and phase 4 dropped the `url` field
+       * that used to open those. Writing a record anyway put books on the shelf
+       * that could never be opened, and marked them `already` so the migration
+       * would never revisit them.
+       *
+       * `origin` is the reader's own file and IS a way back, so a row with one
+       * still migrates: `openStored` falls back to it. A row with neither is
+       * left in the phase-3 store, reported, and picked up by a later run if
+       * anything ever makes it recoverable. */
+      if (!copied && !str(row.path)) {
+        outcomes.push({
+          bookId,
+          status: 'skipped',
+          reason: 'no stored copy and no original path — left in the previous library',
+        })
+        continue
       }
       const legacyCover = typeof row.cover === 'string' ? row.cover : null
       if (legacyCover) {
@@ -204,12 +224,14 @@ export async function migrateToFolders(
  * had bugs that produced exactly that — so a missing source is a book without
  * its bytes rather than a failed migration.
  */
-async function copy(fs: VaultFs, from: string, to: string): Promise<void> {
+async function copy(fs: VaultFs, from: string, to: string): Promise<boolean> {
   let bytes: Uint8Array
   try {
     bytes = await fs.readFile(from)
   } catch {
-    return
+    // A row naming a copy that is not there — phase 3 had bugs producing exactly
+    // that. Reported as "no bytes", not as a failure.
+    return false
   }
   await fs.mkdir(to.slice(0, to.lastIndexOf('/')))
   const writing = `${to}.writing`
@@ -220,6 +242,7 @@ async function copy(fs: VaultFs, from: string, to: string): Promise<void> {
     await fs.remove(writing).catch(() => {})
     throw cause
   }
+  return true
 }
 
 /** A line for the reader, since a silent migration is indistinguishable from none. */
@@ -228,8 +251,12 @@ export function summariseMigration(outcomes: readonly MigrationOutcome[]): strin
   const failed = outcomes.filter((one) => one.status === 'failed')
   if (migrated.length === 0 && failed.length === 0) return null
   const marks = migrated.reduce((sum, one) => sum + (one.marks ?? 0), 0)
+  const skipped = outcomes.filter((one) => one.status === 'skipped')
   const parts = [`${migrated.length} ${migrated.length === 1 ? 'book' : 'books'} moved`]
   if (marks) parts.push(`${marks} ${marks === 1 ? 'note' : 'notes'} kept`)
+  // Named separately from a failure, because it is not one: those books are
+  // still in the previous library and nothing was lost.
+  if (skipped.length) parts.push(`${skipped.length} had no stored copy`)
   if (failed.length) parts.push(`${failed.length} could not be moved`)
   return parts.join(', ')
 }

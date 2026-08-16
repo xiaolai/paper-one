@@ -1,7 +1,9 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import { Check, FolderPlus, Globe, Plus, Tag, X } from 'lucide-react'
 import {
+  CANNOT_OPEN,
   allTags,
+  canOpen,
   displayAuthor,
   displayTitle,
   shelfFor,
@@ -341,13 +343,16 @@ export function Library({
           virtualising ? { paddingBlockStart: win.padTop, paddingBlockEnd: win.padBottom } : undefined
         }>
           {visible.map((book) => {
+            const openable = canOpen(book)
             return (
               <div key={book.bookId} className={styles.cell}>
               <button
                 type="button"
                 className={styles.book}
-                title={`Open ${displayTitle(book)}`}
-                onClick={() => onOpen(book)}
+                disabled={!openable}
+                data-disabled={!openable}
+                title={openable ? `Open ${displayTitle(book)}` : CANNOT_OPEN}
+                onClick={() => openable && onOpen(book)}
               >
                 <BookCover
                   book={book}
@@ -358,6 +363,10 @@ export function Library({
                 <span className={styles.bookTitle}>{displayTitle(book)}</span>
                 <span className={styles.bookAuthor}>
                   {displayAuthor(book)}
+                  {/* SAYS SO ON THE ROW. A shelf that shows a book it cannot
+                      open, with nothing explaining why, is worse than one that
+                      does not show it — the reader clicks and nothing happens. */}
+                  {!openable && ' · no copy'}
                 </span>
                 {/* A bar only where there is something true to draw. A book
                     never opened has no fraction, and a zero-width bar under
