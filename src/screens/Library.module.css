@@ -310,6 +310,8 @@
   cursor: pointer;
 }
 
+/* The active scope, which is the only chip state left now that a tag IS the
+   scope and there is nothing to save. */
 .chip[data-active='true'] {
   border-color: transparent;
   background: var(--accent-soft, rgb(0 0 0 / 0.08));
@@ -491,38 +493,3 @@
   }
 }
 
-/* A saved collection and its unsave control, as one visual unit. Two real
-   buttons rather than one with a middle-click: keyboard activation emits
-   `click`, never `auxclick`, so the middle-click version was unreachable
-   without a three-button mouse. */
-.chipPair {
-  display: inline-flex;
-  align-items: center;
-}
-
-.chipPair > .chip {
-  border-start-end-radius: 0;
-  border-end-end-radius: 0;
-  border-inline-end: 0;
-}
-
-.chipUnsave {
-  height: 28px;
-  padding: 0 8px;
-  border: 1px solid var(--rule, rgb(0 0 0 / 0.12));
-  border-start-start-radius: 0;
-  border-end-start-radius: 0;
-  border-start-end-radius: 999px;
-  border-end-end-radius: 999px;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  font-size: 11px;
-  opacity: 0.6;
-  cursor: pointer;
-}
-
-.chipUnsave:hover,
-.chipUnsave:focus-visible {
-  opacity: 1;
-}

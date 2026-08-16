@@ -14,8 +14,6 @@ import {
 import type { LibraryEntry, LibraryOrder, Scope } from '../lib/library'
 import { ICON } from '../lib/metrics'
 import type { Platform } from '../lib/metrics'
-import type { Collection } from '../lib/collections'
-import { scopeOf } from '../lib/collections'
 import { VIRTUALISE_ABOVE, gridWindow } from '../lib/virtualGrid'
 import { BookCover } from './BookCover'
 import styles from './Library.module.css'
@@ -50,10 +48,6 @@ export interface LibraryProps {
    * so adding the book again finds them waiting.
    */
   onRemove: (entry: LibraryEntry) => void
-  /** The reader's saved scopes — see `collections.ts`. */
-  collections: readonly Collection[]
-  onSaveCollection: (scope: Scope) => void
-  onRemoveCollection: (id: string) => void
   /** Add or remove one of the reader's own tags. Publisher subjects are fixed. */
   onTag: (bookId: string, tag: string) => void
   onUntag: (bookId: string, tag: string) => void
@@ -91,9 +85,6 @@ export function Library({
   onOpen,
   onAddBooks,
   onRemove,
-  collections,
-  onSaveCollection,
-  onRemoveCollection,
   onTag,
   onUntag,
   onSetFinished,
@@ -119,8 +110,9 @@ export function Library({
   const [query, setQuery] = useState('')
   /* The SCOPE — Decision 2. A collection restricts what is in play, and the
    * search then runs inside it rather than beside it. Held here for now; the
-   * collections that produce one arrive in WI-3.6, and every consumer below is
-   * already written against it so none of them has to change then. */
+   * A tag IS the scope — there is no collection to save, because the tag
+   * already persists. Clicking a chip scopes the search; it never removes the
+   * tag. */
   const [scope, setScope] = useState<Scope | null>(null)
 
   /* Deferred, not debounced. `useDeferredValue` lets the keystroke paint
@@ -285,63 +277,22 @@ export function Library({
           {/* Counts are DERIVED and counted within the scope, so they describe
               what the reader can actually reach. The chips these replace were a
               prototype constant reading `All 2,418`. */}
-          {/* NOT conditional on `tags.length`. Saved collections and the control
-              that clears the active scope both live here, so gating the whole
-              area on tag counts hid a reader's collections in a library with no
-              tags — and, worse, could strand them inside a scope whose last
-              matching tag had just been removed, with no way back out. */}
-          {(tags.length > 0 || collections.length > 0 || scope) && (
+          {/* NOT conditional on `tags.length` alone: the control that clears an
+              active scope lives here, so gating on tag counts could strand a
+              reader inside a scope whose last matching tag had just been
+              removed, with no way back out. */}
+          {(tags.length > 0 || scope) && (
             <div className={styles.chips}>
               {scope && (
-                <>
-                  <button
-                    type="button"
-                    className={styles.chip}
-                    data-active="true"
-                    onClick={() => setScope(null)}
-                  >
-                    {scope.label} ✕
-                  </button>
-                  {/* Only when it is not already saved — offering to save a
-                      collection that exists is a control that appears to do
-                      nothing, which is worse than an absent one. */}
-                  {!collections.some((one) => one.tag === scope.tag && one.series === scope.series) && (
-                    <button
-                      type="button"
-                      className={styles.chip}
-                      onClick={() => onSaveCollection(scope)}
-                    >
-                      Save as collection
-                    </button>
-                  )}
-                </>
+                <button
+                  type="button"
+                  className={styles.chip}
+                  data-active="true"
+                  onClick={() => setScope(null)}
+                >
+                  {scope.label} ✕
+                </button>
               )}
-              {!scope &&
-                collections.map((one) => (
-                  /* TWO BUTTONS, not one with a middle-click.
-                     Unsaving was bound to `onAuxClick`, which keyboard
-                     activation never emits — it sends `click` — and which many
-                     trackpads cannot produce at all. The action was unreachable
-                     for anyone not using a mouse with three buttons. */
-                  <span key={one.id} className={styles.chipPair}>
-                    <button
-                      type="button"
-                      className={styles.chip}
-                      data-saved="true"
-                      onClick={() => setScope(scopeOf(one))}
-                    >
-                      {one.label}
-                    </button>
-                    <button
-                      type="button"
-                      className={styles.chipUnsave}
-                      aria-label={`Unsave the collection ${one.label}`}
-                      onClick={() => onRemoveCollection(one.id)}
-                    >
-                      ✕
-                    </button>
-                  </span>
-                ))}
               {!scope &&
                 tags.slice(0, 8).map(({ tag, count }) => (
                   <button

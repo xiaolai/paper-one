@@ -581,7 +581,10 @@ export interface Scope {
 export function inScope(entry: LibraryEntry, scope: Scope | null): boolean {
   if (!scope) return true
   if (scope.series) return entry.series === scope.series
-  if (scope.tag) return allTags(entry).includes(scope.tag)
+  if (scope.tag) {
+    const key = tagKey(scope.tag)
+    return allTags(entry).some((one) => tagKey(one) === key)
+  }
   return true
 }
 
@@ -597,7 +600,37 @@ export function allTags(entry: LibraryEntry): readonly string[] {
   const own = entry.tags ?? []
   const declared = entry.subjects ?? []
   if (own.length === 0) return declared
-  return [...own, ...declared.filter((tag) => !own.includes(tag))]
+  const keys = new Set(own.map(tagKey))
+  // Folded, so a publisher's `philosophy` does not appear beside a reader's
+  // `Philosophy` as though they were two subjects.
+  return [...own, ...declared.filter((tag) => !keys.has(tagKey(tag)))]
+}
+
+/**
+ * The identity of a tag, as opposed to its spelling.
+ *
+ * `Philosophy` and `philosophy` are ONE tag. Before this they were two, with two
+ * counts and two chips, and a reader who typed a tag in the wrong case got a
+ * second shelf that looked identical to the first.
+ *
+ * Three steps, and each earns its place:
+ *
+ *   trim         — a trailing space is not a different subject.
+ *   NFC          — `Café` typed on macOS is decomposed (e + combining acute) and
+ *                  the same word pasted from elsewhere is composed. They render
+ *                  identically and compare unequal, which is the worst kind of
+ *                  duplicate because nothing on screen can explain it.
+ *   toLowerCase  — case-fold.
+ *
+ * NFC BEFORE lowercasing, not after: lowercasing can change which
+ * decompositions apply, so normalising second would leave the two forms of
+ * `Café` folding to different keys.
+ *
+ * The DISPLAY spelling is never this — it is whatever the reader first typed,
+ * kept on the book. This is only ever the key.
+ */
+export function tagKey(tag: string): string {
+  return tag.trim().normalize('NFC').toLowerCase()
 }
 
 /**
@@ -616,7 +649,10 @@ export function tagBook(
   if (!tag) return entries
   const at = entries.findIndex((entry) => entry.bookId === bookId)
   const entry = at === -1 ? null : entries[at]
-  if (!entry || allTags(entry).includes(tag)) return entries
+  // Compared by KEY, so adding `philosophy` to a book already tagged
+  // `Philosophy` is a no-op rather than a second tag.
+  const key = tagKey(tag)
+  if (!entry || allTags(entry).some((one) => tagKey(one) === key)) return entries
   const next = [...entries]
   next[at] = { ...entry, tags: [...(entry.tags ?? []), tag] }
   return next
@@ -630,9 +666,13 @@ export function untagBook(
 ): readonly LibraryEntry[] {
   const at = entries.findIndex((entry) => entry.bookId === bookId)
   const entry = at === -1 ? null : entries[at]
-  if (!entry || !(entry.tags ?? []).includes(tag)) return entries
+  const key = tagKey(tag)
+  const own = entry?.tags ?? []
+  // By key as well, so a chip showing the display spelling removes the tag
+  // whatever case the reader clicked it in.
+  if (!entry || !own.some((one) => tagKey(one) === key)) return entries
   const next = [...entries]
-  next[at] = { ...entry, tags: (entry.tags ?? []).filter((one) => one !== tag) }
+  next[at] = { ...entry, tags: own.filter((one) => tagKey(one) !== key) }
   return next
 }
 
@@ -670,13 +710,28 @@ export function tagCounts(
   entries: readonly LibraryEntry[],
   scope: Scope | null = null,
 ): { tag: string; count: number }[] {
-  const counts = new Map<string, number>()
+  /* Counted by KEY and shown by SPELLING. Grouping on the raw string listed
+   * `Philosophy` and `philosophy` as two chips with two counts, which is a
+   * shelf telling a reader they have two subjects when they have one.
+   *
+   * The display spelling is the FIRST one encountered, and the shelf is walked
+   * in a stable order, so the label does not change between redraws. */
+  const counts = new Map<string, { tag: string; count: number }>()
   for (const entry of entries) {
     if (!inScope(entry, scope)) continue
-    for (const tag of allTags(entry)) counts.set(tag, (counts.get(tag) ?? 0) + 1)
+    // Within one book too: a reader's `Sea` and a publisher's `sea` are one tag
+    // on that book and must not count it twice.
+    const seen = new Set<string>()
+    for (const tag of allTags(entry)) {
+      const key = tagKey(tag)
+      if (seen.has(key)) continue
+      seen.add(key)
+      const already = counts.get(key)
+      if (already) already.count += 1
+      else counts.set(key, { tag, count: 1 })
+    }
   }
-  return [...counts]
-    .map(([tag, count]) => ({ tag, count }))
+  return [...counts.values()]
     // Count first, then name, so the order is stable rather than depending on
     // insertion — two tags with the same count would otherwise swap on a redraw.
     .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag))

@@ -18,7 +18,6 @@ import { useMarking } from './lib/useMarking'
 import { coverTintFor } from './lib/bookAccent'
 import { disownBook, ownBook, readOwnedBook, tauriVaultFs } from './lib/bookVault'
 import type { LibraryEntry } from './lib/library'
-import { useCollections } from './lib/useCollections'
 import { saveCover } from './lib/coverArt'
 import {
   importFolder,
@@ -115,7 +114,6 @@ export function App({ storage }: AppProps) {
 
   const { record, remember, rememberOwned, rememberJacket, forget, applyFound, shelve, positionOf } =
     library
-  const collections = useCollections(storage)
 
   /**
    * Put what an import produced onto the shelf.
@@ -901,9 +899,6 @@ export function App({ storage }: AppProps) {
             // reader does not want from a click on a cover.
             onOpen={openStored}
             onRemove={removeBook}
-            collections={collections.all}
-            onSaveCollection={collections.save}
-            onRemoveCollection={collections.remove}
             onTag={library.tag}
             onUntag={library.untag}
             onSetFinished={library.setFinished}

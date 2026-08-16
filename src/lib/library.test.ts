@@ -14,6 +14,7 @@ import {
   statusOf,
   inScope,
   tagBook,
+  tagKey,
   untagBook,
   matchesQuery,
   recordOpen,
@@ -824,5 +825,89 @@ describe('parseLibrary clamps progress rather than only checking it', () => {
 
   it('drops one that is not a number at all', () => {
     expect(parseLibrary(withProgress('lots'))[0]?.progress).toBeUndefined()
+  })
+})
+
+
+/**
+ * A tag's identity, as opposed to its spelling.
+ *
+ * `Philosophy` and `philosophy` are one tag. They were two — with two counts and
+ * two chips — which is a shelf telling a reader they have two subjects when they
+ * have one, and nothing on screen able to explain it.
+ */
+describe('tagKey', () => {
+  it('folds case', () => {
+    expect(tagKey('Philosophy')).toBe(tagKey('philosophy'))
+  })
+
+  it('folds surrounding space', () => {
+    expect(tagKey('  Sea  ')).toBe(tagKey('Sea'))
+  })
+
+  /**
+   * The duplicate nothing on screen can explain.
+   *
+   * `Café` typed on macOS is decomposed — `e` plus a combining acute — and the
+   * same word pasted from elsewhere is composed. They render identically and
+   * compare unequal.
+   */
+  it('folds Unicode composition', () => {
+    const composed = 'Caf\u00e9'
+    const decomposed = 'Cafe\u0301'
+    expect(composed).not.toBe(decomposed)
+    expect(tagKey(composed)).toBe(tagKey(decomposed))
+  })
+
+  /* NFC before lowercasing, not after: lowercasing can change which
+   * decompositions apply, so normalising second leaves the two forms of a
+   * word folding to different keys. */
+  it('folds composition and case together', () => {
+    expect(tagKey('CAF\u00c9')).toBe(tagKey('cafe\u0301'))
+  })
+})
+
+describe('tags fold rather than duplicate', () => {
+  it('refuses a tag that differs only in case', () => {
+    const shelf = tagBook([entry({ bookId: 'a' })], 'a', 'Philosophy')
+    expect(tagBook(shelf, 'a', 'philosophy')).toBe(shelf)
+    expect(tagBook(shelf, 'a', 'PHILOSOPHY')).toBe(shelf)
+  })
+
+  it('keeps the spelling the reader first used', () => {
+    const shelf = tagBook([entry({ bookId: 'a' })], 'a', 'Philosophy')
+    expect(shelf[0]?.tags).toEqual(['Philosophy'])
+  })
+
+  it('removes a tag whatever case it is clicked in', () => {
+    const shelf = tagBook([entry({ bookId: 'a' })], 'a', 'Philosophy')
+    expect(untagBook(shelf, 'a', 'philosophy')[0]?.tags).toEqual([])
+  })
+
+  /* A publisher's `philosophy` beside a reader's `Philosophy` would otherwise
+   * appear as two subjects on one book. */
+  it('does not show a declared subject that folds onto a reader tag', () => {
+    const row = entry({ bookId: 'a', subjects: ['philosophy'], tags: ['Philosophy'] })
+    expect(allTags(row)).toEqual(['Philosophy'])
+  })
+
+  it('counts folded variants as one tag, shown once', () => {
+    const shelf = [
+      entry({ bookId: 'a', tags: ['Philosophy'] }),
+      entry({ bookId: 'b', tags: ['philosophy'] }),
+      entry({ bookId: 'c', subjects: ['PHILOSOPHY'] }),
+    ]
+    expect(tagCounts(shelf)).toEqual([{ tag: 'Philosophy', count: 3 }])
+  })
+
+  /* One book carrying the tag under both provenances must not count twice. */
+  it('counts a book once even when both lists carry the tag', () => {
+    const shelf = [entry({ bookId: 'a', tags: ['Sea'], subjects: ['sea'] })]
+    expect(tagCounts(shelf)).toEqual([{ tag: 'Sea', count: 1 }])
+  })
+
+  it('scopes by key, so a chip matches whatever case a book used', () => {
+    const row = entry({ bookId: 'a', tags: ['philosophy'] })
+    expect(inScope(row, { label: 'Philosophy', tag: 'Philosophy' })).toBe(true)
   })
 })
