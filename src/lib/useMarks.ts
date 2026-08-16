@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { writeQueue } from './writeQueue'
-import { readMarks, writeMarks } from './bookFolder'
+import { folderOf, marksPathIn, readMarks, writeMarks } from './bookFolder'
 import { scanAllMarks, type IndexFs } from './bookIndex'
 import { upsertOverlapping } from './markMatch'
 import {
@@ -129,6 +129,12 @@ export function useMarks(bookId: string | null, fs: IndexFs | null): MarkStore {
       if (!fs) return
       void queue.current
         .push(bookId, async () => {
+          /* NOT IF THE BOOK HAS GONE. `writeMarks` creates the folder it writes
+           * into, so a mark saved just after the reader removed the book put a
+           * marks-only directory back where the book had been — invisible to the
+           * shelf, which skips a folder with no record, and enough to make the
+           * index disagree with the disk on every load. */
+          if (!(await fs.exists(folderOf(bookId)))) return
           await writeMarks(fs, bookId, next)
         })
         .then(() => setPersistent(true))
@@ -240,11 +246,31 @@ export function useMarks(bookId: string | null, fs: IndexFs | null): MarkStore {
   const rekey = useCallback(
     (from: string, to: string) => {
       if (!fs || from === to) return
-      void readMarks(fs, from).then((raw) => {
-        const moved = parseMarks(JSON.stringify(raw))
-        if (moved.length === 0) return
-        apply((prev) => [...prev, ...moved.map((mark) => ({ ...mark, bookId: to }))])
-      })
+      void readMarks(fs, from)
+        .then(async (raw) => {
+          const moved = parseMarks(JSON.stringify(raw))
+          if (moved.length === 0) return
+          /* BY ID, because this ran on every open and only ever COPIED: the old
+           * file stayed where it was, so each reopen appended the same marks
+           * again and a reader who opened a migrated book five times had five of
+           * every highlight. */
+          apply((prev) => {
+            const held = new Set(prev.map((mark) => mark.id))
+            const fresh = moved
+              .filter((mark) => !held.has(mark.id))
+              .map((mark) => ({ ...mark, bookId: to }))
+            return fresh.length === 0 ? prev : [...prev, ...fresh]
+          })
+          /* And the source is REMOVED, once they are safely merged — which is
+           * what makes this a move. Failing here is survivable now that the
+           * merge deduplicates, so it is logged rather than thrown. */
+          await fs.remove(marksPathIn(from)).catch((cause: unknown) => {
+            console.error('Paper: could not clear the old marks file', cause)
+          })
+        })
+        .catch(() => {
+          // No marks under the old id, which is the ordinary case.
+        })
     },
     [fs, apply],
   )

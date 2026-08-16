@@ -107,4 +107,27 @@ describe('writeQueue', () => {
     await after
     expect(ran).toEqual(['after'])
   })
+
+  /**
+   * The two modes share a key, so `push` must not throw away an `append`.
+   *
+   * Editing a mark in a book that is closed appends a read-modify-write; opening
+   * that book and highlighting something pushes a whole snapshot. Clearing the
+   * line outright dropped the first edit, and the row it belonged to came back.
+   */
+  it('a pushed snapshot supersedes other snapshots, never a pending change', async () => {
+    const q = writeQueue()
+    const ran: string[] = []
+    const gate = defer()
+    void q.push('k', async () => {
+      ran.push('running')
+      await gate.promise
+    })
+    void q.append('k', async () => void ran.push('change'))
+    void q.push('k', async () => void ran.push('snapshot-1'))
+    const last = q.push('k', async () => void ran.push('snapshot-2'))
+    gate.resolve()
+    await last
+    expect(ran).toEqual(['running', 'change', 'snapshot-2'])
+  })
 })

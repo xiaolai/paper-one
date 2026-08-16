@@ -40,6 +40,7 @@ export interface WriteQueue {
 interface Waiting {
   readonly task: Task
   readonly settle: (error?: unknown) => void
+  readonly mode: Mode
 }
 
 type Mode = 'replace' | 'append'
@@ -80,14 +81,24 @@ export function writeQueue(): WriteQueue {
       const settle = (error?: unknown) => (error ? reject(error) : resolve())
       const line = pending.get(key) ?? []
       if (mode === 'replace') {
-        /* The superseded task RESOLVES rather than rejecting. It was skipped
+        /* ONLY OTHER WHOLE-STATE WRITES ARE SUPERSEDED. Clearing the line
+         * outright also threw away appended tasks — and those READ the file and
+         * change part of it, so dropping one loses the edit it was carrying. The
+         * two modes share a key whenever a book is edited from Notes and then
+         * opened, which is not an exotic sequence.
+         *
+         * The superseded task RESOLVES rather than rejecting. It was skipped
          * deliberately because a newer value made it pointless, and that is a
          * success from the caller's side — its data is about to be written by
          * the task that replaced it. */
-        for (const waiting of line) waiting.settle()
+        for (const waiting of line) {
+          if (waiting.mode === 'replace') waiting.settle()
+        }
+        const kept = line.filter((waiting) => waiting.mode === 'append')
         line.length = 0
+        line.push(...kept)
       }
-      line.push({ task, settle })
+      line.push({ task, settle, mode })
       pending.set(key, line)
       if (running.has(key)) return
       running.set(key, drain(key))

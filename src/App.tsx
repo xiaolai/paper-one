@@ -122,11 +122,6 @@ export function App({ storage, fs, initialBooks }: AppProps) {
 
   const openBook = useCallback(
     (source: File | string, path: string | null = null) => {
-      /* CLEARED on every deliberate open, because opening a book IS asking for
-       * it back. The flag exists to stop an in-flight intake from undoing a
-       * removal, not to remember the removal past the reader changing their
-       * mind. */
-      removedWhileOpen.current.clear()
       dispatch({ type: 'goScreen', screen: 'reader' })
       // Set before the open, so the record effect below cannot fire on the new
       // book while this still holds the previous one's path.
@@ -147,7 +142,7 @@ export function App({ storage, fs, initialBooks }: AppProps) {
       })
   }, [openBook])
 
-  const { add, update, remove, positionOf } = library
+  const { add, update, remove, positionOf, rekeyBook } = library
 
   /**
    * Put what an import produced onto the shelf.
@@ -472,9 +467,14 @@ export function App({ storage, fs, initialBooks }: AppProps) {
    */
   useEffect(() => {
     if (!bookId || !meta) return
+    /* CLEARED FOR THIS BOOK ONLY, and here rather than in `openBook`, because
+     * this is the point at which the reader is unambiguously asking for THIS
+     * book: its id is known and its parse has landed. Clearing the whole set on
+     * any open meant opening a second book wiped the first one's marker while
+     * its intake was still in flight, which is the race this exists to close. */
+    removedWhileOpen.current.delete(bookId)
     let cancelled = false
     void (async () => {
-      if (removedWhileOpen.current.has(bookId)) return
       if (source instanceof File && fs) {
         try {
           const at = contentPathIn(bookId, source.name)
@@ -530,7 +530,11 @@ export function App({ storage, fs, initialBooks }: AppProps) {
         ...(meta.publisher ? { publisher: meta.publisher } : {}),
         ...(meta.published ? { published: meta.published } : {}),
         ...(meta.languages.length ? { languages: meta.languages } : {}),
-        ...(meta.description ? { description: meta.description } : {}),
+        /* NO `description`. It was passed here and dropped on the floor:
+         * `BookRecord` has no such field and `parseRecord` discards it, so every
+         * write serialised it and every read threw it away. Nothing displays a
+         * description yet — when something does, it belongs in the record first
+         * and here second. */
         ...(openedPath ? { origin: openedPath } : {}),
         ...(source instanceof File ? { ext: source.name.split('.').pop() ?? '' } : {}),
       })
@@ -653,10 +657,16 @@ export function App({ storage, fs, initialBooks }: AppProps) {
         if (!live || legacy === bookId) return
         rekeyMarks(legacy, bookId)
         rekeyCards(legacy, bookId)
-        /* The LIBRARY is not rekeyed here any more, and cannot be: a book's id
-         * names its folder, so moving a book to a new id is a directory rename
-         * rather than a field update. That belongs to the migration, which is
-         * the one place allowed to move folders — see phase 4's WI-4.8. */
+        /* THE LIBRARY TOO, which was left out on the reasoning that moving a
+         * book to a new id is a directory rename and therefore the migration's
+         * business. The migration cannot do it: the new id is a hash of the
+         * book's content, and it is computed here, on open, precisely because
+         * hashing every book at startup is what the lazy migration avoids.
+         *
+         * Leaving it out did not leave the book alone — it gave the reader a
+         * SECOND row for it, with no tags and no position, while the ones they
+         * had stayed on a shelf entry pointing at the old folder. */
+        rekeyBook(legacy, bookId)
       })
       .catch((cause: unknown) => {
         console.error('Paper: could not check the legacy book id', cause)
@@ -664,7 +674,7 @@ export function App({ storage, fs, initialBooks }: AppProps) {
     return () => {
       live = false
     }
-  }, [bookId, source, rekeyMarks, rekeyCards])
+  }, [bookId, source, rekeyMarks, rekeyCards, rekeyBook])
 
   const commands = useMemo(
     () =>

@@ -178,12 +178,30 @@ describe('restoring onto a folder that is already there', () => {
     )
   })
 
-  it('empties the trash entry behind it', async () => {
+  it('empties the trash entry when everything moved', async () => {
+    const fs = fakeFs(shelved())
+    await trashBook(fs, 'book_a')
+    // Nothing live to collide with — the whole book comes back.
+    await restoreBook(fs, 'book_a')
+    expect([...fs.store.keys()].some((k) => k.startsWith(`${trashOf('book_a')}/`))).toBe(false)
+  })
+
+  /**
+   * A collided `content.<ext>` is KEPT, not deleted.
+   *
+   * An earlier version deleted it, reasoning that the folder is named by a hash
+   * of those bytes so the two must be the same book. Above 64MB `bookIdFor`
+   * samples rather than hashes whole — the comment on `INTERIOR_PROBES` says so
+   * outright — and deleting a file on a premise the code documents as
+   * approximate is how a scanned book disappears.
+   */
+  it('keeps a trashed copy it cannot prove is a duplicate', async () => {
     const fs = fakeFs(shelved())
     await trashBook(fs, 'book_a')
     fs.store.set(`${folderOf('book_a')}/content.epub`, new TextEncoder().encode('FRESH'))
     await restoreBook(fs, 'book_a')
-    expect([...fs.store.keys()].some((k) => k.startsWith(`${trashOf('book_a')}/`))).toBe(false)
+    expect(fs.store.has(`${trashOf('book_a')}/content.epub`)).toBe(true)
+    expect(fs.store.has(`${folderOf('book_a')}/book.json`)).toBe(true)
   })
 })
 

@@ -83,25 +83,22 @@ export async function restoreBook(fs: TrashFs, bookId: string): Promise<boolean>
       // The stamp belongs to the trash and is not part of the book.
       if (entry.name === '.removed') continue
       const to = `${folderOf(bookId)}/${entry.name}`
-      /* A NAME ALREADY LIVE WINS, and what happens to the trashed one depends
-       * on whether the two can be known to be the same.
+      /* A NAME ALREADY LIVE WINS, and the trashed one STAYS WHERE IT IS.
        *
-       * `content.<ext>` can: the folder is named by a hash OF THOSE BYTES, so a
-       * live copy in this folder is the same book. Dropping the trashed one is
-       * lossless and saves carrying a duplicate of an entire book for a
-       * fortnight — which is the usual case, since an import writes the content
-       * first and that is what makes the folder exist at all.
+       * An earlier version deleted a collided `content.<ext>` on the reasoning
+       * that the folder is named by a hash of those bytes, so the two must be
+       * the same book. THAT IS NOT TRUE, and this codebase says so a few files
+       * away: above 64MB `bookIdFor` samples rather than hashes whole, and the
+       * comment on `INTERIOR_PROBES` states plainly that identity there is
+       * approximate. Deleting a file on a premise the code documents as
+       * approximate is how a scanned book disappears.
        *
-       * NOTHING ELSE CAN. `marks.json` especially: the live one may be empty and
-       * the trashed one a year of annotations, and there is no way to tell them
-       * apart by name. So it stays in the trash, ages out on the ordinary
-       * schedule, and can be recovered by hand until it does. */
+       * So nothing is deleted. What could not move keeps its stamp, ages out on
+       * the ordinary fortnight, and can be recovered by hand until it does. The
+       * cost is carrying a duplicate copy for that fortnight, which is the right
+       * side to be wrong on. */
       if (await fs.exists(to)) {
-        if (entry.name.startsWith('content.')) {
-          await fs.remove(`${trashOf(bookId)}/${entry.name}`).catch(() => {})
-        } else {
-          allMoved = false
-        }
+        allMoved = false
         continue
       }
       try {

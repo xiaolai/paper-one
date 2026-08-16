@@ -53,21 +53,6 @@ export interface IndexFs extends VaultFs {
 interface StoredIndex {
   readonly version: 1
   readonly books: readonly IndexedBook[]
-  /**
-   * The folder names this index was built from.
-   *
-   * A COUNT was not enough, and the gap is not exotic: a book added and another
-   * removed between two launches leaves the count identical, so a stale index
-   * describing neither was trusted. Comparing the SET catches that, and it costs
-   * the directory listing that was already being read to count.
-   *
-   * It still does not catch a `book.json` edited without the index being
-   * rewritten, which happens only on a crash between the two — and that is why
-   * `updateBook` applies changes to the record ON DISK rather than to whatever
-   * the index handed the caller. A stale index can then be out of date; it
-   * cannot cause a stale write.
-   */
-  readonly folders?: readonly string[]
 }
 
 /**
@@ -185,9 +170,7 @@ export async function loadShelf(fs: IndexFs): Promise<{ books: IndexedBook[]; re
   return { books, rescanned: true }
 }
 
-async function readIndex(
-  fs: IndexFs,
-): Promise<{ books: readonly IndexedBook[]; folders?: readonly string[] } | null> {
+async function readIndex(fs: IndexFs): Promise<{ books: readonly IndexedBook[] } | null> {
   try {
     const raw = new TextDecoder().decode(await fs.readFile(INDEX_FILE))
     const books = parseIndex(raw)
@@ -211,7 +194,6 @@ export async function writeIndex(fs: IndexFs, books: readonly IndexedBook[]): Pr
   const payload: StoredIndex = {
     version: 1,
     books,
-    folders: books.map((one) => folderOf(one.bookId).slice(BOOKS_DIR.length + 1)),
   }
   try {
     await fs.writeFile(writing, new TextEncoder().encode(JSON.stringify(payload)))

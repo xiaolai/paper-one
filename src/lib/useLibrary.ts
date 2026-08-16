@@ -53,6 +53,16 @@ export interface Library {
   untag: (bookId: string, tag: string) => void
   /** The saved position for a book, or null. Stable across renders. */
   positionOf: (bookId: string | null) => string | null
+  /**
+   * Carry a book onto a new id, moving its folder with it.
+   *
+   * For the lazy id migration: `bookIdFor` hashes content now rather than a
+   * file's ends, so a book stored before that computes a different id the first
+   * time it is opened. Marks and cards already migrate themselves there; without
+   * this the library did not, and the reader got a second row with none of their
+   * tags or their place in the book.
+   */
+  rekeyBook: (from: string, to: string) => void
 }
 
 export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] = []): Library {
@@ -164,8 +174,71 @@ export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] =
          * Writing a fresh record over the top would throw them away at the exact
          * moment content-derived identity was about to hand them back. */
         if (at === -1) await restoreBook(target as never, bookId)
-        const existing = at === -1 ? await readBook(target, bookId) : null
+        /* MERGED INTO WHAT IS ON DISK, ALWAYS — not only when the row was
+         * missing. The in-memory copy comes from an index that `loadShelf` will
+         * knowingly trust while it is one write behind, so folding the parse
+         * into it and writing that back put a stale record over a newer one:
+         * opening a book could undo the tag applied just before the last quit.
+         * The record is the truth; the row is a view of it. */
+        const existing = await readBook(target, bookId)
         await writeBook(target, bookId, existing ? mergeParsed(existing, record) : merged)
+      })
+    },
+    [commit],
+  )
+
+  /**
+   * Carry a book onto a new id, folder and all.
+   *
+   * `bookIdFor` changed between phases — it hashes content now rather than a
+   * file's ends — so every book stored before that computes a DIFFERENT id the
+   * first time it is opened. Marks and cards already migrate themselves on open;
+   * the library could not, because a book's id names its directory and moving it
+   * is a rename rather than a field update. Without this the reader opened a
+   * migrated book and got a SECOND row for it: no tags, no position, and the
+   * ones they had still attached to a shelf entry pointing at the old folder.
+   *
+   * A no-op unless the old row exists and the new folder does not, so it is safe
+   * to call on every open and costs one comparison after the first.
+   */
+  const rekeyBook = useCallback(
+    (from: string, to: string) => {
+      if (from === to) return
+      const at = latest.current.findIndex((one) => one.bookId === from)
+      if (at === -1) return
+      const { bookId: _id, ...old } = latest.current[at]!
+      const already = latest.current.findIndex((one) => one.bookId === to)
+
+      /* BOTH ORDERS HANDLED, because this races the open. Opening a book adds a
+       * row under the NEW id after a couple of awaits, and this runs after a
+       * hash of the same file — whichever finishes first, the reader must end up
+       * with one row carrying their tags and their place.
+       *
+       * Arriving first, the old row simply becomes the new one. Arriving second,
+       * the two are folded: `mergeParsed` keeps what the reader owns from the
+       * old record and what the book says about itself from the new, which is
+       * the same rule every other reopen uses. */
+      const { bookId: _newId, ...fresh } = already === -1 ? { bookId: '' } : latest.current[already]!
+      const carried =
+        already === -1 ? (old as BookRecord) : mergeParsed(old as BookRecord, fresh as BookRecord)
+
+      const list = latest.current
+        .filter((one) => one.bookId !== from)
+        .map((one) => (one.bookId === to ? ({ ...carried, bookId: to } as IndexedBook) : one))
+      commit(to, already === -1 ? [{ ...carried, bookId: to } as IndexedBook, ...list] : list, async (target) => {
+        /* The folder moves only when there is nowhere already there. When the
+         * open won the race it has written the content itself, and what is
+         * missing from it is the record — which is what gets written below. */
+        if (!(await target.exists(folderOf(to)))) {
+          await target.rename(folderOf(from), folderOf(to)).catch(() => {})
+        }
+        const onDisk = await readBook(target, from)
+        await writeBook(target, to, onDisk ? mergeParsed(onDisk, carried) : carried)
+        /* The old folder goes to the TRASH rather than away, if it is still
+         * there. It holds a duplicate of a book the reader still has, so it is
+         * not worth keeping — but this is a rename computed from a hash, and a
+         * mistake here should cost disk for a fortnight rather than a book. */
+        if (await target.exists(folderOf(from))) await trashBook(target as never, from)
       })
     },
     [commit],
@@ -220,7 +293,7 @@ export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] =
   )
 
   return useMemo<Library>(
-    () => ({ books, add, update, remove, tag, untag, positionOf }),
-    [books, add, update, remove, tag, untag, positionOf],
+    () => ({ books, add, update, remove, tag, untag, positionOf, rekeyBook }),
+    [books, add, update, remove, tag, untag, positionOf, rekeyBook],
   )
 }
