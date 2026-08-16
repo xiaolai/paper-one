@@ -369,6 +369,7 @@ export function App() {
             onAddBooks={addBooks}
           />
         }
+        onDismissPane={() => dispatch({ type: 'closePane' })}
       >
         {/* The reader stays mounted under every screen. Unmounting it tears
             foliate down mid-flight and loses the reading position — see the

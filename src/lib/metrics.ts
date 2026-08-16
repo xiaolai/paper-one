@@ -74,11 +74,19 @@ export const SYS_ZONE_W: Record<Platform, number> = {
 export const PANE_TAB_H = 44
 
 /**
- * §06: the pane collapses below this width.
+ * §06: below this width the pane stops taking a track of its own.
  *
  * Enforced in `WindowShell`, not merely declared. Left unconsumed it was a
  * false invariant — the pane stayed open on narrow windows and squeezed the
  * measure down to whatever was left.
+ *
+ * What it does BELOW the threshold changed, because collapsing was the wrong
+ * answer: the pane simply did not appear, and the tab buttons and ⌘\ went on
+ * looking exactly as available as they do at any other width. A control that
+ * silently does nothing is indistinguishable from a broken one. The design's
+ * own answer for a narrow window is that "the pane becomes a sheet" — it
+ * overlays the reader instead of displacing it, which costs the measure
+ * nothing and is why the threshold exists in the first place.
  */
 export const PANE_COLLAPSE_W = 1024
 
@@ -233,6 +241,11 @@ export const Z = {
   stickyBar: 7,
   rulerHint: 8,
   popover: 20,
+  /* The pane when it is a sheet, and the scrim under it. Below `scrim`, which
+   * belongs to the palette and the switcher: those take the whole window and
+   * must cover a sheet, not appear behind one. */
+  paneSheetScrim: 22,
+  paneSheet: 23,
   menu: 24,
   scrim: 30,
   figure: 40,
@@ -298,6 +311,8 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
     '--z-sticky': String(Z.stickyBar),
     '--z-ruler-hint': String(Z.rulerHint),
     '--z-popover': String(Z.popover),
+    '--z-pane-sheet-scrim': String(Z.paneSheetScrim),
+    '--z-pane-sheet': String(Z.paneSheet),
     '--z-menu': String(Z.menu),
     '--z-scrim': String(Z.scrim),
     '--z-figure': String(Z.figure),

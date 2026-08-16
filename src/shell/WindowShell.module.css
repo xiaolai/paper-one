@@ -47,11 +47,16 @@
   position: relative;
 }
 
-/* The row holding the reader and the pane. */
+/* The row holding the reader and the pane.
+ *
+ * The containing block for the pane as a sheet, stated here rather than left to
+ * `.window`: a sheet has to occupy exactly the box the pane occupies as a
+ * track, and anchoring it one level up would hang it off the window instead. */
 .shell {
   flex: 1;
   min-height: 0;
   display: flex;
+  position: relative;
 }
 
 .content {
@@ -88,4 +93,67 @@
 
 .paneSlot[data-side='right'] {
   order: 1;
+}
+
+/* Below §06's threshold the pane becomes a SHEET: it lifts out of the row and
+   floats over the reader rather than displacing it.
+ *
+ * The animation has to change with it. Open-on-width is right for a pane,
+ * because the reader is meant to reflow around it — but a sheet that animated
+ * its width would still be squeezing the measure it exists to protect, one
+ * frame at a time. So a sheet slides on transform, over a layout that never
+ * moves. `width` is pinned to the track so the card inside keeps its designed
+ * 400px however narrow the window gets. */
+.paneSlot[data-sheet='true'] {
+  position: absolute;
+  inset-block: 0;
+  width: var(--pane-track);
+  max-width: 100%;
+  z-index: var(--z-pane-sheet);
+  transition: transform var(--motion-pane);
+}
+
+.paneSlot[data-sheet='true'][data-side='left'] {
+  inset-inline-start: 0;
+}
+
+.paneSlot[data-sheet='true'][data-side='right'] {
+  inset-inline-end: 0;
+}
+
+/* Off its own edge, not off the left: a right-hand sheet leaves to the right.
+   `translate` rather than `inset` so nothing reflows behind it. */
+.paneSlot[data-sheet='true'][data-open='false'][data-side='right'] {
+  transform: translateX(100%);
+}
+
+.paneSlot[data-sheet='true'][data-open='false'][data-side='left'] {
+  transform: translateX(-100%);
+}
+
+/* A closed sheet keeps its width — see above — so it must not also keep its
+   track. This overrides the `width: 0` rule that closes a pane. */
+.paneSlot[data-sheet='true'][data-open='false'] {
+  width: var(--pane-track);
+}
+
+.paneScrim {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-pane-sheet-scrim);
+  border: none;
+  padding: 0;
+  background: var(--scrim);
+  cursor: default;
+  /* Fades with the sheet it belongs to, on §08's pane timing. */
+  animation: paneScrimIn var(--motion-pane);
+}
+
+@keyframes paneScrimIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
