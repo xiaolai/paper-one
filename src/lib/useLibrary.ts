@@ -35,6 +35,16 @@ import { writeQueue } from './writeQueue'
  * watching the tag they just added fail to appear.
  */
 
+/**
+ * What a rekey did, because the caller has to act on it.
+ *
+ * `failed` matters: adding the book under its new id after a move that did not
+ * happen creates the second folder the move existed to prevent, and every later
+ * attempt then stops because the destination exists. A failure has to stop the
+ * add, so the next open can try again.
+ */
+export type RekeyOutcome = 'moved' | 'nothing' | 'failed'
+
 export interface Library {
   readonly books: readonly IndexedBook[]
   /** Add a book, or fold a fresh parse into one already here — see `mergeParsed`. */
@@ -63,7 +73,7 @@ export interface Library {
    * under its new id — which is the difference between a migration and a
    * duplicate.
    */
-  rekeyBook: (from: string, to: string) => Promise<void>
+  rekeyBook: (from: string, to: string) => Promise<RekeyOutcome>
 }
 
 /** One file as text, or null when it is not there or will not read. */
@@ -315,10 +325,11 @@ export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] =
    * prefer over any amount of cleverness with somebody's library.
    */
   const rekeyBook = useCallback(
-    async (from: string, to: string): Promise<void> => {
-      if (from === to || !fs) return
-      if (!latest.current.some((one) => one.bookId === from)) return
-      if (latest.current.some((one) => one.bookId === to)) return
+    async (from: string, to: string): Promise<RekeyOutcome> => {
+      if (from === to || !fs) return 'nothing'
+      if (!latest.current.some((one) => one.bookId === from)) return 'nothing'
+      if (latest.current.some((one) => one.bookId === to)) return 'nothing'
+      let outcome: RekeyOutcome = 'nothing'
       try {
         await queue.current.append(from, async () => {
           // Occupied, or already gone. Either way this is not ours to move.
@@ -327,6 +338,7 @@ export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] =
           await fs.rename(folderOf(from), folderOf(to))
           // Stamped with the id it now lives under; the record still names the
           // folder it came from until this runs.
+          outcome = 'moved'
           const moved = await readBook(fs, to)
           if (moved) await writeBook(fs, to, moved)
           const at = latest.current.findIndex((one) => one.bookId === from)
@@ -341,9 +353,14 @@ export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] =
         })
       } catch (cause) {
         /* Reported and survivable: the book keeps its old id, which is the state
-         * it was in a moment ago and one every later open tries again from. */
+         * it was in a moment ago and one every later open tries again from —
+         * PROVIDED the caller does not go on to create the new folder anyway,
+         * which is what `failed` is for. A permissions refusal is enough to get
+         * here; it needs no crash and no fault. */
         console.error('Paper: could not carry that book onto its new id', cause)
+        return 'failed'
       }
+      return outcome
     },
     [fs],
   )

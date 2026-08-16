@@ -313,35 +313,52 @@ export function useMarks(bookId: string | null, fs: IndexFs | null): MarkStore {
   const rekey = useCallback(
     (from: string, to: string) => {
       if (!fs || from === to) return
-      void readMarks(fs, from)
-        .then((raw) => {
-          const moved = parseMarks(JSON.stringify(raw))
-          if (moved.length === 0) return
-          /* BY ID, and the set grows as it goes — a source holding two marks
-           * with one id would otherwise let both through. This ran on every open
-           * and only ever COPIED, so before the deduplication a reader who
-           * opened a migrated book five times had five of every highlight.
-           *
-           * THE SOURCE IS LEFT WHERE IT IS. Removing it after calling `apply` —
-           * which only QUEUES the write — deleted the original before the copy
-           * was durable, and the queued write can be skipped, superseded or fail.
-           * Deduplication is what makes leaving it harmless: a second open merges
-           * the same marks and changes nothing. The old file costs a few
-           * kilobytes until the folder it is in is dealt with properly. */
-          apply((prev) => {
-            const held = new Set(prev.map((mark) => mark.id))
-            const fresh: Mark[] = []
-            for (const mark of moved) {
-              if (held.has(mark.id)) continue
-              held.add(mark.id)
-              fresh.push({ ...mark, bookId: to })
-            }
-            return fresh.length === 0 ? prev : [...prev, ...fresh]
+      void (async () => {
+        /* TWO PLACES, because the library may have got here first.
+         *
+         * `rekeyBook` renames the whole folder, `marks.json` included — so by
+         * the time this runs the marks are usually already in the new book's
+         * file, with the OLD id still written inside every one of them. Reading
+         * only the old folder therefore found nothing and did nothing, and Notes
+         * then sorted the reader's own highlights under a book that no longer
+         * existed and refused to navigate to them.
+         *
+         * So: rewrite what is already here, AND merge anything still sitting in
+         * the old folder if the rename has not happened. Whichever order the two
+         * ran in, the answer is the same. */
+        let waiting: Mark[] = []
+        try {
+          waiting = parseMarks(JSON.stringify(await readMarks(fs, from)))
+        } catch (cause) {
+          // The old file is there and will not read. Left alone, and said out
+          // loud, rather than quietly treated as a book with no marks.
+          console.error('Paper: could not read the marks under the old book id', cause)
+        }
+        apply((prev) => {
+          let rewrote = false
+          const mine = prev.map((mark) => {
+            if (mark.bookId !== from) return mark
+            rewrote = true
+            return { ...mark, bookId: to }
           })
+          /* BY ID, and the set grows as it goes — a file holding two marks with
+           * one id would otherwise let both through. Nothing is deleted from the
+           * old folder: this ran on every open and only ever copied, so before
+           * the deduplication a reader who opened a migrated book five times had
+           * five of every highlight. Removing the source after `apply`, which
+           * only QUEUES the write, would delete the original before the copy was
+           * durable — so it stays, and the duplicate is what is prevented. */
+          const held = new Set(mine.map((mark) => mark.id))
+          const fresh: Mark[] = []
+          for (const mark of waiting) {
+            if (held.has(mark.id)) continue
+            held.add(mark.id)
+            fresh.push({ ...mark, bookId: to })
+          }
+          if (!rewrote && fresh.length === 0) return prev
+          return [...mine, ...fresh]
         })
-        .catch(() => {
-          // No marks under the old id, which is the ordinary case.
-        })
+      })()
     },
     [fs, apply],
   )

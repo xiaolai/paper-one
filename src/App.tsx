@@ -476,7 +476,8 @@ export function App({ storage, fs, initialBooks }: AppProps) {
      * unconditionally there undid a removal made in the seconds between opening
      * a book and it finishing parsing. A fresh open produces a new `File`, or a
      * different path, so identity is exactly the right test. */
-    if (clearedFor.current !== source) {
+    const freshOpen = clearedFor.current !== source
+    if (freshOpen) {
       removedWhileOpen.current.delete(bookId)
       clearedFor.current = source
     }
@@ -491,12 +492,29 @@ export function App({ storage, fs, initialBooks }: AppProps) {
        * A book stored under the previous scheme only. `legacyBookIdFor` returns
        * the same id for everything since, and `rekeyBook` returns immediately
        * when it does. */
+      let legacy = bookId
       try {
-        if (source) await rekeyBook(await legacyBookIdFor(source), bookId)
+        if (source) legacy = await legacyBookIdFor(source)
+        if (legacy !== bookId && (await rekeyBook(legacy, bookId)) === 'failed') {
+          /* STOP. Adding the book under its new id now would create the second
+           * folder the move exists to prevent — and every later attempt would
+           * then find the destination occupied and give up. Left alone, the book
+           * keeps the id it has and the next open tries again. */
+          return
+        }
       } catch (cause) {
         console.error('Paper: could not check the legacy book id', cause)
       }
-      if (cancelled) return
+      // The legacy id is cleared for a deliberate open too, or a removal made
+      // under the old id would block the book under its new one forever.
+      if (freshOpen) removedWhileOpen.current.delete(legacy)
+      /* THE LEGACY ID COUNTS AS THIS BOOK. `removeBook` records whatever id the
+       * ROW carried, which for a book stored under the previous scheme is the
+       * legacy one — so checking only the newly computed id meant removing a
+       * book while it was still parsing put it back under a different name,
+       * with the tags and marks it owned left in the old id's trash entry for
+       * the sweep. */
+      if (cancelled || removedWhileOpen.current.has(legacy)) return
       if (source instanceof File && fs) {
         try {
           const at = contentPathIn(bookId, source.name)
@@ -534,7 +552,11 @@ export function App({ storage, fs, initialBooks }: AppProps) {
          * position and marks — before `trashBook` has moved anything, so there
          * is no copy to recover. A stray file is worth incomparably less than
          * the chance of that. */
-        if (removedWhileOpen.current.has(bookId) && fs && source instanceof File) {
+        if (
+          (removedWhileOpen.current.has(bookId) || removedWhileOpen.current.has(legacy)) &&
+          fs &&
+          source instanceof File
+        ) {
           const at = contentPathIn(bookId, source.name)
           if (!(await fs.exists(recordPath(bookId)))) await fs.remove(at).catch(() => {})
           return
