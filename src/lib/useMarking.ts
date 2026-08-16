@@ -142,6 +142,9 @@ export function useMarking(book: Book, marks: MarkStore): Marking {
         cfi: selection.cfi,
         sectionIndex: selection.sectionIndex,
         text: selection.text,
+        // Captured here because here is the only place it exists. See `Mark`.
+        prefix: selection.prefix,
+        suffix: selection.suffix,
         note,
         kind: 'highlight',
         chapter,

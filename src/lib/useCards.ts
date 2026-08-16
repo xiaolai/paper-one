@@ -1,4 +1,5 @@
 import { useCallback, useMemo } from 'react'
+import { rekeyBook } from './idMigration'
 import {
   CARDS_STORAGE_KEY,
   addCard,
@@ -32,6 +33,14 @@ export interface CardStore {
    * anywhere having said so.
    */
   readonly persistent: boolean
+  /**
+   * Move every row from a superseded book id onto the current one.
+   *
+   * A no-op unless the reader has rows written under the previous identity
+   * scheme — see `idMigration`. Called on open rather than at load, because the
+   * old id can only be recomputed from the file itself.
+   */
+  rekey: (from: string, to: string) => void
   make: (draft: NewCard) => Card
   discard: (id: string) => void
 }
@@ -79,8 +88,21 @@ export function useCards(storage = localStore()): CardStore {
   )
 
 
+
+  /* `apply` persists whatever the mutation returns even when nothing changed,
+   * and this runs on every open — so the guard is here, reading the identity
+   * `rekeyBook` returns when it found nothing to move. */
+  const rekey = useCallback(
+    (from: string, to: string) =>
+      apply((prev) => {
+        const next = rekeyBook(prev, from, to)
+        return next === prev ? prev : [...next]
+      }),
+    [apply],
+  )
+
   return useMemo<CardStore>(
-    () => ({ all: cards, persistent, make, discard }),
-    [cards, persistent, make, discard],
+    () => ({ all: cards, persistent, make, discard, rekey }),
+    [cards, persistent, make, discard, rekey],
   )
 }

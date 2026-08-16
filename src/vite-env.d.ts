@@ -80,6 +80,8 @@ declare module 'foliate-js/view.js' {
     readonly title?: string | Record<string, string>
     readonly author?: string | readonly unknown[]
     readonly language?: string | readonly string[]
+    /** `dc:identifier`, resolved by foliate through the OPF's unique-identifier. */
+    readonly identifier?: string
   }
 
   export interface Book {

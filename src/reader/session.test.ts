@@ -169,7 +169,7 @@ describe('ReaderSession disposal', () => {
     await session.start('book.epub', deps(view))
 
     expect(cb.calls['onToc']).toHaveLength(1)
-    expect(cb.calls['onMeta']?.[0]?.[0]).toEqual({ title: 'T', author: 'A' })
+    expect(cb.calls['onMeta']?.[0]?.[0]).toEqual({ title: 'T', author: 'A', identifier: '' })
     const nav = cb.calls['onNavigator']?.[0]?.[0] as {
       goTo: unknown
       search: unknown
@@ -793,7 +793,14 @@ describe('ReaderSession gesture provenance', () => {
     doc.dispatch('keyup')
 
     expect(published(cb)).toEqual([
-      { cfi: 'cfi(0:ick bro)', sectionIndex: 0, text: 'ick bro', range: selection.getRangeAt(0) },
+      {
+          cfi: 'cfi(0:ick bro)',
+          sectionIndex: 0,
+          text: 'ick bro',
+          prefix: 'the qu',
+          suffix: 'wn fox',
+          range: selection.getRangeAt(0),
+        },
     ])
     // The whole point of the criterion: the reader's own character-granular
     // boundaries survive, which a snap on this path would destroy.
@@ -836,6 +843,8 @@ describe('ReaderSession gesture provenance', () => {
         cfi: 'cfi(0:quick brown)',
         sectionIndex: 0,
         text: 'quick brown',
+        prefix: 'the ',
+        suffix: ' fox',
         range: selection.getRangeAt(0),
       },
     ])
@@ -880,6 +889,8 @@ describe('ReaderSession gesture provenance', () => {
         cfi: 'cfi(0:quick brown)',
         sectionIndex: 0,
         text: 'quick brown',
+        prefix: 'the ',
+        suffix: ' fox',
         range: selection.getRangeAt(0),
       },
     ])
@@ -957,8 +968,20 @@ describe('ReaderSession — a pointer gesture always publishes', () => {
   /** The macrotask WI-8 parks the snap in — real, as in the block above. */
   const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
 
-  const UNSNAPPED = { cfi: 'cfi(0:ick bro)', sectionIndex: 0, text: 'ick bro' }
-  const SNAPPED = { cfi: 'cfi(0:quick brown)', sectionIndex: 0, text: 'quick brown' }
+  const UNSNAPPED = {
+    cfi: 'cfi(0:ick bro)',
+    sectionIndex: 0,
+    text: 'ick bro',
+    prefix: 'the qu',
+    suffix: 'wn fox',
+  }
+  const SNAPPED = {
+    cfi: 'cfi(0:quick brown)',
+    sectionIndex: 0,
+    text: 'quick brown',
+    prefix: 'the ',
+    suffix: ' fox',
+  }
 
   /*
    * `KeyboardEvent` and `window`, for the length of this block.
@@ -1152,7 +1175,14 @@ describe('ReaderSession publishes the selection', () => {
       vi.runAllTimers()
 
       expect(published(scene.cb)).toEqual([
-        { cfi: 'cfi(0:+)', sectionIndex: 0, text: '+', range: selection.getRangeAt(0) },
+        {
+          cfi: 'cfi(0:+)',
+          sectionIndex: 0,
+          text: '+',
+          prefix: 'a ',
+          suffix: ' b',
+          range: selection.getRangeAt(0),
+        },
       ])
     })
 
@@ -1338,7 +1368,14 @@ describe('ReaderSession publishes the selection', () => {
       vi.runAllTimers()
 
       expect(published(scene.cb)).toEqual([
-        { cfi: 'cfi(0:+)', sectionIndex: 0, text: '+', range: selection.getRangeAt(0) },
+        {
+          cfi: 'cfi(0:+)',
+          sectionIndex: 0,
+          text: '+',
+          prefix: 'a ',
+          suffix: ' b',
+          range: selection.getRangeAt(0),
+        },
       ])
       expect(selection.mutations).toBe(0)
     })
@@ -1367,7 +1404,14 @@ describe('ReaderSession publishes the selection', () => {
 
       expect(vi.getTimerCount()).toBe(0)
       expect(published(scene.cb)).toEqual([
-        { cfi: 'cfi(0:ick bro)', sectionIndex: 0, text: 'ick bro', range: selection.getRangeAt(0) },
+        {
+          cfi: 'cfi(0:ick bro)',
+          sectionIndex: 0,
+          text: 'ick bro',
+          prefix: 'the qu',
+          suffix: 'wn fox',
+          range: selection.getRangeAt(0),
+        },
       ])
 
       vi.runAllTimers()
@@ -1727,6 +1771,7 @@ describe('readMeta', () => {
     expect(readMeta({ metadata: { title: 'Moby-Dick', author: 'Melville' } })).toEqual({
       title: 'Moby-Dick',
       author: 'Melville',
+      identifier: '',
     })
   })
 
@@ -1742,6 +1787,24 @@ describe('readMeta', () => {
   })
 
   it('returns empty strings rather than undefined when metadata is absent', () => {
-    expect(readMeta({})).toEqual({ title: '', author: '' })
+    expect(readMeta({})).toEqual({ title: '', author: '', identifier: '' })
+  })
+
+  /* The work's own identifier, which foliate parses out of the OPF and this
+   * function used to throw away. It is what sharing between two READERS has to
+   * be keyed on — `bookId` is the bytes, and two people never hold the same
+   * bytes — so losing it here lost it everywhere. */
+  it('keeps the work identifier the book declares', () => {
+    expect(
+      readMeta({ metadata: { title: 'T', identifier: 'urn:uuid:9f2a' } }).identifier,
+    ).toBe('urn:uuid:9f2a')
+  })
+
+  it('treats a malformed identifier as no identifier', () => {
+    // A package can put anything here; the rest of this function is defensive
+    // about exactly that and this field is no different.
+    for (const bad of [42, null, {}, ['a'], undefined]) {
+      expect(readMeta({ metadata: { identifier: bad } }).identifier).toBe('')
+    }
   })
 })

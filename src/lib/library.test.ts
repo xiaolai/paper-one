@@ -15,6 +15,7 @@ function entry(over: Partial<LibraryEntry> = {}): LibraryEntry {
     url: '/moby.epub',
     lastOpened: 1000,
     position: null,
+    workId: null,
     ...over,
   }
 }

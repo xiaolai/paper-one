@@ -3,6 +3,7 @@ import { buildCommands } from './lib/commands'
 import { PANE_SHORTCUTS } from './lib/panes'
 import { ACCEPT_FORMATS } from './lib/formats'
 import { DEFAULT_STEP_IDX, applyMetrics } from './lib/metrics'
+import { legacyBookIdFor } from './lib/idMigration'
 import { positionRecorder, type PositionRecorder } from './lib/positionRecorder'
 import { usePlatform, usePrefersDark } from './lib/platform'
 import { NOT_CONFIGURED } from './lib/companion'
@@ -98,6 +99,10 @@ export function App() {
       // An open knows nothing about where the reader will be. `recordOpen`
       // carries the saved position through rather than letting this erase it.
       position: null,
+      // The work's own identifier, when the book declares one. Nothing reads it
+      // yet; it is captured here because recovering it later means re-opening
+      // every book on the shelf.
+      workId: meta.identifier || null,
     })
   }, [bookId, meta, source, record])
 
@@ -147,6 +152,42 @@ export function App() {
   useEffect(() => {
     saver.current?.record(bookId, cfi)
   }, [bookId, cfi])
+
+  /* Carry a reader's existing work across the change of book identity.
+   *
+   * `bookIdFor` now hashes content rather than a file's ends, and reads a URL
+   * rather than trusting its address — so everything already stored is filed
+   * under an id nothing will compute again. The old id cannot be derived from
+   * the new one, only recomputed from the same source, which is why this runs
+   * on open rather than at load and why a book never reopened keeps its rows
+   * under the legacy id until it is.
+   *
+   * Every store returns its collection unchanged when there is nothing to move,
+   * so all but the first open of each book costs one comparison.
+   */
+  const { rekey: rekeyMarks } = marks
+  const { rekey: rekeyCards } = cards
+  const { rekey: rekeyLibrary } = library
+  useEffect(() => {
+    if (!bookId || !source) return
+    let live = true
+    void legacyBookIdFor(source)
+      .then((legacy) => {
+        if (!live || legacy === bookId) return
+        rekeyMarks(legacy, bookId)
+        rekeyCards(legacy, bookId)
+        rekeyLibrary(legacy, bookId)
+      })
+      .catch((cause: unknown) => {
+        // Nothing is lost by failing — the rows stay under the old id and the
+        // next open tries again. Silence would make a migration that never
+        // runs look like a reader who never had any marks.
+        console.error('Paper: could not migrate this book\'s earlier marks', cause)
+      })
+    return () => {
+      live = false
+    }
+  }, [bookId, source, rekeyMarks, rekeyCards, rekeyLibrary])
 
   const commands = useMemo(
     () =>

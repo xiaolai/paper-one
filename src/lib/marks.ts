@@ -12,8 +12,11 @@
  * rendered layout, so changing the reading step, the theme or the window width
  * moves the highlight with the words instead of stranding it.
  *
- * Everything here is pure except the two storage functions, which is what lets
- * the anchoring and merge rules be tested without a DOM or a book.
+ * The anchoring and merge rules are pure, which is what lets them be tested
+ * without a DOM or a book. Three functions here are NOT: the two storage
+ * helpers, and `bookIdFor`, which since it began hashing content reads a file
+ * or fetches a URL. Worth stating plainly — the header used to claim everything
+ * but storage was pure, and identity quietly stopped being so.
  */
 
 import { compare } from 'foliate-js/epubcfi.js'
@@ -44,6 +47,22 @@ export interface Mark {
   readonly sectionIndex: number
   /** The marked words, for the Notes list and the margin. */
   readonly text: string
+  /**
+   * The text immediately before and after the mark — see `markContext`.
+   *
+   * Empty when the mark sits at the edge of its section, or when it was made
+   * before this field existed. Nothing reads it yet, and it is stored anyway:
+   * a CFI locates a passage inside ONE package and resolves to the wrong text
+   * in a different build of the same work without erroring, so re-finding a
+   * passage needs the quote plus what surrounds it. The quote alone is not
+   * enough — "the whale" occurs hundreds of times.
+   *
+   * It has to be captured at creation. Recovering it later means re-opening
+   * the book and resolving the CFI, which is the operation that has already
+   * failed by the time anyone needs this.
+   */
+  readonly prefix: string
+  readonly suffix: string
   /** The written note. Empty when the mark is a bare highlight. */
   readonly note: string
   readonly kind: MarkKind
@@ -63,34 +82,114 @@ export const MARKS_STORAGE_KEY = 'paper.marks.v1'
  * A File has no durable identifier — the same book re-picked from disk is a
  * different File object — so the identity has to come from the content.
  *
- * It is derived from the size plus the first and last 64KB rather than from the
- * name and size, which is what this used to be. Name and size collide in ways
- * that are not exotic: two files named `book.pdf` in different folders, or the
- * same title from two sources, and the reader silently gets the other book's
- * marks, cards and reading position. Revising a file without changing its
- * length does the same thing in reverse.
+ * It is derived from the content rather than from the name and size, which is
+ * what this used to be. Name and size collide in ways that are not exotic: two
+ * files named `book.pdf` in different folders, or the same title from two
+ * sources, and the reader silently gets the other book's marks, cards and
+ * reading position. Revising a file without changing its length does the same
+ * thing in reverse. Content also survives copying, moving and re-downloading,
+ * which an mtime does not.
  *
- * Bounded on purpose: hashing a whole 50MB EPUB on every open to settle this
- * would be the obvious over-correction. 128KB spans an EPUB's mimetype,
- * container and opening spine item, or a PDF's header, xref and trailer, which
- * no two different books share; it costs a couple of milliseconds and is
- * stable across copying, moving and re-downloading, which an mtime is not.
+ * WHY THE ENDS ARE NOT ENOUGH. This used to hash only the size and the first and
+ * last 64KB, on the reasoning that 128KB spans an EPUB's mimetype and opening
+ * spine item, or a PDF's header and trailer, and that no two different books
+ * share those. That is a statement about the ends of a file, and it says nothing
+ * at all about the middle. Reproduced on 2026-08-16: two files of equal length
+ * with identical first and last 64KB and one differing kilobyte in between both
+ * hashed to `file:97055b281d7b0385e0297135aece6323`, and one book's marks,
+ * cards and reading position therefore belonged to the other.
  *
- * A string source is already a stable URL and is used as-is.
+ * So a book that fits is hashed WHOLE, and identity is exact. Only above the
+ * limit does this fall back to sampling, and then it probes the interior as
+ * well as the ends.
+ *
+ * WHY A URL IS NO LONGER USED AS-IS. It was, and the same bytes therefore had
+ * two identities depending on how they were opened — `url:/sample.epub` from the
+ * address and `file:63d69499…` from the picker — so marks made on one did not
+ * exist on the other. Identity is derived from CONTENT now, whatever route the
+ * content arrived by, which is the property every later feature needs and the
+ * reason the prefix is no longer named after a source.
  */
 const SAMPLE_BYTES = 64 * 1024
 
-export async function bookIdFor(source: File | string): Promise<string> {
-  if (typeof source === 'string') return `url:${source}`
+/**
+ * Below this, the whole file is hashed and identity is EXACT.
+ *
+ * Set high on purpose. Sampling cannot be made reliable by adding probes: with
+ * any fixed set of windows there are gaps between them, and a change that lands
+ * in a gap is invisible however many probes there are. That is not a theory —
+ * eight evenly spaced probes were tried first, and a four-kilobyte difference at
+ * the exact midpoint of a nine-megabyte file fell cleanly between probes four
+ * and five and produced identical ids.
+ *
+ * So the answer is not better sampling, it is not sampling. 64MB covers
+ * essentially every EPUB and most PDFs outright; only scanned books exceed it.
+ *
+ * The cost is bounded and lands where it can be afforded. This runs on the open
+ * path and races the parse — the saved reading position is keyed by this id and
+ * read once the book is parsed — but a file large enough to be slow to hash is
+ * far slower to parse, so the margin widens with size rather than narrowing.
+ */
+const FULL_HASH_LIMIT = 64 * 1024 * 1024
 
-  const head = source.slice(0, SAMPLE_BYTES)
-  const tail = source.slice(Math.max(0, source.size - SAMPLE_BYTES))
-  const sample = new Blob([`${source.size}:`, head, tail])
+/**
+ * Probes through a file too large to hash whole.
+ *
+ * Above the limit identity is APPROXIMATE and this is the trade being made: a
+ * change confined to a gap between probes leaves the id unchanged, and two such
+ * books are one book to every mark, card and position. It is strictly better
+ * than the ends-only scheme it replaces, and it is not exact. For real books of
+ * this size — scans, mostly — two differing files that also share a byte length,
+ * both ends and all sixteen probes is not a case that occurs by accident.
+ */
+const INTERIOR_PROBES = 16
+
+/**
+ * The parts of a blob that identity is computed over.
+ *
+ * Exported for the tests, which assert the SHAPE of the sampling rather than
+ * allocating a file large enough to trigger it — reading `size` and `slice` is
+ * all this does, so a stand-in with those two members exercises it honestly.
+ */
+export function identityParts(blob: Blob): BlobPart[] {
+  // The size leads, so two files cannot agree by sampling alone.
+  const parts: BlobPart[] = [`${blob.size}:`]
+  if (blob.size <= FULL_HASH_LIMIT) {
+    parts.push(blob)
+    return parts
+  }
+  parts.push(blob.slice(0, SAMPLE_BYTES))
+  for (let i = 1; i <= INTERIOR_PROBES; i++) {
+    const at = Math.floor((blob.size * i) / (INTERIOR_PROBES + 1))
+    parts.push(blob.slice(at, at + SAMPLE_BYTES))
+  }
+  parts.push(blob.slice(Math.max(0, blob.size - SAMPLE_BYTES)))
+  return parts
+}
+
+/** The content id of a blob, whatever route it arrived by. */
+export async function contentId(blob: Blob): Promise<string> {
+  const sample = new Blob(identityParts(blob))
   const digest = await crypto.subtle.digest('SHA-256', await sample.arrayBuffer())
   const hex = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0'))
   // Half the digest. This is an identity, not a security boundary, and 128 bits
-  // of it makes an accidental collision impossible in a personal library.
-  return `file:${hex.join('').slice(0, 32)}`
+  // of it makes an accidental collision impossible in a personal library. If it
+  // ever becomes the key a PEER uses to decide which book you are discussing,
+  // that sentence stops being true and this needs revisiting.
+  return `book:${hex.join('').slice(0, 32)}`
+}
+
+export async function bookIdFor(source: File | string): Promise<string> {
+  if (typeof source !== 'string') return contentId(source)
+
+  /* A URL is read rather than trusted. It costs one fetch, which the renderer
+   * is about to make anyway and which the cache serves — and it is the only way
+   * the same book opened two ways can be the same book. A failure here is
+   * reported by the caller as "could not identify this book", which is the
+   * honest outcome: a URL that cannot be fetched cannot be opened either. */
+  const response = await fetch(source)
+  if (!response.ok) throw new Error(`could not read ${source}: ${response.status}`)
+  return contentId(await response.blob())
 }
 
 /**
@@ -214,7 +313,12 @@ export function createMark(draft: NewMark): Mark {
  * pasted into devtools. A malformed row is dropped rather than thrown on —
  * losing one mark is recoverable, refusing to start the reader is not.
  */
-function isMark(value: unknown): value is Mark {
+type StoredMark = Omit<Mark, 'prefix' | 'suffix'> & {
+  readonly prefix?: unknown
+  readonly suffix?: unknown
+}
+
+function isMark(value: unknown): value is StoredMark {
   if (typeof value !== 'object' || value === null) return false
   const m = value as Record<string, unknown>
   /* The right TYPE is not the same as a usable value, and every one of these
@@ -253,6 +357,11 @@ function isMark(value: unknown): value is Mark {
   )
 }
 
+/** Context is optional on the way in, and always a string on the way out. */
+function readContext(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
 /** Parse a stored payload, keeping only the rows that survive validation. */
 export function parseMarks(raw: string | null): Mark[] {
   if (!raw) return []
@@ -263,7 +372,16 @@ export function parseMarks(raw: string | null): Mark[] {
     return []
   }
   if (!Array.isArray(parsed)) return []
-  return dedupeById(parsed.filter(isMark))
+  return dedupeById(
+    parsed.filter(isMark).map((row) => ({
+      ...row,
+      // Absent for every mark made before context was stored, which is most of
+      // them. Empty is the honest reading: there is nothing extra to re-anchor
+      // with — NOT a reason to drop a mark the reader made.
+      prefix: readContext(row.prefix),
+      suffix: readContext(row.suffix),
+    })),
+  )
 }
 
 /**

@@ -38,6 +38,16 @@ export interface LibraryEntry {
    * rather than to a reader that will not display.
    */
   readonly position: string | null
+  /**
+   * The WORK's identifier, as the book declares it, or null.
+   *
+   * Recorded here and used by nothing yet — deliberately. It is the key that
+   * anything shared between two READERS has to be keyed on, because `bookId`
+   * says "this exact file" and two people almost never hold the same bytes. It
+   * is captured now because it cannot be recovered from storage later: getting
+   * it back means re-opening every book on the shelf.
+   */
+  readonly workId: string | null
 }
 
 export const LIBRARY_STORAGE_KEY = 'paper.library.v1'
@@ -126,7 +136,10 @@ export function rememberPosition(
  *   - A non-finite `lastOpened` sorts unpredictably against every other row,
  *     so one bad entry scrambles a recency list that has nothing wrong with it.
  */
-type StoredRow = Omit<LibraryEntry, 'position'> & { readonly position?: unknown }
+type StoredRow = Omit<LibraryEntry, 'position' | 'workId'> & {
+  readonly position?: unknown
+  readonly workId?: unknown
+}
 
 function isEntry(value: unknown): value is StoredRow {
   if (typeof value !== 'object' || value === null) return false
@@ -155,6 +168,11 @@ function isEntry(value: unknown): value is StoredRow {
  * were — and that is what null already says.
  */
 function readPosition(value: unknown): string | null {
+  return typeof value === 'string' && value !== '' ? value : null
+}
+
+/** Same rule, same reason: absent means "we do not know", which is null. */
+function readWorkId(value: unknown): string | null {
   return typeof value === 'string' && value !== '' ? value : null
 }
 
@@ -218,5 +236,9 @@ export function parseLibrary(raw: string | null): LibraryEntry[] {
   if (!Array.isArray(parsed)) return []
   return parsed
     .filter(isEntry)
-    .map((row) => ({ ...row, position: readPosition(row.position) }))
+    .map((row) => ({
+      ...row,
+      position: readPosition(row.position),
+      workId: readWorkId(row.workId),
+    }))
 }

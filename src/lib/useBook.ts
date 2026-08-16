@@ -38,6 +38,17 @@ export interface ReaderPosition {
 export interface BookMeta {
   readonly title: string
   readonly author: string
+  /**
+   * The WORK's own identifier, as the book declares it — `dc:identifier` in an
+   * EPUB's OPF, usually a UUID or an ISBN. Empty when the book declares none.
+   *
+   * Distinct from `bookId`, and both are needed. `bookId` is derived from the
+   * bytes and says "this exact file"; this says "this book, whoever's copy".
+   * Anything shared between two people has to key on the second, because two
+   * readers almost never hold byte-identical files — and foliate has been
+   * parsing it all along while `readMeta` discarded it.
+   */
+  readonly identifier: string
 }
 
 /** A File when picked or dropped; a URL for a book already on disk. */

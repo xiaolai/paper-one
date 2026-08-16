@@ -1,4 +1,5 @@
 import { useCallback, useMemo } from 'react'
+import { rekeyBook } from './idMigration'
 import { upsertOverlapping } from './markMatch'
 import {
   createMark,
@@ -36,6 +37,14 @@ export interface MarkStore {
   add: (draft: NewMark) => Mark
   remove: (id: string) => void
   setNote: (id: string, note: string) => void
+  /**
+   * Move every row from a superseded book id onto the current one.
+   *
+   * A no-op unless the reader has rows written under the previous identity
+   * scheme — see `idMigration`. Called on open rather than at load, because the
+   * old id can only be recomputed from the file itself.
+   */
+  rekey: (from: string, to: string) => void
 }
 
 export function useMarks(bookId: string | null, storage = localStore()): MarkStore {
@@ -73,8 +82,21 @@ export function useMarks(bookId: string | null, storage = localStore()): MarkSto
 
   const current = useMemo(() => marksForBook(marks, bookId), [marks, bookId])
 
+
+  /* `apply` persists whatever the mutation returns even when nothing changed,
+   * and this runs on every open — so the guard is here, reading the identity
+   * `rekeyBook` returns when it found nothing to move. */
+  const rekey = useCallback(
+    (from: string, to: string) =>
+      apply((prev) => {
+        const next = rekeyBook(prev, from, to)
+        return next === prev ? prev : [...next]
+      }),
+    [apply],
+  )
+
   return useMemo<MarkStore>(
-    () => ({ all: marks, current, persistent, add, remove, setNote }),
-    [marks, current, persistent, add, remove, setNote],
+    () => ({ all: marks, current, persistent, add, remove, setNote, rekey }),
+    [marks, current, persistent, add, remove, setNote, rekey],
   )
 }

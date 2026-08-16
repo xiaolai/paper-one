@@ -14,6 +14,8 @@ function mark(over: Partial<Mark> = {}): Mark {
     cfi: 'epubcfi(/6/4!/4/2,/1:5,/1:12)',
     sectionIndex: 0,
     text: 'Ishmael',
+    prefix: '',
+    suffix: '',
     note: '',
     kind: 'highlight',
     chapter: 'Ch. 1',

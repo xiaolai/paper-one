@@ -11,6 +11,7 @@ import type { BookMeta, ReaderPosition } from '../lib/useBook'
 import { deferSnap } from './wordSnap/deferredSnap'
 import { watchGestureProvenance } from './wordSnap/gestureProvenance'
 import { createReflowGuard } from './wordSnap/invalidate'
+import { markContext } from './wordSnap/markContext'
 import { rangeText } from './wordSnap/rangeText'
 
 /**
@@ -57,6 +58,15 @@ export interface SelectionSnapshot {
   readonly cfi: string
   readonly sectionIndex: number
   readonly text: string
+  /**
+   * The text on either side of the selection — see `markContext`.
+   *
+   * Read HERE, from the live range, because this is the only place it exists.
+   * By the time a mark is stored the range is gone, and recovering the context
+   * from a stored mark means re-opening the book and resolving its CFI.
+   */
+  readonly prefix: string
+  readonly suffix: string
   /** In the BOOK document's coordinate space — translate before use. */
   readonly range: Range
 }
@@ -663,7 +673,15 @@ export class ReaderSession {
         return
       }
       this.#selectionOwner = doc
-      this.#cb.onSelection({ cfi: view.getCFI(index, live), sectionIndex: index, text, range: live })
+      const context = markContext(live)
+      this.#cb.onSelection({
+        cfi: view.getCFI(index, live),
+        sectionIndex: index,
+        text,
+        prefix: context.prefix,
+        suffix: context.suffix,
+        range: live,
+      })
     }
 
     const publishLive = () => publish(selectionOf())
@@ -1188,5 +1206,11 @@ export function readMeta(book: { metadata?: unknown }): BookMeta {
     }
     return ''
   }
-  return { title: text(md['title']), author: text(md['author']) }
+  return {
+    title: text(md['title']),
+    author: text(md['author']),
+    // Loosely typed like the rest: foliate resolves the OPF's unique-identifier
+    // and hands back a string, but a malformed package can put anything here.
+    identifier: typeof md['identifier'] === 'string' ? md['identifier'] : '',
+  }
 }

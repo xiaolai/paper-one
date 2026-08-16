@@ -1,4 +1,5 @@
 import { useCallback, useMemo, useRef } from 'react'
+import { rekeyBook } from './idMigration'
 import {
   LIBRARY_STORAGE_KEY,
   byRecency,
@@ -25,6 +26,8 @@ export interface Library {
   remember: (bookId: string, position: string) => void
   /** The saved position for a book, or null. Stable across renders. */
   positionOf: (bookId: string | null) => string | null
+  /** Move a row from a superseded book id — see `idMigration`. */
+  rekey: (from: string, to: string) => void
 }
 
 export function useLibrary(storage = localStore()): Library {
@@ -87,12 +90,21 @@ export function useLibrary(storage = localStore()): Library {
     [apply],
   )
 
+  const rekey = useCallback(
+    (from: string, to: string) =>
+      apply((prev) => {
+        const next = rekeyBook(prev, from, to)
+        return next === prev ? prev : [...next]
+      }),
+    [apply],
+  )
+
   /* `forget` was published here and nothing called it: there is no affordance
    * anywhere for removing a book from the shelf, so this was an API waiting for
    * a button. It comes back with the button, tested against what that button
    * actually needs rather than against what seemed likely in advance. */
   return useMemo<Library>(
-    () => ({ books, record, remember, positionOf }),
-    [books, record, remember, positionOf],
+    () => ({ books, record, remember, positionOf, rekey }),
+    [books, record, remember, positionOf, rekey],
   )
 }
