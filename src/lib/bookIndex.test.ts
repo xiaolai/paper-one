@@ -256,3 +256,28 @@ describe('a cache from before the flag existed', () => {
     expect((await loadShelf(fs)).rescanned).toBe(false)
   })
 })
+
+/**
+ * A stored id is trusted only where it lives.
+ *
+ * Carrying a book onto a new id renames its directory atomically and stamps the
+ * record afterwards, and the second step can fail on its own — leaving a record
+ * claiming an id that resolves to a folder that is not there. The directory
+ * wins, so the next write stamps it straight and nothing points at nothing.
+ */
+describe('a record whose id does not match its folder', () => {
+  it('takes the id from the directory it is in', async () => {
+    const fs = fakeFs({
+      [`${BOOKS_DIR}/book_new/book.json`]: '{"bookId":"book:old","title":"Moby-Dick","author":"M"}',
+    })
+    const books = await scanBooks(fs)
+    expect(books[0]?.bookId).toBe('book_new')
+  })
+
+  it('keeps a stored id that does resolve to its folder', async () => {
+    const fs = fakeFs({
+      [`${BOOKS_DIR}/book_abc/book.json`]: '{"bookId":"book:abc","title":"Moby-Dick","author":"M"}',
+    })
+    expect((await scanBooks(fs))[0]?.bookId).toBe('book:abc')
+  })
+})

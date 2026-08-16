@@ -42,8 +42,13 @@ import { writeQueue } from './writeQueue'
  * happen creates the second folder the move existed to prevent, and every later
  * attempt then stops because the destination exists. A failure has to stop the
  * add, so the next open can try again.
+ *
+ * `occupied` matters for a different reason: the book exists under BOTH ids and
+ * neither is going to move. The other stores must then leave the old copy alone
+ * rather than migrating their half of it, or the same mark ends up in two
+ * folders under one id and no read of either is authoritative.
  */
-export type RekeyOutcome = 'moved' | 'nothing' | 'failed'
+export type RekeyOutcome = 'moved' | 'nothing' | 'occupied' | 'failed'
 
 export interface Library {
   readonly books: readonly IndexedBook[]
@@ -328,16 +333,25 @@ export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] =
     async (from: string, to: string): Promise<RekeyOutcome> => {
       if (from === to || !fs) return 'nothing'
       if (!latest.current.some((one) => one.bookId === from)) return 'nothing'
-      if (latest.current.some((one) => one.bookId === to)) return 'nothing'
-      let outcome: RekeyOutcome = 'nothing'
+      if (latest.current.some((one) => one.bookId === to)) return 'occupied'
+      let outcome = 'nothing' as RekeyOutcome
       try {
         await queue.current.append(from, async () => {
-          // Occupied, or already gone. Either way this is not ours to move.
-          if (await fs.exists(folderOf(to))) return
+          if (await fs.exists(folderOf(to))) {
+            outcome = 'occupied'
+            return
+          }
+          // Already gone — nothing here to carry anywhere.
           if (!(await fs.exists(folderOf(from)))) return
           await fs.rename(folderOf(from), folderOf(to))
           // Stamped with the id it now lives under; the record still names the
           // folder it came from until this runs.
+          /* THE RENAME IS THE MIGRATION. Everything after it is bookkeeping on
+           * a book that has already arrived, so nothing below may turn the
+           * answer back into a failure — the caller would then decline to add a
+           * book that is sitting there under its new name. `scanBooks` trusts a
+           * stored id only when it names the folder it is in, which is what
+           * makes the stamp below safe to lose. */
           outcome = 'moved'
           const moved = await readBook(fs, to)
           if (moved) await writeBook(fs, to, moved)
@@ -358,7 +372,9 @@ export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] =
          * which is what `failed` is for. A permissions refusal is enough to get
          * here; it needs no crash and no fault. */
         console.error('Paper: could not carry that book onto its new id', cause)
-        return 'failed'
+        // Only if the rename itself did not happen. Past that the book HAS
+        // moved, whatever else went wrong afterwards.
+        return outcome === 'moved' ? 'moved' : 'failed'
       }
       return outcome
     },

@@ -119,12 +119,19 @@ export async function scanBooks(fs: IndexFs): Promise<IndexedBook[]> {
       const bytes = await fs.readFile(`${BOOKS_DIR}/${entry.name}/book.json`)
       const record = parseRecord(new TextDecoder().decode(bytes))
       if (!record) continue
-      /* THE RECORD'S OWN ID, not the directory name. `safeId` is not reversible
-       * — `book:abc` is stored in `book_abc` — so taking the id from the folder
-       * renamed every book on any rescan, and marks are keyed by it. The folder
-       * name is the fallback for records written before the id was stored, which
-       * is the same wrong answer as before and no worse. */
-      const bookId = record.bookId || entry.name
+      /* THE RECORD'S OWN ID — but only when it names the folder it is sitting
+       * in. `safeId` is not reversible, so `book:abc` lives in `book_abc` and
+       * taking the id from the directory renamed every book on any rescan.
+       *
+       * The check matters because a folder can be renamed while its record is
+       * not: carrying a book onto a new id moves the directory atomically and
+       * stamps the record afterwards, and the second step can fail on its own.
+       * A record claiming an id that resolves somewhere else is describing a
+       * folder that is not there, so the directory wins and the next write
+       * stamps it straight. The folder name is also the fallback for a record
+       * written before the id was stored at all. */
+      const claimed = record.bookId
+      const bookId = claimed && folderOf(claimed) === `${BOOKS_DIR}/${entry.name}` ? claimed : entry.name
       /* WHETHER THERE ARE BYTES, derived here rather than stored. A record with
        * no content is a folder that is not a book yet — a half-written import,
        * or a migrated row whose copy never existed — and the shelf has to be

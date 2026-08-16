@@ -118,9 +118,24 @@ export function App({ storage, fs, initialBooks }: AppProps) {
    * reappeared as if the click had been ignored. Nothing else can see that: the
    * effect's inputs do not change when a row is removed.
    */
-  const removedWhileOpen = useRef(new Set<string>())
-  /** Which source the marker above was last cleared for — see the intake effect. */
-  const clearedFor = useRef<File | string | null>(null)
+  /**
+   * Books the reader took off the shelf, and WHEN — as a count of removals
+   * rather than a clock, because only the order matters.
+   *
+   * Intake writes the bytes and then the record, with awaits in between, and a
+   * removal landing in that gap used to put the book straight back: the row
+   * reappeared as if the click had been ignored. Nothing else can see that,
+   * because the effect's inputs do not change when a row is removed.
+   *
+   * A TICK RATHER THAN A FLAG THAT GETS CLEARED. Clearing was the trap: the
+   * marker for a book removed under its legacy id could only be cleared after
+   * hashing the file, and a removal made during that hash was then cleared by
+   * it. Comparing counts asks the question that actually matters — did a removal
+   * happen AFTER this intake started — and needs nothing cleared, since one made
+   * before it is the reader opening the book again.
+   */
+  const removedWhileOpen = useRef(new Map<string, number>())
+  const removals = useRef(0)
 
   const openBook = useCallback(
     (source: File | string, path: string | null = null) => {
@@ -448,7 +463,8 @@ export function App({ storage, fs, initialBooks }: AppProps) {
    */
   const removeBook = useCallback(
     (entry: IndexedBook) => {
-      removedWhileOpen.current.add(entry.bookId)
+      removals.current += 1
+      removedWhileOpen.current.set(entry.bookId, removals.current)
       remove(entry.bookId)
     },
     [remove],
@@ -467,6 +483,14 @@ export function App({ storage, fs, initialBooks }: AppProps) {
    * simply not on the shelf yet — `scanBooks` skips it — and the next open of
    * the same file finishes the job. The reverse is a row that cannot open.
    */
+  /* The three halves of the identity migration are carried out TOGETHER, by
+   * the intake effect above, in one order. This used to be a second effect
+   * running beside it, and the two raced: the library's half renames a
+   * directory and the other two rewrite ids inside whatever directory the book
+   * ends up in, so only one of the two interleavings produced a whole book. */
+  const { rekey: rekeyMarks } = marks
+  const { rekey: rekeyCards } = cards
+
   useEffect(() => {
     if (!bookId || !meta) return
     /* CLEARED FOR THIS BOOK, ONCE PER OPEN.
@@ -476,11 +500,11 @@ export function App({ storage, fs, initialBooks }: AppProps) {
      * unconditionally there undid a removal made in the seconds between opening
      * a book and it finishing parsing. A fresh open produces a new `File`, or a
      * different path, so identity is exactly the right test. */
-    const freshOpen = clearedFor.current !== source
-    if (freshOpen) {
-      removedWhileOpen.current.delete(bookId)
-      clearedFor.current = source
-    }
+    /* Captured SYNCHRONOUSLY, before anything can await. Everything below asks
+     * whether a removal arrived after this point. */
+    const startedAt = removals.current
+    const removedSince = (...ids: readonly string[]): boolean =>
+      ids.some((id) => (removedWhileOpen.current.get(id) ?? 0) > startedAt)
     let cancelled = false
     void (async () => {
       /* THE IDENTITY MIGRATION FIRST, and awaited, which is the whole reason it
@@ -492,29 +516,47 @@ export function App({ storage, fs, initialBooks }: AppProps) {
        * A book stored under the previous scheme only. `legacyBookIdFor` returns
        * the same id for everything since, and `rekeyBook` returns immediately
        * when it does. */
+      /* CARRY THE READER'S EXISTING WORK ACROSS FIRST, in one place and in one
+       * order, because the three halves of it cannot be independent.
+       *
+       * `bookIdFor` hashes content now rather than a file's ends, so everything
+       * stored under the previous scheme is filed under an id nothing will
+       * compute again. The library's half is a DIRECTORY RENAME and the other
+       * two are id rewrites inside whatever directory the book ends up in — so
+       * the rename has to finish before they run. Left as separate effects they
+       * raced, and only one of the two interleavings produced a whole book:
+       * marks migrated into a folder that was about to be renamed over them, or
+       * a folder renamed out from under a migration still reading it.
+       */
       let legacy = bookId
       try {
         if (source) legacy = await legacyBookIdFor(source)
-        if (legacy !== bookId && (await rekeyBook(legacy, bookId)) === 'failed') {
-          /* STOP. Adding the book under its new id now would create the second
-           * folder the move exists to prevent — and every later attempt would
-           * then find the destination occupied and give up. Left alone, the book
-           * keeps the id it has and the next open tries again. */
-          return
-        }
       } catch (cause) {
         console.error('Paper: could not check the legacy book id', cause)
       }
-      // The legacy id is cleared for a deliberate open too, or a removal made
-      // under the old id would block the book under its new one forever.
-      if (freshOpen) removedWhileOpen.current.delete(legacy)
+      if (legacy !== bookId) {
+        const carried = await rekeyBook(legacy, bookId)
+        /* STOP. Adding the book under its new id after a move that did not
+         * happen creates the second folder the move exists to prevent — and
+         * every later attempt then finds the destination occupied and gives up.
+         * Left alone, the book keeps the id it has and the next open retries. */
+        if (carried === 'failed') return
+        /* OCCUPIED means the book exists under both ids and neither is moving.
+         * The other stores must leave the old copy alone rather than migrating
+         * their half of it, or the same mark ends up in two folders under one id
+         * and neither read of it is authoritative. */
+        if (carried !== 'occupied') {
+          rekeyMarks(legacy, bookId)
+          rekeyCards(legacy, bookId)
+        }
+      }
       /* THE LEGACY ID COUNTS AS THIS BOOK. `removeBook` records whatever id the
        * ROW carried, which for a book stored under the previous scheme is the
        * legacy one — so checking only the newly computed id meant removing a
        * book while it was still parsing put it back under a different name,
        * with the tags and marks it owned left in the old id's trash entry for
        * the sweep. */
-      if (cancelled || removedWhileOpen.current.has(legacy)) return
+      if (cancelled || removedSince(bookId, legacy)) return
       if (source instanceof File && fs) {
         try {
           const at = contentPathIn(bookId, source.name)
@@ -552,11 +594,7 @@ export function App({ storage, fs, initialBooks }: AppProps) {
          * position and marks — before `trashBook` has moved anything, so there
          * is no copy to recover. A stray file is worth incomparably less than
          * the chance of that. */
-        if (
-          (removedWhileOpen.current.has(bookId) || removedWhileOpen.current.has(legacy)) &&
-          fs &&
-          source instanceof File
-        ) {
+        if (removedSince(bookId, legacy) && fs && source instanceof File) {
           const at = contentPathIn(bookId, source.name)
           if (!(await fs.exists(recordPath(bookId)))) await fs.remove(at).catch(() => {})
           return
@@ -593,7 +631,7 @@ export function App({ storage, fs, initialBooks }: AppProps) {
     return () => {
       cancelled = true
     }
-  }, [bookId, meta, source, add, openedPath, fs, rekeyBook])
+  }, [bookId, meta, source, add, openedPath, fs, rekeyBook, rekeyMarks, rekeyCards])
 
 
   /* File the book's own jacket, once.
@@ -685,41 +723,6 @@ export function App({ storage, fs, initialBooks }: AppProps) {
      * reading. */
     saver.current?.record(bookId, cfi, fraction)
   }, [bookId, cfi, fraction])
-
-  /* Carry a reader's existing work across the change of book identity.
-   *
-   * `bookIdFor` now hashes content rather than a file's ends, and reads a URL
-   * rather than trusting its address — so everything already stored is filed
-   * under an id nothing will compute again. The old id cannot be derived from
-   * the new one, only recomputed from the same source, which is why this runs
-   * on open rather than at load and why a book never reopened keeps its rows
-   * under the legacy id until it is.
-   *
-   * Every store returns its collection unchanged when there is nothing to move,
-   * so all but the first open of each book costs one comparison.
-   */
-  const { rekey: rekeyMarks } = marks
-  const { rekey: rekeyCards } = cards
-  useEffect(() => {
-    if (!bookId || !source) return
-    let live = true
-    void legacyBookIdFor(source)
-      .then((legacy) => {
-        if (!live || legacy === bookId) return
-        rekeyMarks(legacy, bookId)
-        rekeyCards(legacy, bookId)
-        /* The LIBRARY is rekeyed by the intake effect above, not here, because
-         * it has to happen BEFORE the book is added under its new id and this
-         * effect cannot promise that. Marks and cards have no such constraint:
-         * they merge rather than rename, so arriving late costs nothing. */
-      })
-      .catch((cause: unknown) => {
-        console.error('Paper: could not check the legacy book id', cause)
-      })
-    return () => {
-      live = false
-    }
-  }, [bookId, source, rekeyMarks, rekeyCards])
 
   const commands = useMemo(
     () =>
