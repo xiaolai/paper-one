@@ -456,6 +456,22 @@ describe('two rows that want the same folder', () => {
     expect(out[1]?.reason).toContain('collides')
   })
 
+  /* The default macOS volume is case-insensitive, so two names differing only
+   * in case are ONE directory. Comparing them verbatim distinguished names the
+   * filesystem does not, and let the collision straight through. */
+  it('catches one that only the filesystem would fold', async () => {
+    const fs = fakeFs({ 'books/one.epub': 'A', 'books/two.epub': 'B' })
+    const out = await migrateToFolders(fs, {
+      rows: [
+        row({ bookId: 'url:x/A', vault: 'books/one.epub', cover: null }),
+        row({ bookId: 'url:x/a', vault: 'books/two.epub', cover: null }),
+      ],
+      marks: [],
+    })
+    expect(out[0]?.status).toBe('migrated')
+    expect(out[1]?.status).toBe('failed')
+  })
+
   it('does not mistake a row for a collision with itself on a re-run', async () => {
     const fs = fakeFs(legacy)
     await migrateToFolders(fs, { rows: [row(), row()], marks: [] })

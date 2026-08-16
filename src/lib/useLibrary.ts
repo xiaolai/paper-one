@@ -56,6 +56,14 @@ export interface Library {
   untag: (bookId: string, tag: string) => void
   /** The saved position for a book, or null. Stable across renders. */
   positionOf: (bookId: string | null) => string | null
+  /**
+   * Carry a book onto a new id, for the lazy identity migration.
+   *
+   * Resolves when it is done, so a caller can order it BEFORE adding the book
+   * under its new id — which is the difference between a migration and a
+   * duplicate.
+   */
+  rekeyBook: (from: string, to: string) => Promise<void>
 }
 
 /** One file as text, or null when it is not there or will not read. */
@@ -284,6 +292,62 @@ export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] =
     [commit, reconcile],
   )
 
+  /**
+   * Move a book onto a new id: ONE rename, and deliberately nothing else.
+   *
+   * `bookIdFor` hashes content now rather than a file's ends, so every book
+   * stored under the previous scheme computes a different id the first time it
+   * is opened. Marks and cards already migrate themselves there. The library
+   * could not, because a book's id names its DIRECTORY — and so opening a
+   * migrated book added a second row for it, without the tags or the position
+   * held by the first, and the reader's work sat on a shelf entry pointing at
+   * the old folder.
+   *
+   * An earlier attempt at this read, merged, renamed and trashed, and was the
+   * most dangerous code on the branch — every one of those steps can fail on its
+   * own and leave a book half moved. This does one thing instead. A rename
+   * within a filesystem is atomic: the record, the content and the marks arrive
+   * together or none of them do, and there is no partial state to reason about.
+   *
+   * NOTHING IS DELETED, at any point, by anything here. If the destination is
+   * occupied the move is abandoned and both books are left exactly as they are —
+   * a duplicate row is a visible annoyance, and it is the correct outcome to
+   * prefer over any amount of cleverness with somebody's library.
+   */
+  const rekeyBook = useCallback(
+    async (from: string, to: string): Promise<void> => {
+      if (from === to || !fs) return
+      if (!latest.current.some((one) => one.bookId === from)) return
+      if (latest.current.some((one) => one.bookId === to)) return
+      try {
+        await queue.current.append(from, async () => {
+          // Occupied, or already gone. Either way this is not ours to move.
+          if (await fs.exists(folderOf(to))) return
+          if (!(await fs.exists(folderOf(from)))) return
+          await fs.rename(folderOf(from), folderOf(to))
+          // Stamped with the id it now lives under; the record still names the
+          // folder it came from until this runs.
+          const moved = await readBook(fs, to)
+          if (moved) await writeBook(fs, to, moved)
+          const at = latest.current.findIndex((one) => one.bookId === from)
+          if (at === -1) return
+          const next = [...latest.current]
+          next[at] = { ...latest.current[at]!, bookId: to }
+          latest.current = next
+          setBooks(next)
+          await queue.current.push('index', async () => {
+            await writeIndex(fs, latest.current)
+          })
+        })
+      } catch (cause) {
+        /* Reported and survivable: the book keeps its old id, which is the state
+         * it was in a moment ago and one every later open tries again from. */
+        console.error('Paper: could not carry that book onto its new id', cause)
+      }
+    },
+    [fs],
+  )
+
   const remove = useCallback(
     (bookId: string) => {
       const list = latest.current.filter((one) => one.bookId !== bookId)
@@ -333,7 +397,7 @@ export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] =
   )
 
   return useMemo<Library>(
-    () => ({ books, add, update, remove, tag, untag, positionOf }),
-    [books, add, update, remove, tag, untag, positionOf],
+    () => ({ books, add, update, remove, tag, untag, positionOf, rekeyBook }),
+    [books, add, update, remove, tag, untag, positionOf, rekeyBook],
   )
 }

@@ -144,7 +144,7 @@ export function App({ storage, fs, initialBooks }: AppProps) {
       })
   }, [openBook])
 
-  const { add, update, remove, positionOf } = library
+  const { add, update, remove, positionOf, rekeyBook } = library
 
   /**
    * Put what an import produced onto the shelf.
@@ -482,6 +482,21 @@ export function App({ storage, fs, initialBooks }: AppProps) {
     }
     let cancelled = false
     void (async () => {
+      /* THE IDENTITY MIGRATION FIRST, and awaited, which is the whole reason it
+       * lives here rather than in its own effect. `add` below creates the folder
+       * for the NEW id, and `rekeyBook` abandons the move when that folder is
+       * already there — so run as a separate effect the two raced, and losing
+       * the race meant a permanent duplicate row rather than a moved book.
+       *
+       * A book stored under the previous scheme only. `legacyBookIdFor` returns
+       * the same id for everything since, and `rekeyBook` returns immediately
+       * when it does. */
+      try {
+        if (source) await rekeyBook(await legacyBookIdFor(source), bookId)
+      } catch (cause) {
+        console.error('Paper: could not check the legacy book id', cause)
+      }
+      if (cancelled) return
       if (source instanceof File && fs) {
         try {
           const at = contentPathIn(bookId, source.name)
@@ -556,7 +571,7 @@ export function App({ storage, fs, initialBooks }: AppProps) {
     return () => {
       cancelled = true
     }
-  }, [bookId, meta, source, add, openedPath, fs])
+  }, [bookId, meta, source, add, openedPath, fs, rekeyBook])
 
 
   /* File the book's own jacket, once.
@@ -671,18 +686,10 @@ export function App({ storage, fs, initialBooks }: AppProps) {
         if (!live || legacy === bookId) return
         rekeyMarks(legacy, bookId)
         rekeyCards(legacy, bookId)
-        /* THE LIBRARY IS STILL NOT REKEYED, and this is a KNOWN GAP rather
-         * than a decision that is finished. A book's id names its folder, so
-         * carrying it across is a directory rename — and a rename that has to
-         * fold two records, survive a partial failure, and not race the marks
-         * being migrated out of the same folder is a migration, not a line in an
-         * effect. Written as one during an audit round it was the most dangerous
-         * code on the branch, so it was taken back out.
-         *
-         * What the reader sees until it is done properly: opening a book stored
-         * under the previous id scheme adds a SECOND row, without the tags or
-         * the position held by the first. Nothing is lost — the old row and its
-         * folder are untouched — but the shelf shows the book twice. */
+        /* The LIBRARY is rekeyed by the intake effect above, not here, because
+         * it has to happen BEFORE the book is added under its new id and this
+         * effect cannot promise that. Marks and cards have no such constraint:
+         * they merge rather than rename, so arriving late costs nothing. */
       })
       .catch((cause: unknown) => {
         console.error('Paper: could not check the legacy book id', cause)

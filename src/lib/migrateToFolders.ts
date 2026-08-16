@@ -168,7 +168,11 @@ export async function migrateToFolders(
   for (const row of rows) {
     const bookId = typeof row.bookId === 'string' ? row.bookId : ''
     if (!bookId) continue
-    const folder = folderOf(bookId)
+    /* FOLDED, because the default macOS volume is case-insensitive: `url_x_A`
+     * and `url_x_a` are two strings and one directory. Comparing them verbatim
+     * distinguished names the filesystem does not, which let exactly the
+     * collision this check exists for through. */
+    const folder = folderOf(bookId).toLowerCase()
     const owner = claimed.get(folder)
     if (owner !== undefined && owner !== bookId) {
       outcomes.push({
