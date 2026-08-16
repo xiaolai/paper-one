@@ -268,3 +268,36 @@ describe('restoring when something is in the way', () => {
     expect(fs.store.has(`${trashOf('book_a')}/marks.json`)).toBe(true)
   })
 })
+
+/**
+ * A partial restore has to be retried, or its leftovers are deleted for it.
+ *
+ * `restoreBook` leaves behind what it could not move. The caller attempted it
+ * only when the book was absent from the shelf, so the first attempt was also
+ * the last: the row existed afterwards, nothing looked at the trash again, and
+ * the sweep cleared it a fortnight later.
+ */
+describe('finishing a restore that could not finish before', () => {
+  it('moves what was left once the obstruction is gone', async () => {
+    const fs = fakeFs(shelved())
+    await trashBook(fs, 'book_a')
+    fs.store.set(`${folderOf('book_a')}/marks.json`, new TextEncoder().encode('[]'))
+    await restoreBook(fs, 'book_a')
+    expect(fs.store.has(`${trashOf('book_a')}/marks.json`)).toBe(true)
+
+    // The live file goes away — a failed write cleaned up, say — and a later
+    // add tries again.
+    fs.store.delete(`${folderOf('book_a')}/marks.json`)
+    expect(await restoreBook(fs, 'book_a')).toBe(true)
+    expect(new TextDecoder().decode(fs.store.get(`${folderOf('book_a')}/marks.json`)!)).toContain(
+      'x',
+    )
+    expect([...fs.store.keys()].some((k) => k.startsWith(`${trashOf('book_a')}/`))).toBe(false)
+  })
+
+  it('is a no-op when there is nothing in the trash', async () => {
+    const fs = fakeFs(shelved())
+    expect(await restoreBook(fs, 'book_a')).toBe(false)
+    expect(fs.store.has(`${folderOf('book_a')}/book.json`)).toBe(true)
+  })
+})

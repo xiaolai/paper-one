@@ -276,3 +276,38 @@ describe('a write racing a removal', () => {
     expect((await readBook(fs, 'book_a'))?.finished).toBe(true)
   })
 })
+
+/**
+ * A reading position is a path through the document, not prose.
+ *
+ * It shared the 4000-character bound with titles and author names, and `text`
+ * SLICES at its bound — so a CFI past it came back shortened, which parses as
+ * nothing. Worse, the shortened value survived the next merge and was written
+ * back over the complete one: the position was destroyed by being read.
+ */
+describe('a very long reading position', () => {
+  const cfi = (length: number) => `epubcfi(/6/14!/4/2/${'2/'.repeat(length)}1:0)`
+
+  it('survives a round trip well past the length of ordinary text', async () => {
+    const fs = fakeFs()
+    const long = cfi(2000)
+    expect(long.length).toBeGreaterThan(4000)
+    await writeBook(fs, 'book_a', { title: 'T', author: 'A', position: long })
+    expect((await readBook(fs, 'book_a'))?.position).toBe(long)
+  })
+
+  /* Past the bound it is DROPPED, not cut. A book that opens at the beginning
+   * is a book the reader can navigate; one that opens at a corrupted anchor is
+   * a bug report. */
+  it('is dropped rather than truncated when it is absurd', async () => {
+    const fs = fakeFs()
+    await writeBook(fs, 'book_a', { title: 'T', author: 'A', position: 'x'.repeat(70_000) })
+    expect((await readBook(fs, 'book_a'))?.position).toBeUndefined()
+  })
+
+  it('still keeps an ordinary one', async () => {
+    const fs = fakeFs()
+    await writeBook(fs, 'book_a', { title: 'T', author: 'A', position: 'epubcfi(/6/14)' })
+    expect((await readBook(fs, 'book_a'))?.position).toBe('epubcfi(/6/14)')
+  })
+})

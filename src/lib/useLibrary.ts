@@ -178,8 +178,16 @@ export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] =
          * the bytes, so re-adding a book Paper had removed lands on the same
          * folder name — and its tags, position and marks are still in there.
          * Writing a fresh record over the top would throw them away at the exact
-         * moment content-derived identity was about to hand them back. */
-        if (at === -1) await restoreBook(target as never, bookId)
+         * moment content-derived identity was about to hand them back.
+         *
+         * ATTEMPTED EVERY TIME, not only when the row was missing. `restoreBook`
+         * moves file by file and leaves behind anything it could not move, so a
+         * restore CAN be partial — and gating this on the row being absent meant
+         * the first attempt was also the last: the row existed afterwards, the
+         * leftovers were never retried, and the trash sweep deleted them a
+         * fortnight later. It is a cheap no-op when the trash is empty, which is
+         * the ordinary case. */
+        await restoreBook(target as never, bookId)
         /* MERGED INTO WHAT IS ON DISK, ALWAYS — not only when the row was
          * missing. The in-memory copy comes from an index that `loadShelf` will
          * knowingly trust while it is one write behind, so folding the parse

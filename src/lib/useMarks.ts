@@ -92,14 +92,25 @@ export function useMarks(bookId: string | null, fs: IndexFs | null): MarkStore {
    * passages in a second had three writes racing for one temporary file. */
   const queue = useRef(writeQueue())
 
+  /** Which book is open, for tasks that finish after a render. */
+  const openRef = useRef(bookId)
+  openRef.current = bookId
+
   useEffect(() => {
     if (!bookId || !fs) {
       setLoaded({ bookId: null, marks: [] })
       return
     }
     let live = true
-    void readMarks(fs, bookId)
-      .then((raw) => {
+    /* THE READ GOES ON THE QUEUE TOO, which is the point rather than a detail.
+     * A highlight made before this lands is written as a change and reaches the
+     * file first; an unqueued read then returned the file as it was BEFORE that
+     * change and installed it as the open book's list, so the next highlight
+     * wrote a snapshot without the first one in it. Ordering the read against
+     * the writes is what makes the answer it gets the current answer. */
+    void queue.current
+      .append(bookId, async () => {
+        const raw = await readMarks(fs, bookId)
         // Parsed through the same validator the shared store used: this is a
         // file on disk, and a mark with no CFI cannot be drawn.
         if (live) setLoaded({ bookId, marks: parseMarks(JSON.stringify(raw)) })
@@ -209,6 +220,15 @@ export function useMarks(bookId: string | null, fs: IndexFs | null): MarkStore {
           if (next === before) return
           await writeMarks(fs, targetId, next)
           setAll((prev) => [...next, ...prev.filter((mark) => mark.bookId !== targetId)])
+          /* AND THE OPEN BOOK'S OWN LIST, when this is that book. It is, every
+           * time `apply` routes here because the file has not been read yet —
+           * and leaving the list behind meant the mark just made was missing
+           * from it, so the NEXT mark wrote a snapshot that erased the first.
+           * The path added to stop a mark being lost was losing one. */
+          if (openRef.current === targetId) {
+            latest.current = next
+            setLoaded({ bookId: targetId, marks: next })
+          }
         })
         .catch((cause: unknown) => {
           console.error('Paper: could not save that book\'s marks', cause)

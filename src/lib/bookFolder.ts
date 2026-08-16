@@ -102,6 +102,17 @@ export const contentPathIn = (bookId: string, name: string): string =>
 
 const MAX_FIELD = 500
 const MAX_LONG = 4000
+/**
+ * The bound for a reading position, which is DROPPED past it rather than cut.
+ *
+ * A CFI is a path through a document and truncating one does not produce a
+ * shorter position, it produces a broken string that parses as nothing. Worse,
+ * the truncated value survived the next merge and was written back over the
+ * complete one, so a position long enough to trip this was destroyed by being
+ * read. Generous enough that no real CFI reaches it, and a bound rather than
+ * none because this parses a file a reader can edit.
+ */
+const MAX_POSITION = 64_000
 const MAX_LIST = 64
 
 const text = (v: unknown, limit = MAX_FIELD): string | undefined =>
@@ -152,7 +163,15 @@ export function parseRecord(raw: string | null): BookRecord | null {
     ...(list(r['languages']) ? { languages: list(r['languages'])! } : {}),
     ...(list(r['subjects']) ? { subjects: list(r['subjects'])! } : {}),
     ...(list(r['tags']) ? { tags: list(r['tags'])! } : {}),
-    ...(text(r['position'], MAX_LONG) ? { position: text(r['position'], MAX_LONG)! } : {}),
+    /* NOT `text`, which SLICES. See `MAX_POSITION`: a shortened CFI is not a
+     * rougher position, it is a broken one, and it used to overwrite the good
+     * value on the next merge. Over the bound the field is dropped, so the book
+     * opens at the beginning — recoverable — instead of at a corrupted anchor. */
+    ...(typeof r['position'] === 'string' &&
+    r['position'] !== '' &&
+    r['position'].length <= MAX_POSITION
+      ? { position: r['position'] }
+      : {}),
     // Clamped, not merely checked finite: a hand-edited `progress: 4` would draw
     // a bar four times the width of its track.
     ...(num(r['progress']) === undefined
