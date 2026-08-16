@@ -1,11 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import type { VaultFs } from './bookVault'
 import {
-  COVERS_DIR,
   COVER_WIDTH,
-  coverPath,
   downscaleCover,
-  saveCover,
   scaledTo,
   type ImageOps,
 } from './coverArt'
@@ -20,30 +16,6 @@ import {
  * side needs the app.
  */
 
-function fakeFs() {
-  const files = new Map<string, Uint8Array>()
-  const dirs = new Set<string>()
-  const fs: VaultFs & { files: Map<string, Uint8Array>; dirs: Set<string> } = {
-    files,
-    dirs,
-    readFile: async (path) => files.get(path) ?? Promise.reject(new Error('missing')),
-    writeFile: async (path, bytes) => void files.set(path, bytes),
-    exists: async (path) => files.has(path),
-    mkdir: async (path) => void dirs.add(path),
-    remove: async (path) => void files.delete(path),
-    removeDir: async (path: string) => {
-      for (const key of [...files.keys()]) {
-        if (key === path || key.startsWith(`${path}/`)) files.delete(key)
-      }
-    },
-    rename: async (from, to) => {
-      const bytes = files.get(from)
-      if (bytes) files.set(to, bytes)
-      files.delete(from)
-    },
-  }
-  return fs
-}
 
 /** Records what it was asked to do, and whether the bitmap was released. */
 function fakeOps(over: { width?: number; height?: number; fail?: boolean } = {}) {
@@ -71,17 +43,6 @@ function fakeOps(over: { width?: number; height?: number; fail?: boolean } = {})
 
 const jacket = () => new Blob([new Uint8Array([9, 9, 9])], { type: 'image/png' })
 
-describe('coverPath', () => {
-  it('files a jacket under the book id', () => {
-    expect(coverPath('book:abc')).toBe(`${COVERS_DIR}/book_abc.jpg`)
-  })
-
-  /* The id comes back off a stored row, so a path segment built from one must
-   * not be able to contain a slash whatever it says. */
-  it('cannot be made to escape the directory', () => {
-    expect(coverPath('../../etc/passwd')).toBe(`${COVERS_DIR}/______etc_passwd.jpg`)
-  })
-})
 
 describe('scaledTo', () => {
   it('shrinks a publisher-sized jacket to shelf size, keeping the ratio', () => {
@@ -123,40 +84,3 @@ describe('downscaleCover', () => {
   })
 })
 
-describe('saveCover', () => {
-  it('writes the jacket and reports where it landed', async () => {
-    const fs = fakeFs()
-    const { ops } = fakeOps()
-    const path = await saveCover(fs, 'book:a', { getCover: async () => jacket() }, ops)
-    expect(path).toBe(`${COVERS_DIR}/book_a.jpg`)
-    expect(fs.files.has(`${COVERS_DIR}/book_a.jpg`)).toBe(true)
-    expect(fs.dirs.has(COVERS_DIR)).toBe(true)
-  })
-
-  /* Most PDFs, and the case the derived tint exists for. */
-  it('reports nothing for a book that declares no cover', async () => {
-    const fs = fakeFs()
-    const { ops } = fakeOps()
-    expect(await saveCover(fs, 'book:a', {}, ops)).toBeNull()
-    expect(await saveCover(fs, 'book:a', { getCover: async () => null }, ops)).toBeNull()
-    expect(fs.files.size).toBe(0)
-  })
-
-  it('reports nothing for an empty cover blob', async () => {
-    const fs = fakeFs()
-    const { ops } = fakeOps()
-    const empty = new Blob([], { type: 'image/png' })
-    expect(await saveCover(fs, 'book:a', { getCover: async () => empty }, ops)).toBeNull()
-  })
-
-  /* foliate's own extractor can throw on a malformed package. That is a book
-   * without a picture, not a book that failed to open. */
-  it('survives getCover throwing', async () => {
-    const fs = fakeFs()
-    const { ops } = fakeOps()
-    const book = {
-      getCover: () => Promise.reject(new Error('bad manifest')),
-    }
-    await expect(saveCover(fs, 'book:a', book, ops)).resolves.toBeNull()
-  })
-})

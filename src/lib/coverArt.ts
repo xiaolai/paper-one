@@ -4,11 +4,11 @@
  * The shelf drew a hash-derived colour with the title printed on it, and called
  * that a cover. foliate has exposed `book.getCover()` the whole time.
  *
- * THE BLOB DOES NOT GO IN THE STORE, and that is the constraint everything here
- * is shaped by. `library.json` is read whole, parsed whole and rewritten whole
- * on every position save — a book's jacket is tens of kilobytes, and forty of
- * them base64'd into that file would turn a page turn into a megabyte of
- * serialisation. So covers are files, and a row keeps a filename.
+ * THE BLOB IS NEVER STORED AS DATA, and that is the constraint everything here
+ * is shaped by. A jacket is tens of kilobytes; base64'd into a book's record it
+ * would be read and rewritten on every position save. So a cover is a FILE —
+ * `cover.webp` inside the book's own folder — and because that path is derived
+ * from the book's id, there is no field naming it and nothing to go stale.
  *
  * They are downscaled once, on the way in, rather than on the way out. A
  * publisher's jacket is routinely 1600px wide and the shelf draws it at a
@@ -17,9 +17,6 @@
  */
 
 import type { VaultFs } from './bookVault'
-
-/** Where jackets live, under the app's own data directory. */
-export const COVERS_DIR = 'covers'
 
 /**
  * Roughly twice the widest the shelf draws a cover.
@@ -39,14 +36,6 @@ export const COVER_WIDTH = 400
  */
 const COVER_TYPE = 'image/jpeg'
 const COVER_QUALITY = 0.82
-
-/** Where this book's jacket lives, relative to the app data directory. */
-export function coverPath(bookId: string): string {
-  // Same reduction `bookVault` applies, and for the same reason: the id comes
-  // back off a stored row, and a path segment built from one must not be able
-  // to contain a slash whatever it says.
-  return `${COVERS_DIR}/${bookId.replace(/[^a-zA-Z0-9]/g, '_')}.jpg`
-}
 
 /**
  * The browser bits this needs, injected so the decision logic can be tested.
@@ -116,31 +105,6 @@ export async function downscaleCover(
   } catch {
     return null
   }
-}
-
-/**
- * Take the jacket off a book and file it, returning where it landed.
- *
- * Null when the book declares no cover — most PDFs — or when it cannot be
- * decoded. The caller falls back to the derived tint, which is what the shelf
- * drew for everything before this existed and remains correct for a book that
- * genuinely has no artwork.
- */
-export async function saveCover(
-  fs: VaultFs,
-  bookId: string,
-  book: { getCover?: () => Promise<Blob | null> },
-  ops: ImageOps = browserImageOps,
-): Promise<string | null> {
-  if (typeof book.getCover !== 'function') return null
-  const raw = await book.getCover().catch(() => null)
-  if (!raw || raw.size === 0) return null
-  const small = await downscaleCover(raw, ops)
-  if (!small) return null
-  const path = coverPath(bookId)
-  await fs.mkdir(COVERS_DIR)
-  await fs.writeFile(path, new Uint8Array(await small.arrayBuffer()))
-  return path
 }
 
 /**

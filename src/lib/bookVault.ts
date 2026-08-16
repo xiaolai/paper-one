@@ -1,29 +1,14 @@
 /**
- * Paper's own copy of a book.
+ * The two things a book's bytes need, wherever they are kept.
  *
- * A reader picks a file from somewhere on their disk; Paper copies the bytes
- * into `$APPDATA/books/` and opens that copy from then on. The original is never
- * moved, never written to, and never deleted.
+ * This module OWNED the layout once — `books/<bookId>.<ext>` at the top level,
+ * with `ownBook` writing there and `vaultPath` naming it. A book is a folder
+ * now, so the layout moved to `bookFolder` and what is left here is the part
+ * that was never about layout: the filesystem seam, and the closed list of
+ * extensions a book may be stored under.
  *
- * WHY OWN THEM AT ALL, given the shelf already keeps a path. Because a path is
- * a promise about someone else's filesystem and Paper cannot keep it. The file
- * gets renamed, moved to an external drive, or lives in a folder the app was
- * granted access to once and has to be granted again — and the failure is
- * always the same: a row on the shelf that will not open, with the reading
- * position and the marks still sitting behind it.
- *
- * IT ALSO RETIRES A DEPENDENCY. Reopening after a relaunch used to rest
- * entirely on `tauri-plugin-persisted-scope` restoring the scope the file dialog
- * granted — inherited, never exercised here, and flagged in phase 2 as the one
- * place already wrong once. `$APPDATA` is in scope permanently and by
- * definition, so reopening stops depending on anything being restored.
- *
- * And it is the precondition for everything later: a phone cannot read a Mac
- * path, so sharing a book between devices needs the bytes somewhere the app
- * owns. Deciding it now rather than after import exists is the cheap order.
- *
- * The cost is disk. A library is stored twice, and that was accepted knowingly
- * rather than discovered — `bytesHeld` exists so the app can say how much.
+ * The extension list stays HERE rather than moving with the paths, because it
+ * is a security property and not a naming convention — see below.
  */
 
 import {
@@ -106,84 +91,6 @@ export function extensionFor(name: string): string {
   return KNOWN_EXTENSIONS.includes(ext) ? ext : 'bin'
 }
 
-/**
- * Where a book's copy lives, relative to the app data directory.
- *
- * Named by `bookId`, which is a content hash and therefore both safe to
- * interpolate and exactly the right key: the same bytes are the same book, so
- * two routes to one file cannot produce two copies.
- */
-export function vaultPath(bookId: string, name: string): string {
-  return `${BOOKS_DIR}/${safeId(bookId)}.${extensionFor(name)}`
-}
-
-/**
- * A `bookId` reduced to characters that cannot leave the directory.
- *
- * `bookIdFor` produces `book:` followed by hex, so in practice this changes
- * nothing. It is here because "in practice" is not a guarantee: the id also
- * comes back off a stored row that a reader could have edited, and a path
- * segment built from it must not be able to contain a slash or a dot-dot
- * whatever it says.
- */
-function safeId(bookId: string): string {
-  return bookId.replace(/[^a-zA-Z0-9]/g, '_')
-}
-
-export interface VaultEntry {
-  /** Path relative to the app data directory — what a library row stores. */
-  readonly path: string
-  readonly bytes: number
-  /** False when the book was ALREADY held, which is how a duplicate is known. */
-  readonly created: boolean
-}
-
-/**
- * Copy a book in, unless an identical one is already held.
- *
- * Idempotent by construction: the destination is derived from the content hash,
- * so re-adding a book Paper already owns writes nothing and returns the copy
- * that exists. That is where duplicate refusal actually lives — bulk import only
- * surfaces it.
- */
-export async function ownBook(
-  fs: VaultFs,
-  bookId: string,
-  name: string,
-  bytes: Uint8Array,
-): Promise<VaultEntry> {
-  const path = vaultPath(bookId, name)
-  // `created` distinguishes "we wrote it" from "it was already here", which the
-  // caller needs and could not previously get: the byte count is the input's
-  // length either way, so a book already held reported as newly added.
-  if (await fs.exists(path)) return { path, bytes: bytes.length, created: false }
-  await fs.mkdir(BOOKS_DIR)
-  /* Written to a temporary neighbour and then moved into place, for the reason
-   * `appStorage` does the same with the store: a write interrupted halfway —
-   * the disk filling, the app quitting — otherwise leaves a TRUNCATED file at
-   * the exact path `exists` is asked about later. That file would then be
-   * treated as the book forever, and it would fail to parse with no clue why.
-   *
-   * The rename is what provides that property, and the first version of this
-   * comment claimed it without one. */
-  const writing = `${path}.writing`
-  try {
-    await fs.writeFile(writing, bytes)
-    // THE RENAME IS THE WHOLE POINT, and the first version of this did not have
-    // one — it wrote the temporary file and then wrote the bytes AGAIN to the
-    // real path, which is not atomic in any sense and left exactly the truncated
-    // file the temporary was supposed to prevent. It also cost twice the book's
-    // free space. A rename within one directory is atomic on every filesystem
-    // Paper runs on, so the real path either does not exist or is complete.
-    await fs.rename(writing, path)
-  } catch (cause) {
-    // Best effort: a leftover `.writing` file is waste rather than corruption,
-    // and it is never mistaken for the book because nothing looks for that name.
-    await fs.remove(writing).catch(() => {})
-    throw cause
-  }
-  return { path, bytes: bytes.length, created: true }
-}
 
 /** Read a book Paper owns back as a `File`, ready for the reader. */
 export async function readOwnedBook(
@@ -196,20 +103,4 @@ export async function readOwnedBook(
    * copies cannot collide; the reader routes on the filename's extension and
    * shows it when a book declares no title, and neither wants a hash. */
   return new File([bytes as BlobPart], name)
-}
-
-/** Whether Paper holds its own copy of this book. */
-export function ownsBook(fs: VaultFs, path: string): Promise<boolean> {
-  return fs.exists(path)
-}
-
-/**
- * Give up Paper's copy. The reader's own file is not touched — see the header.
- *
- * Resolves even when there was nothing to remove: forgetting a book twice, or
- * forgetting one whose copy never landed, is not a failure worth surfacing to
- * someone who asked for it to be gone.
- */
-export async function disownBook(fs: VaultFs, path: string): Promise<void> {
-  await fs.remove(path).catch(() => {})
 }

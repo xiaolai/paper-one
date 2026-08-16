@@ -21,7 +21,8 @@
  * on a guess.
  */
 
-import { ownBook, type VaultFs } from './bookVault'
+import type { VaultFs } from './bookVault'
+import { contentPathIn, folderOf } from './bookFolder'
 import { bookIdFor } from './marks'
 
 /** Extensions worth reading. The same closed list the vault stores under. */
@@ -54,8 +55,6 @@ export interface ImportOutcome {
   readonly reason?: string
   readonly bookId?: string
   readonly name?: string
-  /** Where the vault put it — the caller must not rebuild this. */
-  readonly vault?: string
 }
 
 export interface ImportProgress {
@@ -138,24 +137,36 @@ export async function importFolder(
       const file = new File([bytes as BlobPart], name)
       const bookId = await bookIdFor(file)
       // And again between the hash and the write. What remains after this point
-      // is a single rename, which is better finished than half-done.
+      // is one file, which is better finished than half-done.
       if (signal?.aborted) break
-      const entry = await ownBook(fs, bookId, name, bytes)
+
+      /* INTO THE BOOK'S OWN FOLDER, which is where every other part of a book
+       * lives. This wrote `books/<id>.<ext>` at the top level until phase 4, and
+       * a folder import was the last thing still producing the flat layout. */
+      const at = contentPathIn(bookId, name)
+      const held = await fs.exists(at)
+      if (!held) {
+        await fs.mkdir(folderOf(bookId))
+        const writing = `${at}.writing`
+        try {
+          await fs.writeFile(writing, bytes)
+          // Renamed into place, so an interrupted import cannot leave a
+          // truncated file that `exists` will later call a book.
+          await fs.rename(writing, at)
+        } catch (cause) {
+          await fs.remove(writing).catch(() => {})
+          throw cause
+        }
+      }
       outcomes.push({
         path,
-        /* `created`, from the vault itself. The first version probed
-         * `books/<id>` WITHOUT the extension — a path that never exists — so the
-         * check was always false; and it fell back to comparing `entry.bytes`,
-         * which is the input's length whether the file was written or reused. So
-         * every book reported as added and an empty file reported as duplicate.
-         * The vault knows which it did, so it says. */
-        status: entry.created ? 'added' : 'duplicate',
+        /* Whether the file was ALREADY there, checked before writing. An
+         * earlier version probed a path without the extension — one that never
+         * exists — so every book reported as added; and it could not fall back
+         * to a byte count, which is the input's length either way. */
+        status: held ? 'duplicate' : 'added',
         bookId,
         name,
-        // The path the vault CHOSE, not one reconstructed from the filename:
-        // `extensionFor` lowercases, so rebuilding it recorded `BOOK.EPUB` as a
-        // `.EPUB` that is not on disk.
-        vault: entry.path,
       })
     } catch (cause) {
       /* Named individually rather than counted. "4 of 300 failed" tells a reader
