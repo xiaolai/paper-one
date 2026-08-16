@@ -34,6 +34,19 @@ export interface Collection {
 const MAX_COLLECTIONS = 200
 const MAX_LABEL = 60
 
+/**
+ * The id a scope will always produce.
+ *
+ * DERIVED, not drawn at random, and it lives here rather than in the hook that
+ * calls it so the claim can be tested: the same scope produces the same
+ * collection on any machine, which is what will let these be replicated between
+ * devices without colliding. A `crypto.randomUUID()` here would make two
+ * machines that both saved "Philosophy" disagree forever.
+ */
+export function collectionIdFor(scope: Scope): string {
+  return scope.series ? `c:s/${scope.series}` : `c:t/${scope.tag ?? ''}`
+}
+
 /** The scope a collection stands for. */
 export function scopeOf(collection: Collection): Scope {
   return {

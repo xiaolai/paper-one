@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   addCollection,
+  collectionIdFor,
   parseCollections,
   removeCollection,
   scopeOf,
@@ -86,5 +87,35 @@ describe('parseCollections', () => {
    * a shelf headed "Philosophy" showing the whole library. */
   it('drops a collection that restricts nothing', () => {
     expect(parseCollections(JSON.stringify([{ id: '1', label: 'Empty' }]))).toEqual([])
+  })
+})
+
+
+/**
+ * The id is derived, and that is a claim worth testing rather than a detail.
+ *
+ * Same scope, same id, on any machine — which is what will let collections be
+ * replicated between devices without colliding. `crypto.randomUUID()` here would
+ * make two machines that both saved "Philosophy" disagree forever.
+ */
+describe('collectionIdFor', () => {
+  it('is stable for the same scope', () => {
+    expect(collectionIdFor({ label: 'Philosophy', tag: 'Philosophy' })).toBe(
+      collectionIdFor({ label: 'Philosophy', tag: 'Philosophy' }),
+    )
+  })
+
+  /* The LABEL is not part of it: two readers who saved the same tag under
+   * different names have the same shelf, and should not end up with two. */
+  it('ignores the label', () => {
+    expect(collectionIdFor({ label: 'Philosophy', tag: 'Phil' })).toBe(
+      collectionIdFor({ label: 'Something else', tag: 'Phil' }),
+    )
+  })
+
+  it('separates a series from a tag of the same name', () => {
+    expect(collectionIdFor({ label: 'X', series: 'Dune' })).not.toBe(
+      collectionIdFor({ label: 'X', tag: 'Dune' })
+    )
   })
 })

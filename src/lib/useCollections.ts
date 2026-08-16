@@ -2,6 +2,7 @@ import { useCallback, useMemo } from 'react'
 import {
   COLLECTIONS_STORAGE_KEY,
   addCollection,
+  collectionIdFor,
   parseCollections,
   removeCollection,
   type Collection,
@@ -38,12 +39,9 @@ export function useCollections(storage = localStore()): Collections {
 
   const save = useCallback(
     (scope: Scope) => {
-      /* The id is derived from the predicate rather than drawn at random, for
-       * the reason every other id in this project is derived: it makes the same
-       * scope produce the same collection on any machine, which is what lets
-       * these ever be replicated between devices without colliding. */
-      const id = `c:${scope.series ? `s/${scope.series}` : `t/${scope.tag ?? ''}`}`
-      apply((prev) => [...addCollection(prev, scope, id)])
+      // Derived, and derived in `collections.ts` so the claim it makes — same
+      // scope, same id, any machine — is somewhere it can be tested.
+      apply((prev) => [...addCollection(prev, scope, collectionIdFor(scope))])
     },
     [apply],
   )
