@@ -86,6 +86,21 @@ export interface LibraryEntry {
   readonly published?: string
   readonly languages?: readonly string[]
   readonly description?: string
+  /**
+   * Where PAPER'S OWN copy of this book lives, relative to the app data
+   * directory — or absent for a row shelved before the vault existed.
+   *
+   * Distinct from `path`, which points at the reader's file wherever they keep
+   * it. This one is inside `$APPDATA`, which is in scope permanently, so
+   * reopening from it does not depend on a dialog grant having been restored
+   * across a relaunch — the thing phase 2 could never verify.
+   *
+   * Recorded only AFTER the copy lands. A row claiming a copy that is not there
+   * would send `openStored` down a path that fails before it falls back, and a
+   * shelf that overstates what it holds is the failure this project keeps
+   * choosing not to ship.
+   */
+  readonly vault?: string | null
 }
 
 export const LIBRARY_STORAGE_KEY = 'paper.library.v1'
@@ -185,6 +200,31 @@ export function rememberPosition(
   if (!entry || entry.position === position) return entries
   const next = [...entries]
   next[at] = { ...entry, position }
+  return next
+}
+
+/**
+ * Record that Paper now holds its own copy of a book.
+ *
+ * Separate from `recordOpen` for the reason `rememberPosition` is: an open
+ * rewrites the row and moves it to the top, and a copy landing is neither. It
+ * happens moments after the open, asynchronously, and must not disturb the
+ * order the reader is looking at.
+ *
+ * Returns its input BY IDENTITY when nothing moves, so a caller can skip a
+ * write without comparing rows itself.
+ */
+export function rememberVault(
+  entries: readonly LibraryEntry[],
+  bookId: string,
+  vault: string,
+): readonly LibraryEntry[] {
+  const at = entries.findIndex((entry) => entry.bookId === bookId)
+  if (at === -1) return entries
+  const entry = entries[at]
+  if (!entry || entry.vault === vault) return entries
+  const next = [...entries]
+  next[at] = { ...entry, vault }
   return next
 }
 

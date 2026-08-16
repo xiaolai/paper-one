@@ -16,6 +16,8 @@ import { useCards } from './lib/useCards'
 import { useMarks } from './lib/useMarks'
 import { useMarking } from './lib/useMarking'
 import { coverTintFor } from './lib/bookAccent'
+import { ownBook, readOwnedBook, tauriVaultFs } from './lib/bookVault'
+import { inTauri } from './lib/appStorage'
 import { BookSwitcher } from './overlays/BookSwitcher'
 import { CommandPalette } from './overlays/CommandPalette'
 import { TitleBar } from './shell/TitleBar'
@@ -102,7 +104,23 @@ export function App({ storage }: AppProps) {
 
   /** Reopen a book the shelf knows the location of. */
   const openStored = useCallback(
-    (entry: { url: string | null; path: string | null }) => {
+    (entry: { url: string | null; path: string | null; vault?: string | null; title?: string }) => {
+      /* Paper's own copy FIRST, and the reader's original only as a fallback.
+       *
+       * The copy is under `$APPDATA`, which is in scope permanently, so this
+       * path does not depend on a dialog grant having been restored. The
+       * original is tried after it for books shelved before the vault existed —
+       * they are copied in on this open, by the effect below. */
+      if (entry.vault) {
+        const at = entry.vault
+        void readOwnedBook(tauriVaultFs, at, entry.title || 'book.epub')
+          .then((file) => openBook(file, entry.path ?? null))
+          .catch((cause: unknown) => {
+            console.error('Paper: could not read our own copy', at, cause)
+            if (entry.path) void readBookAt(entry.path).then((f) => openBook(f, entry.path))
+          })
+        return
+      }
       if (entry.path) {
         const at = entry.path
         void readBookAt(at)
@@ -139,7 +157,7 @@ export function App({ storage }: AppProps) {
    * actually read rather than a fixture shelf. Keyed on the metadata arriving,
    * because that is when there is a title worth showing. */
   const { bookId, meta, source } = book
-  const { record, remember, positionOf } = library
+  const { record, remember, rememberOwned, positionOf } = library
   useEffect(() => {
     if (!bookId || !meta) return
     record({
@@ -176,6 +194,39 @@ export function App({ storage }: AppProps) {
       description: meta.description,
     })
   }, [bookId, meta, source, record, openedPath])
+
+  /* Take our own copy of the book, so the shelf stops depending on someone
+   * else's filesystem.
+   *
+   * Runs after the record effect above rather than inside it: the copy is
+   * asynchronous and the row has to exist before there is anything to attach a
+   * vault path to. It is also how a book shelved BEFORE the vault existed gets
+   * one — there is no migration sweep at startup, because that would turn a cold
+   * launch into a disk copy of the whole library. A book is copied the next time
+   * it is opened, and never again after that.
+   *
+   * Silent on failure by design. A copy that does not land leaves the row
+   * pointing at the reader's own file, which is exactly where it pointed before
+   * this existed; telling someone their book opened but was not filed away is
+   * noise about a fallback that worked.
+   */
+  useEffect(() => {
+    if (!bookId || !meta || !inTauri()) return
+    if (!(source instanceof File)) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const bytes = new Uint8Array(await source.arrayBuffer())
+        const entry = await ownBook(tauriVaultFs, bookId, source.name, bytes)
+        if (!cancelled) rememberOwned(bookId, entry.path)
+      } catch (cause) {
+        console.error('Paper: could not keep our own copy of the book', cause)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [bookId, meta, source, rememberOwned])
 
   /* Remember where the reader is, so the next open starts there.
    *

@@ -6,6 +6,7 @@ import {
   isReopenable,
   parseLibrary,
   recordOpen,
+  rememberVault,
   rememberPosition,
   type LibraryEntry,
 } from './library'
@@ -331,5 +332,50 @@ describe('rows written before the metadata fields existed', () => {
       seriesIndex: 5,
       subjects: ['Fantasy'],
     })
+  })
+})
+
+
+/**
+ * Paper's own copy, recorded once it lands.
+ *
+ * Kept separate from `recordOpen` because it happens moments after one,
+ * asynchronously — a copy landing must not move the row the reader is looking
+ * at, the same reason `rememberPosition` is separate.
+ */
+describe('rememberVault', () => {
+  it('attaches the copy to the right row', () => {
+    const shelf = [entry({ bookId: 'a' }), entry({ bookId: 'b' })]
+    const after = rememberVault(shelf, 'b', 'books/b.epub')
+    expect(after[1]?.vault).toBe('books/b.epub')
+    expect(after[0]?.vault).toBeUndefined()
+  })
+
+  it('does not reorder the shelf', () => {
+    const shelf = [entry({ bookId: 'a' }), entry({ bookId: 'b' })]
+    expect(rememberVault(shelf, 'b', 'books/b.epub').map((e) => e.bookId)).toEqual(['a', 'b'])
+  })
+
+  /* Returned by identity so the caller can skip a write without comparing rows
+   * itself — this fires on every open and most find the copy already recorded. */
+  it('returns its input unchanged when the copy is already recorded', () => {
+    const shelf = [entry({ bookId: 'a', vault: 'books/a.epub' })]
+    expect(rememberVault(shelf, 'a', 'books/a.epub')).toBe(shelf)
+  })
+
+  it('returns its input for a book not on the shelf', () => {
+    const shelf = [entry({ bookId: 'a' })]
+    expect(rememberVault(shelf, 'missing', 'books/x.epub')).toBe(shelf)
+  })
+
+  /* A row shelved before the vault existed has no `vault` and must survive
+   * parsing untouched — it gets one on its next open, not by a sweep. */
+  it('leaves a pre-vault row parseable', () => {
+    const legacy = JSON.stringify([
+      { bookId: 'a', title: 'T', author: 'A', url: null, path: '/books/t.epub', lastOpened: 1, position: null },
+    ])
+    const [row] = parseLibrary(legacy)
+    expect(row?.vault).toBeUndefined()
+    expect(row?.path).toBe('/books/t.epub')
   })
 })

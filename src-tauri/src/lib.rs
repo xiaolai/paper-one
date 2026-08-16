@@ -70,7 +70,23 @@ pub fn run() {
          *
          * What it fixes: a path the reader chose in the dialog is added to the
          * filesystem scope in memory, and the shelf stores that path — so
-         * reopening worked until the app quit and failed silently afterwards. */
+         * reopening worked until the app quit and failed silently afterwards.
+         *
+         * PHASE 3 WAS EXPECTED TO DELETE THIS AND DOES NOT. Paper now keeps its
+         * own copy of every book under $APPDATA, which is in scope permanently,
+         * so reopening no longer depends on any scope being restored — that was
+         * the plugin's whole justification and it is gone.
+         *
+         * One job remains, and it is a migration rather than a feature. A row
+         * shelved BEFORE the vault existed has no copy, only a path into the
+         * reader's own filesystem. It gets its copy the next time it is opened
+         * — there is no startup sweep, because that would turn a cold launch
+         * into a disk copy of the whole library — and that open has to succeed
+         * for the migration to happen at all. Without this plugin it would fail
+         * after the first relaunch, and every book on an existing shelf would be
+         * stranded exactly where phase 2 left it.
+         *
+         * So this comes out when pre-vault rows can no longer exist, not now. */
         .plugin(tauri_plugin_persisted_scope::init())
         .setup(|app| {
         if cfg!(debug_assertions) {

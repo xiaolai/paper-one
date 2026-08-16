@@ -6,6 +6,7 @@ import {
   parseLibrary,
   recordOpen,
   rememberPosition,
+  rememberVault,
   type LibraryEntry,
 } from './library'
 import { localStore, useStoredCollection, writeJson } from './useStoredCollection'
@@ -24,6 +25,8 @@ export interface Library {
   record: (entry: LibraryEntry) => void
   /** Where the reader left off. Ignored for a book not on the shelf. */
   remember: (bookId: string, position: string) => void
+  /** Record that Paper's own copy landed — see `rememberVault`. */
+  rememberOwned: (bookId: string, vault: string) => void
   /** The saved position for a book, or null. Stable across renders. */
   positionOf: (bookId: string | null) => string | null
   /** Move a row from a superseded book id — see `idMigration`. */
@@ -71,6 +74,16 @@ export function useLibrary(storage = localStore()): Library {
     [],
   )
 
+  const rememberOwned = useCallback(
+    (bookId: string, vault: string) => {
+      // Identity check first, like `remember`: this fires on every open and
+      // most of them find the copy already recorded.
+      if (rememberVault(booksRef.current, bookId, vault) === booksRef.current) return
+      apply((prev) => [...rememberVault(prev, bookId, vault)])
+    },
+    [apply],
+  )
+
   const remember = useCallback(
     (bookId: string, position: string) => {
       /* Checked before applying, not inside the mutation. `apply` persists
@@ -104,7 +117,7 @@ export function useLibrary(storage = localStore()): Library {
    * a button. It comes back with the button, tested against what that button
    * actually needs rather than against what seemed likely in advance. */
   return useMemo<Library>(
-    () => ({ books, record, remember, positionOf, rekey }),
-    [books, record, remember, positionOf, rekey],
+    () => ({ books, record, remember, rememberOwned, positionOf, rekey }),
+    [books, record, remember, rememberOwned, positionOf, rekey],
   )
 }
