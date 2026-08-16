@@ -110,8 +110,23 @@ export function App({ storage, fs, initialBooks }: AppProps) {
    * for finished loading out of sight, which reads as the click having done
    * nothing at all.
    */
+  /**
+   * Books the reader took off the shelf while they were open.
+   *
+   * Intake writes the bytes and then the record, with awaits in between, and a
+   * removal landing in that gap used to put the book straight back — the row
+   * reappeared as if the click had been ignored. Nothing else can see that: the
+   * effect's inputs do not change when a row is removed.
+   */
+  const removedWhileOpen = useRef(new Set<string>())
+
   const openBook = useCallback(
     (source: File | string, path: string | null = null) => {
+      /* CLEARED on every deliberate open, because opening a book IS asking for
+       * it back. The flag exists to stop an in-flight intake from undoing a
+       * removal, not to remember the removal past the reader changing their
+       * mind. */
+      removedWhileOpen.current.clear()
       dispatch({ type: 'goScreen', screen: 'reader' })
       // Set before the open, so the record effect below cannot fire on the new
       // book while this still holds the previous one's path.
@@ -434,7 +449,13 @@ export function App({ storage, fs, initialBooks }: AppProps) {
    * visible directory rather than hidden state, and because re-adding the same
    * bytes lands on the same folder name.
    */
-  const removeBook = useCallback((entry: IndexedBook) => remove(entry.bookId), [remove])
+  const removeBook = useCallback(
+    (entry: IndexedBook) => {
+      removedWhileOpen.current.add(entry.bookId)
+      remove(entry.bookId)
+    },
+    [remove],
+  )
 
   /* Take the book in: its bytes first, THEN its record.
    *
@@ -453,6 +474,7 @@ export function App({ storage, fs, initialBooks }: AppProps) {
     if (!bookId || !meta) return
     let cancelled = false
     void (async () => {
+      if (removedWhileOpen.current.has(bookId)) return
       if (source instanceof File && fs) {
         try {
           const at = contentPathIn(bookId, source.name)
@@ -479,8 +501,17 @@ export function App({ storage, fs, initialBooks }: AppProps) {
            * says the copy is missing rather than pretending the open failed. */
           console.error('Paper: could not keep our own copy of the book', cause)
         }
+        /* CHECKED AGAIN, because the write above is the long part — a 40MB book
+         * off a network volume — and a removal during it left the folder that
+         * `mkdir` had just recreated sitting there holding nothing but content.
+         * `scanBooks` skips it, so it is invisible rather than wrong, but it is
+         * still the removed book's bytes back on disk. */
+        if (removedWhileOpen.current.has(bookId) && fs) {
+          await fs.removeDir(folderOf(bookId)).catch(() => {})
+          return
+        }
       }
-      if (cancelled) return
+      if (cancelled || removedWhileOpen.current.has(bookId)) return
       /* `add`, which FOLDS a fresh parse into what the reader owns rather than
        * replacing it — see `mergeParsed`. Phase 3 spread the parse over the row
        * and erased the reader's tags on every reopen.

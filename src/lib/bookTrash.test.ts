@@ -186,3 +186,46 @@ describe('restoring onto a folder that is already there', () => {
     expect([...fs.store.keys()].some((k) => k.startsWith(`${trashOf('book_a')}/`))).toBe(false)
   })
 })
+
+/**
+ * A restore that cannot finish must not delete what it failed to move.
+ *
+ * The first entry-by-entry version swallowed each rename failure and then
+ * emptied the trash regardless — so an entry that failed to move was deleted
+ * instead. A restore that loses the thing it is restoring is worse than one
+ * that refuses.
+ */
+describe('restoring when something is in the way', () => {
+  it('leaves a trashed file behind rather than deleting it, when a live one wins', async () => {
+    const fs = fakeFs(shelved())
+    await trashBook(fs, 'book_a')
+    // A live marks file, which is the collision that would cost the reader work.
+    fs.store.set(`${folderOf('book_a')}/marks.json`, new TextEncoder().encode('[]'))
+    expect(await restoreBook(fs, 'book_a')).toBe(true)
+    expect(fs.store.has(`${trashOf('book_a')}/marks.json`)).toBe(true)
+    // The record still came back — one collision does not stop the rest.
+    expect(fs.store.has(`${folderOf('book_a')}/book.json`)).toBe(true)
+  })
+
+  it('keeps the stamp on what it left, so the sweep can still age it', async () => {
+    const fs = fakeFs(shelved())
+    await trashBook(fs, 'book_a')
+    fs.store.set(`${folderOf('book_a')}/marks.json`, new TextEncoder().encode('[]'))
+    await restoreBook(fs, 'book_a')
+    expect(fs.store.has(`${trashOf('book_a')}/.removed`)).toBe(true)
+    const DAY = 24 * 60 * 60 * 1000
+    expect(await emptyExpired(fs, Date.now() + (TRASH_DAYS + 1) * DAY)).toEqual(['book_a'])
+  })
+
+  it('does not delete an entry whose move failed', async () => {
+    const fs = fakeFs(shelved())
+    await trashBook(fs, 'book_a')
+    const rename = fs.rename
+    fs.rename = async (from, to) => {
+      if (from.endsWith('marks.json')) throw new Error('locked')
+      return rename(from, to)
+    }
+    expect(await restoreBook(fs, 'book_a')).toBe(true)
+    expect(fs.store.has(`${trashOf('book_a')}/marks.json`)).toBe(true)
+  })
+})

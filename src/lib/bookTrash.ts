@@ -78,18 +78,48 @@ export async function restoreBook(fs: TrashFs, bookId: string): Promise<boolean>
     if (!(await fs.exists(trashOf(bookId)))) return false
     const entries = await fs.readDir(trashOf(bookId))
     await fs.mkdir(folderOf(bookId))
+    let allMoved = true
     for (const entry of entries) {
       // The stamp belongs to the trash and is not part of the book.
       if (entry.name === '.removed') continue
       const to = `${folderOf(bookId)}/${entry.name}`
-      if (await fs.exists(to)) continue
-      await fs.rename(`${trashOf(bookId)}/${entry.name}`, to).catch(() => {})
+      /* A NAME ALREADY LIVE WINS, and what happens to the trashed one depends
+       * on whether the two can be known to be the same.
+       *
+       * `content.<ext>` can: the folder is named by a hash OF THOSE BYTES, so a
+       * live copy in this folder is the same book. Dropping the trashed one is
+       * lossless and saves carrying a duplicate of an entire book for a
+       * fortnight — which is the usual case, since an import writes the content
+       * first and that is what makes the folder exist at all.
+       *
+       * NOTHING ELSE CAN. `marks.json` especially: the live one may be empty and
+       * the trashed one a year of annotations, and there is no way to tell them
+       * apart by name. So it stays in the trash, ages out on the ordinary
+       * schedule, and can be recovered by hand until it does. */
+      if (await fs.exists(to)) {
+        if (entry.name.startsWith('content.')) {
+          await fs.remove(`${trashOf(bookId)}/${entry.name}`).catch(() => {})
+        } else {
+          allMoved = false
+        }
+        continue
+      }
+      try {
+        await fs.rename(`${trashOf(bookId)}/${entry.name}`, to)
+      } catch {
+        /* SWALLOWED AND REMEMBERED, not swallowed and forgotten. Catching the
+         * failure and then emptying the trash anyway deleted the entry that had
+         * just failed to move — a restore that loses the thing it was restoring,
+         * which is worse than not restoring at all. */
+        allMoved = false
+      }
     }
-    /* The trash entry goes LAST, once its contents have moved. A failure part
-     * way through leaves the rest of the book in the trash with its stamp, which
-     * is recoverable; removing the stamp first would leave it there with no age,
-     * and `emptyExpired` keeps anything it cannot age — forever. */
-    await fs.removeDir(trashOf(bookId)).catch(() => {})
+    /* The trash entry goes LAST, and ONLY when it is empty of the book. Anything
+     * still in there keeps its stamp and therefore its age, so `emptyExpired`
+     * clears it on the ordinary schedule rather than never — removing the stamp
+     * early is what would strand it, because that sweep keeps whatever it cannot
+     * age. */
+    if (allMoved) await fs.removeDir(trashOf(bookId)).catch(() => {})
     return true
   } catch {
     return false

@@ -145,6 +145,13 @@ export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] =
        * tags, their place in it, and whether they are done. */
       const { bookId: _id, ...prior } = previous ?? { bookId: '' }
       const merged = mergeParsed(previous ? (prior as BookRecord) : null, record)
+      /* THE INCOMING ID WINS, which is what makes matching by folder safe rather
+       * than merely tolerant. `bookId` here is derived from the content; a row
+       * that matched by folder under a different spelling is one whose record
+       * predates the id being stored. Taking the canonical one now — and
+       * `writeBook` stamps it into the record — means `update`, `remove` and
+       * `positionOf` see one id from this point on, instead of an alias that
+       * resolves to the same folder and matches none of them. */
       const entry: IndexedBook = { ...merged, bookId }
       const list =
         at === -1

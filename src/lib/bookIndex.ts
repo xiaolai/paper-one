@@ -172,7 +172,13 @@ export async function loadShelf(fs: IndexFs): Promise<{ books: IndexedBook[]; re
     const folders = await folderNames(fs)
     const known = new Set(cached.books.map((one) => folderOf(one.bookId).slice(BOOKS_DIR.length + 1)))
     const agrees = folders.length === known.size && folders.every((name) => known.has(name))
-    if (agrees) return { books: [...cached.books], rescanned: false }
+    /* AND EVERY ENTRY KNOWS WHETHER IT HAS BYTES. `hasContent` is derived by the
+     * scan, so an index written before it was recorded has none — and `canOpen`
+     * reads an absent flag as openable, which puts a row for a book Paper cannot
+     * open back on the shelf looking fine. Distrusting such a cache costs one
+     * rescan, once, and the index it writes has the flag. */
+    const complete = cached.books.every((one) => typeof one.hasContent === 'boolean')
+    if (agrees && complete) return { books: [...cached.books], rescanned: false }
   }
   const books = await scanBooks(fs)
   await writeIndex(fs, books).catch(() => {})

@@ -221,3 +221,38 @@ describe('the cache remembers which books have bytes', () => {
     expect(parseIndex(stored)![0]?.hasContent).toBe(false)
   })
 })
+
+/**
+ * An index written before `hasContent` was recorded is not trusted.
+ *
+ * `canOpen` reads an absent flag as openable, so believing such a cache put
+ * rows for books Paper has no bytes for back on the shelf looking perfectly
+ * fine — the shelf told the truth on the launch that scanned and lied on every
+ * launch after it. One rescan fixes it permanently, because the index that
+ * rescan writes carries the flag.
+ */
+describe('a cache from before the flag existed', () => {
+  it('is rescanned rather than believed', async () => {
+    const fs = fakeFs({
+      [`${BOOKS_DIR}/book_a/book.json`]: '{"title":"Moby-Dick","author":"M"}',
+      [INDEX_FILE]: JSON.stringify({
+        version: 1,
+        books: [{ bookId: 'book_a', title: 'Moby-Dick', author: 'M' }],
+      }),
+    })
+    const { rescanned, books } = await loadShelf(fs)
+    expect(rescanned).toBe(true)
+    expect(books[0]?.hasContent).toBe(false)
+  })
+
+  it('is believed once it carries the flag', async () => {
+    const fs = fakeFs({
+      [`${BOOKS_DIR}/book_a/book.json`]: '{"title":"Moby-Dick","author":"M"}',
+      [INDEX_FILE]: JSON.stringify({
+        version: 1,
+        books: [{ bookId: 'book_a', title: 'Moby-Dick', author: 'M', hasContent: false }],
+      }),
+    })
+    expect((await loadShelf(fs)).rescanned).toBe(false)
+  })
+})

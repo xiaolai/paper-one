@@ -173,7 +173,11 @@ export function useMarks(bookId: string | null, fs: IndexFs | null): MarkStore {
     (targetId: string, mutate: (prev: readonly Mark[]) => readonly Mark[]) => {
       if (!fs) return
       void queue.current
-        .push(targetId, async () => {
+        /* APPEND. Unlike the open book's writes, which persist the whole list
+         * and so make their predecessors redundant, this one READS the file and
+         * changes part of it. Coalescing two — delete a mark, then recolour
+         * another — drops the first, and the row it belonged to reappears. */
+        .append(targetId, async () => {
           const before = parseMarks(JSON.stringify(await readMarks(fs, targetId)))
           const next = mutate(before)
           if (next === before) return

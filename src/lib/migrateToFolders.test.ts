@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import type { VaultFs } from './bookVault'
-import { contentPathIn, folderOf, readBook, readMarks, writeBook } from './bookFolder'
+import {
+  contentPathIn,
+  folderOf,
+  readBook,
+  readMarks,
+  writeBook,
+  writeMarks,
+} from './bookFolder'
 import {
   marksByBook,
   migrateToFolders,
@@ -355,5 +362,41 @@ describe('a record left behind by the broken first run', () => {
     const again = await migrateToFolders(fs, { rows: [row()], marks: [] })
     expect(again[0]?.status).toBe('already')
     expect((await readBook(fs, 'book_a'))?.title).toBe('Renamed by the reader')
+  })
+})
+
+/**
+ * A retry must not replace marks the reader has made since the first attempt.
+ *
+ * The phase-3 store is the source only for a book that has none of its own. A
+ * record retried because it had no bytes reaches the marks step a second time,
+ * and rewriting `marks.json` from the old shared store there discards every
+ * highlight made in between.
+ */
+describe('marks on a retried book', () => {
+  it('leaves an existing marks file alone', async () => {
+    /* A record stranded by the broken first run, WITH marks the reader has made
+     * since — and the bytes now findable, so this run actually migrates it. A
+     * row that is still unrecoverable would be skipped before the marks step,
+     * which is what made the first version of this test prove nothing. */
+    const fs = fakeFs(legacy)
+    await writeBook(fs, 'book_a', { title: 'Moby-Dick', author: 'M' })
+    await writeMarks(fs, 'book_a', [{ id: 'mine', bookId: 'book_a', cfi: 'later' }])
+    const out = await migrateToFolders(fs, {
+      rows: [row()],
+      marks: [{ id: 'm1', bookId: 'book_a', cfi: 'x' }],
+    })
+    expect(out[0]?.status).toBe('migrated')
+    const kept = (await readMarks(fs, 'book_a')) as { id: string }[]
+    expect(kept.map((m) => m.id)).toEqual(['mine'])
+  })
+
+  it('still files them for a book that has none', async () => {
+    const fs = fakeFs(legacy)
+    await migrateToFolders(fs, {
+      rows: [row()],
+      marks: [{ id: 'm1', bookId: 'book_a', cfi: 'x' }],
+    })
+    expect(await readMarks(fs, 'book_a')).toHaveLength(1)
   })
 })

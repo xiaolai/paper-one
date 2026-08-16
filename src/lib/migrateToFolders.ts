@@ -36,6 +36,7 @@ import { extensionFor } from './bookVault'
 import {
   contentPathIn,
   folderOf,
+  marksPathIn,
   readBook,
   writeBook,
   writeMarks,
@@ -211,7 +212,13 @@ export async function migrateToFolders(
       }
 
       const mine = grouped.get(bookId) ?? []
-      if (mine.length) await writeMarks(fs, bookId, mine)
+      /* ONLY IF THE FOLDER HAS NONE. A retry of an incomplete record reaches
+       * here a second time, and writing the phase-3 snapshot over `marks.json`
+       * would discard every highlight made since the first attempt. The phase-3
+       * store is the source only for a book that has no marks of its own yet. */
+      if (mine.length && !(await fs.exists(marksPathIn(bookId)))) {
+        await writeMarks(fs, bookId, mine)
+      }
 
       await writeBook(fs, bookId, record)
       outcomes.push({ bookId, status: 'migrated', marks: mine.length })
