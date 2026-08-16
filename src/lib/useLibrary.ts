@@ -45,10 +45,10 @@ export interface Library {
   /**
    * Shelve a batch of imported books, in ONE write.
    *
-   * `isNew` books are recorded unconditionally; the rest only when no row refers
-   * to them already — a book whose bytes are in the vault and whose row is gone
-   * would otherwise be invisible forever, because every later import reports it
-   * as a duplicate again.
+   * A book with no row gets one. A book that HAS a row gets its vault path
+   * patched and nothing else — an import knows where the bytes landed and does
+   * not know the book's metadata, so anything more would overwrite a real row
+   * with a filename.
    *
    * The presence check runs INSIDE the mutation, against `prev`. Done outside it
    * the callback would have to depend on `books`, and the watcher effect depends
@@ -59,7 +59,7 @@ export interface Library {
    * serialises the entire shelf on every call, so importing three hundred books
    * one row at a time writes the library three hundred times.
    */
-  shelve: (rows: readonly { entry: LibraryEntry; isNew: boolean }[]) => void
+  shelve: (rows: readonly LibraryEntry[]) => void
   /** Apply looked-up metadata to a row that is still there — see `applyLookup`. */
   applyFound: (bookId: string, found: Parameters<typeof applyLookup>[2]) => void
   /** The saved position for a book, or null. Stable across renders. */
@@ -120,16 +120,39 @@ export function useLibrary(storage = localStore()): Library {
   )
 
   const shelve = useCallback(
-    (rows: readonly { entry: LibraryEntry; isNew: boolean }[]) => {
+    (rows: readonly LibraryEntry[]) => {
       if (rows.length === 0) return
       apply((prev) =>
-        rows.reduce(
-          (acc, { entry, isNew }) =>
-            isNew || !acc.some((row) => row.bookId === entry.bookId)
-              ? recordOpen(acc, entry)
-              : acc,
-          prev,
-        ),
+        rows.reduce((acc, entry) => {
+          const at = acc.findIndex((row) => row.bookId === entry.bookId)
+          // Absent: a genuinely new row, from the only metadata an import has.
+          if (at === -1) return recordOpen(acc, entry)
+
+          /* PRESENT: patch where the bytes are, and nothing else.
+           *
+           * An import knows one thing a shelved book might not — where its copy
+           * landed. It does NOT know the book's metadata: the entry it builds
+           * carries a filename for a title and an empty author, because parsing
+           * three hundred books to shelve them would make importing as slow as
+           * reading.
+           *
+           * Passing that through `recordOpen` therefore OVERWROTE a real row
+           * with a skeleton, and the case is reachable: a book shelved before
+           * the vault existed, whose folder is then imported, has a rich row and
+           * a newly created copy at the same moment. Its title became the
+           * filename and its series, subjects and publisher were erased.
+           *
+           * The mistake was treating "new vault file" as "new library row". They
+           * are different questions and only the second one is asked here. */
+          const existing = acc[at]
+          if (!existing) return acc
+          const vault = entry.vault ?? existing.vault
+          const path = entry.path ?? existing.path
+          if (existing.vault === vault && existing.path === path) return acc
+          const next = [...acc]
+          next[at] = { ...existing, ...(vault ? { vault } : {}), path }
+          return next
+        }, prev),
       )
     },
     [apply],

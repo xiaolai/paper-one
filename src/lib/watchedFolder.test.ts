@@ -96,7 +96,33 @@ describe('watchFolder', () => {
     }
   })
 
-  /* A watcher announcing "0 added" every time a file is touched is noise. */
+  /**
+   * A book whose bytes are in the vault but whose ROW is gone.
+   *
+   * It reports as a duplicate, so filtering the handover on `added` discarded
+   * the batch before the shelf could recover it — and it would stay invisible
+   * forever, because every later run reported it exactly the same way. What is
+   * worth SAYING and what is worth shelving are different questions, and only
+   * the caller can answer the first.
+   */
+  it('hands over an all-duplicate batch, so a missing row can be recovered', async () => {
+    const fs = fakeDir({ 'a.epub': 'ALPHA' })
+    const { ops, fire } = fakeWatch()
+    const imported = vi.fn()
+    await watchFolder(fs, ops, '/books', imported, { settleMs: SETTLE })
+    await tick(100)
+    expect(imported).toHaveBeenCalledTimes(1)
+
+    // Second pass: the book is already held, so every outcome is a duplicate.
+    fire()
+    await tick(100)
+    expect(imported).toHaveBeenCalledTimes(2)
+    expect(imported.mock.calls[1]![0]).toEqual([
+      expect.objectContaining({ status: 'duplicate' }),
+    ])
+  })
+
+  /* An empty folder still has nothing to hand over. */
   it('says nothing when a change added no books', async () => {
     {
       const fs = fakeDir({})

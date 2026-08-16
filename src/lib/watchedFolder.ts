@@ -83,9 +83,18 @@ export function watchFolder(
         again = false
         const outcomes = await importFolder(fs, folder, { signal: aborter.signal })
         if (stopped) return
-        // Reported only when something actually landed. A watcher that announces
-        // "0 added" every time a file is touched is noise.
-        if (outcomes.some((one) => one.status === 'added')) onImported(outcomes)
+        /* Handed over whenever there is ANYTHING, not only when something was
+         * newly written — and the caller decides what is worth saying.
+         *
+         * Filtering on `added` here looked like noise control and hid a real
+         * case: a book whose bytes are already in the vault but whose row is
+         * gone reports as a duplicate, so an all-duplicate catch-up was
+         * discarded before the shelf could recover it. It would then stay
+         * invisible forever, because every later run reported it the same way.
+         *
+         * Shelving an unchanged batch is free — the store skips a write when
+         * nothing moved — so the cost of being generous here is nothing. */
+        if (outcomes.length > 0) onImported(outcomes)
       } while (again && !stopped)
     } finally {
       running = false

@@ -118,7 +118,10 @@ export async function importFolder(
     signal,
   }: { onProgress?: (progress: ImportProgress) => void; signal?: AbortSignal } = {},
 ): Promise<ImportOutcome[]> {
+  // The walk itself can be long on a deep tree, and was uncancellable.
+  if (signal?.aborted) return []
   const paths = await collectBooks(fs, root)
+  if (signal?.aborted) return []
   const outcomes: ImportOutcome[] = []
 
   for (const [index, path] of paths.entries()) {
@@ -134,6 +137,9 @@ export async function importFolder(
       if (signal?.aborted) break
       const file = new File([bytes as BlobPart], name)
       const bookId = await bookIdFor(file)
+      // And again between the hash and the write. What remains after this point
+      // is a single rename, which is better finished than half-done.
+      if (signal?.aborted) break
       const entry = await ownBook(fs, bookId, name, bytes)
       outcomes.push({
         path,

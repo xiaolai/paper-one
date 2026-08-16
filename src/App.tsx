@@ -131,8 +131,6 @@ export function App({ storage }: AppProps) {
         outcomes
           .filter((one) => one.status !== 'failed' && one.bookId && one.name)
           .map((one) => ({
-            isNew: one.status === 'added',
-            entry: {
               bookId: one.bookId!,
               /* The FILENAME, until the book is opened. Parsing every book to
                * learn its title would make importing a folder as slow as reading
@@ -148,12 +146,11 @@ export function App({ storage }: AppProps) {
               // recorded a `.EPUB` that is not on disk — `extensionFor`
               // lowercases.
               ...(one.vault ? { vault: one.vault } : {}),
-            },
           })),
       )
     },
     // Stable: `shelve` is a `useCallback` over a stable `apply`, and the
-    // already-on-the-shelf check happens inside the mutation rather than here.
+    // already-on-the-shelf question is answered inside the mutation.
     [shelve],
   )
 
@@ -211,8 +208,13 @@ export function App({ storage }: AppProps) {
       tauriWatchOps,
       watched,
       (outcomes) => {
+        // Always shelved; only ANNOUNCED when something new arrived. A watcher
+        // that says "0 added" whenever a file is touched is noise, but a book
+        // silently missing from the shelf is worse than noise.
         shelveImported(outcomes)
-        setImportNotice(summarise(outcomes))
+        if (outcomes.some((one) => one.status === 'added')) {
+          setImportNotice(summarise(outcomes))
+        }
       },
     )
       .then((live) => {
