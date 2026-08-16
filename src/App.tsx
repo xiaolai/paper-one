@@ -157,26 +157,49 @@ export function App() {
        * every PDF, does not scroll at all. These were its only way through and
        * it had none, so it opened on one page and stayed there. */
       if (!accel && !typing && reading) {
-        if (event.key === 'ArrowRight' || event.key === 'PageDown') {
+        /* Shift+arrow is a SELECTION, not a page turn — the platform meaning of
+         * the combo in every text surface there is. Without this guard the page
+         * turned instead, which also made the paginator's keyboard-selection
+         * branch unreachable: it extends the selection on the same keydown this
+         * handler was consuming first. Space handles its own shift below, where
+         * ⇧Space is the published binding for the previous page. */
+        const selecting = event.shiftKey
+
+        if (!selecting && (event.key === 'ArrowRight' || event.key === 'PageDown')) {
           event.preventDefault()
           book.next()
           return
         }
-        if (event.key === 'ArrowLeft' || event.key === 'PageUp') {
+        if (!selecting && (event.key === 'ArrowLeft' || event.key === 'PageUp')) {
           event.preventDefault()
           book.prev()
           return
         }
 
-        /* §11: Space turns the page in a paginated book.
+        /* §11: Space moves on by one screen, ⇧Space back by one.
          *
-         * Only there. In scrolled flow with the ruler on, Space belongs to the
-         * ruler, which pins it and advances a line — see `ReadingRuler`, which
-         * has already had its say by the time this runs and marks the event
-         * handled. With the ruler off, Space is the scroll the reader expects
-         * and nothing here should take it. */
+         * In BOTH flows, which this used to refuse. It returned early unless
+         * the book was paginated, on the stated grounds that "with the ruler
+         * off, Space is the scroll the reader expects and nothing here should
+         * take it" — and there is no such scroll. foliate's scroller is a
+         * `#container` div inside the paginator's SHADOW ROOT, styled
+         * `overflow: auto` only at `:host([flow="scrolled"])`; the book's own
+         * iframe is `overflow: hidden` and does not scroll. So with focus in
+         * the book — which is where it is while reading — Space reached a
+         * document with nothing to scroll and a container that never had
+         * focus, and both Space and ⇧Space did nothing at all. Reported
+         * against ⇧Space; plain Space was equally dead.
+         *
+         * `next`/`prev` are the right call in both flows rather than a special
+         * case for one: the paginator's own `#scrollNext` branches on
+         * `this.scrolled` and scrolls by a viewport there, turning a page here.
+         *
+         * The ruler still wins when it is on. It pins and advances a single
+         * line — §06 — and marks the event handled from its own window
+         * listener, which React registers before this one because a child's
+         * effects run before its parent's. That is what `defaultPrevented`
+         * below is reading, and it is the whole reason this can be flow-blind. */
         if ((event.key === ' ' || event.code === 'Space') && !event.defaultPrevented) {
-          if (state.pageLayout !== 'paginated') return
           event.preventDefault()
           if (event.shiftKey) book.prev()
           else book.next()
@@ -218,7 +241,6 @@ export function App() {
     book,
     platform,
     state.screen,
-    state.pageLayout,
     state.paletteOpen,
     state.switcherOpen,
   ])
