@@ -360,6 +360,16 @@ export function mergeParsed(previous: BookRecord | null, parsed: BookRecord): Bo
     ...(previous.progress === undefined ? {} : { progress: previous.progress }),
     ...(previous.finished === undefined ? {} : { finished: previous.finished }),
     ...(previous.addedAt === undefined ? {} : { addedAt: previous.addedAt }),
+    /* THE ORIGIN IS KEPT unless the open supplies a new one.
+     *
+     * It is not something a book says about itself — it is where this copy came
+     * from — so it belongs on this side of the line with the tags and the
+     * position. It was not here, and the routes that open a book WITHOUT a path
+     * therefore erased it: drop an already-shelved book onto the open reader and
+     * its way back was gone, which for a book Paper has no copy of is the whole
+     * of it. A fresh one still wins, because that is the reader telling us where
+     * the book is now. */
+    ...(parsed.origin ? {} : previous.origin ? { origin: previous.origin } : {}),
   }
 }
 

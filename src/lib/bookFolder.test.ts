@@ -429,6 +429,30 @@ describe('updateBook on a record that will not read', () => {
  * slices — so a long URL came back cut, which fetches nothing, while `canOpen`
  * went on offering the row because an origin was present.
  */
+/**
+ * `origin` is where THIS COPY came from, not something the book says about
+ * itself — so it survives a reopen like the tags and the position do.
+ *
+ * It did not, and the routes that open a book without a path erased it: drop an
+ * already-shelved book onto the open reader and its way back was gone, which for
+ * a book Paper has no copy of is the whole of it.
+ */
+describe('mergeParsed and the origin', () => {
+  it('keeps the one already stored when the open supplies none', () => {
+    const merged = mergeParsed(book({ origin: '/Users/x/moby.epub' }), book())
+    expect(merged.origin).toBe('/Users/x/moby.epub')
+  })
+
+  it('takes a fresh one, because that is where the book is now', () => {
+    const merged = mergeParsed(book({ origin: '/old/moby.epub' }), book({ origin: '/new/moby.epub' }))
+    expect(merged.origin).toBe('/new/moby.epub')
+  })
+
+  it('leaves it unset when neither has one', () => {
+    expect(mergeParsed(book(), book()).origin).toBeUndefined()
+  })
+})
+
 describe('a very long origin', () => {
   it('survives a round trip past the length of ordinary text', async () => {
     const fs = fakeFs()
