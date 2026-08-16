@@ -3,6 +3,7 @@ import { buildCommands } from './lib/commands'
 import { PANE_SHORTCUTS } from './lib/panes'
 import { ACCEPT_FORMATS } from './lib/formats'
 import { applyMetrics } from './lib/metrics'
+import { positionRecorder, type PositionRecorder } from './lib/positionRecorder'
 import { usePlatform, usePrefersDark } from './lib/platform'
 import { NOT_CONFIGURED } from './lib/companion'
 import { hasOpenLayer, useAppState } from './lib/state'
@@ -83,7 +84,7 @@ export function App() {
    * actually read rather than a fixture shelf. Keyed on the metadata arriving,
    * because that is when there is a title worth showing. */
   const { bookId, meta, source } = book
-  const { record } = library
+  const { record, remember, positionOf } = library
   useEffect(() => {
     if (!bookId || !meta) return
     record({
@@ -94,8 +95,58 @@ export function App() {
       // URL source records one. The switcher shows the difference.
       url: typeof source === 'string' ? source : null,
       lastOpened: Date.now(),
+      // An open knows nothing about where the reader will be. `recordOpen`
+      // carries the saved position through rather than letting this erase it.
+      position: null,
     })
   }, [bookId, meta, source, record])
+
+  /* Remember where the reader is, so the next open starts there.
+   *
+   * The recorder owns the "not on every page turn" rules — see its own file.
+   * Everything here is about the moments a position stops being reachable and
+   * must be written before it is: the window going away, and this component
+   * coming apart. `pagehide` rather than `unload`, which WebKit does not fire
+   * reliably; `visibilitychange` catches the app being hidden without closing,
+   * which on macOS is most of how an app is left. */
+  /* Through a ref, not closed over. The recorder is built once and outlives
+   * every render, so capturing `remember` directly would pin whichever one this
+   * component first rendered with — the exact staleness FoliateView's handler
+   * refs exist to prevent. It happens to be stable today; that is a property of
+   * `useLibrary` this file must not depend on silently. */
+  const rememberRef = useRef(remember)
+  rememberRef.current = remember
+
+  const saver = useRef<PositionRecorder | null>(null)
+  if (saver.current === null) {
+    saver.current = positionRecorder({
+      write: (id, at) => rememberRef.current(id, at),
+    })
+  }
+
+  useEffect(() => {
+    const recorder = saver.current
+    if (!recorder) return
+    const flush = () => recorder.flush()
+    const onHidden = () => {
+      if (document.visibilityState === 'hidden') flush()
+    }
+    window.addEventListener('pagehide', flush)
+    document.addEventListener('visibilitychange', onHidden)
+    return () => {
+      window.removeEventListener('pagehide', flush)
+      document.removeEventListener('visibilitychange', onHidden)
+      // In that order: whatever is outstanding is written, and only then is the
+      // timer that would have written it dropped.
+      recorder.flush()
+      recorder.stop()
+    }
+  }, [])
+
+  const { cfi } = book.position
+  useEffect(() => {
+    saver.current?.record(bookId, cfi)
+  }, [bookId, cfi])
 
   const commands = useMemo(
     () =>
@@ -329,6 +380,11 @@ export function App() {
           book={book}
           marks={marks}
           marking={marking}
+          /* Read at every render and consumed once, when the book finishes
+             parsing. It is null for the first few milliseconds of an open —
+             `bookId` is derived from the file's content — which is why the
+             reader takes it through a ref rather than at mount. */
+          lastLocation={positionOf(bookId)}
           onAddBooks={addBooks}
           dragging={dragging}
           inert={state.screen === 'library'}

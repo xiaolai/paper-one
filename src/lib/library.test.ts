@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { byRecency, parseLibrary, recordOpen, type LibraryEntry } from './library'
+import {
+  byRecency,
+  parseLibrary,
+  recordOpen,
+  rememberPosition,
+  type LibraryEntry,
+} from './library'
 
 function entry(over: Partial<LibraryEntry> = {}): LibraryEntry {
   return {
@@ -8,6 +14,7 @@ function entry(over: Partial<LibraryEntry> = {}): LibraryEntry {
     author: 'Herman Melville',
     url: '/moby.epub',
     lastOpened: 1000,
+    position: null,
     ...over,
   }
 }
@@ -38,6 +45,52 @@ describe('recordOpen', () => {
     expect(after).toHaveLength(1)
     expect(after[0]?.title).toBe('Moby-Dick')
     expect(after[0]?.author).toBe('Herman Melville')
+  })
+
+  /* The exception to "every field from the newer entry", and the reason it is
+   * an exception: an open is recorded the moment the metadata arrives, before
+   * the reader has been anywhere, so the entry it carries has no position. Left
+   * to the rule above, opening a book would erase where you were in it — the
+   * one field whose whole purpose is to survive an open. */
+  it('carries the saved position through an open that does not name one', () => {
+    const before = [entry({ bookId: 'a', position: 'epubcfi(/6/14!/4/2/6)' })]
+    const after = recordOpen(before, entry({ bookId: 'a', lastOpened: 2000 }))
+    expect(after[0]?.position).toBe('epubcfi(/6/14!/4/2/6)')
+    expect(after[0]?.lastOpened).toBe(2000)
+  })
+
+  it('lets an entry that does name a position replace the saved one', () => {
+    const before = [entry({ bookId: 'a', position: 'old' })]
+    expect(recordOpen(before, entry({ bookId: 'a', position: 'new' }))[0]?.position).toBe('new')
+  })
+})
+
+describe('rememberPosition', () => {
+  it('stores where the reader left off, touching nothing else', () => {
+    const before = [entry({ bookId: 'a' }), entry({ bookId: 'b' })]
+    const after = rememberPosition(before, 'a', 'epubcfi(/6/4!/4/2)')
+    expect(after[0]?.position).toBe('epubcfi(/6/4!/4/2)')
+    expect({ ...after[0], position: null }).toEqual(before[0])
+    expect(after[1]).toBe(before[1])
+  })
+
+  it('leaves the recency order alone — reading a book is not opening it', () => {
+    const before = [entry({ bookId: 'a' }), entry({ bookId: 'b' })]
+    expect(rememberPosition(before, 'b', 'x').map((e) => e.bookId)).toEqual(['a', 'b'])
+  })
+
+  /* Returned by identity, not by value. This runs on a page turn, and a new
+   * array every time re-renders the shelf and the switcher for a change that
+   * did not happen. */
+  it('returns the same list when there is nothing to change', () => {
+    const before = [entry({ bookId: 'a', position: 'same' })]
+    expect(rememberPosition(before, 'a', 'same')).toBe(before)
+    expect(rememberPosition(before, 'absent', 'x')).toBe(before)
+  })
+
+  it('drops a position for a book not on the shelf rather than inventing a row', () => {
+    // A row without a title or a url is not something any surface can draw.
+    expect(rememberPosition([], 'ghost', 'x')).toEqual([])
   })
 })
 
@@ -78,5 +131,29 @@ describe('parseLibrary', () => {
 
   it('rejects a url that is neither a string nor null', () => {
     expect(parseLibrary(JSON.stringify([{ ...entry(), url: 42 }]))).toEqual([])
+  })
+
+  /* Rows written before positions existed are already in readers' storage, and
+   * a shelf that empties itself on upgrade is a worse bug than the one the
+   * position field fixes. Absent, empty and wrong-typed all mean "we do not
+   * know where they were", which is exactly what null means. */
+  it('reads a row saved before positions existed, as a book with no position', () => {
+    const old = { bookId: 'a', title: 'T', author: 'A', url: '/a.epub', lastOpened: 5 }
+    const parsed = parseLibrary(JSON.stringify([old]))
+    expect(parsed).toHaveLength(1)
+    expect(parsed[0]?.position).toBeNull()
+  })
+
+  it('normalises an unusable position to null rather than dropping the book', () => {
+    for (const position of [42, '', {}, false]) {
+      const parsed = parseLibrary(JSON.stringify([{ ...entry(), position }]))
+      expect(parsed, `position: ${JSON.stringify(position)}`).toHaveLength(1)
+      expect(parsed[0]?.position).toBeNull()
+    }
+  })
+
+  it('reads back a stored position unchanged', () => {
+    const cfi = 'epubcfi(/6/14!/4/2/6,/1:0,/1:12)'
+    expect(parseLibrary(JSON.stringify([entry({ position: cfi })]))[0]?.position).toBe(cfi)
   })
 })

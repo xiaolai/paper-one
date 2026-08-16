@@ -1,9 +1,10 @@
-import { useCallback, useMemo } from 'react'
+import { useCallback, useMemo, useRef } from 'react'
 import {
   LIBRARY_STORAGE_KEY,
   byRecency,
   parseLibrary,
   recordOpen,
+  rememberPosition,
   type LibraryEntry,
 } from './library'
 import { localStore, useStoredCollection, writeJson } from './useStoredCollection'
@@ -20,6 +21,10 @@ import { localStore, useStoredCollection, writeJson } from './useStoredCollectio
 export interface Library {
   readonly books: readonly LibraryEntry[]
   record: (entry: LibraryEntry) => void
+  /** Where the reader left off. Ignored for a book not on the shelf. */
+  remember: (bookId: string, position: string) => void
+  /** The saved position for a book, or null. Stable across renders. */
+  positionOf: (bookId: string | null) => string | null
 }
 
 export function useLibrary(storage = localStore()): Library {
@@ -45,9 +50,49 @@ export function useLibrary(storage = localStore()): Library {
     [apply],
   )
 
+  /* The shelf as it is right now, for the two reads below.
+   *
+   * `books` is a render value; both of these are called from outside a render
+   * — one from a debounced timer, the other from the reader's startup, several
+   * awaits after the component that created it was drawn. Closing over the
+   * render value would give each of them whatever the shelf held when their
+   * closure was built. */
+  const booksRef = useRef(books)
+  booksRef.current = books
+
+  const positionOf = useCallback(
+    (bookId: string | null) =>
+      bookId
+        ? booksRef.current.find((entry) => entry.bookId === bookId)?.position ?? null
+        : null,
+    [],
+  )
+
+  const remember = useCallback(
+    (bookId: string, position: string) => {
+      /* Checked before applying, not inside the mutation. `apply` persists
+       * whatever the mutation returns — a full serialisation of the shelf —
+       * even when it returns the collection unchanged, and this runs while the
+       * reader is reading. `rememberPosition` returning its input by identity
+       * is what makes the check a comparison rather than a diff. */
+      if (rememberPosition(booksRef.current, bookId, position) === booksRef.current) return
+      /* Copied unconditionally on the way out. The guard above reads the render
+       * value and the mutation below reads `apply`'s own, and the two differ
+       * between an apply and the render that follows it — so the inner call can
+       * legitimately find nothing to change. Forcing a new array costs one
+       * redundant write in that window; not forcing one would drop a real
+       * position on the floor, and only the second failure is silent. */
+      apply((prev) => [...rememberPosition(prev, bookId, position)])
+    },
+    [apply],
+  )
+
   /* `forget` was published here and nothing called it: there is no affordance
    * anywhere for removing a book from the shelf, so this was an API waiting for
    * a button. It comes back with the button, tested against what that button
    * actually needs rather than against what seemed likely in advance. */
-  return useMemo<Library>(() => ({ books, record }), [books, record])
+  return useMemo<Library>(
+    () => ({ books, record, remember, positionOf }),
+    [books, record, remember, positionOf],
+  )
 }

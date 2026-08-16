@@ -30,6 +30,14 @@ export interface ReaderProps {
   book: Book
   marks: MarkStore
   marking: Marking
+  /**
+   * Where the open book was last left, or null to start at the beginning.
+   *
+   * Passed as the value rather than as the library it comes from: the reader
+   * needs one string, and taking the store would couple this screen to every
+   * other thing the shelf knows.
+   */
+  lastLocation: string | null
   /** Opens the file picker, which the window owns — see App. */
   onAddBooks: () => void
   /**
@@ -58,6 +66,7 @@ export function Reader({
   book,
   marks,
   marking,
+  lastLocation,
   onAddBooks,
   dragging,
   inert = false,
@@ -171,6 +180,7 @@ export function Reader({
                       stepIdx={state.stepIdx}
                       theme={state.theme}
                       paginated={state.pageLayout === 'paginated'}
+                      lastLocation={lastLocation}
                       onToc={book.setToc}
                       onRelocate={book.setPosition}
                       onDocument={book.setDoc}

@@ -34,6 +34,8 @@ interface FakeView extends View {
   deselected: number
   /** Page turns, so a navigator that cannot turn a page is a failing test. */
   turns: { next: number; prev: number }
+  /** What each `init` was asked to show — the restore contract, in order. */
+  initCalls: (string | null)[]
 }
 
 /**
@@ -58,6 +60,7 @@ function fakeView(overrides: Partial<Record<'open' | 'init', () => Promise<void>
     closed: 0,
     removed: 0,
     turns: { next: 0, prev: 0 },
+    initCalls: [],
     listeners,
     book: { toc: [{ label: 'One', href: 'a.xhtml' }], metadata: { title: 'T', author: 'A' } },
     addEventListener: (type: string, fn: (e: unknown) => void) => {
@@ -67,7 +70,14 @@ function fakeView(overrides: Partial<Record<'open' | 'init', () => Promise<void>
       for (const fn of listeners[type] ?? []) fn({ detail })
     },
     open: overrides.open ?? (() => Promise.resolve()),
-    init: overrides.init ?? (() => Promise.resolve()),
+    /* Records what it was asked to show before delegating. The restore is only
+     * observable here: `init` is the one call that receives the saved position,
+     * and a fake that swallowed its argument would let every assertion about
+     * restoring pass against a session that never passed it on. */
+    init: (options?: { lastLocation?: string | null }) => {
+      view.initCalls.push(options?.lastLocation ?? null)
+      return (overrides.init ?? (() => Promise.resolve()))()
+    },
     goTo: () => Promise.resolve(),
     next: () => {
       view.turns.next += 1
@@ -384,6 +394,125 @@ describe('ReaderSession disposal', () => {
     expect(cb.calls['onError']?.[0]?.[0]).toBe('not an epub')
     session.dispose()
     expect(view.closed).toBe(1)
+  })
+})
+
+describe('ReaderSession restore', () => {
+  const AT = 'epubcfi(/6/14!/4/2/6,/1:0,/1:12)'
+
+  it('opens the book where it was left', async () => {
+    const view = fakeView()
+    const session = new ReaderSession(fakeHost(), callbacks())
+    await session.start('book.epub', { ...deps(view), lastLocation: () => AT })
+    expect(view.initCalls).toEqual([AT])
+  })
+
+  it('opens at the start when there is nothing saved', async () => {
+    const view = fakeView()
+    const session = new ReaderSession(fakeHost(), callbacks())
+    await session.start('book.epub', deps(view))
+    expect(view.initCalls).toEqual([null])
+  })
+
+  /* The position is read AFTER the book is parsed, not when the session is
+   * built. The id it is keyed by is derived from the file's content and
+   * resolves on its own schedule, so a value read at construction is a value
+   * read before it can exist. */
+  it('reads the saved position after the book is open, not before', async () => {
+    /* Null until the book is parsed, which is what the real value does: it is
+     * keyed by an id derived from the file's content, resolved alongside the
+     * open. A session that read this when it was constructed — or at any point
+     * before `open` resolved — would see null and start every book at page one. */
+    let saved: string | null = null
+    const view = fakeView({
+      open: () => {
+        saved = AT
+        return Promise.resolve()
+      },
+    })
+    const session = new ReaderSession(fakeHost(), callbacks())
+    await session.start('book.epub', { ...deps(view), lastLocation: () => saved })
+    expect(view.initCalls).toEqual([AT])
+  })
+
+  /* Books are identified by hashing their ends, so a re-exported edition can
+   * inherit a position from a file whose spine it no longer matches. Losing
+   * the book over a stale bookmark is the worse of the two failures. */
+  it('falls back to the start when the saved position will not resolve', async () => {
+    let attempt = 0
+    const view = fakeView({
+      init: () => (attempt++ === 0 ? Promise.reject(new Error('bad CFI')) : Promise.resolve()),
+    })
+    const cb = callbacks()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const session = new ReaderSession(fakeHost(), cb)
+    await session.start('book.epub', { ...deps(view), lastLocation: () => AT })
+
+    expect(view.initCalls).toEqual([AT, null])
+    // The reader is reading, not looking at an error about a bookmark.
+    expect(cb.calls['onError'] ?? []).toHaveLength(0)
+    // But it is not silent — a restore that never works must be findable.
+    expect(warn).toHaveBeenCalled()
+    warn.mockRestore()
+  })
+
+  it('reports a book that cannot be displayed even from the start', async () => {
+    const view = fakeView({ init: () => Promise.reject(new Error('no spine')) })
+    const cb = callbacks()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const session = new ReaderSession(fakeHost(), cb)
+    await session.start('book.epub', { ...deps(view), lastLocation: () => AT })
+
+    expect(view.initCalls).toEqual([AT, null])
+    expect(cb.calls['onError']?.[0]?.[0]).toBe('no spine')
+    warn.mockRestore()
+  })
+
+  /* Disposal DURING the failing init, which is the only window the retry could
+   * open. Disposing before `start` proves nothing here — the session bails long
+   * before it reaches `init` — and a test written that way passes against a
+   * retry with no guard on it at all. */
+  it('does not retry a book the reader closed while it was restoring', async () => {
+    let session: ReaderSession | null = null
+    const view = fakeView({
+      init: () => {
+        session?.dispose()
+        return Promise.reject(new Error('bad CFI'))
+      },
+    })
+    const cb = callbacks()
+    session = new ReaderSession(fakeHost(), cb)
+    await session.start('book.epub', { ...deps(view), lastLocation: () => AT })
+
+    expect(view.initCalls).toEqual([AT])
+    expect(cb.calls['onError'] ?? []).toHaveLength(0)
+  })
+
+  it('reports the CFI foliate publishes on relocate, so there is one to save', async () => {
+    const view = fakeView()
+    const cb = callbacks()
+    const session = new ReaderSession(fakeHost(), cb)
+    await session.start('book.epub', deps(view))
+
+    view.emit('relocate', { fraction: 0.5, tocItem: { label: 'One', href: 'a' }, cfi: AT })
+    expect(cb.calls['onRelocate']?.[0]?.[0]).toEqual({
+      fraction: 0.5,
+      chapterLabel: 'One',
+      chapterHref: 'a',
+      cfi: AT,
+    })
+  })
+
+  it('reports a null cfi for a renderer that publishes none', async () => {
+    const view = fakeView()
+    const cb = callbacks()
+    const session = new ReaderSession(fakeHost(), cb)
+    await session.start('book.epub', deps(view))
+
+    view.emit('relocate', { fraction: 0.5 })
+    expect(
+      (cb.calls['onRelocate']?.[0]?.[0] as { cfi: unknown }).cfi,
+    ).toBeNull()
   })
 })
 

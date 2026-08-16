@@ -165,6 +165,18 @@ export interface SessionDeps {
    */
   prepare?: (source: File | string) => Promise<unknown>
   applySettings: (view: View) => void
+  /**
+   * Where this book was last left, if anywhere.
+   *
+   * A getter, and read at the LAST possible moment — after the book has been
+   * parsed — because the saved position is keyed by the book's content-derived
+   * id, which resolves asynchronously alongside the open. Reading it when the
+   * session is constructed would be reading it before it can be known.
+   *
+   * Returning null means the start of the book, which is also what a position
+   * the book no longer contains falls back to. See `#display`.
+   */
+  lastLocation?: () => string | null
 }
 
 /**
@@ -300,7 +312,7 @@ export class ReaderSession {
     if (!(await this.#openBook(view, source, deps))) return
 
     this.#publish(view, deps)
-    await this.#display(view)
+    await this.#display(view, deps)
   }
 
   /**
@@ -441,6 +453,9 @@ export class ReaderSession {
         fraction: detail.fraction,
         chapterLabel: detail.tocItem?.label ?? '',
         chapterHref: detail.tocItem?.href ?? '',
+        // Carried through rather than dropped, which is what this handler used
+        // to do with it. It is what `lastLocation` below is given back.
+        cfi: detail.cfi ?? null,
       })
     })
   }
@@ -500,21 +515,54 @@ export class ReaderSession {
   }
 
   /**
-   * Show the first section.
+   * Show where the reader left off, or the first section.
    *
    * `open` parses the book and attaches a renderer but navigates NOWHERE.
    * Without this the view stays empty with a populated table of contents and no
    * iframe, reporting no error to explain it.
+   *
+   * A saved position is UNTRUSTED input, even though this app wrote it: books
+   * are identified by hashing their ends, so a re-exported or re-encoded
+   * edition can inherit a position from a file whose spine it no longer
+   * matches. Losing the book over a stale bookmark is the worse of the two
+   * failures, so a failed restore is retried from the start and only a failure
+   * with no position to blame is reported to the reader.
+   *
+   * Be precise about what that retry is FOR, because foliate covers most of it
+   * already: `resolveNavigation` catches its own errors and returns nothing, so
+   * a CFI that cannot be resolved at all falls through to `showTextStart`
+   * inside `init` and never reaches this catch. What does reach it is a
+   * position that resolves to a section and then fails to RENDER — and that is
+   * the case where retrying is the difference between a book and an error.
    */
-  async #display(view: View): Promise<void> {
-    try {
-      await view.init({ lastLocation: null, showTextStart: true })
-    } catch (cause) {
-      if (!this.#settle(view)) return
-      this.#cb.onError(message(cause, 'This book could not be displayed.'))
-      return
+  async #display(view: View, deps: SessionDeps): Promise<void> {
+    const saved = deps.lastLocation?.() ?? null
+
+    /* Wrapped rather than thrown, so a book that fails BOTH attempts reports
+     * the second failure and not a stale first one. A bare `catch` variable
+     * cannot say "nothing failed" — a thrown `undefined` is indistinguishable
+     * from no throw at all. */
+    const show = async (at: string | null): Promise<{ cause: unknown } | null> => {
+      try {
+        await view.init({ lastLocation: at, showTextStart: true })
+        return null
+      } catch (cause) {
+        return { cause }
+      }
     }
-    this.#settle(view)
+
+    let failed = await show(saved)
+
+    if (failed && saved !== null && !this.#disposed) {
+      /* Loud, but not at the reader: they asked to read a book and they get
+       * one. Silence here would make a position that never restores look
+       * exactly like a book nobody had opened before. */
+      console.warn('Paper: the saved position could not be restored', failed.cause)
+      failed = await show(null)
+    }
+
+    if (!this.#settle(view)) return
+    if (failed) this.#cb.onError(message(failed.cause, 'This book could not be displayed.'))
   }
 
   /**

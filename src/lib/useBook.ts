@@ -20,6 +20,19 @@ export interface ReaderPosition {
   readonly chapterLabel: string
   /** Stable identity of the current TOC entry — labels repeat, hrefs do not. */
   readonly chapterHref: string
+  /**
+   * A CFI naming exactly where the reader is, or null.
+   *
+   * The precise one of the four: `fraction` is a proportion of the whole book
+   * and `chapterHref` names a section, and neither can bring a reader back to
+   * the paragraph they stopped at. foliate has been reporting this on every
+   * relocate all along; it was discarded in the handler that built this object,
+   * three lines from where it was needed.
+   *
+   * Null for a renderer that does not produce one, so a consumer must treat
+   * "no position" and "the start of the book" as different things.
+   */
+  readonly cfi: string | null
 }
 
 export interface BookMeta {
@@ -84,7 +97,12 @@ export interface Book extends BookState {
   fail: (generation: number, message: string) => void
 }
 
-const NOWHERE: ReaderPosition = { fraction: 0, chapterLabel: '', chapterHref: '' }
+const NOWHERE: ReaderPosition = {
+  fraction: 0,
+  chapterLabel: '',
+  chapterHref: '',
+  cfi: null,
+}
 
 /**
  * `?book=<url>` opens a book straight from a URL on load. This is how a book

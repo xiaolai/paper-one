@@ -22,6 +22,22 @@ export interface LibraryEntry {
   /** Reopenable only when the book came from a URL. Null for a picked file. */
   readonly url: string | null
   readonly lastOpened: number
+  /**
+   * Where the reader left off — a CFI into this book, or null for one never
+   * read past its first page.
+   *
+   * It lives here rather than in a store of its own because this row is already
+   * the one thing that knows a book by the identity marks use, is already
+   * persisted, already validated, and already goes away when the book does. A
+   * second store keyed the same way would be a second answer to the same
+   * question, with orphans whenever the two disagreed.
+   *
+   * Untrusted on the way back in. It is handed to foliate's resolver, and a
+   * string that no longer names anything in the book — a re-exported EPUB, a
+   * different edition under a colliding id — must fail to opening at the start
+   * rather than to a reader that will not display.
+   */
+  readonly position: string | null
 }
 
 export const LIBRARY_STORAGE_KEY = 'paper.library.v1'
@@ -48,7 +64,47 @@ export function recordOpen(
   entries: readonly LibraryEntry[],
   entry: LibraryEntry,
 ): LibraryEntry[] {
-  return [entry, ...entries.filter((existing) => existing.bookId !== entry.bookId)]
+  /* One field the new entry does NOT win: the position, when it does not have
+   * one. An open is recorded as soon as the metadata arrives — before the
+   * reader has been anywhere — so the entry that arrives here carries a null
+   * position on every single open. Taking it would erase, on opening a book,
+   * the one field whose entire job is to survive that. */
+  const previous = entries.find((existing) => existing.bookId === entry.bookId)
+  const kept =
+    entry.position === null && previous?.position
+      ? { ...entry, position: previous.position }
+      : entry
+  return [kept, ...entries.filter((existing) => existing.bookId !== entry.bookId)]
+}
+
+/**
+ * Record where the reader left off in a book already on the shelf.
+ *
+ * Separate from `recordOpen` because it means something different: an open
+ * rewrites the row and moves it to the top, and reading on inside a book is
+ * neither. Nothing here touches the recency order — a book does not become the
+ * most recent because a page turned in it.
+ *
+ * Returns the SAME array when nothing changes. This is called on a page turn,
+ * and a fresh array every time would re-render the shelf and the switcher for a
+ * change that did not happen.
+ *
+ * A position for a book with no row is dropped rather than creating one: the
+ * row is written when the metadata arrives, and a row invented here would have
+ * no title, no author and no url — nothing any surface can draw.
+ */
+export function rememberPosition(
+  entries: readonly LibraryEntry[],
+  bookId: string,
+  position: string,
+): readonly LibraryEntry[] {
+  const at = entries.findIndex((entry) => entry.bookId === bookId)
+  if (at === -1) return entries
+  const entry = entries[at]
+  if (!entry || entry.position === position) return entries
+  const next = [...entries]
+  next[at] = { ...entry, position }
+  return next
 }
 
 /* `forgetBook` was here, with a test and no caller. Nothing in the app can
@@ -70,7 +126,9 @@ export function recordOpen(
  *   - A non-finite `lastOpened` sorts unpredictably against every other row,
  *     so one bad entry scrambles a recency list that has nothing wrong with it.
  */
-function isEntry(value: unknown): value is LibraryEntry {
+type StoredRow = Omit<LibraryEntry, 'position'> & { readonly position?: unknown }
+
+function isEntry(value: unknown): value is StoredRow {
   if (typeof value !== 'object' || value === null) return false
   const e = value as Record<string, unknown>
   const url = e['url']
@@ -84,6 +142,20 @@ function isEntry(value: unknown): value is LibraryEntry {
     Number.isFinite(e['lastOpened']) &&
     e['lastOpened'] >= 0
   )
+}
+
+/**
+ * A stored position, or null.
+ *
+ * Deliberately gentler than the rule above it, which DROPS a row whose url is
+ * the wrong shape. Rows written before positions existed are already in
+ * readers' storage and have no such field, and a shelf that empties itself on
+ * upgrade would be a far worse defect than the one this field fixes. Missing,
+ * empty and wrong-typed all mean the same thing — we do not know where they
+ * were — and that is what null already says.
+ */
+function readPosition(value: unknown): string | null {
+  return typeof value === 'string' && value !== '' ? value : null
 }
 
 /**
@@ -144,5 +216,7 @@ export function parseLibrary(raw: string | null): LibraryEntry[] {
     return []
   }
   if (!Array.isArray(parsed)) return []
-  return parsed.filter(isEntry)
+  return parsed
+    .filter(isEntry)
+    .map((row) => ({ ...row, position: readPosition(row.position) }))
 }

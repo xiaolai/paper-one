@@ -21,6 +21,15 @@ export interface FoliateViewProps {
   stepIdx: number
   theme: Theme
   paginated: boolean
+  /**
+   * Where this book was last left, or null to open at the start.
+   *
+   * Read once, when the book finishes parsing — never depended on, for the
+   * reason the note on the refs below gives: this value CHANGES as the reader
+   * reads, and a book that reopened every time it did would be a book that
+   * could not be read at all.
+   */
+  lastLocation: string | null
   onToc: (generation: number, toc: readonly TocItem[]) => void
   onRelocate: (generation: number, position: ReaderPosition) => void
   /** Called with each spine item's document as it loads, for the ruler and
@@ -109,6 +118,7 @@ export function FoliateView({
   stepIdx,
   theme,
   paginated,
+  lastLocation,
   onToc,
   onRelocate,
   onDocument,
@@ -158,8 +168,13 @@ export function FoliateView({
    * — long after any value captured at startup went stale. */
   const marksRef = useRef(marks)
   const settings = useRef<Settings>({ stepIdx, theme, paginated })
+  /* Through a ref for the same reason, and for one that is specific to it: the
+   * saved position is derived from the book's content id, which resolves a few
+   * milliseconds AFTER the reader mounts. A prop read at mount is read before
+   * the answer exists; the session reads this once, after the book is parsed. */
+  const lastLocationRef = useRef(lastLocation)
 
-  /* All three refs commit together, after render — see the note on `handlers`.
+  /* All four refs commit together, after render — see the note on `handlers`.
    * `useLayoutEffect` rather than `useEffect` because it runs before the
    * session-creating effect below, so startup reads current values rather than
    * the ones this component mounted with. */
@@ -167,6 +182,7 @@ export function FoliateView({
     handlers.current = currentHandlers
     marksRef.current = marks
     settings.current = { stepIdx, theme, paginated }
+    lastLocationRef.current = lastLocation
   })
 
   useEffect(() => {
@@ -255,6 +271,7 @@ export function FoliateView({
           })
         },
         applySettings: (view: View) => applySettings(view.renderer, settings.current),
+        lastLocation: () => lastLocationRef.current,
       })
       .then(() => {
         if (!session.disposed) setReady((n) => n + 1)
