@@ -1,4 +1,4 @@
-import { useDeferredValue, useMemo, useState } from 'react'
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import { Check, FolderPlus, Plus, Tag, X } from 'lucide-react'
 import {
   NOT_REOPENABLE,
@@ -16,6 +16,7 @@ import { ICON } from '../lib/metrics'
 import type { Platform } from '../lib/metrics'
 import type { Collection } from '../lib/collections'
 import { scopeOf } from '../lib/collections'
+import { VIRTUALISE_ABOVE, gridWindow } from '../lib/virtualGrid'
 import { BookCover } from './BookCover'
 import styles from './Library.module.css'
 
@@ -123,6 +124,62 @@ export function Library({
     [books, scope, deferredQuery, order],
   )
   const tags = useMemo(() => tagCounts(books, scope), [books, scope])
+
+  /* Virtualisation, but only past the point where it pays.
+   *
+   * Below `VIRTUALISE_ABOVE` the window arithmetic, the spacers and the scroll
+   * listener cost more than they save, and they add a class of bug — a shelf
+   * showing the wrong slice — to a screen that had none. Most readers never
+   * cross it, and those who do have a shelf that would otherwise decode two
+   * thousand covers at once. */
+  const shelfRef = useRef<HTMLDivElement | null>(null)
+  const [viewport, setViewport] = useState({ scrollTop: 0, height: 0, columns: 0, rowHeight: 0 })
+  const virtualising = shelf.length > VIRTUALISE_ABOVE
+
+  useEffect(() => {
+    const node = shelfRef.current
+    if (!node || !virtualising) return
+    /* Measured from the FIRST CELL rather than assumed from the CSS. The grid is
+     * responsive, so the column count and the row height are both facts about
+     * the rendered layout — reading them from a constant would put the window a
+     * row out at every breakpoint, which looks like a scroll glitch. */
+    const measure = () => {
+      const cell = node.firstElementChild as HTMLElement | null
+      const rowHeight = cell ? cell.offsetHeight + 24 : 0
+      const columns = cell && cell.offsetWidth > 0
+        ? Math.max(1, Math.round(node.clientWidth / (cell.offsetWidth + 24)))
+        : 0
+      const scroller = node.closest('[data-scroll]') ?? node.parentElement
+      setViewport({
+        scrollTop: scroller instanceof HTMLElement ? scroller.scrollTop : 0,
+        height: scroller instanceof HTMLElement ? scroller.clientHeight : 0,
+        columns,
+        rowHeight,
+      })
+    }
+    measure()
+    const scroller = node.closest('[data-scroll]') ?? node.parentElement
+    scroller?.addEventListener('scroll', measure, { passive: true })
+    const observer = new ResizeObserver(measure)
+    observer.observe(node)
+    return () => {
+      scroller?.removeEventListener('scroll', measure)
+      observer.disconnect()
+    }
+  }, [virtualising, shelf.length])
+
+  const win = useMemo(
+    () =>
+      gridWindow({
+        total: shelf.length,
+        columns: viewport.columns,
+        rowHeight: viewport.rowHeight,
+        scrollTop: viewport.scrollTop,
+        viewportHeight: viewport.height,
+      }),
+    [shelf.length, viewport],
+  )
+  const visible = virtualising ? shelf.slice(win.firstIndex, win.endIndex) : shelf
 
   return (
     <div className={styles.library} data-platform={platform}>
@@ -280,8 +337,10 @@ export function Library({
           </div>
         </div>
       ) : (
-        <div className={styles.shelf}>
-          {shelf.map((book) => {
+        <div className={styles.shelf} ref={shelfRef} style={
+          virtualising ? { paddingBlockStart: win.padTop, paddingBlockEnd: win.padBottom } : undefined
+        }>
+          {visible.map((book) => {
             const reopenable = isReopenable(book)
             return (
               <div key={book.bookId} className={styles.cell}>
