@@ -414,3 +414,23 @@ describe('a legacy row with a very long position', () => {
     expect(recordFromRow(row({ position: 'x'.repeat(70_000) })).position).toBeUndefined()
   })
 })
+
+/**
+ * A record that is there but will not read is NOT an absent one.
+ *
+ * `readBook` answers both with null, and the retry writes the phase-3 row when
+ * it gets one — so a momentary read failure on a finished book would replace
+ * everything the reader had done since with the state it was migrated from.
+ * This runs once, so that is permanent.
+ */
+describe('a record that cannot be read', () => {
+  it('is left untouched and reported, rather than overwritten', async () => {
+    const fs = fakeFs(legacy)
+    fs.files.set(`${folderOf('book_a')}/book.json`, new TextEncoder().encode('half a write'))
+    const out = await migrateToFolders(fs, { rows: [row()], marks: [] })
+    expect(out[0]).toMatchObject({ bookId: 'book_a', status: 'failed' })
+    expect(new TextDecoder().decode(fs.files.get(`${folderOf('book_a')}/book.json`)!)).toBe(
+      'half a write',
+    )
+  })
+})

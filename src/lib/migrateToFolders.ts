@@ -37,6 +37,7 @@ import {
   contentPathIn,
   folderOf,
   marksPathIn,
+  recordPath,
   readBook,
   writeBook,
   writeMarks,
@@ -172,6 +173,19 @@ export async function migrateToFolders(
        * neither content nor a path back is unfinished business, and falls
        * through to be tried again. */
       const existing = await readBook(fs, bookId)
+      /* PRESENT BUT UNREADABLE IS NOT ABSENT. `readBook` answers both with null,
+       * and the retry below writes the phase-3 row when it gets one — so a
+       * momentary read failure on a finished book replaced everything the reader
+       * had done since with the state it was migrated from. This runs once, so
+       * that would be permanent. Reported and skipped instead. */
+      if (!existing && (await fs.exists(recordPath(bookId)))) {
+        outcomes.push({
+          bookId,
+          status: 'failed',
+          reason: 'its record is there but could not be read — left untouched',
+        })
+        continue
+      }
       if (existing && ((await hasBytes(fs, bookId, existing)) || existing.origin)) {
         outcomes.push({ bookId, status: 'already' })
         continue

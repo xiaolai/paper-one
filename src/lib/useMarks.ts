@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { writeQueue } from './writeQueue'
-import { folderOf, readMarks, writeMarks } from './bookFolder'
+import { folderOf, marksPathIn, readMarks, trashOf, writeMarks } from './bookFolder'
 import { scanAllMarks, type IndexFs } from './bookIndex'
 import { upsertOverlapping } from './markMatch'
 import {
@@ -96,12 +96,16 @@ export function useMarks(bookId: string | null, fs: IndexFs | null): MarkStore {
   const openRef = useRef(bookId)
   openRef.current = bookId
 
+  /** Whether a write has failed since the last successful load — see below. */
+  const failed = useRef(false)
+
   useEffect(() => {
     if (!bookId || !fs) {
       setLoaded({ bookId: null, marks: [] })
       return
     }
     let live = true
+    failed.current = false
     /* THE READ GOES ON THE QUEUE TOO, which is the point rather than a detail.
      * A highlight made before this lands is written as a change and reaches the
      * file first; an unqueued read then returned the file as it was BEFORE that
@@ -199,21 +203,39 @@ export function useMarks(bookId: string | null, fs: IndexFs | null): MarkStore {
 
   const applyElsewhere = useCallback(
     (targetId: string, mutate: (prev: readonly Mark[]) => readonly Mark[]) => {
-      if (!fs) return
+      if (!fs) {
+        /* SAID OUT LOUD. With nowhere to write, a mark is drawn and gone at the
+         * next redraw — and a store that silently stops persisting is
+         * indistinguishable from one that works, which is the whole reason this
+         * flag exists. */
+        setPersistent(false)
+        return
+      }
       void queue.current
         /* APPEND. Unlike the open book's writes, which persist the whole list
          * and so make their predecessors redundant, this one READS the file and
          * changes part of it. Coalescing two — delete a mark, then recolour
          * another — drops the first, and the row it belonged to reappears. */
         .append(targetId, async () => {
-          // The same guard the open book's writes carry: `writeMarks` creates
-          // the folder it writes into, so a change landing after a removal put a
-          // marks-only directory back where the book had been.
+          /* `writeMarks` creates the folder it writes into, so a change landing
+           * after a removal puts a marks-only directory back where the book had
+           * been. Checked before — and, because a removal can land between the
+           * check and the write, checked AFTER as well: the trash entry the
+           * removal leaves is the evidence, exactly as `updateBook` uses it. */
           if (!(await fs.exists(folderOf(targetId)))) return
+          const trashedBefore = await fs.exists(trashOf(targetId))
           const before = parseMarks(JSON.stringify(await readMarks(fs, targetId)))
           const next = mutate(before)
           if (next === before) return
           await writeMarks(fs, targetId, next)
+          if (!trashedBefore && (await fs.exists(trashOf(targetId)))) {
+            /* The removal won. What was just written is a fragment of this
+             * book's marks in a folder that is no longer the book — and leaving
+             * it there is worse than losing the edit, because a later re-add
+             * lets that fragment beat the complete list waiting in the trash. */
+            await fs.remove(marksPathIn(targetId)).catch(() => {})
+            return
+          }
           setAll((prev) => [...next, ...prev.filter((mark) => mark.bookId !== targetId)])
           /* AND THE OPEN BOOK'S OWN LIST, when this is that book. It is, every
            * time `apply` routes here because the file has not been read yet —
@@ -224,10 +246,17 @@ export function useMarks(bookId: string | null, fs: IndexFs | null): MarkStore {
             latest.current = next
             setLoaded({ bookId: targetId, marks: next })
           }
-          setPersistent(true)
+          /* NOT AFTER A FAILURE, until the book is read again. A write that
+           * fails is an edit that is gone: the next one is computed from the
+           * file WITHOUT it, so reporting "saving" again on that success hides
+           * the loss behind the very thing that caused it. The load effect is
+           * what clears this, because that is the point at which what is on
+           * screen agrees with what is on disk. */
+          if (!failed.current) setPersistent(true)
         })
         .catch((cause: unknown) => {
           console.error('Paper: could not save that book\'s marks', cause)
+          failed.current = true
           setPersistent(false)
         })
     },

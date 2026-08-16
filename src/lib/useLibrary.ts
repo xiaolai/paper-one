@@ -2,7 +2,9 @@ import { useCallback, useMemo, useRef, useState } from 'react'
 import {
   folderOf,
   mergeParsed,
+  parseRecord,
   readBook,
+  trashOf,
   updateBook,
   writeBook,
   type BookRecord,
@@ -53,6 +55,15 @@ export interface Library {
   untag: (bookId: string, tag: string) => void
   /** The saved position for a book, or null. Stable across renders. */
   positionOf: (bookId: string | null) => string | null
+}
+
+/** One file as text, or null when it is not there or will not read. */
+async function readText(fs: IndexFs, path: string): Promise<string | null> {
+  try {
+    return new TextDecoder().decode(await fs.readFile(path))
+  } catch {
+    return null
+  }
 }
 
 export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] = []): Library {
@@ -202,13 +213,27 @@ export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] =
          * fortnight later. It is a cheap no-op when the trash is empty, which is
          * the ordinary case. */
         await restoreBook(target as never, bookId)
+        /* WHAT THE RESTORE COULD NOT BRING BACK, folded in here.
+         *
+         * `restoreBook` moves file by file and leaves behind a name already
+         * live, so `book.json` can stay in the trash while the book is on the
+         * shelf. It refuses to overwrite it — correctly, since it cannot know
+         * which record is worth more — and the reader's tags and their place in
+         * the book then sat there until the sweep deleted them.
+         *
+         * This layer DOES know: the stranded record is the one the reader wrote,
+         * so it is `previous` in the merge and the live one is the parse. Once
+         * it is safely written, the copy in the trash goes. */
+        const stranded = parseRecord(await readText(target, `${trashOf(bookId)}/book.json`))
         /* MERGED INTO WHAT IS ON DISK, ALWAYS — not only when the row was
          * missing. The in-memory copy comes from an index that `loadShelf` will
          * knowingly trust while it is one write behind, so folding the parse
          * into it and writing that back put a stale record over a newer one:
          * opening a book could undo the tag applied just before the last quit.
          * The record is the truth; the row is a view of it. */
-        const existing = await readBook(target, bookId)
+        const existing = stranded
+          ? mergeParsed(stranded, (await readBook(target, bookId)) ?? record)
+          : await readBook(target, bookId)
         /* SPARSE IS CHECKED AGAINST THE DISK TOO. The early return above guards
          * the in-memory row, and a record can be on disk without being in that
          * list — a removal shown optimistically before its trash landed, or an
@@ -223,11 +248,15 @@ export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] =
             ...(record.origin && !existing.origin ? { origin: record.origin } : {}),
           }
           await writeBook(target, bookId, kept)
+          if (stranded) await target.remove(`${trashOf(bookId)}/book.json`).catch(() => {})
           reconcile(bookId, kept)
           return
         }
         const written = existing ? mergeParsed(existing, record) : merged
         await writeBook(target, bookId, written)
+        // Only now: the reader's record is in two places until this line, which
+        // is the order that cannot lose it.
+        if (stranded) await target.remove(`${trashOf(bookId)}/book.json`).catch(() => {})
         /* WHAT WAS ACTUALLY WRITTEN, back into the row. The optimistic row was
          * built from the index, which `loadShelf` will knowingly trust while it
          * is one write behind — so a tag or a position on disk but not in the
