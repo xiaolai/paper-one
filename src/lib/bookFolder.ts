@@ -309,13 +309,21 @@ export function mergeParsed(previous: BookRecord | null, parsed: BookRecord): Bo
  * throwing on the way to drawing a page.
  */
 export async function readMarks(fs: VaultFs, bookId: string): Promise<unknown[]> {
-  try {
-    const bytes = await fs.readFile(marksPathIn(bookId))
-    const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes))
-    return Array.isArray(parsed) ? parsed : []
-  } catch {
-    return []
-  }
+  /* ABSENT AND UNREADABLE ARE NOT THE SAME ANSWER, and collapsing them into
+   * `[]` was the most destructive line in this file. A book with no marks yet
+   * and a book whose marks file could not be read look identical to the caller
+   * — so a momentary read failure loaded an empty list, and the next highlight
+   * wrote a snapshot of exactly that one mark over everything the reader had.
+   *
+   * Absent is an empty list, which is the truth. Anything else THROWS, and the
+   * store surfaces it as "not saving" rather than quietly starting again. */
+  if (!(await fs.exists(marksPathIn(bookId)))) return []
+  const bytes = await fs.readFile(marksPathIn(bookId))
+  const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes))
+  /* A file holding something that is not a list is not a marks file. Treated as
+   * empty it would be overwritten on the next edit; thrown, it is left alone. */
+  if (!Array.isArray(parsed)) throw new Error(`marks.json for ${bookId} is not a list`)
+  return parsed
 }
 
 /** Write a book's marks, whole and atomically — see `writeBook`. */

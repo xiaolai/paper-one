@@ -10,6 +10,7 @@ import {
   parseRecord,
   readBook,
   recordPath,
+  readMarks,
   trashOf,
   updateBook,
   writeBook,
@@ -309,5 +310,45 @@ describe('a very long reading position', () => {
     const fs = fakeFs()
     await writeBook(fs, 'book_a', { title: 'T', author: 'A', position: 'epubcfi(/6/14)' })
     expect((await readBook(fs, 'book_a'))?.position).toBe('epubcfi(/6/14)')
+  })
+})
+
+/**
+ * "No marks yet" and "could not read the marks" are not the same answer.
+ *
+ * Collapsing both into an empty list was the most destructive line in this
+ * file: a momentary read failure loaded nothing, the store took that for a
+ * successful load, and the reader's next highlight wrote a snapshot of exactly
+ * that one mark over everything they had.
+ */
+describe('readMarks', () => {
+  it('is empty for a book that has none', async () => {
+    expect(await readMarks(fakeFs(), 'book_a')).toEqual([])
+  })
+
+  it('reads them back', async () => {
+    const fs = fakeFs({ [marksPathIn('book_a')]: '[{"id":"m1"}]' })
+    expect(await readMarks(fs, 'book_a')).toHaveLength(1)
+  })
+
+  it('throws rather than reporting none when the file will not read', async () => {
+    const fs = fakeFs({ [marksPathIn('book_a')]: '[{"id":"m1"}]' })
+    const broken: VaultFs = {
+      ...fs,
+      readFile: async () => {
+        throw new Error('I/O error')
+      },
+    }
+    await expect(readMarks(broken, 'book_a')).rejects.toThrow('I/O error')
+  })
+
+  it('throws rather than reporting none when the file is not a list', async () => {
+    const fs = fakeFs({ [marksPathIn('book_a')]: '{"not":"a list"}' })
+    await expect(readMarks(fs, 'book_a')).rejects.toThrow('not a list')
+  })
+
+  it('throws on a file that is not JSON at all', async () => {
+    const fs = fakeFs({ [marksPathIn('book_a')]: 'half a write' })
+    await expect(readMarks(fs, 'book_a')).rejects.toThrow()
   })
 })

@@ -123,51 +123,43 @@ export function useMarks(bookId: string | null, fs: IndexFs | null): MarkStore {
     }
   }, [bookId, fs])
 
-  /** Change this book's marks, then write its file. */
+  /**
+   * Change this book's marks: the screen at once, the file as a change.
+   *
+   * ONE PATH, and the reason is the bug that had two. A snapshot write captures
+   * the list at the moment the reader highlights something, and anything else
+   * still in flight for that book is not in it — highlight A while the file is
+   * being read, highlight B before A's write lands, and B persists a list
+   * without A in it. Every version of this that wrote a captured list had some
+   * version of that hole in it.
+   *
+   * So the CHANGE goes to disk, not the result: read, modify, write, in order,
+   * on the book's queue. `mutate` is applied to what is actually in the file at
+   * the moment it is written. The optimistic update below is for the screen
+   * only, and is corrected by whatever the write finds.
+   */
   const apply = useCallback(
     (mutate: (prev: readonly Mark[]) => readonly Mark[]) => {
       if (!bookId) return
-      /* NOT YET READ, so there is nothing to write a snapshot OVER.
-       *
-       * The read is asynchronous and a highlight made before it lands would
-       * persist `[] + the new mark`, erasing everything already in the file. The
-       * change goes to disk as a change instead — read, modify, write, on the
-       * queue — which is exactly what an edit to a book that is not open does. */
-      if (loaded.bookId !== bookId) {
-        applyElsewhereRef.current?.(bookId, mutate)
-        return
+      /* The screen first, and only when the file has been read — before that,
+       * `latest` is not this book's list and predicting from it would show marks
+       * appearing and vanishing. The write below still lands either way. */
+      if (loaded.bookId === bookId) {
+        const next = mutate(latest.current)
+        if (next !== latest.current) {
+          latest.current = next
+          setLoaded({ bookId, marks: next })
+          /* `all` kept in step, so a Notes row does not revert to the old value
+           * the moment it is edited. It only holds what a scan put there, so a
+           * book the scan never reached is left alone rather than half-updated. */
+          setAll((prev) =>
+            prev.length === 0 ? prev : [...next, ...prev.filter((mark) => mark.bookId !== bookId)],
+          )
+        }
       }
-      const next = mutate(latest.current)
-      if (next === latest.current) return
-      latest.current = next
-      setLoaded({ bookId, marks: next })
-      /* `all` kept in step, so a Notes row does not revert to the old value the
-       * moment it is edited. It only holds what a scan put there, so a book the
-       * scan never reached is left alone rather than half-updated. */
-      setAll((prev) =>
-        prev.length === 0 ? prev : [...next, ...prev.filter((mark) => mark.bookId !== bookId)],
-      )
-      if (!fs) return
-      void queue.current
-        .push(bookId, async () => {
-          /* NOT IF THE BOOK HAS GONE. `writeMarks` creates the folder it writes
-           * into, so a mark saved just after the reader removed the book put a
-           * marks-only directory back where the book had been — invisible to the
-           * shelf, which skips a folder with no record, and enough to make the
-           * index disagree with the disk on every load. */
-          if (!(await fs.exists(folderOf(bookId)))) return
-          await writeMarks(fs, bookId, next)
-        })
-        .then(() => setPersistent(true))
-        .catch((cause: unknown) => {
-          /* SURFACED, not swallowed. Losing a mark loses the reader's own words,
-           * and a store that silently stops persisting is indistinguishable from
-           * one that works. */
-          console.error('Paper: could not save your marks', cause)
-          setPersistent(false)
-        })
+      applyElsewhereRef.current?.(bookId, mutate)
     },
-    [bookId, fs],
+    [bookId, loaded.bookId],
   )
 
   /**
@@ -185,7 +177,10 @@ export function useMarks(bookId: string | null, fs: IndexFs | null): MarkStore {
   }, [fs])
 
   /**
-   * Change a mark that belongs to a book which is NOT open.
+   * Write a change to one book's marks file — the only thing that writes one.
+   *
+   * Named for the case it was added for, which is a mark belonging to a book
+   * that is NOT open.
    *
    * Notes lists every book's marks, so a reader can edit or delete one from a
    * book they are not reading — and every mutation here acted on the open
@@ -229,6 +224,7 @@ export function useMarks(bookId: string | null, fs: IndexFs | null): MarkStore {
             latest.current = next
             setLoaded({ bookId: targetId, marks: next })
           }
+          setPersistent(true)
         })
         .catch((cause: unknown) => {
           console.error('Paper: could not save that book\'s marks', cause)

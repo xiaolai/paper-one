@@ -97,7 +97,12 @@ export function recordFromRow(row: LegacyRow): BookRecord {
     ...(list(row.languages) ? { languages: list(row.languages)! } : {}),
     ...(list(row.subjects) ? { subjects: list(row.subjects)! } : {}),
     ...(list(row.tags) ? { tags: list(row.tags)! } : {}),
-    ...(str(row.position) ? { position: str(row.position)! } : {}),
+    /* NOT `str`, which slices at 4000. A CFI is a path through a document and a
+     * shortened one parses as nothing — see `MAX_POSITION`. Carried whole, or
+     * not at all: this runs once, so a position lost here is lost for good. */
+    ...(typeof row.position === 'string' && row.position && row.position.length <= 64_000
+      ? { position: row.position }
+      : {}),
     ...(num(row.progress) === undefined
       ? {}
       : { progress: Math.min(1, Math.max(0, num(row.progress)!)) }),

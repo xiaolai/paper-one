@@ -155,7 +155,21 @@ export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] =
        * filename for a title and an empty author; `mergeParsed` treats what it
        * is given as the book's own account of itself, which is right for a
        * parse and destructive for a guess. */
-      if (sparse && previous) return
+      if (sparse && previous) {
+        /* NOTHING TO THE SHELF, but the trash may still hold half of this book
+         * from a restore that could not finish — and returning here was the only
+         * path to `add` that never looked. A watched folder rescanning on every
+         * launch would then sail past the stranded files until the sweep deleted
+         * them. */
+        if (fs) {
+          void queue.current
+            .append(bookId, async () => {
+              await restoreBook(fs, bookId)
+            })
+            .catch(() => {})
+        }
+        return
+      }
       /* A fresh parse folded into what the reader owns. The book is the
        * authority on its own metadata; the reader is the authority on their
        * tags, their place in it, and whether they are done. */

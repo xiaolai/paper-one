@@ -400,3 +400,17 @@ describe('marks on a retried book', () => {
     expect(await readMarks(fs, 'book_a')).toHaveLength(1)
   })
 })
+
+/* This runs once, so a position lost here is lost for good — and `str` slices
+ * at 4000, which turns a long CFI into a string that anchors nowhere. */
+describe('a legacy row with a very long position', () => {
+  it('carries it across whole', () => {
+    const long = `epubcfi(/6/14!/4/2/${'2/'.repeat(2000)}1:0)`
+    expect(long.length).toBeGreaterThan(4000)
+    expect(recordFromRow(row({ position: long })).position).toBe(long)
+  })
+
+  it('drops an absurd one rather than carrying a broken anchor', () => {
+    expect(recordFromRow(row({ position: 'x'.repeat(70_000) })).position).toBeUndefined()
+  })
+})
