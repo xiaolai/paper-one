@@ -479,3 +479,41 @@ describe('two rows that want the same folder', () => {
     expect(again.every((one) => one.status === 'already')).toBe(true)
   })
 })
+
+/**
+ * A book Paper only ever had an address for.
+ *
+ * Phase 3 kept `path` and `url` apart, and phase 4 dropped `url` on the
+ * reasoning that a book is its own folder. Paper only copies a `File`, though —
+ * so a book opened from a URL has no folder contents at all, and dropping its
+ * address turned it into a row that could never be opened again. Most of what a
+ * real phase-3 library turned out to contain was exactly that.
+ */
+describe('a row that only has a URL', () => {
+  it('migrates, with the URL as its way back', async () => {
+    const fs = fakeFs({})
+    const out = await migrateToFolders(fs, {
+      rows: [row({ vault: null, cover: null, path: null, url: 'https://example.org/moby.epub' })],
+      marks: [],
+    })
+    expect(out[0]?.status).toBe('migrated')
+    expect((await readBook(fs, 'book_a'))?.origin).toBe('https://example.org/moby.epub')
+  })
+
+  /* A path still wins: it is the reader's own file, and does not depend on
+   * somebody else's server still being there. */
+  it('prefers the reader own file when it has both', () => {
+    expect(
+      recordFromRow(row({ url: 'https://example.org/moby.epub' })).origin,
+    ).toBe('/Users/someone/Downloads/moby.epub')
+  })
+
+  it('is still skipped when it has neither', async () => {
+    const fs = fakeFs({})
+    const out = await migrateToFolders(fs, {
+      rows: [row({ vault: null, cover: null, path: null, url: null })],
+      marks: [],
+    })
+    expect(out[0]?.status).toBe('skipped')
+  })
+})

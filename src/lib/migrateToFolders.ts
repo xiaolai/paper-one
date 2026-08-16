@@ -115,8 +115,12 @@ export function recordFromRow(row: LegacyRow): BookRecord {
     ...(num(row.lastOpened) === undefined
       ? {}
       : { openedAt: num(row.lastOpened)!, addedAt: num(row.lastOpened)! }),
-    // The reader's own file, kept for provenance only — see `BookRecord`.
-    ...(str(row.path) ? { origin: str(row.path)! } : {}),
+    /* The reader's own file, OR the address it was opened from. Phase 3 kept
+     * `path` and `url` apart; phase 4 has one `origin` because a fallback is a
+     * fallback whatever kind of address it holds — and dropping `url` on the
+     * way through made every book ever opened from one unopenable, which is
+     * most of what a real phase-3 library turned out to contain. */
+    ...(str(row.path) ?? str(row.url) ? { origin: (str(row.path) ?? str(row.url))! } : {}),
     ...(str(row.vault) ? { ext: extensionFor(str(row.vault)!) } : {}),
   }
 }
@@ -240,7 +244,7 @@ export async function migrateToFolders(
        * still migrates: `openStored` falls back to it. A row with neither is
        * left in the phase-3 store, reported, and picked up by a later run if
        * anything ever makes it recoverable. */
-      if (!copied && !str(row.path)) {
+      if (!copied && !str(row.path) && !str(row.url)) {
         outcomes.push({
           bookId,
           status: 'skipped',

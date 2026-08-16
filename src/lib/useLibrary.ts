@@ -11,7 +11,7 @@ import {
   type BookRecord,
 } from './bookFolder'
 import { writeIndex, type IndexFs, type IndexedBook } from './bookIndex'
-import { restoreBook, trashBook } from './bookTrash'
+import { rescueStrandedMarks, restoreBook, trashBook } from './bookTrash'
 import { tagKey } from './library'
 import { writeQueue } from './writeQueue'
 
@@ -200,6 +200,7 @@ export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] =
           void queue.current
             .append(bookId, async () => {
               await restoreBook(fs, bookId)
+              await rescueStrandedMarks(fs, bookId)
               /* AND THE SAME RESCUE the full path does. Returning after the
                * restore alone left a `book.json` the restore could not move
                * sitting in the trash — so a folder import, which is all sparse
@@ -261,6 +262,12 @@ export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] =
          * so it is `previous` in the merge and the live one is the parse. Once
          * it is safely written, the copy in the trash goes. */
         const stranded = parseRecord(await readText(target, `${trashOf(bookId)}/book.json`))
+        /* AND THE MARKS, for the same reason and by the same route. A highlight
+         * made while a re-added book's bytes were still being written created a
+         * live `marks.json` that blocked the complete one from coming back — so
+         * one annotation made in that window cost every annotation made before
+         * the book was removed. */
+        await rescueStrandedMarks(target as never, bookId)
         /* MERGED INTO WHAT IS ON DISK, ALWAYS — not only when the row was
          * missing. The in-memory copy comes from an index that `loadShelf` will
          * knowingly trust while it is one write behind, so folding the parse

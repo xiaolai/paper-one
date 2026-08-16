@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import { folderOf, trashOf } from './bookFolder'
-import { TRASH_DAYS, emptyExpired, restoreBook, trashBook, type TrashFs } from './bookTrash'
+import {
+  TRASH_DAYS,
+  emptyExpired,
+  rescueStrandedMarks,
+  restoreBook,
+  trashBook,
+  type TrashFs,
+} from './bookTrash'
 
 /**
  * Removing a book takes the reader's tags, their place in it and their marks
@@ -299,5 +306,64 @@ describe('finishing a restore that could not finish before', () => {
     const fs = fakeFs(shelved())
     expect(await restoreBook(fs, 'book_a')).toBe(false)
     expect(fs.store.has(`${folderOf('book_a')}/book.json`)).toBe(true)
+  })
+})
+
+/**
+ * The one annotation that cost all the others.
+ *
+ * Re-adding a book writes its bytes first, so there is a real window — seconds,
+ * for a large file — in which the folder exists and the restore has not run. A
+ * highlight made in it creates a live `marks.json`, `restoreBook` treats it as a
+ * collision and correctly refuses to overwrite it, and the complete list then
+ * sat in the trash until the sweep deleted it.
+ */
+describe('rescueStrandedMarks', () => {
+  const staged = async () => {
+    const fs = fakeFs(shelved())
+    await trashBook(fs, 'book_a')
+    // The reader highlights something while the book is coming back.
+    fs.store.set(
+      `${folderOf('book_a')}/marks.json`,
+      new TextEncoder().encode('[{"id":"new","cfi":"z"}]'),
+    )
+    await restoreBook(fs, 'book_a')
+    return fs
+  }
+
+  it('folds the trashed marks in beside the new one', async () => {
+    const fs = await staged()
+    expect(fs.store.has(`${trashOf('book_a')}/marks.json`)).toBe(true)
+    expect(await rescueStrandedMarks(fs, 'book_a')).toBe(true)
+    const kept = JSON.parse(
+      new TextDecoder().decode(fs.store.get(`${folderOf('book_a')}/marks.json`)!),
+    ) as { id?: string; cfi?: string }[]
+    // The one made during the window, and the one that was in the trash. The
+    // fixture's mark carries no id, which is the case that must be CARRIED
+    // rather than dropped — it cannot be deduplicated, and losing somebody's
+    // note to tidy bookkeeping is the wrong way round.
+    expect(kept).toHaveLength(2)
+    expect(kept.map((m) => m.cfi).sort()).toEqual(['x', 'z'])
+  })
+
+  it('clears the trashed copy only once the merged list is written', async () => {
+    const fs = await staged()
+    await rescueStrandedMarks(fs, 'book_a')
+    expect(fs.store.has(`${trashOf('book_a')}/marks.json`)).toBe(false)
+  })
+
+  it('is quiet when there is nothing stranded', async () => {
+    const fs = fakeFs(shelved())
+    expect(await rescueStrandedMarks(fs, 'book_a')).toBe(false)
+  })
+
+  /* A trashed marks file that will not read is not one to delete on the way
+   * past — it keeps its stamp and its fortnight. */
+  it('leaves an unreadable trashed file alone', async () => {
+    const fs = fakeFs(shelved())
+    await trashBook(fs, 'book_a')
+    fs.store.set(`${trashOf('book_a')}/marks.json`, new TextEncoder().encode('half a write'))
+    expect(await rescueStrandedMarks(fs, 'book_a')).toBe(false)
+    expect(fs.store.has(`${trashOf('book_a')}/marks.json`)).toBe(true)
   })
 })

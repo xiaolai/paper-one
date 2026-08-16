@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { buildCommands } from './lib/commands'
 import { PANE_SHORTCUTS } from './lib/panes'
 import { DEFAULT_STEP_IDX, applyMetrics } from './lib/metrics'
@@ -136,19 +136,11 @@ export function App({ storage, fs, initialBooks }: AppProps) {
    */
   const removedWhileOpen = useRef(new Map<string, number>())
   const removals = useRef(0)
-  /** The tick when the current book was ASKED FOR — see `openBook`. */
+  /** The tick when the current book was ASKED FOR — see the effect below. */
   const openedAt = useRef<{ source: File | string; at: number } | null>(null)
 
   const openBook = useCallback(
     (source: File | string, path: string | null = null) => {
-      /* THE BASELINE IS STAMPED HERE, at the moment the reader asks for the
-       * book — not in the intake effect, which does not run until the file has
-       * been hashed and parsed. That window is seconds for a large book, and a
-       * removal inside it landed BEFORE the effect started: read as a removal
-       * the reader had since changed their mind about, and the book was
-       * resurrected under its new id with its tags and marks left in the trash
-       * under the old one. */
-      openedAt.current = { source, at: removals.current }
       dispatch({ type: 'goScreen', screen: 'reader' })
       // Set before the open, so the record effect below cannot fire on the new
       // book while this still holds the previous one's path.
@@ -325,6 +317,15 @@ export function App({ storage, fs, initialBooks }: AppProps) {
            * reason Paper keeps its own copy. */
           const original = entry.origin
           if (original) {
+            /* A URL GOES BACK AS A URL. `origin` holds either kind of address —
+             * see the record effect — and handing one to the file reader made
+             * every book ever opened from a URL report that it could not be
+             * opened, having taken the trouble to remember exactly how. The
+             * reader takes a string source directly. */
+            if (/^https?:\/\//i.test(original)) {
+              openBook(original)
+              return
+            }
             void readBookAt(original)
               .then((file) => openBook(file, original))
               .catch((second: unknown) => {
@@ -364,6 +365,24 @@ export function App({ storage, fs, initialBooks }: AppProps) {
    * actually read rather than a fixture shelf. Keyed on the metadata arriving,
    * because that is when there is a title worth showing. */
   const { bookId, meta, source, cover } = book
+
+  /* Stamp the removal baseline the instant a new source appears.
+   *
+   * NOT IN `openBook`, which is only one of the ways a book arrives — a drop on
+   * the reader and a `?book=` on startup both go straight to `book.open`, and
+   * for those the baseline fell back to "now", which is captured only after the
+   * file has been hashed and parsed. A removal inside that window then became
+   * the baseline instead of being compared against it, so the book was
+   * resurrected under its new id with its tags and marks left in the trash.
+   *
+   * `useLayoutEffect` so it runs before the intake effect that reads it, and on
+   * `source` because that is set the moment an open begins, long before there
+   * is an id or a parse. */
+  useLayoutEffect(() => {
+    if (source && openedAt.current?.source !== source) {
+      openedAt.current = { source, at: removals.current }
+    }
+  }, [source])
 
   /* The open book's row, narrowed to the two fields the effects below depend on.
    *
@@ -640,7 +659,17 @@ export function App({ storage, fs, initialBooks }: AppProps) {
          * write serialised it and every read threw it away. Nothing displays a
          * description yet — when something does, it belongs in the record first
          * and here second. */
-        ...(openedPath ? { origin: openedPath } : {}),
+        /* WHERE THE BOOK CAME FROM — a path, or a URL when that is what was
+         * opened. Phase 3 kept `url` as a separate field and phase 4 deleted it
+         * on the reasoning that a book is its own folder; but Paper only ever
+         * copies a `File`, so a book opened from a URL has no folder contents at
+         * all. Without this it became a row that could never be opened again,
+         * which is precisely the state `canOpen` had to be brought back to
+         * describe. One field, because a fallback is a fallback whatever kind of
+         * address it holds. */
+        ...(openedPath ?? (typeof source === 'string' ? source : null)
+          ? { origin: openedPath ?? (source as string) }
+          : {}),
         ...(source instanceof File ? { ext: source.name.split('.').pop() ?? '' } : {}),
       })
     })()

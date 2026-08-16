@@ -17,7 +17,7 @@
  */
 
 import type { VaultFs } from './bookVault'
-import { folderOf, trashOf } from './bookFolder'
+import { folderOf, readMarks, trashOf, writeMarks } from './bookFolder'
 
 export { TRASH_DIR } from './bookFolder'
 
@@ -165,4 +165,43 @@ export async function emptyExpired(fs: TrashFs, now = Date.now()): Promise<strin
     }
   }
   return gone
+}
+
+/**
+ * Fold marks a restore had to leave in the trash into the live ones.
+ *
+ * `restoreBook` moves file by file and a name already live WINS, so a reader who
+ * highlights something while a re-added book's bytes are still being written
+ * creates a `marks.json` that blocks the complete one from coming back. It then
+ * sat in the trash until the sweep deleted it — the one annotation made in that
+ * window costing every annotation made before the book was removed.
+ *
+ * BY ID, and the live copy wins a tie: it is the one the reader has been looking
+ * at. Nothing is removed from the trash until the merged list is written.
+ */
+export async function rescueStrandedMarks(fs: TrashFs, bookId: string): Promise<boolean> {
+  const at = `${trashOf(bookId)}/marks.json`
+  try {
+    if (!(await fs.exists(at))) return false
+    const stranded = JSON.parse(new TextDecoder().decode(await fs.readFile(at))) as unknown
+    if (!Array.isArray(stranded)) return false
+    const live = (await readMarks(fs as never, bookId)) as { id?: unknown }[]
+    const held = new Set(live.map((mark) => mark?.id).filter((id) => typeof id === 'string'))
+    const fresh = stranded.filter((mark) => {
+      const id = (mark as { id?: unknown })?.id
+      /* A mark with no usable id CANNOT be deduplicated, so it is carried over
+       * rather than dropped: a duplicate is visible and deletable, and this runs
+       * once because the trashed file goes immediately after. Losing somebody's
+       * note to tidy bookkeeping is the wrong way round. */
+      return typeof id !== 'string' || !held.has(id)
+    })
+    if (fresh.length) await writeMarks(fs as never, bookId, [...live, ...fresh])
+    await fs.remove(at).catch(() => {})
+    return fresh.length > 0
+  } catch (cause) {
+    /* LEFT WHERE IT IS. A trashed marks file that will not read is not one to
+     * delete on the way past — it keeps its stamp and its fortnight. */
+    console.error('Paper: could not recover the removed marks', cause)
+    return false
+  }
 }
