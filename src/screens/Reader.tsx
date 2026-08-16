@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState, type CSSProperties } from 'react'
-import { Plus } from 'lucide-react'
+import { Library, Plus } from 'lucide-react'
 import type { Platform } from '../lib/metrics'
 import {
   ICON,
@@ -44,6 +44,17 @@ export interface ReaderProps {
   /** Opens the file picker, which the window owns — see App. */
   onAddBooks: () => void
   /**
+   * How many books are on the shelf.
+   *
+   * The reader needs this for ONE thing and it is not decoration: with no book
+   * open, this screen used to announce "Your library is empty" — from a screen
+   * that is not the library, without ever asking. The app boots to the reader,
+   * so a reader with ten books relaunched Paper and was told they had none.
+   */
+  libraryCount: number
+  /** Show the shelf. */
+  onOpenLibrary: () => void
+  /**
    * True while a book is being dragged over the WINDOW.
    *
    * Owned by App, not by this component. A drop that misses an element which
@@ -79,6 +90,8 @@ export function Reader({
   lastLocation,
   reducedMotion,
   onAddBooks,
+  libraryCount,
+  onOpenLibrary,
   dragging,
   inert = false,
 }: ReaderProps) {
@@ -425,14 +438,34 @@ export function Reader({
             className={styles.empty}
             data-dragging={dragging}
           >
-            <h1 className={styles.emptyTitle}>Your library is empty</h1>
+            {/* SAYS WHICH IS TRUE, having asked. This screen used to announce
+                "Your library is empty" whenever no book was open — and the app
+                boots to the reader, so relaunching Paper told a reader with ten
+                books on the shelf that they had none. The library was intact on
+                disk the whole time; the reader was simply describing a screen it
+                is not. */}
+            <h1 className={styles.emptyTitle}>
+              {libraryCount > 0 ? 'No book open' : 'Your library is empty'}
+            </h1>
             <p className={styles.emptyBody}>
-              Drop an EPUB, PDF, MOBI or CBZ here, or connect a folder to watch.
+              {libraryCount > 0
+                ? `Pick up where you left off, or drop a new book here.`
+                : 'Drop an EPUB, PDF, MOBI or CBZ here, or connect a folder to watch.'}
             </p>
             {book.error && <p className={styles.error}>{book.error}</p>}
+            {libraryCount > 0 && (
+              <button
+                type="button"
+                className={styles.primaryButton}
+                onClick={onOpenLibrary}
+              >
+                <Library size={ICON.control} strokeWidth={ICON.stroke} />
+                {`Open the library · ${libraryCount} ${libraryCount === 1 ? 'book' : 'books'}`}
+              </button>
+            )}
             <button
               type="button"
-              className={styles.primaryButton}
+              className={libraryCount > 0 ? styles.secondaryButton : styles.primaryButton}
               onClick={onAddBooks}
             >
               <Plus size={ICON.control} strokeWidth={ICON.stroke} />

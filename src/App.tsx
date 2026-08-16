@@ -836,6 +836,8 @@ export function App({ storage }: AppProps) {
             foliate down mid-flight and loses the reading position — see the
             note on Library's own stacking. */}
         <Reader
+          libraryCount={library.books.length}
+          onOpenLibrary={() => dispatch({ type: 'goScreen', screen: 'library' })}
           state={state}
           dispatch={dispatch}
           platform={platform}
