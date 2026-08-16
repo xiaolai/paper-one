@@ -430,5 +430,25 @@ export function FoliateView({
     }
   }, [stepIdx, theme, typeface, animated, paginated, ready, generation])
 
+  /* Redraw when the MARKS change, not only when a setting does.
+   *
+   * They are read through a ref, so nothing re-ran when they arrived — and they
+   * arrive asynchronously, one file read after the book opens. A section drawn
+   * before that read landed stayed unannotated until something else happened to
+   * rebuild it: the reader's own highlights, invisible in the book they are in.
+   *
+   * `redrawMarks` only walks the sections currently on screen, and re-attaching
+   * an already-attached mark replaces it rather than stacking a second copy, so
+   * running this on every change costs nothing and needs no diff. */
+  useEffect(() => {
+    const session = sessionRef.current
+    if (!session || ready === 0) return
+    try {
+      session.redrawMarks()
+    } catch (cause) {
+      console.error('Paper: could not draw the marks', cause)
+    }
+  }, [marks, ready])
+
   return <div ref={hostRef} style={{ position: 'absolute', inset: 0 }} />
 }

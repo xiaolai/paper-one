@@ -296,3 +296,64 @@ describe('the record knows its own id', () => {
     expect((await readBook(fs, 'book:abc'))?.bookId).toBe('book:abc')
   })
 })
+
+/**
+ * Repairing what the FIRST version of this migration wrote.
+ *
+ * It wrote a record for a row it had no bytes for, and the idempotence check
+ * then reported that record `already` on every later run — so the one state
+ * needing repair was the one state guaranteed never to be looked at again. A
+ * record is finished when it has content or a path back to it, not merely when
+ * it is present.
+ */
+describe('a record left behind by the broken first run', () => {
+  const stranded = async () => {
+    const fs = fakeFs({})
+    await writeBook(fs, 'book_a', { title: 'Moby-Dick', author: 'Herman Melville' })
+    return fs
+  }
+
+  it('is retried rather than reported already done', async () => {
+    const fs = await stranded()
+    const out = await migrateToFolders(fs, { rows: [row({ vault: null, path: null })], marks: [] })
+    expect(out[0]?.status).toBe('skipped')
+  })
+
+  it('is repaired once the bytes are findable again', async () => {
+    const fs = await stranded()
+    fs.files.set('books/book_a.epub', new TextEncoder().encode('WHALE'))
+    const out = await migrateToFolders(fs, { rows: [row()], marks: [] })
+    expect(out[0]?.status).toBe('migrated')
+    expect(fs.files.has(contentPathIn('book_a', 'book.epub'))).toBe(true)
+  })
+
+  /* And the repair must not undo the reader. Anything they did to the stranded
+   * record — a tag, a rename — outlives the retry. */
+  it('keeps what the reader wrote on the stranded record', async () => {
+    const fs = await stranded()
+    await writeBook(fs, 'book_a', {
+      title: 'Moby-Dick; or, The Whale',
+      author: 'Herman Melville',
+      tags: ['Mine'],
+    })
+    fs.files.set('books/book_a.epub', new TextEncoder().encode('WHALE'))
+    await migrateToFolders(fs, { rows: [row()], marks: [] })
+    const record = await readBook(fs, 'book_a')
+    expect(record?.tags).toEqual(['Mine'])
+    expect(record?.title).toBe('Moby-Dick; or, The Whale')
+  })
+
+  /* A COMPLETE record is still left alone, which is what idempotence means. */
+  it('leaves a finished record untouched', async () => {
+    const fs = fakeFs(legacy)
+    await migrateToFolders(fs, { rows: [row()], marks: [] })
+    await writeBook(fs, 'book_a', {
+      title: 'Renamed by the reader',
+      author: 'M',
+      ext: 'epub',
+    })
+    const again = await migrateToFolders(fs, { rows: [row()], marks: [] })
+    expect(again[0]?.status).toBe('already')
+    expect((await readBook(fs, 'book_a'))?.title).toBe('Renamed by the reader')
+  })
+})

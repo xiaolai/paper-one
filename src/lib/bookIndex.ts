@@ -94,7 +94,18 @@ export function parseIndex(raw: string | null): readonly IndexedBook[] | null {
     // Validated through the SAME parser the folder uses, so the cache cannot
     // hold a shape the record could not.
     const record = parseRecord(JSON.stringify(one))
-    if (record) books.push({ ...record, bookId: id })
+    if (!record) continue
+    /* `hasContent` CARRIED THROUGH. It is derived by the scan and is not part of
+     * a record, so rebuilding a cached entry through `parseRecord` dropped it —
+     * and `canOpen` reads `!== false`, so every dead row came back enabled on
+     * the next cache-backed launch. The fix that disabled them worked exactly
+     * once, on the launch that scanned. */
+    const flag = (one as { hasContent?: unknown }).hasContent
+    books.push({
+      ...record,
+      bookId: id,
+      ...(typeof flag === 'boolean' ? { hasContent: flag } : {}),
+    })
   }
   return books
 }

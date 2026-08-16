@@ -227,17 +227,30 @@ export async function updateBook(
    * function rather than a value. A caller holding an in-memory copy may be
    * behind — the index it came from can be one write stale after a crash — and
    * writing that copy back would undo whatever landed in between. */
+  /* WHETHER A REMOVED COPY WAS ALREADY WAITING, read before anything is
+   * written. It is the discriminator for the check below: a trash entry that
+   * appears while this call is running is a removal that happened in between. */
+  const trashedBefore = await fs.exists(trashOf(bookId))
   const current = await readBook(fs, bookId)
   if (!current) return false
   const next = change(current)
   if (next === current) return true
   await writeBook(fs, bookId, next)
-  /* CHECKED AGAIN AFTER THE WRITE, because a removal can rename the folder
-   * between the read above and the write — and `writeBook` calls `mkdir`, so it
-   * would happily recreate the folder containing nothing but this record. That
-   * is a book resurrected as an empty shell, which is worse than the write
-   * simply being lost. Undone rather than left. */
-  if (!(await fs.exists(folderOf(bookId)))) return false
+  /* CHECKED AFTER THE WRITE, because a removal can rename the folder between
+   * the read above and the write — and `writeBook` calls `mkdir`, so it happily
+   * recreates the folder containing nothing but this record. That is a book
+   * resurrected as an empty shell, which is worse than the write being lost.
+   *
+   * TESTING `exists(folder)` HERE PROVED NOTHING: `writeBook` had just created
+   * it, so the answer was always yes and the guard could not fire. The removal
+   * is what leaves a trace — the folder it renamed away — so that is what is
+   * looked for, and only when it was not already there. */
+  if (!trashedBefore && (await fs.exists(trashOf(bookId)))) {
+    // Undone rather than left: the shell this call created is removed, and the
+    // removal keeps the book it moved.
+    await fs.removeDir(folderOf(bookId)).catch(() => {})
+    return false
+  }
   return true
 }
 

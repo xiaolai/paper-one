@@ -18,8 +18,23 @@
 type Task = () => Promise<void>
 
 export interface WriteQueue {
-  /** Run after anything in flight, replacing any other write still waiting. */
+  /**
+   * Run after anything in flight, REPLACING any other write still waiting.
+   *
+   * Correct only when a task writes the WHOLE state — marks, or the index. Each
+   * such write makes its predecessor redundant, so running a superseded one is
+   * two writes of stale bytes.
+   */
   push: (key: string, task: Task) => Promise<void>
+  /**
+   * Run after everything already queued, replacing nothing.
+   *
+   * For a task that applies a CHANGE rather than writing a state: two edits to
+   * one book — a tag, then finished — are different changes, and coalescing
+   * them drops the first. That is silent data loss, which is exactly what the
+   * queue was added to prevent, so the two shapes cannot share one method.
+   */
+  append: (key: string, task: Task) => Promise<void>
 }
 
 interface Waiting {
@@ -27,17 +42,22 @@ interface Waiting {
   readonly settle: (error?: unknown) => void
 }
 
+type Mode = 'replace' | 'append'
+
 export function writeQueue(): WriteQueue {
   /** What is running, per key. */
   const running = new Map<string, Promise<void>>()
-  /** The one task waiting behind it — replaced, never queued behind. */
-  const pending = new Map<string, Waiting>()
+  /** What is waiting, per key. At most one under `replace`; a line under `append`. */
+  const pending = new Map<string, Waiting[]>()
 
   const drain = async (key: string): Promise<void> => {
     for (;;) {
-      const next = pending.get(key)
-      if (!next) break
-      pending.delete(key)
+      const queued = pending.get(key)
+      const next = queued?.shift()
+      if (!next) {
+        pending.delete(key)
+        break
+      }
       try {
         await next.task()
         next.settle()
@@ -55,19 +75,26 @@ export function writeQueue(): WriteQueue {
     running.delete(key)
   }
 
-  return {
-    push(key, task) {
-      return new Promise<void>((resolve, reject) => {
-        const settle = (error?: unknown) => (error ? reject(error) : resolve())
+  const enqueue = (key: string, task: Task, mode: Mode): Promise<void> =>
+    new Promise<void>((resolve, reject) => {
+      const settle = (error?: unknown) => (error ? reject(error) : resolve())
+      const line = pending.get(key) ?? []
+      if (mode === 'replace') {
         /* The superseded task RESOLVES rather than rejecting. It was skipped
          * deliberately because a newer value made it pointless, and that is a
          * success from the caller's side — its data is about to be written by
          * the task that replaced it. */
-        pending.get(key)?.settle()
-        pending.set(key, { task, settle })
-        if (running.has(key)) return
-        running.set(key, drain(key))
-      })
-    },
+        for (const waiting of line) waiting.settle()
+        line.length = 0
+      }
+      line.push({ task, settle })
+      pending.set(key, line)
+      if (running.has(key)) return
+      running.set(key, drain(key))
+    })
+
+  return {
+    push: (key, task) => enqueue(key, task, 'replace'),
+    append: (key, task) => enqueue(key, task, 'append'),
   }
 }

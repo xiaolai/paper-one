@@ -17,8 +17,18 @@
  * is the opposite of what typing more means everywhere else.
  */
 
-/** A quoted tag, so a tag with a space in it survives — `tag:"Book club"`. */
-const TAG = /(^|\s)tag:(?:"([^"]*)"|(\S*))/gi
+/**
+ * A quoted tag, so a tag with a space in it survives — `tag:"Book club"`.
+ *
+ * `\"` inside the quotes is a literal quote. Without that the writer had no way
+ * to spell a tag containing one and DELETED it instead, producing a query for a
+ * different tag — `He said "Hi"` searched for `He said Hi`, which matches
+ * nothing. An escape in the grammar is what makes `withTag` able to round-trip.
+ */
+const TAG = /(^|\s)tag:(?:"((?:[^"\\]|\\.)*)"|(\S*))/gi
+
+/** Undo `withTag`'s escaping: `\"` and `\\` become the characters they spell. */
+const unescape = (quoted: string): string => quoted.replace(/\\(.)/g, '$1')
 
 export interface ParsedQuery {
   /** Tags to restrict to, in the order typed. Deduplicated by key. */
@@ -41,7 +51,7 @@ export function parseQuery(raw: string, key: (tag: string) => string): ParsedQue
   const seen = new Set<string>()
   const text = raw
     .replace(TAG, (_match, lead: string, quoted?: string, bare?: string) => {
-      const tag = (quoted ?? bare ?? '').trim()
+      const tag = (quoted === undefined ? (bare ?? '') : unescape(quoted)).trim()
       if (tag) {
         const k = key(tag)
         if (!seen.has(k)) {
@@ -74,13 +84,14 @@ export function withTag(raw: string, tag: string, key: (t: string) => string): s
   if (tags.some((one) => key(one) === key(tag))) return raw
   if (!tag.trim()) return raw
   /* Quoted only when it needs to be — `tag:Sea` reads better than `tag:"Sea"`,
-   * and the reader is going to see this. A quote INSIDE the tag is dropped
-   * rather than escaped: the parser has no escape sequence, so inventing one
-   * here would produce a term it cannot read back, and a tag containing a
-   * double quote is vanishingly rare against the cost of a query that silently
-   * stops round-tripping. */
-  const safe = tag.replace(/"/g, '')
-  const term = /\s/.test(safe) ? `tag:"${safe}"` : `tag:${safe}`
+   * and the reader is going to see this.
+   *
+   * A quote inside the tag is ESCAPED. Deleting it, which is what this did,
+   * produced a well-formed query for a DIFFERENT tag: `He said "Hi"` came out
+   * as `He said Hi`, and the shelf emptied with the chip still showing. The
+   * parser now reads `\"`, so the term round-trips. */
+  const escaped = tag.replace(/[\\"]/g, (ch) => `\\${ch}`)
+  const term = /[\s"\\]/.test(tag) ? `tag:"${escaped}"` : `tag:${tag}`
   return raw.trim() ? `${term} ${raw.trim()}` : term
 }
 
@@ -89,7 +100,10 @@ export function withoutTag(raw: string, tag: string, key: (t: string) => string)
   const target = key(tag)
   return raw
     .replace(TAG, (match, lead: string, quoted?: string, bare?: string) => {
-      const found = (quoted ?? bare ?? '').trim()
+      /* UNESCAPED before comparing, exactly as `parseQuery` does. Comparing the
+       * raw text meant the chip for a tag containing a quote matched nothing and
+       * could not be cleared — the one tag `withTag` had just learned to write. */
+      const found = (quoted === undefined ? (bare ?? '') : unescape(quoted)).trim()
       return found && key(found) === target ? lead : match
     })
     .trim()

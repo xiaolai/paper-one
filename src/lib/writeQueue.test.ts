@@ -72,4 +72,39 @@ describe('writeQueue', () => {
     await q.push('k', async () => void ran.push('after'))
     expect(ran).toEqual(['after'])
   })
+
+  /**
+   * The distinction the two methods exist for.
+   *
+   * `push` writes a whole state, so the superseded one is redundant. `append`
+   * applies a CHANGE — a tag, then a position — and dropping either loses what
+   * it was carrying. One queue with only `push` silently lost the first of any
+   * two edits made to one book in the same tick.
+   */
+  it('runs every appended task, in order', async () => {
+    const q = writeQueue()
+    const ran: string[] = []
+    const gate = defer()
+    void q.append('k', async () => {
+      ran.push('first')
+      await gate.promise
+    })
+    void q.append('k', async () => void ran.push('second'))
+    const last = q.append('k', async () => void ran.push('third'))
+    gate.resolve()
+    await last
+    expect(ran).toEqual(['first', 'second', 'third'])
+  })
+
+  it('carries on appending after a task throws', async () => {
+    const q = writeQueue()
+    const ran: string[] = []
+    const failed = q.append('k', async () => {
+      throw new Error('disk full')
+    })
+    const after = q.append('k', async () => void ran.push('after'))
+    await failed.catch(() => {})
+    await after
+    expect(ran).toEqual(['after'])
+  })
 })

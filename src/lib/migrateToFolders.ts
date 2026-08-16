@@ -155,14 +155,26 @@ export async function migrateToFolders(
     if (!bookId) continue
     try {
       /* ALREADY DONE, so nothing happens. This is what makes a second run — or
-       * a run after a crash — safe: a book whose record exists is finished, and
-       * rewriting it would overwrite whatever the reader has done since. */
-      if (await readBook(fs, bookId)) {
+       * a run after a crash — safe: a book whose record is FINISHED is left
+       * exactly as it is, because rewriting it would overwrite whatever the
+       * reader has done since.
+       *
+       * FINISHED, not merely present. The first version of this migration wrote
+       * a record for a row it had no bytes for, and this check then reported it
+       * `already` on every later run — so the one state that needed repairing
+       * was the one state guaranteed never to be revisited. A record with
+       * neither content nor a path back is unfinished business, and falls
+       * through to be tried again. */
+      const existing = await readBook(fs, bookId)
+      if (existing && ((await hasBytes(fs, bookId, existing)) || existing.origin)) {
         outcomes.push({ bookId, status: 'already' })
         continue
       }
 
-      const record = recordFromRow(row)
+      /* WHAT IS ON DISK WINS over what the row says, when both exist. Falling
+       * through to retry must not undo a rename, a tag or a position the reader
+       * has applied since the incomplete record was written. */
+      const record = existing ? { ...recordFromRow(row), ...existing } : recordFromRow(row)
       const name = `book.${record.ext ?? 'epub'}`
 
       // The bytes first, then the cover, then the marks, and the RECORD LAST.
@@ -215,6 +227,11 @@ export async function migrateToFolders(
     }
   }
   return outcomes
+}
+
+/** Whether a record's own folder actually holds the book it describes. */
+async function hasBytes(fs: VaultFs, bookId: string, record: BookRecord): Promise<boolean> {
+  return fs.exists(contentPathIn(bookId, `book.${record.ext ?? 'epub'}`))
 }
 
 /**

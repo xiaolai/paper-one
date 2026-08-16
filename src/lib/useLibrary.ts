@@ -1,5 +1,12 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
-import { mergeParsed, readBook, updateBook, writeBook, type BookRecord } from './bookFolder'
+import {
+  folderOf,
+  mergeParsed,
+  readBook,
+  updateBook,
+  writeBook,
+  type BookRecord,
+} from './bookFolder'
 import { writeIndex, type IndexFs, type IndexedBook } from './bookIndex'
 import { restoreBook, trashBook } from './bookTrash'
 import { tagKey } from './library'
@@ -73,7 +80,11 @@ export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] =
       setBooks(next)
       if (!fs) return
       void queue.current
-        .push(key, async () => {
+        /* APPEND, not replace. Each task here applies a CHANGE to what is on
+         * disk — a tag, then a position — and coalescing two of them drops the
+         * first. Marks can coalesce because each of those writes the whole list;
+         * these cannot, and the distinction is why the queue has two methods. */
+        .append(key, async () => {
           await write(fs)
         })
         .then(() =>
@@ -117,7 +128,12 @@ export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] =
 
   const add = useCallback(
     (bookId: string, record: BookRecord, sparse = false) => {
-      const at = latest.current.findIndex((one) => one.bookId === bookId)
+      /* MATCHED BY FOLDER, not by the id as spelled. `safeId` is not reversible
+       * and not injective, so a record written before the id was stored comes
+       * back off the scan as its directory name — `book_abc` for `book:abc` —
+       * and a content-derived add would then miss it and put a SECOND row on the
+       * shelf for the one folder both resolve to. */
+      const at = latest.current.findIndex((one) => folderOf(one.bookId) === folderOf(bookId))
       const previous = at === -1 ? null : latest.current[at]
       /* A PLACEHOLDER over a real record does nothing. An import supplies a
        * filename for a title and an empty author; `mergeParsed` treats what it

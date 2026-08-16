@@ -137,3 +137,52 @@ describe('emptyExpired', () => {
     expect(await emptyExpired(fakeFs())).toEqual([])
   })
 })
+
+/**
+ * The case restore was actually asked for, and refused.
+ *
+ * An import writes `content.epub` FIRST and puts the book on the shelf second,
+ * so by the time anything calls `restoreBook` the live folder already exists.
+ * Renaming the trashed folder onto it fails, and returning false there left the
+ * reader's tags, place and marks in the trash — at the exact moment
+ * content-derived identity was about to hand them back.
+ */
+describe('restoring onto a folder that is already there', () => {
+  const withContentOnly = (id = 'book_a') => ({
+    [`${folderOf(id)}/content.epub`]: 'FRESH BYTES',
+  })
+
+  it('brings back the record and the marks', async () => {
+    const fs = fakeFs(shelved())
+    await trashBook(fs, 'book_a')
+    // The import lands while the old copy is still in the trash.
+    for (const [k, v] of Object.entries(withContentOnly())) {
+      fs.store.set(k, new TextEncoder().encode(v))
+    }
+    expect(await restoreBook(fs, 'book_a')).toBe(true)
+    expect(new TextDecoder().decode(fs.store.get(`${folderOf('book_a')}/book.json`)!)).toContain(
+      'Sea',
+    )
+    expect(fs.store.has(`${folderOf('book_a')}/marks.json`)).toBe(true)
+  })
+
+  /* The bytes just written WIN. They are the current copy; the trashed one is
+   * the same book by definition, since the id is the content. */
+  it('keeps the freshly imported content rather than the trashed copy', async () => {
+    const fs = fakeFs(shelved())
+    await trashBook(fs, 'book_a')
+    fs.store.set(`${folderOf('book_a')}/content.epub`, new TextEncoder().encode('FRESH BYTES'))
+    await restoreBook(fs, 'book_a')
+    expect(new TextDecoder().decode(fs.store.get(`${folderOf('book_a')}/content.epub`)!)).toBe(
+      'FRESH BYTES',
+    )
+  })
+
+  it('empties the trash entry behind it', async () => {
+    const fs = fakeFs(shelved())
+    await trashBook(fs, 'book_a')
+    fs.store.set(`${folderOf('book_a')}/content.epub`, new TextEncoder().encode('FRESH'))
+    await restoreBook(fs, 'book_a')
+    expect([...fs.store.keys()].some((k) => k.startsWith(`${trashOf('book_a')}/`))).toBe(false)
+  })
+})

@@ -58,22 +58,38 @@ export async function trashBook(fs: TrashFs, bookId: string): Promise<boolean> {
   }
 }
 
-/** Put a trashed book back. Returns false when it was not there. */
+/**
+ * Put a trashed book back. Returns false when there was nothing in the trash.
+ *
+ * FILE BY FILE, NOT FOLDER BY FOLDER, and that is the whole of it. Renaming the
+ * folder needs the destination not to exist — but by the time anything asks for
+ * a restore, it usually does: an import writes `content.epub` first and puts the
+ * book on the shelf second, so the live folder is already there holding the
+ * bytes. Refusing at that point was correct about the rename and wrong about the
+ * outcome: the reader re-added a book they had removed, and their tags, their
+ * place and their marks stayed in the trash where nothing would look again.
+ *
+ * So each entry moves on its own, and one already live WINS. The bytes just
+ * written are the current ones; the record and marks in the trash are the ones
+ * with nothing to replace them.
+ */
 export async function restoreBook(fs: TrashFs, bookId: string): Promise<boolean> {
   try {
     if (!(await fs.exists(trashOf(bookId)))) return false
-    /* REFUSED when the live folder already exists, because a rename onto a
-     * non-empty destination fails — and the caller then carried on and wrote a
-     * fresh record over the top, leaving the trashed tags and marks stranded
-     * where nothing would look for them again. Saying so lets the caller keep
-     * what is already live instead. */
-    if (await fs.exists(folderOf(bookId))) return false
-    await fs.rename(trashOf(bookId), folderOf(bookId))
-    /* The stamp is removed AFTER the rename, not before. Before, a failing
-     * rename left the folder in the trash with no age — and `emptyExpired`
-     * errs towards keeping anything it cannot age, so it would have sat there
-     * forever. */
-    await fs.remove(`${folderOf(bookId)}/.removed`).catch(() => {})
+    const entries = await fs.readDir(trashOf(bookId))
+    await fs.mkdir(folderOf(bookId))
+    for (const entry of entries) {
+      // The stamp belongs to the trash and is not part of the book.
+      if (entry.name === '.removed') continue
+      const to = `${folderOf(bookId)}/${entry.name}`
+      if (await fs.exists(to)) continue
+      await fs.rename(`${trashOf(bookId)}/${entry.name}`, to).catch(() => {})
+    }
+    /* The trash entry goes LAST, once its contents have moved. A failure part
+     * way through leaves the rest of the book in the trash with its stamp, which
+     * is recoverable; removing the stamp first would leave it there with no age,
+     * and `emptyExpired` keeps anything it cannot age — forever. */
+    await fs.removeDir(trashOf(bookId)).catch(() => {})
     return true
   } catch {
     return false

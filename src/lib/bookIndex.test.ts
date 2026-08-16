@@ -185,3 +185,39 @@ describe('writeIndex', () => {
     expect(fs.store.has(INDEX_FILE)).toBe(false)
   })
 })
+
+/**
+ * `hasContent` is DERIVED by the scan and is not part of a record — so the cache
+ * has to carry it explicitly or it is gone on the next launch.
+ *
+ * It was not, and rebuilding a cached entry through `parseRecord` dropped it.
+ * `canOpen` reads `!== false`, so every row for a book Paper has no bytes for
+ * came back enabled: the shelf told the truth exactly once, on the launch that
+ * happened to rescan, and lied on every launch after it.
+ */
+describe('the cache remembers which books have bytes', () => {
+  it('carries hasContent back out of the index', () => {
+    const raw = JSON.stringify({
+      version: 1,
+      books: [
+        { bookId: 'a', title: 'Has', author: '', hasContent: true },
+        { bookId: 'b', title: 'Has not', author: '', hasContent: false },
+      ],
+    })
+    const books = parseIndex(raw)!
+    expect(books[0]?.hasContent).toBe(true)
+    expect(books[1]?.hasContent).toBe(false)
+  })
+
+  it('leaves it unset for an index written before it was recorded', () => {
+    const raw = JSON.stringify({ version: 1, books: [{ bookId: 'a', title: 'Old', author: '' }] })
+    expect(parseIndex(raw)![0]).not.toHaveProperty('hasContent')
+  })
+
+  it('survives a round trip through writeIndex', async () => {
+    const fs = fakeFs({})
+    await writeIndex(fs, [{ bookId: 'a', title: 'T', author: '', hasContent: false }])
+    const stored = new TextDecoder().decode(fs.store.get(INDEX_FILE)!)
+    expect(parseIndex(stored)![0]?.hasContent).toBe(false)
+  })
+})

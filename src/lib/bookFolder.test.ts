@@ -10,6 +10,7 @@ import {
   parseRecord,
   readBook,
   recordPath,
+  trashOf,
   updateBook,
   writeBook,
   type BookRecord,
@@ -40,7 +41,11 @@ function fakeFs(seed: Record<string, string> = {}) {
       if (fs.failWrite === path) throw new Error('disk full')
       files.set(path, bytes)
     },
-    exists: async (path) => files.has(path),
+    /* A DIRECTORY EXISTS WHEN SOMETHING IS IN IT, which is what the real
+     * `exists` reports and what this fake claimed otherwise. An exact match made
+     * every directory look absent, so a guard that asks about one passed here
+     * for the wrong reason and failed on disk. */
+    exists: async (path) => [...files.keys()].some((k) => k === path || k.startsWith(`${path}/`)),
     mkdir: async (path) => void dirs.add(path),
     remove: async (path) => void files.delete(path),
     removeDir: async (path: string) => {
@@ -226,5 +231,48 @@ describe('mergeParsed', () => {
   it('is the parse itself for a book with no previous record', () => {
     const parsed = book({ title: 'New' })
     expect(mergeParsed(null, parsed)).toBe(parsed)
+  })
+})
+
+/**
+ * A position save landing while the reader removes the book.
+ *
+ * `updateBook` reads, applies, writes — and `writeBook` calls `mkdir`, so a
+ * removal in between left the folder recreated holding nothing but a record: a
+ * book resurrected as an empty shell, with its content and marks in the trash.
+ *
+ * The check that was supposed to catch this asked whether the folder existed
+ * AFTER the write, which `writeBook` had just guaranteed. It could not fire.
+ */
+describe('a write racing a removal', () => {
+  it('does not resurrect the book, and says it did not write', async () => {
+    const fs = fakeFs({
+      [`${folderOf('book_a')}/book.json`]: '{"title":"Moby-Dick","author":"M"}',
+      [`${folderOf('book_a')}/content.epub`]: 'WHALE',
+    })
+    const wrote = await updateBook(fs, 'book_a', (record) => {
+      // The removal happens between the read and the write.
+      for (const key of [...fs.files.keys()]) {
+        if (!key.startsWith(`${folderOf('book_a')}/`)) continue
+        fs.files.set(`${trashOf('book_a')}/${key.split('/').pop()}`, fs.files.get(key)!)
+        fs.files.delete(key)
+      }
+      return { ...record, position: 'epubcfi(/6/14)' }
+    })
+    expect(wrote).toBe(false)
+    expect([...fs.files.keys()].some((k) => k.startsWith(`${folderOf('book_a')}/`))).toBe(false)
+    expect(fs.files.has(`${trashOf('book_a')}/content.epub`)).toBe(true)
+  })
+
+  /* And the ordinary case still writes — including for a book that was removed
+   * and put back before this call started, which is what the `before` check
+   * distinguishes. */
+  it('writes normally when an unrelated trashed copy is sitting there', async () => {
+    const fs = fakeFs({
+      [`${folderOf('book_a')}/book.json`]: '{"title":"Moby-Dick","author":"M"}',
+      [`${trashOf('book_a')}/book.json`]: '{"title":"An older removal","author":""}',
+    })
+    expect(await updateBook(fs, 'book_a', (r) => ({ ...r, finished: true }))).toBe(true)
+    expect((await readBook(fs, 'book_a'))?.finished).toBe(true)
   })
 })

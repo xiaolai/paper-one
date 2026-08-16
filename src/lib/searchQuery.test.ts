@@ -122,3 +122,34 @@ describe('round trip', () => {
     expect(parse(q).tags).toEqual(['Classics'])
   })
 })
+
+/**
+ * A tag containing a double quote.
+ *
+ * `withTag` used to DELETE the quote, which produced a perfectly well-formed
+ * query for a different tag — `He said "Hi"` searched for `He said Hi` — so the
+ * chip appeared, the shelf emptied, and nothing on screen could explain it.
+ */
+describe('a tag with a quote in it', () => {
+  const key = (t: string) => t.trim().toLowerCase()
+
+  it('round-trips through the query it writes', () => {
+    const tag = 'He said "Hi"'
+    const query = withTag('', tag, key)
+    expect(parseQuery(query, key).tags).toEqual([tag])
+  })
+
+  it('round-trips one with a backslash too', () => {
+    const tag = 'C:\\Books'
+    expect(parseQuery(withTag('', tag, key), key).tags).toEqual([tag])
+  })
+
+  it('can be taken back out again', () => {
+    const tag = 'He said "Hi"'
+    expect(withoutTag(withTag('moby', tag, key), tag, key).trim()).toBe('moby')
+  })
+
+  it('still leaves a plain tag unquoted', () => {
+    expect(withTag('', 'Sea', key)).toBe('tag:Sea')
+  })
+})

@@ -163,7 +163,13 @@ export function App({ storage, fs, initialBooks }: AppProps) {
            * `.epub` — so it looks for a file that is not there. */
           ext: extensionFor(one.name),
           ...(one.path ? { origin: one.path } : {}),
-        })
+        },
+        /* SPARSE — a placeholder, not a parse. Everything above except the
+         * extension is a guess from a filename, and `add` folds what it is given
+         * in as the book's own account of itself. Without this flag, re-scanning
+         * a watched folder on startup overwrote the real title and author of
+         * every book in it with `moby-dick-1851` and nothing. */
+        true)
       }
     },
     [add],
@@ -430,71 +436,79 @@ export function App({ storage, fs, initialBooks }: AppProps) {
    */
   const removeBook = useCallback((entry: IndexedBook) => remove(entry.bookId), [remove])
 
-  useEffect(() => {
-    if (!bookId || !meta) return
-    /* `add`, which FOLDS a fresh parse into what the reader owns rather than
-     * replacing it — see `mergeParsed`. Phase 3 spread the parse over the row
-     * and erased the reader's tags on every reopen.
-     *
-     * `openedAt` is set here because this is the moment a book is opened, and
-     * the shelf is ordered by it. */
-    add(bookId, {
-      title: meta.title,
-      author: meta.author,
-      openedAt: Date.now(),
-      addedAt: Date.now(),
-      ...(meta.sortAs ? { sortAs: meta.sortAs } : {}),
-      ...(meta.series ? { series: meta.series } : {}),
-      ...(meta.seriesIndex === null ? {} : { seriesIndex: meta.seriesIndex }),
-      ...(meta.subjects.length ? { subjects: meta.subjects } : {}),
-      ...(meta.publisher ? { publisher: meta.publisher } : {}),
-      ...(meta.published ? { published: meta.published } : {}),
-      ...(meta.languages.length ? { languages: meta.languages } : {}),
-      ...(meta.description ? { description: meta.description } : {}),
-      ...(openedPath ? { origin: openedPath } : {}),
-      ...(source instanceof File ? { ext: source.name.split('.').pop() ?? '' } : {}),
-    })
-  }, [bookId, meta, source, add, openedPath])
-
-  /* Put the book's bytes in its own folder.
+  /* Take the book in: its bytes first, THEN its record.
    *
-   * `content.<ext>` beside `book.json`, so the whole book is one directory to
-   * back up, replicate, or hand to somebody. The reader's original file is never
-   * moved, written to or deleted.
+   * ONE EFFECT, and the order inside it is the point. These were two — a record
+   * written on parse and a copy written on `isShelved`, which meant the copy
+   * waited for the record — so a crash in between left a book on the shelf that
+   * Paper had no bytes for. That is the exact state the migration produces and
+   * the exact state `canOpen` exists to describe; producing it here as well, on
+   * every ordinary open, is not something a derived flag should have to cover.
    *
-   * NO ATTACHMENT STEP. Phase 3 wrote the bytes and then recorded WHERE they
-   * went, which is two operations that could disagree — and did. The folder is
-   * named by the book's own id, so its location is not a fact to be stored.
-   *
-   * Written to a temporary neighbour and renamed, like every other write here:
-   * a crash partway must not leave a truncated `content.epub`, because `exists`
-   * would then call it the book forever.
+   * The bytes go in first because a folder holding a book with no record is
+   * simply not on the shelf yet — `scanBooks` skips it — and the next open of
+   * the same file finishes the job. The reverse is a row that cannot open.
    */
   useEffect(() => {
-    if (!bookId || !isShelved || !fs) return
-    if (!(source instanceof File)) return
+    if (!bookId || !meta) return
+    let cancelled = false
     void (async () => {
-      try {
-        const at = contentPathIn(bookId, source.name)
-        // Checked before the bytes are touched: `arrayBuffer()` copies the whole
-        // book into memory, and reopening a 40MB book should not do that to
-        // discover it is already here.
-        if (await fs.exists(at)) return
-        const bytes = new Uint8Array(await source.arrayBuffer())
-        await fs.mkdir(folderOf(bookId))
-        const writing = `${at}.writing`
+      if (source instanceof File && fs) {
         try {
-          await fs.writeFile(writing, bytes)
-          await fs.rename(writing, at)
+          const at = contentPathIn(bookId, source.name)
+          /* Checked before the bytes are touched: `arrayBuffer()` copies the
+           * whole book into memory, and reopening a 40MB book should not do that
+           * to discover it is already here. */
+          if (!(await fs.exists(at))) {
+            const bytes = new Uint8Array(await source.arrayBuffer())
+            await fs.mkdir(folderOf(bookId))
+            /* Written to a temporary neighbour and renamed, like every other
+             * write here: a crash partway must not leave a truncated
+             * `content.epub`, because `exists` would then call it the book. */
+            const writing = `${at}.writing`
+            try {
+              await fs.writeFile(writing, bytes)
+              await fs.rename(writing, at)
+            } catch (cause) {
+              await fs.remove(writing).catch(() => {})
+              throw cause
+            }
+          }
         } catch (cause) {
-          await fs.remove(writing).catch(() => {})
-          throw cause
+          /* Reported and not fatal. The record is still written, and the shelf
+           * says the copy is missing rather than pretending the open failed. */
+          console.error('Paper: could not keep our own copy of the book', cause)
         }
-      } catch (cause) {
-        console.error('Paper: could not keep our own copy of the book', cause)
       }
+      if (cancelled) return
+      /* `add`, which FOLDS a fresh parse into what the reader owns rather than
+       * replacing it — see `mergeParsed`. Phase 3 spread the parse over the row
+       * and erased the reader's tags on every reopen.
+       *
+       * `openedAt` is set here because this is the moment a book is opened, and
+       * the shelf is ordered by it. */
+      add(bookId, {
+        title: meta.title,
+        author: meta.author,
+        openedAt: Date.now(),
+        addedAt: Date.now(),
+        ...(meta.sortAs ? { sortAs: meta.sortAs } : {}),
+        ...(meta.series ? { series: meta.series } : {}),
+        ...(meta.seriesIndex === null ? {} : { seriesIndex: meta.seriesIndex }),
+        ...(meta.subjects.length ? { subjects: meta.subjects } : {}),
+        ...(meta.publisher ? { publisher: meta.publisher } : {}),
+        ...(meta.published ? { published: meta.published } : {}),
+        ...(meta.languages.length ? { languages: meta.languages } : {}),
+        ...(meta.description ? { description: meta.description } : {}),
+        ...(openedPath ? { origin: openedPath } : {}),
+        ...(source instanceof File ? { ext: source.name.split('.').pop() ?? '' } : {}),
+      })
     })()
-  }, [bookId, isShelved, source, fs])
+    return () => {
+      cancelled = true
+    }
+  }, [bookId, meta, source, add, openedPath, fs])
+
 
   /* File the book's own jacket, once.
    *
