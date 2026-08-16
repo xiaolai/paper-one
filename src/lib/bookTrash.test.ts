@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { folderOf, trashOf } from './bookFolder'
-import { TRASH_DAYS, emptyExpired, isTrashed, restoreBook, trashBook, type TrashFs } from './bookTrash'
+import { TRASH_DAYS, emptyExpired, restoreBook, trashBook, type TrashFs } from './bookTrash'
 
 /**
  * Removing a book takes the reader's tags, their place in it and their marks
@@ -99,14 +99,6 @@ describe('restoreBook', () => {
   })
 })
 
-describe('isTrashed', () => {
-  it('knows a removed copy is waiting', async () => {
-    const fs = fakeFs(shelved())
-    expect(await isTrashed(fs, 'book_a')).toBe(false)
-    await trashBook(fs, 'book_a')
-    expect(await isTrashed(fs, 'book_a')).toBe(true)
-  })
-})
 
 describe('emptyExpired', () => {
   const DAY = 24 * 60 * 60 * 1000

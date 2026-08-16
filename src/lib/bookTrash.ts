@@ -70,14 +70,6 @@ export async function restoreBook(fs: TrashFs, bookId: string): Promise<boolean>
   }
 }
 
-/** Whether a removed copy of this book is waiting to be restored. */
-export async function isTrashed(fs: TrashFs, bookId: string): Promise<boolean> {
-  try {
-    return await fs.exists(trashOf(bookId))
-  } catch {
-    return false
-  }
-}
 
 /**
  * Delete anything that has been in the trash longer than its stay.

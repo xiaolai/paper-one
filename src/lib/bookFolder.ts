@@ -63,8 +63,19 @@ export interface BookRecord {
   readonly ext?: string
 }
 
-/** A `bookId` reduced to a safe single path segment — see `bookVault`. */
-export function safeId(bookId: string): string {
+/**
+ * A `bookId` reduced to a safe single path segment.
+ *
+ * `bookIdFor` produces `book:` followed by hex, so in practice this changes
+ * nothing. It is here because "in practice" is not a guarantee: an id also comes
+ * back off a stored record, and a path segment built from one must not be able
+ * to contain a slash whatever it says.
+ *
+ * Not exported — the two builders below are the only callers, and a path helper
+ * that anything can reach is a path helper somebody will use to build a path
+ * this file did not sanction.
+ */
+function safeId(bookId: string): string {
   return bookId.replace(/[^a-zA-Z0-9]/g, '_')
 }
 
