@@ -22,6 +22,7 @@ import { useCollections } from './lib/useCollections'
 import { saveCover } from './lib/coverArt'
 import { importFolder, summarise, type ImportProgress } from './lib/importFolder'
 import { WATCHED_FOLDER_KEY, watchFolder } from './lib/watchedFolder'
+import { lookupMetadata } from './lib/metadataLookup'
 import { inTauri } from './lib/appStorage'
 import { BookSwitcher } from './overlays/BookSwitcher'
 import { CommandPalette } from './overlays/CommandPalette'
@@ -233,6 +234,43 @@ export function App({ storage }: AppProps) {
   const { bookId, meta, source, cover } = book
   const { record, remember, rememberOwned, rememberJacket, forget, positionOf } = library
   const collections = useCollections(storage)
+
+  /**
+   * Ask Open Library about one book — Decision 1's only network call.
+   *
+   * Explicit, per book, and never on import. What comes back is applied to the
+   * row rather than shown as a dialog to approve: the control is only offered
+   * on a book that is MISSING an author, so there is nothing of the reader's to
+   * overwrite and a confirmation would be ceremony over an empty field.
+   *
+   * A failure of any kind — offline, no match, a shape that was not expected —
+   * says one thing, because from here they are one thing.
+   */
+  const lookUp = useCallback(
+    (entry: LibraryEntry) => {
+      void (async () => {
+        const found = await lookupMetadata({ title: entry.title, author: entry.author })
+        if (!found) {
+          setImportNotice('Nothing found for that book.')
+          return
+        }
+        record({
+          ...entry,
+          title: found.title || entry.title,
+          author: found.author || entry.author,
+          ...(found.publisher ? { publisher: found.publisher } : {}),
+          ...(found.published ? { published: found.published } : {}),
+          ...(found.subjects?.length ? { subjects: found.subjects } : {}),
+          // NOT touched: `lastOpened`. A lookup is not a read, and the shelf is
+          // ordered by recency — this must not push the book to the top.
+          lastOpened: entry.lastOpened,
+        })
+        setImportNotice(`Updated from ${found.source}.`)
+      })()
+    },
+    [record],
+  )
+
 
   /**
    * Add a whole folder.
@@ -784,6 +822,7 @@ export function App({ storage }: AppProps) {
             onTag={library.tag}
             onUntag={library.untag}
             onSetFinished={library.setFinished}
+            onLookUp={lookUp}
             onAddFolder={addFolder}
             importing={importing}
             importNotice={importNotice}

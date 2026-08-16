@@ -1,5 +1,5 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
-import { Check, FolderPlus, Plus, Tag, X } from 'lucide-react'
+import { Check, FolderPlus, Globe, Plus, Tag, X } from 'lucide-react'
 import {
   NOT_REOPENABLE,
   displayAuthor,
@@ -59,6 +59,14 @@ export interface LibraryProps {
   onUntag: (bookId: string, tag: string) => void
   /** The reader's judgement that a book is done. */
   onSetFinished: (bookId: string, finished: boolean) => void
+  /**
+   * Ask Open Library about ONE book, because the reader asked.
+   *
+   * Decision 1. The only thing in this screen that leaves the machine, and it
+   * takes a deliberate click on a specific book — never automatic, never on
+   * import, never in bulk.
+   */
+  onLookUp: (entry: LibraryEntry) => void
   /** Add a whole folder — see `importFolder`. */
   onAddFolder: () => void
   /** Live import progress, or null when none is running. */
@@ -89,6 +97,7 @@ export function Library({
   onTag,
   onUntag,
   onSetFinished,
+  onLookUp,
   onAddFolder,
   importing,
   importNotice,
@@ -435,6 +444,20 @@ export function Library({
               >
                 <Check size={ICON.control} strokeWidth={ICON.stroke} />
               </button>
+              {/* Offered only where it HELPS: a book that already knows its own
+                  author does not need a stranger's opinion, and a control that
+                  appears on every row invites the bulk use Decision 1 rules out. */}
+              {!book.author && (
+                <button
+                  type="button"
+                  className={styles.lookupButton}
+                  aria-label={`Look up ${displayTitle(book)} on Open Library`}
+                  title="Look up on Open Library — this is the one thing here that uses the network"
+                  onClick={() => onLookUp(book)}
+                >
+                  <Globe size={ICON.control} strokeWidth={ICON.stroke} />
+                </button>
+              )}
               {tagging === book.bookId && (
                 <form
                   className={styles.tagForm}
