@@ -1,13 +1,7 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
-import {
-  folderOf,
-  mergeParsed,
-  trashOf,
-  updateBook,
-  writeBook,
-  type BookRecord,
-} from './bookFolder'
+import { mergeParsed, readBook, updateBook, writeBook, type BookRecord } from './bookFolder'
 import { writeIndex, type IndexFs, type IndexedBook } from './bookIndex'
+import { restoreBook, trashBook } from './bookTrash'
 import { tagKey } from './library'
 
 /**
@@ -110,7 +104,16 @@ export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] =
         at === -1
           ? [entry, ...latest.current]
           : latest.current.map((one, i) => (i === at ? entry : one))
-      commit(list, (target) => writeBook(target, bookId, merged))
+      commit(list, async (target) => {
+        /* RESTORED, not overwritten, when a removed copy is waiting. The id is
+         * the bytes, so re-adding a book Paper had removed lands on the same
+         * folder name — and its tags, position and marks are still in there.
+         * Writing a fresh record over the top would throw them away at the exact
+         * moment content-derived identity was about to hand them back. */
+        if (at === -1) await restoreBook(target as never, bookId)
+        const existing = at === -1 ? await readBook(target, bookId) : null
+        await writeBook(target, bookId, existing ? mergeParsed(existing, record) : merged)
+      })
     },
     [commit],
   )
@@ -121,7 +124,7 @@ export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] =
       if (list.length === latest.current.length) return
       /* ONE RENAME. Phase 3's removal touched three places — a row, the bytes,
        * the cover — any of which could fail alone, and two of which did. */
-      commit(list, (target) => target.rename(folderOf(bookId), trashOf(bookId)))
+      commit(list, (target) => trashBook(target as never, bookId))
     },
     [commit],
   )

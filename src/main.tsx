@@ -17,6 +17,7 @@ import './styles/global.css'
 import { App } from './App'
 import { inTauri, openAppStorage } from './lib/appStorage'
 import { loadShelf } from './lib/bookIndex'
+import { emptyExpired } from './lib/bookTrash'
 import { libraryFs } from './lib/bookFiles'
 import { installFatalHandlers } from './lib/reportFatal'
 
@@ -50,6 +51,17 @@ async function boot(root: HTMLElement): Promise<void> {
    * shelf starts empty, which is the honest answer in a browser. */
   const fs = inTauri() ? libraryFs : null
   const initialBooks = fs ? (await loadShelf(fs).catch(() => ({ books: [] }))).books : []
+  /* Emptied at BOOT, not on a timer and not when the reader removes something.
+   *
+   * It has to happen somewhere, and every other candidate is worse: a timer
+   * deletes a reader's work while they are looking at the shelf, and doing it
+   * during a removal makes an undoable action wait on unrelated disk work. At
+   * launch nothing is waiting, and being a fortnight late is not a failure.
+   *
+   * Deliberately not awaited. A slow or failing sweep must not delay the window,
+   * and `emptyExpired` errs towards keeping anything it cannot age. */
+  if (fs) void emptyExpired(fs).catch(() => [])
+
   createRoot(root).render(
     <StrictMode>
       <App storage={storage} fs={fs} initialBooks={initialBooks} />

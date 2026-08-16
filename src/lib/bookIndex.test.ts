@@ -37,6 +37,11 @@ function fakeFs(files: Record<string, string> = {}) {
     exists: async (path) => store.has(path),
     mkdir: async () => {},
     remove: async (path) => void store.delete(path),
+    removeDir: async (path: string) => {
+      for (const key of [...store.keys()]) {
+        if (key === path || key.startsWith(`${path}/`)) store.delete(key)
+      }
+    },
     rename: async (from, to) => {
       const bytes = store.get(from)
       if (bytes) store.set(to, bytes)

@@ -28,6 +28,11 @@ function fakeDir(tree: Record<string, string[]>, files: Record<string, string> =
     exists: async (path) => fs.written.has(path),
     mkdir: async () => {},
     remove: async (path) => void fs.written.delete(path),
+    removeDir: async (path: string) => {
+      for (const key of [...fs.written.keys()]) {
+        if (key === path || key.startsWith(`${path}/`)) fs.written.delete(key)
+      }
+    },
     rename: async (from, to) => {
       const bytes = fs.written.get(from)
       if (bytes) fs.written.set(to, bytes)

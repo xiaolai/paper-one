@@ -58,6 +58,8 @@ export interface VaultFs {
   remove: (path: string) => Promise<void>
   /** The step that makes a write atomic — see `ownBook`. */
   rename: (from: string, to: string) => Promise<void>
+  /** Remove a directory and everything in it — for emptying the trash. */
+  removeDir: (path: string) => Promise<void>
 }
 
 const DIR = { baseDir: BaseDirectory.AppData } as const
@@ -69,6 +71,7 @@ export const tauriVaultFs: VaultFs = {
   mkdir: (path) => mkdir(path, { ...DIR, recursive: true }),
   remove: (path) => remove(path, DIR),
   rename: (from, to) => rename(from, to, { oldPathBaseDir: DIR.baseDir, newPathBaseDir: DIR.baseDir }),
+  removeDir: (path) => remove(path, { ...DIR, recursive: true }),
 }
 
 /**

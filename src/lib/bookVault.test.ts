@@ -39,6 +39,11 @@ function fakeFs(seed: Record<string, Uint8Array> = {}) {
     exists: async (path) => files.has(path),
     mkdir: async (path) => void dirs.add(path),
     remove: async (path) => void files.delete(path),
+    removeDir: async (path: string) => {
+      for (const key of [...files.keys()]) {
+        if (key === path || key.startsWith(`${path}/`)) files.delete(key)
+      }
+    },
     rename: async (from, to) => {
       const bytes = files.get(from)
       if (bytes) files.set(to, bytes)

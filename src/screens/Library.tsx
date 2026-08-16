@@ -391,8 +391,13 @@ export function Library({
                 className={styles.remove}
                 aria-label={
                   confirming === book.bookId
-                    ? `Remove ${displayTitle(book)} from the library — your file is kept`
+                    ? `Remove ${displayTitle(book)} — the file you imported is kept, and this is recoverable for two weeks`
                     : `Remove ${displayTitle(book)}`
+                }
+                title={
+                  confirming === book.bookId
+                    ? 'The file you imported is untouched. Your tags, place and notes are recoverable for two weeks.'
+                    : undefined
                 }
                 data-confirming={confirming === book.bookId}
                 onClick={() => {
