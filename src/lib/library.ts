@@ -14,6 +14,8 @@
  * rather than pretending a click will work.
  */
 
+import { parseQuery } from './searchQuery'
+
 export interface LibraryEntry {
   /** Matches `bookIdFor` — the same identity marks are keyed by. */
   readonly bookId: string
@@ -572,20 +574,17 @@ export function matchesQuery(entry: LibraryEntry, query: string): boolean {
  * rewrite of every caller, and every caller is already being written now.
  */
 export interface Scope {
-  readonly label: string
-  /** Which books are inside. A tag the book carries, or a series it is in. */
-  readonly tag?: string
-  readonly series?: string
+  /** Every tag a book must carry. AND, not OR — see `searchQuery`. */
+  readonly tags: readonly string[]
 }
 
 export function inScope(entry: LibraryEntry, scope: Scope | null): boolean {
-  if (!scope) return true
-  if (scope.series) return entry.series === scope.series
-  if (scope.tag) {
-    const key = tagKey(scope.tag)
-    return allTags(entry).some((one) => tagKey(one) === key)
-  }
-  return true
+  if (!scope || scope.tags.length === 0) return true
+  /* EVERY tag, not any: adding a second tag narrows. `tag:Sea tag:Classics`
+   * meaning "nautical or classical" would grow the shelf as the reader typed
+   * more, which is the opposite of what typing more means anywhere else. */
+  const has = new Set(allTags(entry).map(tagKey))
+  return scope.tags.every((tag) => has.has(tagKey(tag)))
 }
 
 /**
@@ -696,6 +695,24 @@ export function shelfView(
     entries.filter((entry) => inScope(entry, scope) && matchesQuery(entry, query)),
     order,
   )
+}
+
+/**
+ * The shelf for one typed query — scope and text come from the same string.
+ *
+ * The whole point of the `tag:` syntax: there is no scope state beside the
+ * field that could disagree with it. What the reader sees IS what is applied.
+ */
+export function shelfFor(
+  entries: readonly LibraryEntry[],
+  raw: string,
+  order: LibraryOrder = 'recent',
+): { books: LibraryEntry[]; tags: readonly string[] } {
+  const { tags, text } = parseQuery(raw, tagKey)
+  return {
+    books: shelfView(entries, { scope: { tags }, query: text, order }),
+    tags,
+  }
 }
 
 /**

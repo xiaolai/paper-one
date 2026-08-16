@@ -8,10 +8,12 @@ import {
   isReopenable,
   statusOf,
   rowSuffix,
-  shelfView,
+  shelfFor,
   tagCounts,
+  tagKey,
 } from '../lib/library'
-import type { LibraryEntry, LibraryOrder, Scope } from '../lib/library'
+import type { LibraryEntry, LibraryOrder } from '../lib/library'
+import { withTag, withoutTag } from '../lib/searchQuery'
 import { ICON } from '../lib/metrics'
 import type { Platform } from '../lib/metrics'
 import { VIRTUALISE_ABOVE, gridWindow } from '../lib/virtualGrid'
@@ -107,24 +109,27 @@ export function Library({
   /** Which row has its tag input open, by id. */
   const [tagging, setTagging] = useState<string | null>(null)
   const [draftTag, setDraftTag] = useState('')
+  /* ONE piece of state, and that is the point of the `tag:` syntax.
+   *
+   * There was a `scope` beside this field, which meant two sources of truth
+   * that could disagree — a chip could say Philosophy while the field said
+   * something else. The query now carries both: `tag:Philosophy whales` is the
+   * scope AND the text, visible, editable, and copyable out of the box. */
   const [query, setQuery] = useState('')
-  /* The SCOPE — Decision 2. A collection restricts what is in play, and the
-   * search then runs inside it rather than beside it. Held here for now; the
-   * A tag IS the scope — there is no collection to save, because the tag
-   * already persists. Clicking a chip scopes the search; it never removes the
-   * tag. */
-  const [scope, setScope] = useState<Scope | null>(null)
 
   /* Deferred, not debounced. `useDeferredValue` lets the keystroke paint
    * immediately and re-filters at React's leisure, which is the behaviour a
    * debounce is usually approximating — and unlike a debounce it has no timer to
    * tune and cannot drop the final keystroke. */
   const deferredQuery = useDeferredValue(query)
-  const shelf = useMemo(
-    () => shelfView(books, { scope, query: deferredQuery, order }),
-    [books, scope, deferredQuery, order],
+  const view = useMemo(() => shelfFor(books, deferredQuery, order), [books, deferredQuery, order])
+  const shelf = view.books
+  /* Counted WITHIN the active tags, so the numbers describe what is reachable
+   * from here — adding a second tag shows what is left, not what exists. */
+  const tags = useMemo(
+    () => tagCounts(books, { tags: view.tags }),
+    [books, view.tags],
   )
-  const tags = useMemo(() => tagCounts(books, scope), [books, scope])
 
   /* Virtualisation, but only past the point where it pays.
    *
@@ -271,7 +276,7 @@ export function Library({
             className={styles.search}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search title, author, series, tag"
+            placeholder="Search, or tag:Name to narrow"
             aria-label="Search the library"
           />
           {/* Counts are DERIVED and counted within the scope, so they describe
@@ -281,25 +286,31 @@ export function Library({
               active scope lives here, so gating on tag counts could strand a
               reader inside a scope whose last matching tag had just been
               removed, with no way back out. */}
-          {(tags.length > 0 || scope) && (
+          {(tags.length > 0 || view.tags.length > 0) && (
             <div className={styles.chips}>
-              {scope && (
+              {/* The ACTIVE tags, read back out of the query. Clicking one
+                  removes its term from the field rather than setting hidden
+                  state, so the field and the chips cannot disagree. */}
+              {view.tags.map((tag) => (
                 <button
+                  key={tagKey(tag)}
                   type="button"
                   className={styles.chip}
                   data-active="true"
-                  onClick={() => setScope(null)}
+                  onClick={() => setQuery((q) => withoutTag(q, tag, tagKey))}
                 >
-                  {scope.label} ✕
+                  {tag} ✕
                 </button>
-              )}
-              {!scope &&
-                tags.slice(0, 8).map(({ tag, count }) => (
+              ))}
+              {tags
+                .filter(({ tag }) => !view.tags.some((one) => tagKey(one) === tagKey(tag)))
+                .slice(0, 8)
+                .map(({ tag, count }) => (
                   <button
-                    key={tag}
+                    key={tagKey(tag)}
                     type="button"
                     className={styles.chip}
-                    onClick={() => setScope({ label: tag, tag })}
+                    onClick={() => setQuery((q) => withTag(q, tag, tagKey))}
                   >
                     {tag} <span className={styles.chipCount}>{count}</span>
                   </button>
@@ -312,13 +323,13 @@ export function Library({
       {shelf.length === 0 ? (
         <div className={styles.empty}>
           <div className={styles.emptyTitle}>
-            {/* NAMES ITS SCOPE. "No books" inside a collection with a full
-                library behind it is the most confusing state this design can
-                produce — Decision 2 calls it out for exactly this reason. */}
+            {/* NAMES ITS SCOPE. "No books" while a tag is narrowing a full
+                library is the most confusing state this design can produce, so
+                the message says which tags are in the way. */}
             {books.length === 0
               ? 'Your library is empty'
-              : scope
-                ? `Nothing in ${scope.label} matches`
+              : view.tags.length > 0
+                ? `Nothing tagged ${view.tags.join(' and ')} matches`
                 : 'Nothing matches'}
           </div>
           <div className={styles.emptyBody}>
@@ -476,7 +487,13 @@ export function Library({
                         className={styles.bookTag}
                         data-mine={mine}
                         title={mine ? `Remove the tag ${tag}` : `Show everything tagged ${tag}`}
-                        onClick={() => (mine ? onUntag(book.bookId, tag) : setScope({ label: tag, tag }))}
+                        /* A reader's own tag REMOVES; a publisher's subject
+                           scopes. Two actions on one control, split by whose tag
+                           it is — which is also why only one of them is styled
+                           as removable. */
+                        onClick={() =>
+                          mine ? onUntag(book.bookId, tag) : setQuery((q) => withTag(q, tag, tagKey))
+                        }
                       >
                         {tag}
                       </button>

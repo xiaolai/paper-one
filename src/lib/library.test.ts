@@ -467,14 +467,21 @@ describe('inScope', () => {
   })
 
   it('restricts to a tag', () => {
-    expect(inScope(entry({ subjects: ['Ethics'] }), { label: 'Ethics', tag: 'Ethics' })).toBe(true)
-    expect(inScope(entry({ subjects: ['Poetry'] }), { label: 'Ethics', tag: 'Ethics' })).toBe(false)
+    expect(inScope(entry({ subjects: ['Ethics'] }), { tags: ['Ethics'] })).toBe(true)
+    expect(inScope(entry({ subjects: ['Poetry'] }), { tags: ['Ethics'] })).toBe(false)
   })
 
-  it('restricts to a series', () => {
-    const scope = { label: 'Discworld', series: 'Discworld' }
-    expect(inScope(entry({ series: 'Discworld' }), scope)).toBe(true)
-    expect(inScope(entry({ series: 'Dune' }), scope)).toBe(false)
+  /* A series is a book PROPERTY, not a tag — phase 4's vocabulary. Scoping by
+   * one is scoping by the tag a reader gave it, which is the only kind of scope
+   * that exists now. */
+  it('requires EVERY tag, so a second tag narrows', () => {
+    const both = { tags: ['Sea', 'Classics'] }
+    expect(inScope(entry({ tags: ['Sea', 'Classics'] }), both)).toBe(true)
+    expect(inScope(entry({ tags: ['Sea'] }), both)).toBe(false)
+  })
+
+  it('lets everything through for an empty tag list', () => {
+    expect(inScope(entry(), { tags: [] })).toBe(true)
   })
 })
 
@@ -486,12 +493,12 @@ describe('shelfView', () => {
   ]
 
   it('applies the scope before the query, so a search stays inside it', () => {
-    const view = shelfView(shelf, { scope: { label: 'Poetry', tag: 'Poetry' }, query: 'ethics' })
+    const view = shelfView(shelf, { scope: { tags: ['Poetry'] }, query: 'ethics' })
     expect(view).toEqual([])
   })
 
   it('orders what survived, not the whole library', () => {
-    const view = shelfView(shelf, { scope: { label: 'Philosophy', tag: 'Philosophy' }, order: 'title' })
+    const view = shelfView(shelf, { scope: { tags: ['Philosophy'] }, order: 'title' })
     expect(view.map((e) => e.title)).toEqual(['Ethics', 'Ethics II'])
   })
 
@@ -517,7 +524,7 @@ describe('tagCounts', () => {
   /* Counted WITHIN the scope, so the numbers describe what the reader can
    * actually reach rather than what exists somewhere else. */
   it('counts within the scope it is given', () => {
-    expect(tagCounts(shelf, { label: 'Ethics', tag: 'Ethics' })).toEqual([
+    expect(tagCounts(shelf, { tags: ['Ethics'] })).toEqual([
       { tag: 'Ethics', count: 1 },
       { tag: 'Philosophy', count: 1 },
     ])
@@ -908,6 +915,6 @@ describe('tags fold rather than duplicate', () => {
 
   it('scopes by key, so a chip matches whatever case a book used', () => {
     const row = entry({ bookId: 'a', tags: ['philosophy'] })
-    expect(inScope(row, { label: 'Philosophy', tag: 'Philosophy' })).toBe(true)
+    expect(inScope(row, { tags: ['Philosophy'] })).toBe(true)
   })
 })
