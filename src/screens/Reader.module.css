@@ -71,9 +71,10 @@
 
 .progressFill {
   width: 100%;
-  /* Deliberately not §08's page-turn timing. That token is 0ms because a page
-     turn should be instant; this is a continuous value being reported, and
-     snapping it makes a 1% move look like a glitch rather than progress. */
+  /* Deliberately not §08's page-turn timing, which is now 300ms and describes
+     foliate easing between two discrete pages. This is a continuous value being
+     reported rather than a transition between states, and snapping it would
+     make a 1% move look like a glitch instead of progress. */
   transition: height 120ms linear;
 }
 

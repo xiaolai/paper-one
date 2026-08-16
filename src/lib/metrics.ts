@@ -272,13 +272,22 @@ export const Z = {
   figure: 40,
 } as const
 
-/** §08 motion. Page turn is instant by default; the slide is opt-in. */
+/**
+ * §08 motion.
+ *
+ * `pageTurn` read `0ms` for as long as nothing turned foliate's `animated`
+ * attribute on — it described the absence of an implementation rather than a
+ * decision. The renderer eases over 300ms, and that duration is foliate's own
+ * and not settable from here, so this records it rather than declaring it.
+ * There is no instant option: one behaviour, and the system's reduced-motion
+ * preference is the only thing that suppresses it.
+ */
 export const MOTION = {
   chromeFade: '180ms ease',
   rulerTrack: '90ms ease',
   paneOpen: '220ms ease-out',
   popover: '120ms ease-out',
-  pageTurn: '0ms',
+  pageTurn: '300ms',
 } as const
 
 /** §08 icon ramp. One stroke weight everywhere, never filled, never two-tone. */

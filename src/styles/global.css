@@ -7,6 +7,20 @@ body {
   margin: 0;
   padding: 0;
   height: 100%;
+  /* The window must not move. Ever.
+   *
+   * A wheel gesture that reaches a scroll container with nowhere to go chains
+   * outwards, and the chain ends at the viewport — where macOS rubber-bands it,
+   * dragging the entire application sideways and springing back. Reported as the
+   * whole window "shaking" when swiping to turn a page, which is exactly what it
+   * looks like: the shell is a fixed-size layout, so any movement at all is the
+   * document bouncing rather than anything scrolling.
+   *
+   * `overscroll-behavior: none` terminates the chain here and takes the bounce
+   * with it. `overflow: hidden` is the second half: this document has nothing to
+   * scroll by design, and saying so stops it being asked. */
+  overscroll-behavior: none;
+  overflow: hidden;
   /* The desktop shell sits on --wash; the literal is the Paper-theme value and
    * only shows for the instant before the theme attribute is applied. */
   background: var(--wash, #F2F3F1);

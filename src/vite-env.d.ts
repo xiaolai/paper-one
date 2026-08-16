@@ -182,6 +182,17 @@ declare module 'foliate-js/view.js' {
   }
 
   export class View extends HTMLElement {
+    /**
+     * True when the book declares `pre-paginated`, which every PDF does.
+     *
+     * The RENDERER is chosen from this — `foliate-fxl` rather than
+     * `foliate-paginator` — and the two express the same ideas under different
+     * attributes. Whether the book scrolls is `flow="scrolled"` on the
+     * paginator and `zoom="fit-width"` on fxl, whose `observedAttributes` is
+     * `['zoom']`; each ignores the other's, so both are always set and this
+     * says which one to believe.
+     */
+    readonly isFixedLayout: boolean
     /** Accepts a File/Blob, a URL string, or an object implementing Book. */
     open(book: File | Blob | string | Book): Promise<void>
 

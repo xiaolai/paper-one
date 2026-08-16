@@ -1,4 +1,4 @@
-import { useMemo, useState, type CSSProperties } from 'react'
+import { useCallback, useMemo, useState, type CSSProperties } from 'react'
 import { Plus } from 'lucide-react'
 import type { Platform } from '../lib/metrics'
 import {
@@ -14,10 +14,12 @@ import { bookAccent } from '../lib/bookAccent'
 import { marginMarks } from '../lib/marks'
 import type { MarkStore } from '../lib/useMarks'
 import type { Marking } from '../lib/useMarking'
+import { hasOpenLayer } from '../lib/state'
 import type { AppDispatch, AppState } from '../lib/state'
 import type { Book } from '../lib/useBook'
 import { useAvailableWidth, useElementWidth } from '../lib/useAvailableWidth'
 import { FoliateView } from '../reader/FoliateView'
+import type { PageIntent } from '../reader/wheelPaging'
 import { MarginMarks } from '../reader/MarginMarks'
 import { ReadingRuler } from '../reader/ReadingRuler'
 import { SelectionTools } from '../reader/SelectionTools'
@@ -51,6 +53,13 @@ export interface ReaderProps {
    */
   dragging: boolean
   /**
+   * The reader's system asks for less movement, so the page turn does not slide.
+   *
+   * Passed down rather than read here because it is an OS preference and App
+   * already owns those — the same place `prefersDark` is read.
+   */
+  reducedMotion: boolean
+  /**
    * True when another screen is layered over the reader.
    *
    * The reader stays mounted underneath so foliate is not torn down and the
@@ -68,6 +77,7 @@ export function Reader({
   marks,
   marking,
   lastLocation,
+  reducedMotion,
   onAddBooks,
   dragging,
   inert = false,
@@ -152,8 +162,85 @@ export function Reader({
     '--track-gap': `${grid.gap}px`,
   } as CSSProperties
 
+  /**
+   * Take down a selection — the BOOK's and React's, which are two things.
+   *
+   * `deselect` clears the book's own selection inside its document; React's
+   * copy follows asynchronously, on the `selectionchange` that results. Clearing
+   * only the first leaves the toolbar drawn over the page for a frame, which is
+   * why every call site does both.
+   *
+   * One callback because there were three spellings of this pair across the
+   * file, and the drift between them is what let the page-turn path guard the
+   * teardown on a value that is not always populated yet.
+   */
+  const clearSelection = useCallback(() => {
+    book.deselect()
+    setSelection(null)
+  }, [book])
 
-  const { deselect } = book
+  /* A wheel gesture turns one page — the policy half of `wheelPaging`.
+   *
+   * The same guards §11's reading keys use, and for the same reasons: the
+   * reader stays MOUNTED under the library and under every overlay, so a
+   * gesture over the shelf or the palette would turn pages in a book nobody can
+   * see. Paged flow only — in scrolled flow a slightly diagonal two-finger
+   * scroll would turn pages while someone is reading downward.
+   *
+   * `goLeft`/`goRight` rather than `prev`/`next`, because the gesture knows
+   * only which way the reader pushed and foliate knows which page that is: in a
+   * right-to-left book the next page is the one on the left.
+   */
+  const onPageIntent = useCallback(
+    (intent: PageIntent) => {
+      /* A fixed-layout book takes page intents in BOTH modes, which is why the
+       * setting alone is not the question.
+       *
+       * `foliate-fxl` never reads `flow`; the same setting reaches it as `zoom`,
+       * where `fit-page` shows a whole page and `fit-width` overflows it so the
+       * renderer scrolls. So a PDF is paged in one mode and scrolled in the
+       * other, exactly like an EPUB — but in the scrolled one the session only
+       * raises an intent at a scroll EDGE or from a sideways gesture, which is
+       * what carries the reader from the foot of one page to the next.
+       *
+       * Asking `state.pageLayout` alone dropped every PDF gesture, because
+       * scrolled is the default and it describes a PDF's renderer under a name
+       * that renderer does not answer to. */
+      if (state.pageLayout !== 'paginated' && !book.fixedLayout) return
+      if (state.screen === 'library' || hasOpenLayer(state)) return
+      /* The side pane counts too, below §06's threshold, where it stops being a
+       * track beside the reader and becomes a SHEET over it. `hasOpenLayer`
+       * knows only about the palette and the switcher, so without this a
+       * gesture over the sheet paged the book behind it. */
+      if (state.pane !== null && !paneVisible) return
+
+      /* Unconditionally, and NOT gated on `selection` being set.
+       *
+       * Turning the page under a live selection leaves the toolbar floating over
+       * text that is no longer there — the popup is positioned against a range
+       * on the page being left. Guarding on React's committed `selection` looked
+       * equivalent and was not: a pointer selection is published after deferred
+       * SNAPPING, so there is a window where the document holds a real selection
+       * and this value is still null. A gesture landing in that window skipped
+       * the teardown entirely, and the toolbar then arrived over the new page.
+       *
+       * Clearing when there is nothing to clear costs a no-op call, which is the
+       * cheaper side of the trade by a wide margin. */
+      clearSelection()
+
+      /* Four intents, two pairs, because the axes mean different things. A
+       * horizontal gesture named a SIDE and foliate resolves which page that is
+       * from the book's own direction; a vertical one named a DIRECTION OF
+       * TRAVEL through the book, which needs no resolving and must not be given
+       * any — routing it through goLeft/goRight would reverse the mouse wheel
+       * in a right-to-left book. */
+      if (intent === 'left') book.goLeft()
+      else if (intent === 'right') book.goRight()
+      else if (intent === 'next') book.next()
+      else book.prev()
+    },
+    [state, book, selection, paneVisible, setSelection],
+  )
 
   return (
     <div className={styles.reader} inert={inert}>
@@ -215,6 +302,7 @@ export function Reader({
                       stepIdx={state.stepIdx}
                       theme={state.theme}
                       typeface={state.typeface}
+                      animated={!reducedMotion}
                       paginated={state.pageLayout === 'paginated'}
                       lastLocation={lastLocation}
                       onToc={book.setToc}
@@ -227,6 +315,8 @@ export function Reader({
                       onSelection={setSelection}
                       onMarkDrawn={onMarkDrawn}
                       onFileDropped={book.open}
+                      onPageIntent={onPageIntent}
+                      onFixedLayout={book.setFixedLayout}
                       onMarkActivated={(cfi) => {
                         /* The mark is already in hand, so Notes is told WHICH
                            one. Opening the panel is not showing the mark: the
@@ -291,13 +381,11 @@ export function Reader({
                       } else if (text) {
                         setNotice('This device has no clipboard available.')
                       }
-                      deselect()
-                      setSelection(null)
+                      clearSelection()
                     }}
                     onRemove={() => {
                       if (selected) unmark(selected)
-                      deselect()
-                      setSelection(null)
+                      clearSelection()
                     }}
                   />
                 </div>

@@ -11,6 +11,7 @@ import type { BookMeta, ReaderPosition } from '../lib/useBook'
 import { deferSnap } from './wordSnap/deferredSnap'
 import { watchGestureProvenance } from './wordSnap/gestureProvenance'
 import { createReflowGuard } from './wordSnap/invalidate'
+import { wheelPager, type PageIntent } from './wheelPaging'
 import { markContext } from './wordSnap/markContext'
 import { rangeText } from './wordSnap/rangeText'
 
@@ -30,6 +31,57 @@ import { rangeText } from './wordSnap/rangeText'
  * to the latch, so whichever side finishes last performs the close. None of it
  * touches React, so all of it can be asserted directly.
  */
+
+/**
+ * Is the pointer over a box the BOOK's own author made scrollable?
+ *
+ * A code listing or a wide table in an `overflow: auto` div is ordinary book
+ * markup, and its content has to stay reachable — so an event over one belongs
+ * to it, not to page turning.
+ *
+ * Deliberately stops at `body`. The document scroller above it is the
+ * renderer's, and handing events back to that is what the flow question below
+ * decides; answering it here as well would consume nothing and page nothing.
+ *
+ * `overflow: auto` and `scroll` only — `hidden` is scrollable via script but
+ * not by a wheel, and treating it as scrollable would swallow gestures over any
+ * clipped box, which is a very common thing for a book to contain.
+ */
+function scrollableUnder(event: WheelEvent): boolean {
+  const vertical = Math.abs(event.deltaY) > Math.abs(event.deltaX)
+  const delta = vertical ? event.deltaY : event.deltaX
+  if (delta === 0) return false
+
+  let node = event.target as Element | null
+  for (; node && node.nodeName !== 'BODY' && node.nodeName !== 'HTML'; node = node.parentElement) {
+    const style = node.ownerDocument?.defaultView?.getComputedStyle(node)
+    if (!style) continue
+    const overflow = vertical ? style.overflowY : style.overflowX
+    if (overflow !== 'auto' && overflow !== 'scroll') continue
+
+    const size = vertical ? node.clientHeight : node.clientWidth
+    const content = vertical ? node.scrollHeight : node.scrollWidth
+    const position = vertical ? node.scrollTop : node.scrollLeft
+    const remaining = content - size
+    if (remaining <= 1) continue
+    /* Only while it can still MOVE the way the gesture asks. A box scrolled to
+     * its end must hand the gesture on, or the reader is stuck at the foot of a
+     * code listing with a page that will not turn. */
+    if (delta > 0 ? position < remaining - 1 : position > 1) return true
+  }
+  return false
+}
+
+/**
+ * How long after scrolling backwards a page may still arrive and open at its foot.
+ *
+ * A page load that a gesture caused follows it within a frame or two; anything
+ * slower than this came from somewhere else. Generous rather than tight because
+ * failing the check is a real cost — the reader lands at the head of the page
+ * and has to scroll down through it — while passing it late costs one surprising
+ * scroll position.
+ */
+const ENTER_AT_FOOT_MS = 1500
 
 /** One hit, flattened from foliate's mixed yield shapes. */
 export interface SearchHit {
@@ -135,6 +187,31 @@ export interface SessionCallbacks {
    * open, and a drop lands in whichever document is under the pointer.
    */
   onFileDropped: (file: File) => void
+  /**
+   * A wheel gesture asked for another page — see `wheelPaging`.
+   *
+   * A semantic event rather than the wheel events it came from. The keymap is
+   * forwarded raw because keystrokes are occasional and the host owns the map;
+   * wheel events arrive tens per second, and re-dispatching each one to be
+   * accumulated somewhere else would be waste. The gesture is recognised where
+   * the events land, and what it MEANS is still the host's to decide.
+   */
+  onPageIntent: (intent: PageIntent) => void
+  /**
+   * The book is fixed-layout, so it cannot REFLOW — but it can still scroll.
+   *
+   * The second half of that used to say it could not, and this work is what made
+   * it false: the same Flow setting reaches `foliate-fxl` as `zoom`, where
+   * `fit-width` overflows a page and the renderer scrolls it. What a fixed
+   * layout cannot do is re-break text, which is what the reading ruler and the
+   * measure depend on.
+   *
+   * Published because the app offers controls that only mean something for a
+   * reflowable book, and a control wired to nothing is worse than an absent one.
+   * Read from the view rather than guessed from the file extension: a PDF is
+   * always fixed-layout, and an EPUB declaring `pre-paginated` is too.
+   */
+  onFixedLayout: (fixed: boolean) => void
 }
 
 export interface SessionNavigator {
@@ -155,6 +232,16 @@ export interface SessionNavigator {
    */
   next: () => void
   prev: () => void
+  /**
+   * The page to the left, and to the right — in VISUAL terms.
+   *
+   * Distinct from `next`/`prev` and not a synonym for them: in a right-to-left
+   * book the next page is the one on the LEFT. foliate resolves that through
+   * the book's own `dir`, so a gesture that knows only which way the reader
+   * pushed can hand the question over rather than answering it twice.
+   */
+  goLeft: () => void
+  goRight: () => void
 }
 
 export interface SessionDeps {
@@ -230,6 +317,26 @@ function connectedRange(range: Range): boolean {
 export class ReaderSession {
   #disposed = false
   #view: View | null = null
+  /** One per session — a gesture can span a spine boundary. See `#watchWheel`. */
+  readonly #pager = wheelPager()
+  /**
+   * The next page to load was reached by scrolling BACKWARDS, so open its foot.
+   *
+   * Only ever set for a fit-width fixed-layout book, where one page is one
+   * section and scrolling is the reading motion. Without it, scrolling up at the
+   * head of a page loads the previous one at ITS head — so the reader is at the
+   * top again, scrolls up again, and skips backwards through the book without
+   * seeing any of it. Reading forwards has no equivalent problem, because the
+   * head of the next page is where it should start.
+   *
+   * A TIME rather than a boolean, because arming it is not proof that anything
+   * will load. `prev()` at the very first page navigates nowhere, and a
+   * fixed-layout renderer can move within a spread without emitting `load` — so
+   * a plain flag could stay armed indefinitely and then send some unrelated
+   * later page, reached by a tap in the contents, to its foot. Bounding it keeps
+   * the worst case inside the moment the gesture happened.
+   */
+  #enterAtFootAt: number | null = null
   #painters: MarkPainters | null = null
   /**
    * Sections that currently have an overlay.
@@ -380,8 +487,10 @@ export class ReaderSession {
       // previous listeners are dropped before new ones go on — otherwise every
       // return to a section doubles them.
       this.#resetWatchers(doc)
+      this.#openAtFootIfArrivedBackwards()
       this.#watchSelection(doc, view, index)
       this.#watchKeys(doc)
+      this.#watchWheel(doc)
       this.#watchDrops(doc)
       /* The overlay for this section dies with its document, so the section
        * leaves the live set at the same moment. Without this the set only ever
@@ -517,7 +626,11 @@ export class ReaderSession {
       deselect: () => view.deselect(),
       next: () => void view.next()?.catch?.(reportNavigation('next')),
       prev: () => void view.prev()?.catch?.(reportNavigation('prev')),
+      goLeft: () => void view.goLeft()?.catch?.(reportNavigation('goLeft')),
+      goRight: () => void view.goRight()?.catch?.(reportNavigation('goRight')),
     })
+
+    this.#cb.onFixedLayout(view.isFixedLayout)
 
     // Settings go on BEFORE the first paint, so the reader never flashes
     // foliate's defaults on the way to the configured layout.
@@ -825,6 +938,197 @@ export class ReaderSession {
     }
     doc.addEventListener('keydown', onKey)
     this.#onTeardown(doc, () => doc.removeEventListener('keydown', onKey))
+  }
+
+  /**
+   * Does the platform have a real scroll to perform with this event?
+   *
+   * Asked of the renderer, not of the app: what a gesture MEANS is the host's
+   * question and is answered in `Reader`, but whether the event has a default
+   * worth suppressing is a fact about the renderer. It has to be settled here,
+   * because `preventDefault` counts only synchronously inside the listener.
+   *
+   * THE TWO RENDERERS ANSWER IT DIFFERENTLY, and asking only `flow` was the
+   * regression that killed swiping on PDFs. A fixed-layout book is drawn by
+   * `foliate-fxl`, whose `observedAttributes` is `['zoom']` — `flow` sits on it
+   * unread, so reading it back meant a reader who had ever chosen scrolled mode
+   * got a PDF that ignored every gesture, in a renderer that could not scroll
+   * either way.
+   *
+   *   paginator, `flow="scrolled"`  — its scrollport is inside a CLOSED shadow
+   *     root, so the host cannot even see it. Hands the event straight back.
+   *
+   *   fxl, `zoom="fit-width"`       — the scrollport IS the renderer element
+   *     (`:host { overflow: auto }`), so its position is readable from here and
+   *     the answer can be exact: hand the event back while the page has further
+   *     to go, and take it at the edge so the gesture turns the page instead.
+   *     That edge check is what makes a PDF read continuously — reaching the
+   *     bottom of one page carries on to the next, rather than stranding the
+   *     reader on page one with a dead trackpad.
+   */
+  /**
+   * Land on the foot of a page the reader reached by scrolling up into it.
+   *
+   * Deferred by a frame, and that is the whole difficulty. The `load` event
+   * fires when the page's document is ready, which is BEFORE `foliate-fxl` has
+   * scaled the frame — so `scrollHeight` at this instant is the pre-layout
+   * value and scrolling to it lands somewhere arbitrarily short. A frame later
+   * the layout is settled.
+   *
+   * A SUSPENDED FRAME RESUMES, which is the part that has to be defended
+   * against and which an earlier comment here got wrong. An occluded window
+   * stops servicing `requestAnimationFrame` — this project has been caught by
+   * that before — but it does not cancel the callback: it runs when the window
+   * comes back, which may be minutes and several pages later. So the deadline is
+   * re-checked INSIDE the frame rather than only before scheduling it, and the
+   * renderer is the one captured when the page loaded rather than whichever is
+   * current when the frame finally arrives. Without both, coming back to an
+   * occluded reader scrolled whatever page happened to be open.
+   */
+  #openAtFootIfArrivedBackwards(): void {
+    const armed = this.#enterAtFootAt
+    this.#enterAtFootAt = null
+    if (armed === null || performance.now() - armed > ENTER_AT_FOOT_MS) return
+    /* Captured here, at the load this belongs to. Reading it inside the callback
+     * would resolve a renderer that may by then belong to a different book. */
+    const renderer = this.#view?.renderer
+    if (!renderer) return
+    const toFoot = () => {
+      if (this.#disposed) return
+      if (performance.now() - armed > ENTER_AT_FOOT_MS) return
+      if (this.#view?.renderer !== renderer || !this.#scrollsByPage()) return
+      /* Assigning past the end is how the DOM is asked for "the bottom" — it
+       * clamps to the maximum, so this needs no arithmetic and cannot overshoot
+       * if the layout settled at a different height than expected. */
+      renderer.scrollTop = renderer.scrollHeight
+    }
+    /* Read off `globalThis` rather than called bare, because a bare call throws
+     * where the function does not exist — which would take down section loading
+     * entirely, for a scroll-position nicety. The immediate path is a real
+     * fallback rather than a test affordance: it lands correctly whenever the
+     * layout is already settled, and simply lands short when it is not. */
+    const raf = globalThis.requestAnimationFrame
+    if (typeof raf === 'function') raf(toFoot)
+    else toFoot()
+  }
+
+  /**
+   * A fixed-layout book scaled to the width — one page per section, scrolled.
+   *
+   * The shape a PDF takes in scroll mode. Named rather than inlined because two
+   * separate decisions turn on it: whether a wheel event is the platform's, and
+   * whether arriving at a new page backwards should open its foot.
+   */
+  #scrollsByPage(): boolean {
+    const view = this.#view
+    return view?.isFixedLayout === true && view.renderer?.getAttribute('zoom') === 'fit-width'
+  }
+
+  #platformScrolls(event: WheelEvent): boolean {
+    const view = this.#view
+    const renderer = view?.renderer
+    if (!view || !renderer) return false
+
+    /* THE AUTHOR'S OWN SCROLLING BOXES COME FIRST, before anything about flow.
+     *
+     * A book is HTML, and a book designer may put a long code listing or a wide
+     * table in an `overflow: auto` box. In paged flow the whole event was being
+     * consumed, so a wheel over that box turned the page instead of scrolling
+     * it, and its content below the fold was simply unreachable. Nothing about
+     * the reader's flow setting makes that right.
+     *
+     * Walked from the event's target rather than asked of the renderer, because
+     * this is a question about what is UNDER THE POINTER. It stops at the body:
+     * beyond that is the document scroller, which in paged flow is the
+     * paginator's business and is exactly what the suppression exists for. */
+    if (scrollableUnder(event)) return true
+
+    if (!view.isFixedLayout) return renderer.getAttribute('flow') === 'scrolled'
+    if (!this.#scrollsByPage()) return false
+
+    /* Only a dominantly VERTICAL gesture is a scroll. A horizontal swipe means
+     * the page left or right whatever the reader has scrolled to, and letting
+     * it fall in here would silently do nothing whenever the page happened to
+     * be scrolled away from an edge. */
+    if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return false
+
+    /* The one-pixel slack absorbs fractional layout: a scrollport sized by a
+     * scaled canvas lands on `scrollHeight` a hair over `clientHeight` with
+     * nothing actually to scroll, and an exact comparison would then hand back
+     * every event and wedge the book on that page. */
+    const remaining = renderer.scrollHeight - renderer.clientHeight
+    if (remaining <= 1) return false
+    return event.deltaY > 0 ? renderer.scrollTop < remaining - 1 : renderer.scrollTop > 1
+  }
+
+  /**
+   * Turn a trackpad swipe into one page.
+   *
+   * The detector is per SESSION, not per document: a gesture that begins on one
+   * spine item and finishes after the next has loaded is one gesture, and a
+   * fresh detector per document would lose its accumulated travel halfway
+   * through. Nothing resets it explicitly — it is discarded WITH the session,
+   * and a session is never reused for a second book.
+   *
+   * NOT passive, and the earlier comment here had it exactly backwards. It said
+   * there was no default to suppress because paged flow has nothing to scroll.
+   * There is: a wheel event that reaches a scroll container with nowhere to go
+   * chains outwards until something bounces, and on macOS that is the viewport
+   * — so every swipe dragged the whole application sideways and sprang back.
+   * Reported as the window "shaking".
+   *
+   * So in PAGED flow the gesture is consumed. `global.css` also terminates the
+   * chain at the document, which covers everything that never reaches here;
+   * this covers the case properly, by saying the event was handled.
+   *
+   * In SCROLLED flow it is not touched. The book genuinely scrolls there, and
+   * consuming the event would stop it dead.
+   */
+  #watchWheel(doc: Document): void {
+    const onWheel = (event: WheelEvent) => {
+      if (this.#disposed) return
+      /* Only real input. A book is attacker-controlled HTML in a same-origin
+       * frame, and `dispatchEvent(new WheelEvent('wheel', { deltaY: 40 }))`
+       * would otherwise let its script drive the host's navigation and clear
+       * the reader's selection at will. Phase 0's policy stops book script
+       * running at all; this is the second lock on the same door, and it is the
+       * same property the gesture checklist relies on to say the MCP bridge
+       * cannot fake a gesture. */
+      if (!event.isTrusted) return
+
+      /* A PINCH, which arrives as a wheel event with `ctrlKey` set, and which
+       * has to be let go BEFORE the suppression below rather than after.
+       *
+       * `wheelPager` already declines to page on one, so the gesture was
+       * harmless — but declining happens after `preventDefault`, and by then the
+       * platform's zoom and the paginator's own pinch handling have both been
+       * cancelled. A reader pinching a PDF page got nothing at all, which looks
+       * exactly like a missing feature rather than a suppressed one. */
+      if (event.ctrlKey) return
+
+      if (this.#platformScrolls(event)) return
+      event.preventDefault()
+      /* The HOST's clock, not `event.timeStamp`.
+       *
+       * A DOM event's timestamp is relative to its own global's time origin,
+       * and every spine item is a separate iframe with a separate origin. The
+       * pager is per-session on purpose — a gesture can span a section boundary
+       * — so mixing the two scales compares numbers that are not on the same
+       * axis. Turning a page at a boundary loads a new document, the momentum
+       * tail lands in THAT document, and its timestamps start near zero while
+       * the previous document's were large: the gap goes hugely negative, never
+       * exceeds the quiet period, and the gesture never ends. */
+      const intent = this.#pager.feed(event, performance.now())
+      if (!intent) return
+      /* Only a backwards VERTICAL intent, and only where scrolling is how the
+       * book is read. A sideways swipe is a page turn, and a page turn lands at
+       * the top like every other one. */
+      this.#enterAtFootAt =
+      intent === 'prev' && this.#scrollsByPage() ? performance.now() : null
+      this.#cb.onPageIntent(intent)
+    }
+    doc.addEventListener('wheel', onWheel, { passive: false })
+    this.#onTeardown(doc, () => doc.removeEventListener('wheel', onWheel))
   }
 
   /**

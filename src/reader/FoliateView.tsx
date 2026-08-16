@@ -8,6 +8,7 @@ import { isPdf } from '../lib/formats'
 import { bookCss, markPalette } from './bookCss'
 import { balanceRects } from './markGeometry'
 import { ReaderSession, type MarkAnchor, type SelectionSnapshot } from './session'
+import type { PageIntent } from './wheelPaging'
 
 export interface FoliateViewProps {
   /**
@@ -22,6 +23,8 @@ export interface FoliateViewProps {
   theme: Theme
   /** The face the BOOK is set in — never the interface's. */
   typeface: Typeface
+  /** False only when the system asks for reduced motion. Not a preference. */
+  animated: boolean
   paginated: boolean
   /**
    * Where this book was last left, or null to open at the start.
@@ -60,6 +63,10 @@ export interface FoliateViewProps {
    * webview navigates to the file and the app is gone.
    */
   onFileDropped: (file: File) => void
+  /** A wheel gesture asked for another page — see `wheelPaging`. */
+  onPageIntent: (intent: PageIntent) => void
+  /** The book cannot reflow, so the controls that assume it can must not show. */
+  onFixedLayout: (generation: number, fixed: boolean) => void
 }
 
 interface Settings {
@@ -67,6 +74,14 @@ interface Settings {
   theme: Theme
   typeface: Typeface
   paginated: boolean
+  /**
+   * Whether a page turn slides.
+   *
+   * Always true, except for a reader whose system asks for less movement — see
+   * `usePrefersReducedMotion`. There is no setting behind this: the slide is the
+   * behaviour, not one of several.
+   */
+  animated: boolean
 }
 
 /**
@@ -76,7 +91,30 @@ interface Settings {
  * them — and `setStyles` is optional because the fixed-layout renderer does
  * not implement it.
  */
-function applySettings(renderer: Renderer, settings: Settings): void {
+export function applySettings(renderer: Renderer, settings: Settings): void {
+  applyLayout(renderer, settings)
+  renderer.setStyles?.(
+    bookCss({
+      stepIdx: settings.stepIdx,
+      theme: settings.theme,
+      typeface: settings.typeface,
+      justify: true,
+      hyphenate: true,
+    }),
+  )
+}
+
+/**
+ * The renderer's layout ATTRIBUTES, separately from the stylesheet.
+ *
+ * Split out because the two are different kinds of thing and only one of them
+ * needs a document: the attributes are a handful of strings, while the
+ * stylesheet is built by `bookCss`, which reads the host's own `@font-face`
+ * rules out of `document.styleSheets` to copy them into the book. Keeping them
+ * in one function meant the attribute contract — including whether the page
+ * turn animates at all — could only be exercised somewhere with a DOM.
+ */
+export function applyLayout(renderer: Renderer, settings: Settings): void {
   /* Order matters. `flow` is what triggers the paginator to re-render, and the
    * sizing attributes are read during that render rather than each being
    * observed independently — so anything set AFTER flow lands too late.
@@ -96,16 +134,70 @@ function applySettings(renderer: Renderer, settings: Settings): void {
   // §09 gives every reading step its own measure; a single constant meant
   // changing the size changed the type but never its designed line width.
   renderer.setAttribute('max-inline-size', `${measureForStep(settings.stepIdx)}px`)
+  /* The page slide, which foliate has always been able to do and Paper never
+   * asked for: `#scrollTo` eases over 300ms when this attribute is present and
+   * jumps when it is not. It was `0ms` in §08's motion table for exactly as long
+   * as nothing set this.
+   *
+   * `toggleAttribute` rather than `setAttribute`, because foliate tests for
+   * PRESENCE — `hasAttribute('animated')` — so `animated="false"` would animate.
+   *
+   * WHAT THIS DOES NOT COVER, because the claim was made too broadly at first:
+   * only the reflowable paginator reads this. A PDF is rendered by
+   * `foliate-fxl`, which never looks at the attribute and swaps spreads
+   * immediately, and a turn that crosses into a different spine item is a load
+   * rather than a scroll and does not ease either. So: page turns WITHIN a
+   * reflowable section slide. Everything else still jumps, and making those
+   * animate is a change to the fork. */
+  renderer.toggleAttribute('animated', settings.animated)
+  /* ONE SETTING, TWO RENDERERS, and this pair of lines is the whole of it.
+   *
+   * The reflowable paginator reads `flow` and has never read `zoom`;
+   * `foliate-fxl` reads `zoom` and has never read `flow` — its
+   * `observedAttributes` is `['zoom']`. So both are derived from the same
+   * boolean and each renderer picks up the one it understands. No branch on the
+   * book type, and no way for the two to disagree. They are not WRITTEN the same
+   * way — `flow` every time, `zoom` only when it changes — and the note at the
+   * write itself says why that asymmetry is deliberate.
+   *
+   * What `zoom` means here is not a zoom control. `fit-page` scales a page so
+   * the whole of it is visible, which is a paged reading experience; `fit-width`
+   * scales it to the viewport's width, so a portrait page overflows and the
+   * renderer — `:host { overflow: auto }` — scrolls it. That IS a PDF's scroll
+   * mode, and it was always there. Paper simply never set the attribute, so
+   * every PDF sat on fxl's implicit fit-page default and the Flow control had
+   * nothing to change.
+   *
+   * The attempt before this one made the PDF `reflowable` instead, to put it on
+   * the paginator. That was wrong in a way worth recording: the paginator
+   * columnises the loaded document by the READING MEASURE, so a rigid page
+   * canvas was laid out inside a ~600px text column and drew at half the
+   * window. It also measures the document to size the scrollport, and a PDF
+   * page paints asynchronously — so it measured an empty document and there was
+   * nothing to scroll. Both modes came out broken. A fixed-size page belongs in
+   * the fixed-layout renderer; the mistake was reaching for flow when the
+   * renderer already had the concept under a different name. */
   renderer.setAttribute('flow', settings.paginated ? 'paginated' : 'scrolled')
-  renderer.setStyles?.(
-    bookCss({
-      stepIdx: settings.stepIdx,
-      theme: settings.theme,
-      typeface: settings.typeface,
-      justify: true,
-      hyphenate: true,
-    }),
-  )
+
+  /* `zoom` is written only when it CHANGES, and `flow` deliberately is not.
+   *
+   * `attributeChangedCallback` fires on every `setAttribute`, not only on ones
+   * that alter the value — so rewriting `zoom` unconditionally re-ran fxl's
+   * `#render`, which calls back into `makePdf`'s `onZoom` and REPAINTS EVERY
+   * PDF PAGE. Changing the theme, or the typeface, or the reading size — none
+   * of which mean anything to a fixed-layout book — threw away a page render
+   * and its text layer and did them again.
+   *
+   * The asymmetry is not an oversight. `flow` being written every time is what
+   * makes the paginator re-render, and the sizing attributes above are read
+   * during that render rather than observed on their own: guard `flow` too and
+   * a type-size change would set `max-inline-size` with nothing to act on it,
+   * leaving the measure stale until something else moved. So the reflowable
+   * side keeps its unconditional write, and only the fixed-layout side — where
+   * no other attribute matters and the cost of a needless render is a repaint
+   * of the whole page — is guarded. */
+  const zoom = settings.paginated ? 'fit-page' : 'fit-width'
+  if (renderer.getAttribute('zoom') !== zoom) renderer.setAttribute('zoom', zoom)
 }
 
 /**
@@ -122,6 +214,7 @@ export function FoliateView({
   stepIdx,
   theme,
   typeface,
+  animated,
   paginated,
   lastLocation,
   onToc,
@@ -135,6 +228,8 @@ export function FoliateView({
   onMarkDrawn,
   onMarkActivated,
   onFileDropped,
+  onPageIntent,
+  onFixedLayout,
 }: FoliateViewProps) {
   const hostRef = useRef<HTMLDivElement>(null)
   const sessionRef = useRef<ReaderSession | null>(null)
@@ -165,6 +260,8 @@ export function FoliateView({
     onMarkDrawn,
     onMarkActivated,
     onFileDropped,
+    onPageIntent,
+    onFixedLayout,
   }
   const handlers = useRef(currentHandlers)
 
@@ -172,7 +269,7 @@ export function FoliateView({
    * whenever a section's overlay is built, which happens as the reader scrolls
    * — long after any value captured at startup went stale. */
   const marksRef = useRef(marks)
-  const settings = useRef<Settings>({ stepIdx, theme, typeface, paginated })
+  const settings = useRef<Settings>({ stepIdx, theme, typeface, animated, paginated })
   /* Through a ref for the same reason, and for one that is specific to it: the
    * saved position is derived from the book's content id, which resolves a few
    * milliseconds AFTER the reader mounts. A prop read at mount is read before
@@ -186,7 +283,7 @@ export function FoliateView({
   useLayoutEffect(() => {
     handlers.current = currentHandlers
     marksRef.current = marks
-    settings.current = { stepIdx, theme, typeface, paginated }
+    settings.current = { stepIdx, theme, typeface, animated, paginated }
     lastLocationRef.current = lastLocation
   })
 
@@ -218,6 +315,8 @@ export function FoliateView({
       onMarkDrawn: (cfi, range) => handlers.current.onMarkDrawn(cfi, range),
       onMarkActivated: (cfi) => handlers.current.onMarkActivated(cfi),
       onFileDropped: (file) => handlers.current.onFileDropped(file),
+      onPageIntent: (intent) => handlers.current.onPageIntent(intent),
+      onFixedLayout: (fixed) => handlers.current.onFixedLayout(gen, fixed),
       getMarks: () => marksRef.current,
       getPalette: () => markPalette(settings.current.theme),
     })
@@ -312,7 +411,7 @@ export function FoliateView({
      * the effect and unmounted the React tree — the reader vanished instead of
      * the theme failing to change. */
     try {
-      applySettings(renderer, { stepIdx, theme, typeface, paginated })
+      applySettings(renderer, { stepIdx, theme, typeface, animated, paginated })
       /* A theme change reaches the book through `setStyles`, which restyles the
        * document WITHOUT rebuilding the section — so no `create-overlay` fires
        * and the marks keep the colour they were painted in. Changing the step or
@@ -324,7 +423,7 @@ export function FoliateView({
       console.error('Paper: applying reader settings failed', cause)
       handlers.current.onError(generation, 'That setting could not be applied.')
     }
-  }, [stepIdx, theme, typeface, paginated, ready, generation])
+  }, [stepIdx, theme, typeface, animated, paginated, ready, generation])
 
   return <div ref={hostRef} style={{ position: 'absolute', inset: 0 }} />
 }

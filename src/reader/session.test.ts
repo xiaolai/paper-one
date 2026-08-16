@@ -33,9 +33,11 @@ interface FakeView extends View {
   annotations: { value: string; kind: string; remove: boolean }[]
   deselected: number
   /** Page turns, so a navigator that cannot turn a page is a failing test. */
-  turns: { next: number; prev: number }
+  turns: { next: number; prev: number; left: number; right: number }
   /** What each `init` was asked to show — the restore contract, in order. */
   initCalls: (string | null)[]
+  /** Writable here so a test can be a PDF; readonly on the real `View`. */
+  isFixedLayout: boolean
 }
 
 /**
@@ -50,7 +52,18 @@ interface FakeView extends View {
  */
 type ViewCalls = Pick<
   View,
-  'open' | 'init' | 'close' | 'goTo' | 'next' | 'prev' | 'search' | 'addAnnotation' | 'getCFI' | 'deselect'
+  | 'open'
+  | 'init'
+  | 'close'
+  | 'goTo'
+  | 'next'
+  | 'prev'
+  | 'goLeft'
+  | 'goRight'
+  | 'search'
+  | 'addAnnotation'
+  | 'getCFI'
+  | 'deselect'
 >
 
 function fakeView(overrides: Partial<Record<'open' | 'init', () => Promise<void>>> = {}): FakeView {
@@ -59,10 +72,13 @@ function fakeView(overrides: Partial<Record<'open' | 'init', () => Promise<void>
     style: {} as CSSStyleDeclaration,
     closed: 0,
     removed: 0,
-    turns: { next: 0, prev: 0 },
+    turns: { next: 0, prev: 0, left: 0, right: 0 },
     initCalls: [],
     listeners,
     book: { toc: [{ label: 'One', href: 'a.xhtml' }], metadata: { title: 'T', author: 'A' } },
+    /* Settable, because the wheel gate reads it: a PDF is fixed-layout and
+     * cannot scroll whatever `flow` says. */
+    isFixedLayout: false,
     addEventListener: (type: string, fn: (e: unknown) => void) => {
       ;(listeners[type] ??= []).push(fn)
     },
@@ -81,6 +97,19 @@ function fakeView(overrides: Partial<Record<'open' | 'init', () => Promise<void>
     goTo: () => Promise.resolve(),
     next: () => {
       view.turns.next += 1
+      return Promise.resolve()
+    },
+    /* Present because `ViewCalls` demands it. They were added to the navigator
+     * without being added here, and the cast at the bottom of this fake hid it:
+     * every test passed while `book.goLeft()` would have thrown on the first
+     * swipe. That is precisely the drift the structural check exists to stop,
+     * and it only works if the Pick above lists every method. */
+    goLeft: () => {
+      view.turns.left += 1
+      return Promise.resolve()
+    },
+    goRight: () => {
+      view.turns.right += 1
       return Promise.resolve()
     },
     prev: () => {
@@ -114,7 +143,34 @@ function fakeView(overrides: Partial<Record<'open' | 'init', () => Promise<void>
     remove() {
       view.removed += 1
     },
-    renderer: { setAttribute: () => {}, setStyles: () => {} },
+    /* Stores what it is given, because the session now READS `flow` back off it
+     * to decide whether a wheel gesture is its business. A renderer that
+     * forgets its own attributes cannot answer that, and a stub that returned a
+     * constant would make the scrolled-flow case untestable. */
+    renderer: (() => {
+      const attrs = new Map<string, string>()
+      return {
+        setAttribute: (name: string, value: string) => void attrs.set(name, value),
+        getAttribute: (name: string) => attrs.get(name) ?? null,
+        toggleAttribute: (name: string, force: boolean) => {
+          if (force) attrs.set(name, '')
+          else attrs.delete(name)
+          return force
+        },
+        setStyles: () => {},
+        /* A scrollport, because for a FIXED-LAYOUT book the renderer element
+         * IS one — `foliate-fxl` carries `:host { overflow: auto }`, so a page
+         * scaled to the viewport's width overflows it and scrolls. The session
+         * reads these three to decide whether a page has further to go.
+         *
+         * Defaulted to a page that exactly fits, which is the honest neutral:
+         * every test written before this one meant "nothing to scroll", and
+         * `scrollHeight === clientHeight` is how the DOM says that. */
+        scrollTop: 0,
+        scrollHeight: 600,
+        clientHeight: 600,
+      }
+    })(),
   }
   return view as unknown as FakeView
 }
@@ -142,6 +198,8 @@ function callbacks(
     onMarkDrawn: rec('onMarkDrawn'),
     onMarkActivated: rec('onMarkActivated'),
     onFileDropped: rec('onFileDropped'),
+    onPageIntent: rec('onPageIntent'),
+    onFixedLayout: rec('onFixedLayout'),
     getMarks: () => marks,
     getPalette: () => PALETTE,
   }
@@ -175,16 +233,22 @@ describe('ReaderSession disposal', () => {
       search: unknown
       next: () => void
       prev: () => void
+      goLeft: () => void
+      goRight: () => void
     }
     expect(nav.goTo).toBeTypeOf('function')
     expect(nav.search).toBeTypeOf('function')
 
-    // Called, not merely present. These are what the arrow keys are wired to,
-    // and a published callback that throws on the first press is the failure
-    // this exercises.
+    /* Called, not merely present. These are what the arrow keys and the wheel
+     * gesture are wired to, and a published callback that throws on the first
+     * press is the failure this exercises — which is exactly what `goLeft` and
+     * `goRight` would have done, having been added to the navigator and to
+     * nothing else. */
     nav.next()
     nav.prev()
-    expect(view.turns).toEqual({ next: 1, prev: 1 })
+    nav.goLeft()
+    nav.goRight()
+    expect(view.turns).toEqual({ next: 1, prev: 1, left: 1, right: 1 })
 
     expect(view.closed).toBe(0)
     expect(session.view).toBe(view)
@@ -704,6 +768,32 @@ describe('ReaderSession gesture provenance', () => {
     return { selection: selectionOver({ node: words, offset: 6 }, { node: words, offset: 13 }), words }
   }
 
+  /**
+   * A wheel event as the session reads one, with a recordable `preventDefault`.
+   *
+   * Big enough on one axis to clear the pager's threshold in a single event, so
+   * a test asserting an intent does not depend on the gesture arithmetic being
+   * exercised somewhere else.
+   */
+  function wheelEvent(over: {
+    isTrusted: boolean
+    deltaX?: number
+    deltaY?: number
+    ctrlKey?: boolean
+  }) {
+    return {
+      deltaX: 400,
+      deltaY: 0,
+      deltaMode: 0,
+      ctrlKey: false,
+      prevented: false,
+      preventDefault(this: { prevented: boolean }) {
+        this.prevented = true
+      },
+      ...over,
+    }
+  }
+
   async function loadedSection(): Promise<{
     doc: FakeDocument
     selection: FakeSelection
@@ -744,6 +834,8 @@ describe('ReaderSession gesture provenance', () => {
     pointercancel: 1,
     keydown: 2,
     keyup: 1,
+    // The trackpad swipe — one per document, passive, torn down with the rest.
+    wheel: 1,
     selectionchange: 2,
     dragenter: 1,
     dragover: 1,
@@ -767,6 +859,385 @@ describe('ReaderSession gesture provenance', () => {
 
     expect(doc.listenerCounts()).toEqual(LOADED_DOCUMENT_LISTENERS)
     expect(view.listenerCounts()).toEqual({ blur: 1, pagehide: 1 })
+  })
+
+  /* The wheel listener drives host NAVIGATION, and a book is attacker-controlled
+   * HTML in a same-origin frame. `dispatchEvent(new WheelEvent(...))` from an
+   * EPUB's own script would otherwise page the reader's book at will and clear
+   * their selection — so the listener takes only real input.
+   *
+   * The same property the gesture checklist relies on when it says the MCP
+   * bridge cannot fake a gesture: `isTrusted` is provenance, and it cannot be
+   * forged from inside the page. */
+  it('turns a page for real input and ignores a book`s synthetic wheel event', async () => {
+    const { doc, cb } = await loadedSection()
+
+    doc.dispatch('wheel', wheelEvent({ isTrusted: false }))
+    expect(cb.calls['onPageIntent'] ?? []).toHaveLength(0)
+
+    doc.dispatch('wheel', wheelEvent({ isTrusted: true }))
+    expect(cb.calls['onPageIntent']?.[0]?.[0]).toBe('right')
+  })
+
+  /* The window must not move. An unconsumed wheel chains outwards until
+   * something bounces, and on macOS that is the viewport — the whole
+   * application dragged sideways and sprung back on every swipe. */
+  it('consumes the gesture in paged flow, so nothing rubber-bands', async () => {
+    const { doc, view } = await loadedSection()
+    view.renderer.setAttribute('flow', 'paginated')
+
+    const event = wheelEvent({ isTrusted: true })
+    doc.dispatch('wheel', event)
+    expect(event.prevented).toBe(true)
+  })
+
+  /* And leaves it alone where the book genuinely scrolls — consuming it there
+   * would stop scrolling dead. */
+  it('does not consume the gesture in scrolled flow', async () => {
+    const { doc, view, cb } = await loadedSection()
+    view.renderer.setAttribute('flow', 'scrolled')
+
+    const event = wheelEvent({ isTrusted: true })
+    doc.dispatch('wheel', event)
+    expect(event.prevented).toBe(false)
+    expect(cb.calls['onPageIntent'] ?? []).toHaveLength(0)
+  })
+
+  /* A PDF is fixed-layout, and `foliate-fxl` observes `zoom` and nothing else —
+   * so `flow` sits on it unread and says nothing about whether the book
+   * scrolls. Reading that attribute back as though it meant something made
+   * every PDF stop responding to a swipe as soon as the reader had ever chosen
+   * scrolled mode. `zoom` is the attribute that decides it here. */
+  it('still pages a fixed-layout book whose flow says scrolled', async () => {
+    const { doc, view, cb } = await loadedSection()
+    view.isFixedLayout = true
+    view.renderer.setAttribute('flow', 'scrolled')
+
+    const event = wheelEvent({ isTrusted: true })
+    doc.dispatch('wheel', event)
+    expect(event.prevented).toBe(true)
+    expect(cb.calls['onPageIntent']?.[0]?.[0]).toBe('right')
+  })
+
+  /**
+   * A fixed-layout book in fit-width — a PDF in scroll mode.
+   *
+   * The renderer element is the scrollport itself, so unlike the paginator's
+   * (which is sealed inside a closed shadow root) its position is readable, and
+   * the answer can be exact rather than a blanket hands-off.
+   */
+  describe('a fixed-layout book scaled to the width', () => {
+    /** A PDF page taller than the window, scrolled to `scrollTop`. */
+    const scrollable = async (scrollTop: number) => {
+      const loaded = await loadedSection()
+      loaded.view.isFixedLayout = true
+      loaded.view.renderer.setAttribute('zoom', 'fit-width')
+      Object.assign(loaded.view.renderer, {
+        scrollHeight: 2000,
+        clientHeight: 600,
+        scrollTop,
+      })
+      return loaded
+    }
+
+    it('lets the platform scroll a page that has further to go', async () => {
+      const { doc, cb } = await scrollable(0)
+      const event = wheelEvent({ deltaX: 0, deltaY: 40, isTrusted: true })
+      doc.dispatch('wheel', event)
+      expect(event.prevented).toBe(false)
+      expect(cb.calls['onPageIntent'] ?? []).toHaveLength(0)
+    })
+
+    /* The half that makes a PDF read CONTINUOUSLY. Without it the reader
+     * scrolls to the foot of page one and the trackpad goes dead, because in
+     * this renderer one page is one section and nothing else moves. */
+    it('turns the page once the foot of this one is reached', async () => {
+      const { doc, cb } = await scrollable(1400)
+      const event = wheelEvent({ deltaX: 0, deltaY: 40, isTrusted: true })
+      doc.dispatch('wheel', event)
+      expect(event.prevented).toBe(true)
+      expect(cb.calls['onPageIntent']?.[0]?.[0]).toBe('next')
+    })
+
+    it('turns back at the head of the page', async () => {
+      const { doc, cb } = await scrollable(0)
+      const event = wheelEvent({ deltaX: 0, deltaY: -40, isTrusted: true })
+      doc.dispatch('wheel', event)
+      expect(event.prevented).toBe(true)
+      expect(cb.calls['onPageIntent']?.[0]?.[0]).toBe('prev')
+    })
+
+    /* A sideways swipe means the page left or right wherever the reader has
+     * scrolled to. Deciding it on the scroll position instead would make the
+     * gesture work at the top of a page and silently do nothing in the middle
+     * — the shape of bug that gets reported as "sometimes it ignores me". */
+    it('pages sideways even when the page is scrolled mid-way', async () => {
+      const { doc, cb } = await scrollable(700)
+      const event = wheelEvent({ deltaX: 60, deltaY: 0, isTrusted: true })
+      doc.dispatch('wheel', event)
+      expect(event.prevented).toBe(true)
+      expect(cb.calls['onPageIntent']?.[0]?.[0]).toBe('right')
+    })
+
+    /* A page that fits the window has nothing to scroll, and `scrollHeight`
+     * lands a fraction over `clientHeight` on a scaled canvas. Without the
+     * slack this hands back every event and the book wedges on that page. */
+    it('pages when the page fits, despite a fractional overflow', async () => {
+      const { doc, view, cb } = await loadedSection()
+      view.isFixedLayout = true
+      view.renderer.setAttribute('zoom', 'fit-width')
+      Object.assign(view.renderer, { scrollHeight: 600.5, clientHeight: 600, scrollTop: 0 })
+
+      const event = wheelEvent({ deltaX: 0, deltaY: 40, isTrusted: true })
+      doc.dispatch('wheel', event)
+      expect(event.prevented).toBe(true)
+      expect(cb.calls['onPageIntent']?.[0]?.[0]).toBe('next')
+    })
+  })
+
+  /**
+   * A PINCH — a wheel event carrying `ctrlKey`.
+   *
+   * `wheelPager` already declines to page on one, so nothing turned; the defect
+   * was that it declined AFTER `preventDefault`, cancelling the platform's zoom
+   * and foliate's own pinch handling on the way past. A reader pinching a PDF
+   * page got nothing, which reads as a missing feature rather than a suppressed
+   * one.
+   */
+  it('leaves a pinch entirely alone', async () => {
+    const { doc, cb } = await loadedSection()
+    const event = wheelEvent({ isTrusted: true, ctrlKey: true })
+    doc.dispatch('wheel', event)
+    expect(event.prevented).toBe(false)
+    expect(cb.calls['onPageIntent'] ?? []).toHaveLength(0)
+  })
+
+  /**
+   * A scrolling box the BOOK's author made — a long code listing, a wide table.
+   *
+   * Ordinary book markup, and in paged flow the whole event was being consumed,
+   * so a wheel over one turned the page and its content below the fold could
+   * not be reached at all.
+   */
+  describe("over the book author's own scrolling box", () => {
+    /** An element chain ending at BODY, with computed overflow per element. */
+    const boxAt = (over: {
+      overflowY?: string
+      scrollTop?: number
+      scrollHeight?: number
+      clientHeight?: number
+    }) => {
+      const style = { overflowY: over.overflowY ?? 'auto', overflowX: 'visible' }
+      const body = { nodeName: 'BODY', parentElement: null }
+      return {
+        nodeName: 'PRE',
+        parentElement: body,
+        scrollTop: over.scrollTop ?? 0,
+        scrollHeight: over.scrollHeight ?? 900,
+        clientHeight: over.clientHeight ?? 300,
+        scrollLeft: 0,
+        scrollWidth: 0,
+        clientWidth: 0,
+        ownerDocument: { defaultView: { getComputedStyle: () => style } },
+      }
+    }
+
+    it('hands the gesture to a box that can still scroll', async () => {
+      const { doc, cb } = await loadedSection()
+      const event = { ...wheelEvent({ isTrusted: true, deltaX: 0, deltaY: 40 }), target: boxAt({}) }
+      doc.dispatch('wheel', event)
+      expect(event.prevented).toBe(false)
+      expect(cb.calls['onPageIntent'] ?? []).toHaveLength(0)
+    })
+
+    /* At its end the box must give the gesture up, or the reader is stuck at the
+     * foot of a listing with a page that will not turn. */
+    it('takes it back once the box is scrolled to its end', async () => {
+      const { doc, cb } = await loadedSection()
+      const event = {
+        ...wheelEvent({ isTrusted: true, deltaX: 0, deltaY: 40 }),
+        target: boxAt({ scrollTop: 600 }),
+      }
+      doc.dispatch('wheel', event)
+      expect(event.prevented).toBe(true)
+      expect(cb.calls['onPageIntent']?.[0]?.[0]).toBe('next')
+    })
+
+    /* `hidden` is scrollable by script but not by a wheel, and books clip boxes
+     * constantly — treating it as scrollable would swallow gestures at random. */
+    it('ignores a merely clipped box', async () => {
+      const { doc, cb } = await loadedSection()
+      const event = {
+        ...wheelEvent({ isTrusted: true, deltaX: 0, deltaY: 40 }),
+        target: boxAt({ overflowY: 'hidden' }),
+      }
+      doc.dispatch('wheel', event)
+      expect(event.prevented).toBe(true)
+      expect(cb.calls['onPageIntent']?.[0]?.[0]).toBe('next')
+    })
+  })
+
+  /**
+   * Reading BACKWARDS through a scrolled PDF.
+   *
+   * One page is one section here, so scrolling up at the head of a page loads
+   * the previous one — and it used to open at ITS head. The reader was then at
+   * the top again, scrolled up again, and skipped backwards through the book
+   * without seeing a word of it. Arriving backwards has to land on the foot.
+   *
+   * `requestAnimationFrame` does not exist in this environment, which is the
+   * fallback path the code takes deliberately rather than throwing inside the
+   * load handler — so the scroll lands synchronously here.
+   */
+  describe('arriving at a page by scrolling backwards', () => {
+    const scrolledPdf = async () => {
+      const loaded = await loadedSection()
+      loaded.view.isFixedLayout = true
+      loaded.view.renderer.setAttribute('zoom', 'fit-width')
+      Object.assign(loaded.view.renderer, {
+        scrollHeight: 2000,
+        clientHeight: 600,
+        scrollTop: 0,
+      })
+      return loaded
+    }
+
+    it('opens the previous page at its foot', async () => {
+      const { doc, view, cb, reload } = await scrolledPdf()
+      doc.dispatch('wheel', wheelEvent({ isTrusted: true, deltaX: 0, deltaY: -40 }))
+      expect(cb.calls['onPageIntent']?.[0]?.[0]).toBe('prev')
+
+      reload() // the previous page's document arrives
+      expect(view.renderer.scrollTop).toBe(view.renderer.scrollHeight)
+    })
+
+    /* Forwards is the opposite: the head of the next page is where reading
+     * should resume, so nothing must move it. */
+    it('leaves a page reached forwards at its head', async () => {
+      const { doc, view, cb, reload } = await scrolledPdf()
+      view.renderer.scrollTop = 1400 // at the foot, so the next event pages
+      doc.dispatch('wheel', wheelEvent({ isTrusted: true, deltaX: 0, deltaY: 40 }))
+      expect(cb.calls['onPageIntent']?.[0]?.[0]).toBe('next')
+
+      reload()
+      expect(view.renderer.scrollTop).toBe(1400)
+    })
+
+    /* Arming is not proof that anything will load: `prev()` at the very first
+     * page navigates nowhere. A plain flag stayed armed indefinitely, so the
+     * next page the reader reached by ANY means — a tap in the contents, an
+     * hour later — opened at its foot. The window bounds that to the moment. */
+    it('does not send a much later page to its foot', async () => {
+      const { doc, view, cb, reload } = await scrolledPdf()
+      doc.dispatch('wheel', wheelEvent({ isTrusted: true, deltaX: 0, deltaY: -40 }))
+      expect(cb.calls['onPageIntent']?.[0]?.[0]).toBe('prev')
+
+      const realNow = performance.now.bind(performance)
+      const late = realNow() + 5_000
+      performance.now = () => late
+      try {
+        reload()
+      } finally {
+        performance.now = realNow
+      }
+      expect(view.renderer.scrollTop).toBe(0)
+    })
+
+    /**
+     * The DEFERRED path, which the tests above never reach.
+     *
+     * Node has no `requestAnimationFrame`, so every case above takes the
+     * synchronous fallback — meaning the frame callback, where the real hazard
+     * lives, went unexercised. An occluded window does not CANCEL a frame, it
+     * postpones it: the callback runs when the window comes back, potentially
+     * minutes and several pages later. So the window is re-checked inside it.
+     */
+    describe('when the frame is deferred', () => {
+      /** Installs a fake rAF that hands back its callback instead of running it. */
+      const captureFrame = () => {
+        const pending: (() => void)[] = []
+        const real = (globalThis as { requestAnimationFrame?: unknown }).requestAnimationFrame
+        ;(globalThis as { requestAnimationFrame?: unknown }).requestAnimationFrame = (
+          fn: () => void,
+        ) => {
+          pending.push(fn)
+          return pending.length
+        }
+        return {
+          pending,
+          restore: () => {
+            if (real === undefined) delete (globalThis as { requestAnimationFrame?: unknown })
+              .requestAnimationFrame
+            else (globalThis as { requestAnimationFrame?: unknown }).requestAnimationFrame = real
+          },
+        }
+      }
+
+      it('scrolls when the frame arrives promptly', async () => {
+        const frame = captureFrame()
+        try {
+          const { doc, view, cb, reload } = await scrolledPdf()
+          doc.dispatch('wheel', wheelEvent({ isTrusted: true, deltaX: 0, deltaY: -40 }))
+          expect(cb.calls['onPageIntent']?.[0]?.[0]).toBe('prev')
+          reload()
+          expect(view.renderer.scrollTop).toBe(0) // nothing yet — it is deferred
+          frame.pending.forEach((fn) => fn())
+          expect(view.renderer.scrollTop).toBe(view.renderer.scrollHeight)
+        } finally {
+          frame.restore()
+        }
+      })
+
+      /* The window came back long afterwards. The page on screen is no longer
+       * the one the gesture was about, so the frame must do nothing. */
+      it('does nothing when the window comes back much later', async () => {
+        const frame = captureFrame()
+        const realNow = performance.now.bind(performance)
+        try {
+          const { doc, view, reload } = await scrolledPdf()
+          doc.dispatch('wheel', wheelEvent({ isTrusted: true, deltaX: 0, deltaY: -40 }))
+          reload()
+          performance.now = () => realNow() + 60_000
+          frame.pending.forEach((fn) => fn())
+          expect(view.renderer.scrollTop).toBe(0)
+        } finally {
+          performance.now = realNow
+          frame.restore()
+        }
+      })
+
+      it('does nothing once the session is disposed', async () => {
+        const frame = captureFrame()
+        try {
+          const { doc, view, session, reload } = await scrolledPdf()
+          doc.dispatch('wheel', wheelEvent({ isTrusted: true, deltaX: 0, deltaY: -40 }))
+          reload()
+          session.dispose()
+          frame.pending.forEach((fn) => fn())
+          expect(view.renderer.scrollTop).toBe(0)
+        } finally {
+          frame.restore()
+        }
+      })
+    })
+
+    /* A sideways swipe is a page turn, not a scroll, and a page turn lands at
+     * the top however it was asked for. */
+    it('leaves a page reached by a sideways swipe at its head', async () => {
+      const { doc, view, cb, reload } = await scrolledPdf()
+      doc.dispatch('wheel', wheelEvent({ isTrusted: true, deltaX: -60, deltaY: 0 }))
+      expect(cb.calls['onPageIntent']?.[0]?.[0]).toBe('left')
+
+      reload()
+      expect(view.renderer.scrollTop).toBe(0)
+    })
+  })
+
+  it('stops feeding the pager once the session is disposed', async () => {
+    const { doc, cb, session } = await loadedSection()
+    session.dispose()
+    doc.dispatch('wheel', wheelEvent({ isTrusted: true }))
+    expect(cb.calls['onPageIntent'] ?? []).toHaveLength(0)
   })
 
   it('takes every listener off again when the session is disposed', async () => {

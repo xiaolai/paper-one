@@ -80,6 +80,14 @@ export interface BookState {
   readonly position: ReaderPosition
   readonly meta: BookMeta | null
   /** The current spine item's document, for the ruler and selection. */
+  /**
+   * The book cannot reflow — a PDF, or an EPUB declaring `pre-paginated`.
+   *
+   * Controls that only mean something for a reflowable book read this: Flow
+   * cannot change, and the reading ruler depends on scrolled flow, so both
+   * would be switches wired to nothing.
+   */
+  readonly fixedLayout: boolean
   readonly doc: Document | null
   readonly error: string | null
 }
@@ -99,11 +107,21 @@ export interface Book extends BookState {
   /** Turn the page. The only way through a fixed-layout book. */
   next: () => void
   prev: () => void
+  /**
+   * The page to one SIDE — which is not the same question as next/prev.
+   *
+   * In a right-to-left book the next page is the one on the left. foliate
+   * resolves that from the book's own `dir`, so a gesture that knows only which
+   * way the reader pushed hands the question over instead of answering it.
+   */
+  goLeft: () => void
+  goRight: () => void
   setNavigator: (navigator: BookNavigator | null) => void
   /** Renderer callbacks. Each takes the generation it was issued under. */
   setToc: (generation: number, toc: readonly TocItem[]) => void
   setPosition: (generation: number, position: ReaderPosition) => void
   setDoc: (generation: number, doc: Document | null) => void
+  setFixedLayout: (generation: number, fixed: boolean) => void
   setMeta: (generation: number, meta: BookMeta) => void
   fail: (generation: number, message: string) => void
 }
@@ -142,6 +160,7 @@ export function useBook(): Book {
   const [position, setPositionState] = useState<ReaderPosition>(NOWHERE)
   const [meta, setMetaState] = useState<BookMeta | null>(null)
   const [doc, setDocState] = useState<Document | null>(null)
+  const [fixedLayout, setFixedLayoutState] = useState(false)
   const [error, setError] = useState<string | null>(null)
   /**
    * The book's durable identity, resolved from its content.
@@ -174,6 +193,7 @@ export function useBook(): Book {
     setPositionState(NOWHERE)
     setMetaState(null)
     setDocState(null)
+    setFixedLayoutState(false)
     setError(null)
     setBookId(null)
   }, [])
@@ -249,6 +269,8 @@ export function useBook(): Book {
   const deselect = useCallback(() => navigatorRef.current?.deselect(), [])
   const next = useCallback(() => navigatorRef.current?.next(), [])
   const prev = useCallback(() => navigatorRef.current?.prev(), [])
+  const goLeft = useCallback(() => navigatorRef.current?.goLeft(), [])
+  const goRight = useCallback(() => navigatorRef.current?.goRight(), [])
   const setNavigator = useCallback((navigator: BookNavigator | null) => {
     navigatorRef.current = navigator
   }, [])
@@ -267,6 +289,12 @@ export function useBook(): Book {
   const setDoc = useCallback(
     (generation: number, value: Document | null) => {
       if (current(generation)) setDocState(value)
+    },
+    [current],
+  )
+  const setFixedLayout = useCallback(
+    (generation: number, value: boolean) => {
+      if (current(generation)) setFixedLayoutState(value)
     },
     [current],
   )
@@ -292,6 +320,7 @@ export function useBook(): Book {
       position,
       meta,
       doc,
+      fixedLayout,
       error,
       open,
       close,
@@ -302,10 +331,13 @@ export function useBook(): Book {
       deselect,
       next,
       prev,
+      goLeft,
+      goRight,
       setNavigator,
       setToc,
       setPosition,
       setDoc,
+      setFixedLayout,
       setMeta,
       fail,
     }),
@@ -316,6 +348,11 @@ export function useBook(): Book {
       position,
       meta,
       doc,
+      /* Omitting this was a real staleness bug, not a lint nit: `fixedLayout` is
+       * what the wheel policy asks before deciding a gesture is a page turn, so
+       * a stale `false` made every PDF gesture drop for as long as nothing else
+       * in this list happened to change. */
+      fixedLayout,
       error,
       open,
       close,
@@ -326,10 +363,13 @@ export function useBook(): Book {
       deselect,
       next,
       prev,
+      goLeft,
+      goRight,
       setNavigator,
       setToc,
       setPosition,
       setDoc,
+      setFixedLayout,
       setMeta,
       fail,
     ],

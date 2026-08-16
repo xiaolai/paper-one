@@ -62,6 +62,34 @@ export function isTauri(): boolean {
 }
 
 /**
+ * Whether the reader has asked their system for less movement.
+ *
+ * Not a setting this app offers. The page turn animates, always, and there is
+ * deliberately no control for it — one behaviour is simpler to hold in the head
+ * than three. This is the single exception, and it is not an option in any
+ * meaningful sense: animation-induced discomfort is a health matter, the person
+ * affected has already said so once at the system level, and asking them to say
+ * it again in every application is the thing the system preference exists to
+ * stop. There is no UI for it, and no way to switch it on from inside Paper.
+ */
+export function usePrefersReducedMotion(): boolean {
+  const query = '(prefers-reduced-motion: reduce)'
+  const [reduce, setReduce] = useState(() => window.matchMedia(query).matches)
+  useEffect(() => {
+    const media = window.matchMedia(query)
+    const onChange = (e: MediaQueryListEvent) => setReduce(e.matches)
+    media.addEventListener('change', onChange)
+    /* Re-read after subscribing, not only before. The lazy initialiser runs
+     * during render and the subscription lands after commit; a preference that
+     * changed in between would be missed by both, and — since nothing else ever
+     * reads it — missed for the rest of the session. */
+    setReduce(media.matches)
+    return () => media.removeEventListener('change', onChange)
+  }, [])
+  return reduce
+}
+
+/**
  * Follow the OS colour scheme. Design system §05: the system follows the OS by
  * default, with an explicit override in Settings.
  */

@@ -5,7 +5,7 @@ import { DEFAULT_STEP_IDX, applyMetrics } from './lib/metrics'
 import { pickBooks, readBookAt } from './lib/bookFiles'
 import { legacyBookIdFor } from './lib/idMigration'
 import { positionRecorder, type PositionRecorder } from './lib/positionRecorder'
-import { usePlatform, usePrefersDark } from './lib/platform'
+import { usePlatform, usePrefersDark, usePrefersReducedMotion } from './lib/platform'
 import { NOT_CONFIGURED } from './lib/companion'
 import { hasOpenLayer, useAppState } from './lib/state'
 import type { MarkStorage } from './lib/marks'
@@ -39,6 +39,9 @@ export interface AppProps {
 export function App({ storage }: AppProps) {
   const platform = usePlatform()
   const prefersDark = usePrefersDark()
+  /* The one thing that can stop a page turn sliding. Not a setting — see the
+   * hook, which explains why there is deliberately no control for it. */
+  const reducedMotion = usePrefersReducedMotion()
   const [state, dispatch] = useAppState()
   /* The open book lives here, not in the reader: Contents and Companion read
    * from it and they are panels of the side pane now. */
@@ -507,6 +510,7 @@ export function App({ storage }: AppProps) {
              `bookId` is derived from the file's content — which is why the
              reader takes it through a ref rather than at mount. */
           lastLocation={positionOf(bookId)}
+          reducedMotion={reducedMotion}
           onAddBooks={addBooks}
           dragging={dragging}
           inert={state.screen === 'library'}
