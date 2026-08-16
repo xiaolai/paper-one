@@ -60,7 +60,19 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[allow(unused_mut)]
-    let mut builder = tauri::Builder::default().setup(|app| {
+    let mut builder = tauri::Builder::default()
+        // Scoped by `capabilities/default.json`, not by these registrations —
+        // registering a plugin grants nothing on its own.
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_dialog::init())
+        /* MUST come after fs and dialog: it restores the saved scope into the
+         * fs plugin's state, so the plugin it is restoring into has to exist.
+         *
+         * What it fixes: a path the reader chose in the dialog is added to the
+         * filesystem scope in memory, and the shelf stores that path — so
+         * reopening worked until the app quit and failed silently afterwards. */
+        .plugin(tauri_plugin_persisted_scope::init())
+        .setup(|app| {
         if cfg!(debug_assertions) {
             app.handle().plugin(
                 tauri_plugin_log::Builder::default()

@@ -1,13 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { buildCommands } from './lib/commands'
 import { PANE_SHORTCUTS } from './lib/panes'
-import { ACCEPT_FORMATS } from './lib/formats'
 import { DEFAULT_STEP_IDX, applyMetrics } from './lib/metrics'
+import { pickBooks, readBookAt } from './lib/bookFiles'
 import { legacyBookIdFor } from './lib/idMigration'
 import { positionRecorder, type PositionRecorder } from './lib/positionRecorder'
 import { usePlatform, usePrefersDark } from './lib/platform'
 import { NOT_CONFIGURED } from './lib/companion'
 import { hasOpenLayer, useAppState } from './lib/state'
+import type { MarkStorage } from './lib/marks'
 import { useBook } from './lib/useBook'
 import { useFileDrop } from './lib/useFileDrop'
 import { useLibrary } from './lib/useLibrary'
@@ -24,7 +25,18 @@ import { Reader } from './screens/Reader'
 import { SidePane } from './pane/SidePane'
 import { useSpeech } from './reader/useSpeech'
 
-export function App() {
+export interface AppProps {
+  /**
+   * Where the reader's marks, cards and library live.
+   *
+   * Injected rather than reached for, because it is resolved asynchronously
+   * before the first render — see `main.tsx` — and because the three stores
+   * below already take a storage argument for exactly this reason.
+   */
+  storage: MarkStorage | null
+}
+
+export function App({ storage }: AppProps) {
   const platform = usePlatform()
   const prefersDark = usePrefersDark()
   const [state, dispatch] = useAppState()
@@ -33,10 +45,10 @@ export function App() {
   const book = useBook()
   /* Marks outlive the open book — the Notes panel browses every book's — so the
    * store is keyed by book rather than owned by one. */
-  const marks = useMarks(book.bookId)
-  const cards = useCards()
+  const marks = useMarks(book.bookId, storage)
+  const cards = useCards(storage)
   const marking = useMarking(book, marks)
-  const library = useLibrary()
+  const library = useLibrary(storage)
   /* Reading aloud follows the spine document: an utterance outlives a section,
    * and would otherwise go on reading words that are no longer on screen. */
   const speech = useSpeech(book.doc)
@@ -44,8 +56,14 @@ export function App() {
   /* One file picker for the window. The reader's empty state, the palette and
    * the switcher all ask for books, and one input serves all three rather than
    * each surface growing its own. */
-  const pickerRef = useRef<HTMLInputElement>(null)
-  const addBooks = useCallback(() => pickerRef.current?.click(), [])
+  /* Where the open book lives on THIS machine, when it was opened from disk.
+   *
+   * Held beside the book rather than inside it: everything downstream takes a
+   * `File`, and neither foliate nor `bookIdFor` has any business knowing about
+   * the filesystem. It is written onto the library row so the shelf can open
+   * the book again — which is the whole point, and what a `File` could never
+   * support, since it is a handle to bytes granted for one session. */
+  const [openedPath, setOpenedPath] = useState<string | null>(null)
 
   /**
    * Open a book AND go to it.
@@ -58,11 +76,44 @@ export function App() {
    * nothing at all.
    */
   const openBook = useCallback(
-    (source: File | string) => {
+    (source: File | string, path: string | null = null) => {
       dispatch({ type: 'goScreen', screen: 'reader' })
+      // Set before the open, so the record effect below cannot fire on the new
+      // book while this still holds the previous one's path.
+      setOpenedPath(path)
       book.open(source)
     },
     [book, dispatch],
+  )
+
+  /** The native picker. Returns paths, which is the entire difference. */
+  const addBooks = useCallback(() => {
+    void pickBooks()
+      .then((picked) => {
+        for (const { file, path } of picked) openBook(file, path)
+      })
+      .catch((cause: unknown) => {
+        console.error('Paper: the book picker failed', cause)
+      })
+  }, [openBook])
+
+  /** Reopen a book the shelf knows the location of. */
+  const openStored = useCallback(
+    (entry: { url: string | null; path: string | null }) => {
+      if (entry.path) {
+        const at = entry.path
+        void readBookAt(at)
+          .then((file) => openBook(file, at))
+          .catch((cause: unknown) => {
+            // Moved, renamed, on an unmounted volume. The row stays; the reader
+            // is told rather than left clicking something that does nothing.
+            console.error('Paper: could not reopen', at, cause)
+          })
+        return
+      }
+      if (entry.url) openBook(entry.url)
+    },
+    [openBook],
   )
 
   /* Window-wide, not just over the empty state. A file dropped anywhere the
@@ -103,8 +154,11 @@ export function App() {
       // yet; it is captured here because recovering it later means re-opening
       // every book on the shelf.
       workId: meta.identifier || null,
+      // Device-local. `recordOpen` carries a known path through an open that
+      // does not have one, so a drop or a URL cannot erase it.
+      path: openedPath,
     })
-  }, [bookId, meta, source, record])
+  }, [bookId, meta, source, record, openedPath])
 
   /* Remember where the reader is, so the next open starts there.
    *
@@ -409,9 +463,9 @@ export function App() {
               <BookSwitcher
                 books={library.books}
                 currentBookId={book.bookId}
-                onOpen={(url) => {
+                onOpen={(entry) => {
                   dispatch({ type: 'closeLayer', layer: 'switcherOpen' })
-                  openBook(url)
+                  openStored(entry)
                 }}
                 onDismiss={() => dispatch({ type: 'closeLayer', layer: 'switcherOpen' })}
                 onAddBooks={addBooks}
@@ -465,24 +519,12 @@ export function App() {
             // Opening from the library takes you to what you opened. Staying
             // on the shelf with a book loading behind it is the one thing a
             // reader does not want from a click on a cover.
-            onOpen={openBook}
+            onOpen={openStored}
             onAddBooks={addBooks}
           />
         )}
       </WindowShell>
 
-      <input
-        ref={pickerRef}
-        type="file"
-        accept={ACCEPT_FORMATS}
-        hidden
-        onChange={(event) => {
-          const picked = event.target.files?.item(0)
-          if (picked) openBook(picked)
-          // Reset so picking the same file twice still fires a change.
-          event.target.value = ''
-        }}
-      />
     </>
   )
 }

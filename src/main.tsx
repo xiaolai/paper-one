@@ -15,6 +15,7 @@ import './styles/tokens.css'
 import './styles/global.css'
 
 import { App } from './App'
+import { openAppStorage } from './lib/appStorage'
 import { installFatalHandlers } from './lib/reportFatal'
 
 installFatalHandlers()
@@ -22,8 +23,27 @@ installFatalHandlers()
 const host = document.getElementById('root')
 if (!host) throw new Error('#root is missing from index.html')
 
-createRoot(host).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
-)
+/* The store is read BEFORE the first render, and this is the reason boot is
+ * asynchronous at all.
+ *
+ * `useStoredCollection` reads its storage once, in a `useState` initialiser, so
+ * a store that arrived later would be a store the app never saw. Rendering
+ * first and filling in afterwards is worse than a moment's delay either way:
+ * every reader would get one frame of an empty shelf and an unannotated book.
+ *
+ * A failure here cannot stop the app — `openAppStorage` falls back rather than
+ * throwing — so there is no error branch to render.
+ *
+ * An async function rather than a top-level await: TLA needs a build target
+ * that supports it, and raising the target for the whole bundle to avoid four
+ * lines here would be the wrong trade. */
+async function boot(root: HTMLElement): Promise<void> {
+  const storage = await openAppStorage()
+  createRoot(root).render(
+    <StrictMode>
+      <App storage={storage} />
+    </StrictMode>,
+  )
+}
+
+void boot(host)

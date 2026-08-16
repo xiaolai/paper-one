@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   byRecency,
+  inOrder,
+  isReopenable,
   parseLibrary,
   recordOpen,
   rememberPosition,
@@ -16,6 +18,7 @@ function entry(over: Partial<LibraryEntry> = {}): LibraryEntry {
     lastOpened: 1000,
     position: null,
     workId: null,
+    path: null,
     ...over,
   }
 }
@@ -66,6 +69,40 @@ describe('recordOpen', () => {
   })
 })
 
+describe('a row that can be reopened', () => {
+  it('counts a path as reopenable, not only a url', () => {
+    expect(isReopenable(entry({ url: null, path: '/books/moby.epub' }))).toBe(true)
+    expect(isReopenable(entry({ url: '/moby.epub', path: null }))).toBe(true)
+    expect(isReopenable(entry({ url: null, path: null }))).toBe(false)
+  })
+
+  /* The same carry-through rule the position has, for the same reason: a book
+   * can be opened again by a route that does not know where it lives — dropped
+   * in, or from a URL — and losing the path would turn a row that opens back
+   * into one that does not. */
+  it('keeps a known path through an open that does not carry one', () => {
+    const before = [entry({ bookId: 'a', path: '/books/moby.epub' })]
+    const after = recordOpen(before, entry({ bookId: 'a', path: null, lastOpened: 2000 }))
+    expect(after[0]?.path).toBe('/books/moby.epub')
+    expect(after[0]?.lastOpened).toBe(2000)
+  })
+
+  it('lets a newer path replace an older one', () => {
+    const before = [entry({ bookId: 'a', path: '/old/moby.epub' })]
+    expect(recordOpen(before, entry({ bookId: 'a', path: '/new/moby.epub' }))[0]?.path).toBe(
+      '/new/moby.epub',
+    )
+  })
+
+  it('reads a row saved before paths existed, as a book with no path', () => {
+    const old = { bookId: 'a', title: 'T', author: 'A', url: null, lastOpened: 5 }
+    // url null and no path: honest about not being reopenable rather than dropped.
+    const parsed = parseLibrary(JSON.stringify([{ ...old, url: '/a.epub' }]))
+    expect(parsed).toHaveLength(1)
+    expect(parsed[0]?.path).toBeNull()
+  })
+})
+
 describe('rememberPosition', () => {
   it('stores where the reader left off, touching nothing else', () => {
     const before = [entry({ bookId: 'a' }), entry({ bookId: 'b' })]
@@ -92,6 +129,55 @@ describe('rememberPosition', () => {
   it('drops a position for a book not on the shelf rather than inventing a row', () => {
     // A row without a title or a url is not something any surface can draw.
     expect(rememberPosition([], 'ghost', 'x')).toEqual([])
+  })
+})
+
+describe('inOrder', () => {
+  const shelf = [
+    entry({ bookId: 'c', title: 'Émile', author: 'Rousseau', lastOpened: 1 }),
+    entry({ bookId: 'a', title: 'Volume 10', author: 'Zola', lastOpened: 3 }),
+    entry({ bookId: 'b', title: 'Volume 2', author: 'Adams', lastOpened: 2 }),
+  ]
+
+  it('keeps recency as the switcher has always had it', () => {
+    expect(inOrder(shelf, 'recent').map((e) => e.bookId)).toEqual(['a', 'b', 'c'])
+  })
+
+  /* `<` orders by code point, so every accented title sorts after every
+   * unaccented one — a shelf with Émile on it puts that book after Zola in a
+   * list the reader is scanning alphabetically. */
+  it('sorts titles the way a reader reads them, accents included', () => {
+    expect(inOrder(shelf, 'title').map((e) => e.title)).toEqual([
+      'Émile',
+      'Volume 2',
+      'Volume 10',
+    ])
+  })
+
+  it('sorts by author', () => {
+    expect(inOrder(shelf, 'author').map((e) => e.author)).toEqual([
+      'Adams',
+      'Rousseau',
+      'Zola',
+    ])
+  })
+
+  /* Without a tie-break two books with one title swap places between renders,
+   * because `Array.sort` is only stable with respect to the input order and the
+   * input is itself re-derived. */
+  it('breaks ties by recency rather than arbitrarily', () => {
+    const same = [
+      entry({ bookId: 'old', title: 'Same', lastOpened: 1 }),
+      entry({ bookId: 'new', title: 'Same', lastOpened: 9 }),
+    ]
+    expect(inOrder(same, 'title').map((e) => e.bookId)).toEqual(['new', 'old'])
+    expect(inOrder([...same].reverse(), 'title').map((e) => e.bookId)).toEqual(['new', 'old'])
+  })
+
+  it('does not mutate the shelf it was given', () => {
+    const before = shelf.map((e) => e.bookId)
+    inOrder(shelf, 'title')
+    expect(shelf.map((e) => e.bookId)).toEqual(before)
   })
 })
 

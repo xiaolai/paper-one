@@ -35,9 +35,43 @@
   flex: 0 0 auto;
   display: flex;
   align-items: flex-end;
-  justify-content: space-between;
   gap: 16px;
   padding: 24px 40px 20px;
+}
+
+/* The count sits with the title it describes; the sort chips take the slack, so
+   Add books stays pinned to the trailing edge wherever the shelf is. */
+.count {
+  font-size: 13px;
+  color: var(--muted);
+  padding-bottom: 4px;
+}
+
+.orders {
+  margin-inline-start: auto;
+  display: flex;
+  gap: 2px;
+  padding-bottom: 2px;
+}
+
+.order {
+  border: none;
+  border-radius: var(--radius-control, 10px);
+  background: transparent;
+  padding: 6px 10px;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.order:hover {
+  background: var(--wash);
+}
+
+.order[data-on='true'] {
+  background: var(--wash);
+  color: var(--ink);
 }
 
 .title {

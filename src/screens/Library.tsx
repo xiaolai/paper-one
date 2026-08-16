@@ -1,13 +1,15 @@
+import { useMemo, useState } from 'react'
 import { Plus } from 'lucide-react'
 import { coverTintFor } from '../data/fixtures'
 import {
   NOT_REOPENABLE,
   displayAuthor,
   displayTitle,
+  inOrder,
   isReopenable,
   rowSuffix,
 } from '../lib/library'
-import type { LibraryEntry } from '../lib/library'
+import type { LibraryEntry, LibraryOrder } from '../lib/library'
 import { ICON } from '../lib/metrics'
 import type { Platform } from '../lib/metrics'
 import styles from './Library.module.css'
@@ -29,23 +31,49 @@ import styles from './Library.module.css'
 export interface LibraryProps {
   books: readonly LibraryEntry[]
   platform: Platform
-  /**
-   * Open a book by URL.
-   *
-   * It is never called for a book without one — see `isReopenable`, which
-   * disables those rows. The note here used to say the argument could be null,
-   * describing `LibraryEntry.url` rather than this callback, which takes a
-   * string and always has.
-   */
-  onOpen: (url: string) => void
+  /** Open a row. Takes the ENTRY, not a url: a book can be reopened from a
+   *  stored path as well, and only the caller knows how to read one. */
+  onOpen: (entry: LibraryEntry) => void
   onAddBooks: () => void
 }
 
+const ORDERS: readonly { id: LibraryOrder; label: string }[] = [
+  { id: 'recent', label: 'Recent' },
+  { id: 'title', label: 'Title' },
+  { id: 'author', label: 'Author' },
+]
+
 export function Library({ books, platform, onOpen, onAddBooks }: LibraryProps) {
+  const [order, setOrder] = useState<LibraryOrder>('recent')
+  const shelf = useMemo(() => inOrder(books, order), [books, order])
+
   return (
     <div className={styles.library} data-platform={platform}>
       <div className={styles.head}>
         <h1 className={styles.title}>Library</h1>
+        {/* Says what is on the shelf. A count is the one thing a grid cannot
+            show at a glance once it scrolls. */}
+        {books.length > 0 && (
+          <span className={styles.count}>
+            {books.length} {books.length === 1 ? 'book' : 'books'}
+          </span>
+        )}
+        {books.length > 1 && (
+          <div className={styles.orders}>
+            {ORDERS.map(({ id, label }) => (
+              <button
+                key={id}
+                type="button"
+                className={styles.order}
+                data-on={order === id}
+                aria-pressed={order === id}
+                onClick={() => setOrder(id)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
         <button type="button" className={styles.add} onClick={onAddBooks}>
           <Plus size={ICON.control} strokeWidth={ICON.stroke} />
           Add books
@@ -61,7 +89,7 @@ export function Library({ books, platform, onOpen, onAddBooks }: LibraryProps) {
         </div>
       ) : (
         <div className={styles.shelf}>
-          {books.map((book) => {
+          {shelf.map((book) => {
             const reopenable = isReopenable(book)
             return (
               <button
@@ -71,7 +99,7 @@ export function Library({ books, platform, onOpen, onAddBooks }: LibraryProps) {
                 disabled={!reopenable}
                 data-disabled={!reopenable}
                 title={reopenable ? `Open ${displayTitle(book)}` : NOT_REOPENABLE}
-                onClick={() => book.url && onOpen(book.url)}
+                onClick={() => isReopenable(book) && onOpen(book)}
               >
                 <span className={styles.cover} style={{ background: coverTintFor(book.bookId) }}>
                   <span className={styles.coverTitle}>{displayTitle(book)}</span>

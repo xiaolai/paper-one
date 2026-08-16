@@ -25,6 +25,15 @@ log = "0.4"
 # `trafficLightPosition`; without it the position is silently ignored.
 tauri = { version = "2.11.3", features = ["macos-private-api", "tray-icon", "image-png"] }
 tauri-plugin-log = "2"
+# Reopening a book, and the reader's own work outliving the webview's storage.
+# A picked `File` is a handle to bytes granted for one session, and localStorage
+# has a quota and no backup — see docs/plans/phase-02-native-storage-and-library.md.
+tauri-plugin-fs = "2"
+tauri-plugin-dialog = "2"
+# The dialog grants a chosen path into the fs scope for that RUNTIME only, so a
+# stored path is unreadable after a relaunch and the shelf cannot reopen the
+# book. This persists the scope and restores it at launch.
+tauri-plugin-persisted-scope = "2"
 # Automation bridge for e2e testing. Registered only in debug builds (see
 # lib.rs); kept a normal dependency rather than a dev-dependency because
 # dev-dependencies do not apply to a binary's own debug profile.

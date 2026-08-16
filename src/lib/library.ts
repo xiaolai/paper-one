@@ -48,6 +48,20 @@ export interface LibraryEntry {
    * it back means re-opening every book on the shelf.
    */
   readonly workId: string | null
+  /**
+   * Where this book is on THIS machine, or null.
+   *
+   * The field that makes a shelf a shelf: a picked `File` is bytes granted for
+   * one session, so before this every file-opened book was a row that said,
+   * honestly, that it would not open again — and the reading position saved for
+   * it had nowhere to be spent.
+   *
+   * DEVICE-LOCAL, and the one field here that is. It is a fact about this
+   * machine rather than about the book, and later phases replicate these rows
+   * between devices: a macOS path replicated onto a phone is meaningless at
+   * best. Anything that syncs must strip it.
+   */
+  readonly path: string | null
 }
 
 export const LIBRARY_STORAGE_KEY = 'paper.library.v1'
@@ -55,6 +69,33 @@ export const LIBRARY_STORAGE_KEY = 'paper.library.v1'
 /** Newest first — a switcher is a recency list, not an alphabetical one. */
 export function byRecency(entries: readonly LibraryEntry[]): LibraryEntry[] {
   return [...entries].sort((a, b) => b.lastOpened - a.lastOpened)
+}
+
+/** How a shelf can be arranged. Recency is what the switcher always used. */
+export type LibraryOrder = 'recent' | 'title' | 'author'
+
+/**
+ * The shelf in a chosen order.
+ *
+ * Compared with `localeCompare` rather than `<`, because `<` orders by code
+ * point: every accented title sorts after every unaccented one, so a shelf with
+ * `Émile` on it puts that book after `Zola` in a list a reader is scanning
+ * alphabetically. `numeric` so `Volume 2` precedes `Volume 10`.
+ *
+ * Ties fall back to recency, which is total here — two books with the same
+ * title would otherwise swap places between renders.
+ */
+export function inOrder(
+  entries: readonly LibraryEntry[],
+  order: LibraryOrder,
+): LibraryEntry[] {
+  if (order === 'recent') return byRecency(entries)
+  const key = order === 'title' ? displayTitle : displayAuthor
+  return [...entries].sort(
+    (a, b) =>
+      key(a).localeCompare(key(b), undefined, { numeric: true, sensitivity: 'base' }) ||
+      b.lastOpened - a.lastOpened,
+  )
 }
 
 /**
@@ -80,10 +121,16 @@ export function recordOpen(
    * position on every single open. Taking it would erase, on opening a book,
    * the one field whose entire job is to survive that. */
   const previous = entries.find((existing) => existing.bookId === entry.bookId)
-  const kept =
-    entry.position === null && previous?.position
-      ? { ...entry, position: previous.position }
-      : entry
+  /* Two fields a newer entry does not win when it does not have them. The
+   * position, because an open is recorded before the reader has been anywhere;
+   * and the path, because the same book can be opened again by a route that
+   * does not carry one — a drop, or a URL — and forgetting where it lives would
+   * turn a reopenable row back into a dead one. */
+  const kept = {
+    ...entry,
+    position: entry.position ?? previous?.position ?? null,
+    path: entry.path ?? previous?.path ?? null,
+  }
   return [kept, ...entries.filter((existing) => existing.bookId !== entry.bookId)]
 }
 
@@ -136,9 +183,10 @@ export function rememberPosition(
  *   - A non-finite `lastOpened` sorts unpredictably against every other row,
  *     so one bad entry scrambles a recency list that has nothing wrong with it.
  */
-type StoredRow = Omit<LibraryEntry, 'position' | 'workId'> & {
+type StoredRow = Omit<LibraryEntry, 'position' | 'workId' | 'path'> & {
   readonly position?: unknown
   readonly workId?: unknown
+  readonly path?: unknown
 }
 
 function isEntry(value: unknown): value is StoredRow {
@@ -176,6 +224,11 @@ function readWorkId(value: unknown): string | null {
   return typeof value === 'string' && value !== '' ? value : null
 }
 
+/** And again for the path. An empty path is not a path. */
+function readPath(value: unknown): string | null {
+  return typeof value === 'string' && value !== '' ? value : null
+}
+
 /**
  * How a row presents itself — shared by the shelf and the switcher.
  *
@@ -195,7 +248,7 @@ export function displayAuthor(entry: LibraryEntry): string {
 
 /** Whether clicking the row can actually open the book — see the header. */
 export function isReopenable(entry: LibraryEntry): boolean {
-  return entry.url !== null && entry.url !== ''
+  return Boolean(entry.url) || Boolean(entry.path)
 }
 
 /** §11: say what happened and what to do, in one line. */
@@ -240,5 +293,6 @@ export function parseLibrary(raw: string | null): LibraryEntry[] {
       ...row,
       position: readPosition(row.position),
       workId: readWorkId(row.workId),
+      path: readPath(row.path),
     }))
 }

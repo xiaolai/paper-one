@@ -30,7 +30,9 @@ export interface BookSwitcherProps {
   books: readonly LibraryEntry[]
   /** The open book, so it can be marked rather than offered. */
   currentBookId: string | null
-  onOpen: (url: string) => void
+  /** Open a row. Takes the ENTRY, not a url: a book can be reopened from a
+   *  stored path as well, and only the caller knows how to read one. */
+  onOpen: (entry: LibraryEntry) => void
   onDismiss: () => void
   onAddBooks: () => void
 }
@@ -94,7 +96,7 @@ export function BookSwitcher({
                       ? undefined
                       : NOT_REOPENABLE
                 }
-                onClick={() => book.url && onOpen(book.url)}
+                onClick={() => isReopenable(book) && onOpen(book)}
               >
                 <span
                   className={styles.cover}
