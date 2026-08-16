@@ -790,3 +790,39 @@ describe('isReopenable', () => {
     expect(isReopenable(entry({ url: null, path: null }))).toBe(false)
   })
 })
+
+
+/**
+ * `progress` off disk, which is a different trust boundary from `progress` on
+ * the way in.
+ *
+ * `rememberPosition` clamps what it writes; this file can be edited, and a row
+ * claiming `progress: 4` would draw a bar four times the width of its track.
+ */
+describe('parseLibrary clamps progress rather than only checking it', () => {
+  const withProgress = (progress: unknown) =>
+    JSON.stringify([
+      {
+        bookId: 'a',
+        title: 'T',
+        author: 'A',
+        url: null,
+        lastOpened: 1,
+        position: null,
+        progress,
+      },
+    ])
+
+  it('holds an over-range value to the track', () => {
+    expect(parseLibrary(withProgress(4))[0]?.progress).toBe(1)
+    expect(parseLibrary(withProgress(-2))[0]?.progress).toBe(0)
+  })
+
+  it('keeps a sane value untouched', () => {
+    expect(parseLibrary(withProgress(0.42))[0]?.progress).toBe(0.42)
+  })
+
+  it('drops one that is not a number at all', () => {
+    expect(parseLibrary(withProgress('lots'))[0]?.progress).toBeUndefined()
+  })
+})

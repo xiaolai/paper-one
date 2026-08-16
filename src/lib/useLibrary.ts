@@ -42,6 +42,24 @@ export interface Library {
   untag: (bookId: string, tag: string) => void
   /** The reader's judgement that a book is done — see `markFinished`. */
   setFinished: (bookId: string, finished: boolean) => void
+  /**
+   * Shelve a batch of imported books, in ONE write.
+   *
+   * `isNew` books are recorded unconditionally; the rest only when no row refers
+   * to them already — a book whose bytes are in the vault and whose row is gone
+   * would otherwise be invisible forever, because every later import reports it
+   * as a duplicate again.
+   *
+   * The presence check runs INSIDE the mutation, against `prev`. Done outside it
+   * the callback would have to depend on `books`, and the watcher effect depends
+   * on this callback — so every shelved batch would tear the watcher down and
+   * schedule another full catch-up import.
+   *
+   * One `apply` for the whole batch, rather than one per book: `apply`
+   * serialises the entire shelf on every call, so importing three hundred books
+   * one row at a time writes the library three hundred times.
+   */
+  shelve: (rows: readonly { entry: LibraryEntry; isNew: boolean }[]) => void
   /** Apply looked-up metadata to a row that is still there — see `applyLookup`. */
   applyFound: (bookId: string, found: Parameters<typeof applyLookup>[2]) => void
   /** The saved position for a book, or null. Stable across renders. */
@@ -101,50 +119,60 @@ export function useLibrary(storage = localStore()): Library {
     [],
   )
 
+  const shelve = useCallback(
+    (rows: readonly { entry: LibraryEntry; isNew: boolean }[]) => {
+      if (rows.length === 0) return
+      apply((prev) =>
+        rows.reduce(
+          (acc, { entry, isNew }) =>
+            isNew || !acc.some((row) => row.bookId === entry.bookId)
+              ? recordOpen(acc, entry)
+              : acc,
+          prev,
+        ),
+      )
+    },
+    [apply],
+  )
+
   const applyFound = useCallback(
     (bookId: string, found: Parameters<typeof applyLookup>[2]) => {
-      if (applyLookup(booksRef.current, bookId, found) === booksRef.current) return
-      apply((prev) => [...applyLookup(prev, bookId, found)])
+      apply((prev) => applyLookup(prev, bookId, found))
     },
     [apply],
   )
 
   const setFinished = useCallback(
     (bookId: string, finished: boolean) => {
-      if (markFinished(booksRef.current, bookId, finished) === booksRef.current) return
-      apply((prev) => [...markFinished(prev, bookId, finished)])
+      apply((prev) => markFinished(prev, bookId, finished))
     },
     [apply],
   )
 
   const tag = useCallback(
     (bookId: string, value: string) => {
-      if (tagBook(booksRef.current, bookId, value) === booksRef.current) return
-      apply((prev) => [...tagBook(prev, bookId, value)])
+      apply((prev) => tagBook(prev, bookId, value))
     },
     [apply],
   )
 
   const untag = useCallback(
     (bookId: string, value: string) => {
-      if (untagBook(booksRef.current, bookId, value) === booksRef.current) return
-      apply((prev) => [...untagBook(prev, bookId, value)])
+      apply((prev) => untagBook(prev, bookId, value))
     },
     [apply],
   )
 
   const forget = useCallback(
     (bookId: string) => {
-      if (forgetBook(booksRef.current, bookId) === booksRef.current) return
-      apply((prev) => [...forgetBook(prev, bookId)])
+      apply((prev) => forgetBook(prev, bookId))
     },
     [apply],
   )
 
   const rememberJacket = useCallback(
     (bookId: string, cover: string) => {
-      if (rememberCover(booksRef.current, bookId, cover) === booksRef.current) return
-      apply((prev) => [...rememberCover(prev, bookId, cover)])
+      apply((prev) => rememberCover(prev, bookId, cover))
     },
     [apply],
   )
@@ -153,27 +181,17 @@ export function useLibrary(storage = localStore()): Library {
     (bookId: string, vault: string) => {
       // Identity check first, like `remember`: this fires on every open and
       // most of them find the copy already recorded.
-      if (rememberVault(booksRef.current, bookId, vault) === booksRef.current) return
-      apply((prev) => [...rememberVault(prev, bookId, vault)])
+      apply((prev) => rememberVault(prev, bookId, vault))
     },
     [apply],
   )
 
   const remember = useCallback(
     (bookId: string, position: string, progress?: number) => {
-      /* Checked before applying, not inside the mutation. `apply` persists
-       * whatever the mutation returns — a full serialisation of the shelf —
-       * even when it returns the collection unchanged, and this runs while the
-       * reader is reading. `rememberPosition` returning its input by identity
-       * is what makes the check a comparison rather than a diff. */
-      if (rememberPosition(booksRef.current, bookId, position, progress) === booksRef.current) return
-      /* Copied unconditionally on the way out. The guard above reads the render
-       * value and the mutation below reads `apply`'s own, and the two differ
-       * between an apply and the render that follows it — so the inner call can
-       * legitimately find nothing to change. Forcing a new array costs one
-       * redundant write in that window; not forcing one would drop a real
-       * position on the floor, and only the second failure is silent. */
-      apply((prev) => [...rememberPosition(prev, bookId, position, progress)])
+      /* No guard here any more, and none needed. `apply` skips the write when
+       * the mutation returns its input by identity, against the authoritative
+       * value rather than the render-lagging ref this used to read. */
+      apply((prev) => rememberPosition(prev, bookId, position, progress))
     },
     [apply],
   )
@@ -203,9 +221,10 @@ export function useLibrary(storage = localStore()): Library {
       untag,
       setFinished,
       applyFound,
+      shelve,
       positionOf,
       rekey,
     }),
-    [books, record, remember, rememberOwned, rememberJacket, forget, tag, untag, setFinished, applyFound, positionOf, rekey],
+    [books, record, remember, rememberOwned, rememberJacket, forget, tag, untag, setFinished, applyFound, shelve, positionOf, rekey],
   )
 }

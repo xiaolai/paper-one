@@ -41,13 +41,13 @@ export function useCollections(storage = localStore()): Collections {
     (scope: Scope) => {
       // Derived, and derived in `collections.ts` so the claim it makes — same
       // scope, same id, any machine — is somewhere it can be tested.
-      apply((prev) => [...addCollection(prev, scope, collectionIdFor(scope))])
+      apply((prev) => addCollection(prev, scope, collectionIdFor(scope)))
     },
     [apply],
   )
 
   const remove = useCallback(
-    (id: string) => apply((prev) => [...removeCollection(prev, id)]),
+    (id: string) => apply((prev) => removeCollection(prev, id)),
     [apply],
   )
 

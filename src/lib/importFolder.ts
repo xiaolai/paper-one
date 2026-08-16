@@ -127,6 +127,11 @@ export async function importFolder(
     onProgress?.({ done: index, total: paths.length, current: name })
     try {
       const bytes = await fs.readOutside(path)
+      /* Checked AGAIN after the read, which is the long part of one book — a
+       * 40MB file off a network volume takes long enough that stopping only
+       * between books means "stop" waits for it. Anything after this point is
+       * hashing and a rename, which are fast and better finished than half-done. */
+      if (signal?.aborted) break
       const file = new File([bytes as BlobPart], name)
       const bookId = await bookIdFor(file)
       const entry = await ownBook(fs, bookId, name, bytes)

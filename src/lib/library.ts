@@ -220,12 +220,13 @@ export function recordOpen(
    * reason — and reopening the book destroyed it anyway. The separation was
    * real and the thing it protected against happened one function away.
    *
-   * So the rule is inverted from "keep two fields" to "keep everything the book
-   * cannot know about". A field is listed below because the BOOK is the
-   * authority on it; anything absent from that list belongs to the reader or to
-   * Paper and is carried through untouched. */
+   * So every field the book cannot know about is carried across EXPLICITLY
+   * below. A spread of `previous` was there first and was removed on finding it
+   * changed nothing: `readMeta` always returns every book-authored field, so
+   * `entry` defines them all and wins the spread regardless. It only looked
+   * like protection, which is worse than not being there — the explicit list is
+   * the contract, and it should be the only thing that reads like one. */
   const kept: LibraryEntry = {
-    ...previous,
     ...entry,
     position: entry.position ?? previous?.position ?? null,
     path: entry.path ?? previous?.path ?? null,
@@ -698,6 +699,18 @@ function readStrings(row: unknown, key: string): Record<string, readonly string[
   return clean.length ? { [key]: clean } : {}
 }
 
+/** A finite number held to a range, or nothing. */
+function clampedNumber(
+  row: unknown,
+  key: string,
+  low: number,
+  high: number,
+): Record<string, number> {
+  const value = (row as Record<string, unknown>)[key]
+  if (typeof value !== 'number' || !Number.isFinite(value)) return {}
+  return { [key]: Math.min(high, Math.max(low, value)) }
+}
+
 /** A finite number, or nothing. NaN through JSON is `null`; NaN in code is not. */
 function readNumber(row: unknown, key: string): Record<string, number> {
   const value = (row as Record<string, unknown>)[key]
@@ -743,7 +756,10 @@ export function parseLibrary(raw: string | null): LibraryEntry[] {
       ...readStrings(raw, 'languages'),
       ...readStrings(raw, 'tags'),
       ...readNumber(raw, 'seriesIndex'),
-      ...readNumber(raw, 'progress'),
+      /* Clamped, not merely checked finite. `rememberPosition` clamps what it
+       * writes, but this file can be edited and a row claiming `progress: 4`
+       * would draw a bar four times the width of its track. */
+      ...clampedNumber(raw, 'progress', 0, 1),
       ...(typeof raw['finished'] === 'boolean' ? { finished: raw['finished'] } : {}),
     }
   })

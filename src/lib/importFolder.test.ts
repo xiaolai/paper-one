@@ -116,6 +116,15 @@ describe('importFolder', () => {
     expect(seen[seen.length - 1]).toBe(2)
   })
 
+  /* A book already in the vault is a duplicate, and saying so is what lets the
+   * caller shelve it when no row refers to it. */
+  it('reports a book it already holds as a duplicate rather than as added', async () => {
+    const fs = fakeDir(tree, files)
+    await importFolder(fs, '/books')
+    const again = await importFolder(fs, '/books')
+    expect(again.map((one) => one.status)).toEqual(['duplicate', 'duplicate'])
+  })
+
   it('stops when aborted', async () => {
     const controller = new AbortController()
     controller.abort()

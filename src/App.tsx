@@ -113,7 +113,8 @@ export function App({ storage }: AppProps) {
       })
   }, [openBook])
 
-  const { record, remember, rememberOwned, rememberJacket, forget, positionOf } = library
+  const { record, remember, rememberOwned, rememberJacket, forget, applyFound, shelve, positionOf } =
+    library
   const collections = useCollections(storage)
 
   /**
@@ -126,27 +127,34 @@ export function App({ storage }: AppProps) {
    */
   const shelveImported = useCallback(
     (outcomes: readonly ImportOutcome[]) => {
-      for (const one of outcomes) {
-        if (one.status !== 'added' || !one.bookId || !one.name) continue
-        record({
-          bookId: one.bookId,
-          /* The FILENAME, until the book is opened. Parsing every book to learn
-           * its title would make importing a folder as slow as reading one, and
-           * the row corrects itself on first open. */
-          title: one.name.replace(/\.[^.]+$/, ''),
-          author: '',
-          url: null,
-          lastOpened: Date.now(),
-          position: null,
-          workId: null,
-          path: one.path,
-          // The path the VAULT chose. Rebuilding it from the filename recorded a
-          // `.EPUB` that is not on disk, because `extensionFor` lowercases.
-          ...(one.vault ? { vault: one.vault } : {}),
-        })
-      }
+      shelve(
+        outcomes
+          .filter((one) => one.status !== 'failed' && one.bookId && one.name)
+          .map((one) => ({
+            isNew: one.status === 'added',
+            entry: {
+              bookId: one.bookId!,
+              /* The FILENAME, until the book is opened. Parsing every book to
+               * learn its title would make importing a folder as slow as reading
+               * one, and the row corrects itself on first open. */
+              title: one.name!.replace(/\.[^.]+$/, ''),
+              author: '',
+              url: null,
+              lastOpened: Date.now(),
+              position: null,
+              workId: null,
+              path: one.path,
+              // The path the VAULT chose. Rebuilding it from the filename
+              // recorded a `.EPUB` that is not on disk — `extensionFor`
+              // lowercases.
+              ...(one.vault ? { vault: one.vault } : {}),
+            },
+          })),
+      )
     },
-    [library],
+    // Stable: `shelve` is a `useCallback` over a stable `apply`, and the
+    // already-on-the-shelf check happens inside the mutation rather than here.
+    [shelve],
   )
 
   /**
@@ -315,11 +323,12 @@ export function App({ storage }: AppProps) {
          * removed in the meantime, revert one changed since, and move it to the
          * top of a shelf ordered by recency. This patches by id and no-ops when
          * the book has gone. */
-        library.applyFound(entry.bookId, found)
+        applyFound(entry.bookId, found)
         setImportNotice(`Updated from ${found.source}.`)
       })()
     },
-    [library],
+    // The stable callback, for the same reason `shelveImported` takes `record`.
+    [applyFound],
   )
 
 

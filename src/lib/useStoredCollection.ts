@@ -70,6 +70,18 @@ export function useStoredCollection<T>({
 
   const apply = useCallback((mutate: (prev: readonly T[]) => readonly T[]) => {
     const next = mutate(latest.current)
+    /* NOTHING MOVED, so nothing is written. The mutation is applied to
+     * `latest.current`, which is authoritative and updated synchronously — so a
+     * mutation returning its input BY IDENTITY is a reliable "no change".
+     *
+     * This lives here because every caller needed it and each was doing it
+     * wrong in the same way: guarding on a ref assigned during render, which
+     * lags this one between an apply and the render that follows. Two mutations
+     * in one tick therefore saw stale state and the second was dropped — a
+     * `record` immediately followed by `rememberOwned`, or two tag toggles in
+     * one batch. Asking the authoritative value cannot lag, and it deletes
+     * eleven copies of the same broken check. */
+    if (next === latest.current) return
     latest.current = next
     setItems(next)
 
