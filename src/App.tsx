@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { buildCommands } from './lib/commands'
 import { PANE_SHORTCUTS } from './lib/panes'
 import { DEFAULT_STEP_IDX, applyMetrics } from './lib/metrics'
-import { pickBooks, pickFolder, tauriDirOps, tauriWatchOps } from './lib/bookFiles'
+import { pickBooks, pickFolder, readBookAt, tauriDirOps, tauriWatchOps } from './lib/bookFiles'
 import { legacyBookIdFor } from './lib/idMigration'
 import { positionRecorder, type PositionRecorder } from './lib/positionRecorder'
 import { usePlatform, usePrefersDark, usePrefersReducedMotion } from './lib/platform'
@@ -16,7 +16,7 @@ import { useCards } from './lib/useCards'
 import { useMarks } from './lib/useMarks'
 import { useMarking } from './lib/useMarking'
 import { coverTintFor } from './lib/bookAccent'
-import { readOwnedBook } from './lib/bookVault'
+import { extensionFor, readOwnedBook } from './lib/bookVault'
 import type { IndexedBook } from './lib/bookIndex'
 import type { IndexFs } from './lib/bookIndex'
 import type { DirFs } from './lib/importFolder'
@@ -158,6 +158,10 @@ export function App({ storage, fs, initialBooks }: AppProps) {
           title: one.name.replace(/\.[^.]+$/, ''),
           author: '',
           addedAt: Date.now(),
+          /* WITHOUT THIS EVERY IMPORTED PDF IS UNOPENABLE. The bytes go to
+           * `content.pdf`, and `openStored` defaults a record with no `ext` to
+           * `.epub` — so it looks for a file that is not there. */
+          ext: extensionFor(one.name),
           ...(one.path ? { origin: one.path } : {}),
         })
       }
@@ -265,6 +269,27 @@ export function App({ storage, fs, initialBooks }: AppProps) {
       void readOwnedBook(fs, contentPathIn(entry.bookId, name), name)
         .then((file) => openBook(file, entry.origin ?? null))
         .catch((cause: unknown) => {
+          /* FALL BACK TO THE READER'S OWN FILE, which phase 4 deleted too
+           * eagerly. "Three branches became one" was true for a book Paper
+           * holds — and six of the ten books in a real phase-3 library never
+           * had a stored copy, because phase 3 only started keeping them near
+           * the end. Migrating those produced a record with no content, and
+           * with the path fallback gone they became unopenable.
+           *
+           * `origin` is kept for provenance, and provenance is exactly what is
+           * needed here. It is still a fallback rather than a first choice: it
+           * depends on the reader's file being where it was, which is the whole
+           * reason Paper keeps its own copy. */
+          const original = entry.origin
+          if (original) {
+            void readBookAt(original)
+              .then((file) => openBook(file, original))
+              .catch((second: unknown) => {
+                console.error('Paper: could not reopen', original, second)
+                setImportNotice('That book could not be opened. Try adding it again.')
+              })
+            return
+          }
           /* The folder is there and its content is not, which means an import
            * that did not finish. The record stays — its tags and position are
            * still the reader's — and they are told rather than left clicking
