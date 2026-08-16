@@ -39,6 +39,11 @@ function fakeFs(seed: Record<string, Uint8Array> = {}) {
     exists: async (path) => files.has(path),
     mkdir: async (path) => void dirs.add(path),
     remove: async (path) => void files.delete(path),
+    rename: async (from, to) => {
+      const bytes = files.get(from)
+      if (bytes) files.set(to, bytes)
+      files.delete(from)
+    },
   }
   return fs
 }
@@ -116,15 +121,47 @@ describe('ownBook', () => {
     expect(writes).toBe(0)
   })
 
-  /* A truncated file at the real path would be treated as the book forever and
-   * would fail to parse with no clue why — so the interrupted write must not
-   * leave one there. */
+  /**
+   * A truncated file at the real path would be treated as the book forever and
+   * fail to parse with no clue why — so an interrupted write must not leave one.
+   *
+   * The failure is injected at the TEMPORARY path now, which is where the bytes
+   * actually go: the first version of `ownBook` wrote the temp file and then
+   * wrote the bytes again to the real path, so this case could only be provoked
+   * by failing the second write. The rename replaced it, and this case had to
+   * follow the bytes.
+   */
   it('leaves no file at the real path when the write fails', async () => {
     const fs = fakeFs()
     const path = vaultPath('book:a', 'Moby.epub')
-    fs.failWrite = path
+    fs.failWrite = `${path}.writing`
     await expect(ownBook(fs, 'book:a', 'Moby.epub', bytes('WHALE'))).rejects.toThrow('disk full')
     expect(fs.files.has(path)).toBe(false)
+    expect(fs.files.has(`${path}.writing`)).toBe(false)
+  })
+
+  /* The rename is what makes it atomic, and the absence of one is exactly what
+   * the audit found: the bytes must reach the real path by being MOVED there. */
+  it('moves the temporary file into place rather than writing twice', async () => {
+    const fs = fakeFs()
+    let writes = 0
+    const counted: VaultFs = {
+      ...fs,
+      writeFile: async (p, b) => {
+        writes += 1
+        await fs.writeFile(p, b)
+      },
+    }
+    await ownBook(counted, 'book:a', 'Moby.epub', bytes('WHALE'))
+    expect(writes).toBe(1)
+  })
+
+  /* `created` is how a duplicate is known. The byte count cannot say — it is the
+   * input's length whether the file was written or reused. */
+  it('reports whether it actually wrote', async () => {
+    const fs = fakeFs()
+    expect((await ownBook(fs, 'book:a', 'Moby.epub', bytes('WHALE'))).created).toBe(true)
+    expect((await ownBook(fs, 'book:a', 'Moby.epub', bytes('WHALE'))).created).toBe(false)
   })
 
   it('cleans up its temporary neighbour', async () => {

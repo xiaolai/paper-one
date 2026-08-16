@@ -31,6 +31,11 @@ function fakeFs() {
     exists: async (path) => files.has(path),
     mkdir: async (path) => void dirs.add(path),
     remove: async (path) => void files.delete(path),
+    rename: async (from, to) => {
+      const bytes = files.get(from)
+      if (bytes) files.set(to, bytes)
+      files.delete(from)
+    },
   }
   return fs
 }

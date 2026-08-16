@@ -23,6 +23,11 @@ function fakeDir(files: Record<string, string>) {
     exists: async (path) => fs.written.has(path),
     mkdir: async () => {},
     remove: async () => {},
+    rename: async (from, to) => {
+      const bytes = fs.written.get(from)
+      if (bytes) fs.written.set(to, bytes)
+      fs.written.delete(from)
+    },
   }
   return fs
 }

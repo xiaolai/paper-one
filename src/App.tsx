@@ -20,7 +20,12 @@ import { disownBook, ownBook, readOwnedBook, tauriVaultFs } from './lib/bookVaul
 import type { LibraryEntry } from './lib/library'
 import { useCollections } from './lib/useCollections'
 import { saveCover } from './lib/coverArt'
-import { importFolder, summarise, type ImportProgress } from './lib/importFolder'
+import {
+  importFolder,
+  summarise,
+  type ImportOutcome,
+  type ImportProgress,
+} from './lib/importFolder'
 import { WATCHED_FOLDER_KEY, watchFolder } from './lib/watchedFolder'
 import { lookupMetadata } from './lib/metadataLookup'
 import { inTauri } from './lib/appStorage'
@@ -108,6 +113,42 @@ export function App({ storage }: AppProps) {
       })
   }, [openBook])
 
+  const { record, remember, rememberOwned, rememberJacket, forget, positionOf } = library
+  const collections = useCollections(storage)
+
+  /**
+   * Put what an import produced onto the shelf.
+   *
+   * ONE function, called by both the manual import and the watched folder. The
+   * watcher had no equivalent at all: it copied books into the vault and updated
+   * a notice, so a folder being watched filled the vault and never the shelf —
+   * the books were there and invisible.
+   */
+  const shelveImported = useCallback(
+    (outcomes: readonly ImportOutcome[]) => {
+      for (const one of outcomes) {
+        if (one.status !== 'added' || !one.bookId || !one.name) continue
+        record({
+          bookId: one.bookId,
+          /* The FILENAME, until the book is opened. Parsing every book to learn
+           * its title would make importing a folder as slow as reading one, and
+           * the row corrects itself on first open. */
+          title: one.name.replace(/\.[^.]+$/, ''),
+          author: '',
+          url: null,
+          lastOpened: Date.now(),
+          position: null,
+          workId: null,
+          path: one.path,
+          // The path the VAULT chose. Rebuilding it from the filename recorded a
+          // `.EPUB` that is not on disk, because `extensionFor` lowercases.
+          ...(one.vault ? { vault: one.vault } : {}),
+        })
+      }
+    },
+    [library],
+  )
+
   /**
    * The watched folder — one, not a list.
    *
@@ -161,7 +202,10 @@ export function App({ storage }: AppProps) {
       { ...tauriVaultFs, ...tauriDirOps },
       tauriWatchOps,
       watched,
-      (outcomes) => setImportNotice(summarise(outcomes)),
+      (outcomes) => {
+        shelveImported(outcomes)
+        setImportNotice(summarise(outcomes))
+      },
     )
       .then((live) => {
         if (stopped) live.stop()
@@ -175,7 +219,7 @@ export function App({ storage }: AppProps) {
       stopped = true
       watcher?.stop()
     }
-  }, [watched])
+  }, [watched, shelveImported])
 
   /** Reopen a book the shelf knows the location of. */
   const openStored = useCallback(
@@ -188,11 +232,25 @@ export function App({ storage }: AppProps) {
        * they are copied in on this open, by the effect below. */
       if (entry.vault) {
         const at = entry.vault
-        void readOwnedBook(tauriVaultFs, at, entry.title || 'book.epub')
+        /* The name must carry an EXTENSION, and a title does not. `isPdf` routes
+         * on it, so `readOwnedBook(..., 'Moby-Dick')` sent every PDF to foliate,
+         * which rejects it as an unsupported type. The vault path always has the
+         * right extension because `vaultPath` put it there. */
+        const named = `${entry.title || 'book'}.${at.slice(at.lastIndexOf('.') + 1)}`
+        void readOwnedBook(tauriVaultFs, at, named)
           .then((file) => openBook(file, entry.path ?? null))
           .catch((cause: unknown) => {
             console.error('Paper: could not read our own copy', at, cause)
-            if (entry.path) void readBookAt(entry.path).then((f) => openBook(f, entry.path))
+            const original = entry.path
+            if (!original) return
+            /* CAUGHT, because the fallback can fail too. Without this a book
+             * whose vault copy is missing AND whose original has moved produced
+             * an unhandled rejection at the window rather than a message. */
+            void readBookAt(original)
+              .then((file) => openBook(file, original))
+              .catch((second: unknown) => {
+                console.error('Paper: could not reopen', original, second)
+              })
           })
         return
       }
@@ -232,8 +290,6 @@ export function App({ storage }: AppProps) {
    * actually read rather than a fixture shelf. Keyed on the metadata arriving,
    * because that is when there is a title worth showing. */
   const { bookId, meta, source, cover } = book
-  const { record, remember, rememberOwned, rememberJacket, forget, positionOf } = library
-  const collections = useCollections(storage)
 
   /**
    * Ask Open Library about one book — Decision 1's only network call.
@@ -254,21 +310,16 @@ export function App({ storage }: AppProps) {
           setImportNotice('Nothing found for that book.')
           return
         }
-        record({
-          ...entry,
-          title: found.title || entry.title,
-          author: found.author || entry.author,
-          ...(found.publisher ? { publisher: found.publisher } : {}),
-          ...(found.published ? { published: found.published } : {}),
-          ...(found.subjects?.length ? { subjects: found.subjects } : {}),
-          // NOT touched: `lastOpened`. A lookup is not a read, and the shelf is
-          // ordered by recency — this must not push the book to the top.
-          lastOpened: entry.lastOpened,
-        })
+        /* `applyFound`, not `record`. A lookup is a slow call against a row
+         * captured when the reader clicked: `recordOpen` would RECREATE a book
+         * removed in the meantime, revert one changed since, and move it to the
+         * top of a shelf ordered by recency. This patches by id and no-ops when
+         * the book has gone. */
+        library.applyFound(entry.bookId, found)
         setImportNotice(`Updated from ${found.source}.`)
       })()
     },
-    [record],
+    [library],
   )
 
 
@@ -297,23 +348,7 @@ export function App({ storage }: AppProps) {
           folder,
           { onProgress: setImporting },
         )
-        for (const one of outcomes) {
-          if (one.status !== 'added' || !one.bookId || !one.name) continue
-          record({
-            bookId: one.bookId,
-            /* The FILENAME, until the book is opened. Parsing every book to
-             * learn its title would make importing a folder as slow as reading
-             * one, and the row corrects itself on first open. */
-            title: one.name.replace(/\.[^.]+$/, ''),
-            author: '',
-            url: null,
-            lastOpened: Date.now(),
-            position: null,
-            workId: null,
-            path: one.path,
-            vault: `books/${one.bookId.replace(/[^a-zA-Z0-9]/g, '_')}.${one.name.split('.').pop()}`,
-          })
-        }
+        shelveImported(outcomes)
         setImportNotice(summarise(outcomes))
       } catch (cause) {
         console.error('Paper: the folder import failed', cause)

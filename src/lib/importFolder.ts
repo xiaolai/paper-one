@@ -54,6 +54,8 @@ export interface ImportOutcome {
   readonly reason?: string
   readonly bookId?: string
   readonly name?: string
+  /** Where the vault put it — the caller must not rebuild this. */
+  readonly vault?: string
 }
 
 export interface ImportProgress {
@@ -127,15 +129,22 @@ export async function importFolder(
       const bytes = await fs.readOutside(path)
       const file = new File([bytes as BlobPart], name)
       const bookId = await bookIdFor(file)
-      const before = await fs.exists(`books/${bookId.replace(/[^a-zA-Z0-9]/g, '_')}`)
       const entry = await ownBook(fs, bookId, name, bytes)
       outcomes.push({
         path,
-        // `exists` above cannot see the extension, so held-ness is decided by
-        // whether `ownBook` found the file rather than by that probe alone.
-        status: before || entry.bytes === 0 ? 'duplicate' : 'added',
+        /* `created`, from the vault itself. The first version probed
+         * `books/<id>` WITHOUT the extension — a path that never exists — so the
+         * check was always false; and it fell back to comparing `entry.bytes`,
+         * which is the input's length whether the file was written or reused. So
+         * every book reported as added and an empty file reported as duplicate.
+         * The vault knows which it did, so it says. */
+        status: entry.created ? 'added' : 'duplicate',
         bookId,
         name,
+        // The path the vault CHOSE, not one reconstructed from the filename:
+        // `extensionFor` lowercases, so rebuilding it recorded `BOOK.EPUB` as a
+        // `.EPUB` that is not on disk.
+        vault: entry.path,
       })
     } catch (cause) {
       /* Named individually rather than counted. "4 of 300 failed" tells a reader

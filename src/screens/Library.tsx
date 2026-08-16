@@ -154,9 +154,17 @@ export function Library({
      * row out at every breakpoint, which looks like a scroll glitch. */
     const measure = () => {
       const cell = node.firstElementChild as HTMLElement | null
-      const rowHeight = cell ? cell.offsetHeight + 24 : 0
+      /* READ the gaps rather than assuming them. Both were hardcoded to 24px
+       * while the stylesheet uses a different row and column gap, so the row
+       * height was wrong by a few pixels per row — which is invisible near the
+       * top and selects the wrong rows entirely once a reader has scrolled a
+       * few hundred books down. */
+      const style = getComputedStyle(node)
+      const rowGap = parseFloat(style.rowGap) || 0
+      const columnGap = parseFloat(style.columnGap) || 0
+      const rowHeight = cell ? cell.offsetHeight + rowGap : 0
       const columns = cell && cell.offsetWidth > 0
-        ? Math.max(1, Math.round(node.clientWidth / (cell.offsetWidth + 24)))
+        ? Math.max(1, Math.round((node.clientWidth + columnGap) / (cell.offsetWidth + columnGap)))
         : 0
       const scroller = node.closest('[data-scroll]') ?? node.parentElement
       setViewport({
@@ -271,7 +279,12 @@ export function Library({
           {/* Counts are DERIVED and counted within the scope, so they describe
               what the reader can actually reach. The chips these replace were a
               prototype constant reading `All 2,418`. */}
-          {tags.length > 0 && (
+          {/* NOT conditional on `tags.length`. Saved collections and the control
+              that clears the active scope both live here, so gating the whole
+              area on tag counts hid a reader's collections in a library with no
+              tags — and, worse, could strand them inside a scope whose last
+              matching tag had just been removed, with no way back out. */}
+          {(tags.length > 0 || collections.length > 0 || scope) && (
             <div className={styles.chips}>
               {scope && (
                 <>

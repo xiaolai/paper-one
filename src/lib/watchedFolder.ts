@@ -64,6 +64,9 @@ export function watchFolder(
   let running = false
   let again = false
   let stopped = false
+  /* `importFolder` already takes a signal; without owning one, "Stop watching"
+   * left a running import reading, hashing and copying the whole folder. */
+  const aborter = new AbortController()
 
   const run = async () => {
     /* One import at a time. Two overlapping runs would both read the same
@@ -78,7 +81,7 @@ export function watchFolder(
     try {
       do {
         again = false
-        const outcomes = await importFolder(fs, folder)
+        const outcomes = await importFolder(fs, folder, { signal: aborter.signal })
         if (stopped) return
         // Reported only when something actually landed. A watcher that announces
         // "0 added" every time a file is touched is noise.
@@ -100,6 +103,7 @@ export function watchFolder(
     return {
       stop: () => {
         stopped = true
+        aborter.abort()
         if (timer) clearTimeout(timer)
         unsubscribe()
       },

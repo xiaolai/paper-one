@@ -8,6 +8,7 @@ import {
   isReopenable,
   parseLibrary,
   allTags,
+  applyLookup,
   forgetBook,
   markFinished,
   statusOf,
@@ -655,5 +656,137 @@ describe('rememberPosition with a fraction', () => {
   it('returns its input when nothing moved', () => {
     const shelf = [entry({ bookId: 'a', position: 'cfi', progress: 0.5 })]
     expect(rememberPosition(shelf, 'a', 'cfi', 0.5)).toBe(shelf)
+  })
+})
+
+
+/**
+ * What a REOPEN may overwrite, and what it must not.
+ *
+ * The audit's worst finding, and the sharpest kind: reader tags exist as a
+ * separate field precisely so a re-parse cannot erase them, and reopening the
+ * book erased them anyway — one function away from the separation that was
+ * supposed to protect them.
+ */
+describe('recordOpen keeps what the book cannot know about', () => {
+  const fresh = (over: Partial<LibraryEntry> = {}) =>
+    entry({ bookId: 'a', title: 'T', author: 'A', lastOpened: 2, ...over })
+
+  const lived = [
+    entry({
+      bookId: 'a',
+      lastOpened: 1,
+      position: 'epubcfi(/6/4)',
+      progress: 0.4,
+      finished: true,
+      tags: ['To reread'],
+      vault: 'books/a.epub',
+      cover: 'covers/a.jpg',
+    }),
+  ]
+
+  it('keeps the reader own tags', () => {
+    expect(recordOpen(lived, fresh())[0]?.tags).toEqual(['To reread'])
+  })
+
+  it('keeps the finished flag and the progress', () => {
+    const [row] = recordOpen(lived, fresh())
+    expect(row?.finished).toBe(true)
+    expect(row?.progress).toBe(0.4)
+  })
+
+  it('keeps the vault path and the cover', () => {
+    const [row] = recordOpen(lived, fresh())
+    expect(row?.vault).toBe('books/a.epub')
+    expect(row?.cover).toBe('covers/a.jpg')
+  })
+
+  /* The book IS the authority on its own metadata, so a re-parse must still
+   * win there — otherwise a corrected OPF could never take effect. */
+  it('still lets the book replace what the book declares', () => {
+    const [row] = recordOpen(lived, fresh({ title: 'Corrected', subjects: ['New'] }))
+    expect(row?.title).toBe('Corrected')
+    expect(row?.subjects).toEqual(['New'])
+  })
+})
+
+describe('applyLookup', () => {
+  /* A lookup is a slow call against a row captured when the reader clicked. By
+   * the time it answers the book may be gone — and `recordOpen` would have
+   * recreated it. */
+  it('does nothing for a book that has been removed', () => {
+    const shelf = [entry({ bookId: 'a' })]
+    expect(applyLookup(shelf, 'gone', { title: 'X' })).toBe(shelf)
+  })
+
+  it('does not reorder the shelf', () => {
+    const shelf = [entry({ bookId: 'a' }), entry({ bookId: 'b' })]
+    expect(applyLookup(shelf, 'b', { author: 'Found' }).map((e) => e.bookId)).toEqual(['a', 'b'])
+  })
+
+  it('fills only the fields it was given', () => {
+    const shelf = [entry({ bookId: 'a', title: 'Keep', position: 'cfi' })]
+    const [row] = applyLookup(shelf, 'a', { author: 'Melville' })
+    expect(row?.title).toBe('Keep')
+    expect(row?.author).toBe('Melville')
+    expect(row?.position).toBe('cfi')
+  })
+})
+
+/**
+ * The store is a file on disk, so every field in it is untrusted.
+ *
+ * The row validator only ever checked the fields that existed when it was
+ * written, so everything added since arrived unexamined — and a `subjects` that
+ * is not an array of strings crashes the shelf the moment it renders.
+ */
+describe('parseLibrary validates the fields added since it was written', () => {
+  const row = (over: Record<string, unknown>) =>
+    JSON.stringify([
+      { bookId: 'a', title: 'T', author: 'A', url: null, lastOpened: 1, position: null, ...over },
+    ])
+
+  it('drops a subjects list that is not a list of strings', () => {
+    const [parsed] = parseLibrary(row({ subjects: 42 }))
+    expect(parsed?.subjects).toBeUndefined()
+  })
+
+  it('drops the non-strings out of a mixed list', () => {
+    const [parsed] = parseLibrary(row({ tags: ['ok', 7, null, 'fine'] }))
+    expect(parsed?.tags).toEqual(['ok', 'fine'])
+  })
+
+  it('drops a non-finite number', () => {
+    expect(parseLibrary(row({ progress: 'lots' }))[0]?.progress).toBeUndefined()
+  })
+
+  it('drops a non-boolean finished flag', () => {
+    expect(parseLibrary(row({ finished: 'yes' }))[0]?.finished).toBeUndefined()
+  })
+
+  /* The crash this prevents: `matchesQuery` and `tagCounts` both call string
+   * methods on whatever is in these lists. */
+  it('leaves the shelf able to search a hostile row', () => {
+    const [parsed] = parseLibrary(row({ subjects: [1, 2], series: 99 }))
+    expect(() => matchesQuery(parsed!, 'anything')).not.toThrow()
+    expect(() => tagCounts([parsed!])).not.toThrow()
+  })
+})
+
+describe('isReopenable', () => {
+  /* A DROPPED file has no path and no url, so it was marked never-reopenable at
+   * the moment it was added — and stayed greyed out even after its vault copy
+   * landed a second later. */
+  it('counts Paper own copy', () => {
+    expect(isReopenable(entry({ url: null, path: null, vault: 'books/a.epub' }))).toBe(true)
+  })
+
+  it('still counts a url or a path', () => {
+    expect(isReopenable(entry({ url: '/a.epub', path: null }))).toBe(true)
+    expect(isReopenable(entry({ url: null, path: '/books/a.epub' }))).toBe(true)
+  })
+
+  it('is false with none of the three', () => {
+    expect(isReopenable(entry({ url: null, path: null }))).toBe(false)
   })
 })

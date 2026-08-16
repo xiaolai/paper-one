@@ -8,6 +8,7 @@ import {
   rememberPosition,
   forgetBook,
   rememberCover,
+  applyLookup,
   markFinished,
   tagBook,
   untagBook,
@@ -41,6 +42,8 @@ export interface Library {
   untag: (bookId: string, tag: string) => void
   /** The reader's judgement that a book is done — see `markFinished`. */
   setFinished: (bookId: string, finished: boolean) => void
+  /** Apply looked-up metadata to a row that is still there — see `applyLookup`. */
+  applyFound: (bookId: string, found: Parameters<typeof applyLookup>[2]) => void
   /** The saved position for a book, or null. Stable across renders. */
   positionOf: (bookId: string | null) => string | null
   /** Move a row from a superseded book id — see `idMigration`. */
@@ -48,11 +51,21 @@ export interface Library {
 }
 
 export function useLibrary(storage = localStore()): Library {
-  /* The same plumbing as marks and cards — see `useStoredCollection`. The one
-   * difference that matters is deliberate and stays here: a failed write is not
-   * surfaced. Losing a mark loses the reader's own words; losing a row here
-   * only means the switcher forgets a title, and a persistence warning over
-   * the recency list would be noise. */
+  /* The same plumbing as marks and cards — see `useStoredCollection`.
+   *
+   * A failed write is still not surfaced, but THE REASON GIVEN HERE HAS EXPIRED
+   * and is worth correcting rather than repeating. It said losing a row only
+   * means the switcher forgets a title. That was true when this store held four
+   * fields; it now holds reading positions, the reader's own tags, the finished
+   * flag, progress, and the paths to Paper's copy of the book and its cover. A
+   * failed write now loses work somebody did.
+   *
+   * It stays silent for now because the failure is not actionable from this
+   * screen and the store is written on a throttle — a warning would appear
+   * mid-reading, about a write that the next one will probably repair. Surfacing
+   * it properly means the durable notice marks and cards use, and that is a
+   * change to `useStoredCollection` rather than a line here. Recorded as
+   * outstanding rather than left looking intentional. */
   const { items: books, apply } = useStoredCollection<LibraryEntry>({
     storage,
     load: (target) => {
@@ -86,6 +99,14 @@ export function useLibrary(storage = localStore()): Library {
         ? booksRef.current.find((entry) => entry.bookId === bookId)?.position ?? null
         : null,
     [],
+  )
+
+  const applyFound = useCallback(
+    (bookId: string, found: Parameters<typeof applyLookup>[2]) => {
+      if (applyLookup(booksRef.current, bookId, found) === booksRef.current) return
+      apply((prev) => [...applyLookup(prev, bookId, found)])
+    },
+    [apply],
   )
 
   const setFinished = useCallback(
@@ -181,9 +202,10 @@ export function useLibrary(storage = localStore()): Library {
       tag,
       untag,
       setFinished,
+      applyFound,
       positionOf,
       rekey,
     }),
-    [books, record, remember, rememberOwned, rememberJacket, forget, tag, untag, setFinished, positionOf, rekey],
+    [books, record, remember, rememberOwned, rememberJacket, forget, tag, untag, setFinished, applyFound, positionOf, rekey],
   )
 }

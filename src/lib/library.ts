@@ -207,10 +207,35 @@ export function recordOpen(
    * and the path, because the same book can be opened again by a route that
    * does not carry one — a drop, or a URL — and forgetting where it lives would
    * turn a reopenable row back into a dead one. */
-  const kept = {
+  /* WHAT AN OPEN MAY OVERWRITE IS ONLY WHAT THE BOOK DECLARES.
+   *
+   * The entry arriving here is built from a fresh parse, so it carries the
+   * book's own metadata and NOTHING the reader or the app has since attached.
+   * Spreading it over the previous row therefore erased, on every single reopen:
+   * the reader's tags, the finished flag, the recorded progress, the vault path
+   * and the cover.
+   *
+   * Tags were the sharpest case, because the field exists specifically to
+   * survive a re-parse — it is kept apart from `subjects` for exactly that
+   * reason — and reopening the book destroyed it anyway. The separation was
+   * real and the thing it protected against happened one function away.
+   *
+   * So the rule is inverted from "keep two fields" to "keep everything the book
+   * cannot know about". A field is listed below because the BOOK is the
+   * authority on it; anything absent from that list belongs to the reader or to
+   * Paper and is carried through untouched. */
+  const kept: LibraryEntry = {
+    ...previous,
     ...entry,
     position: entry.position ?? previous?.position ?? null,
     path: entry.path ?? previous?.path ?? null,
+    /* Carried explicitly rather than left to the spread, because `entry` names
+     * these keys with `undefined` values and `undefined` wins a spread. */
+    ...(entry.vault ? {} : previous?.vault ? { vault: previous.vault } : {}),
+    ...(entry.cover ? {} : previous?.cover ? { cover: previous.cover } : {}),
+    ...(previous?.tags ? { tags: previous.tags } : {}),
+    ...(previous?.finished === undefined ? {} : { finished: previous.finished }),
+    ...(previous?.progress === undefined ? {} : { progress: previous.progress }),
   }
   return [kept, ...entries.filter((existing) => existing.bookId !== entry.bookId)]
 }
@@ -264,6 +289,43 @@ export function markFinished(
   if (!entry || (entry.finished ?? false) === finished) return entries
   const next = [...entries]
   next[at] = { ...entry, finished }
+  return next
+}
+
+/**
+ * Apply looked-up fields to a row that is still there.
+ *
+ * NOT `recordOpen`, and the difference is the whole point. A lookup is a slow
+ * network call against a row captured when the reader clicked: by the time it
+ * answers, the book may have been removed — in which case `recordOpen` would
+ * RECREATE it — or changed, in which case the captured copy would revert it. It
+ * also moves the row to the top, so a metadata fix reordered the shelf.
+ *
+ * Keyed by id, no-ops when the book has gone, and leaves position in place.
+ */
+export function applyLookup(
+  entries: readonly LibraryEntry[],
+  bookId: string,
+  found: {
+    title?: string
+    author?: string
+    publisher?: string
+    published?: string
+    subjects?: readonly string[]
+  },
+): readonly LibraryEntry[] {
+  const at = entries.findIndex((entry) => entry.bookId === bookId)
+  const entry = at === -1 ? null : entries[at]
+  if (!entry) return entries
+  const next = [...entries]
+  next[at] = {
+    ...entry,
+    ...(found.title ? { title: found.title } : {}),
+    ...(found.author ? { author: found.author } : {}),
+    ...(found.publisher ? { publisher: found.publisher } : {}),
+    ...(found.published ? { published: found.published } : {}),
+    ...(found.subjects?.length ? { subjects: found.subjects } : {}),
+  }
   return next
 }
 
@@ -450,7 +512,14 @@ export function sortTitle(entry: LibraryEntry): string {
 
 /** Whether clicking the row can actually open the book — see the header. */
 export function isReopenable(entry: LibraryEntry): boolean {
-  return Boolean(entry.url) || Boolean(entry.path)
+  /* THE VAULT COUNTS, and counts first. Paper's own copy lives under `$APPDATA`,
+   * which is in scope permanently — it is the most reopenable a row can be.
+   *
+   * Leaving it out disabled exactly the rows the vault was built for: a DROPPED
+   * file has no path and no url, so it was marked never-reopenable at the moment
+   * it was added, and stayed greyed out on the shelf even after its copy had
+   * landed a second later. */
+  return Boolean(entry.vault) || Boolean(entry.url) || Boolean(entry.path)
 }
 
 /** §11: say what happened and what to do, in one line. */
@@ -612,6 +681,29 @@ export function tagCounts(
     .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag))
 }
 
+/** One string field, or nothing. Bounded, because this came off a disk. */
+function readText(row: unknown, key: string): Record<string, string> {
+  const value = (row as Record<string, unknown>)[key]
+  return typeof value === 'string' && value ? { [key]: value.slice(0, 4000) } : {}
+}
+
+/** A list of strings, or nothing. Non-strings are dropped, not coerced. */
+function readStrings(row: unknown, key: string): Record<string, readonly string[]> {
+  const value = (row as Record<string, unknown>)[key]
+  if (!Array.isArray(value)) return {}
+  const clean = value
+    .filter((one): one is string => typeof one === 'string' && one !== '')
+    .slice(0, 64)
+    .map((one) => one.slice(0, 500))
+  return clean.length ? { [key]: clean } : {}
+}
+
+/** A finite number, or nothing. NaN through JSON is `null`; NaN in code is not. */
+function readNumber(row: unknown, key: string): Record<string, number> {
+  const value = (row as Record<string, unknown>)[key]
+  return typeof value === 'number' && Number.isFinite(value) ? { [key]: value } : {}
+}
+
 /** Same trust-boundary rule as marks: drop a bad row, keep the rest. */
 export function parseLibrary(raw: string | null): LibraryEntry[] {
   if (!raw) return []
@@ -622,12 +714,37 @@ export function parseLibrary(raw: string | null): LibraryEntry[] {
     return []
   }
   if (!Array.isArray(parsed)) return []
-  return parsed
-    .filter(isEntry)
-    .map((row) => ({
-      ...row,
+  /* BUILT FROM KNOWN FIELDS, not spread from the row.
+   *
+   * The first version of this spread `...row` and then patched the suspect keys
+   * — which does nothing, because the bad value is already in the object by the
+   * time the patch decides not to set it. Listing the fields also means an
+   * unknown key on disk never reaches memory at all, which is the right default
+   * for a file anything could have written. */
+  return parsed.filter(isEntry).map((row) => {
+    const raw = row as unknown as Record<string, unknown>
+    return {
+      bookId: row.bookId,
+      title: row.title,
+      author: row.author,
+      url: row.url,
+      lastOpened: row.lastOpened,
       position: readPosition(row.position),
       workId: readWorkId(row.workId),
       path: readPath(row.path),
-    }))
+      ...readText(raw, 'sortAs'),
+      ...readText(raw, 'series'),
+      ...readText(raw, 'publisher'),
+      ...readText(raw, 'published'),
+      ...readText(raw, 'description'),
+      ...readText(raw, 'vault'),
+      ...readText(raw, 'cover'),
+      ...readStrings(raw, 'subjects'),
+      ...readStrings(raw, 'languages'),
+      ...readStrings(raw, 'tags'),
+      ...readNumber(raw, 'seriesIndex'),
+      ...readNumber(raw, 'progress'),
+      ...(typeof raw['finished'] === 'boolean' ? { finished: raw['finished'] } : {}),
+    }
+  })
 }

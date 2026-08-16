@@ -26,7 +26,15 @@
  * rather than discovered — `bytesHeld` exists so the app can say how much.
  */
 
-import { BaseDirectory, exists, mkdir, readFile, remove, writeFile } from '@tauri-apps/plugin-fs'
+import {
+  BaseDirectory,
+  exists,
+  mkdir,
+  readFile,
+  remove,
+  rename,
+  writeFile,
+} from '@tauri-apps/plugin-fs'
 
 /** Where copies live, under the app's own data directory. */
 export const BOOKS_DIR = 'books'
@@ -48,6 +56,8 @@ export interface VaultFs {
   exists: (path: string) => Promise<boolean>
   mkdir: (path: string) => Promise<void>
   remove: (path: string) => Promise<void>
+  /** The step that makes a write atomic — see `ownBook`. */
+  rename: (from: string, to: string) => Promise<void>
 }
 
 const DIR = { baseDir: BaseDirectory.AppData } as const
@@ -58,6 +68,7 @@ export const tauriVaultFs: VaultFs = {
   exists: (path) => exists(path, DIR),
   mkdir: (path) => mkdir(path, { ...DIR, recursive: true }),
   remove: (path) => remove(path, DIR),
+  rename: (from, to) => rename(from, to, { oldPathBaseDir: DIR.baseDir, newPathBaseDir: DIR.baseDir }),
 }
 
 /**
@@ -120,6 +131,8 @@ export interface VaultEntry {
   /** Path relative to the app data directory — what a library row stores. */
   readonly path: string
   readonly bytes: number
+  /** False when the book was ALREADY held, which is how a duplicate is known. */
+  readonly created: boolean
 }
 
 /**
@@ -137,7 +150,10 @@ export async function ownBook(
   bytes: Uint8Array,
 ): Promise<VaultEntry> {
   const path = vaultPath(bookId, name)
-  if (await fs.exists(path)) return { path, bytes: bytes.length }
+  // `created` distinguishes "we wrote it" from "it was already here", which the
+  // caller needs and could not previously get: the byte count is the input's
+  // length either way, so a book already held reported as newly added.
+  if (await fs.exists(path)) return { path, bytes: bytes.length, created: false }
   await fs.mkdir(BOOKS_DIR)
   /* Written to a temporary neighbour and then moved into place, for the reason
    * `appStorage` does the same with the store: a write interrupted halfway —
@@ -145,19 +161,25 @@ export async function ownBook(
    * the exact path `exists` is asked about later. That file would then be
    * treated as the book forever, and it would fail to parse with no clue why.
    *
-   * `remove`-then-`writeFile` rather than a rename, because the fs plugin's
-   * rename is not exposed through this seam and a partial file that never
-   * becomes visible under the real name is the property that matters. */
+   * The rename is what provides that property, and the first version of this
+   * comment claimed it without one. */
   const writing = `${path}.writing`
   try {
     await fs.writeFile(writing, bytes)
-    await fs.writeFile(path, bytes)
-  } finally {
-    // Best effort: a leftover `.writing` file is waste, not corruption, and
-    // failing the import over it would be worse than the leak.
+    // THE RENAME IS THE WHOLE POINT, and the first version of this did not have
+    // one — it wrote the temporary file and then wrote the bytes AGAIN to the
+    // real path, which is not atomic in any sense and left exactly the truncated
+    // file the temporary was supposed to prevent. It also cost twice the book's
+    // free space. A rename within one directory is atomic on every filesystem
+    // Paper runs on, so the real path either does not exist or is complete.
+    await fs.rename(writing, path)
+  } catch (cause) {
+    // Best effort: a leftover `.writing` file is waste rather than corruption,
+    // and it is never mistaken for the book because nothing looks for that name.
     await fs.remove(writing).catch(() => {})
+    throw cause
   }
-  return { path, bytes: bytes.length }
+  return { path, bytes: bytes.length, created: true }
 }
 
 /** Read a book Paper owns back as a `File`, ready for the reader. */
