@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { buildCommands } from './lib/commands'
 import { PANE_SHORTCUTS } from './lib/panes'
 import { DEFAULT_STEP_IDX, applyMetrics } from './lib/metrics'
-import { pickBooks, pickFolder, tauriWatchOps } from './lib/bookFiles'
+import { pickBooks, pickFolder, tauriDirOps, tauriWatchOps } from './lib/bookFiles'
 import { legacyBookIdFor } from './lib/idMigration'
 import { positionRecorder, type PositionRecorder } from './lib/positionRecorder'
 import { usePlatform, usePrefersDark, usePrefersReducedMotion } from './lib/platform'
@@ -30,7 +30,6 @@ import {
 } from './lib/importFolder'
 import { WATCHED_FOLDER_KEY, watchFolder } from './lib/watchedFolder'
 import { lookupMetadata } from './lib/metadataLookup'
-import { inTauri } from './lib/appStorage'
 import { BookSwitcher } from './overlays/BookSwitcher'
 import { CommandPalette } from './overlays/CommandPalette'
 import { TitleBar } from './shell/TitleBar'
@@ -73,9 +72,17 @@ export function App({ storage, fs, initialBooks }: AppProps) {
   const book = useBook()
   /* Marks outlive the open book — the Notes panel browses every book's — so the
    * store is keyed by book rather than owned by one. */
-  const marks = useMarks(book.bookId, storage)
+  const marks = useMarks(book.bookId, fs)
   const cards = useCards(storage)
   const marking = useMarking(book, marks)
+  /* The import walks the reader's OWN filesystem, so it needs the absolute
+   * directory reader rather than the app-relative one the shelf scan uses. They
+   * are different operations and were one name, which is how the shelf came up
+   * empty with ten books on disk. */
+  const importFs = useMemo(
+    () => (fs ? ({ ...fs, readDir: tauriDirOps.readDirOutside } as unknown as DirFs) : null),
+    [fs],
+  )
   const library = useLibrary(fs, initialBooks)
   /* Reading aloud follows the spine document: an utterance outlives a section,
    * and would otherwise go on reading words that are no longer on screen. */
@@ -204,11 +211,11 @@ export function App({ storage, fs, initialBooks }: AppProps) {
    * rare — and it must be torn down, or connecting a second folder leaves the
    * first one importing forever with nothing referring to it. */
   useEffect(() => {
-    if (!watched || !inTauri()) return
+    if (!watched || !importFs) return
     let watcher: { stop: () => void } | null = null
     let stopped = false
     void watchFolder(
-      fs as unknown as DirFs,
+      importFs,
       tauriWatchOps,
       watched,
       (outcomes) => {
@@ -236,7 +243,7 @@ export function App({ storage, fs, initialBooks }: AppProps) {
       stopped = true
       watcher?.stop()
     }
-  }, [watched, shelveImported])
+  }, [watched, shelveImported, importFs])
 
   /**
    * Open a book the library holds.
@@ -363,11 +370,11 @@ export function App({ storage, fs, initialBooks }: AppProps) {
   const addFolder = useCallback(() => {
     void (async () => {
       const folder = await pickFolder().catch(() => null)
-      if (!folder) return
+      if (!folder || !importFs) return
       setImporting({ done: 0, total: 0, current: '' })
       try {
         const outcomes = await importFolder(
-          fs as unknown as DirFs,
+          importFs,
           folder,
           { onProgress: setImporting },
         )
@@ -380,7 +387,7 @@ export function App({ storage, fs, initialBooks }: AppProps) {
         setImporting(null)
       }
     })()
-  }, [shelveImported])
+  }, [shelveImported, importFs])
 
 
   /**

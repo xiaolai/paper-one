@@ -222,3 +222,46 @@ export function mergeParsed(previous: BookRecord | null, parsed: BookRecord): Bo
     ...(previous.addedAt === undefined ? {} : { addedAt: previous.addedAt }),
   }
 }
+
+
+/**
+ * The reader's marks in a book, read from that book's folder.
+ *
+ * Decision 1: they are what the reader WROTE about this book, so they belong
+ * with it. It also makes a book genuinely self-contained — one directory to back
+ * up, replicate to a phone, or hand to somebody — and it means removing a book
+ * takes its annotations with it in one rename, rather than leaving them in a
+ * shared file keyed by an id nothing refers to any more.
+ *
+ * Returns an empty list for a book with none AND for a file that will not parse.
+ * The second is the same trust boundary the record has: this is a file on disk,
+ * and one damaged book's marks should cost that book's marks rather than
+ * throwing on the way to drawing a page.
+ */
+export async function readMarks(fs: VaultFs, bookId: string): Promise<unknown[]> {
+  try {
+    const bytes = await fs.readFile(marksPathIn(bookId))
+    const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes))
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+/** Write a book's marks, whole and atomically — see `writeBook`. */
+export async function writeMarks(
+  fs: VaultFs,
+  bookId: string,
+  marks: readonly unknown[],
+): Promise<void> {
+  const path = marksPathIn(bookId)
+  const writing = `${path}.writing`
+  await fs.mkdir(folderOf(bookId))
+  try {
+    await fs.writeFile(writing, new TextEncoder().encode(JSON.stringify(marks)))
+    await fs.rename(writing, path)
+  } catch (cause) {
+    await fs.remove(writing).catch(() => {})
+    throw cause
+  }
+}

@@ -18,6 +18,7 @@ import { App } from './App'
 import { inTauri, openAppStorage } from './lib/appStorage'
 import { loadShelf } from './lib/bookIndex'
 import { emptyExpired } from './lib/bookTrash'
+import { migrateToFolders, summariseMigration } from './lib/migrateToFolders'
 import { libraryFs } from './lib/bookFiles'
 import { installFatalHandlers } from './lib/reportFatal'
 
@@ -50,6 +51,33 @@ async function boot(root: HTMLElement): Promise<void> {
    * disagrees with the folders. Outside Tauri there is no filesystem and the
    * shelf starts empty, which is the honest answer in a browser. */
   const fs = inTauri() ? libraryFs : null
+
+  /* CARRY A PHASE-3 LIBRARY ACROSS, before the shelf is read.
+   *
+   * Before, because the shelf is built by scanning book folders and a book that
+   * has not been migrated has no folder to find — so running it after would show
+   * an empty library to a reader who has one, exactly once, which is precisely
+   * the alarming failure this project has already produced.
+   *
+   * Awaited, unlike the trash sweep: this decides what the shelf contains.
+   * Idempotent, so the second launch does almost nothing — it reads one record
+   * per book and stops.
+   *
+   * Failure is SWALLOWED rather than fatal. A migration that cannot run leaves
+   * the phase-3 files untouched, which is recoverable; refusing to start is not.
+   */
+  if (fs && storage) {
+    try {
+      const outcomes = await migrateToFolders(fs, {
+        rows: JSON.parse(storage.getItem('paper.library.v1') ?? '[]') as [],
+        marks: JSON.parse(storage.getItem('paper.marks.v1') ?? '[]'),
+      })
+      const said = summariseMigration(outcomes)
+      if (said) console.info(`Paper: ${said}`)
+    } catch (cause) {
+      console.error('Paper: could not carry the previous library across', cause)
+    }
+  }
   const initialBooks = fs ? (await loadShelf(fs).catch(() => ({ books: [] }))).books : []
   /* Emptied at BOOT, not on a timer and not when the reader removes something.
    *

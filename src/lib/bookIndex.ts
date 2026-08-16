@@ -151,3 +151,40 @@ export async function writeIndex(fs: IndexFs, books: readonly IndexedBook[]): Pr
 
 /** Where a book's record lives — re-exported so callers need one import. */
 export { recordPath }
+
+
+/**
+ * Every book's marks, for the one view that needs them all.
+ *
+ * `pane/Notes.tsx` shows the open book's marks first and every other book's
+ * after, deliberately — and marks living in book folders means answering that
+ * costs one read per book. So it is paid ONLY when the Notes pane is mounted,
+ * which is the moment somebody asked for cross-book notes, rather than at boot
+ * where nobody did.
+ *
+ * A book whose marks will not read contributes none rather than failing the
+ * scan: one damaged book should cost that book's notes, not the pane.
+ *
+ * This is the shape a SQLite index would eventually replace — and replacing it
+ * would change nothing above, because the folders stay the truth either way.
+ */
+export async function scanAllMarks(fs: IndexFs): Promise<unknown[]> {
+  let entries: { name: string; isDirectory: boolean }[]
+  try {
+    entries = await fs.readDir(BOOKS_DIR)
+  } catch {
+    return []
+  }
+  const all: unknown[] = []
+  for (const entry of entries) {
+    if (!entry.isDirectory) continue
+    try {
+      const bytes = await fs.readFile(`${BOOKS_DIR}/${entry.name}/marks.json`)
+      const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes))
+      if (Array.isArray(parsed)) all.push(...parsed)
+    } catch {
+      continue
+    }
+  }
+  return all
+}

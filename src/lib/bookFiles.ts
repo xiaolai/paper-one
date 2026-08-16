@@ -1,6 +1,6 @@
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import { tauriVaultFs } from './bookVault'
-import { readDir, readFile, watch } from '@tauri-apps/plugin-fs'
+import { BaseDirectory, readDir, readFile, watch } from '@tauri-apps/plugin-fs'
 import { ACCEPT_FORMATS } from './formats'
 
 /**
@@ -102,14 +102,37 @@ export async function pickFolder(): Promise<string | null> {
 
 /** The directory half of a vault filesystem — see `importFolder`. */
 export const tauriDirOps = {
+  /**
+   * Read a directory INSIDE the app's own data directory.
+   *
+   * `baseDir` is the whole of it, and leaving it off was a real bug that no test
+   * could see: `readDir('books')` with no base resolves against the process's
+   * working directory, so the library scan looked somewhere that does not exist,
+   * threw, and `scanBooks` — which skips an unreadable directory on purpose —
+   * returned an empty shelf. Ten migrated books, an index written with zero in
+   * it, and nothing anywhere saying why.
+   *
+   * The two readDirs in this app are DIFFERENT OPERATIONS that happened to share
+   * a name: this one is app-relative, and the import's is absolute, because the
+   * dialog grants a path outside the app. Merging them into one object let the
+   * wrong one win silently.
+   */
   readDir: async (path: string) => {
+    const entries = await readDir(path, { baseDir: BaseDirectory.AppData })
+    return entries.map((entry) => ({
+      name: entry.name,
+      isDirectory: entry.isDirectory,
+    }))
+  },
+  /** Read an ABSOLUTE directory — the folder a reader picked. */
+  readDirOutside: async (path: string) => {
     const entries = await readDir(path)
     return entries.map((entry) => ({
       name: entry.name,
       isDirectory: entry.isDirectory,
     }))
   },
-  /* Reads from the reader's OWN filesystem rather than the vault, which is why
+  /* Reads from the reader's OWN filesystem rather than the app's, which is why
    * it takes an absolute path and passes no base directory. It only works for a
    * path the dialog granted. */
   readOutside: (path: string) => readFile(path),

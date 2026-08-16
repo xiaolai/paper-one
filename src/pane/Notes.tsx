@@ -136,6 +136,15 @@ export interface NotesProps {
 export function Notes({ marks, cards, bookId, onDelete, focus, onGoTo }: NotesProps) {
   const [filter, setFilter] = useState<NoteFilter>('All')
   /** The mark whose note is being written. One at a time, like a text field. */
+  /* Cross-book marks are read HERE, on mount, because this is the only view
+   * that wants them — marks live in each book's folder, so answering "every
+   * book's marks" costs one read per book. This pane mounts only when it is
+   * open, so a reader who never opens Notes never pays for the scan. */
+  const { loadAll } = marks
+  useEffect(() => {
+    loadAll()
+  }, [loadAll])
+
   const [editing, setEditing] = useState<string | null>(null)
   const rows = useRef(new Map<string, HTMLDivElement>())
 
