@@ -434,3 +434,32 @@ describe('a record that cannot be read', () => {
     )
   })
 })
+
+/**
+ * `safeId` is not injective: everything that is not alphanumeric becomes an
+ * underscore, so two phase-3 rows keyed by URL can land on one directory. The
+ * second used to find the first's record, report `already`, and have its tags,
+ * position and marks left permanently unreachable with nothing said.
+ */
+describe('two rows that want the same folder', () => {
+  it('reports the collision instead of silently swallowing the second', async () => {
+    const fs = fakeFs({ 'books/one.epub': 'A', 'books/two.epub': 'B' })
+    const out = await migrateToFolders(fs, {
+      rows: [
+        row({ bookId: 'url:x/a-b', vault: 'books/one.epub', cover: null }),
+        row({ bookId: 'url:x/a_b', vault: 'books/two.epub', cover: null }),
+      ],
+      marks: [],
+    })
+    expect(out[0]?.status).toBe('migrated')
+    expect(out[1]?.status).toBe('failed')
+    expect(out[1]?.reason).toContain('collides')
+  })
+
+  it('does not mistake a row for a collision with itself on a re-run', async () => {
+    const fs = fakeFs(legacy)
+    await migrateToFolders(fs, { rows: [row(), row()], marks: [] })
+    const again = await migrateToFolders(fs, { rows: [row(), row()], marks: [] })
+    expect(again.every((one) => one.status === 'already')).toBe(true)
+  })
+})

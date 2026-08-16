@@ -251,7 +251,17 @@ export async function updateBook(
    * appears while this call is running is a removal that happened in between. */
   const trashedBefore = await fs.exists(trashOf(bookId))
   const current = await readBook(fs, bookId)
-  if (!current) return false
+  if (!current) {
+    /* PRESENT BUT UNREADABLE IS NOT ABSENT. `readBook` answers both with null,
+     * and returning false here reported "the book is gone, nothing to do" — so
+     * the tag the reader had just typed was dropped with no error anywhere and
+     * nothing to replay it. Gone is false; broken throws, and the caller says
+     * it could not save. */
+    if (await fs.exists(recordPath(bookId))) {
+      throw new Error(`book.json for ${bookId} is there but could not be read`)
+    }
+    return false
+  }
   const next = change(current)
   if (next === current) return true
   await writeBook(fs, bookId, next)
@@ -281,6 +291,49 @@ export async function updateBook(
  * wrong in `recordOpen` and erased a reader's tags on every reopen, so the rule
  * is stated as a function rather than left to a spread.
  */
+/**
+ * Reconcile TWO records that are both the reader's, for one book.
+ *
+ * Not the same problem as `mergeParsed`, which folds what a book says about
+ * itself into what the reader owns and has a clear winner for every field. Here
+ * both sides are the reader's own work — a record stranded in the trash by a
+ * restore that could not finish, and the live one that has been in use since —
+ * so taking either side whole loses the other's.
+ *
+ * Tags UNION, because a tag is an addition and neither list is more correct.
+ * Position and progress come from the LIVE record when it has them, because
+ * reading moves forwards and the live one is where the reading happened.
+ * `finished` is true if either says so; `addedAt` is the earlier, since that is
+ * when the book actually arrived.
+ */
+export function mergeStranded(stranded: BookRecord, live: BookRecord): BookRecord {
+  const tags = [...(stranded.tags ?? [])]
+  const seen = new Set(tags.map((tag) => tag.trim().normalize('NFC').toLowerCase()))
+  for (const tag of live.tags ?? []) {
+    const key = tag.trim().normalize('NFC').toLowerCase()
+    if (key && !seen.has(key)) {
+      seen.add(key)
+      tags.push(tag)
+    }
+  }
+  const addedAt =
+    stranded.addedAt === undefined
+      ? live.addedAt
+      : live.addedAt === undefined
+        ? stranded.addedAt
+        : Math.min(stranded.addedAt, live.addedAt)
+  return {
+    ...live,
+    ...(tags.length ? { tags } : {}),
+    ...(live.position ?? stranded.position ? { position: live.position ?? stranded.position! } : {}),
+    ...((live.progress ?? stranded.progress) === undefined
+      ? {}
+      : { progress: live.progress ?? stranded.progress! }),
+    ...(stranded.finished || live.finished ? { finished: true } : {}),
+    ...(addedAt === undefined ? {} : { addedAt }),
+  }
+}
+
 export function mergeParsed(previous: BookRecord | null, parsed: BookRecord): BookRecord {
   if (!previous) return parsed
   return {
@@ -303,10 +356,10 @@ export function mergeParsed(previous: BookRecord | null, parsed: BookRecord): Bo
  * takes its annotations with it in one rename, rather than leaving them in a
  * shared file keyed by an id nothing refers to any more.
  *
- * Returns an empty list for a book with none AND for a file that will not parse.
- * The second is the same trust boundary the record has: this is a file on disk,
- * and one damaged book's marks should cost that book's marks rather than
- * throwing on the way to drawing a page.
+ * Returns an empty list for a book with none, and THROWS for one whose file is
+ * there and will not read. The two are different answers and were the same for
+ * a while, which is how a momentary read failure came to look like a book with
+ * no marks — and the next highlight wrote over everything the reader had.
  */
 export async function readMarks(fs: VaultFs, bookId: string): Promise<unknown[]> {
   /* ABSENT AND UNREADABLE ARE NOT THE SAME ANSWER, and collapsing them into

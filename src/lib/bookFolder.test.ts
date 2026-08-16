@@ -7,6 +7,7 @@ import {
   folderOf,
   marksPathIn,
   mergeParsed,
+  mergeStranded,
   parseRecord,
   readBook,
   recordPath,
@@ -350,5 +351,73 @@ describe('readMarks', () => {
   it('throws on a file that is not JSON at all', async () => {
     const fs = fakeFs({ [marksPathIn('book_a')]: 'half a write' })
     await expect(readMarks(fs, 'book_a')).rejects.toThrow()
+  })
+})
+
+/**
+ * Two records, both the reader's, for one book.
+ *
+ * A restore that could not move `book.json` leaves one in the trash while the
+ * live one carries on being used. Taking either side whole loses the other's
+ * work, which is a fresh way to lose the thing the rescue exists to save.
+ */
+describe('mergeStranded', () => {
+  const stranded = book({ tags: ['Sea'], position: 'epubcfi(/6/4)', progress: 0.3, addedAt: 10 })
+
+  it('unions the tags rather than picking a list', () => {
+    const merged = mergeStranded(stranded, book({ tags: ['Mine'] }))
+    expect(merged.tags).toEqual(['Sea', 'Mine'])
+  })
+
+  it('folds a tag that differs only in case', () => {
+    expect(mergeStranded(stranded, book({ tags: ['sea'] })).tags).toEqual(['Sea'])
+  })
+
+  /* Reading moves forwards, and the live record is where the reading happened. */
+  it('takes the live position and progress when it has them', () => {
+    const merged = mergeStranded(stranded, book({ position: 'epubcfi(/6/40)', progress: 0.9 }))
+    expect(merged.position).toBe('epubcfi(/6/40)')
+    expect(merged.progress).toBe(0.9)
+  })
+
+  it('falls back to the stranded one when the live record has none', () => {
+    const merged = mergeStranded(stranded, book())
+    expect(merged.position).toBe('epubcfi(/6/4)')
+    expect(merged.progress).toBe(0.3)
+  })
+
+  it('is finished if either says so', () => {
+    expect(mergeStranded(book({ finished: true }), book()).finished).toBe(true)
+    expect(mergeStranded(book(), book({ finished: true })).finished).toBe(true)
+  })
+
+  it('keeps the earlier arrival', () => {
+    expect(mergeStranded(stranded, book({ addedAt: 99 })).addedAt).toBe(10)
+  })
+
+  /* The book's own account of itself comes from the live record, which is the
+   * one a parse has been folded into. */
+  it('keeps the live metadata', () => {
+    expect(mergeStranded(stranded, book({ title: 'Corrected' })).title).toBe('Corrected')
+  })
+})
+
+/**
+ * A record that is there and will not read is not a book that is gone.
+ *
+ * Both were null, so `updateBook` reported "nothing to do" — and the tag the
+ * reader had just typed was dropped with no error anywhere and nothing to
+ * replay it from.
+ */
+describe('updateBook on a record that will not read', () => {
+  it('throws rather than quietly doing nothing', async () => {
+    const fs = fakeFs({ [recordPath('book_a')]: 'half a write' })
+    await expect(updateBook(fs, 'book_a', (r) => ({ ...r, finished: true }))).rejects.toThrow(
+      'could not be read',
+    )
+  })
+
+  it('still reports a book that is genuinely gone, without throwing', async () => {
+    expect(await updateBook(fakeFs(), 'book_a', (r) => r)).toBe(false)
   })
 })

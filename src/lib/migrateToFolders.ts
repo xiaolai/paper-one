@@ -156,10 +156,29 @@ export async function migrateToFolders(
 ): Promise<MigrationOutcome[]> {
   const grouped = marksByBook(marks)
   const outcomes: MigrationOutcome[] = []
+  /* WHICH FOLDERS THIS RUN HAS CLAIMED. `safeId` replaces everything that is not
+   * alphanumeric with an underscore, so it is not injective: two phase-3 rows
+   * keyed by URL — `.../a-b` and `.../a_b` — land on one directory. The second
+   * would find the first's record, report `already`, and its tags, position and
+   * marks would be permanently unreachable with nothing said. Renaming the
+   * scheme would move every folder in an existing library, so the collision is
+   * REPORTED instead, which is the part that was missing. */
+  const claimed = new Map<string, string>()
 
   for (const row of rows) {
     const bookId = typeof row.bookId === 'string' ? row.bookId : ''
     if (!bookId) continue
+    const folder = folderOf(bookId)
+    const owner = claimed.get(folder)
+    if (owner !== undefined && owner !== bookId) {
+      outcomes.push({
+        bookId,
+        status: 'failed',
+        reason: `its folder name collides with ${owner} — left in the previous library`,
+      })
+      continue
+    }
+    claimed.set(folder, bookId)
     try {
       /* ALREADY DONE, so nothing happens. This is what makes a second run — or
        * a run after a crash — safe: a book whose record is FINISHED is left

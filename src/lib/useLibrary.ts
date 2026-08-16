@@ -2,6 +2,7 @@ import { useCallback, useMemo, useRef, useState } from 'react'
 import {
   folderOf,
   mergeParsed,
+  mergeStranded,
   parseRecord,
   readBook,
   trashOf,
@@ -176,8 +177,20 @@ export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] =
           void queue.current
             .append(bookId, async () => {
               await restoreBook(fs, bookId)
+              /* AND THE SAME RESCUE the full path does. Returning after the
+               * restore alone left a `book.json` the restore could not move
+               * sitting in the trash — so a folder import, which is all sparse
+               * adds, was the one route that could see the stranded record and
+               * walk past it. */
+              const stranded = parseRecord(await readText(fs, `${trashOf(bookId)}/${'book.json'}`))
+              if (!stranded) return
+              const live = await readBook(fs, bookId)
+              await writeBook(fs, bookId, live ? mergeStranded(stranded, live) : stranded)
+              await fs.remove(`${trashOf(bookId)}/book.json`).catch(() => {})
             })
-            .catch(() => {})
+            .catch((cause: unknown) => {
+              console.error('Paper: could not finish restoring that book', cause)
+            })
         }
         return
       }
@@ -231,9 +244,12 @@ export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] =
          * into it and writing that back put a stale record over a newer one:
          * opening a book could undo the tag applied just before the last quit.
          * The record is the truth; the row is a view of it. */
-        const existing = stranded
-          ? mergeParsed(stranded, (await readBook(target, bookId)) ?? record)
-          : await readBook(target, bookId)
+        const live = await readBook(target, bookId)
+        /* BOTH ARE THE READER'S, so neither wins outright — see `mergeStranded`.
+         * Treating the stranded copy as authoritative threw away a tag applied
+         * after the partial restore, which is a fresh way to lose the same thing
+         * this rescue exists to save. */
+        const existing = stranded ? (live ? mergeStranded(stranded, live) : stranded) : live
         /* SPARSE IS CHECKED AGAINST THE DISK TOO. The early return above guards
          * the in-memory row, and a record can be on disk without being in that
          * list — a removal shown optimistically before its trash landed, or an
