@@ -1,5 +1,5 @@
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
-import { readFile } from '@tauri-apps/plugin-fs'
+import { readDir, readFile } from '@tauri-apps/plugin-fs'
 import { ACCEPT_FORMATS } from './formats'
 
 /**
@@ -75,4 +75,36 @@ export async function pickBooks(): Promise<PickedBook[]> {
     }
   }
   return books
+}
+
+
+/**
+ * Ask for a FOLDER, and the pieces needed to walk it.
+ *
+ * Returns null when the reader cancelled, which is not an error.
+ *
+ * The dialog is what grants access to the chosen folder — the app's own
+ * capability is scoped to `$APPDATA` and nothing else, so this is the only way a
+ * path outside it becomes readable at all. That grant is why the walk and the
+ * per-file read both go through the seam this returns rather than importing the
+ * plugin wherever they happen to run.
+ */
+export async function pickFolder(): Promise<string | null> {
+  const chosen = await openDialog({ directory: true, multiple: false })
+  return typeof chosen === 'string' ? chosen : null
+}
+
+/** The directory half of a vault filesystem — see `importFolder`. */
+export const tauriDirOps = {
+  readDir: async (path: string) => {
+    const entries = await readDir(path)
+    return entries.map((entry) => ({
+      name: entry.name,
+      isDirectory: entry.isDirectory,
+    }))
+  },
+  /* Reads from the reader's OWN filesystem rather than the vault, which is why
+   * it takes an absolute path and passes no base directory. It only works for a
+   * path the dialog granted. */
+  readOutside: (path: string) => readFile(path),
 }

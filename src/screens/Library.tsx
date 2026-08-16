@@ -1,5 +1,5 @@
 import { useDeferredValue, useMemo, useState } from 'react'
-import { Check, Plus, Tag, X } from 'lucide-react'
+import { Check, FolderPlus, Plus, Tag, X } from 'lucide-react'
 import {
   NOT_REOPENABLE,
   displayAuthor,
@@ -58,6 +58,12 @@ export interface LibraryProps {
   onUntag: (bookId: string, tag: string) => void
   /** The reader's judgement that a book is done. */
   onSetFinished: (bookId: string, finished: boolean) => void
+  /** Add a whole folder — see `importFolder`. */
+  onAddFolder: () => void
+  /** Live import progress, or null when none is running. */
+  importing: { done: number; total: number; current: string } | null
+  /** What the last import did, in one line. */
+  importNotice: string | null
 }
 
 const ORDERS: readonly { id: LibraryOrder; label: string }[] = [
@@ -78,6 +84,9 @@ export function Library({
   onTag,
   onUntag,
   onSetFinished,
+  onAddFolder,
+  importing,
+  importNotice,
 }: LibraryProps) {
   const [order, setOrder] = useState<LibraryOrder>('recent')
   /* Which row is asking to be confirmed, by id.
@@ -139,7 +148,31 @@ export function Library({
           <Plus size={ICON.control} strokeWidth={ICON.stroke} />
           Add books
         </button>
+        <button
+          type="button"
+          className={styles.add}
+          onClick={onAddFolder}
+          disabled={importing !== null}
+        >
+          <FolderPlus size={ICON.control} strokeWidth={ICON.stroke} />
+          Add folder
+        </button>
       </div>
+
+      {/* Per BOOK, not a spinner. An import of three hundred books that says
+          only "working…" is indistinguishable from one that has hung. */}
+      {importing && (
+        <div className={styles.importing} role="status">
+          {importing.total > 0
+            ? `Importing ${importing.done} of ${importing.total} — ${importing.current}`
+            : 'Reading the folder…'}
+        </div>
+      )}
+      {!importing && importNotice && (
+        <div className={styles.importing} role="status">
+          {importNotice}
+        </div>
+      )}
 
       {books.length > 0 && (
         <div className={styles.filters}>

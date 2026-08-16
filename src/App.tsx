@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { buildCommands } from './lib/commands'
 import { PANE_SHORTCUTS } from './lib/panes'
 import { DEFAULT_STEP_IDX, applyMetrics } from './lib/metrics'
-import { pickBooks, readBookAt } from './lib/bookFiles'
+import { pickBooks, pickFolder, readBookAt, tauriDirOps } from './lib/bookFiles'
 import { legacyBookIdFor } from './lib/idMigration'
 import { positionRecorder, type PositionRecorder } from './lib/positionRecorder'
 import { usePlatform, usePrefersDark, usePrefersReducedMotion } from './lib/platform'
@@ -20,6 +20,7 @@ import { disownBook, ownBook, readOwnedBook, tauriVaultFs } from './lib/bookVaul
 import type { LibraryEntry } from './lib/library'
 import { useCollections } from './lib/useCollections'
 import { saveCover } from './lib/coverArt'
+import { importFolder, summarise, type ImportProgress } from './lib/importFolder'
 import { inTauri } from './lib/appStorage'
 import { BookSwitcher } from './overlays/BookSwitcher'
 import { CommandPalette } from './overlays/CommandPalette'
@@ -162,6 +163,59 @@ export function App({ storage }: AppProps) {
   const { bookId, meta, source, cover } = book
   const { record, remember, rememberOwned, rememberJacket, forget, positionOf } = library
   const collections = useCollections(storage)
+
+  /**
+   * Add a whole folder.
+   *
+   * The books are copied into the vault and the shelf fills from what landed —
+   * NOT by opening each one, which would mean parsing three hundred books to
+   * learn three hundred titles. A row appears with the filename and gains its
+   * real metadata and cover the first time it is actually read.
+   *
+   * Progress is reported per book rather than as a spinner, and failures are
+   * named individually: "4 of 300 failed" tells a reader nothing they can act
+   * on.
+   */
+  const [importing, setImporting] = useState<ImportProgress | null>(null)
+  const [importNotice, setImportNotice] = useState<string | null>(null)
+  const addFolder = useCallback(() => {
+    void (async () => {
+      const folder = await pickFolder().catch(() => null)
+      if (!folder) return
+      setImporting({ done: 0, total: 0, current: '' })
+      try {
+        const outcomes = await importFolder(
+          { ...tauriVaultFs, ...tauriDirOps },
+          folder,
+          { onProgress: setImporting },
+        )
+        for (const one of outcomes) {
+          if (one.status !== 'added' || !one.bookId || !one.name) continue
+          record({
+            bookId: one.bookId,
+            /* The FILENAME, until the book is opened. Parsing every book to
+             * learn its title would make importing a folder as slow as reading
+             * one, and the row corrects itself on first open. */
+            title: one.name.replace(/\.[^.]+$/, ''),
+            author: '',
+            url: null,
+            lastOpened: Date.now(),
+            position: null,
+            workId: null,
+            path: one.path,
+            vault: `books/${one.bookId.replace(/[^a-zA-Z0-9]/g, '_')}.${one.name.split('.').pop()}`,
+          })
+        }
+        setImportNotice(summarise(outcomes))
+      } catch (cause) {
+        console.error('Paper: the folder import failed', cause)
+        setImportNotice('That folder could not be imported.')
+      } finally {
+        setImporting(null)
+      }
+    })()
+  }, [record])
+
 
   /**
    * Take a book off the shelf, and give up our copy of it.
@@ -660,6 +714,9 @@ export function App({ storage }: AppProps) {
             onTag={library.tag}
             onUntag={library.untag}
             onSetFinished={library.setFinished}
+            onAddFolder={addFolder}
+            importing={importing}
+            importNotice={importNotice}
             onAddBooks={addBooks}
           />
         )}
