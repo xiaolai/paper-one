@@ -6,6 +6,7 @@ import {
   parseLibrary,
   recordOpen,
   rememberPosition,
+  forgetBook,
   rememberCover,
   rememberVault,
   type LibraryEntry,
@@ -30,6 +31,8 @@ export interface Library {
   rememberOwned: (bookId: string, vault: string) => void
   /** Record the book's jacket once it is filed — see `rememberCover`. */
   rememberJacket: (bookId: string, cover: string) => void
+  /** Take a book off the shelf. The reader's own file is not touched. */
+  forget: (bookId: string) => void
   /** The saved position for a book, or null. Stable across renders. */
   positionOf: (bookId: string | null) => string | null
   /** Move a row from a superseded book id — see `idMigration`. */
@@ -75,6 +78,14 @@ export function useLibrary(storage = localStore()): Library {
         ? booksRef.current.find((entry) => entry.bookId === bookId)?.position ?? null
         : null,
     [],
+  )
+
+  const forget = useCallback(
+    (bookId: string) => {
+      if (forgetBook(booksRef.current, bookId) === booksRef.current) return
+      apply((prev) => [...forgetBook(prev, bookId)])
+    },
+    [apply],
   )
 
   const rememberJacket = useCallback(
@@ -128,7 +139,7 @@ export function useLibrary(storage = localStore()): Library {
    * a button. It comes back with the button, tested against what that button
    * actually needs rather than against what seemed likely in advance. */
   return useMemo<Library>(
-    () => ({ books, record, remember, rememberOwned, rememberJacket, positionOf, rekey }),
-    [books, record, remember, rememberOwned, rememberJacket, positionOf, rekey],
+    () => ({ books, record, remember, rememberOwned, rememberJacket, forget, positionOf, rekey }),
+    [books, record, remember, rememberOwned, rememberJacket, forget, positionOf, rekey],
   )
 }

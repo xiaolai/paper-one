@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Plus } from 'lucide-react'
+import { Plus, X } from 'lucide-react'
 import {
   NOT_REOPENABLE,
   displayAuthor,
@@ -35,6 +35,15 @@ export interface LibraryProps {
    *  stored path as well, and only the caller knows how to read one. */
   onOpen: (entry: LibraryEntry) => void
   onAddBooks: () => void
+  /**
+   * Take a book off the shelf.
+   *
+   * Named `onRemove` rather than `onDelete` because of what it does NOT do: the
+   * reader's own file stays exactly where it is. Paper gives up its own copy,
+   * and the marks and the reading position survive — they are keyed by content,
+   * so adding the book again finds them waiting.
+   */
+  onRemove: (entry: LibraryEntry) => void
 }
 
 const ORDERS: readonly { id: LibraryOrder; label: string }[] = [
@@ -43,8 +52,15 @@ const ORDERS: readonly { id: LibraryOrder; label: string }[] = [
   { id: 'author', label: 'Author' },
 ]
 
-export function Library({ books, platform, onOpen, onAddBooks }: LibraryProps) {
+export function Library({ books, platform, onOpen, onAddBooks, onRemove }: LibraryProps) {
   const [order, setOrder] = useState<LibraryOrder>('recent')
+  /* Which row is asking to be confirmed, by id.
+   *
+   * A second click rather than a dialog. Removal here is not destructive — the
+   * file survives and so do the marks — so a modal would be a ceremony out of
+   * all proportion to what happens. But it is also one pixel from Open, and a
+   * misclick that silently empties a row is worse than one extra click. */
+  const [confirming, setConfirming] = useState<string | null>(null)
   const shelf = useMemo(() => inOrder(books, order), [books, order])
 
   return (
@@ -92,8 +108,8 @@ export function Library({ books, platform, onOpen, onAddBooks }: LibraryProps) {
           {shelf.map((book) => {
             const reopenable = isReopenable(book)
             return (
+              <div key={book.bookId} className={styles.cell}>
               <button
-                key={book.bookId}
                 type="button"
                 className={styles.book}
                 disabled={!reopenable}
@@ -113,6 +129,32 @@ export function Library({ books, platform, onOpen, onAddBooks }: LibraryProps) {
                   {rowSuffix(book)}
                 </span>
               </button>
+              {/* OUTSIDE the open button, not inside it. A button nested in a
+                  button is invalid, and browsers resolve it by dropping the
+                  inner one — so the remove control would render and simply never
+                  fire, which looks like a broken feature rather than bad markup. */}
+              <button
+                type="button"
+                className={styles.remove}
+                aria-label={
+                  confirming === book.bookId
+                    ? `Remove ${displayTitle(book)} from the library — your file is kept`
+                    : `Remove ${displayTitle(book)}`
+                }
+                data-confirming={confirming === book.bookId}
+                onClick={() => {
+                  if (confirming === book.bookId) {
+                    setConfirming(null)
+                    onRemove(book)
+                  } else {
+                    setConfirming(book.bookId)
+                  }
+                }}
+                onBlur={() => setConfirming((at) => (at === book.bookId ? null : at))}
+              >
+                {confirming === book.bookId ? 'Remove?' : <X size={ICON.control} strokeWidth={ICON.stroke} />}
+              </button>
+              </div>
             )
           })}
         </div>

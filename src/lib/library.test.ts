@@ -5,6 +5,7 @@ import {
   sortTitle,
   isReopenable,
   parseLibrary,
+  forgetBook,
   recordOpen,
   rememberVault,
   rememberPosition,
@@ -377,5 +378,37 @@ describe('rememberVault', () => {
     const [row] = parseLibrary(legacy)
     expect(row?.vault).toBeUndefined()
     expect(row?.path).toBe('/books/t.epub')
+  })
+})
+
+
+/**
+ * Taking a book off the shelf.
+ *
+ * `forgetBook` existed once with a test and no caller, and was deleted for being
+ * a capability that lived only in the suite. It is back with the control that
+ * makes it real — and with a promise it can now keep, because there are two
+ * files and only one of them is Paper's.
+ */
+describe('forgetBook', () => {
+  it('removes the row', () => {
+    const shelf = [entry({ bookId: 'a' }), entry({ bookId: 'b' })]
+    expect(forgetBook(shelf, 'a').map((e) => e.bookId)).toEqual(['b'])
+  })
+
+  it('leaves the rest in their order', () => {
+    const shelf = [entry({ bookId: 'a' }), entry({ bookId: 'b' }), entry({ bookId: 'c' })]
+    expect(forgetBook(shelf, 'b').map((e) => e.bookId)).toEqual(['a', 'c'])
+  })
+
+  /* By identity, so a caller can skip the write — the same contract
+   * `rememberPosition` and `rememberVault` keep. */
+  it('returns its input unchanged for a book that is not there', () => {
+    const shelf = [entry({ bookId: 'a' })]
+    expect(forgetBook(shelf, 'missing')).toBe(shelf)
+  })
+
+  it('empties a shelf of one', () => {
+    expect(forgetBook([entry({ bookId: 'a' })], 'a')).toEqual([])
   })
 })

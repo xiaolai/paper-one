@@ -16,7 +16,8 @@ import { useCards } from './lib/useCards'
 import { useMarks } from './lib/useMarks'
 import { useMarking } from './lib/useMarking'
 import { coverTintFor } from './lib/bookAccent'
-import { ownBook, readOwnedBook, tauriVaultFs } from './lib/bookVault'
+import { disownBook, ownBook, readOwnedBook, tauriVaultFs } from './lib/bookVault'
+import type { LibraryEntry } from './lib/library'
 import { saveCover } from './lib/coverArt'
 import { inTauri } from './lib/appStorage'
 import { BookSwitcher } from './overlays/BookSwitcher'
@@ -158,7 +159,33 @@ export function App({ storage }: AppProps) {
    * actually read rather than a fixture shelf. Keyed on the metadata arriving,
    * because that is when there is a title worth showing. */
   const { bookId, meta, source, cover } = book
-  const { record, remember, rememberOwned, rememberJacket, positionOf } = library
+  const { record, remember, rememberOwned, rememberJacket, forget, positionOf } = library
+
+  /**
+   * Take a book off the shelf, and give up our copy of it.
+   *
+   * TWO FILES, ONE OF THEM OURS. The row goes and Paper's copy under `$APPDATA`
+   * is deleted; the reader's own file, wherever they keep it, is not touched.
+   * That distinction only became expressible once the vault existed — before it
+   * there was one file and it belonged to the reader, so "remove" could not be
+   * offered honestly at all.
+   *
+   * The row goes FIRST and the copy after. The shelf is what the reader is
+   * looking at, and a removal that waits on a disk operation to redraw feels
+   * broken; a copy that fails to delete is wasted disk, not a wrong answer.
+   *
+   * Marks and reading position survive on purpose — they are keyed by content,
+   * so adding the book again finds them waiting.
+   */
+  const removeBook = useCallback(
+    (entry: LibraryEntry) => {
+      forget(entry.bookId)
+      if (entry.vault && inTauri()) void disownBook(tauriVaultFs, entry.vault)
+      if (entry.cover && inTauri()) void disownBook(tauriVaultFs, entry.cover)
+    },
+    [forget],
+  )
+
   useEffect(() => {
     if (!bookId || !meta) return
     record({
@@ -620,6 +647,7 @@ export function App({ storage }: AppProps) {
             // on the shelf with a book loading behind it is the one thing a
             // reader does not want from a click on a cover.
             onOpen={openStored}
+            onRemove={removeBook}
             onAddBooks={addBooks}
           />
         )}

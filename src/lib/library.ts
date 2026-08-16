@@ -252,9 +252,34 @@ export function rememberVault(
   return next
 }
 
-/* `forgetBook` was here, with a test and no caller. Nothing in the app can
- * remove a book from the shelf — there is no control for it — so this was a
- * capability that existed only in the test suite. */
+/**
+ * Take a book off the shelf.
+ *
+ * `forgetBook` was here once, with a test and no caller, and was deleted for
+ * being a capability that existed only in the test suite. It comes back with the
+ * control that makes it real — and with a promise it can now actually keep.
+ *
+ * WHAT IT DOES NOT DO IS DELETE THE READER'S FILE. Before the vault there were
+ * not two files to distinguish, so "remove" was ambiguous in a way no wording
+ * could fix: the only file was the reader's own, sitting wherever they keep
+ * their books, and an app that did not put it there has no business deleting it.
+ * Now Paper has its own copy, that copy is what goes, and the original is
+ * untouched. The caller disposes of the copy — see `disownBook`.
+ *
+ * MARKS AND POSITION DELIBERATELY SURVIVE. They are keyed by `bookId`, which is
+ * derived from the bytes, so adding the same book again finds its highlights
+ * waiting. That is what content-derived identity was built for and this is the
+ * first place a reader can see it pay off. It also means removing a book is not
+ * a destructive act, which is what makes it safe to offer without a trash.
+ */
+export function forgetBook(
+  entries: readonly LibraryEntry[],
+  bookId: string,
+): readonly LibraryEntry[] {
+  const next = entries.filter((entry) => entry.bookId !== bookId)
+  // By identity when nothing matched, so a caller can skip the write.
+  return next.length === entries.length ? entries : next
+}
 
 /**
  * A stored row, or not.
