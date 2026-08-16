@@ -421,3 +421,32 @@ describe('updateBook on a record that will not read', () => {
     expect(await updateBook(fakeFs(), 'book_a', (r) => r)).toBe(false)
   })
 })
+
+/**
+ * An address is the other field that means nothing shortened.
+ *
+ * It shared the four-thousand-character bound with titles, and that bound
+ * slices — so a long URL came back cut, which fetches nothing, while `canOpen`
+ * went on offering the row because an origin was present.
+ */
+describe('a very long origin', () => {
+  it('survives a round trip past the length of ordinary text', async () => {
+    const fs = fakeFs()
+    const url = `https://example.org/${'a'.repeat(5000)}.epub`
+    expect(url.length).toBeGreaterThan(4000)
+    await writeBook(fs, 'book_a', { title: 'T', author: 'A', origin: url })
+    expect((await readBook(fs, 'book_a'))?.origin).toBe(url)
+  })
+
+  it('is dropped rather than cut when it is absurd', async () => {
+    const fs = fakeFs()
+    await writeBook(fs, 'book_a', { title: 'T', author: 'A', origin: 'x'.repeat(9000) })
+    expect((await readBook(fs, 'book_a'))?.origin).toBeUndefined()
+  })
+
+  it('still keeps an ordinary path', async () => {
+    const fs = fakeFs()
+    await writeBook(fs, 'book_a', { title: 'T', author: 'A', origin: '/Users/x/moby.epub' })
+    expect((await readBook(fs, 'book_a'))?.origin).toBe('/Users/x/moby.epub')
+  })
+})

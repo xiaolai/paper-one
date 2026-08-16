@@ -508,6 +508,11 @@ describe('a row that only has a URL', () => {
     ).toBe('/Users/someone/Downloads/moby.epub')
   })
 
+  it('carries a long URL whole rather than slicing it', () => {
+    const url = `https://example.org/${'a'.repeat(5000)}.epub`
+    expect(recordFromRow(row({ path: null, url })).origin).toBe(url)
+  })
+
   it('is still skipped when it has neither', async () => {
     const fs = fakeFs({})
     const out = await migrateToFolders(fs, {

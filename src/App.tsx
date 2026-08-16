@@ -99,6 +99,8 @@ export function App({ storage, fs, initialBooks }: AppProps) {
    * the book again — which is the whole point, and what a `File` could never
    * support, since it is a handle to bytes granted for one session. */
   const [openedPath, setOpenedPath] = useState<string | null>(null)
+  /** The path `openBook` was given, tagged with the source it belongs to. */
+  const pendingPath = useRef<{ source: File | string; path: string | null } | null>(null)
 
   /**
    * Open a book AND go to it.
@@ -142,9 +144,10 @@ export function App({ storage, fs, initialBooks }: AppProps) {
   const openBook = useCallback(
     (source: File | string, path: string | null = null) => {
       dispatch({ type: 'goScreen', screen: 'reader' })
-      // Set before the open, so the record effect below cannot fire on the new
-      // book while this still holds the previous one's path.
-      setOpenedPath(path)
+      /* Handed over WITH its source rather than set directly, so the effect that
+       * notices the new source is the single place the path is decided. Set here
+       * alone, it survived a route that does not come through this function. */
+      pendingPath.current = { source, path }
       book.open(source)
     },
     [book, dispatch],
@@ -381,6 +384,12 @@ export function App({ storage, fs, initialBooks }: AppProps) {
   useLayoutEffect(() => {
     if (source && openedAt.current?.source !== source) {
       openedAt.current = { source, at: removals.current }
+      /* AND THE PATH BELONGS TO THE SOURCE, not to whatever was opened last.
+       * `openBook` set it and the routes that bypass `openBook` did not clear
+       * it — so dropping a book onto the open reader recorded it with the
+       * PREVIOUS book's path as its origin, and clicking it later opened the
+       * wrong book. A source that arrived with no path of its own has none. */
+      setOpenedPath(pendingPath.current?.source === source ? pendingPath.current.path : null)
     }
   }, [source])
 

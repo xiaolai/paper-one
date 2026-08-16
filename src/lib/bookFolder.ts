@@ -101,7 +101,12 @@ export const contentPathIn = (bookId: string, name: string): string =>
   `${folderOf(bookId)}/content.${extensionFor(name)}`
 
 const MAX_FIELD = 500
-const MAX_LONG = 4000
+/* There is no `MAX_LONG` any more. It was the shared 4000-character bound for
+ * the two fields that are not prose — a reading position and an address — and
+ * `text` SLICES at its bound. Both of them mean nothing shortened, and both were
+ * being destroyed by being read: the cut value survived the next merge and was
+ * written back over the whole one. They have their own bounds now, and past them
+ * the field is DROPPED rather than cut. */
 /**
  * The bound for a reading position, which is DROPPED past it rather than cut.
  *
@@ -113,6 +118,13 @@ const MAX_LONG = 4000
  * none because this parses a file a reader can edit.
  */
 const MAX_POSITION = 64_000
+/**
+ * The bound for a book's origin, DROPPED past it rather than cut — for the same
+ * reason as a position, and it took the same bug to notice. Slicing a URL does
+ * not produce a shorter address, it produces one that fetches nothing, and
+ * `canOpen` would go on offering the row because an origin was present.
+ */
+const MAX_ORIGIN = 8_000
 const MAX_LIST = 64
 
 const text = (v: unknown, limit = MAX_FIELD): string | undefined =>
@@ -180,7 +192,12 @@ export function parseRecord(raw: string | null): BookRecord | null {
     ...(typeof r['finished'] === 'boolean' ? { finished: r['finished'] } : {}),
     ...(num(r['addedAt']) === undefined ? {} : { addedAt: num(r['addedAt'])! }),
     ...(num(r['openedAt']) === undefined ? {} : { openedAt: num(r['openedAt'])! }),
-    ...(text(r['origin'], MAX_LONG) ? { origin: text(r['origin'], MAX_LONG)! } : {}),
+    /* NOT `text`, which SLICES — see `MAX_ORIGIN`. A shortened path or URL is
+     * not a rougher way back, it is a broken one, and it survived the next merge
+     * to be written over the good value. */
+    ...(typeof r['origin'] === 'string' && r['origin'] && r['origin'].length <= MAX_ORIGIN
+      ? { origin: r['origin'] }
+      : {}),
     ...(text(r['ext'], 8) ? { ext: text(r['ext'], 8)! } : {}),
   }
 }

@@ -79,6 +79,10 @@ const str = (v: unknown): string | undefined =>
   typeof v === 'string' && v ? v.slice(0, 4000) : undefined
 const num = (v: unknown): number | undefined =>
   typeof v === 'number' && Number.isFinite(v) ? v : undefined
+/* Whole or nothing, never sliced: `str` cuts at 4000, and a shortened path or
+ * URL is not a rougher way back to the book — it is one that opens nothing. */
+const origin = (v: unknown): string | undefined =>
+  typeof v === 'string' && v && v.length <= 8_000 ? v : undefined
 const list = (v: unknown): readonly string[] | undefined => {
   if (!Array.isArray(v)) return undefined
   const clean = v.filter((one): one is string => typeof one === 'string' && one !== '').slice(0, 64)
@@ -120,7 +124,7 @@ export function recordFromRow(row: LegacyRow): BookRecord {
      * fallback whatever kind of address it holds — and dropping `url` on the
      * way through made every book ever opened from one unopenable, which is
      * most of what a real phase-3 library turned out to contain. */
-    ...(str(row.path) ?? str(row.url) ? { origin: (str(row.path) ?? str(row.url))! } : {}),
+    ...(origin(row.path) ?? origin(row.url) ? { origin: (origin(row.path) ?? origin(row.url))! } : {}),
     ...(str(row.vault) ? { ext: extensionFor(str(row.vault)!) } : {}),
   }
 }
