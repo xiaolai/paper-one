@@ -167,8 +167,14 @@ export function Library({
         ? Math.max(1, Math.round((node.clientWidth + columnGap) / (cell.offsetWidth + columnGap)))
         : 0
       const scroller = node.closest('[data-scroll]') ?? node.parentElement
+      /* SHELF-RELATIVE. The scroller's `scrollTop` counts from its own top,
+       * which is above the heading, the sort controls and the filter row — so
+       * feeding it straight to the grid told the arithmetic the reader was
+       * further down the shelf than they were, by the height of everything
+       * above it. `offsetTop` is that distance. */
+      const above = node.offsetTop - (scroller instanceof HTMLElement ? scroller.offsetTop : 0)
       setViewport({
-        scrollTop: scroller instanceof HTMLElement ? scroller.scrollTop : 0,
+        scrollTop: scroller instanceof HTMLElement ? Math.max(0, scroller.scrollTop - above) : 0,
         height: scroller instanceof HTMLElement ? scroller.clientHeight : 0,
         columns,
         rowHeight,
@@ -312,17 +318,29 @@ export function Library({
               )}
               {!scope &&
                 collections.map((one) => (
-                  <button
-                    key={one.id}
-                    type="button"
-                    className={styles.chip}
-                    data-saved="true"
-                    onClick={() => setScope(scopeOf(one))}
-                    onAuxClick={() => onRemoveCollection(one.id)}
-                    title={`${one.label} — middle-click to unsave`}
-                  >
-                    {one.label}
-                  </button>
+                  /* TWO BUTTONS, not one with a middle-click.
+                     Unsaving was bound to `onAuxClick`, which keyboard
+                     activation never emits — it sends `click` — and which many
+                     trackpads cannot produce at all. The action was unreachable
+                     for anyone not using a mouse with three buttons. */
+                  <span key={one.id} className={styles.chipPair}>
+                    <button
+                      type="button"
+                      className={styles.chip}
+                      data-saved="true"
+                      onClick={() => setScope(scopeOf(one))}
+                    >
+                      {one.label}
+                    </button>
+                    <button
+                      type="button"
+                      className={styles.chipUnsave}
+                      aria-label={`Unsave the collection ${one.label}`}
+                      onClick={() => onRemoveCollection(one.id)}
+                    >
+                      ✕
+                    </button>
+                  </span>
                 ))}
               {!scope &&
                 tags.slice(0, 8).map(({ tag, count }) => (

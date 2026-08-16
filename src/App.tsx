@@ -223,7 +223,10 @@ export function App({ storage }: AppProps) {
       })
       .catch((cause: unknown) => {
         console.error('Paper: could not watch that folder', cause)
-        setImportNotice('That folder could not be watched.')
+        // Not after cleanup: a rejection from a folder the reader has already
+        // replaced would otherwise overwrite the status of the working watcher
+        // that succeeded it.
+        if (!stopped) setImportNotice('That folder could not be watched.')
       })
     return () => {
       stopped = true
@@ -300,6 +303,21 @@ export function App({ storage }: AppProps) {
    * actually read rather than a fixture shelf. Keyed on the metadata arriving,
    * because that is when there is a title worth showing. */
   const { bookId, meta, source, cover } = book
+
+  /* The open book's row, narrowed to the two fields the effects below depend on.
+   *
+   * PRIMITIVES rather than the row or the array, so an effect restarts only when
+   * the thing it cares about changes. Depending on `library.books` restarted an
+   * in-flight cover encode on every position save.
+   *
+   * `null` and `undefined` are deliberately different here: `undefined` means no
+   * row (removed, or not yet recorded) and `null` means a row with nothing
+   * attached yet. Collapsing them is what made removing the open book start a
+   * cover write for a book that no longer existed. */
+  const openRow = bookId ? library.books.find((one) => one.bookId === bookId) : undefined
+  const vaultOfOpenBook = openRow ? openRow.vault ?? null : undefined
+  const coverOfOpenBook = openRow ? openRow.cover ?? null : undefined
+
 
   /**
    * Ask Open Library about one book — Decision 1's only network call.
@@ -451,20 +469,30 @@ export function App({ storage }: AppProps) {
   useEffect(() => {
     if (!bookId || !meta || !inTauri()) return
     if (!(source instanceof File)) return
-    let cancelled = false
+    /* ALREADY HELD, so there is nothing to do — checked before the bytes are
+     * touched. `ownBook` is idempotent and would discover this itself, but only
+     * after `arrayBuffer()` had copied the whole book into memory. Reopening a
+     * 40MB book from the vault was allocating and reading it a second time to
+     * learn that it was already there. */
+    if (vaultOfOpenBook) return
     void (async () => {
       try {
         const bytes = new Uint8Array(await source.arrayBuffer())
         const entry = await ownBook(tauriVaultFs, bookId, source.name, bytes)
-        if (!cancelled) rememberOwned(bookId, entry.path)
+        /* Attached UNCONDITIONALLY, with no cancellation guard.
+         *
+         * There was one, and it made an orphan: switching books mid-copy
+         * suppressed the attachment but not the write, so the file landed with
+         * no row referring to it — and for a dropped book, which has no original
+         * path, the row stayed marked never-reopenable even though its copy was
+         * sitting on disk. The row is keyed by `bookId` and does not care which
+         * book happens to be open when the copy finishes. */
+        rememberOwned(bookId, entry.path)
       } catch (cause) {
         console.error('Paper: could not keep our own copy of the book', cause)
       }
     })()
-    return () => {
-      cancelled = true
-    }
-  }, [bookId, meta, source, rememberOwned])
+  }, [bookId, meta, source, vaultOfOpenBook, rememberOwned])
 
   /* File the book's own jacket, once.
    *
@@ -479,7 +507,16 @@ export function App({ storage }: AppProps) {
    */
   useEffect(() => {
     if (!bookId || !cover || !inTauri()) return
-    if (library.books.find((b) => b.bookId === bookId)?.cover) return
+    /* A PRIMITIVE, not the array. Depending on `library.books` restarted an
+     * in-flight encode on every unrelated mutation — a position save, a tag, a
+     * vault path landing — and cancellation only suppressed the attachment, so
+     * the work was redone and the previous result thrown away each time.
+     *
+     * `coverOfOpenBook` is `undefined` for a row that does not exist, which the
+     * old `?.cover` guard read as "no cover yet, go and write one": removing the
+     * open book therefore triggered a fresh cover write for a book that had just
+     * been deleted. `null` and `undefined` now mean different things. */
+    if (coverOfOpenBook !== null) return
     let cancelled = false
     void (async () => {
       try {
@@ -494,7 +531,7 @@ export function App({ storage }: AppProps) {
     return () => {
       cancelled = true
     }
-  }, [bookId, cover, library.books, rememberJacket])
+  }, [bookId, cover, coverOfOpenBook, rememberJacket])
 
   /* Remember where the reader is, so the next open starts there.
    *

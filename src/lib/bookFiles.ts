@@ -90,7 +90,12 @@ export async function pickBooks(): Promise<PickedBook[]> {
  * plugin wherever they happen to run.
  */
 export async function pickFolder(): Promise<string | null> {
-  const chosen = await openDialog({ directory: true, multiple: false })
+  /* `recursive` is what extends the grant to DESCENDANTS. Without it Tauri
+   * permits the chosen directory and nothing under it, so `collectBooks` walks
+   * into a subfolder, `readDir` is denied, and the error is swallowed by the
+   * skip-an-unreadable-branch rule — a folder import silently finding only the
+   * books at the top level, with nothing anywhere saying why. */
+  const chosen = await openDialog({ directory: true, multiple: false, recursive: true })
   return typeof chosen === 'string' ? chosen : null
 }
 
