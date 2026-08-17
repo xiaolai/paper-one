@@ -99,7 +99,7 @@ export function BookCell({
    * moves; when it flips, the menu's left sits on the cover's left, which is
    * exactly the border the eye expects. */
   const cellRef = useRef<HTMLDivElement | null>(null)
-  const { style: menuStyle } = usePlacement(menuOpen, cellRef, menuRef, {
+  const { style: menuStyle, placement } = usePlacement(menuOpen, cellRef, menuRef, {
     side: 'bottom',
     align: 'end',
     /* On the last row there is no room below, so it flips — and flipped CLEAR
@@ -234,8 +234,17 @@ export function BookCell({
               aria-label={`Actions for ${title}`}
               /* Rendered even before the first placement lands, so the hook
                  has a box to measure — but parked off screen until then, so it
-                 does not flash at 0,0 for the frame it takes to place. */
-              style={menuStyle ?? { top: -9999, left: -9999 }}
+                 does not flash at 0,0 for the frame it takes to place.
+
+                 DETACHED IS HIDDEN, not drawn. If this card scrolls out of a
+                 virtualised shelf with its menu open, the anchor is off screen
+                 and the hook says so; a menu floating at the window's edge
+                 with no card under it is a menu that belongs to nothing. */
+              style={
+                menuStyle && placement?.fit !== 'detached'
+                  ? menuStyle
+                  : { top: -9999, left: -9999 }
+              }
             >
               <button
                 type="button"

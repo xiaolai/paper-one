@@ -72,6 +72,12 @@ export function SelectionTools({
   onRemove,
 }: SelectionToolsProps) {
   const [box, setBox] = useState<HostRect | null>(null)
+  /* The visible EXTENT of the selection — every on-page line, unioned — so
+   * the popup can be told to stay clear of all of it, not just the line it
+   * hangs from. Anchored to the first line alone, a toolbar over a three-line
+   * selection sat on top of lines two and three: the very words the reader
+   * had just chosen. */
+  const [extent, setExtent] = useState<HostRect | null>(null)
   /** The popup's own width, for the edge clamp below. */
   const popupRef = useRef<HTMLDivElement | null>(null)
   const [width, setWidth] = useState(0)
@@ -82,6 +88,7 @@ export function SelectionTools({
   const measure = useCallback(() => {
     if (!selection || !stage) {
       setBox(null)
+      setExtent(null)
       return
     }
     const doc = selection.range.startContainer.ownerDocument
@@ -94,12 +101,24 @@ export function SelectionTools({
      * rect is always somewhere real. The same clip keeps a selection that has
      * scrolled off the page from putting the popup over whatever text now
      * occupies that spot, offering to mark a passage nowhere on screen. */
-    const rect = rangeRectsInHost(selection.range, stage).find(
+    const visible = rangeRectsInHost(selection.range, stage).filter(
       (candidate) =>
         (candidate.width > 0 || candidate.height > 0) &&
         (!page || overlaps(candidate, page)),
     )
-    setBox(rect ?? null)
+    setBox(visible[0] ?? null)
+    /* Union of the visible lines. Still clipped to the page, for the same
+     * reason as the anchor: a line on a page that is not being shown must not
+     * push the popup around. */
+    if (visible.length === 0) {
+      setExtent(null)
+    } else {
+      const top = Math.min(...visible.map((r) => r.top))
+      const left = Math.min(...visible.map((r) => r.left))
+      const bottom = Math.max(...visible.map((r) => r.top + r.height))
+      const right = Math.max(...visible.map((r) => r.left + r.width))
+      setExtent({ top, left, width: right - left, height: bottom - top, bottom, right })
+    }
   }, [selection, stage])
 
   useEffect(() => {
@@ -142,12 +161,18 @@ export function SelectionTools({
    * into a centre at this one seam. */
   const stageBox = stage?.getBoundingClientRect()
   const placed = place({
-    anchor: { top: box.top, left: box.left, width: box.width, height: box.height },
+    /* `container` space: these rects are stage-relative, from
+       `rangeRectsInHost`, and the bounds are the stage's own box at origin.
+       The brand is what stops a viewport rect wandering in here — it would be
+       numerically valid and wrong by the stage's offset, and nothing else
+       could tell. */
+    anchor: { top: box.top, left: box.left, width: box.width, height: box.height, space: 'container' },
     surface: { width, height: POPUP_H },
-    /* The stage's own box, at origin — this popup's coordinates are stage-
-       relative. Before the stage has a box there is nothing to clamp against,
-       and a very large bound is the honest "no constraint" rather than a guess. */
-    bounds: { top: 0, left: 0, width: stageBox?.width ?? 1e6, height: stageBox?.height ?? 1e6 },
+    /* Before the stage has a box there is nothing to clamp against, and a very
+       large bound is the honest "no constraint" rather than a guess. */
+    bounds: { top: 0, left: 0, width: stageBox?.width ?? 1e6, height: stageBox?.height ?? 1e6, space: 'container' },
+    // Clear of EVERY selected line, not just the one it hangs from.
+    ...(extent ? { avoid: { ...extent, space: 'container' as const } } : {}),
     side: 'top',
     align: 'center',
     gap: GAP,
