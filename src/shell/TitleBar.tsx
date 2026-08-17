@@ -1,5 +1,7 @@
 import {
   AudioLines,
+  ChevronLeft,
+  Library as LibraryIcon,
   ListTree,
   Minus,
   PanelLeft,
@@ -154,6 +156,34 @@ export function TitleBar({
         inert={chromeHidden}
         data-tauri-drag-region
       >
+        {/* HOME, and it is a gap rather than a flourish.
+            The only route to the shelf from an open book was the command
+            palette: `onOpenLibrary` exists but is rendered inside the reader's
+            EMPTY state, so it disappears the moment there is a book to read.
+            Meanwhile this bar has carried "Switch book" all along — you could
+            move between books but not reach the place they live. Paper now
+            opens on the library, which makes it home, and home had no door.
+
+            A TOGGLE, because the return trip has the same hole: going to the
+            shelf with a book open and wanting it back was the palette too. It
+            is absent rather than inert when there is nothing to go back to. */}
+        {(isReader || hasBook) && (
+          <button
+            type="button"
+            className={styles.upButton}
+            title={isReader ? `Library · ${comboFor('⌘L', platform)}` : 'Back to the book'}
+            aria-label={isReader ? 'Library' : 'Back to the book'}
+            onClick={() =>
+              dispatch({ type: 'goScreen', screen: isReader ? 'library' : 'reader' })
+            }
+          >
+            {isReader ? (
+              <LibraryIcon size={ICON.control} strokeWidth={ICON.stroke} />
+            ) : (
+              <ChevronLeft size={ICON.control} strokeWidth={ICON.stroke} />
+            )}
+          </button>
+        )}
         {/* Live again: the switcher overlay exists now, so the chip opens it
             rather than being a label that swallowed every click. */}
         <button

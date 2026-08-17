@@ -225,7 +225,10 @@ export function buildCommands(ctx: CommandContext): Command[] {
     id: 'screen:library',
     label: state.screen === 'library' ? 'Back to the reader' : 'Go to the library',
     group: 'Book',
-    keywords: 'shelf books home',
+    // The key the titlebar button names and the handler binds. Three surfaces
+    // for one action, and the palette is where a reader learns the shortcut.
+    combo: '⌘L',
+    keywords: 'shelf books home library',
     on: state.screen === 'library',
     run: () =>
       dispatch({

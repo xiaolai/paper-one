@@ -733,6 +733,18 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
         dispatch({ type: 'togglePane' })
         return
       }
+      /* UP ONE LEVEL, the same toggle the titlebar button and the palette entry
+       * do. Bound because the button's tooltip names it, and a tooltip naming a
+       * key nothing binds is the app describing a feature it does not have —
+       * which is the row the library ledger opens with. */
+      if (event.key === 'l') {
+        event.preventDefault()
+        dispatch({
+          type: 'goScreen',
+          screen: state.screen === 'library' ? 'reader' : 'library',
+        })
+        return
+      }
       if (event.key === 'd') {
         // Only when there is a selection to mark; otherwise ⌘D stays the
         // browser's own, rather than being swallowed to do nothing.

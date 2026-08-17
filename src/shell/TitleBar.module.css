@@ -87,7 +87,39 @@
   order: 2;
   display: flex;
   justify-content: center;
+  /* For the library button, which sits at the LEADING EDGE while the book chip
+     stays centred on the window. Absolute rather than a flex sibling because a
+     sibling would push the chip off centre by half its own width, and the chip
+     being centred is what makes the bar read as the book's. */
+  position: relative;
   transition: opacity var(--motion-chrome);
+}
+
+/* Up one level: to the shelf from a book, back to the book from the shelf. */
+.upButton {
+  position: absolute;
+  inset-inline-start: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted, inherit);
+  cursor: pointer;
+}
+
+.upButton:hover {
+  background: var(--surface-hover, rgb(0 0 0 / 0.06));
+  color: inherit;
+}
+
+.upButton:focus-visible {
+  outline: 2px solid var(--focus, currentColor);
+  outline-offset: 2px;
 }
 
 .chip {
