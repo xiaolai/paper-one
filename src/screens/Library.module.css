@@ -473,86 +473,18 @@
   flex: 0 0 auto;
 }
 
-/* ALWAYS DRAWN. It was hover-only, on the reasoning that a shelf covered in
-   affordances is a management screen — but a control that exists only under
-   the pointer is a control a trackpad-less or touch reader never finds, and
-   with the title and author gone this is the only thing on the row that says
-   the row can be acted on at all. Drawn quiet — the muted ink, no fill — it
-   is a mark rather than a button until it is wanted, and hover and open give
-   it the fill. */
+/* The row menu — shared with the Library panel's tag rows, see
+   `controls.module.css`. Composed rather than restated so the two cannot drift. */
 .more {
-  display: grid;
-  place-items: center;
-  width: 24px;
-  height: 24px;
-  border: 0;
-  border-radius: var(--radius-chip);
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-  transition: background 120ms ease, color 120ms ease;
+  composes: more from '../styles/controls.module.css';
 }
 
-.more:hover,
-.more:focus-visible,
-.more[data-open='true'] {
-  background: var(--wash);
-  color: var(--ink);
-}
-
-/* Placed from the VIEWPORT, not from the cell — the cell clips its overflow
-   for virtualisation's sake and would clip this. `top` and `right` are set
-   inline from the ellipsis's measured rect, so it drops beneath the button and
-   keeps its right edge on the button's, whatever column the row is in. */
 .menu {
-  position: fixed;
-  z-index: var(--z-menu);
-  min-width: 190px;
-  padding: 4px;
-  border-radius: var(--radius-control);
-  background: var(--surface);
-  box-shadow: var(--shadow-pop), 0 0 0 1px var(--line-2);
+  composes: menu from '../styles/controls.module.css';
 }
 
 .menuItem {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  padding: 7px 10px;
-  border: 0;
-  border-radius: var(--radius-chip);
-  background: transparent;
-  color: var(--ink);
-  font: inherit;
-  font-size: 13px;
-  text-align: start;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.menuItem:hover,
-.menuItem:focus-visible {
-  background: var(--wash);
-}
-
-.menuItem[data-danger='true'] {
-  color: var(--danger);
-}
-
-/* Confirming changes the row's words rather than growing a pill: the second
-   click is destructive and an icon cannot say "are you sure", so the row says
-   it, and it collides with nothing because it is already the width of the menu. */
-.menuItem[data-confirming='true'] {
-  background: var(--danger);
-  color: var(--surface);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .more,
-  .menuItem {
-    transition: none;
-  }
+  composes: menuItem from '../styles/controls.module.css';
 }
 
 /* The import report. Per book rather than a spinner — an import of three hundred

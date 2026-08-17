@@ -1,10 +1,12 @@
-import { BookOpen, Check, Circle, CircleDot, Hash, LibraryBig } from 'lucide-react'
+import { useState } from 'react'
+import { BookOpen, Check, Circle, CircleDot, LibraryBig } from 'lucide-react'
 import type { IndexedBook } from '../lib/bookIndex'
 import { statusCounts, tagCounts, tagKey, type ReadingStatus } from '../lib/library'
 import { ICON } from '../lib/metrics'
 import { parseQuery, withStatus, withTag, withoutTag } from '../lib/searchQuery'
 import type { AppDispatch } from '../lib/state'
 import styles from './SidePane.module.css'
+import { TagRow } from './TagRow'
 
 /**
  * Library — the collection view.
@@ -52,9 +54,16 @@ export interface LibraryPanelProps {
   /** The search field's contents — the one place scope lives. */
   readonly query: string
   readonly dispatch: AppDispatch
+  /** Rename one of the reader's tags on every book carrying it — see `Library`. */
+  readonly onRenameTag: (from: string, to: string) => void
+  /** Take one of the reader's tags off every book carrying it. */
+  readonly onRemoveTag: (tag: string) => void
 }
 
-export function LibraryPanel({ books, query, dispatch }: LibraryPanelProps) {
+export function LibraryPanel({ books, query, dispatch, onRenameTag, onRemoveTag }: LibraryPanelProps) {
+  /* Which tag's menu is open — one across the panel, held here for the same
+   * reason the shelf holds `menuFor` for its cards. */
+  const [menuFor, setMenuFor] = useState<string | null>(null)
   const parsed = parseQuery(query, tagKey)
   const counts = statusCounts(books)
   /* Tag counts are SCOPED to the current status, so a tag's number under
@@ -109,26 +118,38 @@ export function LibraryPanel({ books, query, dispatch }: LibraryPanelProps) {
       {tags.length > 0 && (
         <>
           <div className={styles.groupTitle}>Tags</div>
-          {tags.map(({ tag, count }) => {
+          {tags.map(({ tag, count, mine }) => {
             const on = activeTags.has(tagKey(tag))
             return (
-              <button
+              <TagRow
                 key={tagKey(tag)}
-                type="button"
-                className={styles.scopeRow}
-                data-on={on}
-                aria-pressed={on}
+                tag={tag}
+                count={count}
+                mine={mine}
+                on={on}
                 /* Tags ACCUMULATE — every tag, not any — because adding a
                    second one is narrowing, and that is what `tag:` has always
                    meant in the field. */
-                onClick={() =>
+                onToggle={() =>
                   setQuery(on ? withoutTag(query, tag, tagKey) : withTag(query, tag, tagKey))
                 }
-              >
-                <Hash size={ICON.control} strokeWidth={ICON.stroke} />
-                <span className={styles.scopeLabel}>{tag}</span>
-                <span className={styles.scopeCount}>{count}</span>
-              </button>
+                /* A renamed tag that was scoping the shelf keeps scoping it
+                   under its new name, or the shelf would silently un-narrow
+                   the moment the reader corrected a spelling. */
+                onRename={(to) => {
+                  onRenameTag(tag, to)
+                  if (on) setQuery(withTag(withoutTag(query, tag, tagKey), to, tagKey))
+                }}
+                /* A removed tag comes out of the query too — a scope on a tag
+                   that no book carries would empty the shelf with nothing to
+                   say why. */
+                onRemove={() => {
+                  onRemoveTag(tag)
+                  if (on) setQuery(withoutTag(query, tag, tagKey))
+                }}
+                menuFor={menuFor}
+                setMenuFor={setMenuFor}
+              />
             )
           })}
         </>

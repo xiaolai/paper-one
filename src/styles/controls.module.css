@@ -67,3 +67,89 @@
   color: inherit;
   box-shadow: inset 0 0 0 1px var(--line-2);
 }
+
+/* --- the row menu ------------------------------------------------------ */
+
+/* "More about this thing": an ellipsis on a row, and the menu it opens. It
+   was written for the shelf's book cards and is here because the Library
+   panel's tag rows want the same thing — one vocabulary for "more", so a
+   reader who has learned it on a card recognises it on a tag. Written twice it
+   would drift, which is what this file exists to prevent.
+
+   ALWAYS DRAWN. Hover-only was tried on the shelf, on the reasoning that a
+   surface covered in affordances is a management screen — but a control that
+   exists only under the pointer is one a trackpad-less or touch reader never
+   finds. Drawn quiet — muted ink, no fill — it is a mark until it is wanted,
+   and hover and open give it the fill. */
+.more {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: var(--radius-chip);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.more:hover,
+.more:focus-visible,
+.more[data-open='true'] {
+  background: var(--wash);
+  color: var(--ink);
+}
+
+/* Placed from the VIEWPORT by `usePlacement`, since the surfaces that open it
+   clip their overflow. */
+.menu {
+  position: fixed;
+  z-index: var(--z-menu);
+  min-width: 190px;
+  padding: 4px;
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  box-shadow: var(--shadow-pop), 0 0 0 1px var(--line-2);
+}
+
+.menuItem {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: var(--radius-chip);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  text-align: start;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.menuItem:hover,
+.menuItem:focus-visible {
+  background: var(--wash);
+}
+
+.menuItem[data-danger='true'] {
+  color: var(--danger);
+}
+
+/* Confirming changes the row's words rather than growing a pill: the second
+   click is destructive and an icon cannot say "are you sure", so the row says
+   it, and it collides with nothing because it is already the width of the menu. */
+.menuItem[data-confirming='true'] {
+  background: var(--danger);
+  color: var(--surface);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .more,
+  .menuItem {
+    transition: none;
+  }
+}

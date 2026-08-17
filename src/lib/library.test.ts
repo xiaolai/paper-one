@@ -253,8 +253,8 @@ describe('tagCounts', () => {
       entry({ bookId: 'c' }),
     ]
     expect(tagCounts(shelf)).toEqual([
-      { tag: 'Philosophy', count: 2 },
-      { tag: 'Ethics', count: 1 },
+      { tag: 'Philosophy', count: 2, mine: false },
+      { tag: 'Ethics', count: 1, mine: false },
     ])
   })
 
@@ -264,14 +264,38 @@ describe('tagCounts', () => {
       entry({ bookId: 'b', tags: ['philosophy'] }),
       entry({ bookId: 'c', subjects: ['PHILOSOPHY'] }),
     ]
-    expect(tagCounts(shelf)).toEqual([{ tag: 'Philosophy', count: 3 }])
+    expect(tagCounts(shelf)).toEqual([{ tag: 'Philosophy', count: 3, mine: true }])
   })
 
   /* One book carrying the tag under both provenances must not count twice. */
   it('counts a book once even when both lists carry the tag', () => {
     expect(tagCounts([entry({ tags: ['Sea'], subjects: ['sea'] })])).toEqual([
-      { tag: 'Sea', count: 1 },
+      { tag: 'Sea', count: 1, mine: true },
     ])
+  })
+
+  /* `mine` is what decides whether the Library panel offers to rename or
+   * remove a tag. A publisher's subject is a fact about the book and comes
+   * back on re-parse — not the reader's to edit. A tag that is BOTH is
+   * editable, because the reader's copy is real; the publisher's stays. */
+  describe('mine — whether the reader can change it', () => {
+    it('is false for a tag that is only a publisher subject', () => {
+      const [t] = tagCounts([entry({ subjects: ['Fiction'] })])
+      expect(t?.mine).toBe(false)
+    })
+    it('is true for a tag the reader wrote', () => {
+      const [t] = tagCounts([entry({ tags: ['Fiction'] })])
+      expect(t?.mine).toBe(true)
+    })
+    it('is true across the shelf if ANY book carries it as the reader\'s own', () => {
+      const shelf = [entry({ bookId: 'a', subjects: ['Fiction'] }), entry({ bookId: 'b', tags: ['fiction'] })]
+      const [t] = tagCounts(shelf)
+      expect(t).toMatchObject({ count: 2, mine: true })
+    })
+    it('is true for a tag that is both the reader\'s and the publisher\'s on one book', () => {
+      const [t] = tagCounts([entry({ tags: ['Sea'], subjects: ['sea'] })])
+      expect(t?.mine).toBe(true)
+    })
   })
 
   it('counts within the scope it is given', () => {
@@ -280,8 +304,8 @@ describe('tagCounts', () => {
       entry({ bookId: 'b', tags: ['Poetry'] }),
     ]
     expect(tagCounts(shelf, { tags: ['Ethics'] })).toEqual([
-      { tag: 'Ethics', count: 1 },
-      { tag: 'Philosophy', count: 1 },
+      { tag: 'Ethics', count: 1, mine: true },
+      { tag: 'Philosophy', count: 1, mine: true },
     ])
   })
 

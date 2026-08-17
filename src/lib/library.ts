@@ -225,10 +225,17 @@ export function statusCounts(
 export function tagCounts(
   books: readonly IndexedBook[],
   scope: Scope | null = null,
-): { tag: string; count: number }[] {
-  const counts = new Map<string, { tag: string; count: number }>()
+): { tag: string; count: number; mine: boolean }[] {
+  /* `mine`: whether ANY book carries this as the reader's own tag, as opposed
+   * to only as a publisher's subject. It is what decides whether the Library
+   * panel offers to rename or remove the tag — a subject is a fact about the
+   * book, comes back on re-parse, and is not the reader's to edit; a tag that
+   * is both (the reader wrote `Fiction` on a book whose publisher says
+   * `fiction`) IS editable, because the reader's copy is real. */
+  const counts = new Map<string, { tag: string; count: number; mine: boolean }>()
   for (const book of books) {
     if (!inScope(book, scope)) continue
+    const own = new Set((book.tags ?? []).map(tagKey))
     /* No per-book deduplication here: `allTags` already folds a reader's `Sea`
      * and a publisher's `sea` into one before returning, so a second `seen` set
      * was a branch that could not be taken. It was written when `allTags`
@@ -236,8 +243,10 @@ export function tagCounts(
     for (const tag of allTags(book)) {
       const key = tagKey(tag)
       const already = counts.get(key)
-      if (already) already.count += 1
-      else counts.set(key, { tag, count: 1 })
+      if (already) {
+        already.count += 1
+        if (own.has(key)) already.mine = true
+      } else counts.set(key, { tag, count: 1, mine: own.has(key) })
     }
   }
   return [...counts.values()].sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag))

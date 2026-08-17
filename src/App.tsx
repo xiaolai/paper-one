@@ -992,6 +992,8 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
                line that changes when there is. */
             companion={NOT_CONFIGURED}
             books={library.books}
+            onRenameTag={library.renameTag}
+            onRemoveTag={library.removeTag}
           />
         }
         onDismissPane={() => dispatch({ type: 'closePane' })}

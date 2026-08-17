@@ -127,6 +127,9 @@ export interface SidePaneProps {
   companion: CompanionProvider
   /** The shelf, for the Library panel's counts and scopes. */
   books: readonly IndexedBook[]
+  /** Collection-wide tag edits, for the Library panel — see `Library`. */
+  onRenameTag: (from: string, to: string) => void
+  onRemoveTag: (tag: string) => void
 }
 
 export function SidePane({
@@ -140,6 +143,8 @@ export function SidePane({
   markFocus,
   companion,
   books,
+  onRenameTag,
+  onRemoveTag,
 }: SidePaneProps) {
   /* Falls back to the last pane rather than unmounting. The slot stays mounted
    * at zero width and inert while closed, so keeping the panel rendered is what
@@ -223,7 +228,13 @@ export function SidePane({
         )}
 
         {pane === 'library' && (
-          <LibraryPanel books={books} query={state.libraryQuery} dispatch={dispatch} />
+          <LibraryPanel
+            books={books}
+            query={state.libraryQuery}
+            dispatch={dispatch}
+            onRenameTag={onRenameTag}
+            onRemoveTag={onRemoveTag}
+          />
         )}
       </div>
 

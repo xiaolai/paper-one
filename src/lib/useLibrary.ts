@@ -70,6 +70,20 @@ export interface Library {
   /** Add one of the reader's own tags. Folded, so case cannot duplicate. */
   tag: (bookId: string, tag: string) => void
   untag: (bookId: string, tag: string) => void
+  /**
+   * Rename one of the reader's tags on EVERY book that carries it.
+   *
+   * Composed from `tag` and `untag`, in that order — the new name is added
+   * before the old is removed, so a failure between the two leaves a book with
+   * both rather than with neither. Renaming onto a name that already exists
+   * MERGES: `tag` folds by key, so the books simply end up under one tag, and
+   * the survivor's count is what tells the reader it happened. A publisher's
+   * subject is untouched — it is not the reader's to rename, and `untag`
+   * refuses it anyway.
+   */
+  renameTag: (from: string, to: string) => void
+  /** Take one of the reader's tags off every book that carries it. */
+  removeTag: (tag: string) => void
   /** The saved position for a book, or null. Stable across renders. */
   positionOf: (bookId: string | null) => string | null
   /**
@@ -511,6 +525,43 @@ export function useLibrary(
     [update],
   )
 
+  const renameTag = useCallback(
+    (from: string, to: string) => {
+      const value = to.trim().slice(0, 60)
+      if (!value) return
+      const fromKey = tagKey(from)
+      if (tagKey(value) === fromKey) {
+        /* Same key, different spelling — `Sea` to `sea`. `tag` would refuse
+         * the add as a duplicate and `untag` would then strip it, so this case
+         * needs to be a rewrite in place rather than an add-then-remove. */
+        for (const book of latest.current) {
+          if (!(book.tags ?? []).some((one) => tagKey(one) === fromKey)) continue
+          update(book.bookId, (record) => ({
+            ...record,
+            tags: (record.tags ?? []).map((one) => (tagKey(one) === fromKey ? value : one)),
+          }))
+        }
+        return
+      }
+      for (const book of latest.current) {
+        if (!(book.tags ?? []).some((one) => tagKey(one) === fromKey)) continue
+        tag(book.bookId, value)
+        untag(book.bookId, from)
+      }
+    },
+    [tag, untag, update],
+  )
+
+  const removeTag = useCallback(
+    (raw: string) => {
+      const key = tagKey(raw)
+      for (const book of latest.current) {
+        if ((book.tags ?? []).some((one) => tagKey(one) === key)) untag(book.bookId, raw)
+      }
+    },
+    [untag],
+  )
+
   const positionOf = useCallback(
     (bookId: string | null) =>
       bookId ? latest.current.find((one) => one.bookId === bookId)?.position ?? null : null,
@@ -518,7 +569,7 @@ export function useLibrary(
   )
 
   return useMemo<Library>(
-    () => ({ books, add, update, remove, tag, untag, positionOf, rekeyBook }),
-    [books, add, update, remove, tag, untag, positionOf, rekeyBook],
+    () => ({ books, add, update, remove, tag, untag, renameTag, removeTag, positionOf, rekeyBook }),
+    [books, add, update, remove, tag, untag, renameTag, removeTag, positionOf, rekeyBook],
   )
 }

@@ -503,6 +503,47 @@
   color: var(--muted);
 }
 
+/* A tag row: the scope button, and beside it the row menu for a tag the reader
+   can change. The button takes the row's width; the ellipsis sits outside it,
+   because a button in a button is invalid and browsers resolve it by dropping
+   the inner one. */
+.tagRow {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.tagRow > .scopeRow {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Rename, in place: the row's label becomes a field the same size, so nothing
+   around it moves while the reader types. */
+.tagRename {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 36px;
+  padding: 0 10px;
+  color: var(--ink);
+}
+
+.tagRenameInput {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-chip);
+  background: var(--surface);
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink);
+}
+
 /* An empty shelf, stated once and quietly. Not the shelf's own empty state,
    which says what to do; just the fact, so the pane is not a blank. */
 .scopeHint {
