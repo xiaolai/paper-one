@@ -4,6 +4,7 @@ import { cardFromMark } from '../lib/cards'
 import type { Mark } from '../lib/marks'
 import type { MarkFocus } from '../lib/useMarking'
 import { ICON } from '../lib/metrics'
+import { onBeforeClose } from '../lib/beforeClose'
 import type { CardStore } from '../lib/useCards'
 import type { MarkStore } from '../lib/useMarks'
 import { FilterChips } from './FilterChips'
@@ -76,16 +77,26 @@ function NoteEditor({ initial, onCommit, onDone }: NoteEditorProps) {
   }, [])
 
   /**
-   * Save while they type, not only when they stop.
+   * Hand the draft over before the window closes.
    *
-   * The note used to exist ONLY in this ref until blur, unmount or `pagehide` —
-   * and `pagehide` starts an asynchronous write that a webview being torn down
-   * can simply not finish. So the whole of a long note rode on one event firing
-   * and one queued write landing, and losing that lost all of it.
+   * THIS is what makes a note survive quitting, and it is a handover rather than
+   * a save: `save` puts the text into the marks store, whose queue the close
+   * handler then drains. Two halves of one thing — see `beforeClose`.
    *
-   * A pause of a second is not a save button; it is the difference between
-   * losing a paragraph and losing a sentence. The events below still fire — they
-   * are the last flush now rather than the only one.
+   * `pagehide` cannot do this job and never could. It fires as the webview is
+   * torn down, so it starts work nothing will finish; and Tauri's close-request
+   * arrives BEFORE it, so by the time it ran the queue had already been declared
+   * empty. It stays below as the browser's path, where there is no close-request
+   * to intercept.
+   */
+  useEffect(() => onBeforeClose(save), [save])
+
+  /**
+   * And save while they type, which covers what no shutdown hook can.
+   *
+   * A close is orderly. A crash, a force-quit or a power cut is not, and neither
+   * runs anything. A pause of a second is the difference between losing a
+   * paragraph and losing a sentence.
    */
   useEffect(() => {
     const idle = window.setInterval(save, 1000)
@@ -95,7 +106,8 @@ function NoteEditor({ initial, onCommit, onDone }: NoteEditorProps) {
   useEffect(() => {
     // `pagehide` rather than `beforeunload`: it fires on the path a webview
     // actually takes when the window goes away, and it is not blocked by the
-    // conditions that make `beforeunload` unreliable.
+    // conditions that make `beforeunload` unreliable. In Tauri the close is
+    // intercepted before this; in a browser this is all there is.
     window.addEventListener('pagehide', save)
     document.addEventListener('visibilitychange', save)
     return () => {

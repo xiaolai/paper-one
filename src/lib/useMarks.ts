@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { writeQueue } from './writeQueue'
+import type { WriteQueue } from './writeQueue'
 import { folderOf, marksPathIn, readMarks, trashOf, writeMarks } from './bookFolder'
 import { scanAllMarks, type IndexFs } from './bookIndex'
 import { upsertOverlapping } from './markMatch'
@@ -58,7 +58,11 @@ export interface MarkStore {
   loadAll: () => void
 }
 
-export function useMarks(bookId: string | null, fs: IndexFs | null): MarkStore {
+export function useMarks(
+  bookId: string | null,
+  fs: IndexFs | null,
+  shared: WriteQueue,
+): MarkStore {
   /* THE OPEN BOOK'S MARKS ONLY, held here.
    *
    * They live in that book's folder, so there is nothing to load until a book is
@@ -99,7 +103,16 @@ export function useMarks(bookId: string | null, fs: IndexFs | null): MarkStore {
   /* One write at a time per book — see `writeQueue`. Every write goes to the
    * same `marks.json.writing` neighbour, so a reader highlighting three
    * passages in a second had three writes racing for one temporary file. */
-  const queue = useRef(writeQueue())
+  /* THE SHELF'S QUEUE, not one of its own.
+   *
+   * A book is a folder, and its record and its marks are two files in it. Two
+   * queues meant a write to one could not see a write to the other — which is
+   * how a mark landed in a folder a removal had just moved, and how the checks
+   * that catch that had to be written twice. One queue keyed by book makes every
+   * write touching a book genuinely serial, and gives the window something to
+   * wait for when it closes. */
+  const queue = useRef(shared)
+  queue.current = shared
 
   /** Which book is open, for tasks that finish after a render. */
   const openRef = useRef(bookId)

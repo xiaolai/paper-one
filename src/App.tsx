@@ -5,11 +5,14 @@ import { DEFAULT_STEP_IDX, applyMetrics } from './lib/metrics'
 import { pickBooks, pickFolder, readBookAt, tauriDirOps } from './lib/bookFiles'
 import { legacyBookIdFor } from './lib/idMigration'
 import { positionRecorder, type PositionRecorder } from './lib/positionRecorder'
-import { usePlatform, usePrefersDark, usePrefersReducedMotion } from './lib/platform'
+import { getCurrentWindow } from '@tauri-apps/api/window'
+import { isTauri, usePlatform, usePrefersDark, usePrefersReducedMotion } from './lib/platform'
 import { NOT_CONFIGURED } from './lib/companion'
 import { hasOpenLayer, useAppState } from './lib/state'
 import type { MarkStorage } from './lib/marks'
 import { useBook } from './lib/useBook'
+import { flushBeforeClose } from './lib/beforeClose'
+import { writeQueue } from './lib/writeQueue'
 import { useFileDrop } from './lib/useFileDrop'
 import { useLibrary } from './lib/useLibrary'
 import { useCards } from './lib/useCards'
@@ -21,7 +24,7 @@ import type { IndexedBook } from './lib/bookIndex'
 import type { IndexFs } from './lib/bookIndex'
 import type { DirFs } from './lib/importFolder'
 import { downscaleCover } from './lib/coverArt'
-import { contentPathIn, coverPathIn, folderOf, recordPath } from './lib/bookFolder'
+import { contentPathIn, coverPathIn, folderOf, readBook, recordPath } from './lib/bookFolder'
 import {
   importFolder,
   keepOwnCopy,
@@ -80,7 +83,16 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
   const book = useBook()
   /* Marks outlive the open book — the Notes panel browses every book's — so the
    * store is keyed by book rather than owned by one. */
-  const marks = useMarks(book.bookId, fs)
+  /**
+   * ONE QUEUE for everything written to a book's folder.
+   *
+   * Both stores had their own, so a write to `book.json` could not see a write
+   * to `marks.json` beside it — and there is nothing to wait for at the moment
+   * that matters most, which is the window closing. One queue keyed by book
+   * makes those writes serial and gives the close something to hold for.
+   */
+  const writes = useRef(writeQueue())
+  const marks = useMarks(book.bookId, fs, writes.current)
   const cards = useCards(storage)
   const marking = useMarking(book, marks)
   /* The import walks the reader's OWN filesystem, so it needs the absolute
@@ -103,7 +115,7 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
         : null,
     [fs],
   )
-  const library = useLibrary(fs, initialBooks)
+  const library = useLibrary(fs, writes.current, initialBooks)
   /* Reading aloud follows the spine document: an utterance outlives a section,
    * and would otherwise go on reading words that are no longer on screen. */
   const speech = useSpeech(book.doc)
@@ -449,6 +461,88 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
     },
     [remove],
   )
+
+  /**
+   * Where to resume, read from the BOOK'S OWN RECORD rather than from the index.
+   *
+   * The index is a cache and it can be one write behind — a crash between
+   * writing `book.json` and writing `index.json` leaves it so, and that is a
+   * trade this project accepts because a stale cache cannot cause a stale WRITE:
+   * every mutation applies to the record on disk.
+   *
+   * Except through here. The position it handed back was fed to the reader as
+   * the place to resume, and the reader then saved it — so the one path by which
+   * a stale cache could overwrite a newer record was the reading position, which
+   * is the single thing a reader notices losing.
+   *
+   * Falls back to the row until the read lands. One small file against parsing a
+   * book is not a close race, but if it were, the cached position is a better
+   * answer than none.
+   */
+  const [resumeAt, setResumeAt] = useState<{ bookId: string; position: string | null } | null>(null)
+  useEffect(() => {
+    if (!bookId || !fs) return
+    let live = true
+    void readBook(fs, bookId)
+      .then((record) => {
+        if (live) setResumeAt({ bookId, position: record?.position ?? null })
+      })
+      .catch(() => {
+        // The row's value stands. A record that will not read is a book that is
+        // about to fail to open anyway, and this is not where that is reported.
+      })
+    return () => {
+      live = false
+    }
+  }, [bookId, fs])
+  const lastLocation =
+    resumeAt && resumeAt.bookId === bookId ? resumeAt.position : positionOf(bookId)
+
+  /**
+   * Hold the window shut until everything written has landed.
+   *
+   * Every write in this app is deliberately asynchronous — a page turn must not
+   * wait on a disk — and that is right until the process is about to go away, at
+   * which point an unfinished write is a highlight the reader will not get back.
+   * `pagehide` was the previous answer and it cannot be one: it STARTS the work
+   * and the webview is torn down underneath it.
+   *
+   * So the close is intercepted, the queue drained, and the window closed for
+   * real. The reader sees a window that takes a few milliseconds longer to shut,
+   * which is the correct price.
+   *
+   * BOUNDED. A queue that will not drain — a disk that has stopped answering —
+   * must not make the app unclosable, because then the only way out is to kill
+   * it and that loses strictly more. Two seconds is far past any real write.
+   */
+  useEffect(() => {
+    if (!isTauri()) return
+    let stop: (() => void) | undefined
+    void getCurrentWindow()
+      .onCloseRequested(async (event) => {
+        event.preventDefault()
+        /* WHAT IS HELD IN MEMORY FIRST, then what is on the queue. A queue can
+         * only drain what it has been given, and the thing most likely to be
+         * lost is the thing not yet handed over — a note being typed. */
+        flushBeforeClose()
+        await Promise.race([
+          writes.current.idle(),
+          new Promise((resolve) => setTimeout(resolve, 2000)),
+        ])
+        await getCurrentWindow().destroy()
+      })
+      .then((unlisten) => {
+        stop = unlisten
+      })
+      .catch((cause: unknown) => {
+        // Without the listener the window closes as it always did — writes in
+        // flight are at risk, which is the state this replaces rather than a
+        // new one. Reported, because it is the difference between "saved" and
+        // "probably saved".
+        console.error('Paper: could not hold the window open to finish saving', cause)
+      })
+    return () => stop?.()
+  }, [])
 
   /* Take the book in: its bytes first, THEN its record.
    *
@@ -986,7 +1080,7 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
              parsing. It is null for the first few milliseconds of an open —
              `bookId` is derived from the file's content — which is why the
              reader takes it through a ref rather than at mount. */
-          lastLocation={positionOf(bookId)}
+          lastLocation={lastLocation}
           reducedMotion={reducedMotion}
           onAddBooks={addBooks}
           dragging={dragging}

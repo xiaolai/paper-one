@@ -14,7 +14,7 @@ import { BOOKS_DIR } from './bookFolder'
 import { hasContentFile, writeIndex, type IndexFs, type IndexedBook } from './bookIndex'
 import { rescueStrandedMarks, restoreBook, trashBook } from './bookTrash'
 import { tagKey } from './library'
-import { writeQueue } from './writeQueue'
+import type { WriteQueue } from './writeQueue'
 
 /**
  * The library, bound to React.
@@ -91,7 +91,11 @@ async function readText(fs: IndexFs, path: string): Promise<string | null> {
   }
 }
 
-export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] = []): Library {
+export function useLibrary(
+  fs: IndexFs | null,
+  shared: WriteQueue,
+  initial: readonly IndexedBook[] = [],
+): Library {
   const [books, setBooks] = useState<readonly IndexedBook[]>(initial)
 
   /* ONE WRITE AT A TIME. Every write here goes to a fixed `<path>.writing`
@@ -101,7 +105,11 @@ export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] =
    *
    * The index is one key, so its rewrites also serialise: two commits could
    * otherwise both write it and the older one land last. */
-  const queue = useRef(writeQueue())
+  /* SHARED WITH THE MARKS STORE — see the note there. One queue per book means
+   * a record write and a marks write for the same book are serial, which is
+   * what the two separate queues could never guarantee. */
+  const queue = useRef(shared)
+  queue.current = shared
 
   /* The list as it is right now, for callbacks that run outside a render — a
    * throttled position save, or an import finishing several awaits after the

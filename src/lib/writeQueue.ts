@@ -35,6 +35,19 @@ export interface WriteQueue {
    * queue was added to prevent, so the two shapes cannot share one method.
    */
   append: (key: string, task: Task) => Promise<void>
+  /**
+   * Resolves when nothing is running or waiting, on any key.
+   *
+   * For the one moment that cannot be deferred: the window closing. Everything
+   * here is deliberately asynchronous — a page turn must not wait on a disk —
+   * and that is right until the process is about to go away, at which point an
+   * unfinished write is a lost highlight. The close is held for this instead.
+   *
+   * Resolves rather than rejects when a task failed: the caller is asking "is
+   * anything still in flight", and a write that failed is not. Its own promise
+   * already carried the failure to whoever queued it.
+   */
+  idle: () => Promise<void>
 }
 
 interface Waiting {
@@ -112,5 +125,18 @@ export function writeQueue(): WriteQueue {
   return {
     push: (key, task) => enqueue(key, task, 'replace'),
     append: (key, task) => enqueue(key, task, 'append'),
+    async idle() {
+      /* LOOPED, because draining one key can enqueue another — the library
+       * writes a book's record and then the index, on a different key, from
+       * inside the first task's continuation. Waiting once would return between
+       * those two and call the queue empty while the cache was still unwritten.
+       *
+       * It terminates because every task is already queued by the time its
+       * predecessor resolves: this waits for work in flight, not for work a
+       * reader might still create. */
+      while (running.size > 0 || pending.size > 0) {
+        await Promise.allSettled([...running.values()])
+      }
+    },
   }
 }

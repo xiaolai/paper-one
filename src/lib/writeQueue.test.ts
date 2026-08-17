@@ -147,4 +147,56 @@ describe('writeQueue', () => {
       )
     expect(settled).toBe('rejected')
   })
+
+  /**
+   * The one moment that cannot be deferred: the window closing.
+   *
+   * Everything here is asynchronous on purpose — a page turn must not wait on a
+   * disk — and that is right until the process is about to go away, when an
+   * unfinished write is a lost highlight.
+   */
+  describe('idle', () => {
+    it('resolves immediately when nothing is queued', async () => {
+      await expect(writeQueue().idle()).resolves.toBeUndefined()
+    })
+
+    it('waits for what is running and what is behind it', async () => {
+      const q = writeQueue()
+      const gate = defer()
+      const ran: string[] = []
+      void q.append('k', async () => {
+        await gate.promise
+        ran.push('first')
+      })
+      void q.append('k', async () => void ran.push('second'))
+      void q.append('other', async () => void ran.push('elsewhere'))
+      gate.resolve()
+      await q.idle()
+      expect(ran.sort()).toEqual(['elsewhere', 'first', 'second'])
+    })
+
+    /* A task that queues another — the library writes a record, then the index
+     * on a different key from inside the first task's continuation. Waiting once
+     * would return between the two and call the queue empty. */
+    it('waits for work a running task starts', async () => {
+      const q = writeQueue()
+      const ran: string[] = []
+      void q.append('a', async () => {
+        ran.push('a')
+        void q.push('b', async () => void ran.push('b'))
+      })
+      await q.idle()
+      expect(ran).toEqual(['a', 'b'])
+    })
+
+    /* Resolves rather than rejects: the question is "is anything in flight",
+     * and a failed write is not. Its own promise already carried the failure. */
+    it('resolves even when a task threw', async () => {
+      const q = writeQueue()
+      void q.append('k', async () => {
+        throw new Error('disk full')
+      }).catch(() => {})
+      await expect(q.idle()).resolves.toBeUndefined()
+    })
+  })
 })
