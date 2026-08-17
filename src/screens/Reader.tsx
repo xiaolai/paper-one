@@ -3,10 +3,10 @@ import { Library, Plus } from 'lucide-react'
 import type { Platform } from '../lib/metrics'
 import {
   ICON,
-  PANE_COLLAPSE_W,
   PANE_TRACK,
   STAGE_PADDING_X,
   measureForStep,
+  paneTakesTrack,
   proseBleed,
   proseGrid,
 } from '../lib/metrics'
@@ -137,7 +137,7 @@ export function Reader({
    * closing the pane widened the tracks immediately, while the pane was still
    * occupying its space, and the measure was clipped until the animation
    * caught up with the numbers. */
-  const paneVisible = state.pane !== null && windowWidth >= PANE_COLLAPSE_W
+  const paneVisible = state.pane !== null && paneTakesTrack(windowWidth, state.stepIdx)
   const estimated = windowWidth - (paneVisible ? PANE_TRACK : 0) - STAGE_PADDING_X * 2
   const measured = useElementWidth(stage)
   const available = measured ?? estimated

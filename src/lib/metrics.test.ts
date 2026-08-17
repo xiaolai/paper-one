@@ -2,11 +2,15 @@ import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_STEP_IDX,
   GUTTER,
+  GUTTER_MIN,
   MARGIN_COL,
   MEASURE,
+  PANE_TRACK,
   PROSE_GAP,
   READING_STEPS,
+  STAGE_PADDING_X,
   measureForStep,
+  paneTakesTrack,
   proseBleed,
   proseGrid,
   readingStep,
@@ -53,9 +57,24 @@ describe('proseGrid', () => {
   it('only sacrifices the measure when nothing else is left', () => {
     const grid = proseGrid(400, true)
     expect(grid.marginCol).toBe(0)
-    expect(grid.gutter).toBe(0)
+    /* The gutter FLOORS rather than vanishing — see `GUTTER_MIN`. This asserted
+     * 0 for as long as the gutter was allowed to go there, which is the state
+     * that let the text sit flush against its container. */
+    expect(grid.gutter).toBe(GUTTER_MIN)
     expect(grid.measure).toBeLessThan(MEASURE)
     expect(grid.measure).toBeGreaterThan(0)
+  })
+
+  /* The text must never touch the edge of the thing holding it, whatever
+   * squeezed it — a narrow window, an open pane, or a large reading step. */
+  it('never lets the gutter fall below the floor, at any width', () => {
+    for (let width = 0; width <= 2000; width += 7) {
+      for (const marks of [false, true]) {
+        const grid = proseGrid(width, marks)
+        expect(grid.gutter).toBeGreaterThanOrEqual(GUTTER_MIN)
+        expect(grid.gutter).toBeLessThanOrEqual(GUTTER)
+      }
+    }
   })
 
   it('never returns a negative track', () => {
@@ -65,6 +84,44 @@ describe('proseGrid', () => {
       expect(grid.measure).toBeGreaterThanOrEqual(0)
       expect(grid.marginCol).toBeGreaterThanOrEqual(0)
     }
+  })
+})
+
+/* The defect this pins is recorded in `dev-docs/pane-collapse-threshold.md`:
+ * a flat 1024px threshold let the pane take a track the grid could not pay
+ * for, and the gutters silently went to zero. The threshold has to move with
+ * the reading step, because the measure does. */
+describe('paneTakesTrack', () => {
+  const stageInner = (windowWidth: number) =>
+    windowWidth - PANE_TRACK - STAGE_PADDING_X * 2
+
+  it('lets the pane take a track only when the full gutter survives it', () => {
+    for (let stepIdx = 0; stepIdx < READING_STEPS.length; stepIdx++) {
+      const measure = measureForStep(stepIdx)
+      // Walk the width across the threshold and check the grid agrees.
+      for (let width = measure + 400; width <= measure + 800; width++) {
+        const grid = proseGrid(stageInner(width), false, measure)
+        if (paneTakesTrack(width, stepIdx)) {
+          expect(grid.gutter).toBe(GUTTER)
+          expect(grid.measure).toBe(measure)
+        }
+      }
+    }
+  })
+
+  it('moves with the reading step rather than sitting at one number', () => {
+    const widths = READING_STEPS.map((_, stepIdx) => {
+      let width = 0
+      while (!paneTakesTrack(width, stepIdx)) width += 1
+      return width
+    })
+    // Strictly increasing: a larger measure needs a wider window.
+    for (let i = 1; i < widths.length; i++) {
+      expect(widths[i]!).toBeGreaterThan(widths[i - 1]!)
+    }
+    // And every one of them is above the flat 1024 this replaced, which is
+    // exactly why the old constant was wrong rather than merely imprecise.
+    for (const width of widths) expect(width).toBeGreaterThan(1024)
   })
 })
 

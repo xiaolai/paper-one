@@ -114,22 +114,14 @@ export const SYS_ZONE_W: Record<Platform, number> = {
 /** §03 pane tab bar, matching the aside tabs. */
 export const PANE_TAB_H = 44
 
-/**
- * §06: below this width the pane stops taking a track of its own.
- *
- * Enforced in `WindowShell`, not merely declared. Left unconsumed it was a
- * false invariant — the pane stayed open on narrow windows and squeezed the
- * measure down to whatever was left.
- *
- * What it does BELOW the threshold changed, because collapsing was the wrong
- * answer: the pane simply did not appear, and the tab buttons and ⌘\ went on
- * looking exactly as available as they do at any other width. A control that
- * silently does nothing is indistinguishable from a broken one. The design's
- * own answer for a narrow window is that "the pane becomes a sheet" — it
- * overlays the reader instead of displacing it, which costs the measure
- * nothing and is why the threshold exists in the first place.
- */
-export const PANE_COLLAPSE_W = 1024
+/* THERE IS NO `PANE_COLLAPSE_W` ANY MORE. It was a flat 1024, and a flat number
+ * cannot answer this question: whether the pane can afford a track of its own
+ * depends on what the grid costs, and the grid costs `measure + …`, which §09
+ * varies per reading step. Between 1024 and the width the grid actually needed,
+ * the pane took a track the stage could not pay for and `proseGrid` silently
+ * spent the whole gutter on it — 164px of window widths at the default type
+ * size, 324px at the largest. See `paneTakesTrack`, and
+ * `dev-docs/pane-collapse-threshold.md` for the measurement. */
 
 /**
  * §09 reading steps. Sizes producing a fractional line box are not offered,
@@ -160,6 +152,20 @@ export const DEFAULT_STEP_IDX = 2
 /** §03 reading measure and margin gutter. */
 export const MEASURE = 660
 export const GUTTER = 56
+
+/**
+ * The narrowest the gutter is ever allowed to get.
+ *
+ * A FLOOR, not a preference. `proseGrid` sheds the gutter before the measure —
+ * correctly, since the measure is the one number §03 defines in characters —
+ * but it used to shed it all the way to zero, and a gutter of zero puts the
+ * text flush against the edge of whatever is holding it. That is not a smaller
+ * margin; it is the absence of one, and it reads as the reader being broken.
+ *
+ * Below this the MEASURE yields instead. Narrower text is a legible page; text
+ * touching its container is not.
+ */
+export const GUTTER_MIN = 24
 
 /**
  * The step at an index, or the default when there is no such step.
@@ -249,8 +255,12 @@ export function proseGrid(
     marginCol -= take
     over -= take
   }
+  /* DOWN TO THE FLOOR, and no further — see `GUTTER_MIN`. This took the gutter
+   * to zero, which is what let an open pane leave the text flush against the
+   * edge of the stage. The measure yields after this instead: narrower text is
+   * still a page, whereas text with no margin reads as a broken window. */
   if (over > 0) {
-    const take = Math.min(over, gutter)
+    const take = Math.min(over, Math.max(0, gutter - GUTTER_MIN))
     gutter -= take
     over -= take
   }
@@ -259,6 +269,33 @@ export function proseGrid(
   }
 
   return { gutter, measure, marginCol, gap }
+}
+
+/**
+ * Whether the side pane can take a track of its own at this window width.
+ *
+ * THE PREDICATE, not a threshold constant, and shared by the two places that
+ * must agree — `WindowShell`, which draws the pane as a track or as a sheet,
+ * and `Reader`, which reserves `PANE_TRACK` out of the stage before it has a
+ * box to measure. `Reader`'s own comment already warned that these two
+ * answering differently is how the measure and the pane come to disagree; a
+ * function they both call is what makes that impossible rather than merely
+ * discouraged.
+ *
+ * The width has to fit the pane, the stage's padding, the measure, both gaps
+ * and ONE WHOLE GUTTER. The margin column is deliberately not counted: it is
+ * decoration for companion marks and `proseGrid` is entitled to spend it. The
+ * gutter is not — it holds the ruler hint, and at zero the text touches the
+ * stage.
+ *
+ * Written from the tokens rather than as a number, so it follows them. The
+ * constant this replaces was 1024 for every reading step, which is below every
+ * width this returns.
+ */
+export function paneTakesTrack(windowWidth: number, stepIdx: number): boolean {
+  const needed =
+    measureForStep(stepIdx) + PANE_TRACK + STAGE_PADDING_X * 2 + GUTTER + PROSE_GAP * 2
+  return windowWidth >= needed
 }
 
 /**
@@ -373,6 +410,14 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
     // screen following it.
     '--radius-chip': `${RADIUS.chip}px`,
     '--radius-mark': `${RADIUS.mark}px`,
+    // The one rung of the §08 ramp a stylesheet needs: the app mark in the book
+    // chip is drawn by CSS (a mask over `currentColor`) rather than by a lucide
+    // component, so it cannot take `size={ICON.control}` the way every other
+    // control in that bar does. Published so it sits at the same size as its
+    // neighbours BY DERIVATION rather than by a 15 written down twice. Only
+    // this rung, because publishing the other four would put four tokens that
+    // nothing reads next to the one that does.
+    '--icon-control': px(ICON.control),
     // §12 layer order, published so stylesheets stop restating the numbers.
     '--z-ruler-band': String(Z.rulerBand),
     '--z-prose': String(Z.prose),

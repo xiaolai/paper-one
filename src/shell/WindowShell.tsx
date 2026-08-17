@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { PANE_COLLAPSE_W, PANE_W, type Platform } from '../lib/metrics'
+import { PANE_W, paneTakesTrack, type Platform } from '../lib/metrics'
 import { useAvailableWidth } from '../lib/useAvailableWidth'
 import type { AppState } from '../lib/state'
 import { LeadingCard } from './LeadingCard'
@@ -47,7 +47,11 @@ export function WindowShell({
    * threshold exists — the measure is not squeezed, since an overlay displaces
    * nothing — while letting the control do what it says it does. */
   const width = useAvailableWidth()
-  const asSheet = width < PANE_COLLAPSE_W
+  /* Asked of `paneTakesTrack` rather than compared against a constant, and the
+   * reading step is now part of the question: the grid this has to leave room
+   * for is `measure + …`, and §09 gives every step a different measure. A flat
+   * 1024 let the pane in at widths where the gutters then went to zero. */
+  const asSheet = !paneTakesTrack(width, state.stepIdx)
   const paneOpen = state.pane !== null
 
   return (
