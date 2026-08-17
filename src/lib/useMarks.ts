@@ -5,7 +5,7 @@ import { scanAllMarks, type IndexFs } from './bookIndex'
 import { upsertOverlapping } from './markMatch'
 import {
   createMark,
-  parseMarks,
+  validMarks,
   removeMark as removeFrom,
   updateNote as updateNoteIn,
   type Mark,
@@ -139,7 +139,7 @@ export function useMarks(
         const raw = await readMarks(fs, bookId)
         // Parsed through the same validator the shared store used: this is a
         // file on disk, and a mark with no CFI cannot be drawn.
-        if (live) setLoaded({ bookId, marks: parseMarks(JSON.stringify(raw)) })
+        if (live) setLoaded({ bookId, marks: validMarks(raw) })
       })
       .catch(() => {
         if (live) setLoaded({ bookId, marks: [] })
@@ -203,7 +203,7 @@ export function useMarks(
     void scanAllMarks(fs)
       .then((raw) => {
         scanned.current = true
-        setAll(parseMarks(JSON.stringify(raw)))
+        setAll(validMarks(raw))
       })
       .catch(() => {
         // NOT marked scanned: a failed scan has not established that there is
@@ -257,7 +257,7 @@ export function useMarks(
            * removal leaves is the evidence, exactly as `updateBook` uses it. */
           if (!(await fs.exists(folderOf(targetId)))) return
           const trashedBefore = await fs.exists(trashOf(targetId))
-          const before = parseMarks(JSON.stringify(await readMarks(fs, targetId)))
+          const before = validMarks(await readMarks(fs, targetId))
           const next = mutate(before)
           if (next === before) return
           await writeMarks(fs, targetId, next)
@@ -371,7 +371,7 @@ export function useMarks(
          * ran in, the answer is the same. */
         let waiting: Mark[] = []
         try {
-          waiting = parseMarks(JSON.stringify(await readMarks(fs, from)))
+          waiting = validMarks(await readMarks(fs, from))
         } catch (cause) {
           // The old file is there and will not read. Left alone, and said out
           // loud, rather than quietly treated as a book with no marks.

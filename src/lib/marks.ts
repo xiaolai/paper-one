@@ -371,6 +371,19 @@ export function parseMarks(raw: string | null): Mark[] {
   } catch {
     return []
   }
+  return validMarks(parsed)
+}
+
+/**
+ * The same validation, for a value that has already been parsed.
+ *
+ * `readMarks` returns `unknown[]` off a book's folder, and every caller was
+ * re-serialising it just to hand it back to `parseMarks` — `parseMarks(JSON
+ * .stringify(raw))`, four times. A round trip through a string to reach a
+ * function whose first act is to undo it, on every mark of every book the Notes
+ * pane lists.
+ */
+export function validMarks(parsed: unknown): Mark[] {
   if (!Array.isArray(parsed)) return []
   return dedupeById(
     parsed.filter(isMark).map((row) => ({

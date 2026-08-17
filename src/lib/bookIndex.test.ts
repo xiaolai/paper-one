@@ -338,3 +338,46 @@ describe('a cached index with no books directory', () => {
     expect(books).toEqual([])
   })
 })
+
+/**
+ * A folder that is not a book yet.
+ *
+ * `scanBooks` deliberately skips a directory with no `book.json` — a
+ * half-finished import is simply not on the shelf. But the cache was checked by
+ * comparing the DIRECTORY listing against the cached BOOKS, which is a different
+ * question: the stray folder disagreed forever. Every launch rescanned, wrote an
+ * index that still did not mention it, and disagreed again. One abandoned folder
+ * turned the cache off permanently, and quietly.
+ */
+describe('a stray folder beside the books', () => {
+  const withStray = () =>
+    fakeFs({
+      [`${BOOKS_DIR}/book_a/book.json`]: '{"title":"Moby-Dick","author":"M"}',
+      [`${BOOKS_DIR}/book_a/content.epub`]: 'WHALE',
+      // An import that never finished: bytes, no record.
+      [`${BOOKS_DIR}/half_done/content.epub`]: 'PARTIAL',
+    })
+
+  it('is scanned once and then the cache is believed', async () => {
+    const fs = withStray()
+    expect((await loadShelf(fs)).rescanned).toBe(true)
+    expect((await loadShelf(fs)).rescanned).toBe(false)
+  })
+
+  it('still notices a book actually appearing', async () => {
+    const fs = withStray()
+    await loadShelf(fs)
+    fs.store.set(
+      `${BOOKS_DIR}/book_b/book.json`,
+      new TextEncoder().encode('{"title":"New","author":"N"}'),
+    )
+    expect((await loadShelf(fs)).rescanned).toBe(true)
+  })
+
+  it('still notices the stray folder going away', async () => {
+    const fs = withStray()
+    await loadShelf(fs)
+    fs.store.delete(`${BOOKS_DIR}/half_done/content.epub`)
+    expect((await loadShelf(fs)).rescanned).toBe(true)
+  })
+})

@@ -60,6 +60,23 @@ export interface IndexFs extends VaultFs {
 interface StoredIndex {
   readonly version: 1
   readonly books: readonly IndexedBook[]
+  /**
+   * Every directory under `books/` when this index was built — not just the
+   * ones that produced a book.
+   *
+   * The check below asks whether the library has CHANGED since the scan, and
+   * comparing the directory listing against the cached books answers a
+   * different question: a folder the scan deliberately skipped, because it has
+   * no `book.json` yet, is a directory with no book. An abandoned import or a
+   * half-finished one therefore disagreed forever — every launch rescanned,
+   * wrote an index that still did not mention it, and disagreed again. The
+   * cache stopped working entirely, quietly, for one stray folder.
+   *
+   * Not circular: this is what the DIRECTORY looked like, and the directory is
+   * what it is being compared with. It says nothing about whether those folders
+   * were readable, which is the scan's business and is checked separately.
+   */
+  readonly folders?: readonly string[]
 }
 
 /**
@@ -207,7 +224,15 @@ export async function loadShelf(fs: IndexFs): Promise<{ books: IndexedBook[]; re
   const cached = await readIndex(fs)
   if (cached) {
     const folders = await folderNames(fs)
-    const known = new Set(cached.books.map((one) => folderOf(one.bookId).slice(BOOKS_DIR.length + 1)))
+    /* WHAT THE DIRECTORY HELD AT SCAN TIME, when the index records it — see
+     * `StoredIndex.folders`. Falling back to the cached books is what an index
+     * written before that field existed can offer, and it is the old, weaker
+     * answer: correct for a library where every folder is a book, and wrong
+     * forever for one that has a stray folder in it. */
+    const before =
+      cached.folders ??
+      cached.books.map((one) => folderOf(one.bookId).slice(BOOKS_DIR.length + 1))
+    const known = new Set(before)
     const agrees = folders.length === known.size && folders.every((name) => known.has(name))
     /* AND EVERY ENTRY KNOWS WHETHER IT HAS BYTES. `hasContent` is derived by the
      * scan, so an index written before it was recorded has none — and `canOpen`
@@ -218,15 +243,23 @@ export async function loadShelf(fs: IndexFs): Promise<{ books: IndexedBook[]; re
     if (agrees && complete) return { books: [...cached.books], rescanned: false }
   }
   const books = await scanBooks(fs)
-  await writeIndex(fs, books).catch(() => {})
+  // The scan has just walked it, so this is the one caller that knows.
+  await writeIndex(fs, books, await folderNames(fs).catch(() => undefined)).catch(() => {})
   return { books, rescanned: true }
 }
 
-async function readIndex(fs: IndexFs): Promise<{ books: readonly IndexedBook[] } | null> {
+async function readIndex(
+  fs: IndexFs,
+): Promise<{ books: readonly IndexedBook[]; folders?: readonly string[] } | null> {
   try {
     const raw = new TextDecoder().decode(await fs.readFile(INDEX_FILE))
     const books = parseIndex(raw)
-    return books ? { books } : null
+    if (!books) return null
+    const shape = JSON.parse(raw) as Partial<StoredIndex>
+    const folders = Array.isArray(shape.folders)
+      ? shape.folders.filter((one): one is string => typeof one === 'string')
+      : undefined
+    return { books, ...(folders ? { folders } : {}) }
   } catch {
     return null
   }
@@ -251,8 +284,17 @@ async function folderNames(fs: IndexFs): Promise<string[]> {
 }
 
 /** Write the cache. Atomic, like every other write here. */
-export async function writeIndex(fs: IndexFs, books: readonly IndexedBook[]): Promise<void> {
-  const payload: StoredIndex = { version: 1, books }
+export async function writeIndex(
+  fs: IndexFs,
+  books: readonly IndexedBook[],
+  folders?: readonly string[],
+): Promise<void> {
+  /* The DIRECTORY listing this describes, when the caller has one — see
+   * `StoredIndex.folders`. A write that follows an ordinary mutation does not:
+   * it knows the books it is saving and nothing about stray folders, so it
+   * leaves the field alone rather than asserting the library is exactly its own
+   * books. Asserting that is what made one abandoned folder rescan forever. */
+  const payload: StoredIndex = { version: 1, books, ...(folders ? { folders } : {}) }
   await atomicWrite(fs, INDEX_FILE, new TextEncoder().encode(JSON.stringify(payload)))
 }
 
