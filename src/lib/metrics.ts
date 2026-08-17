@@ -20,41 +20,71 @@ export const LINE = 34
 /** §03 side pane. Fixed width, left or right by user choice. */
 export const PANE_W = 400
 
-/** §03 concentric inset. Nested card radius = parent radius − inset. */
-export const CONCENTRIC_INSET = 6
+/**
+ * The window's own corner radius, MEASURED — not chosen.
+ *
+ * From the alpha channel of a shadowless window capture, which is the only
+ * reading that is not a guess: a colour threshold against a light backdrop gave
+ * 19 and against a dark one 13, for a corner that is exactly 21.
+ *
+ *   36.0pt  Finder — native AppKit
+ *   21.0pt  Paper — and every other Tauri window
+ *
+ * NOT SETTABLE from here, and that was checked rather than assumed. There is no
+ * corner-radius API in `tauri` or in `tao` (which exposes only `set_has_shadow`),
+ * the frame is drawn by the window server for a `Titled` window, the binary
+ * already links the macOS 26.4 SDK so it is not an appearance opt-in, and tao
+ * builds the same style-mask class Finder uses. Changing it would mean a
+ * borderless transparent window drawing its own corners and shadow — giving up
+ * the native shadow and resize behaviour — or an upstream change in tao.
+ *
+ * So it is a fact to design against, which is what the two constants below do.
+ */
+export const WINDOW_RADIUS = 21
+
+/**
+ * §03 concentric inset. Nested card radius = parent radius − inset.
+ *
+ * 8, matching Finder: its sidebar sits 8pt inside a 36pt window and carries 28,
+ * which is exactly 36 − 8. The rule is Apple's own concentricity guidance and
+ * Finder follows it precisely.
+ */
+export const CONCENTRIC_INSET = 8
 
 /** What the pane costs in the row, including its concentric margins. */
 export const PANE_TRACK = PANE_W + CONCENTRIC_INSET * 2
 
-/** Radius of the window card and the pane card. */
-export const CARD_RADIUS = 20
+/* THERE IS NO `CARD_RADIUS`. It was 20, with `--card-radius-inner` derived from
+ * it as 20 − 6 = 14, and both were injected as custom properties on every
+ * render and referenced by NOTHING. Its comment claimed to be "the radius of
+ * the window card and the pane card", which made it worse than merely dead: the
+ * pane card is `LeadingCard` and takes `--leading-card-radius`, so anyone
+ * reading the token to find out how a card is drawn was reading a token that
+ * draws nothing and being told it drew that.
+ *
+ * The concentric RULE it encoded is real and is kept — see `CONCENTRIC_INSET`
+ * and `LEADING_CARD_RADIUS`. What is gone is a second, unused expression of it
+ * that could only ever disagree with the one in use. */
 
 /**
  * Radius of a floating leading card (Contents, Companion, Collections).
  *
- * Measured on macOS 26.6.1 rather than taken from the prototype. Capturing
- * windows with `screencapture -o` (no shadow) and reading the alpha corner
- * gives, in points:
+ * DERIVED, not chosen — the rule §05 states, applied to the real parent.
  *
- *   36  Finder, Books, Dictionary, ChatGPT — native AppKit
- *   27  Chrome, Ghostty
- *   21  Paper and VMark — both Tauri
- *   15  older Electron apps
+ * It was 26, picked to match the ABSOLUTE radius of Finder's sidebar. That
+ * reproduced native's number while inverting native's relationship: Finder's
+ * sidebar is TIGHTER than the window holding it (28 inside 36), and a 26 inside
+ * our 21 is rounder than the window it sits in. A card whose corners bulge past
+ * its container cannot read as native, whatever value it borrowed.
  *
- * Finder's floating sidebar sits 8pt inside its 36pt window and carries a
- * radius of roughly 28 — i.e. concentric, parent minus inset, which is what
- * §05 and Apple's own concentricity guidance both describe.
+ * The earlier 14 was rejected as "reading square next to native surfaces", and
+ * that diagnosis mistook the cause: it looked wrong because it was concentric
+ * with a SIMULATED 20px window card rather than with the real 21pt frame — off
+ * by the inset, not by the idea. Concentric with the real window is 13.
  *
- * The prototype's 14 came from that same rule applied to its SIMULATED 20px
- * window card. Against a real window the parent radius is the OS's, so 14 is
- * far tighter than any native surface and reads as square next to them. 26
- * matches the native sidebar's proportions.
- *
- * Worth knowing: our window is 21pt where every native app is 36pt. That gap
- * is set by the window's own configuration, not by anything here, and it is
- * the reason a strictly concentric card would still look tight.
+ * Both Paper and Finder now follow one rule: parent minus inset.
  */
-export const LEADING_CARD_RADIUS = 26
+export const LEADING_CARD_RADIUS = WINDOW_RADIUS - CONCENTRIC_INSET
 
 /** §03 titlebar: 52 on macOS, where it overlays and cards run full height. */
 export const TITLEBAR_H: Record<Platform, number> = {
@@ -327,8 +357,6 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
     '--line-box': px(LINE),
     '--pane-w': px(PANE_W),
     '--pane-track': px(PANE_TRACK),
-    '--card-radius': px(CARD_RADIUS),
-    '--card-radius-inner': px(CARD_RADIUS - CONCENTRIC_INSET),
     '--leading-card-radius': px(LEADING_CARD_RADIUS),
     '--concentric-inset': px(CONCENTRIC_INSET),
     '--titlebar-h': px(TITLEBAR_H[platform]),
