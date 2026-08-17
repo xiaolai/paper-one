@@ -1,6 +1,6 @@
 import {
   AudioLines,
-  ChevronLeft,
+  BookOpen,
   Library as LibraryIcon,
   ListTree,
   Minus,
@@ -156,34 +156,6 @@ export function TitleBar({
         inert={chromeHidden}
         data-tauri-drag-region
       >
-        {/* HOME, and it is a gap rather than a flourish.
-            The only route to the shelf from an open book was the command
-            palette: `onOpenLibrary` exists but is rendered inside the reader's
-            EMPTY state, so it disappears the moment there is a book to read.
-            Meanwhile this bar has carried "Switch book" all along — you could
-            move between books but not reach the place they live. Paper now
-            opens on the library, which makes it home, and home had no door.
-
-            A TOGGLE, because the return trip has the same hole: going to the
-            shelf with a book open and wanting it back was the palette too. It
-            is absent rather than inert when there is nothing to go back to. */}
-        {(isReader || hasBook) && (
-          <button
-            type="button"
-            className={styles.upButton}
-            title={isReader ? `Library · ${comboFor('⌘L', platform)}` : 'Back to the book'}
-            aria-label={isReader ? 'Library' : 'Back to the book'}
-            onClick={() =>
-              dispatch({ type: 'goScreen', screen: isReader ? 'library' : 'reader' })
-            }
-          >
-            {isReader ? (
-              <LibraryIcon size={ICON.control} strokeWidth={ICON.stroke} />
-            ) : (
-              <ChevronLeft size={ICON.control} strokeWidth={ICON.stroke} />
-            )}
-          </button>
-        )}
         {/* Live again: the switcher overlay exists now, so the chip opens it
             rather than being a label that swallowed every click. */}
         <button
@@ -269,6 +241,55 @@ export function TitleBar({
             </button>
           </>
         )}
+        {/* HOME, and it is a gap rather than a flourish.
+            The only route to the shelf from an open book was the command
+            palette: `onOpenLibrary` exists but is rendered inside the reader's
+            EMPTY state, so it disappears the moment there is a book to read.
+            Meanwhile this bar has carried "Switch book" all along — you could
+            move between books but not reach the place they live. Paper opens on
+            the library now, which makes it home, and home had no door.
+
+            A TOGGLE, because the return trip has the same hole: going to the
+            shelf with a book open and wanting it back was the palette too. It
+            names the DESTINATION both ways — a shelf of books, or the book
+            itself. A chevron would say "back", which is a direction rather than
+            a place, and this control has two of them.
+
+            ALWAYS DRAWN, including on the shelf with nothing open. It was gated
+            on `hasBook` on the reasoning that a control which cannot act should
+            not be shown — and that reasoning is wrong twice over. It CAN act:
+            the reader's empty state is where a book gets dropped or picked, so
+            going there is a real destination rather than a dead end. And the
+            gate made the pair of controls read as one control that sometimes
+            exists, on the screen Paper now OPENS on. The same instinct hid the
+            Open Library lookup behind an invisible predicate and produced the
+            same question — "why is it missing?" — which is the answer to
+            whether the predicate was a good idea. */}
+        <button
+          type="button"
+          className={styles.action}
+          /* THREE STATES, not two. "Back to the book" is a lie when there is
+             no book — the destination is the reader's empty state, which is
+             where a book gets dropped or picked. The control is always drawn;
+             what it is NAMED still has to be true. */
+          title={
+            isReader
+              ? `Library · ${comboFor('⌘L', platform)}`
+              : hasBook
+                ? `Back to the book · ${comboFor('⌘L', platform)}`
+                : `Open a book · ${comboFor('⌘L', platform)}`
+          }
+          aria-label={isReader ? 'Library' : hasBook ? 'Back to the book' : 'Open a book'}
+          onClick={() =>
+            dispatch({ type: 'goScreen', screen: isReader ? 'library' : 'reader' })
+          }
+        >
+          {isReader ? (
+            <LibraryIcon size={ICON.control} strokeWidth={ICON.stroke} />
+          ) : (
+            <BookOpen size={ICON.control} strokeWidth={ICON.stroke} />
+          )}
+        </button>
         <button
           type="button"
           className={styles.action}
