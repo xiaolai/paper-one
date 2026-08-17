@@ -265,6 +265,29 @@ export function Reader({
     [state, book, selection, paneVisible, setSelection],
   )
 
+  /**
+   * Show a mark in Notes — focus it, then open the pane.
+   *
+   * Three routes reach this: clicking a drawn highlight, clicking one in the
+   * margin, and making a note from the selection. Opening the panel is NOT
+   * showing the mark, which is why both halves are always needed: the list holds
+   * every mark in every book, so landing at the top of it leaves the reader to
+   * find the one they just clicked. Written out three times, one of them was
+   * always going to drift.
+   *
+   * `null` OPENS THE PANE WITHOUT FOCUSING ANYTHING, which is what the note
+   * route did when a mark could not be made — kept deliberately, because a
+   * refactor that quietly stops opening a panel is a refactor that changed
+   * behaviour while claiming to move code.
+   */
+  const showInNotes = useCallback(
+    (id: string | null, editing = false) => {
+      if (id) marking.focusMark(id, editing)
+      dispatch({ type: 'openPane', pane: 'notes' })
+    },
+    [marking, dispatch],
+  )
+
   return (
     <div className={styles.reader} inert={inert}>
       <div className={styles.column} data-platform={platform}>
@@ -349,8 +372,7 @@ export function Reader({
                            just clicked. */
                         const hit = marks.current.find((m) => m.cfi === cfi)
                         if (!hit) return
-                        marking.focusMark(hit.id)
-                        dispatch({ type: 'openPane', pane: 'notes' })
+                        showInNotes(hit.id)
                       }}
                     />
                   </div>
@@ -365,10 +387,7 @@ export function Reader({
                         stage={stage}
                         doc={book.doc}
                         position={book.position}
-                        onSelect={(picked) => {
-                          marking.focusMark(picked.id)
-                          dispatch({ type: 'openPane', pane: 'notes' })
-                        }}
+                        onSelect={(picked) => showInNotes(picked.id)}
                       />
                     </div>
                   )}
@@ -387,8 +406,7 @@ export function Reader({
                          and click "Add a note" a second time. */
                       const created = mark(selected?.note ?? '')
                       const target = created ?? selected
-                      if (target) marking.focusMark(target.id, true)
-                      dispatch({ type: 'openPane', pane: 'notes' })
+                      showInNotes(target?.id ?? null, true)
                     }}
                     onCopy={() => {
                       /* Reported when it fails. Clipboard access can be absent

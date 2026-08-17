@@ -210,7 +210,7 @@ describe('keepOwnCopy', () => {
 
   it('keeps a copy and reports it as added', async () => {
     const fs = fakeFs()
-    const out = await keepOwnCopy(fs, fileOf('moby.epub', 'WHALE'), '/Users/x/moby.epub')
+    const out = (await keepOwnCopy(fs, fileOf('moby.epub', 'WHALE'), '/Users/x/moby.epub'))!
     expect(out.status).toBe('added')
     expect(out.bookId).toBeTruthy()
     expect(fs.files.has(contentPathIn(out.bookId!, 'moby.epub'))).toBe(true)
@@ -221,13 +221,13 @@ describe('keepOwnCopy', () => {
   it('reports the same bytes as a duplicate the second time', async () => {
     const fs = fakeFs()
     await keepOwnCopy(fs, fileOf('moby.epub', 'WHALE'), null)
-    const again = await keepOwnCopy(fs, fileOf('moby-copy.epub', 'WHALE'), null)
+    const again = (await keepOwnCopy(fs, fileOf('moby-copy.epub', 'WHALE'), null))!
     expect(again.status).toBe('duplicate')
   })
 
   it('falls back to the filename when there is no path', async () => {
     const fs = fakeFs()
-    expect((await keepOwnCopy(fs, fileOf('moby.epub', 'W'), null)).path).toBe('moby.epub')
+    expect((await keepOwnCopy(fs, fileOf('moby.epub', 'W'), null))!.path).toBe('moby.epub')
   })
 
   it('leaves no temporary file behind when the write fails', async () => {
@@ -235,5 +235,16 @@ describe('keepOwnCopy', () => {
     fs.failWrite = 'books'
     await expect(keepOwnCopy(fs, fileOf('moby.epub', 'W'), null)).rejects.toThrow()
     expect([...fs.files.keys()].some((k) => k.endsWith('.writing'))).toBe(false)
+  })
+
+  /* A stop between the hash and the write is honoured, and reported as a stop
+   * rather than as a failure — the two look identical to a counter and entirely
+   * different to a reader. */
+  it('returns null when it is stopped after hashing', async () => {
+    const fs = fakeFs()
+    const stop = new AbortController()
+    stop.abort()
+    expect(await keepOwnCopy(fs, fileOf('moby.epub', 'W'), null, stop.signal)).toBeNull()
+    expect(fs.files.size).toBe(0)
   })
 })

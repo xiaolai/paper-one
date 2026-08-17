@@ -127,47 +127,10 @@ export async function importFolder(
     if (signal?.aborted) break
     const name = path.slice(path.lastIndexOf('/') + 1)
     onProgress?.({ done: index, total: paths.length, current: name })
-    try {
-      const bytes = await fs.readOutside(path)
-      /* Checked AGAIN after the read, which is the long part of one book — a
-       * 40MB file off a network volume takes long enough that stopping only
-       * between books means "stop" waits for it. Anything after this point is
-       * hashing and a rename, which are fast and better finished than half-done. */
-      if (signal?.aborted) break
-      const file = new File([bytes as BlobPart], name)
-      const bookId = await bookIdFor(file)
-      // And again between the hash and the write. What remains after this point
-      // is one file, which is better finished than half-done.
-      if (signal?.aborted) break
-
-      /* INTO THE BOOK'S OWN FOLDER, which is where every other part of a book
-       * lives. This wrote `books/<id>.<ext>` at the top level until phase 4, and
-       * a folder import was the last thing still producing the flat layout. */
-      const at = contentPathIn(bookId, name)
-      const held = await fs.exists(at)
-      // Renamed into place by `atomicWrite`, so an interrupted import cannot
-      // leave a truncated file that `exists` will later call a book.
-      if (!held) await atomicWrite(fs, at, bytes)
-      outcomes.push({
-        path,
-        /* Whether the file was ALREADY there, checked before writing. An
-         * earlier version probed a path without the extension — one that never
-         * exists — so every book reported as added; and it could not fall back
-         * to a byte count, which is the input's length either way. */
-        status: held ? 'duplicate' : 'added',
-        bookId,
-        name,
-      })
-    } catch (cause) {
-      /* Named individually rather than counted. "4 of 300 failed" tells a reader
-       * nothing they can act on; the path and the reason tell them which book to
-       * look at and usually why. */
-      outcomes.push({
-        path,
-        status: 'failed',
-        reason: cause instanceof Error ? cause.message : 'could not be read',
-      })
-    }
+    const outcome = await importOne(fs, path, name, signal)
+    // `null` is a stop, not a failure — see `importOne`.
+    if (!outcome) break
+    outcomes.push(outcome)
     // Between books, not inside one: this is the whole of what keeps a
     // three-hundred-book import from freezing the window.
     await yieldToPaint()
@@ -205,15 +168,62 @@ export async function keepOwnCopy(
   fs: VaultFs,
   file: File,
   path: string | null,
-): Promise<ImportOutcome> {
+  signal?: AbortSignal,
+): Promise<ImportOutcome | null> {
   const bookId = await bookIdFor(file)
+  /* CHECKED BETWEEN THE HASH AND THE WRITE. Hashing is the second long step of
+   * one book, and stopping only between books means "stop" waits for it. What
+   * remains after this point is one file, which is better finished than
+   * half-done — so this is the last place a stop is honoured. */
+  if (signal?.aborted) return null
+
+  /* INTO THE BOOK'S OWN FOLDER, which is where every other part of a book
+   * lives. A folder import wrote `books/<id>.<ext>` at the top level until
+   * phase 4, and was the last thing producing the flat layout. */
   const at = contentPathIn(bookId, file.name)
   const held = await fs.exists(at)
+  // Renamed into place by `atomicWrite`, so an interrupted import cannot leave
+  // a truncated file that `exists` will later call a book.
   if (!held) await atomicWrite(fs, at, new Uint8Array(await file.arrayBuffer()))
   return {
     path: path ?? file.name,
+    /* Whether the file was ALREADY there, checked before writing. An earlier
+     * version probed a path without the extension — one that never exists — so
+     * every book reported as added; and it could not fall back to a byte count,
+     * which is the input's length either way. */
     status: held ? 'duplicate' : 'added',
     bookId,
     name: file.name,
+  }
+}
+
+/**
+ * One book of a folder import: read it, keep a copy, say what happened.
+ *
+ * `null` means STOPPED, which is not a failure and must not be reported as one.
+ * Everything else — including being unable to read the file — is an outcome the
+ * reader gets to see, named individually rather than counted: "4 of 300 failed"
+ * tells them nothing they can act on, while the path and the reason tell them
+ * which book to look at and usually why.
+ */
+async function importOne(
+  fs: DirFs,
+  path: string,
+  name: string,
+  signal?: AbortSignal,
+): Promise<ImportOutcome | null> {
+  try {
+    const bytes = await fs.readOutside(path)
+    /* Checked AGAIN after the read, which is the long part of one book — a 40MB
+     * file off a network volume takes long enough that stopping only between
+     * books means "stop" waits for it. */
+    if (signal?.aborted) return null
+    return await keepOwnCopy(fs, new File([bytes as BlobPart], name), path, signal)
+  } catch (cause) {
+    return {
+      path,
+      status: 'failed',
+      reason: cause instanceof Error ? cause.message : 'could not be read',
+    }
   }
 }

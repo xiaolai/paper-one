@@ -348,7 +348,10 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
           const outcomes: ImportOutcome[] = []
           for (const { file, path } of picked) {
             try {
-              outcomes.push(await keepOwnCopy(fs, file, path))
+              /* Never null without a signal — the only `null` is a stop, and
+               * the picker has nothing to stop. */
+              const kept = await keepOwnCopy(fs, file, path)
+              if (kept) outcomes.push(kept)
             } catch (cause) {
               console.error('Paper: could not add', path, cause)
               outcomes.push({ path, status: 'failed', name: file.name })
