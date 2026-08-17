@@ -28,7 +28,6 @@ import {
   type ImportOutcome,
   type ImportProgress,
 } from './lib/importFolder'
-import { lookupMetadata } from './lib/metadataLookup'
 import { BookSwitcher } from './overlays/BookSwitcher'
 import { CommandPalette } from './overlays/CommandPalette'
 import { TitleBar } from './shell/TitleBar'
@@ -238,20 +237,26 @@ export function App({ storage, fs, initialBooks }: AppProps) {
            * reason Paper keeps its own copy. */
           const original = entry.origin
           if (original) {
-            /* A URL GOES BACK AS A URL. `origin` holds either kind of address —
-             * see the record effect — and handing one to the file reader made
-             * every book ever opened from a URL report that it could not be
-             * opened, having taken the trouble to remember exactly how. The
-             * reader takes a string source directly. */
+            /* AN ORIGIN IS A PATH OR AN ADDRESS, and which one is not always
+             * decidable by looking. `https://…` is obvious; `/sample.epub` is
+             * not — it is a relative URL served by the app itself, and it is
+             * what the bundled sample book has been opened by all along. Read as
+             * a filesystem path it is simply absent, so pattern-matching on the
+             * scheme reported the one book most likely to still work as
+             * unopenable.
+             *
+             * So: try it as a file, and fall back to opening it as an address.
+             * The reader takes a string source directly, and a genuinely bad
+             * origin still fails — one step later, through the reader's own
+             * error path, which is where an unopenable book belongs. */
             if (/^https?:\/\//i.test(original)) {
               openBook(original)
               return
             }
             void readBookAt(original)
               .then((file) => openBook(file, original))
-              .catch((second: unknown) => {
-                console.error('Paper: could not reopen', original, second)
-                setImportNotice('That book could not be opened. Try adding it again.')
+              .catch(() => {
+                openBook(original)
               })
             return
           }
@@ -327,44 +332,6 @@ export function App({ storage, fs, initialBooks }: AppProps) {
    * field for each; a book is a folder now, so both are derived from its id. */
   const isShelved = Boolean(openRow)
 
-
-  /**
-   * Ask Open Library about one book — Decision 1's only network call.
-   *
-   * Explicit, per book, and never on import. What comes back is applied to the
-   * row rather than shown as a dialog to approve: the control is only offered
-   * on a book that is MISSING an author, so there is nothing of the reader's to
-   * overwrite and a confirmation would be ceremony over an empty field.
-   *
-   * A failure of any kind — offline, no match, a shape that was not expected —
-   * says one thing, because from here they are one thing.
-   */
-  const lookUp = useCallback(
-    (entry: IndexedBook) => {
-      void (async () => {
-        const found = await lookupMetadata({ title: entry.title, author: entry.author })
-        if (!found) {
-          setImportNotice('Nothing found for that book.')
-          return
-        }
-        /* `update`, which no-ops when the book has gone. A lookup is a slow
-         * call against a record captured when the reader clicked, so by the time
-         * it answers the book may have been removed — and anything that WROTE
-         * unconditionally would bring it back. `openedAt` is untouched: a lookup
-         * is not a read, and the shelf is ordered by recency. */
-        update(entry.bookId, (record) => ({
-          ...record,
-          ...(found.title ? { title: found.title } : {}),
-          ...(found.author ? { author: found.author } : {}),
-          ...(found.publisher ? { publisher: found.publisher } : {}),
-          ...(found.published ? { published: found.published } : {}),
-          ...(found.subjects?.length ? { subjects: found.subjects } : {}),
-        }))
-        setImportNotice(`Updated from ${found.source}.`)
-      })()
-    },
-    [update],
-  )
 
 
   /**
@@ -982,7 +949,6 @@ export function App({ storage, fs, initialBooks }: AppProps) {
             onSetFinished={(bookId, finished) =>
               update(bookId, (record) => ({ ...record, finished }))
             }
-            onLookUp={lookUp}
             onAddFolder={addFolder}
             importing={importing}
             importNotice={importNotice}

@@ -260,8 +260,7 @@
    reader reached for to back out was covered by the one that destroys the row.
    Hidden AND unclickable: `opacity: 0` alone leaves an invisible target. */
 .cell[data-confirming='true'] .tagButton,
-.cell[data-confirming='true'] .finishButton,
-.cell[data-confirming='true'] .lookupButton {
+.cell[data-confirming='true'] .finishButton {
   opacity: 0;
   pointer-events: none;
 }
@@ -474,34 +473,4 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* The lookup control. Same reveal-on-hover rule as the others, and offered only
-   on a book that is missing an author — Decision 1 makes this the one thing on
-   the screen that uses the network, so it should not sit on every row. */
-.lookupButton {
-  position: absolute;
-  inset-block-start: 6px;
-  inset-inline-end: 102px;
-  display: grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  border: 0;
-  border-radius: 999px;
-  background: var(--surface-raised, rgb(0 0 0 / 0.55));
-  color: var(--text-on-raised, #fff);
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 120ms ease;
-}
-
-.cell:hover .lookupButton,
-.lookupButton:focus-visible {
-  opacity: 1;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .lookupButton {
-    transition: none;
-  }
-}
 
