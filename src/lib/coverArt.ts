@@ -17,6 +17,7 @@
  */
 
 import type { VaultFs } from './bookVault'
+import { coverPathIn, legacyCoverPathIn } from './bookFolder'
 
 /**
  * Roughly twice the widest the shelf draws a cover.
@@ -34,14 +35,28 @@ export const COVER_WIDTH = 400
  * costs several times the bytes on the photographic covers that dominate, and
  * these are written once per book and read on every shelf render.
  *
- * IT SAYS WEBP BECAUSE THE FILE IS CALLED `cover.webp`. It encoded JPEG under
- * that name — which every decoder sniffs its way past, so nothing broke and
- * nothing said so, and a book's folder is meant to be a directory somebody can
- * hand to somebody else. A file whose name is a lie about its contents is a
- * poor thing to hand over. WebP is also smaller at the same quality, which is
- * the reason the name was chosen in the first place.
+ * JPEG, AND THAT IS A MEASUREMENT RATHER THAN A PREFERENCE. This asked for
+ * WebP for two rounds of this file's history and never once got it. First it
+ * encoded JPEG under the name `cover.webp`; that was called fixed, and the
+ * bytes then became PNG under the same name, because WebKit's `convertToBlob`
+ * substitutes PNG for any type it cannot encode and the canvas spec permits it
+ * to do so silently. Measured in Paper's own WebView:
+ *
+ *   convertToBlob({type: 'image/webp'})  ->  image/png
+ *   convertToBlob({type: 'image/jpeg'})  ->  image/jpeg
+ *   convertToBlob({type: 'image/png'})   ->  image/png
+ *
+ * So WebP was never available here, two different formats shipped under a name
+ * that described neither, and every decoder sniffed its way past the mismatch
+ * so nothing ever broke and nothing ever said so. A book's folder is meant to
+ * be a directory somebody can hand to somebody else.
+ *
+ * JPEG is the one of the three that is both honoured and small — PNG would keep
+ * text crisper and cost several times the bytes on the photographic covers that
+ * dominate. The file is `cover.jpg`, and the check below asserts the bytes
+ * match the name rather than trusting that they do.
  */
-const COVER_TYPE = 'image/webp'
+const COVER_TYPE = 'image/jpeg'
 const COVER_QUALITY = 0.82
 
 /**
@@ -68,7 +83,28 @@ export const browserImageOps: ImageOps = {
     const ctx = canvas.getContext('2d')
     if (!ctx) return null
     ctx.drawImage(source as unknown as CanvasImageSource, 0, 0, width, height)
-    return canvas.convertToBlob({ type: COVER_TYPE, quality: COVER_QUALITY })
+    const encoded = await canvas.convertToBlob({ type: COVER_TYPE, quality: COVER_QUALITY })
+    /* REFUSES THE MISMATCH rather than filing it. The encoder is allowed to
+     * ignore what it was asked for — substituting PNG is spec-compliant and
+     * silent — and this file's whole history is that substitution going
+     * unnoticed twice, because `cover.jpg`'s name comes from `COVER_TYPE` and
+     * not from the bytes.
+     *
+     * A warning was tried here and is not enough: it records the defect in a
+     * console nobody reads while the mislabelled file is written anyway. There
+     * is a correct answer available — no jacket at all, which the shelf already
+     * draws a tint for and which is honest — so this takes it. A cover is a
+     * thumbnail; losing one costs a reader nothing they can name, while a
+     * folder full of files that misdescribe themselves costs whoever opens it
+     * an afternoon. */
+    if (encoded.type !== COVER_TYPE) {
+      console.error(
+        `Paper: asked the canvas for ${COVER_TYPE} and it returned ${encoded.type} — `
+          + 'refusing to file a cover under a name that misdescribes it',
+      )
+      return null
+    }
+    return encoded
   },
 }
 
@@ -136,13 +172,32 @@ export async function downscaleCover(
 export async function coverUrl(fs: VaultFs, path: string): Promise<string | null> {
   try {
     const bytes = await fs.readFile(path)
-    /* NO TYPE ASSERTED, because the folder can hold either. Covers written
-     * before this were encoded JPEG under the name `cover.webp`; ones written
-     * since are actually WebP. Declaring a type would be a guess that is wrong
-     * for half of them, and `<img>` sniffs the bytes regardless — which is
-     * precisely why the mismatch went unnoticed for as long as it did. */
+    /* NO TYPE ASSERTED, and now for one reason rather than two. Nothing written
+     * from here on is anything but JPEG — `browserImageOps.encode` refuses to
+     * return anything else — but a library written before that holds JPEG and
+     * PNG under `cover.webp`, and this reads those too. `<img>` sniffs the
+     * bytes regardless, which is precisely why the old mismatch went unnoticed
+     * for as long as it did. */
     return URL.createObjectURL(new Blob([bytes as BlobPart]))
   } catch {
     return null
   }
+}
+
+/**
+ * A book's jacket, wherever it happens to live.
+ *
+ * ONE PLACE THAT KNOWS ABOUT THE OLD NAME. Covers are written as `cover.jpg`
+ * now; every library written before that has `cover.webp`, holding perfectly
+ * good JPEG or PNG bytes. Blanking a reader's whole shelf to correct a
+ * filename would be a poor trade, so the old name is still read — here, once,
+ * rather than at each of the callers that would each have to remember.
+ *
+ * There is no migration and deliberately so: renaming files on disk to satisfy
+ * a naming rule risks a reader's library for a cosmetic gain, and a stale
+ * `cover.webp` costs one extra `readFile` that misses, for books imported
+ * before today, once per cell.
+ */
+export async function coverIn(fs: VaultFs, bookId: string): Promise<string | null> {
+  return (await coverUrl(fs, coverPathIn(bookId))) ?? coverUrl(fs, legacyCoverPathIn(bookId))
 }

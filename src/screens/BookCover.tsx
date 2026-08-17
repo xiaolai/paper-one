@@ -1,9 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { coverTintFor } from '../lib/bookAccent'
 import { tauriVaultFs } from '../lib/bookVault'
-import { coverUrl } from '../lib/coverArt'
+import { coverIn } from '../lib/coverArt'
 import type { IndexedBook } from '../lib/bookIndex'
-import { coverPathIn } from '../lib/bookFolder'
 
 /**
  * A book's jacket, or the tint that stands in for one.
@@ -16,9 +15,17 @@ import { coverPathIn } from '../lib/bookFolder'
  * forgets.
  *
  * The tint is not a placeholder to be replaced later — it is the answer for a
- * book that genuinely has no artwork, which is most PDFs. It shows immediately
- * and stays if no jacket arrives, so a shelf never flashes empty rectangles on
- * the way to being drawn.
+ * book that genuinely has no artwork: an EPUB that ships no cover resource, or
+ * a jacket whose bytes will not decode. It shows immediately and stays if no
+ * jacket arrives, so a shelf never flashes empty rectangles on the way to being
+ * drawn.
+ *
+ * IT USED TO SAY "which is most PDFs", and that was a gap wearing the costume
+ * of a fallback. PDFs had no jacket because Paper's own PDF adapter never
+ * implemented `getCover` — not because the format lacks one — and since
+ * `session.ts` asks for it with an optional call, the missing method looked
+ * exactly like a book with no picture. A PDF's first page renders now, so the
+ * only PDFs that land here are the ones whose first page will not.
  */
 export function BookCover({
   book,
@@ -34,8 +41,12 @@ export function BookCover({
   const [url, setUrl] = useState<string | null>(null)
   /* DERIVED, not stored. A cover lives at a known path inside the book's own
    * folder, so there is no field to keep in step and no way for a row to claim
-   * a jacket that is not there — which is what a stale `cover` field did. */
-  const at = coverPathIn(book.bookId)
+   * a jacket that is not there — which is what a stale `cover` field did.
+   *
+   * The ID rather than the path, because there are now two names it could be
+   * under: `cover.jpg`, and `cover.webp` in a library written before that name
+   * was made honest. `coverIn` is the one place that knows both. */
+  const at = book.bookId
 
   /* The URL this cell created, so the error handler below can release it. The
    * effect's own `mine` is not reachable from there and the effect does not
@@ -46,7 +57,7 @@ export function BookCover({
   useEffect(() => {
     let revoked = false
     let mine: string | null = null
-    void coverUrl(tauriVaultFs, at).then((next) => {
+    void coverIn(tauriVaultFs, at).then((next) => {
       if (!next) return
       /* The cell may have been unmounted, or pointed at another book, while the
        * bytes were being read. Revoking immediately rather than setting state is

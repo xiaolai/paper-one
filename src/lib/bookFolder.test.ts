@@ -5,6 +5,7 @@ import {
   atomicWrite,
   contentPathIn,
   coverPathIn,
+  legacyCoverPathIn,
   folderOf,
   marksPathIn,
   mergeParsed,
@@ -75,8 +76,19 @@ describe('paths', () => {
   it('names a folder by the content id', () => {
     expect(folderOf('book:abc')).toBe(`${BOOKS_DIR}/book_abc`)
     expect(recordPath('book:abc')).toBe(`${BOOKS_DIR}/book_abc/book.json`)
-    expect(coverPathIn('book:abc')).toBe(`${BOOKS_DIR}/book_abc/cover.webp`)
+    /* `.jpg`, because that is what the encoder actually produces — this said
+     * `.webp` for as long as the bytes underneath were JPEG and then PNG, which
+     * is the defect `coverArt.ts` measures. */
+    expect(coverPathIn('book:abc')).toBe(`${BOOKS_DIR}/book_abc/cover.jpg`)
     expect(marksPathIn('book:abc')).toBe(`${BOOKS_DIR}/book_abc/marks.json`)
+  })
+
+  /* Pinned because it is load-bearing, not vestigial: every library written
+   * before the rename holds its jackets under this name, and `coverIn` still
+   * reads it. Deleting it would blank a reader's whole shelf. */
+  it('still knows the name jackets were written under before the rename', () => {
+    expect(legacyCoverPathIn('book:abc')).toBe(`${BOOKS_DIR}/book_abc/cover.webp`)
+    expect(legacyCoverPathIn('book:abc')).not.toBe(coverPathIn('book:abc'))
   })
 
   /* The extension still comes off a filename the reader did not write, and is

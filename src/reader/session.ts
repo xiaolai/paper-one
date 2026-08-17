@@ -627,6 +627,18 @@ export class ReaderSession {
      * not blocking the first paint on — and a malformed manifest that throws
      * here is a book without a picture, not a book that failed to open. */
     void (async () => {
+      /* A BACKEND THAT LACKS THE METHOD SAYS SO, because the optional call
+       * below cannot tell that apart from a book that simply has no picture —
+       * and that silence hid a real gap for as long as it existed. Paper's PDF
+       * adapter never implemented `getCover`, so every PDF fell through this
+       * line to the shelf's derived tint, which is a legitimate answer for a
+       * jacketless book and therefore looked like one. The costume fit so well
+       * that `BookCover`'s own comment explained the absence as inherent to the
+       * format. One line here is what makes the next missing backend a question
+       * somebody asks on the first run rather than months later. */
+      if (typeof view.book?.getCover !== 'function') {
+        console.warn('Paper: this book backend implements no getCover — no jacket will be filed')
+      }
       const cover = await view.book?.getCover?.().catch(() => null)
       if (!this.#disposed) this.#cb.onCover(cover ?? null)
     })()

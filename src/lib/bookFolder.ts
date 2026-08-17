@@ -5,7 +5,8 @@
  * $APPDATA/books/<bookId>/
  *   content.<ext>   the bytes
  *   book.json       everything the shelf needs
- *   cover.webp      omitted when the book has no jacket
+ *   cover.jpg       omitted when the book has no jacket (`cover.webp` in
+ *                   libraries written before the name was made honest)
  *   marks.json      the reader's own writing
  * ```
  *
@@ -95,7 +96,32 @@ function safeId(bookId: string): string {
 export const folderOf = (bookId: string): string => `${BOOKS_DIR}/${safeId(bookId)}`
 export const trashOf = (bookId: string): string => `${TRASH_DIR}/${safeId(bookId)}`
 export const recordPath = (bookId: string): string => `${folderOf(bookId)}/book.json`
-export const coverPathIn = (bookId: string): string => `${folderOf(bookId)}/cover.webp`
+/**
+ * Where a jacket is written, and the name it is written under.
+ *
+ * `.jpg`, BECAUSE THAT IS WHAT THE BYTES ARE. It was `cover.webp` and the bytes
+ * were never WebP: first JPEG, then — once that was "fixed" — PNG, because
+ * WebKit's `convertToBlob` silently substitutes PNG for a format it cannot
+ * encode and the canvas spec allows it to. Two different lies under one name,
+ * neither of which broke anything, because every decoder sniffs the bytes and
+ * ignores the extension. See `coverArt.ts` for the measurement.
+ *
+ * A book's folder is meant to be a directory somebody can hand to somebody
+ * else, and a file whose name misdescribes its contents is a poor thing to hand
+ * over. JPEG is what this WebView actually produces when asked, so the name and
+ * the bytes now agree by construction rather than by intention.
+ */
+export const coverPathIn = (bookId: string): string => `${folderOf(bookId)}/cover.jpg`
+
+/**
+ * The jacket written before the name was made honest.
+ *
+ * Read-only, and read only as a fallback — see `coverUrl`. Nothing writes here
+ * any more. It exists because a reader's existing library is full of these and
+ * they are perfectly good images; refusing to look would blank every cover on
+ * the shelf to fix a filename.
+ */
+export const legacyCoverPathIn = (bookId: string): string => `${folderOf(bookId)}/cover.webp`
 export const marksPathIn = (bookId: string): string => `${folderOf(bookId)}/marks.json`
 export const contentPathIn = (bookId: string, name: string): string =>
   `${folderOf(bookId)}/content.${extensionFor(name)}`

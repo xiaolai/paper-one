@@ -4,6 +4,7 @@ import viewerCss from 'pdfjs-dist/web/pdf_viewer.css?raw'
 import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist'
 import type { TocItem } from 'foliate-js/view.js'
 import { titleFromSource } from '../lib/formats'
+import { COVER_WIDTH } from '../lib/coverArt'
 import { createReflowGuard } from './wordSnap/invalidate'
 
 /**
@@ -56,6 +57,8 @@ export interface PdfBook {
   resolveHref: (href: string) => Promise<{ index: number }>
   splitTOCHref: (href: string) => Promise<[number | null, null]>
   getTOCFragment: (doc: Document) => Element
+  /** Page one, rendered. Null when it will not render — see the implementation. */
+  getCover: () => Promise<Blob | null>
   destroy: () => void
 }
 
@@ -404,6 +407,53 @@ export async function makePdf(file: File | string, hooks: PdfHooks = {}): Promis
     },
     splitTOCHref: async (href) => [await destIndex(href), null],
     getTOCFragment: (doc) => doc.documentElement,
+    /* Page one, as the book's jacket.
+     *
+     * A PDF carries no embedded cover to pull out the way an EPUB does — but it
+     * has a first page, which is the thing a reader recognises on a shelf, and
+     * foliate's own PDF backend renders exactly that. Paper replaced that
+     * backend wholesale to reach `pdfjs-dist` (see the header) and this method
+     * did not come across, so every PDF filed no jacket at all.
+     *
+     * NOTHING SAID SO, which is the part worth keeping in mind. `session.ts`
+     * reaches for this with an optional call — `view.book?.getCover?.()` — so a
+     * backend that simply lacks the method is indistinguishable from a book
+     * that has no picture. The shelf drew the derived tint, the tint is a
+     * legitimate answer for a jacketless book, and so a missing feature wore
+     * the costume of a working fallback. The comment on `BookCover` even
+     * explained the gap as inherent to the format.
+     *
+     * Rendered STRAIGHT to `COVER_WIDTH` rather than at full size and shrunk
+     * afterwards. `downscaleCover` would do the shrinking either way, but a
+     * publisher's page at scale 1 is a couple of thousand pixels wide, and
+     * decoding that to throw three quarters of it away is work with nothing to
+     * show for it.
+     *
+     * Null rather than a throw when the page will not render. A book whose
+     * jacket failed is a book with no jacket — the shelf already draws the tint
+     * for that — and taking the open down over a thumbnail would be the wrong
+     * trade by a wide margin. */
+    getCover: async () => {
+      try {
+        const page = await pdf.getPage(1)
+        const unscaled = page.getViewport({ scale: 1 })
+        const viewport = page.getViewport({ scale: COVER_WIDTH / unscaled.width })
+        /* Created in the HOST document, for the reason `paint` gives at length:
+         * pdf.js loads a PDF's fonts into the document that owns the proxy, and
+         * a canvas belonging to another document paints with substituted
+         * glyphs. Nothing adopts this one — it never reaches the screen. */
+        const canvas = document.createElement('canvas')
+        canvas.width = viewport.width
+        canvas.height = viewport.height
+        await page.render({ canvas, viewport }).promise
+        return await new Promise<Blob | null>((resolve) => {
+          canvas.toBlob(resolve)
+        })
+      } catch (cause) {
+        console.error('Paper: could not render the PDF cover', cause)
+        return null
+      }
+    },
     destroy: () => {
       for (const src of sources.values()) URL.revokeObjectURL(src)
       sources.clear()
