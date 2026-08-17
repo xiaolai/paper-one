@@ -148,6 +148,7 @@ export function BookCell({
           book={book}
           title={title}
           className={styles.cover}
+          tintedClassName={styles.coverTinted}
           titleClassName={styles.coverTitle}
         />
         <span className={styles.bookTitle}>{title}</span>

@@ -31,12 +31,29 @@
   padding-top: var(--titlebar-h);
 }
 
+/* LEVEL WITH THE PANE'S OWN HEADING, and by construction rather than by a
+   number that happens to work.
+
+   The pane beside this draws "Notes", "Settings" and the rest in a row that is
+   12px of padding plus one 13px line: its text sits centred at about 22px from
+   the pane's top. This head sat 24px down and its 38px title put "Library"
+   centred a further 11px below that, so two headings sharing one horizon read
+   as two rows. Measured, before: pane text centred at y=72, "Library" at y=83.
+
+   So the head is a row of the same height as the pane's title row, and the
+   title is centred in it — `--pane-title-row` is one number the two share,
+   and if the pane's heading ever moves, this follows. `align-items: center`
+   rather than `baseline` because the count and the sort chips are lines of
+   different sizes, and centring keeps them on the title's optical middle
+   instead of on a baseline the 38px glyphs drag well below the small caps
+   beside them. */
 .head {
   flex: 0 0 auto;
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   gap: 16px;
-  padding: 24px 40px 20px;
+  min-height: var(--pane-title-row);
+  padding: 0 40px 12px;
 }
 
 /* The count sits with the title it describes; the sort chips take the slack, so
@@ -44,14 +61,12 @@
 .count {
   font-size: 13px;
   color: var(--muted);
-  padding-bottom: 4px;
 }
 
 .orders {
   margin-inline-start: auto;
   display: flex;
   gap: 2px;
-  padding-bottom: 2px;
 }
 
 .order {
@@ -91,12 +106,16 @@
   composes: primary iconOnly from '../styles/controls.module.css';
 }
 
-/* Fluid columns rather than a fixed count: the window is resizable and the
- * pane takes 412px out of it when open, so a fixed grid would either overflow
- * or strand a column of whitespace. */
+/* Fixed-width cards, a fluid COUNT of them. The columns were `minmax(150px,
+ * 1fr)`, so a card stretched to fill its row and snapped back whenever another
+ * column fit — every cover on the shelf changed size as the window did, which
+ * reads as a layout responding to itself rather than as a shelf. Cards are one
+ * width now (`--card-w`, from `CARD_W`) and only how many fit per row moves.
+ * `auto-fill` still decides that count from whatever width the row has, pane
+ * open or not. */
 .shelf {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  grid-template-columns: repeat(auto-fill, var(--card-w));
   gap: 28px 20px;
   padding: 4px 40px 40px;
 }
@@ -123,63 +142,67 @@
   border-radius: 4px;
 }
 
-/* 2:3, the proportion of a trade paperback. A cover image would replace the
- * title inside it; until covers are extracted, the tint and the title are what
- * make one book distinguishable from another at a glance. */
-/* The jacket, or the tint standing in for one.
+/* THE COVER WELL: a 2:3 box the artwork stands in, not a frame it is cut to.
  *
- * `position: relative` and `overflow: hidden` are load-bearing together with
- * the rule below: the artwork is taken OUT OF FLOW so it cannot size this box.
- * In flow it did — the image's `width: 100%` resolved against a container that
- * was still sizing itself to the image, so a jacket came out 189px wide in a
- * 173px cell, `aspect-ratio` then made it 283px tall against a 268px grid row,
- * and the title and author underneath were pushed clean out of the cell. The
- * title collapsed to zero height and the author landed on top of the row below.
+ * Jackets are not all one shape — a trade paperback, a squarer textbook, a
+ * tall PDF page — and drawing them all into a 2:3 frame meant either cropping
+ * (`object-fit: cover`) or stretching, and either way every cover became the
+ * same rectangle. The box keeps its 2:3 so the shelf's rows stay in step; the
+ * ARTWORK keeps its own proportion inside it, and stands on the box's floor,
+ * centred — like books of different heights on one shelf, which all rest on
+ * the same board and none of which are trimmed to match their neighbours.
  *
- * The padding belongs to the TINT, which insets its title text. Artwork wants
- * the whole box, which is why the image fills the border box rather than the
- * content box and is clipped to the radius here. */
+ * NO BORDER, NO SHADOW ON THE BOX. The box is invisible; what casts the shadow
+ * is the artwork itself, so a short jacket's shadow sits under the short
+ * jacket and not under an empty rectangle above it. The tint — a book with no
+ * artwork — fills the whole box and takes the same shadow, so it reads as a
+ * jacket too rather than as the well showing through. */
 .cover {
   position: relative;
-  overflow: hidden;
   display: flex;
-  /* CENTRED, so a jacketless book reads as a cover rather than as a caption.
-   * The tint carries the title — that is what makes a book with no artwork
-   * findable while scanning a grid of covers — and the row's own title label
-   * sits directly beneath it. Bottom-aligned, the two were ten pixels apart and
-   * looked like the same line printed twice by mistake. Centred, the tint reads
-   * as the jacket it stands in for and the label reads as metadata, which is
-   * what each of them is. */
-  align-items: center;
-  /* NEVER SHRINKS. As a flex item it was allowed to, so when the cell was too
-   * short the cover gave up its own height to make room — 173x212 against a
-   * 2:3 that wants 259, which is a squat jacket rather than a clipped one and
-   * therefore reads as a design choice. The cell is sized to hold it now
-   * (`cellHeightFor`); if that is ever wrong again it should overflow visibly
-   * rather than deform quietly. */
+  align-items: flex-end;
+  justify-content: center;
   flex-shrink: 0;
   aspect-ratio: 2 / 3;
-  padding: 12px;
   margin-bottom: 8px;
-  border-radius: 4px;
-  box-shadow: var(--shadow-card);
+  /* Transparent by default; the tint sets its own background inline, and
+     `.coverTinted` gives that the jacket treatment. */
+  background: transparent;
   transition: transform var(--motion-chrome);
 }
 
+/* Artwork at its own shape, standing on the floor of the well. `max-*` rather
+   than `width/height: 100%` is the entire difference: it can be no larger than
+   the box, and it is not made any larger than it is. */
 .cover img {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
   display: block;
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  border-radius: 3px;
+  /* Lifted off the surface — the offset is downward, so it reads as floating
+     over the window rather than embossed into it. */
+  box-shadow: var(--shadow-card);
+}
+
+/* The tint fills the well and takes the jacket's shadow, so a book with no
+   artwork is a plain jacket among the others rather than the well laid bare. */
+.coverTinted {
+  align-items: center;
+  border-radius: 3px;
+  box-shadow: var(--shadow-card);
 }
 
 .book:hover:not(:disabled) .cover {
   transform: translateY(-2px);
 }
 
+/* The tint's title. It is inset by its OWN padding now — the well used to carry
+   12px for it, and the well is bare so that artwork can meet the box's edges. */
 .coverTitle {
+  align-self: center;
+  padding: 12px;
   font-family: 'Crimson Pro Variable', 'Crimson Pro', Georgia, serif;
   font-size: 15px;
   line-height: 1.2;

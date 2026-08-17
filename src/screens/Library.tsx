@@ -136,25 +136,40 @@ export function Library({
   useEffect(() => {
     const node = shelfRef.current
     if (!node) return
-    /* ONLY WHEN THE COLUMN ACTUALLY CHANGED WIDTH, and that guard is what keeps
-     * this from spinning. Writing `--cell-height` changes every row's height,
-     * which resizes the grid, which calls this observer again — a loop the
+    /* THE WRITE IS DEFERRED TO THE NEXT FRAME, and that is what keeps this
+     * from spinning. Writing `--cell-height` changes every row's height, which
+     * resizes the grid, which is the very thing this observes — a loop the
      * browser reports as "ResizeObserver loop completed with undelivered
      * notifications" and then abandons, leaving the layout wherever it stopped.
-     * The height this derives depends on the WIDTH alone, so a height-only
-     * change has nothing to recompute and the loop closes after one pass. */
+     *
+     * A same-width guard was tried first and was not enough. The pane's track
+     * ANIMATES over 220ms, so the column is a different width on every frame
+     * of it; each new width passed the guard, each write resized the grid
+     * inside the observer's own delivery, and the browser counted thirteen
+     * loops per pane toggle. Writing in `requestAnimationFrame` moves the
+     * mutation out of the observer's turn entirely — the resize it causes is
+     * delivered on the following turn like any other, and there is nothing
+     * left to be undelivered. The width guard stays as a cheap short-circuit;
+     * it is no longer what makes this correct. */
     let lastWidth = 0
+    let pending = 0
     const size = () => {
       const cell = node.firstElementChild as HTMLElement | null
       const width = Math.round(cell?.getBoundingClientRect().width ?? 0)
       if (width <= 0 || width === lastWidth) return
       lastWidth = width
-      node.style.setProperty('--cell-height', `${cellHeightFor(width)}px`)
+      cancelAnimationFrame(pending)
+      pending = requestAnimationFrame(() => {
+        node.style.setProperty('--cell-height', `${cellHeightFor(width)}px`)
+      })
     }
     size()
     const observer = new ResizeObserver(size)
     observer.observe(node)
-    return () => observer.disconnect()
+    return () => {
+      cancelAnimationFrame(pending)
+      observer.disconnect()
+    }
   }, [shelf.length])
 
   useEffect(() => {

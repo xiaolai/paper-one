@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  CARD_W,
   CELL_FURNITURE,
   COVER_ASPECT,
   DEFAULT_STEP_IDX,
@@ -115,6 +116,14 @@ describe('cellHeightFor', () => {
    * exposed it. Kept as a regression marker: 268 was 51px short. */
   it('is taller than the 268px constant it replaced, at the width that broke', () => {
     expect(cellHeightFor(173)).toBeGreaterThan(268)
+  })
+
+  /* The card the shelf actually draws. Its height is 2:3 of the width plus
+   * the furniture — the user's brief, exactly: "height should be divided by
+   * 0.667". Pinned so a change to either constant is a change here too. */
+  it('gives the shelf card its 2:3 cover plus the text beneath it', () => {
+    expect(cellHeightFor(CARD_W)).toBe(Math.round(CARD_W / COVER_ASPECT) + CELL_FURNITURE)
+    expect(Math.round(CARD_W / COVER_ASPECT)).toBe(189)
   })
 })
 

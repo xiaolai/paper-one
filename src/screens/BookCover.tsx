@@ -31,11 +31,14 @@ export function BookCover({
   book,
   title,
   className,
+  tintedClassName,
   titleClassName,
 }: {
   book: IndexedBook
   title: string
   className?: string | undefined
+  /** Added to the box only while it is drawing the TINT — see the return. */
+  tintedClassName?: string | undefined
   titleClassName?: string | undefined
 }) {
   const [url, setUrl] = useState<string | null>(null)
@@ -78,8 +81,18 @@ export function BookCover({
     }
   }, [at])
 
+  /* THE TINT IS THE JACKET, when there is no artwork — so it fills the box,
+   * takes the jacket's rounding and shadow, and carries the title. When there
+   * IS artwork the box is an invisible well and the image is the jacket, at
+   * its own proportion, standing on the well's floor. The tint therefore comes
+   * and goes with the artwork rather than sitting behind it: a tinted rectangle
+   * showing above a short jacket would be a second, wrong cover. */
+  const tinted = !url
   return (
-    <span className={className} style={{ background: coverTintFor(book.bookId) }}>
+    <span
+      className={tinted && tintedClassName ? `${className ?? ''} ${tintedClassName}` : className}
+      style={tinted ? { background: coverTintFor(book.bookId) } : undefined}
+    >
       {url ? (
         <img
           src={url}

@@ -114,6 +114,17 @@ export const SYS_ZONE_W: Record<Platform, number> = {
 /** §03 pane tab bar, matching the aside tabs. */
 export const PANE_TAB_H = 44
 
+/**
+ * The row a pane's heading ("Notes", "Settings") sits in, and — because the
+ * library's own "Library" heading is drawn as a row of the same height beside
+ * it — the one number that keeps the two headings on one horizon. It was 12px
+ * of padding plus a 13px line plus 6px, which measured 34 in the app; stated
+ * as a row height the pane does not move by a pixel, and the two screens read
+ * the same token instead of each arriving at roughly the same place by
+ * different sums.
+ */
+export const PANE_TITLE_ROW = 34
+
 /* THERE IS NO `PANE_COLLAPSE_W` ANY MORE. It was a flat 1024, and a flat number
  * cannot answer this question: whether the pane can afford a track of its own
  * depends on what the grid costs, and the grid costs `measure + …`, which §09
@@ -323,7 +334,26 @@ export function proseBleed(grid: ProseGrid): { start: number; end: number } {
 export const CONTROL_PILL = 34
 export const ROW_BOOK = 46
 
-/** §03 the proportion a jacket is drawn at, width over height. */
+/**
+ * §03 a shelf card's width, and the box its cover is drawn in.
+ *
+ * FIXED, not fluid. The grid was `minmax(150px, 1fr)`, so a card was never one
+ * size: it stretched to fill the row and snapped back whenever another column
+ * fit, and the cover — sized from the card — grew and shrank with the window.
+ * A shelf of books that change size as the window does reads as a layout
+ * responding to itself, not as a shelf. Fixed at 126, cards are the same
+ * object at every width and only their COUNT per row changes, which is what a
+ * shelf does.
+ *
+ * The cover BOX is a 2:3 well of that width; the artwork inside it is not
+ * forced to 2:3 — see `.cover img` — because jackets are not all one shape,
+ * and stretching or cropping them to a proportion they do not have is what
+ * made every cover look like every other. The box holds the row's rhythm; the
+ * artwork sits at its natural shape on the box's floor.
+ */
+export const CARD_W = 126
+
+/** §03 the proportion the cover BOX is drawn at, width over height. */
 export const COVER_ASPECT = 2 / 3
 
 /**
@@ -432,6 +462,7 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
     '--titlebar-h': px(TITLEBAR_H[platform]),
     '--sys-zone-w': px(SYS_ZONE_W[platform]),
     '--pane-tab-h': px(PANE_TAB_H),
+    '--pane-title-row': px(PANE_TITLE_ROW),
     '--control-pill': px(CONTROL_PILL),
     '--row-book': px(ROW_BOOK),
     '--radius-pill': `${RADIUS.pill}px`,
@@ -451,6 +482,10 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
     // this rung, because publishing the other four would put four tokens that
     // nothing reads next to the one that does.
     '--icon-control': px(ICON.control),
+    // The shelf's card width, so the grid's `repeat()` reads the same number
+    // `cellHeightFor` is called with. Restated in the stylesheet, the two would
+    // agree by coincidence.
+    '--card-w': px(CARD_W),
     // §12 layer order, published so stylesheets stop restating the numbers.
     '--z-ruler-band': String(Z.rulerBand),
     '--z-prose': String(Z.prose),

@@ -42,9 +42,16 @@
   box-shadow: var(--shadow-pill);
 }
 
+/* Its height is published as `--pane-title-row` so the library's own heading
+   can be the same row and sit level with this one — see `.head` there. Kept as
+   `min-height` + centring rather than padding arithmetic, so the number and
+   the layout cannot disagree. */
 .paneTitle {
   flex: 0 0 auto;
-  padding: 12px 16px 6px;
+  display: flex;
+  align-items: center;
+  min-height: var(--pane-title-row);
+  padding: 0 16px;
   font-size: 13px;
   font-weight: 600;
   letter-spacing: -0.01em;
