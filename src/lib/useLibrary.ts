@@ -233,7 +233,11 @@ export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] =
                      * they raced each other and an older list could land last.
                      * Being unchanged in folder membership, that stale cache is
                      * then trusted, and the repaired book goes back to disabled. */
-                    void queue.current.push('index', async () => {
+                    /* AWAITED. Dropping the promise put an index write outside
+                     * the surrounding catch — and an unhandled rejection is
+                     * rendered as a FATAL banner here, so an ordinary failure to
+                     * save a cache became the app reporting it had crashed. */
+                    await queue.current.push('index', async () => {
                       await writeIndex(fs, latest.current)
                     })
                   }
@@ -427,7 +431,7 @@ export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] =
       if (list.length === latest.current.length) return
       /* ONE RENAME. Phase 3's removal touched three places — a row, the bytes,
        * the cover — any of which could fail alone, and two of which did. */
-      const before = latest.current
+      const removed = latest.current.find((one) => one.bookId === bookId)
       commit(bookId, list, async (target) => {
         /* A REMOVAL THAT DID NOT HAPPEN IS NOT A REMOVAL. `trashBook` reports
          * false when there was nothing there — fine, the row was already gone —
@@ -443,16 +447,24 @@ export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] =
             }
           }
         } catch (cause) {
-          /* PUT BACK. The row is removed optimistically, so a failure here left
-           * a book that is still entirely on disk missing from the shelf until
-           * the next launch — the optimism was never taken back, only logged.
-           * Restoring it is what makes the optimism honest: the shelf shows what
-           * is there, and the reader can try again. */
-          latest.current = before
-          setBooks(before)
-          void queue.current.push('index', async () => {
-            await writeIndex(target, latest.current)
-          })
+          /* PUT BACK — THE BOOK, not the shelf. The row is removed
+           * optimistically, so a failure here left a book that is still entirely
+           * on disk missing from the shelf until the next launch.
+           *
+           * Restoring the whole captured array was the wrong repair and a worse
+           * bug than the one it fixed: anything added or changed while the
+           * removal was in flight vanished with it, and the stale index that
+           * followed hid a correctly-written `book.json` across launches. Only
+           * the one book that failed to go comes back, into whatever the shelf
+           * is NOW. */
+          if (removed && !latest.current.some((one) => one.bookId === bookId)) {
+            const back = [removed, ...latest.current]
+            latest.current = back
+            setBooks(back)
+            await queue.current.push('index', async () => {
+              await writeIndex(target, latest.current)
+            })
+          }
           throw cause
         }
       })

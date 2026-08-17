@@ -167,12 +167,44 @@ export interface MigrationSources {
  * old files are cleared, which is stated in the plan and is the price of being
  * able to go back.
  */
+/** Where the list of books already carried across is kept — see `DONE_FILE`. */
+export const DONE_FILE = 'migrated.json'
+
+/**
+ * The books this migration has already carried across, by phase-3 id.
+ *
+ * WITHOUT THIS, REMOVING A MIGRATED BOOK DID NOT REMOVE IT. The phase-3 store is
+ * read on every launch and never written, by design — it is the copy that lets a
+ * bad migration be walked back. But "already done" was decided by asking whether
+ * the phase-4 folder exists, and removing a book moves that folder to the trash.
+ * So the next launch found no record, copied the bytes out of the phase-3 layout
+ * again, and put the book back on the shelf. There was no failure and no race;
+ * it happened every time.
+ *
+ * A list of ids, written where the migration can find it and the phase-3 store
+ * stays untouched. Being told a book is done outranks looking for its folder.
+ */
+async function readDone(fs: VaultFs): Promise<Set<string>> {
+  try {
+    if (!(await fs.exists(DONE_FILE))) return new Set()
+    const parsed: unknown = JSON.parse(new TextDecoder().decode(await fs.readFile(DONE_FILE)))
+    if (!Array.isArray(parsed)) return new Set()
+    return new Set(parsed.filter((one): one is string => typeof one === 'string'))
+  } catch {
+    /* Unreadable is the same as absent HERE, and only here: the cost of being
+     * wrong is re-migrating a book that is already migrated, which is idempotent
+     * — the folder check below still catches it. */
+    return new Set()
+  }
+}
+
 export async function migrateToFolders(
   fs: VaultFs,
   { rows, marks }: MigrationSources,
 ): Promise<MigrationOutcome[]> {
   const grouped = marksByBook(marks)
   const outcomes: MigrationOutcome[] = []
+  const done = await readDone(fs)
   /* WHICH FOLDERS THIS RUN HAS CLAIMED. `safeId` replaces everything that is not
    * alphanumeric with an underscore, so it is not injective: two phase-3 rows
    * keyed by URL — `.../a-b` and `.../a_b` — land on one directory. The second
@@ -212,6 +244,13 @@ export async function migrateToFolders(
        * was the one state guaranteed never to be revisited. A record with
        * neither content nor a path back is unfinished business, and falls
        * through to be tried again. */
+      /* ALREADY CARRIED ACROSS, whether or not its folder is there now. The
+       * folder can be absent because the reader REMOVED the book, and re-running
+       * the migration then undid that — see `readDone`. */
+      if (done.has(bookId)) {
+        outcomes.push({ bookId, status: 'already' })
+        continue
+      }
       const existing = await readBook(fs, bookId)
       /* PRESENT BUT UNREADABLE IS NOT ABSENT. `readBook` answers both with null,
        * and the retry below writes the phase-3 row when it gets one — so a
@@ -227,6 +266,7 @@ export async function migrateToFolders(
         continue
       }
       if (existing && ((await hasBytes(fs, bookId, existing)) || existing.origin)) {
+        done.add(bookId)
         outcomes.push({ bookId, status: 'already' })
         continue
       }
@@ -284,6 +324,7 @@ export async function migrateToFolders(
       }
 
       await writeBook(fs, bookId, record)
+      done.add(bookId)
       outcomes.push({ bookId, status: 'migrated', marks: mine.length })
     } catch (cause) {
       /* Named, and the loop continues. A migration that fails whole is a
@@ -295,6 +336,16 @@ export async function migrateToFolders(
         reason: cause instanceof Error ? cause.message : 'could not be migrated',
       })
     }
+  }
+  /* Written LAST and best effort. Failing to record what was done costs a
+   * repeat, which is idempotent; failing the migration over it would cost the
+   * books. */
+  if (done.size) {
+    await atomicWrite(fs, DONE_FILE, new TextEncoder().encode(JSON.stringify([...done]))).catch(
+      (cause: unknown) => {
+        console.error('Paper: could not record which books were carried across', cause)
+      },
+    )
   }
   return outcomes
 }

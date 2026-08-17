@@ -83,6 +83,15 @@ export function useMarks(bookId: string | null, fs: IndexFs | null): MarkStore {
   const current = loaded.bookId === bookId ? loaded.marks : EMPTY
   const [persistent, setPersistent] = useState(true)
   const [all, setAll] = useState<readonly Mark[]>([])
+  /**
+   * Whether the cross-book scan has RUN, which emptiness cannot tell you.
+   *
+   * `all.length === 0` was standing in for "not loaded yet", and it is also what
+   * a reader with no marks has — so opening Notes on a fresh library and making
+   * the first highlight left `all` untouched, and the pane went on saying
+   * "Nothing marked yet" about the mark that was on screen behind it.
+   */
+  const scanned = useRef(false)
 
   const latest = useRef<readonly Mark[]>(current)
   latest.current = current
@@ -156,8 +165,11 @@ export function useMarks(bookId: string | null, fs: IndexFs | null): MarkStore {
           /* `all` kept in step, so a Notes row does not revert to the old value
            * the moment it is edited. It only holds what a scan put there, so a
            * book the scan never reached is left alone rather than half-updated. */
+          /* Only once the scan has run: `all` holds what that scan put there,
+           * so a book it never reached must be left alone rather than
+           * half-updated. Before it has run there is nothing to keep in step. */
           setAll((prev) =>
-            prev.length === 0 ? prev : [...next, ...prev.filter((mark) => mark.bookId !== bookId)],
+            scanned.current ? [...next, ...prev.filter((mark) => mark.bookId !== bookId)] : prev,
           )
         }
       }
@@ -176,8 +188,16 @@ export function useMarks(bookId: string | null, fs: IndexFs | null): MarkStore {
   const loadAll = useCallback(() => {
     if (!fs) return
     void scanAllMarks(fs)
-      .then((raw) => setAll(parseMarks(JSON.stringify(raw))))
-      .catch(() => setAll([]))
+      .then((raw) => {
+        scanned.current = true
+        setAll(parseMarks(JSON.stringify(raw)))
+      })
+      .catch(() => {
+        // NOT marked scanned: a failed scan has not established that there is
+        // nothing, and treating it as though it had is how an empty pane
+        // becomes permanent.
+        setAll([])
+      })
   }, [fs])
 
   /**

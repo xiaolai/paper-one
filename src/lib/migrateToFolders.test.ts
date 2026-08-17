@@ -9,6 +9,7 @@ import {
   writeMarks,
 } from './bookFolder'
 import {
+  DONE_FILE,
   marksByBook,
   migrateToFolders,
   recordFromRow,
@@ -542,5 +543,47 @@ describe('a heavily tagged legacy row', () => {
    * Paper did not write, and one listing hundreds is describing nothing. */
   it('still bounds the subjects the book declares', () => {
     expect(recordFromRow(row({ subjects: many })).subjects).toHaveLength(64)
+  })
+})
+
+/**
+ * Removing a migrated book did not remove it.
+ *
+ * The phase-3 store is read on every launch and never written — by design, it
+ * is the copy that lets a bad migration be walked back. But "already done" was
+ * decided by asking whether the phase-4 folder exists, and removing a book moves
+ * that folder to the trash. So the next launch found no record, copied the bytes
+ * out of the phase-3 layout again, and put the book back on the shelf. Every
+ * launch, with no failure and no race.
+ */
+describe('a book the reader removed after it was migrated', () => {
+  it('stays removed across a later migration run', async () => {
+    const fs = fakeFs(legacy)
+    await migrateToFolders(fs, { rows: [row()], marks: [] })
+    // The removal: a book's folder is moved to the trash.
+    for (const key of [...fs.files.keys()]) {
+      if (key.startsWith(`${folderOf('book_a')}/`)) fs.files.delete(key)
+    }
+    const again = await migrateToFolders(fs, { rows: [row()], marks: [] })
+    expect(again[0]?.status).toBe('already')
+    expect(fs.files.has(contentPathIn('book_a', 'book.epub'))).toBe(false)
+  })
+
+  it('records what it carried across', async () => {
+    const fs = fakeFs(legacy)
+    await migrateToFolders(fs, { rows: [row()], marks: [] })
+    const done = JSON.parse(new TextDecoder().decode(fs.files.get(DONE_FILE)!)) as string[]
+    expect(done).toContain('book_a')
+  })
+
+  /* A record that is present and complete is recorded too, so a library
+   * migrated before this existed is covered on its next launch rather than
+   * staying vulnerable forever. */
+  it('records a book that was already done before the list existed', async () => {
+    const fs = fakeFs(legacy)
+    await writeBook(fs, 'book_a', { title: 'Moby-Dick', author: 'M', ext: 'epub' })
+    await migrateToFolders(fs, { rows: [row()], marks: [] })
+    const done = JSON.parse(new TextDecoder().decode(fs.files.get(DONE_FILE)!)) as string[]
+    expect(done).toContain('book_a')
   })
 })

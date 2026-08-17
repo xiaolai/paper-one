@@ -64,21 +64,38 @@ export async function trashBook(fs: TrashFs, bookId: string): Promise<boolean> {
        * removal that did not happen, and only one of those is recoverable by
        * pressing the button again. */
       const moved: { from: string; to: string }[] = []
+      /* The trashed copies displaced by a collision, held aside rather than
+       * deleted. Deleting them first made the rollback a half-measure: it could
+       * put the live entries back and had nothing left to restore on the other
+       * side. `content.*` is the one that matters — identity above 64MB is
+       * sampled, which this file already says elsewhere, so a collided copy is
+       * not provably the same book. */
+      const displaced: { held: string; original: string }[] = []
       try {
         for (const entry of await fs.readDir(folderOf(bookId))) {
           const from = `${folderOf(bookId)}/${entry.name}`
           const to = `${trashOf(bookId)}/${entry.name}`
-          if (await fs.exists(to)) await fs.remove(to).catch(() => {})
+          if (await fs.exists(to)) {
+            const held = `${to}.displaced`
+            await fs.rename(to, held)
+            displaced.push({ held, original: to })
+          }
           await fs.rename(from, to)
           moved.push({ from, to })
         }
       } catch (cause) {
-        // Back where they came from, in reverse, best effort.
+        // Back where they came from, in reverse, best effort — the live entries
+        // first, then the trashed copies they displaced.
         for (const one of moved.reverse()) {
           await fs.rename(one.to, one.from).catch(() => {})
         }
+        for (const one of displaced.reverse()) {
+          await fs.rename(one.held, one.original).catch(() => {})
+        }
         throw cause
       }
+      // Only now, with everything moved, is the displaced copy redundant.
+      for (const one of displaced) await fs.remove(one.held).catch(() => {})
       await fs.removeDir(folderOf(bookId)).catch(() => {})
     } else {
       await fs.rename(folderOf(bookId), trashOf(bookId))

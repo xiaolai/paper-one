@@ -428,6 +428,33 @@ describe('removing a book that has been removed before', () => {
  * one, is not fixed by pressing the button again.
  */
 describe('a removal interrupted half way', () => {
+  /* And the TRASHED copy a collision displaced survives too. Deleting it to
+   * make room made the rollback a half-measure: it could put the live entries
+   * back and had nothing left to restore on the other side. That matters most
+   * for `content.*`, which this file says elsewhere is not provably the same
+   * book above 64MB. */
+  it('keeps the trashed copy it had to move out of the way', async () => {
+    const fs = fakeFs(shelved())
+    await trashBook(fs, 'book_a')
+    fs.store.set(`${folderOf('book_a')}/content.epub`, new TextEncoder().encode('FRESH'))
+    await restoreBook(fs, 'book_a')
+    const trashed = new TextDecoder().decode(fs.store.get(`${trashOf('book_a')}/content.epub`)!)
+
+    // Every move fails, so nothing should end up anywhere new.
+    const rename = fs.rename
+    fs.rename = async (from, to) => {
+      if (from.startsWith(folderOf('book_a'))) throw new Error('locked')
+      return rename(from, to)
+    }
+    expect(await trashBook(fs, 'book_a')).toBe(false)
+    fs.rename = rename
+
+    expect(new TextDecoder().decode(fs.store.get(`${trashOf('book_a')}/content.epub`)!)).toBe(
+      trashed,
+    )
+    expect([...fs.store.keys()].some((k) => k.endsWith('.displaced'))).toBe(false)
+  })
+
   it('puts back everything it had already moved', async () => {
     const fs = fakeFs(shelved())
     await trashBook(fs, 'book_a')
