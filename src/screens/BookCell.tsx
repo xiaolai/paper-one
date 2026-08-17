@@ -1,9 +1,10 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useRef } from 'react'
 import { BookCheck, MoreHorizontal, Tag, Trash2 } from 'lucide-react'
 import { CANNOT_OPEN, allTags, canOpen, displayTitle, statusOf, tagKey } from '../lib/library'
 import type { IndexedBook } from '../lib/bookIndex'
 import { ICON } from '../lib/metrics'
 import { withTag } from '../lib/searchQuery'
+import { usePlacement } from '../lib/usePlacement'
 import { BookCover } from './BookCover'
 import styles from './Library.module.css'
 
@@ -74,36 +75,21 @@ export function BookCell({
   const status = statusOf(book)
   const menuOpen = menuFor === book.bookId
   const menuRef = useRef<HTMLDivElement | null>(null)
-  const moreRef = useRef<HTMLButtonElement | null>(null)
-  /* Where the menu goes, in viewport coordinates.
+  /* Where the menu goes — decided by `usePlacement`, not by this cell.
    *
-   * FIXED, NOT ABSOLUTE, and not by preference. The cell is `overflow: hidden`
-   * because virtualisation needs every row to be one height, and a menu that
-   * is a child of the cell is clipped by it — the first version opened 190px
-   * wide inside a 170px cell and lost its left edge. Positioning from the
-   * viewport takes it out of the cell's clip without giving up the clip, which
-   * is the constraint that matters more. Measured in a layout effect so it is
-   * placed before it is painted. */
-  const [at, setAt] = useState<{ top: number; right: number } | null>(null)
-  useLayoutEffect(() => {
-    if (!menuOpen) {
-      setAt(null)
-      return
-    }
-    const place = () => {
-      const r = moreRef.current?.getBoundingClientRect()
-      if (r) setAt({ top: r.bottom + 4, right: window.innerWidth - r.right })
-    }
-    place()
-    // The shelf scrolls under it and the window can resize under it; either
-    // moves the button and the menu has to follow or it floats free.
-    window.addEventListener('resize', place)
-    document.addEventListener('scroll', place, true)
-    return () => {
-      window.removeEventListener('resize', place)
-      document.removeEventListener('scroll', place, true)
-    }
-  }, [menuOpen])
+   * The first version set `{top, right}` from the button's rect and called it
+   * a position. On the first column the button already sits at the shelf's
+   * left edge, so a menu right-aligned to it hung 170px off the window. The
+   * helper is asked for `end` alignment below the button and slides it in, or
+   * flips it above, when the window says no — and it does that for every
+   * popover in the app the same way, which is why it is a helper and not
+   * another block of arithmetic here.
+   *
+   * FIXED positioning is still the constraint it always was: the cell clips
+   * its overflow for virtualisation's sake, and a menu that is a child of the
+   * cell is clipped by it. */
+  const moreRef = useRef<HTMLButtonElement | null>(null)
+  const { style: menuStyle } = usePlacement(menuOpen, moreRef, menuRef, { side: 'bottom', align: 'end' })
 
   /* Closes on a click anywhere else, and on Escape — the two ways every other
    * transient surface in this app is dismissed. Bound only while THIS menu is
@@ -220,13 +206,16 @@ export function BookCell({
             <MoreHorizontal size={ICON.control} strokeWidth={ICON.stroke} />
           </button>
 
-          {menuOpen && at && (
+          {menuOpen && (
             <div
               ref={menuRef}
               className={styles.menu}
               role="menu"
               aria-label={`Actions for ${title}`}
-              style={{ top: at.top, right: at.right }}
+              /* Rendered even before the first placement lands, so the hook
+                 has a box to measure — but parked off screen until then, so it
+                 does not flash at 0,0 for the frame it takes to place. */
+              style={menuStyle ?? { top: -9999, left: -9999 }}
             >
               <button
                 type="button"

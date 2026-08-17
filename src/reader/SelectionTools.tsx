@@ -8,6 +8,7 @@ import {
 } from 'react'
 import { Highlighter, MessageSquareQuote, Copy, Trash2 } from 'lucide-react'
 import { ICON } from '../lib/metrics'
+import { place } from '../lib/placement'
 import {
   frameBoxInHost,
   overlaps,
@@ -126,36 +127,34 @@ export function SelectionTools({
 
   if (!selection || !box) return null
 
-  /* Above the selection by default, below it when there is no room — a popup
-   * clipped by the top of the stage would be unreachable, and the selection is
-   * often the first line of a chapter. */
-  const above = box.top - GAP - POPUP_H >= 0
-  const top = above ? box.top - GAP - POPUP_H : box.bottom + GAP
-
-  /* Centred on the selection, then pushed back inside the stage.
+  /* WHERE IT GOES IS `place`'S DECISION, and the reasoning that used to live
+   * here as thirty lines of arithmetic lives there now, once, for every
+   * popover in the app: above the selection by preference and below when there
+   * is no room, centred on the line and slid back inside the stage when a
+   * selection at the very edge would push half the controls off it, and — when
+   * the stage is narrower than the popup — the leading edge pinned so the first
+   * controls stay reachable rather than centring it and losing both ends.
    *
-   * The popup is a fixed-width row that does not wrap, and it is centred with
-   * `translateX(-50%)`: a selection in the first or last words of a line puts
-   * half of it past the edge of the window, where the controls are simply not
-   * there to be clicked. Clamping keeps every control reachable; the popup
-   * stops pointing exactly at the middle of the selection, which is the lesser
-   * loss, and only for selections at the very edge. */
-  const half = width / 2
-  const centre = box.left + box.width / 2
-  const stageWidth = stage?.getBoundingClientRect().width ?? 0
-  /* Clamped whatever the stage is. The guard used to fall back to the raw
-   * centre when the stage was no wider than the popup — which is exactly the
-   * narrow window where the clipping happens, so the one case that needed
-   * clamping was the one case that skipped it. When the popup genuinely cannot
-   * fit, its leading edge is pinned inside the stage and the trailing end is
-   * allowed to overflow: the first controls stay reachable, which is better
-   * than centring it and losing both ends. */
-  const left =
-    width > 0 && stageWidth > 0
-      ? stageWidth >= width + EDGE * 2
-        ? Math.min(Math.max(centre, half + EDGE), stageWidth - half - EDGE)
-        : half + EDGE
-      : centre
+   * The stage is the BOUNDS, not the viewport: this popup is positioned inside
+   * the stage, in the stage's own coordinates, which is exactly what `bounds`
+   * is for. `place` returns a left EDGE; the stylesheet centres the popup with
+   * `translateX(-50%)` for its enter animation, so the edge is turned back
+   * into a centre at this one seam. */
+  const stageBox = stage?.getBoundingClientRect()
+  const placed = place({
+    anchor: { top: box.top, left: box.left, width: box.width, height: box.height },
+    surface: { width, height: POPUP_H },
+    /* The stage's own box, at origin — this popup's coordinates are stage-
+       relative. Before the stage has a box there is nothing to clamp against,
+       and a very large bound is the honest "no constraint" rather than a guess. */
+    bounds: { top: 0, left: 0, width: stageBox?.width ?? 1e6, height: stageBox?.height ?? 1e6 },
+    side: 'top',
+    align: 'center',
+    gap: GAP,
+    edge: EDGE,
+  })
+  const top = placed.top
+  const left = width > 0 ? placed.left + width / 2 : box.left + box.width / 2
 
   return (
     <div
