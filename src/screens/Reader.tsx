@@ -52,6 +52,15 @@ export interface ReaderProps {
    * so a reader with ten books relaunched Paper and was told they had none.
    */
   libraryCount: number
+  /**
+   * The shelf could not be READ, which is not the same as having no books.
+   *
+   * Without it this screen says "Your library is empty" from a count of zero —
+   * and a count of zero is what a failed read produces. Saying the alarming
+   * thing on the strength of a transient error is the failure this whole
+   * message was rewritten to avoid, arriving by another route.
+   */
+  shelfUnread?: boolean
   /** Show the shelf. */
   onOpenLibrary: () => void
   /**
@@ -91,6 +100,7 @@ export function Reader({
   reducedMotion,
   onAddBooks,
   libraryCount,
+  shelfUnread = false,
   onOpenLibrary,
   dragging,
   inert = false,
@@ -448,12 +458,18 @@ export function Reader({
                 disk the whole time; the reader was simply describing a screen it
                 is not. */}
             <h1 className={styles.emptyTitle}>
-              {libraryCount > 0 ? 'No book open' : 'Your library is empty'}
+              {libraryCount > 0
+                ? 'No book open'
+                : shelfUnread
+                  ? 'Your library could not be read'
+                  : 'Your library is empty'}
             </h1>
             <p className={styles.emptyBody}>
               {libraryCount > 0
                 ? `Pick up where you left off, or drop a new book here.`
-                : 'Drop an EPUB, PDF, MOBI or CBZ here, or add a folder of them.'}
+                : shelfUnread
+                  ? 'Nothing has been changed. Your books are still on disk — try reopening Paper.'
+                  : 'Drop an EPUB, PDF, MOBI or CBZ here, or add a folder of them.'}
             </p>
             {book.error && <p className={styles.error}>{book.error}</p>}
             {libraryCount > 0 && (

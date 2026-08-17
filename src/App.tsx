@@ -399,12 +399,12 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
    * on.
    */
   const [importing, setImporting] = useState<ImportProgress | null>(null)
-  const [importNotice, setImportNotice] = useState<string | null>(
-    /* The shelf failing to read is the first thing the reader should hear about,
-     * because the screen behind this notice will otherwise tell them their
-     * library is empty. */
-    shelfUnread ? 'Your library could not be read. Nothing has been changed — try reopening Paper.' : null,
-  )
+  /* NOT SEEDED WITH THE SHELF FAILURE any more. It shared this channel with
+   * import notices, so the first folder import or failed open replaced it — and
+   * it was not dismissable, so until then it sat there permanently. The screens
+   * say it themselves now, in the place that would otherwise have claimed the
+   * library was empty. */
+  const [importNotice, setImportNotice] = useState<string | null>(null)
   const addFolder = useCallback(() => {
     void (async () => {
       const folder = await pickFolder().catch(() => null)
@@ -974,6 +974,7 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
             note on Library's own stacking. */}
         <Reader
           libraryCount={library.books.length}
+          shelfUnread={shelfUnread}
           onOpenLibrary={() => dispatch({ type: 'goScreen', screen: 'library' })}
           state={state}
           dispatch={dispatch}
@@ -1009,6 +1010,7 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
             onAddFolder={addFolder}
             importing={importing}
             importNotice={importNotice}
+            shelfUnread={shelfUnread}
             onAddBooks={addBooks}
           />
         )}

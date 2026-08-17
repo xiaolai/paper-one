@@ -84,11 +84,19 @@ const num = (v: unknown): number | undefined =>
  * URL is not a rougher way back to the book — it is one that opens nothing. */
 const origin = (v: unknown): string | undefined =>
   typeof v === 'string' && v && v.length <= 8_000 ? v : undefined
-const list = (v: unknown): readonly string[] | undefined => {
+const list = (v: unknown, limit = 64): readonly string[] | undefined => {
   if (!Array.isArray(v)) return undefined
-  const clean = v.filter((one): one is string => typeof one === 'string' && one !== '').slice(0, 64)
+  const clean = v
+    .filter((one): one is string => typeof one === 'string' && one !== '')
+    .slice(0, limit)
   return clean.length ? clean : undefined
 }
+/* The reader's OWN tags are not the book's declared subjects, and 64 is the
+ * bound for the latter — see `MAX_TAGS` in `bookFolder`. Sharing it here sliced
+ * a reader with sixty-five tags down to sixty-four ON A MIGRATION THAT RUNS
+ * ONCE, and the completed record then reports `already` for ever after, so
+ * nothing would have gone back for them. */
+const TAG_LIMIT = 4096
 
 /** A phase-3 row as a phase-4 record. Field names changed; meanings did not. */
 export function recordFromRow(row: LegacyRow): BookRecord {
@@ -102,7 +110,7 @@ export function recordFromRow(row: LegacyRow): BookRecord {
     ...(str(row.published) ? { published: str(row.published)! } : {}),
     ...(list(row.languages) ? { languages: list(row.languages)! } : {}),
     ...(list(row.subjects) ? { subjects: list(row.subjects)! } : {}),
-    ...(list(row.tags) ? { tags: list(row.tags)! } : {}),
+    ...(list(row.tags, TAG_LIMIT) ? { tags: list(row.tags, TAG_LIMIT)! } : {}),
     /* NOT `str`, which slices at 4000. A CFI is a path through a document and a
      * shortened one parses as nothing — see `MAX_POSITION`. Carried whole, or
      * not at all: this runs once, so a position lost here is lost for good. */

@@ -522,3 +522,25 @@ describe('a row that only has a URL', () => {
     expect(out[0]?.status).toBe('skipped')
   })
 })
+
+/**
+ * A reader with more tags than the book's own subject list is allowed.
+ *
+ * `recordFromRow` shared one 64-item bound with the declared subjects, and it
+ * SLICES — so a reader with sixty-five tags lost the sixty-fifth. This runs
+ * ONCE, and a completed record reports `already` for ever after, so nothing
+ * would have gone back for them.
+ */
+describe('a heavily tagged legacy row', () => {
+  const many = Array.from({ length: 200 }, (_, i) => `tag-${i}`)
+
+  it('carries every tag across', () => {
+    expect(recordFromRow(row({ tags: many })).tags).toHaveLength(200)
+  })
+
+  /* The BOOK's declared subjects keep the tighter bound: they come from a file
+   * Paper did not write, and one listing hundreds is describing nothing. */
+  it('still bounds the subjects the book declares', () => {
+    expect(recordFromRow(row({ subjects: many })).subjects).toHaveLength(64)
+  })
+})

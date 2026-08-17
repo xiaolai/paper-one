@@ -59,6 +59,8 @@ export interface LibraryProps {
   onAddFolder: () => void
   /** Live import progress, or null when none is running. */
   importing: { done: number; total: number; current: string } | null
+  /** The shelf could not be read — see `Reader`'s prop of the same name. */
+  shelfUnread?: boolean
   /** What the last import did, in one line. */
   importNotice: string | null
 }
@@ -81,6 +83,7 @@ export function Library({
   onAddFolder,
   importing,
   importNotice,
+  shelfUnread = false,
 }: LibraryProps) {
   const [order, setOrder] = useState<LibraryOrder>('recent')
   /* Which row is asking to be confirmed, by id.
@@ -300,14 +303,18 @@ export function Library({
                 library is the most confusing state this design can produce, so
                 the message says which tags are in the way. */}
             {books.length === 0
-              ? 'Your library is empty'
+              ? shelfUnread
+                ? 'Your library could not be read'
+                : 'Your library is empty'
               : view.tags.length > 0
                 ? `Nothing tagged ${view.tags.join(' and ')} matches`
                 : 'Nothing matches'}
           </div>
           <div className={styles.emptyBody}>
             {books.length === 0
-              ? 'Books you open appear here, with everything you have marked in them.'
+              ? shelfUnread
+                ? 'Nothing has been changed. Your books are still on disk — try reopening Paper.'
+                : 'Books you open appear here, with everything you have marked in them.'
               : 'Try a different search, or clear the filter.'}
           </div>
         </div>
