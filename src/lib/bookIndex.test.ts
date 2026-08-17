@@ -281,3 +281,40 @@ describe('a record whose id does not match its folder', () => {
     expect((await scanBooks(fs))[0]?.bookId).toBe('book:abc')
   })
 })
+
+/**
+ * A library that will not read is not an empty library.
+ *
+ * `scanBooks` skipped every folder whose record failed and returned `[]`, so a
+ * whole library of unreadable records resolved SUCCESSFULLY as empty — and both
+ * screens then said "Your library is empty" over books that were all still on
+ * disk. One damaged book still costs that book; the whole library failing is
+ * reported.
+ */
+describe('a library whose records will not read', () => {
+  it('throws rather than reporting an empty shelf', async () => {
+    const fs = fakeFs({
+      [`${BOOKS_DIR}/book_a/book.json`]: 'half a write',
+      [`${BOOKS_DIR}/book_b/book.json`]: 'also broken',
+    })
+    await expect(scanBooks(fs)).rejects.toThrow('could not be read')
+  })
+
+  /* One damaged book among good ones costs that book, which is the rule the
+   * scan is written around and the right one. */
+  it('still skips a single damaged book when others load', async () => {
+    const fs = fakeFs({
+      [`${BOOKS_DIR}/book_a/book.json`]: 'half a write',
+      [`${BOOKS_DIR}/book_b/book.json`]: '{"title":"Moby-Dick","author":"M"}',
+    })
+    const books = await scanBooks(fs)
+    expect(books).toHaveLength(1)
+  })
+
+  /* A folder with no record at all is a half-written import, not a failure —
+   * it is simply not on the shelf yet. */
+  it('is quiet about a folder that has no record yet', async () => {
+    const fs = fakeFs({ [`${BOOKS_DIR}/book_a/content.epub`]: 'WHALE' })
+    expect(await scanBooks(fs)).toEqual([])
+  })
+})

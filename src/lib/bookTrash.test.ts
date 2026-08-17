@@ -44,9 +44,18 @@ function fakeFs(files: Record<string, string> = {}) {
         if (key === path || key.startsWith(`${path}/`)) store.delete(key)
       }
     },
+    /* REFUSES A NON-EMPTY DESTINATION, because `std::fs::rename` does. The
+     * permissive version quietly succeeded at the exact move the real one
+     * rejects — so a test for "removing a book whose trash entry still exists"
+     * passed against the broken code as well as the fixed code, which is a test
+     * that proves nothing. */
     rename: async (from, to) => {
-      for (const key of [...store.keys()]) {
-        if (key !== from && !key.startsWith(`${from}/`)) continue
+      const moving = [...store.keys()].filter((k) => k === from || k.startsWith(`${from}/`))
+      const occupied = [...store.keys()].some((k) => k === to || k.startsWith(`${to}/`))
+      if (occupied && moving.some((k) => k !== from)) {
+        throw new Error(`rename: ${to} is a non-empty directory`)
+      }
+      for (const key of moving) {
         const bytes = store.get(key)!
         store.set(key === from ? to : `${to}${key.slice(from.length)}`, bytes)
         store.delete(key)
@@ -365,5 +374,47 @@ describe('rescueStrandedMarks', () => {
     fs.store.set(`${trashOf('book_a')}/marks.json`, new TextEncoder().encode('half a write'))
     expect(await rescueStrandedMarks(fs, 'book_a')).toBe(false)
     expect(fs.store.has(`${trashOf('book_a')}/marks.json`)).toBe(true)
+  })
+})
+
+/**
+ * Remove, add again, remove.
+ *
+ * A restore deliberately leaves behind anything it could not bring back, so a
+ * trash entry can still exist for a book that is live again. Renaming a
+ * directory ONTO a non-empty one fails — and the caller ignored the `false`, so
+ * the row vanished, the index was written without it, and the book came back on
+ * the next launch. Remove appearing not to work is about the worst thing the
+ * shelf can do quietly.
+ */
+describe('removing a book that has been removed before', () => {
+  it('succeeds even when the trash still holds part of the old copy', async () => {
+    const fs = fakeFs(shelved())
+    await trashBook(fs, 'book_a')
+    // The re-add: content lands first, so restore leaves the old content behind.
+    fs.store.set(`${folderOf('book_a')}/content.epub`, new TextEncoder().encode('FRESH'))
+    await restoreBook(fs, 'book_a')
+    expect(fs.store.has(`${trashOf('book_a')}/content.epub`)).toBe(true)
+
+    expect(await trashBook(fs, 'book_a')).toBe(true)
+    expect([...fs.store.keys()].some((k) => k.startsWith(`${folderOf('book_a')}/`))).toBe(false)
+    expect(fs.store.has(`${trashOf('book_a')}/book.json`)).toBe(true)
+  })
+
+  /* The LIVE copy wins on a collision, mirroring restore: it is the one the
+   * reader has been using. */
+  it('keeps the live copy of a file the trash also has', async () => {
+    const fs = fakeFs(shelved())
+    await trashBook(fs, 'book_a')
+    fs.store.set(`${folderOf('book_a')}/content.epub`, new TextEncoder().encode('FRESH'))
+    await restoreBook(fs, 'book_a')
+    await trashBook(fs, 'book_a')
+    expect(new TextDecoder().decode(fs.store.get(`${trashOf('book_a')}/content.epub`)!)).toBe(
+      'FRESH',
+    )
+  })
+
+  it('still reports nothing to remove for a book that is not there', async () => {
+    expect(await trashBook(fakeFs(), 'book_a')).toBe(false)
   })
 })

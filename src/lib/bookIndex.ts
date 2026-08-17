@@ -46,7 +46,7 @@ export interface IndexedBook extends BookRecord {
  * and not the other made every book of that format look contentless — the row
  * went disabled with its bytes sitting beside the record.
  */
-async function hasContentFile(fs: IndexFs, folder: string): Promise<boolean> {
+export async function hasContentFile(fs: IndexFs, folder: string): Promise<boolean> {
   for (const ext of CONTENT_EXTENSIONS) {
     if (await fs.exists(`${BOOKS_DIR}/${folder}/content.${ext}`)) return true
   }
@@ -134,12 +134,25 @@ export async function scanBooks(fs: IndexFs): Promise<IndexedBook[]> {
     return []
   }
   const books: IndexedBook[] = []
+  /* Folders whose record IS THERE and would not read — as distinct from one
+   * that simply has no record yet, which is a half-written import and is
+   * correctly skipped. See the throw below. */
+  let unreadable = 0
   for (const entry of entries) {
     if (!entry.isDirectory) continue
     try {
-      const bytes = await fs.readFile(`${BOOKS_DIR}/${entry.name}/book.json`)
+      const at = `${BOOKS_DIR}/${entry.name}/book.json`
+      if (!(await fs.exists(at))) continue
+      const bytes = await fs.readFile(at)
       const record = parseRecord(new TextDecoder().decode(bytes))
-      if (!record) continue
+      /* A record that is THERE and parses to nothing is unreadable too — which
+       * is what a truncated or corrupt `book.json` actually looks like, since
+       * reading the bytes succeeds and only the parse fails. Counting only the
+       * throw missed the commonest shape of the thing being counted. */
+      if (!record) {
+        unreadable += 1
+        continue
+      }
       /* THE RECORD'S OWN ID — but only when it names the folder it is sitting
        * in. `safeId` is not reversible, so `book:abc` lives in `book_abc` and
        * taking the id from the directory renamed every book on any rescan.
@@ -161,8 +174,19 @@ export async function scanBooks(fs: IndexFs): Promise<IndexedBook[]> {
       const hasContent = await hasContentFile(fs, entry.name)
       books.push({ ...record, bookId, hasContent })
     } catch {
+      unreadable += 1
       continue
     }
+  }
+  /* EVERY RECORD UNREADABLE IS NOT AN EMPTY LIBRARY. One damaged book costs
+   * that book — the rule the loop above is written around, and the right one.
+   * But a whole library that will not read is the state where the shelf says
+   * "Your library is empty" over books that are all still on disk, which is the
+   * one thing this app must never say wrongly. If ANY book loaded, the failure
+   * is per-book and the shelf is honest; if none did and records were there to
+   * read, the caller is told rather than shown an empty shelf. */
+  if (books.length === 0 && unreadable > 0) {
+    throw new Error(`the library could not be read: ${unreadable} records failed`)
   }
   return books
 }
@@ -209,11 +233,12 @@ async function readIndex(fs: IndexFs): Promise<{ books: readonly IndexedBook[] }
 }
 
 async function folderNames(fs: IndexFs): Promise<string[]> {
-  try {
-    return (await fs.readDir(BOOKS_DIR)).filter((one) => one.isDirectory).map((one) => one.name)
-  } catch {
-    return []
-  }
+  /* NOT SWALLOWED. Returning `[]` for a directory that would not read made an
+   * empty cached index "agree" with it, so the empty cache was trusted and the
+   * shelf came up empty without anything rescanning or reporting. A failure
+   * here means the cache cannot be checked, and an unchecked cache is one to
+   * rescan rather than believe. */
+  return (await fs.readDir(BOOKS_DIR)).filter((one) => one.isDirectory).map((one) => one.name)
 }
 
 /** Write the cache. Atomic, like every other write here. */

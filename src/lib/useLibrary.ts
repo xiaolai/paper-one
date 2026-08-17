@@ -10,7 +10,8 @@ import {
   writeBook,
   type BookRecord,
 } from './bookFolder'
-import { writeIndex, type IndexFs, type IndexedBook } from './bookIndex'
+import { BOOKS_DIR } from './bookFolder'
+import { hasContentFile, writeIndex, type IndexFs, type IndexedBook } from './bookIndex'
 import { rescueStrandedMarks, restoreBook, trashBook } from './bookTrash'
 import { tagKey } from './library'
 import { writeQueue } from './writeQueue'
@@ -206,6 +207,29 @@ export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] =
                * sitting in the trash — so a folder import, which is all sparse
                * adds, was the one route that could see the stranded record and
                * walk past it. */
+              /* AND THE ROW LEARNS THE BOOK HAS BYTES AGAIN.
+               *
+               * This is the path an import takes for a book already on the
+               * shelf, and it is the exact remedy `CANNOT_OPEN` tells the reader
+               * to perform — "add the file again". The import writes the missing
+               * content and then reaches here, which returned without touching
+               * the row: so the book stayed disabled, the cache kept
+               * `hasContent: false`, folder membership had not changed, and the
+               * stale flag was trusted on every launch after. The advertised
+               * repair repaired nothing. */
+              if (previous.hasContent === false) {
+                const now = await hasContentFile(fs, folderOf(bookId).slice(BOOKS_DIR.length + 1))
+                if (now) {
+                  const where = latest.current.findIndex((one) => one.bookId === previous.bookId)
+                  if (where !== -1) {
+                    const list = [...latest.current]
+                    list[where] = { ...latest.current[where]!, hasContent: true }
+                    latest.current = list
+                    setBooks(list)
+                    await writeIndex(fs, list)
+                  }
+                }
+              }
               const stranded = parseRecord(await readText(fs, `${trashOf(bookId)}/${'book.json'}`))
               if (!stranded) return
               const live = await readBook(fs, bookId)
@@ -394,7 +418,20 @@ export function useLibrary(fs: IndexFs | null, initial: readonly IndexedBook[] =
       if (list.length === latest.current.length) return
       /* ONE RENAME. Phase 3's removal touched three places — a row, the bytes,
        * the cover — any of which could fail alone, and two of which did. */
-      commit(bookId, list, (target) => trashBook(target as never, bookId))
+      commit(bookId, list, async (target) => {
+        /* A REMOVAL THAT DID NOT HAPPEN IS NOT A REMOVAL. `trashBook` reports
+         * false when there was nothing there — fine, the row was already gone —
+         * but it also reported false when the move genuinely failed, and this
+         * ignored the answer either way: the row disappeared optimistically, the
+         * index was written without it, and the book came back on the next
+         * launch. Thrown, so the queue's own reporting says the library could
+         * not be saved rather than the shelf lying quietly. */
+        if (!(await trashBook(target as never, bookId))) {
+          if (await target.exists(folderOf(bookId))) {
+            throw new Error(`could not remove ${bookId}: its folder is still there`)
+          }
+        }
+      })
     },
     [commit],
   )

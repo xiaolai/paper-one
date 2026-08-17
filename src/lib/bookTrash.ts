@@ -45,7 +45,27 @@ export async function trashBook(fs: TrashFs, bookId: string): Promise<boolean> {
      * around for a fortnight. */
     if (!(await fs.exists(folderOf(bookId)))) return false
     await fs.mkdir('trash')
-    await fs.rename(folderOf(bookId), trashOf(bookId))
+    /* FILE BY FILE WHEN THERE IS ALREADY SOMETHING THERE, for the same reason
+     * `restoreBook` moves that way: a restore deliberately leaves behind
+     * anything it could not bring back, so a trash entry can still exist for a
+     * book that is live again. Renaming a directory ONTO a non-empty one fails,
+     * and this reported that failure as `false` — which the caller ignored, so
+     * the row vanished optimistically, the index was written without it, and the
+     * book came back on the next launch. Remove appearing not to work is worse
+     * than almost anything else the shelf can do.
+     *
+     * The LIVE copy wins on a collision here, which is the mirror of restore:
+     * it is the one the reader has been using. */
+    if (await fs.exists(trashOf(bookId))) {
+      for (const entry of await fs.readDir(folderOf(bookId))) {
+        const to = `${trashOf(bookId)}/${entry.name}`
+        if (await fs.exists(to)) await fs.remove(to).catch(() => {})
+        await fs.rename(`${folderOf(bookId)}/${entry.name}`, to)
+      }
+      await fs.removeDir(folderOf(bookId)).catch(() => {})
+    } else {
+      await fs.rename(folderOf(bookId), trashOf(bookId))
+    }
     /* A stamp beside the folder rather than a modified time on it, because a
      * rename does not reliably change mtime on every filesystem — and reading
      * one back through the plugin would need a stat permission this app does not
