@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
+  CELL_FURNITURE,
+  COVER_ASPECT,
   DEFAULT_STEP_IDX,
   GUTTER,
+  cellHeightFor,
   GUTTER_MIN,
   MARGIN_COL,
   MEASURE,
@@ -84,6 +87,34 @@ describe('proseGrid', () => {
       expect(grid.measure).toBeGreaterThanOrEqual(0)
       expect(grid.marginCol).toBeGreaterThanOrEqual(0)
     }
+  })
+})
+
+/* A shelf cell is a FIXED height because virtualisation derives one row height
+ * from one cell. What was wrong was the number: `--cell-height` was referenced
+ * with a 268px fallback and set by nothing, so a 173px column asked for a 259px
+ * cover and got 9px left over for two lines of text and a progress rule —
+ * which `overflow: hidden` ate without a word. */
+describe('cellHeightFor', () => {
+  it('leaves room for the cover at its own proportion, plus the text below it', () => {
+    for (const width of [140, 150, 173, 200, 260]) {
+      const height = cellHeightFor(width)
+      const cover = width / COVER_ASPECT
+      expect(height).toBeGreaterThanOrEqual(cover)
+      // The remainder is the furniture, and it does not shrink with the column:
+      // the title and author are one line each whatever the cover's width.
+      expect(height - Math.round(cover)).toBe(CELL_FURNITURE)
+    }
+  })
+
+  it('grows with the column, so a wider shelf does not clip', () => {
+    expect(cellHeightFor(260)).toBeGreaterThan(cellHeightFor(140))
+  })
+
+  /* The number the old hardcoded fallback would have given, at the width that
+   * exposed it. Kept as a regression marker: 268 was 51px short. */
+  it('is taller than the 268px constant it replaced, at the width that broke', () => {
+    expect(cellHeightFor(173)).toBeGreaterThan(268)
   })
 })
 

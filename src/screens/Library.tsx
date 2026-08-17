@@ -4,7 +4,7 @@ import { shelfFor, tagCounts, tagKey } from '../lib/library'
 import type { LibraryOrder } from '../lib/library'
 import type { IndexedBook } from '../lib/bookIndex'
 import { withTag, withoutTag } from '../lib/searchQuery'
-import { ICON } from '../lib/metrics'
+import { ICON, cellHeightFor } from '../lib/metrics'
 import type { Platform } from '../lib/metrics'
 import { VIRTUALISE_ABOVE, gridWindow } from '../lib/virtualGrid'
 import { BookCell } from './BookCell'
@@ -118,6 +118,40 @@ export function Library({
   const shelfRef = useRef<HTMLDivElement | null>(null)
   const [viewport, setViewport] = useState({ scrollTop: 0, height: 0, columns: 0, rowHeight: 0 })
   const virtualising = shelf.length > VIRTUALISE_ABOVE
+
+  /* The cell's height, from the column it actually got.
+   *
+   * ALWAYS, not only while virtualising. `--cell-height` was referenced by the
+   * stylesheet with a `268px` fallback and set by nothing, so the fallback did
+   * every bit of the work and could not follow a fluid column: at a 173px
+   * column the cover alone wants 259, leaving 9px for two lines of text and a
+   * progress rule, which `overflow: hidden` then ate in silence.
+   *
+   * Set on the grid rather than per cell, so every row is the one height
+   * virtualisation assumes — the reason the height is fixed at all. */
+  useEffect(() => {
+    const node = shelfRef.current
+    if (!node) return
+    /* ONLY WHEN THE COLUMN ACTUALLY CHANGED WIDTH, and that guard is what keeps
+     * this from spinning. Writing `--cell-height` changes every row's height,
+     * which resizes the grid, which calls this observer again — a loop the
+     * browser reports as "ResizeObserver loop completed with undelivered
+     * notifications" and then abandons, leaving the layout wherever it stopped.
+     * The height this derives depends on the WIDTH alone, so a height-only
+     * change has nothing to recompute and the loop closes after one pass. */
+    let lastWidth = 0
+    const size = () => {
+      const cell = node.firstElementChild as HTMLElement | null
+      const width = Math.round(cell?.getBoundingClientRect().width ?? 0)
+      if (width <= 0 || width === lastWidth) return
+      lastWidth = width
+      node.style.setProperty('--cell-height', `${cellHeightFor(width)}px`)
+    }
+    size()
+    const observer = new ResizeObserver(size)
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [shelf.length])
 
   useEffect(() => {
     const node = shelfRef.current

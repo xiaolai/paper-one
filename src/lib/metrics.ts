@@ -323,6 +323,37 @@ export function proseBleed(grid: ProseGrid): { start: number; end: number } {
 export const CONTROL_PILL = 34
 export const ROW_BOOK = 46
 
+/** §03 the proportion a jacket is drawn at, width over height. */
+export const COVER_ASPECT = 2 / 3
+
+/**
+ * What a shelf cell spends BELOW its cover: one line of title, one of author,
+ * the progress rule, and the gaps and margin between them.
+ *
+ * MEASURED off the rendered cell rather than added up from the stylesheet,
+ * because it is font metrics as much as CSS. The tallest arrangement, not the
+ * average: an unread book has no progress rule and comes out 13px shorter, and
+ * a cell sized to that clips every book that has been opened.
+ */
+export const CELL_FURNITURE = 60
+
+/**
+ * How tall a shelf cell must be to hold a cover of this column's width.
+ *
+ * The cell is a FIXED height and has to be — virtualisation derives one row
+ * height from one cell, so a row that grows with a progress bar or a second
+ * line of tags makes that arithmetic a lie a few hundred books down. What was
+ * wrong was the number, not the fixing of it: `--cell-height` was referenced
+ * with a `268px` fallback and never set by anything, so the fallback did all
+ * the work and could not follow a fluid column. At a 173px column the cover
+ * alone wants 259, and 268 left 9px for two lines of text and a rule — so
+ * `overflow: hidden` quietly ate the title, and the author landed on the row
+ * below.
+ */
+export function cellHeightFor(columnWidth: number): number {
+  return Math.round(columnWidth / COVER_ASPECT) + CELL_FURNITURE
+}
+
 /** §03 radii, by role. */
 export const RADIUS = {
   mark: 3,

@@ -97,7 +97,12 @@ export function BookCover({
             held.current = null
             setUrl(null)
           }}
-          style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+          /* STYLED BY THE STYLESHEET, not from here. These were inline —
+             `width/height: 100%` — and inline styles beat any rule the caller
+             writes, which is what made the jacket size its own container: the
+             image's 100% resolved against a box that was still sizing itself to
+             the image, and the cover came out 189px wide inside a 173px cell.
+             The caller owns this element's box now, through `.cover img`. */
         />
       ) : (
         <span className={titleClassName}>{title}</span>

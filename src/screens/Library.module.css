@@ -126,15 +126,53 @@
 /* 2:3, the proportion of a trade paperback. A cover image would replace the
  * title inside it; until covers are extracted, the tint and the title are what
  * make one book distinguishable from another at a glance. */
+/* The jacket, or the tint standing in for one.
+ *
+ * `position: relative` and `overflow: hidden` are load-bearing together with
+ * the rule below: the artwork is taken OUT OF FLOW so it cannot size this box.
+ * In flow it did — the image's `width: 100%` resolved against a container that
+ * was still sizing itself to the image, so a jacket came out 189px wide in a
+ * 173px cell, `aspect-ratio` then made it 283px tall against a 268px grid row,
+ * and the title and author underneath were pushed clean out of the cell. The
+ * title collapsed to zero height and the author landed on top of the row below.
+ *
+ * The padding belongs to the TINT, which insets its title text. Artwork wants
+ * the whole box, which is why the image fills the border box rather than the
+ * content box and is clipped to the radius here. */
 .cover {
+  position: relative;
+  overflow: hidden;
   display: flex;
-  align-items: flex-end;
+  /* CENTRED, so a jacketless book reads as a cover rather than as a caption.
+   * The tint carries the title — that is what makes a book with no artwork
+   * findable while scanning a grid of covers — and the row's own title label
+   * sits directly beneath it. Bottom-aligned, the two were ten pixels apart and
+   * looked like the same line printed twice by mistake. Centred, the tint reads
+   * as the jacket it stands in for and the label reads as metadata, which is
+   * what each of them is. */
+  align-items: center;
+  /* NEVER SHRINKS. As a flex item it was allowed to, so when the cell was too
+   * short the cover gave up its own height to make room — 173x212 against a
+   * 2:3 that wants 259, which is a squat jacket rather than a clipped one and
+   * therefore reads as a design choice. The cell is sized to hold it now
+   * (`cellHeightFor`); if that is ever wrong again it should overflow visibly
+   * rather than deform quietly. */
+  flex-shrink: 0;
   aspect-ratio: 2 / 3;
   padding: 12px;
   margin-bottom: 8px;
   border-radius: 4px;
   box-shadow: var(--shadow-card);
   transition: transform var(--motion-chrome);
+}
+
+.cover img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
 }
 
 .book:hover:not(:disabled) .cover {
