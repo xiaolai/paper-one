@@ -69,13 +69,14 @@ export interface Placement {
  * A menu that opens downward off the bottom of the window is unreachable, and
  * that is worse than a menu that opens upward against expectation.
  *
- * On the cross axis the preferred alignment is tried, then the surface is
- * SLID — not flipped — until it is inside the bounds. Sliding keeps it as close
- * to where it was asked to be as the edge allows; the alignment it reports is
- * the one that would have produced that position, so an arrow can follow.
- * When it cannot fit at all it is pinned to the LEADING edge: the first items
- * stay reachable, which is better than centring it and losing both ends. The
- * selection popup worked this out first and its comment says why.
+ * On the cross axis the alignments that keep the surface TOUCHING its anchor
+ * are tried first — the one asked for, then its mirror — and only when none
+ * fits is it slid inward. A menu that clears the window's edge by sliding past
+ * the button that opened it has kept the lesser property and lost the greater:
+ * it is on screen and belongs to nothing. When it cannot fit at all it is
+ * pinned to the LEADING edge, so the first items stay reachable rather than
+ * centring and losing both ends. The selection popup worked that last part out
+ * first and its comment says why.
  */
 export function place({
   anchor,
@@ -106,28 +107,65 @@ export function place({
   top = Math.min(Math.max(top, bounds.top + edge), boundsBottom - edge - surface.height)
   top = Math.max(top, bounds.top + edge)
 
-  /* --- cross axis: where along the edge, slid inward as needed ------------ */
-  const wanted =
-    align === 'start' ? anchor.left
-    : align === 'end' ? anchorRight - surface.width
-    : anchor.left + anchor.width / 2 - surface.width / 2
-
+  /* --- cross axis: where along the edge ----------------------------------- */
   const minLeft = bounds.left + edge
   const maxLeft = boundsRight - edge - surface.width
-  let left: number
+  const leftFor = (a: Align): number =>
+    a === 'start' ? anchor.left
+    : a === 'end' ? anchorRight - surface.width
+    : anchor.left + anchor.width / 2 - surface.width / 2
+  const fits = (l: number): boolean => l >= minLeft && l <= maxLeft
+
+  /* ANCHORED FIRST, SLID LAST — and the order is the whole point.
+   *
+   * The first version tried the requested alignment and, when it overflowed,
+   * slid the surface inward until it fit. That keeps it on screen and loses
+   * the one thing a menu must not lose: contact with the thing that opened
+   * it. On the first card of the shelf, a menu asked to hang from the
+   * button's right edge slid 32px PAST that edge to clear the window's left,
+   * ending under the next card, and read as that card's menu.
+   *
+   * So an edge alignment tries its MIRROR before it slides — `end` for
+   * `start`, and back — and only when neither anchored placement fits is the
+   * surface slid, which is now the case where the anchor itself is nearly off
+   * screen. Sliding as a last resort is right; sliding as the first response
+   * was the bug.
+   *
+   * `center` HAS NO MIRROR, and is deliberately not given one. It is what a
+   * selection toolbar asks for — centred on a run of text — and snapping it
+   * to the selection's left or right edge when it nears the stage's edge is a
+   * visible jump on a control that should feel glued to the words. Its
+   * fallback IS sliding: it stays as centred as the edge allows, which is
+   * exactly what the selection popup did before it was moved here, and was
+   * checked against that code to the pixel. */
+  const candidates: Align[] =
+    align === 'start' ? ['start', 'end']
+    : align === 'end' ? ['end', 'start']
+    : ['center']
+
+  let left: number | null = null
   let usedAlign: Align = align
-  if (maxLeft < minLeft) {
-    // Wider than the bounds allow: leading edge pinned, trailing end overflows.
-    left = minLeft
-    usedAlign = 'start'
-  } else if (wanted < minLeft) {
-    left = minLeft
-    usedAlign = 'start'
-  } else if (wanted > maxLeft) {
-    left = maxLeft
-    usedAlign = 'end'
-  } else {
-    left = wanted
+  for (const candidate of candidates) {
+    const l = leftFor(candidate)
+    if (fits(l)) {
+      left = l
+      usedAlign = candidate
+      break
+    }
+  }
+  if (left === null) {
+    if (maxLeft < minLeft) {
+      // Wider than the bounds allow: leading edge pinned, trailing end
+      // overflows, so the first items stay reachable.
+      left = minLeft
+      usedAlign = 'start'
+    } else {
+      // No anchored placement fits — the anchor is at or past an edge — so
+      // slide the requested one just far enough to be inside.
+      const wanted = leftFor(align)
+      left = Math.min(Math.max(wanted, minLeft), maxLeft)
+      usedAlign = wanted < minLeft ? 'start' : 'end'
+    }
   }
 
   return { top, left, side: usedSide, align: usedAlign }

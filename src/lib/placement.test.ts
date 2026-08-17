@@ -23,22 +23,54 @@ describe('place', () => {
     expect(p.left).toBe(600)
   })
 
-  /* THE SCREENSHOT. The first card's ellipsis sits 20px from the window's left
-   * edge; a menu right-aligned to it hangs 170px off screen. Asked for `end`
-   * there, the helper slides it in and says so. */
-  it('slides a menu inward instead of hanging it off the left edge', () => {
-    const p = place({ anchor: anchorAt(20, 500), surface: menu, bounds, align: 'end' })
+  /* THE SCREENSHOT, TWICE. The first card's ellipsis sits 142px from the
+   * window's left; a menu right-aligned to it would start at −24 and hang off
+   * screen. The first fix SLID it to left=8 — on screen, but its right edge
+   * then sat 32px past the button, under the next card, reading as that
+   * card's menu. Being on screen is the lesser property; touching the thing
+   * that opened it is the greater. So it FLIPS to `start` — the menu's left
+   * edge on the button's left — which fits and stays attached. */
+  it('flips to the mirror alignment rather than sliding off its anchor', () => {
+    const anchor = anchorAt(142, 500)
+    const p = place({ anchor, surface: menu, bounds, align: 'end' })
     expect(inside(p)).toBe(true)
-    expect(p.left).toBe(8)
     expect(p.align).toBe('start')
-    expect(p.side).toBe('bottom')
+    expect(p.left).toBe(142)
+    // Still touching: the menu's span covers the button's span.
+    expect(p.left).toBeLessThanOrEqual(anchor.left)
+    expect(p.left + menu.width).toBeGreaterThanOrEqual(anchor.left + anchor.width)
   })
 
-  it('slides a menu inward from the right edge too', () => {
-    const p = place({ anchor: anchorAt(1420, 500), surface: menu, bounds, align: 'start' })
+  it('flips the other way at the right edge', () => {
+    const anchor = anchorAt(1400, 500)
+    const p = place({ anchor, surface: menu, bounds, align: 'start' })
     expect(inside(p)).toBe(true)
-    expect(p.left).toBe(1440 - 8 - 190)
     expect(p.align).toBe('end')
+    expect(p.left + menu.width).toBe(1400 + 24)
+  })
+
+  /* Only when NO anchored placement fits — the anchor is right at the edge —
+   * does it slide, and then just far enough. */
+  it('slides only as a last resort, when neither anchored alignment fits', () => {
+    // 4px from the edge: `end` starts at −166, `start` at 4 — both under the
+    // 8px edge clearance, so neither anchored placement fits.
+    const p = place({ anchor: anchorAt(4, 500), surface: menu, bounds, align: 'end' })
+    expect(inside(p)).toBe(true)
+    expect(p.left).toBe(8)
+  })
+
+  /* The invariant that would have caught the slide-first bug: from ANY anchor
+   * that has room for the menu on at least one side of it, the placed menu
+   * overlaps the anchor horizontally. */
+  it('stays in contact with its anchor whenever an anchored placement is possible', () => {
+    for (let x = 30; x <= 1400; x += 17) {
+      for (const align of ['start', 'center', 'end'] as const) {
+        const anchor = anchorAt(x, 400)
+        const p = place({ anchor, surface: menu, bounds, align })
+        const overlaps = p.left < anchor.left + anchor.width && p.left + menu.width > anchor.left
+        expect(overlaps).toBe(true)
+      }
+    }
   })
 
   it('keeps the requested alignment when sliding is not needed', () => {
