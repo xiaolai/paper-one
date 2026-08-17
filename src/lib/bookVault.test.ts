@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { contentPathIn } from './bookFolder'
+import { BOOKS_DIR, contentPathIn } from './bookFolder'
 import {
-  BOOKS_DIR,
   extensionFor,
   readOwnedBook,
   type VaultFs,

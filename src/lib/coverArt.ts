@@ -28,13 +28,20 @@ import type { VaultFs } from './bookVault'
 export const COVER_WIDTH = 400
 
 /**
- * JPEG, and quality below what a photographer would accept.
+ * WEBP, and quality below what a photographer would accept.
  *
  * A jacket is a thumbnail here, not an artwork. PNG would keep text crisper but
  * costs several times the bytes on the photographic covers that dominate, and
  * these are written once per book and read on every shelf render.
+ *
+ * IT SAYS WEBP BECAUSE THE FILE IS CALLED `cover.webp`. It encoded JPEG under
+ * that name — which every decoder sniffs its way past, so nothing broke and
+ * nothing said so, and a book's folder is meant to be a directory somebody can
+ * hand to somebody else. A file whose name is a lie about its contents is a
+ * poor thing to hand over. WebP is also smaller at the same quality, which is
+ * the reason the name was chosen in the first place.
  */
-const COVER_TYPE = 'image/jpeg'
+const COVER_TYPE = 'image/webp'
 const COVER_QUALITY = 0.82
 
 /**
@@ -65,18 +72,28 @@ export const browserImageOps: ImageOps = {
   },
 }
 
+/** At least one whole pixel — see `scaledTo`. */
+const whole = (n: number): number =>
+  Number.isFinite(n) && n >= 1 ? Math.round(n) : 1
+
 /** The size a jacket is stored at, preserving its aspect ratio. */
 export function scaledTo(
   width: number,
   height: number,
   max = COVER_WIDTH,
 ): { width: number; height: number } {
+  /* WHOLE POSITIVE PIXELS, whatever arrives. A decoded bitmap reporting 0, or a
+   * `max` of NaN from a caller doing arithmetic on an absent measurement, came
+   * straight back out — and `new OffscreenCanvas(NaN, NaN)` is a canvas that
+   * draws nothing, so the book lost its jacket for a reason no error mentioned. */
+  const w = whole(width)
+  const h = whole(height)
+  const cap = whole(max)
   // Never ENLARGED. A small cover blown up costs bytes and adds nothing, and a
   // book whose jacket is 60px wide should stay 60px rather than become a
   // 400px-wide blur.
-  if (width <= max || width <= 0) return { width: Math.max(1, width), height: Math.max(1, height) }
-  const scale = max / width
-  return { width: max, height: Math.max(1, Math.round(height * scale)) }
+  if (w <= cap) return { width: w, height: h }
+  return { width: cap, height: Math.max(1, Math.round((h * cap) / w)) }
 }
 
 /**
@@ -119,7 +136,12 @@ export async function downscaleCover(
 export async function coverUrl(fs: VaultFs, path: string): Promise<string | null> {
   try {
     const bytes = await fs.readFile(path)
-    return URL.createObjectURL(new Blob([bytes as BlobPart], { type: COVER_TYPE }))
+    /* NO TYPE ASSERTED, because the folder can hold either. Covers written
+     * before this were encoded JPEG under the name `cover.webp`; ones written
+     * since are actually WebP. Declaring a type would be a guess that is wrong
+     * for half of them, and `<img>` sniffs the bytes regardless — which is
+     * precisely why the mismatch went unnoticed for as long as it did. */
+    return URL.createObjectURL(new Blob([bytes as BlobPart]))
   } catch {
     return null
   }

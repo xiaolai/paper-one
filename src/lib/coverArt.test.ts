@@ -84,3 +84,30 @@ describe('downscaleCover', () => {
   })
 })
 
+/**
+ * A decoded bitmap reporting nonsense.
+ *
+ * These came straight back out, and `new OffscreenCanvas(NaN, NaN)` is a canvas
+ * that draws nothing — so the book lost its jacket with no error anywhere.
+ */
+describe('scaledTo with nonsense in', () => {
+  it('never returns less than a whole pixel', () => {
+    expect(scaledTo(0, 0)).toEqual({ width: 1, height: 1 })
+    expect(scaledTo(-40, -10)).toEqual({ width: 1, height: 1 })
+  })
+
+  it('survives a max that is not a number', () => {
+    expect(scaledTo(800, 400, Number.NaN)).toEqual({ width: 1, height: 1 })
+    expect(scaledTo(800, 400, 0)).toEqual({ width: 1, height: 1 })
+  })
+
+  it('returns whole pixels for fractional input', () => {
+    const { width, height } = scaledTo(800.6, 400.4, 400)
+    expect(Number.isInteger(width)).toBe(true)
+    expect(Number.isInteger(height)).toBe(true)
+  })
+
+  it('still scales an ordinary cover the same way', () => {
+    expect(scaledTo(800, 1200, 400)).toEqual({ width: 400, height: 600 })
+  })
+})

@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
-import { collectBooks, importFolder, summarise, type DirFs } from './importFolder'
+import { contentPathIn } from './bookFolder'
+import type { VaultFs } from './bookVault'
+import { collectBooks, importFolder, keepOwnCopy, summarise, type DirFs } from './importFolder'
 
 /**
  * Folder import, without a filesystem.
@@ -167,5 +169,71 @@ describe('summarise', () => {
 
   it('says so when a folder held no books', () => {
     expect(summarise([])).toBe('No books found in that folder.')
+  })
+})
+
+/**
+ * Picking five books used to add one.
+ *
+ * Opening a book REPLACES the open one, so a loop that opened each picked file
+ * in turn left React with a single source and shelved a single book. The other
+ * four were selected, reported as nothing, and never arrived.
+ */
+describe('keepOwnCopy', () => {
+  const fileOf = (name: string, body: string) => new File([body], name)
+
+  function fakeFs() {
+    const files = new Map<string, Uint8Array>()
+    const fs: VaultFs & { files: Map<string, Uint8Array>; failWrite?: string } = {
+      files,
+      readFile: async (path) => {
+        const bytes = files.get(path)
+        if (!bytes) throw new Error('missing')
+        return bytes
+      },
+      writeFile: async (path, bytes) => {
+        if (fs.failWrite && path.startsWith(fs.failWrite)) throw new Error('disk full')
+        files.set(path, bytes)
+      },
+      exists: async (path) => files.has(path),
+      mkdir: async () => {},
+      remove: async (path) => void files.delete(path),
+      removeDir: async () => {},
+      rename: async (from, to) => {
+        const bytes = files.get(from)
+        if (bytes) files.set(to, bytes)
+        files.delete(from)
+      },
+    }
+    return fs
+  }
+
+  it('keeps a copy and reports it as added', async () => {
+    const fs = fakeFs()
+    const out = await keepOwnCopy(fs, fileOf('moby.epub', 'WHALE'), '/Users/x/moby.epub')
+    expect(out.status).toBe('added')
+    expect(out.bookId).toBeTruthy()
+    expect(fs.files.has(contentPathIn(out.bookId!, 'moby.epub'))).toBe(true)
+  })
+
+  /* Same bytes, same folder — so the second time is a duplicate rather than a
+   * second copy, exactly as a folder import reports it. */
+  it('reports the same bytes as a duplicate the second time', async () => {
+    const fs = fakeFs()
+    await keepOwnCopy(fs, fileOf('moby.epub', 'WHALE'), null)
+    const again = await keepOwnCopy(fs, fileOf('moby-copy.epub', 'WHALE'), null)
+    expect(again.status).toBe('duplicate')
+  })
+
+  it('falls back to the filename when there is no path', async () => {
+    const fs = fakeFs()
+    expect((await keepOwnCopy(fs, fileOf('moby.epub', 'W'), null)).path).toBe('moby.epub')
+  })
+
+  it('leaves no temporary file behind when the write fails', async () => {
+    const fs = fakeFs()
+    fs.failWrite = 'books'
+    await expect(keepOwnCopy(fs, fileOf('moby.epub', 'W'), null)).rejects.toThrow()
+    expect([...fs.files.keys()].some((k) => k.endsWith('.writing'))).toBe(false)
   })
 })

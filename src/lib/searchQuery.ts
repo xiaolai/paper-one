@@ -25,7 +25,14 @@
  * different tag — `He said "Hi"` searched for `He said Hi`, which matches
  * nothing. An escape in the grammar is what makes `withTag` able to round-trip.
  */
-const TAG = /(^|\s)tag:(?:"((?:[^"\\]|\\.)*)"|(\S*))/gi
+const TAG = /(^|\s)tag:(?:"((?:[^"\\]|\\.)*)"?|(\S*))/gi
+
+/* The closing quote is OPTIONAL, which is what makes a half-typed term behave.
+ * Without the `?` the quoted alternative simply failed on `tag:"Book club`, the
+ * bare `\S*` matched instead, and the reader mid-word was searching for a tag
+ * literally called `"Book` while `club` became free text — a shelf emptying
+ * under their hands for a reason nothing on screen could explain. Now it is one
+ * unterminated tag term, which `parseQuery` drops like any other incomplete one. */
 
 /** Undo `withTag`'s escaping: `\"` and `\\` become the characters they spell. */
 const unescape = (quoted: string): string => quoted.replace(/\\(.)/g, '$1')
@@ -106,5 +113,10 @@ export function withoutTag(raw: string, tag: string, key: (t: string) => string)
       const found = (quoted === undefined ? (bare ?? '') : unescape(quoted)).trim()
       return found && key(found) === target ? lead : match
     })
+    /* Collapsed, for the same reason `parseQuery` collapses: removing a term
+     * from the MIDDLE leaves the space before it beside the space after it, and
+     * `moby tag:Sea dick` came back as `moby  dick` — which then fails to match
+     * a title containing one space. */
+    .replace(/\s+/g, ' ')
     .trim()
 }

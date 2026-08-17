@@ -248,7 +248,11 @@ export async function migrateToFolders(
        * still migrates: `openStored` falls back to it. A row with neither is
        * left in the phase-3 store, reported, and picked up by a later run if
        * anything ever makes it recoverable. */
-      if (!copied && !str(row.path) && !str(row.url)) {
+      /* THE SAME TEST THE RECORD USES. `str` slices at 4000 and accepts what
+       * `origin` rejects past 8000 — so a row with a very long address passed
+       * this gate, then had that address DROPPED by `recordFromRow`, and was
+       * reported `migrated` as a book with neither content nor a way back. */
+      if (!copied && !record.origin) {
         outcomes.push({
           bookId,
           status: 'skipped',

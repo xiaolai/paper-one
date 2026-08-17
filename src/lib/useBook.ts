@@ -142,7 +142,7 @@ export interface Book extends BookState {
    */
   goLeft: () => void
   goRight: () => void
-  setNavigator: (navigator: BookNavigator | null) => void
+  setNavigator: (generation: number, navigator: BookNavigator | null) => void
   /** Renderer callbacks. Each takes the generation it was issued under. */
   setToc: (generation: number, toc: readonly TocItem[]) => void
   setPosition: (generation: number, position: ReaderPosition) => void
@@ -302,8 +302,12 @@ export function useBook(): Book {
   const prev = useCallback(() => navigatorRef.current?.prev(), [])
   const goLeft = useCallback(() => navigatorRef.current?.goLeft(), [])
   const goRight = useCallback(() => navigatorRef.current?.goRight(), [])
-  const setNavigator = useCallback((navigator: BookNavigator | null) => {
-    navigatorRef.current = navigator
+  /* GENERATION-TAGGED like every other renderer callback. It was the only one
+   * that was not, so a session being torn down could install ITS navigator over
+   * the one belonging to the book that replaced it — and page turns then went to
+   * a renderer for a book nobody was looking at. */
+  const setNavigator = useCallback((generation: number, navigator: BookNavigator | null) => {
+    if (current(generation)) navigatorRef.current = navigator
   }, [])
   const setToc = useCallback(
     (generation: number, value: readonly TocItem[]) => {

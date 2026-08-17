@@ -45,7 +45,7 @@ export interface FoliateViewProps {
   onCover: (generation: number, cover: Blob | null) => void
   onError: (generation: number, message: string) => void
   /** Publishes navigation once the book is parsed; null on teardown. */
-  onNavigator: (navigator: BookNavigator | null) => void
+  onNavigator: (generation: number, navigator: BookNavigator | null) => void
   /**
    * The open book's marks. Read through a ref rather than depended on, so
    * making a mark redraws the overlay without reopening the book.
@@ -315,7 +315,7 @@ export function FoliateView({
       onMeta: (meta) => handlers.current.onMeta(gen, meta),
       onCover: (cover) => handlers.current.onCover(gen, cover),
       onError: (message) => handlers.current.onError(gen, message),
-      onNavigator: (navigator) => handlers.current.onNavigator(navigator),
+      onNavigator: (navigator) => handlers.current.onNavigator(gen, navigator),
       onSelection: (selection) => handlers.current.onSelection(selection),
       onMarkDrawn: (cfi, range) => handlers.current.onMarkDrawn(cfi, range),
       onMarkActivated: (cfi) => handlers.current.onMarkActivated(cfi),

@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { Search } from 'lucide-react'
 import { coverTintFor } from '../lib/bookAccent'
 import type { IndexedBook } from '../lib/bookIndex'
-import { displayAuthor, displayTitle, matchesQuery } from '../lib/library'
+import { CANNOT_OPEN, canOpen, displayAuthor, displayTitle, matchesQuery } from '../lib/library'
 import { ICON } from '../lib/metrics'
 import { OverlaySheet } from './OverlaySheet'
 import styles from './Overlay.module.css'
@@ -84,9 +84,14 @@ export function BookSwitcher({
                 key={book.bookId}
                 type="button"
                 className={styles.row}
-                disabled={isCurrent}
-                data-disabled={isCurrent}
-                title={isCurrent ? 'Already open' : undefined}
+                /* THE SAME RULE THE SHELF USES. The switcher offered a book
+                 * Paper has no copy of, and clicking it dismissed the switcher
+                 * and failed — with the explanation appearing on the Library
+                 * screen, which is not the screen the reader is looking at. A
+                 * row that cannot open should say so where it is. */
+                disabled={isCurrent || !canOpen(book)}
+                data-disabled={isCurrent || !canOpen(book)}
+                title={isCurrent ? 'Already open' : canOpen(book) ? undefined : CANNOT_OPEN}
                 onClick={() => onOpen(book)}
               >
                 <span

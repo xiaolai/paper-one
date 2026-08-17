@@ -22,7 +22,9 @@ import {
 } from '@tauri-apps/plugin-fs'
 
 /** Where copies live, under the app's own data directory. */
-export const BOOKS_DIR = 'books'
+/* `BOOKS_DIR` lives in `bookFolder`, which owns the layout. It was declared
+ * here too, with no production consumer — two names for one path is one of them
+ * waiting to disagree. */
 
 /**
  * The filesystem operations a vault needs, so tests need no Tauri.
@@ -73,7 +75,7 @@ export const tauriVaultFs: VaultFs = {
  * the PDF adapter are handed the original filename separately and route on
  * that.
  */
-const KNOWN_EXTENSIONS: readonly string[] = [
+export const KNOWN_EXTENSIONS: readonly string[] = [
   'epub',
   'pdf',
   'mobi',
@@ -82,6 +84,16 @@ const KNOWN_EXTENSIONS: readonly string[] = [
   'fb2',
   'fbz',
 ]
+
+/**
+ * What a stored `content.*` can be called — the known list, plus the fallback.
+ *
+ * Exported because `bookIndex` has to decide whether a folder HOLDS a book, and
+ * it kept its own copy of this list to do it. Adding a format to one and not the
+ * other made every book of that format look contentless: the row went disabled,
+ * with the bytes sitting right there beside the record.
+ */
+export const CONTENT_EXTENSIONS: readonly string[] = [...KNOWN_EXTENSIONS, 'bin']
 
 /** The extension to store a book under, from the name it arrived with. */
 export function extensionFor(name: string): string {

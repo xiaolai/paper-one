@@ -64,7 +64,13 @@ export function inOrder(books: readonly IndexedBook[], order: LibraryOrder): Ind
   return [...books].sort(
     (a, b) =>
       key(a).localeCompare(key(b), undefined, { numeric: true, sensitivity: 'base' }) ||
-      (b.openedAt ?? 0) - (a.openedAt ?? 0),
+      (b.openedAt ?? 0) - (a.openedAt ?? 0) ||
+      /* THE ID LAST, so the order is genuinely total. Recency was called the
+       * tie-break that made it so, and it is not one: two books with the same
+       * title and no `openedAt` — which every freshly imported folder produces —
+       * compared equal, so their order came from whatever order the input
+       * happened to be in and could change between renders. */
+      a.bookId.localeCompare(b.bookId),
   )
 }
 
@@ -192,13 +198,12 @@ export function tagCounts(
   const counts = new Map<string, { tag: string; count: number }>()
   for (const book of books) {
     if (!inScope(book, scope)) continue
-    // Within one book too: a reader's `Sea` and a publisher's `sea` are one tag
-    // on that book and must not count it twice.
-    const seen = new Set<string>()
+    /* No per-book deduplication here: `allTags` already folds a reader's `Sea`
+     * and a publisher's `sea` into one before returning, so a second `seen` set
+     * was a branch that could not be taken. It was written when `allTags`
+     * returned the two lists unfolded. */
     for (const tag of allTags(book)) {
       const key = tagKey(tag)
-      if (seen.has(key)) continue
-      seen.add(key)
       const already = counts.get(key)
       if (already) already.count += 1
       else counts.set(key, { tag, count: 1 })

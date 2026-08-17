@@ -38,10 +38,6 @@ export function BookCover({
   const at = coverPathIn(book.bookId)
 
   useEffect(() => {
-    if (!at) {
-      setUrl(null)
-      return
-    }
     let revoked = false
     let mine: string | null = null
     void coverUrl(tauriVaultFs, at).then((next) => {
@@ -72,6 +68,11 @@ export function BookCover({
           /* EMPTY alt, deliberately. The title is right beneath it in the same
            * button, so a screen reader announcing the jacket would read the book
            * twice — and "cover of X" is decoration, not information. */
+          /* AND A FALLBACK WHEN THE BYTES WILL NOT DECODE. There was none, so a
+           * truncated or corrupt `cover.webp` drew the browser's broken-image
+           * glyph — while the tinted panel with the title on it, which exists
+           * for exactly this, sat behind it unused. */
+          onError={() => setUrl(null)}
           style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
         />
       ) : (

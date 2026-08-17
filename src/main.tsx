@@ -73,7 +73,12 @@ async function boot(root: HTMLElement): Promise<void> {
        * already treats unreadable marks as none, so the strict read was the only
        * thing standing between a reader and their books. */
       const outcomes = await migrateToFolders(fs, {
-        rows: readJson(storage.getItem('paper.library.v1'), []) as [],
+        /* CHECKED, not asserted. `as []` told the compiler this was a list and
+         * told the runtime nothing — so a store holding a valid JSON OBJECT
+         * threw inside the migration and skipped every legacy book, which is
+         * exactly the whole-or-nothing failure the separate parse above exists
+         * to prevent. */
+        rows: asRows(readJson(storage.getItem('paper.library.v1'), [])),
         marks: readJson(storage.getItem('paper.marks.v1'), []),
       })
       const said = summariseMigration(outcomes)
@@ -82,7 +87,18 @@ async function boot(root: HTMLElement): Promise<void> {
       console.error('Paper: could not carry the previous library across', cause)
     }
   }
-  const initialBooks = fs ? (await loadShelf(fs).catch(() => ({ books: [] }))).books : []
+  /* A SHELF THAT WILL NOT LOAD IS NOT AN EMPTY SHELF, and the reader is told
+   * which. Swallowing it drew "Your library is empty" over a library that is
+   * still on disk — the single most alarming thing this app can say, produced by
+   * a transient read. */
+  const initialBooks = fs
+    ? (
+        await loadShelf(fs).catch((cause: unknown) => {
+          console.error('Paper: could not read the library', cause)
+          return { books: [] }
+        })
+      ).books
+    : []
   /* Emptied at BOOT, not on a timer and not when the reader removes something.
    *
    * It has to happen somewhere, and every other candidate is worse: a timer
@@ -102,6 +118,11 @@ async function boot(root: HTMLElement): Promise<void> {
 }
 
 /** Parse, or the fallback. A store that will not read is a store with nothing in it. */
+/** A legacy library value that is not a list is not a library. */
+function asRows(value: unknown): [] {
+  return (Array.isArray(value) ? value : []) as []
+}
+
 function readJson(raw: string | null, fallback: unknown): unknown {
   if (!raw) return fallback
   try {

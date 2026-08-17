@@ -265,16 +265,26 @@ export function useMarks(bookId: string | null, fs: IndexFs | null): MarkStore {
 
   applyElsewhereRef.current = applyElsewhere
 
-  /** Route a change to whichever book the mark belongs to. */
+  /**
+   * Route a change to whichever book the mark belongs to.
+   *
+   * NOT CONDITIONAL ON A BOOK BEING OPEN. Notes lists every book's marks and is
+   * reachable with no book open at all — and `!bookId` returned early, so in
+   * exactly that state every edit and every delete was a silent no-op: the row
+   * changed on screen and came back on the next render.
+   */
   const applyToMark = useCallback(
     (id: string, mutate: (prev: readonly Mark[]) => readonly Mark[]) => {
-      const mine = latest.current.some((mark) => mark.id === id)
-      if (mine || !bookId) {
-        if (mine) apply(mutate)
+      // The open book's own list first, which is the only one held in memory.
+      if (latest.current.some((mark) => mark.id === id)) {
+        apply(mutate)
         return
       }
+      /* Otherwise the owner comes from `all`, whether or not anything is open
+       * and whether or not it is the open book — a mark can be in `all` and not
+       * yet in `current`, because the two are read separately. */
       const owner = all.find((mark) => mark.id === id)?.bookId
-      if (owner && owner !== bookId) applyElsewhere(owner, mutate)
+      if (owner) applyElsewhere(owner, mutate)
     },
     [apply, all, bookId, applyElsewhere],
   )

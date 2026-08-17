@@ -24,6 +24,7 @@ import { downscaleCover } from './lib/coverArt'
 import { contentPathIn, coverPathIn, folderOf, recordPath } from './lib/bookFolder'
 import {
   importFolder,
+  keepOwnCopy,
   summarise,
   type ImportOutcome,
   type ImportProgress,
@@ -78,7 +79,19 @@ export function App({ storage, fs, initialBooks }: AppProps) {
    * are different operations and were one name, which is how the shelf came up
    * empty with ten books on disk. */
   const importFs = useMemo(
-    () => (fs ? ({ ...fs, readDir: tauriDirOps.readDirOutside } as unknown as DirFs) : null),
+    /* BUILT, not cast. `IndexFs` has no `readOutside`, and `as unknown as DirFs`
+     * asserted one into existence — so an import would have called a member that
+     * was never there. The two reads it needs are named explicitly, which is
+     * also what makes the difference between them visible: `readDir` walks the
+     * reader's own filesystem here, not the app's data directory. */
+    () =>
+      fs
+        ? ({
+            ...fs,
+            readDir: tauriDirOps.readDirOutside,
+            readOutside: tauriDirOps.readOutside,
+          } satisfies DirFs)
+        : null,
     [fs],
   )
   const library = useLibrary(fs, initialBooks)
@@ -151,16 +164,6 @@ export function App({ storage, fs, initialBooks }: AppProps) {
     [book, dispatch],
   )
 
-  /** The native picker. Returns paths, which is the entire difference. */
-  const addBooks = useCallback(() => {
-    void pickBooks()
-      .then((picked) => {
-        for (const { file, path } of picked) openBook(file, path)
-      })
-      .catch((cause: unknown) => {
-        console.error('Paper: the book picker failed', cause)
-      })
-  }, [openBook])
 
   const { add, update, remove, positionOf, rekeyBook } = library
 
@@ -333,6 +336,46 @@ export function App({ storage, fs, initialBooks }: AppProps) {
   const isShelved = Boolean(openRow)
 
 
+
+  /**
+   * The native picker. Returns paths, which is the entire difference.
+   *
+   * PICKING FIVE BOOKS USED TO ADD ONE. The loop called `openBook` on every file
+   * in turn, and opening a book REPLACES the open one — so React saw a single
+   * source, the last, and the intake effect that shelves a book ran once. The
+   * other four were selected, reported as nothing, and never arrived.
+   *
+   * The button says "Add books", so all of them are added: each is copied into
+   * its own folder and put on the shelf, exactly as a folder import does, and
+   * then ONE is opened. The reader asked to add several and to be reading; both
+   * happen, and neither is inferred from the other.
+   */
+  const addBooks = useCallback(() => {
+    void pickBooks()
+      .then(async (picked) => {
+        if (picked.length === 0) return
+        // The last, because that is the one the previous version happened to
+        // open — the same book opens as before, and now the rest arrive too.
+        const opening = picked[picked.length - 1]!
+        if (picked.length > 1 && fs) {
+          const outcomes: ImportOutcome[] = []
+          for (const { file, path } of picked) {
+            try {
+              outcomes.push(await keepOwnCopy(fs, file, path))
+            } catch (cause) {
+              console.error('Paper: could not add', path, cause)
+              outcomes.push({ path, status: 'failed', name: file.name })
+            }
+          }
+          shelveImported(outcomes)
+          setImportNotice(summarise(outcomes))
+        }
+        openBook(opening.file, opening.path)
+      })
+      .catch((cause: unknown) => {
+        console.error('Paper: the book picker failed', cause)
+      })
+  }, [openBook, fs, shelveImported])
 
   /**
    * Add a whole folder.

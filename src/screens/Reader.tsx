@@ -427,7 +427,10 @@ export function Reader({
                   <span>{book.position.chapterLabel}</span>
                   {book.position.chapterLabel && <span>·</span>}
                   <span style={{ fontVariantNumeric: 'tabular-nums' }}>
-                    {Math.round(book.position.fraction * 100)}%
+                    {/* CLAMPED, like the track beside it. A relocation event
+                        with a malformed fraction drew "-3%" or "NaN%" under a
+                        bar that had already pinned itself to the end. */}
+                    {Math.round(Math.min(1, Math.max(0, book.position.fraction || 0)) * 100)}%
                   </span>
                 </div>
               </>

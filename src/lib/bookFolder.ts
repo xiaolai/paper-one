@@ -125,17 +125,34 @@ const MAX_POSITION = 64_000
  * `canOpen` would go on offering the row because an origin was present.
  */
 const MAX_ORIGIN = 8_000
+/**
+ * The bound for a list the BOOK declares — subjects, languages.
+ *
+ * Sliced, and that is right for these: they come from a file Paper did not
+ * write, a book listing three hundred subjects is describing nothing, and
+ * dropping the field entirely over a long tail would lose the useful head of it.
+ */
 const MAX_LIST = 64
+/**
+ * The bound for the reader's OWN tags, which is not the same question.
+ *
+ * These share a parser with the declared lists, and that parser SLICES — so a
+ * reader with sixty-five tags on a book lost the sixty-fifth silently, and lost
+ * it permanently on the next write. Nothing in the UI stops them adding it. A
+ * bound still exists, because this parses a file a reader can edit by hand, but
+ * it is far past where anyone will meet it.
+ */
+const MAX_TAGS = 4096
 
 const text = (v: unknown, limit = MAX_FIELD): string | undefined =>
   typeof v === 'string' && v ? v.slice(0, limit) : undefined
 const num = (v: unknown): number | undefined =>
   typeof v === 'number' && Number.isFinite(v) ? v : undefined
-const list = (v: unknown): readonly string[] | undefined => {
+const list = (v: unknown, limit = MAX_LIST): readonly string[] | undefined => {
   if (!Array.isArray(v)) return undefined
   const clean = v
     .filter((one): one is string => typeof one === 'string' && one !== '')
-    .slice(0, MAX_LIST)
+    .slice(0, limit)
     .map((one) => one.slice(0, MAX_FIELD))
   return clean.length ? clean : undefined
 }
@@ -174,7 +191,7 @@ export function parseRecord(raw: string | null): BookRecord | null {
     ...(text(r['published']) ? { published: text(r['published'])! } : {}),
     ...(list(r['languages']) ? { languages: list(r['languages'])! } : {}),
     ...(list(r['subjects']) ? { subjects: list(r['subjects'])! } : {}),
-    ...(list(r['tags']) ? { tags: list(r['tags'])! } : {}),
+    ...(list(r['tags'], MAX_TAGS) ? { tags: list(r['tags'], MAX_TAGS)! } : {}),
     /* NOT `text`, which SLICES. See `MAX_POSITION`: a shortened CFI is not a
      * rougher position, it is a broken one, and it used to overwrite the good
      * value on the next merge. Over the bound the field is dropped, so the book
@@ -228,14 +245,37 @@ export async function writeBook(
   bookId: string,
   record: BookRecord,
 ): Promise<void> {
-  const path = recordPath(bookId)
+  // Stamped on every write, so the record always knows its own id even if the
+  // caller passed one that was not in it.
+  const stamped: BookRecord = { ...record, bookId }
+  await atomicWrite(
+    fs,
+    recordPath(bookId),
+    new TextEncoder().encode(JSON.stringify(stamped, null, 2)),
+  )
+}
+
+/**
+ * Write a file so that a crash cannot leave half of one.
+ *
+ * A temporary neighbour, then a rename — atomic within a filesystem, so readers
+ * see the old bytes or the new bytes and never a truncated file. That matters
+ * here more than usual: `exists` is what decides a book HAS content, so a
+ * half-written `content.epub` would be counted as the book forever.
+ *
+ * ONE COPY OF THIS. It was written out four times — the record, the marks, a
+ * folder import, and the reader's own copy on open — and four copies of an
+ * invariant is three chances for one of them to drift out of it.
+ *
+ * The temporary path is derived from the destination, so two writers racing for
+ * ONE file still collide. That is deliberate and is why both stores serialise
+ * their writes per book; see `writeQueue`.
+ */
+export async function atomicWrite(fs: VaultFs, path: string, bytes: Uint8Array): Promise<void> {
   const writing = `${path}.writing`
-  await fs.mkdir(folderOf(bookId))
+  await fs.mkdir(path.slice(0, path.lastIndexOf('/')))
   try {
-    // Stamped on every write, so the record always knows its own id even if the
-    // caller passed one that was not in it.
-    const stamped: BookRecord = { ...record, bookId }
-    await fs.writeFile(writing, new TextEncoder().encode(JSON.stringify(stamped, null, 2)))
+    await fs.writeFile(writing, bytes)
     await fs.rename(writing, path)
   } catch (cause) {
     await fs.remove(writing).catch(() => {})
@@ -301,14 +341,6 @@ export async function updateBook(
 }
 
 /**
- * Fold what a parse learned into what the reader owns.
- *
- * The book is the authority on its own metadata; the reader is the authority on
- * their tags, their place in it, and whether they are done. Phase 3 got this
- * wrong in `recordOpen` and erased a reader's tags on every reopen, so the rule
- * is stated as a function rather than left to a spread.
- */
-/**
  * Reconcile TWO records that are both the reader's, for one book.
  *
  * Not the same problem as `mergeParsed`, which folds what a book says about
@@ -351,6 +383,14 @@ export function mergeStranded(stranded: BookRecord, live: BookRecord): BookRecor
   }
 }
 
+/**
+ * Fold what a parse learned into what the reader owns.
+ *
+ * The book is the authority on its own metadata; the reader is the authority on
+ * their tags, their place in it, and whether they are done. Phase 3 got this
+ * wrong in `recordOpen` and erased a reader's tags on every reopen, so the rule
+ * is stated as a function rather than left to a spread.
+ */
 export function mergeParsed(previous: BookRecord | null, parsed: BookRecord): BookRecord {
   if (!previous) return parsed
   return {
@@ -412,14 +452,5 @@ export async function writeMarks(
   bookId: string,
   marks: readonly unknown[],
 ): Promise<void> {
-  const path = marksPathIn(bookId)
-  const writing = `${path}.writing`
-  await fs.mkdir(folderOf(bookId))
-  try {
-    await fs.writeFile(writing, new TextEncoder().encode(JSON.stringify(marks)))
-    await fs.rename(writing, path)
-  } catch (cause) {
-    await fs.remove(writing).catch(() => {})
-    throw cause
-  }
+  await atomicWrite(fs, marksPathIn(bookId), new TextEncoder().encode(JSON.stringify(marks)))
 }

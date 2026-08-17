@@ -22,7 +22,7 @@
  */
 
 import type { VaultFs } from './bookVault'
-import { contentPathIn, folderOf } from './bookFolder'
+import { atomicWrite, contentPathIn } from './bookFolder'
 import { bookIdFor } from './marks'
 
 /** Extensions worth reading. The same closed list the vault stores under. */
@@ -145,19 +145,9 @@ export async function importFolder(
        * a folder import was the last thing still producing the flat layout. */
       const at = contentPathIn(bookId, name)
       const held = await fs.exists(at)
-      if (!held) {
-        await fs.mkdir(folderOf(bookId))
-        const writing = `${at}.writing`
-        try {
-          await fs.writeFile(writing, bytes)
-          // Renamed into place, so an interrupted import cannot leave a
-          // truncated file that `exists` will later call a book.
-          await fs.rename(writing, at)
-        } catch (cause) {
-          await fs.remove(writing).catch(() => {})
-          throw cause
-        }
-      }
+      // Renamed into place by `atomicWrite`, so an interrupted import cannot
+      // leave a truncated file that `exists` will later call a book.
+      if (!held) await atomicWrite(fs, at, bytes)
       outcomes.push({
         path,
         /* Whether the file was ALREADY there, checked before writing. An
@@ -197,4 +187,33 @@ export function summarise(outcomes: readonly ImportOutcome[]): string {
   if (duplicate) parts.push(`${duplicate} already here`)
   if (failed) parts.push(`${failed} could not be read`)
   return parts.join(', ')
+}
+
+/**
+ * Keep Paper's own copy of one book the reader chose, and say what happened.
+ *
+ * The per-book half of `importFolder`, for a caller that already HAS the bytes:
+ * the native picker hands back a `File` and a path together, so there is nothing
+ * to read off the disk again.
+ *
+ * It exists because picking five books used to add one. Opening a book replaces
+ * the open one, so a loop that opened each in turn left React with a single
+ * source and shelved a single book — the rest were selected and silently
+ * discarded. This is what the other four go through instead.
+ */
+export async function keepOwnCopy(
+  fs: VaultFs,
+  file: File,
+  path: string | null,
+): Promise<ImportOutcome> {
+  const bookId = await bookIdFor(file)
+  const at = contentPathIn(bookId, file.name)
+  const held = await fs.exists(at)
+  if (!held) await atomicWrite(fs, at, new Uint8Array(await file.arrayBuffer()))
+  return {
+    path: path ?? file.name,
+    status: held ? 'duplicate' : 'added',
+    bookId,
+    name: file.name,
+  }
 }

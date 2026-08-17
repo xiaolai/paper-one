@@ -75,6 +75,23 @@ function NoteEditor({ initial, onCommit, onDone }: NoteEditorProps) {
     commit.current(value)
   }, [])
 
+  /**
+   * Save while they type, not only when they stop.
+   *
+   * The note used to exist ONLY in this ref until blur, unmount or `pagehide` —
+   * and `pagehide` starts an asynchronous write that a webview being torn down
+   * can simply not finish. So the whole of a long note rode on one event firing
+   * and one queued write landing, and losing that lost all of it.
+   *
+   * A pause of a second is not a save button; it is the difference between
+   * losing a paragraph and losing a sentence. The events below still fire — they
+   * are the last flush now rather than the only one.
+   */
+  useEffect(() => {
+    const idle = window.setInterval(save, 1000)
+    return () => window.clearInterval(idle)
+  }, [save])
+
   useEffect(() => {
     // `pagehide` rather than `beforeunload`: it fires on the path a webview
     // actually takes when the window goes away, and it is not blocked by the

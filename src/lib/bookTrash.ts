@@ -19,7 +19,6 @@
 import type { VaultFs } from './bookVault'
 import { folderOf, readMarks, trashOf, writeMarks } from './bookFolder'
 
-export { TRASH_DIR } from './bookFolder'
 
 /**
  * How long a removed book is recoverable.

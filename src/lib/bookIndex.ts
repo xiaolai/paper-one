@@ -18,8 +18,8 @@
  * would cost the reader's work.
  */
 
-import type { VaultFs } from './bookVault'
-import { BOOKS_DIR, folderOf, parseRecord, recordPath, type BookRecord } from './bookFolder'
+import { CONTENT_EXTENSIONS, type VaultFs } from './bookVault'
+import { BOOKS_DIR, folderOf, parseRecord, type BookRecord } from './bookFolder'
 
 export const INDEX_FILE = 'index.json'
 
@@ -38,9 +38,16 @@ export interface IndexedBook extends BookRecord {
   readonly hasContent?: boolean
 }
 
-/** Does this folder hold a content file? One `exists` per known extension. */
+/**
+ * Does this folder hold a content file? One `exists` per known extension.
+ *
+ * THE LIST COMES FROM `bookVault`, which is the module that decides what a
+ * stored book may be called. This kept its own copy, so adding a format to one
+ * and not the other made every book of that format look contentless — the row
+ * went disabled with its bytes sitting beside the record.
+ */
 async function hasContentFile(fs: IndexFs, folder: string): Promise<boolean> {
-  for (const ext of ['epub', 'pdf', 'mobi', 'azw3', 'cbz', 'fb2', 'fbz', 'bin']) {
+  for (const ext of CONTENT_EXTENSIONS) {
     if (await fs.exists(`${BOOKS_DIR}/${folder}/content.${ext}`)) return true
   }
   return false
@@ -80,6 +87,10 @@ export function parseIndex(raw: string | null): readonly IndexedBook[] | null {
     // hold a shape the record could not.
     const record = parseRecord(JSON.stringify(one))
     if (!record) continue
+    /* THE VALIDATED ID, not the raw one. `parseRecord` bounds every field it
+     * keeps, and taking `bookId` off the untrusted object afterwards put the
+     * unbounded original back — for a value that names a directory. */
+    if (record.bookId && record.bookId !== id) continue
     /* `hasContent` CARRIED THROUGH. It is derived by the scan and is not part of
      * a record, so rebuilding a cached entry through `parseRecord` dropped it —
      * and `canOpen` reads `!== false`, so every dead row came back enabled on
@@ -108,8 +119,18 @@ export async function scanBooks(fs: IndexFs): Promise<IndexedBook[]> {
   let entries: { name: string; isDirectory: boolean }[]
   try {
     entries = await fs.readDir(BOOKS_DIR)
-  } catch {
-    // No library yet. An empty shelf, not an error.
+  } catch (cause) {
+    /* NO LIBRARY YET is an empty shelf. ANY OTHER FAILURE IS NOT.
+     *
+     * Both were `return []`, and `loadShelf` writes that answer straight back to
+     * `index.json` — so one unreadable directory, from a permission prompt or a
+     * volume not yet mounted, showed an empty library AND replaced the cache
+     * that described the real one. The shelf then agreed with itself, and the
+     * books were gone as far as anything could tell.
+     *
+     * Absent is decided by asking, rather than by inspecting an error whose
+     * shape is the plugin's business. */
+    if (await fs.exists(BOOKS_DIR)) throw cause
     return []
   }
   const books: IndexedBook[] = []
@@ -212,7 +233,6 @@ export async function writeIndex(fs: IndexFs, books: readonly IndexedBook[]): Pr
 }
 
 /** Where a book's record lives — re-exported so callers need one import. */
-export { recordPath }
 
 
 /**
