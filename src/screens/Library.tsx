@@ -1,5 +1,5 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
-import { Check, FolderPlus, Globe, Plus, Tag, X } from 'lucide-react'
+import { BookCheck, FolderPlus, Globe, Plus, Tag, X } from 'lucide-react'
 import {
   CANNOT_OPEN,
   allTags,
@@ -327,7 +327,22 @@ export function Library({
           {visible.map((book) => {
             const openable = canOpen(book)
             return (
-              <div key={book.bookId} className={styles.cell}>
+              <div
+                key={book.bookId}
+                className={styles.cell}
+                /* WHILE A REMOVAL IS PENDING the other controls go away — see the
+                   CSS. The confirm replaces a 26px circle with the word
+                   "Remove?", which grows leftward from the same right edge and
+                   lands exactly on top of the tag button. A reader reaching for
+                   "cancel" by clicking the neighbouring control was hitting the
+                   destructive one instead. */
+                data-confirming={confirming === book.bookId}
+                /* And it clears when the pointer leaves. `onBlur` is focus, not
+                   hover, so moving the mouse away left a red pill on a card
+                   nobody was touching — the one piece of state on this screen
+                   that outlived the gesture that made it. */
+                onMouseLeave={() => setConfirming((at) => (at === book.bookId ? null : at))}
+              >
               <button
                 type="button"
                 className={styles.book}
@@ -373,60 +388,21 @@ export function Library({
                   </span>
                 )}
               </button>
-              {/* OUTSIDE the open button, not inside it. A button nested in a
+              {/* IN READING ORDER, which is not what this was.
+                  These are positioned from the right edge, so the DOM order used
+                  to run backwards: tabbing off the cover reached the DESTRUCTIVE
+                  control first and then walked leftwards. Laid out here the way
+                  they appear, so focus goes left to right and Remove is last.
+
+                  OUTSIDE the open button, not inside it. A button nested in a
                   button is invalid, and browsers resolve it by dropping the
-                  inner one — so the remove control would render and simply never
-                  fire, which looks like a broken feature rather than bad markup. */}
-              <button
-                type="button"
-                className={styles.remove}
-                aria-label={
-                  confirming === book.bookId
-                    ? `Remove ${displayTitle(book)} — the file you imported is kept, and this is recoverable for two weeks`
-                    : `Remove ${displayTitle(book)}`
-                }
-                title={
-                  confirming === book.bookId
-                    ? 'The file you imported is untouched. Your tags, place and notes are recoverable for two weeks.'
-                    : undefined
-                }
-                data-confirming={confirming === book.bookId}
-                onClick={() => {
-                  if (confirming === book.bookId) {
-                    setConfirming(null)
-                    onRemove(book)
-                  } else {
-                    setConfirming(book.bookId)
-                  }
-                }}
-                onBlur={() => setConfirming((at) => (at === book.bookId ? null : at))}
-              >
-                {confirming === book.bookId ? 'Remove?' : <X size={ICON.control} strokeWidth={ICON.stroke} />}
-              </button>
-              <button
-                type="button"
-                className={styles.tagButton}
-                aria-label={`Tag ${displayTitle(book)}`}
-                onClick={() => {
-                  setDraftTag('')
-                  setTagging((at) => (at === book.bookId ? null : book.bookId))
-                }}
-              >
-                <Tag size={ICON.control} strokeWidth={ICON.stroke} />
-              </button>
-              <button
-                type="button"
-                className={styles.finishButton}
-                aria-label={
-                  statusOf(book) === 'finished'
-                    ? `Mark ${displayTitle(book)} unread`
-                    : `Mark ${displayTitle(book)} finished`
-                }
-                data-finished={statusOf(book) === 'finished'}
-                onClick={() => onSetFinished(book.bookId, statusOf(book) !== 'finished')}
-              >
-                <Check size={ICON.control} strokeWidth={ICON.stroke} />
-              </button>
+                  inner one — so the control would render and simply never fire,
+                  which looks like a broken feature rather than bad markup.
+
+                  EVERY ONE CARRIES A `title`. Three of the four had only an
+                  `aria-label`, which a screen reader announces and a pointer
+                  cannot see — so a bare tick sat on every cover with nothing
+                  anywhere to say what it did. */}
               {/* Offered only where it HELPS: a book that already knows its own
                   author does not need a stranger's opinion, and a control that
                   appears on every row invites the bulk use Decision 1 rules out. */}
@@ -441,6 +417,78 @@ export function Library({
                   <Globe size={ICON.control} strokeWidth={ICON.stroke} />
                 </button>
               )}
+              <button
+                type="button"
+                className={styles.finishButton}
+                aria-label={
+                  statusOf(book) === 'finished'
+                    ? `Mark ${displayTitle(book)} unread`
+                    : `Mark ${displayTitle(book)} finished`
+                }
+                /* A BOOK with a tick, not a bare tick. On a card that can be
+                   selected, confirmed or dismissed, ✓ reads as any of those —
+                   and it was the one control here nobody could name. The book
+                   in the glyph is what says the tick is about READING it. */
+                title={
+                  statusOf(book) === 'finished'
+                    ? 'Finished — click to mark unread'
+                    : 'Mark as finished'
+                }
+                data-finished={statusOf(book) === 'finished'}
+                onClick={() => onSetFinished(book.bookId, statusOf(book) !== 'finished')}
+              >
+                <BookCheck size={ICON.control} strokeWidth={ICON.stroke} />
+              </button>
+              <button
+                type="button"
+                className={styles.tagButton}
+                aria-label={`Tag ${displayTitle(book)}`}
+                title="Add a tag"
+                onClick={() => {
+                  setDraftTag('')
+                  setTagging((at) => (at === book.bookId ? null : book.bookId))
+                }}
+              >
+                <Tag size={ICON.control} strokeWidth={ICON.stroke} />
+              </button>
+              <button
+                type="button"
+                className={styles.remove}
+                aria-label={
+                  confirming === book.bookId
+                    ? `Remove ${displayTitle(book)} — the file you imported is kept, and this is recoverable for two weeks`
+                    : `Remove ${displayTitle(book)}`
+                }
+                title={
+                  confirming === book.bookId
+                    ? 'The file you imported is untouched. Your tags, place and notes are recoverable for two weeks. Escape to cancel.'
+                    : 'Remove from the library'
+                }
+                data-confirming={confirming === book.bookId}
+                onClick={() => {
+                  if (confirming === book.bookId) {
+                    setConfirming(null)
+                    onRemove(book)
+                  } else {
+                    setConfirming(book.bookId)
+                  }
+                }}
+                /* ESCAPE CANCELS, like every other transient state in this app —
+                   the tag field a few lines down already did, and the one control
+                   here that destroys something did not. Blur alone was not a way
+                   out: it fires on focus, so a reader who clicked the X and then
+                   moved the mouse away was left with a red "Remove?" sitting on a
+                   card they were no longer touching, and no key would dismiss it. */
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape' && confirming === book.bookId) {
+                    event.stopPropagation()
+                    setConfirming(null)
+                  }
+                }}
+                onBlur={() => setConfirming((at) => (at === book.bookId ? null : at))}
+              >
+                {confirming === book.bookId ? 'Remove?' : <X size={ICON.control} strokeWidth={ICON.stroke} />}
+              </button>
               {tagging === book.bookId && (
                 <form
                   className={styles.tagForm}

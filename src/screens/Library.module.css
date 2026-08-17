@@ -254,6 +254,18 @@
   background: var(--danger, #b3261e);
 }
 
+/* THE OTHER CONTROLS GET OUT OF THE WAY while a removal is pending.
+   "Remove?" is a word where there was a 26px circle, and it grows leftward from
+   the same right edge — straight over the tag button at 38px. So the button a
+   reader reached for to back out was covered by the one that destroys the row.
+   Hidden AND unclickable: `opacity: 0` alone leaves an invisible target. */
+.cell[data-confirming='true'] .tagButton,
+.cell[data-confirming='true'] .finishButton,
+.cell[data-confirming='true'] .lookupButton {
+  opacity: 0;
+  pointer-events: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .remove {
     transition: none;
