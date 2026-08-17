@@ -13,7 +13,7 @@ import { useBook } from './lib/useBook'
 import { useBookIntake } from './lib/useBookIntake'
 import { flushBeforeClose } from './lib/beforeClose'
 import { writeQueue } from './lib/writeQueue'
-import { useFileDrop } from './lib/useFileDrop'
+import { useFileDrop, type DropHaul } from './lib/useFileDrop'
 import { useLibrary } from './lib/useLibrary'
 import { useCards } from './lib/useCards'
 import { useMarks } from './lib/useMarks'
@@ -24,6 +24,7 @@ import type { IndexFs } from './lib/bookIndex'
 import { downscaleCover } from './lib/coverArt'
 import { contentPathIn, coverPathIn, folderOf, readBook } from './lib/bookFolder'
 import {
+  MAX_FILES,
   importFolder,
   keepOwnCopy,
   summarise,
@@ -257,10 +258,8 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
     [openBook, fs],
   )
 
-  /* Window-wide, not just over the empty state. A file dropped anywhere the
-   * app does not intercept NAVIGATES the webview to it — the interface is
-   * replaced by WebKit's PDF viewer with no error and no way back. */
-  const { dragging } = useFileDrop(openBook)
+  /* The drop hook now lives below `dropBooks`, which it takes as its handler —
+   * a `const` read at call time, so it has to be declared first. */
 
   useEffect(() => {
     applyMetrics(document.documentElement, platform)
@@ -329,35 +328,136 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
    * then ONE is opened. The reader asked to add several and to be reading; both
    * happen, and neither is inferred from the other.
    */
-  const addBooks = useCallback(() => {
-    void pickBooks()
-      .then(async (picked) => {
-        if (picked.length === 0) return
-        // The last, because that is the one the previous version happened to
-        // open — the same book opens as before, and now the rest arrive too.
-        const opening = picked[picked.length - 1]!
-        if (picked.length > 1 && fs) {
-          const outcomes: ImportOutcome[] = []
-          for (const { file, path } of picked) {
+  /* Which import is the current one. Bumped by every route that copies books
+   * in, so a batch can tell that a newer one has started and stand down —
+   * see `addAndOpen`, and `addFolder`, which shares it. A ref rather than
+   * state because it is read inside a running loop, where a re-render's stale
+   * closure is exactly the thing that must not happen. */
+  const importBatch = useRef(0)
+
+  /**
+   * Add every book, then open one — the shared half of picking and dropping.
+   *
+   * EXTRACTED BECAUSE THERE ARE NOW TWO CALLERS, and the drop path had been
+   * quietly missing this behaviour entirely: it opened `files.item(0)` and
+   * discarded the rest, which is the very defect the note above records as
+   * fixed for the picker. Written a second time in the drop handler, the two
+   * would drift on exactly the details that already went wrong once — which
+   * book opens, whether duplicates are reported, whether the shelf is told.
+   *
+   * `path` is nullable here where `PickedBook` requires one, because a drop has
+   * no path to give: the webview is handed bytes and a filename, not a location
+   * on disk. Nothing downstream needs it — `keepOwnCopy` derives the
+   * destination from the content hash — so the honest type is the one that
+   * admits the difference rather than inventing a path to satisfy a signature.
+   */
+  const addAndOpen = useCallback(
+    async (picked: readonly { file: File; path: string | null }[]) => {
+      if (picked.length === 0) return
+      // The last, because that is the one the previous version happened to
+      // open — the same book opens as before, and now the rest arrive too.
+      const opening = picked[picked.length - 1]!
+      if (picked.length > 1 && fs) {
+        /* SUPERSEDES ANY BATCH ALREADY RUNNING. Two imports could overlap —
+         * drop a folder, then drop a book — and the older, slower one then
+         * called `openBook` last, so the reader ended up in the book they had
+         * asked for first rather than the one they asked for last. Worse, both
+         * batches wrote through `keepOwnCopy`, whose destination is derived
+         * from the content hash, so two copies of the same book raced for one
+         * path.
+         *
+         * The token is taken BEFORE the first await and re-checked after every
+         * one: a batch that is no longer the current one stops writing, stops
+         * reporting, and above all does not open anything. */
+        const batch = importBatch.current + 1
+        importBatch.current = batch
+        const current = () => importBatch.current === batch
+
+        /* PROGRESS, because a dropped folder can hold thousands. The picker's
+         * folder route has reported per book from the start; the drop route
+         * showed nothing at all until the whole batch finished, which on a
+         * large folder is indistinguishable from the app having hung. Same
+         * lifecycle, same channel, cleared in `finally` so an exception cannot
+         * strand the bar on screen. */
+        setImporting({ done: 0, total: picked.length, current: '' })
+        const outcomes: ImportOutcome[] = []
+        try {
+          for (const [index, { file, path }] of picked.entries()) {
+            if (!current()) return
+            setImporting({ done: index, total: picked.length, current: file.name })
             try {
               /* Never null without a signal — the only `null` is a stop, and
-               * the picker has nothing to stop. */
+               * neither the picker nor a drop has anything to stop. */
               const kept = await keepOwnCopy(fs, file, path)
               if (kept) outcomes.push(kept)
             } catch (cause) {
-              console.error('Paper: could not add', path, cause)
-              outcomes.push({ path, status: 'failed', name: file.name })
+              console.error('Paper: could not add', path ?? file.name, cause)
+              outcomes.push({ path: path ?? file.name, status: 'failed', name: file.name })
             }
           }
-          shelveImported(outcomes)
-          setImportNotice(summarise(outcomes))
+        } finally {
+          if (current()) setImporting(null)
         }
-        openBook(opening.file, opening.path)
-      })
+        if (!current()) return
+        shelveImported(outcomes)
+        setImportNotice(summarise(outcomes))
+      }
+      openBook(opening.file, opening.path)
+    },
+    [openBook, fs, shelveImported],
+  )
+
+  const addBooks = useCallback(() => {
+    void pickBooks()
+      .then(addAndOpen)
       .catch((cause: unknown) => {
         console.error('Paper: the book picker failed', cause)
       })
-  }, [openBook, fs, shelveImported])
+  }, [addAndOpen])
+
+  /**
+   * Books dropped on the window, treated exactly as picked ones.
+   *
+   * A drop used to be the one route in that could not report on itself: it
+   * opened a book and said nothing, so dropping a folder of forty did nothing
+   * at all and dropping five added one, with no notice either way. It goes
+   * through the same path as the picker now, so the shelf fills, duplicates are
+   * named, and failures are counted in the same sentence.
+   */
+  const dropBooks = useCallback(
+    ({ books, unreadable, truncated }: DropHaul) => {
+      /* SAYS WHICH KIND OF NOTHING IT WAS. The drop is filtered to the formats
+       * Paper reads, so a dropped `.txt` or a folder with no books in it yields
+       * an empty list — and a drag that produces no response is
+       * indistinguishable from a frozen window. But "no books here" and "the
+       * books are there and unreadable" are different facts, and reporting the
+       * first for the second is the more alarming of the two told as the
+       * milder. The haul distinguishes them; so does this. */
+      if (books.length === 0) {
+        setImportNotice(
+          unreadable > 0
+            ? `Nothing in that drop could be read — ${unreadable} ${unreadable === 1 ? 'item' : 'items'} failed.`
+            : 'Nothing Paper can open was in that drop.',
+        )
+        return
+      }
+      /* The ceiling is `importFolder`'s, and it is announced rather than
+       * applied quietly: a reader who drops six thousand books and is shown
+       * five thousand has been told something untrue by omission. */
+      if (truncated) {
+        setImportNotice(`That drop held more than ${MAX_FILES} books — taking the first ${MAX_FILES}.`)
+      }
+      void addAndOpen(books.map((file) => ({ file, path: null }))).catch((cause: unknown) => {
+        console.error('Paper: could not add what was dropped', cause)
+      })
+    },
+    [addAndOpen],
+  )
+
+  /* Window-wide, not just over the empty state. A file dropped anywhere the
+   * app does not intercept NAVIGATES the webview to it — the interface is
+   * replaced by WebKit's PDF viewer with no error and no way back. */
+  const { dragging } = useFileDrop(dropBooks)
 
   /**
    * Add a whole folder.
@@ -380,25 +480,43 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
   const [importNotice, setImportNotice] = useState<string | null>(null)
   const addFolder = useCallback(() => {
     void (async () => {
+      /* REFUSES TO RE-ENTER. The toolbar button carried `disabled={importing
+       * !== null}` and that was the whole guard — so when the control moved to
+       * the empty state and the ⌘K palette, the palette had none and ⌘K during
+       * an import started a second one: two walks, two progress streams into
+       * one bar, two notices overwriting each other.
+       *
+       * Guarded HERE rather than only in the palette, because a guard that
+       * lives in one caller is a guard the next caller has to remember. The
+       * palette also omits the command while importing, so the reader is not
+       * offered something that would refuse — but this is what makes it true. */
+      if (importing !== null) return
       const folder = await pickFolder().catch(() => null)
       if (!folder || !importFs) return
+      /* Takes the same token `addAndOpen` uses, so the two routes supersede
+       * each other rather than only themselves. Without it a folder import
+       * finishing after a drop had started would clear the drop's progress bar
+       * and overwrite its notice — one import reporting on another's behalf. */
+      const batch = (importBatch.current += 1)
+      const current = () => importBatch.current === batch
       setImporting({ done: 0, total: 0, current: '' })
       try {
         const outcomes = await importFolder(
           importFs,
           folder,
-          { onProgress: setImporting },
+          { onProgress: (progress) => { if (current()) setImporting(progress) } },
         )
+        if (!current()) return
         shelveImported(outcomes)
         setImportNotice(summarise(outcomes))
       } catch (cause) {
         console.error('Paper: the folder import failed', cause)
-        setImportNotice('That folder could not be imported.')
+        if (current()) setImportNotice('That folder could not be imported.')
       } finally {
-        setImporting(null)
+        if (current()) setImporting(null)
       }
     })()
-  }, [shelveImported, importFs])
+  }, [shelveImported, importFs, importing])
 
 
   /**
@@ -620,10 +738,14 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
         // a command that could not do anything.
         markSelection: marking.selection ? () => marking.mark('') : null,
         openBookPicker: addBooks,
+        /* The palette is where the folder import lives now that the toolbar
+         * carries one action — see `CommandContext`. */
+        importFolder: addFolder,
+        importing: importing !== null,
         closeBook: () => book.close(),
         openSwitcher: () => dispatch({ type: 'toggleLayer', layer: 'switcherOpen' }),
       }),
-    [state, dispatch, book, marking, addBooks],
+    [state, dispatch, book, marking, addBooks, addFolder, importing],
   )
 
   /* §11's keyboard map. Every combo the design publishes is bound here, and

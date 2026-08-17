@@ -205,18 +205,22 @@ export function Library({
             ))}
           </div>
         )}
-        <button type="button" className={styles.add} onClick={onAddBooks}>
-          <Plus size={ICON.control} strokeWidth={ICON.stroke} />
-          Add books
-        </button>
+        {/* ONE ACTION, because there was only ever one intent. "Add books" and
+            "Add folder" sat here at equal weight and made the reader classify
+            files-or-folder before a picker had opened — `pickBooks()` against
+            `pickFolder()` showing through — and they are not equally frequent
+            either: seeding a shelf from a folder happens once in a library's
+            life. The folder route moved to where its moment is, the empty state
+            below and ⌘K, and the label moved to `title`/`aria-label` where a
+            label belongs on an icon control. */}
         <button
           type="button"
           className={styles.add}
-          onClick={onAddFolder}
-          disabled={importing !== null}
+          onClick={onAddBooks}
+          title="Add books…"
+          aria-label="Add books"
         >
-          <FolderPlus size={ICON.control} strokeWidth={ICON.stroke} />
-          Add folder
+          <Plus size={ICON.control} strokeWidth={ICON.stroke} />
         </button>
       </div>
 
@@ -312,6 +316,29 @@ export function Library({
                   'Add a book, or a folder of them — everything you highlight and tag stays with it.'
               : 'Try a different search, or clear the filter.'}
           </div>
+          {/* THE FOLDER ROUTE, at the moment it is actually wanted — and only
+              when the library is genuinely EMPTY. This same empty state also
+              covers "nothing matches your search", where an import offer is a
+              non sequitur, and `shelfUnread`, where the shelf could not be READ
+              and adding to it is the last thing to suggest. */}
+          {books.length === 0 && !shelfUnread && (
+            <button
+              type="button"
+              className={styles.emptyImport}
+              onClick={onAddFolder}
+              disabled={importing !== null}
+              /* BOTH, because they do different jobs and the app's convention
+                 is the attribute. `disabled` stops the click; `data-disabled`
+                 is what `global.css` styles on — so with only the first, the
+                 button refused at full opacity with a pointer cursor, looking
+                 exactly as available as it does when it works. `TitleBar` sets
+                 both on its own controls; this set one. */
+              data-disabled={importing !== null}
+            >
+              <FolderPlus size={ICON.control} strokeWidth={ICON.stroke} />
+              Import a folder…
+            </button>
+          )}
         </div>
       ) : (
         <div className={styles.shelf} ref={shelfRef} style={

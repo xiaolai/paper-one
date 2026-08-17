@@ -38,6 +38,28 @@ export interface CommandContext {
   /** Marks the current selection, when there is one. */
   markSelection: (() => void) | null
   openBookPicker: () => void
+  /**
+   * Import a folder of books.
+   *
+   * HERE BECAUSE IT IS NOT IN THE TOOLBAR any more. Seeding a shelf from a
+   * folder is something a reader does once, so it sat beside the everyday
+   * action at equal weight and asked them to classify their intent — files or
+   * folder — before a picker had even opened. The toolbar keeps the recurring
+   * action; this and the library's empty state keep the rare one reachable.
+   */
+  importFolder: () => void
+  /**
+   * True while books are being copied in.
+   *
+   * THE GUARD THAT MOVED WITH THE CONTROL. The toolbar button carried
+   * `disabled={importing !== null}`, and when the folder import left the
+   * toolbar that guard did not come with it — so ⌘K during an import started a
+   * second one, two walks reporting into one progress bar. The command is
+   * omitted while this is true, and `addFolder` refuses re-entry on its own
+   * account, because a guard that lives only in the caller is a guard the next
+   * caller has to remember.
+   */
+  importing: boolean
   closeBook: () => void
   openSwitcher: () => void
 }
@@ -243,6 +265,22 @@ export function buildCommands(ctx: CommandContext): Command[] {
     group: 'Book',
     keywords: 'import file epub open',
     run: ctx.openBookPicker,
+  })
+
+  /* OMITTED WHILE ONE IS RUNNING, rather than offered and refused. A palette
+   * entry that does nothing when you pick it is worse than one that is absent:
+   * absence is legible, a dead row is a bug report. */
+  if (!ctx.importing) commands.push({
+    id: 'book:import-folder',
+    label: 'Import a folder…',
+    group: 'Book',
+    /* "Add folder" is in the keywords rather than the label, because that is
+     * what this control used to be CALLED and a reader who learned it there
+     * will type it. The label says what happens — a folder is read once and its
+     * books copied in — which the old one did not, and which is why it had to
+     * be asked about. */
+    keywords: 'add folder bulk collection recursive many',
+    run: ctx.importFolder,
   })
 
   commands.push({

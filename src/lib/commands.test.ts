@@ -14,6 +14,8 @@ function context(over: Partial<AppState> = {}) {
     hasBook: true,
     markSelection: null,
     openBookPicker: () => {},
+    importFolder: () => {},
+    importing: false,
     closeBook: () => {},
     openSwitcher: () => {},
   }
@@ -275,6 +277,57 @@ describe('score', () => {
 
   it('matches everything on an empty query', () => {
     expect(score(command, '   ')).toBe(0)
+  })
+})
+
+/* The folder import is no longer in the library's toolbar — it is offered in
+ * the empty state, which disappears the moment there is one book, and here.
+ * From then on the palette is the ONLY permanent way to reach it, so these pin
+ * the two things that would make it unreachable without failing anything else:
+ * the command going missing, and it going missing under the name a reader who
+ * learned the old button would type. */
+describe('importing a folder', () => {
+  it('is offered whether or not a book is open, because seeding a shelf is not a reading action', () => {
+    for (const hasBook of [true, false]) {
+      const { ctx } = context()
+      const commands = buildCommands({ ...ctx, hasBook })
+      expect(find(commands, 'book:import-folder')?.label).toBe('Import a folder…')
+    }
+  })
+
+  it('runs the import rather than the book picker — the two were one keystroke apart', () => {
+    const { ctx } = context()
+    let imported = 0
+    let picked = 0
+    const commands = buildCommands({
+      ...ctx,
+      importFolder: () => (imported += 1),
+      openBookPicker: () => (picked += 1),
+    })
+    find(commands, 'book:import-folder')!.run()
+    expect(imported).toBe(1)
+    expect(picked).toBe(0)
+  })
+
+  /* The guard that used to live on the toolbar button's `disabled` and did not
+   * travel with the control when it moved into the palette. Without it, ⌘K
+   * during an import starts a second one. */
+  it('is not offered while an import is already running', () => {
+    const { ctx } = context()
+    const running = buildCommands({ ...ctx, importing: true })
+    expect(find(running, 'book:import-folder')).toBeUndefined()
+    // …and comes back afterwards, rather than being lost for the session.
+    const idle = buildCommands({ ...ctx, importing: false })
+    expect(find(idle, 'book:import-folder')).toBeDefined()
+  })
+
+  it('is findable by the name it used to have in the toolbar', () => {
+    const commands = buildCommands(context().ctx)
+    // "Add folder" is gone from the label; a reader who learned it there still
+    // types it, so it has to survive as a keyword or the control is lost to
+    // everyone who already knew it.
+    const ranked = filterCommands(commands, 'add folder')
+    expect(ranked.some((one) => one.id === 'book:import-folder')).toBe(true)
   })
 })
 

@@ -25,8 +25,17 @@ import type { VaultFs } from './bookVault'
 import { atomicWrite, contentPathIn } from './bookFolder'
 import { bookIdFor } from './marks'
 
-/** Extensions worth reading. The same closed list the vault stores under. */
-const IMPORTABLE = /\.(epub|pdf|mobi|azw3|cbz|fb2|fbz)$/i
+/**
+ * Extensions worth reading. The same closed list the vault stores under.
+ *
+ * EXPORTED, because a drop is the other way a folder of books arrives and it
+ * walks a different filesystem to get here — `webkitGetAsEntry` rather than
+ * Tauri's `readDir`, since the webview is handed entries and not paths. Two
+ * walkers are unavoidable; two ANSWERS about what counts as a book are not, and
+ * a drop that accepted a format the picker refused would be a difference
+ * nobody chose.
+ */
+export const IMPORTABLE = /\.(epub|pdf|mobi|azw3|cbz|fb2|fbz)$/i
 
 /**
  * How deep to walk.
@@ -36,10 +45,10 @@ const IMPORTABLE = /\.(epub|pdf|mobi|azw3|cbz|fb2|fbz)$/i
  * `readDir` does not resolve links for us, so this is the only thing standing
  * between "import my books folder" and a hang with no error.
  */
-const MAX_DEPTH = 8
+export const MAX_DEPTH = 8
 
 /** A ceiling on one import, so a mis-picked home directory does not run for an hour. */
-const MAX_FILES = 5000
+export const MAX_FILES = 5000
 
 export interface DirFs extends VaultFs {
   readDir: (path: string) => Promise<{ name: string; isDirectory: boolean }[]>
