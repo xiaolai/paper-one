@@ -57,9 +57,18 @@ export interface AppProps {
   fs: IndexFs | null
   /** The shelf, read at boot so no frame renders an empty library. */
   initialBooks: readonly IndexedBook[]
+  /**
+   * The shelf could not be READ, which is not the same as having no books.
+   *
+   * `loadShelf` failing used to hand back an empty list, and the reader was told
+   * their library was empty while it sat on disk. The two states look identical
+   * from here, so the one that is alarming and wrong has to be labelled at the
+   * only place that can tell them apart.
+   */
+  shelfUnread?: boolean
 }
 
-export function App({ storage, fs, initialBooks }: AppProps) {
+export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps) {
   const platform = usePlatform()
   const prefersDark = usePrefersDark()
   /* The one thing that can stop a page turn sliding. Not a setting — see the
@@ -390,7 +399,12 @@ export function App({ storage, fs, initialBooks }: AppProps) {
    * on.
    */
   const [importing, setImporting] = useState<ImportProgress | null>(null)
-  const [importNotice, setImportNotice] = useState<string | null>(null)
+  const [importNotice, setImportNotice] = useState<string | null>(
+    /* The shelf failing to read is the first thing the reader should hear about,
+     * because the screen behind this notice will otherwise tell them their
+     * library is empty. */
+    shelfUnread ? 'Your library could not be read. Nothing has been changed — try reopening Paper.' : null,
+  )
   const addFolder = useCallback(() => {
     void (async () => {
       const folder = await pickFolder().catch(() => null)

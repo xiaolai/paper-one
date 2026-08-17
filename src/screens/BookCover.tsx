@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { coverTintFor } from '../lib/bookAccent'
 import { tauriVaultFs } from '../lib/bookVault'
 import { coverUrl } from '../lib/coverArt'
@@ -37,6 +37,12 @@ export function BookCover({
    * a jacket that is not there — which is what a stale `cover` field did. */
   const at = coverPathIn(book.bookId)
 
+  /* The URL this cell created, so the error handler below can release it. The
+   * effect's own `mine` is not reachable from there and the effect does not
+   * re-run on a decode failure, so without this the bytes of every unreadable
+   * cover stayed held until the whole cell unmounted. */
+  const held = useRef<string | null>(null)
+
   useEffect(() => {
     let revoked = false
     let mine: string | null = null
@@ -50,11 +56,13 @@ export function BookCover({
         return
       }
       mine = next
+      held.current = next
       setUrl(next)
     })
     return () => {
       revoked = true
       if (mine) URL.revokeObjectURL(mine)
+      held.current = null
       setUrl(null)
     }
   }, [at])
@@ -72,7 +80,12 @@ export function BookCover({
            * truncated or corrupt `cover.webp` drew the browser's broken-image
            * glyph — while the tinted panel with the title on it, which exists
            * for exactly this, sat behind it unused. */
-          onError={() => setUrl(null)}
+          onError={() => {
+            // Released, not merely forgotten: the bytes stay held otherwise.
+            if (held.current) URL.revokeObjectURL(held.current)
+            held.current = null
+            setUrl(null)
+          }}
           style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
         />
       ) : (

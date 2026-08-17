@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { VaultFs } from './bookVault'
 import {
   BOOKS_DIR,
+  atomicWrite,
   contentPathIn,
   coverPathIn,
   folderOf,
@@ -472,5 +473,45 @@ describe('a very long origin', () => {
     const fs = fakeFs()
     await writeBook(fs, 'book_a', { title: 'T', author: 'A', origin: '/Users/x/moby.epub' })
     expect((await readBook(fs, 'book_a'))?.origin).toBe('/Users/x/moby.epub')
+  })
+})
+
+/**
+ * The one write, used by everything that writes.
+ *
+ * Extracted because the temp-then-rename was spelled out in six places, and six
+ * copies of an invariant is five chances for one of them to drift out of it.
+ */
+describe('atomicWrite', () => {
+  it('leaves the destination, not the temporary neighbour', async () => {
+    const fs = fakeFs()
+    await atomicWrite(fs, `${BOOKS_DIR}/book_a/thing.json`, new TextEncoder().encode('X'))
+    expect(fs.files.has(`${BOOKS_DIR}/book_a/thing.json`)).toBe(true)
+    expect([...fs.files.keys()].some((k) => k.endsWith('.writing'))).toBe(false)
+  })
+
+  it('cleans up after a failed write', async () => {
+    const fs = fakeFs()
+    fs.failWrite = `${BOOKS_DIR}/book_a/thing.json.writing`
+    await expect(
+      atomicWrite(fs, `${BOOKS_DIR}/book_a/thing.json`, new TextEncoder().encode('X')),
+    ).rejects.toThrow('disk full')
+    expect(fs.files.size).toBe(0)
+  })
+
+  it('makes the parent directory', async () => {
+    const fs = fakeFs()
+    await atomicWrite(fs, `${BOOKS_DIR}/book_a/thing.json`, new TextEncoder().encode('X'))
+    expect(fs.dirs.has(`${BOOKS_DIR}/book_a`)).toBe(true)
+  })
+
+  /* A path with NO separator has no parent to make. `index.json` is one, and
+   * `slice(0, lastIndexOf('/'))` on it returns `index.jso` — a directory named
+   * after most of a filename, created every time the shelf was saved. */
+  it('makes no directory for a file at the root', async () => {
+    const fs = fakeFs()
+    await atomicWrite(fs, 'index.json', new TextEncoder().encode('[]'))
+    expect(fs.files.has('index.json')).toBe(true)
+    expect([...fs.dirs]).toEqual([])
   })
 })

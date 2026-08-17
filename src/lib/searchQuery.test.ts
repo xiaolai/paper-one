@@ -153,3 +153,38 @@ describe('a tag with a quote in it', () => {
     expect(withTag('', 'Sea', key)).toBe('tag:Sea')
   })
 })
+
+/**
+ * A tag term the reader has not finished typing.
+ *
+ * It went wrong twice. First the quoted alternative failed outright, the bare
+ * one matched, and `tag:"Book club` searched for a tag called `"Book` with
+ * `club` as free text. Then, made optional, it became an ACTIVE tag `Book club`
+ * — a complete wrong answer applied mid-keystroke. Both empty the shelf under
+ * somebody's hands for a reason nothing on screen can explain.
+ */
+describe('an unterminated quoted tag', () => {
+  const key = (t: string) => t.trim().toLowerCase()
+
+  it('is dropped rather than applied', () => {
+    expect(parseQuery('tag:"Book club', key)).toEqual({ tags: [], text: '' })
+  })
+
+  it('does not leak the opening quote into the text', () => {
+    expect(parseQuery('moby tag:"Book club', key).text).toBe('moby')
+  })
+
+  it('applies the moment the quote is closed', () => {
+    expect(parseQuery('tag:"Book club"', key).tags).toEqual(['Book club'])
+  })
+
+  it('leaves the other tags in the query alone', () => {
+    expect(parseQuery('tag:Sea tag:"Book clu', key).tags).toEqual(['Sea'])
+  })
+
+  /* Nothing to remove, so `withoutTag` must leave the half-typed term where it
+   * is rather than swallowing what the reader is still writing. */
+  it('survives withoutTag untouched', () => {
+    expect(withoutTag('tag:"Book clu', 'Book club', key)).toBe('tag:"Book clu')
+  })
+})

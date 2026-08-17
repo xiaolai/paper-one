@@ -19,7 +19,7 @@
  */
 
 import { CONTENT_EXTENSIONS, type VaultFs } from './bookVault'
-import { BOOKS_DIR, folderOf, parseRecord, type BookRecord } from './bookFolder'
+import { BOOKS_DIR, atomicWrite, folderOf, parseRecord, type BookRecord } from './bookFolder'
 
 export const INDEX_FILE = 'index.json'
 
@@ -218,18 +218,8 @@ async function folderNames(fs: IndexFs): Promise<string[]> {
 
 /** Write the cache. Atomic, like every other write here. */
 export async function writeIndex(fs: IndexFs, books: readonly IndexedBook[]): Promise<void> {
-  const writing = `${INDEX_FILE}.writing`
-  const payload: StoredIndex = {
-    version: 1,
-    books,
-  }
-  try {
-    await fs.writeFile(writing, new TextEncoder().encode(JSON.stringify(payload)))
-    await fs.rename(writing, INDEX_FILE)
-  } catch (cause) {
-    await fs.remove(writing).catch(() => {})
-    throw cause
-  }
+  const payload: StoredIndex = { version: 1, books }
+  await atomicWrite(fs, INDEX_FILE, new TextEncoder().encode(JSON.stringify(payload)))
 }
 
 /** Where a book's record lives — re-exported so callers need one import. */

@@ -273,7 +273,13 @@ export async function writeBook(
  */
 export async function atomicWrite(fs: VaultFs, path: string, bytes: Uint8Array): Promise<void> {
   const writing = `${path}.writing`
-  await fs.mkdir(path.slice(0, path.lastIndexOf('/')))
+  /* ONLY WHEN THERE IS ONE. `index.json` sits at the root of the data directory
+   * and has no slash in it, so `slice(0, lastIndexOf('/'))` returns `index.jso`
+   * — and this would have created a directory named after most of a filename,
+   * every time the shelf was saved. A path with no separator has no parent to
+   * make. */
+  const cut = path.lastIndexOf('/')
+  if (cut > 0) await fs.mkdir(path.slice(0, cut))
   try {
     await fs.writeFile(writing, bytes)
     await fs.rename(writing, path)

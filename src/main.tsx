@@ -16,6 +16,7 @@ import './styles/global.css'
 
 import { App } from './App'
 import { inTauri, openAppStorage } from './lib/appStorage'
+import type { IndexedBook } from './lib/bookIndex'
 import { loadShelf } from './lib/bookIndex'
 import { emptyExpired } from './lib/bookTrash'
 import { migrateToFolders, summariseMigration } from './lib/migrateToFolders'
@@ -91,14 +92,20 @@ async function boot(root: HTMLElement): Promise<void> {
    * which. Swallowing it drew "Your library is empty" over a library that is
    * still on disk — the single most alarming thing this app can say, produced by
    * a transient read. */
-  const initialBooks = fs
-    ? (
-        await loadShelf(fs).catch((cause: unknown) => {
-          console.error('Paper: could not read the library', cause)
-          return { books: [] }
-        })
-      ).books
-    : []
+  let initialBooks: readonly IndexedBook[] = []
+  let shelfUnread = false
+  if (fs) {
+    try {
+      initialBooks = (await loadShelf(fs)).books
+    } catch (cause) {
+      /* SAID, not swallowed. Logging it and carrying on with `[]` still drew
+       * "Your library is empty" over a library that is sitting on disk, which is
+       * the most alarming thing this app can say and the least true. The flag
+       * travels so the screen can say "could not be read" instead. */
+      console.error('Paper: could not read the library', cause)
+      shelfUnread = true
+    }
+  }
   /* Emptied at BOOT, not on a timer and not when the reader removes something.
    *
    * It has to happen somewhere, and every other candidate is worse: a timer
@@ -112,12 +119,11 @@ async function boot(root: HTMLElement): Promise<void> {
 
   createRoot(root).render(
     <StrictMode>
-      <App storage={storage} fs={fs} initialBooks={initialBooks} />
+      <App storage={storage} fs={fs} initialBooks={initialBooks} shelfUnread={shelfUnread} />
     </StrictMode>,
   )
 }
 
-/** Parse, or the fallback. A store that will not read is a store with nothing in it. */
 /** A legacy library value that is not a list is not a library. */
 function asRows(value: unknown): [] {
   return (Array.isArray(value) ? value : []) as []

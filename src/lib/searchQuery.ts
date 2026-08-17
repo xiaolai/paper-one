@@ -25,14 +25,20 @@
  * different tag — `He said "Hi"` searched for `He said Hi`, which matches
  * nothing. An escape in the grammar is what makes `withTag` able to round-trip.
  */
-const TAG = /(^|\s)tag:(?:"((?:[^"\\]|\\.)*)"?|(\S*))/gi
+const TAG = /(^|\s)tag:(?:"((?:[^"\\]|\\.)*)("?)|(\S*))/gi
 
-/* The closing quote is OPTIONAL, which is what makes a half-typed term behave.
- * Without the `?` the quoted alternative simply failed on `tag:"Book club`, the
- * bare `\S*` matched instead, and the reader mid-word was searching for a tag
- * literally called `"Book` while `club` became free text — a shelf emptying
- * under their hands for a reason nothing on screen could explain. Now it is one
- * unterminated tag term, which `parseQuery` drops like any other incomplete one. */
+/* The closing quote is OPTIONAL AND CAPTURED, which is what makes a half-typed
+ * term behave. Two bugs live here, one after the other:
+ *
+ * Without the `?` the quoted alternative failed on `tag:"Book club`, the bare
+ * `\S*` matched instead, and the reader mid-word was searching for a tag called
+ * `"Book` while `club` became free text.
+ *
+ * With the `?` but nothing capturing it, the same input became an ACTIVE tag
+ * `Book club` — a complete, wrong answer applied while they were still typing
+ * the tag's name. The third group says whether the quote was actually closed, so
+ * an unterminated term can be DROPPED, which is what happens to every other
+ * incomplete one and what the note on `parseQuery` has always claimed. */
 
 /** Undo `withTag`'s escaping: `\"` and `\\` become the characters they spell. */
 const unescape = (quoted: string): string => quoted.replace(/\\(.)/g, '$1')
@@ -57,7 +63,10 @@ export function parseQuery(raw: string, key: (tag: string) => string): ParsedQue
   const tags: string[] = []
   const seen = new Set<string>()
   const text = raw
-    .replace(TAG, (_match, lead: string, quoted?: string, bare?: string) => {
+    .replace(TAG, (_match, lead: string, quoted?: string, closed?: string, bare?: string) => {
+      // Opened and not closed: the reader is still typing the name. Dropped,
+      // like `tag:` on its own, rather than applied as though they had finished.
+      if (quoted !== undefined && !closed) return lead
       const tag = (quoted === undefined ? (bare ?? '') : unescape(quoted)).trim()
       if (tag) {
         const k = key(tag)
@@ -106,7 +115,9 @@ export function withTag(raw: string, tag: string, key: (t: string) => string): s
 export function withoutTag(raw: string, tag: string, key: (t: string) => string): string {
   const target = key(tag)
   return raw
-    .replace(TAG, (match, lead: string, quoted?: string, bare?: string) => {
+    .replace(TAG, (match, lead: string, quoted?: string, closed?: string, bare?: string) => {
+      // An unterminated term is not a tag, so there is nothing here to remove.
+      if (quoted !== undefined && !closed) return match
       /* UNESCAPED before comparing, exactly as `parseQuery` does. Comparing the
        * raw text meant the chip for a tag containing a quote matched nothing and
        * could not be cleared — the one tag `withTag` had just learned to write. */

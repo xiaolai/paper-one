@@ -36,6 +36,7 @@ import { extensionFor } from './bookVault'
 import {
   contentPathIn,
   folderOf,
+  atomicWrite,
   marksPathIn,
   recordPath,
   readBook,
@@ -311,15 +312,7 @@ async function copy(fs: VaultFs, from: string, to: string): Promise<boolean> {
     // that. Reported as "no bytes", not as a failure.
     return false
   }
-  await fs.mkdir(to.slice(0, to.lastIndexOf('/')))
-  const writing = `${to}.writing`
-  try {
-    await fs.writeFile(writing, bytes)
-    await fs.rename(writing, to)
-  } catch (cause) {
-    await fs.remove(writing).catch(() => {})
-    throw cause
-  }
+  await atomicWrite(fs, to, bytes)
   return true
 }
 
