@@ -26,3 +26,44 @@
   font-weight: 600;
   cursor: pointer;
 }
+
+/* A primary action carrying its mark and no words.
+ *
+ * IT HAS TO LIVE HERE, next to `.primary`, and that is a cascade fact rather
+ * than a preference. `composes` emits BOTH class names onto the element and
+ * decides nothing about which wins — that is left to source order at equal
+ * specificity. Written in the consuming stylesheet, this lost: the element got
+ * `_add_ _primary_`, the injected `.primary` came last, and its `0 16px`
+ * padding beat the `0` next to it. The button measured a correct 34px wide
+ * with 32px of that eaten by padding, which no build step reports and which
+ * looks nearly right.
+ *
+ * Declared after `.primary` in the same file, it wins by the same rule that
+ * made it lose.
+ *
+ * The width is the height, so the pill becomes a circle; `--control-pill` is
+ * read rather than the 34 restated, or the shape could come apart from the ramp. */
+.iconOnly {
+  width: var(--control-pill);
+  padding: 0;
+  justify-content: center;
+}
+
+/* The second of two actions offered together — the one that is real but rarer.
+ *
+ * HERE FOR THE REASON THE HEADER GIVES, one instance later. It was written out
+ * in `Reader.module.css` as `.secondaryButton`, and the library's empty state
+ * now needs the same thing; writing it a second time is how the pair drifts,
+ * which is exactly what `.primary` was lifted here to prevent.
+ *
+ * `--line-2`, the themed border token the rest of the app draws edges with.
+ * The version this replaces asked for `--rule`, which does not exist in
+ * `tokens.css` — so its hardcoded fallback did all the work and, being a fixed
+ * black at 15%, did not follow the theme: on Night that is black on dark, which
+ * is no edge at all. */
+.secondary {
+  composes: primary;
+  background: transparent;
+  color: inherit;
+  box-shadow: inset 0 0 0 1px var(--line-2);
+}

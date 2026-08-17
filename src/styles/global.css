@@ -116,6 +116,32 @@ a:hover {
   border-radius: 6px;
 }
 
+/* ONE BOX, NOT TWO. A field that draws its own resting border and then takes
+ * the ring above ends up wearing both at once — a 1px border with a 2 or 3px
+ * outline a pixel outside it, which reads as a box inside a box rather than as
+ * one focused field.
+ *
+ * `border-color: transparent` rather than `border: none`, and the difference is
+ * the whole reason this works: removing the border removes its 1px of layout,
+ * so the field would shift and reflow the row around it every time focus
+ * arrived. Made transparent, the border keeps its space and the background —
+ * which paints under it, `background-clip` being `border-box` by default —
+ * fills right up to the same edge. The visible field does not move at all;
+ * only the second outline goes.
+ *
+ * Global, for the reason the disabled rule below gives: this is a design-system
+ * statement about every input in the app, not about the two that have the
+ * problem today. A field that gains a border later gains this with it.
+ *
+ * `:focus-visible`, not `:focus`, so it tracks §07 exactly — the border is
+ * hidden only when the ring that replaces it is actually being drawn. A pointer
+ * user, who never sees the ring, never loses the border either. */
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  border-color: transparent;
+}
+
 /* §07 Disabled — 45% opacity, no pointer events, and the reason stated nearby
  * rather than hidden in a title attribute alone.
  *

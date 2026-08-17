@@ -85,8 +85,10 @@
 }
 
 /* §07's primary action, shared — see styles/controls.module.css. */
+/* The primary action, as a mark rather than a phrase — see `.iconOnly`, which
+ * has to be composed rather than restated here or `.primary`'s padding wins. */
 .add {
-  composes: primary from '../styles/controls.module.css';
+  composes: primary iconOnly from '../styles/controls.module.css';
 }
 
 /* Fluid columns rather than a fixed count: the window is resizable and the
@@ -190,6 +192,18 @@
   text-wrap: pretty;
 }
 
+/* Seeding a shelf from a folder, offered where that actually happens.
+ *
+ * The SECONDARY treatment, deliberately: it is a real action and not a hint,
+ * so it is a button — but it is the rarer of the two ways in, and drawn as a
+ * peer of "Add books…" it would restate the equal-weight pairing that was just
+ * taken out of the toolbar. The margin gives it its own beat rather than
+ * letting it crowd the sentence above it. */
+.emptyImport {
+  composes: secondary from '../styles/controls.module.css';
+  margin-top: 6px;
+}
+
 /* The cell wraps the open button so the remove control can sit on top of it.
    The control cannot be INSIDE that button — a button nested in a button is
    invalid, and browsers resolve it by dropping the inner one, so it would render
@@ -287,7 +301,12 @@
   min-width: 0;
   height: 32px;
   padding: 0 12px;
-  border: 1px solid var(--rule, rgb(0 0 0 / 0.12));
+  /* `--line-2` is the themed border token the rest of the app draws fields
+   * with. This asked for `--rule`, which does not exist in `tokens.css` — so
+   * the hardcoded fallback was doing all the work, and being a fixed black at
+   * 12% it did not follow the theme at all: on Night that is black-on-dark,
+   * which is no border. */
+  border: 1px solid var(--line-2);
   border-radius: 999px;
   background: var(--surface, transparent);
   color: inherit;
@@ -295,8 +314,15 @@
   font-size: 13px;
 }
 
+/* The border is dropped by the global input rule in `global.css`, so this is
+ * one ring rather than a box inside a box.
+ *
+ * `--accent`, like every other focus ring in the app. This asked for `--focus`,
+ * which does not exist either, so the ring was drawn in `currentColor` — the
+ * field's own ink — and was the one focus indicator in Paper that was not the
+ * accent. Nothing reported it because the fallback made it look deliberate. */
 .search:focus-visible {
-  outline: 2px solid var(--focus, currentColor);
+  outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
 
@@ -367,7 +393,11 @@
   width: 100%;
   height: 28px;
   padding: 0 10px;
-  border: 1px solid var(--rule, rgb(0 0 0 / 0.2));
+  /* `--line-2`, for the reason `.search` gives — and this one asked for the
+   * same absent token with a DIFFERENT fallback (0.2 against 0.12), so the two
+   * fields sat at two border weights that were never chosen relative to each
+   * other. */
+  border: 1px solid var(--line-2);
   border-radius: 999px;
   background: var(--surface, #fff);
   color: inherit;
