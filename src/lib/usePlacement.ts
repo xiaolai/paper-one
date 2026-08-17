@@ -23,10 +23,10 @@ export function usePlacement(
   open: boolean,
   anchorRef: RefObject<HTMLElement | null>,
   surfaceRef: RefObject<HTMLElement | null>,
-  options: { side?: Side; align?: Align; gap?: number; edge?: number } = {},
+  options: { side?: Side; align?: Align; gap?: number; edge?: number; overlayOnFlip?: boolean } = {},
 ): { style: { top: number; left: number } | null; placement: Placement | null } {
   const [placement, setPlacement] = useState<Placement | null>(null)
-  const { side, align, gap, edge } = options
+  const { side, align, gap, edge, overlayOnFlip } = options
 
   useLayoutEffect(() => {
     if (!open) {
@@ -47,6 +47,7 @@ export function usePlacement(
         ...(align !== undefined ? { align } : {}),
         ...(gap !== undefined ? { gap } : {}),
         ...(edge !== undefined ? { edge } : {}),
+        ...(overlayOnFlip !== undefined ? { overlayOnFlip } : {}),
       })
       // Only re-render when it actually moved, or a ResizeObserver on the
       // surface would loop through this forever.
@@ -70,7 +71,7 @@ export function usePlacement(
       observer.disconnect()
     }
     // The refs are stable objects; what changes is `open` and the options.
-  }, [open, anchorRef, surfaceRef, side, align, gap, edge])
+  }, [open, anchorRef, surfaceRef, side, align, gap, edge, overlayOnFlip])
 
   return { style: placement ? { top: placement.top, left: placement.left } : null, placement }
 }

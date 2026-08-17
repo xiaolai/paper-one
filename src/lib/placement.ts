@@ -49,6 +49,19 @@ export interface PlacementInput {
   readonly gap?: number
   /** Clearance kept from the bounds' edges. */
   readonly edge?: number
+  /**
+   * When the surface flips to the OTHER side, may it lie over the anchor?
+   *
+   * Two kinds of anchor want two answers. A menu's anchor is the card or row
+   * it acts on: flipped above a tall card, "clear of the anchor" means leaping
+   * the whole card to land on the neighbour above it, which reads as the
+   * neighbour's menu — while draping up over its own card, hanging from the
+   * same bottom edge, keeps it unmistakably its own. A selection toolbar's
+   * anchor is the text it acts on: it must NOT cover that, since the reader
+   * has to see what they selected. Default false, which is the toolbar's
+   * answer and the conservative one; menus over cards say true.
+   */
+  readonly overlayOnFlip?: boolean
 }
 
 export interface Placement {
@@ -86,6 +99,7 @@ export function place({
   align = 'start',
   gap = 4,
   edge = 8,
+  overlayOnFlip = false,
 }: PlacementInput): Placement {
   const boundsBottom = bounds.top + bounds.height
   const boundsRight = bounds.left + bounds.width
@@ -93,8 +107,16 @@ export function place({
   const anchorRight = anchor.left + anchor.width
 
   /* --- main axis: which side, and the top that goes with it -------------- */
-  const roomBelow = boundsBottom - edge - (anchorBottom + gap)
-  const roomAbove = anchor.top - gap - (bounds.top + edge)
+  /* Where a flipped surface hangs FROM. Clear of the anchor it hangs from the
+   * far edge — above the anchor's top, below its bottom. Overlaid, it hangs
+   * from the NEAR edge instead: flipped up it sits with its bottom on the
+   * anchor's bottom, draping over the anchor rather than leaping it. The room
+   * available is measured from the same edge, so a tall card counts as room
+   * to lie over rather than an obstacle to clear. */
+  const flipUpBottom = overlayOnFlip ? anchorBottom : anchor.top - gap
+  const flipDownTop = overlayOnFlip ? anchor.top : anchorBottom + gap
+  const roomBelow = boundsBottom - edge - (side === 'bottom' ? anchorBottom + gap : flipDownTop)
+  const roomAbove = (side === 'top' ? anchor.top - gap : flipUpBottom) - (bounds.top + edge)
   const fitsBelow = surface.height <= roomBelow
   const fitsAbove = surface.height <= roomAbove
 
@@ -102,7 +124,10 @@ export function place({
   if (side === 'bottom') usedSide = fitsBelow ? 'bottom' : fitsAbove ? 'top' : roomBelow >= roomAbove ? 'bottom' : 'top'
   else usedSide = fitsAbove ? 'top' : fitsBelow ? 'bottom' : roomAbove >= roomBelow ? 'top' : 'bottom'
 
-  let top = usedSide === 'bottom' ? anchorBottom + gap : anchor.top - gap - surface.height
+  const flipped = usedSide !== side
+  let top: number
+  if (usedSide === 'bottom') top = flipped ? flipDownTop : anchorBottom + gap
+  else top = (flipped ? flipUpBottom : anchor.top - gap) - surface.height
   // Pinned inside the bounds when it does not fit on either side.
   top = Math.min(Math.max(top, bounds.top + edge), boundsBottom - edge - surface.height)
   top = Math.max(top, bounds.top + edge)

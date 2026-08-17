@@ -89,7 +89,27 @@ export function BookCell({
    * its overflow for virtualisation's sake, and a menu that is a child of the
    * cell is clipped by it. */
   const moreRef = useRef<HTMLButtonElement | null>(null)
-  const { style: menuStyle } = usePlacement(menuOpen, moreRef, menuRef, { side: 'bottom', align: 'end' })
+  /* ANCHORED TO THE CARD, NOT TO THE BUTTON. The ellipsis is a 24px mark at
+   * the card's far right; anchored to it, a menu that has to flip to `start`
+   * on the first column lands with its left edge on the button's left — 100px
+   * in from the cover, hanging in the middle of nothing, and the reader asked
+   * why it did not line up with the leftmost book. The card is the thing the
+   * menu is ABOUT, and its edges are the lines the shelf is drawn on. The
+   * button shares the card's right edge and bottom, so when `end` fits nothing
+   * moves; when it flips, the menu's left sits on the cover's left, which is
+   * exactly the border the eye expects. */
+  const cellRef = useRef<HTMLDivElement | null>(null)
+  const { style: menuStyle } = usePlacement(menuOpen, cellRef, menuRef, {
+    side: 'bottom',
+    align: 'end',
+    /* On the last row there is no room below, so it flips — and flipped CLEAR
+       of a 225px card it leapt the whole card and landed over the neighbour
+       above, reading as that book's menu. Overlaid, it drapes up over its own
+       jacket from the same bottom edge, which is fine: it is unmistakably this
+       book's menu, and a jacket is not something the reader needs to keep
+       seeing while they choose. */
+    overlayOnFlip: true,
+  })
 
   /* Closes on a click anywhere else, and on Escape — the two ways every other
    * transient surface in this app is dismissed. Bound only while THIS menu is
@@ -121,7 +141,7 @@ export function BookCell({
   }, [menuOpen, setMenuFor, setConfirming])
 
   return (
-    <div key={book.bookId} className={styles.cell}>
+    <div key={book.bookId} className={styles.cell} ref={cellRef}>
       <button
         type="button"
         className={styles.book}

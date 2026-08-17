@@ -92,6 +92,35 @@ describe('place', () => {
     expect(inside(p)).toBe(true)
   })
 
+  /* THE SCREENSHOT, again. Moby-Dick on the last row: 28px below its card,
+   * so the menu flips up — and clear of a 225px card it leapt the whole card
+   * (top at 302, card top at 404) and covered the neighbour above, whose
+   * bottom is 376. Overlaid, it hangs from the card's own bottom edge and
+   * drapes up over its own jacket, stopping well short of the row above. */
+  it('drapes over its own tall anchor when flipping, rather than leaping it', () => {
+    const win: Rect = { top: 0, left: 0, width: 879, height: 657 }
+    const card = { top: 404, left: 40, width: 126, height: 225 }
+    const m = { width: 190, height: 98 }
+    const clear = place({ anchor: card, surface: m, bounds: win, side: 'bottom', align: 'end' })
+    const draped = place({ anchor: card, surface: m, bounds: win, side: 'bottom', align: 'end', overlayOnFlip: true })
+    // Both flip up — there is no room below.
+    expect(clear.side).toBe('top')
+    expect(draped.side).toBe('top')
+    // Clear of the card it lands over the row above (bottom of that row: 376).
+    expect(clear.top).toBeLessThan(376)
+    // Draped, its bottom sits on the card's bottom and it never rises past
+    // the card's top — it covers only its own jacket.
+    expect(draped.top + m.height).toBe(404 + 225)
+    expect(draped.top).toBeGreaterThanOrEqual(404)
+  })
+
+  it('does not overlay when not asked to, so a toolbar stays clear of the text it acts on', () => {
+    const win: Rect = { top: 0, left: 0, width: 879, height: 657 }
+    const line = { top: 600, left: 40, width: 300, height: 22 }
+    const p = place({ anchor: line, surface: { width: 200, height: 40 }, bounds: win, side: 'top', align: 'center' })
+    expect(p.top + 40).toBeLessThanOrEqual(600)
+  })
+
   /* A window shorter than the menu on both sides — the case that used to be
    * "unreachable menu". Whichever side has more room, pinned inside. */
   it('pins inside the bounds when it fits on neither side', () => {
