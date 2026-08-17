@@ -63,9 +63,20 @@ export const TITLEBAR_H: Record<Platform, number> = {
   linux: 44,
 }
 
-/** §03 system zone — reserved for the window controls, per platform. */
+/**
+ * §03 system zone — reserved for the window controls, per platform.
+ *
+ * MEASURED, not assumed, on macOS: the three buttons span 59.5pt and sit at the
+ * inset `trafficLightPosition.x` puts them at, so the zone has to cover both.
+ * At an inset of 18 that is 78.5pt of content — which the previous 78 did not
+ * cover, and the overflow is invisible until a narrow window brings the centred
+ * book chip far enough left to meet a traffic light.
+ *
+ * 82 keeps the same 3.5pt of clearance the 78 had at the old, tighter inset.
+ * Changing `trafficLightPosition.x` without changing this is half a change.
+ */
 export const SYS_ZONE_W: Record<Platform, number> = {
-  macos: 78,
+  macos: 82,
   windows: 138,
   linux: 96,
 }
