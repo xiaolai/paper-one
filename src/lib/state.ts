@@ -128,7 +128,19 @@ export interface AppState {
 }
 
 export const initialState: AppState = {
-  screen: 'reader',
+  /**
+   * THE LIBRARY, not the reader.
+   *
+   * Paper opened onto the reader, which for anyone not mid-book is an empty
+   * screen offering to be given something — and it is the screen you get after
+   * quitting with ten books on the shelf. The library is what the app has; show
+   * it. The reader is where you go when you pick one.
+   *
+   * `?book=` overrides this at startup, because asking for a book IS picking
+   * one — see `screenFor`. That is the only launch that arrives already knowing
+   * what it wants.
+   */
+  screen: 'library',
   theme: 'paper',
   themeFollowsOs: true,
   pane: 'companion',
@@ -258,8 +270,25 @@ export function reducer(state: AppState, action: Action): AppState {
 
 export type AppDispatch = Dispatch<Action>
 
+/**
+ * Which screen a launch starts on.
+ *
+ * A fact about HOW THE APP WAS OPENED rather than a preference, which is why it
+ * is decided once here and not restored from anywhere: the library is the
+ * answer unless the launch already named a book.
+ *
+ * Taking `search` rather than reading `window.location` keeps this testable and
+ * keeps `state` a module that does not touch the DOM.
+ */
+export function screenFor(search: string): Screen {
+  return new URLSearchParams(search).get('book') ? 'reader' : 'library'
+}
+
 export function useAppState(): [AppState, AppDispatch] {
-  return useReducer(reducer, initialState)
+  return useReducer(reducer, {
+    ...initialState,
+    screen: screenFor(typeof window === 'undefined' ? '' : window.location.search),
+  })
 }
 
 /**

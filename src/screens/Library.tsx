@@ -304,7 +304,12 @@ export function Library({
             {books.length === 0
               ? shelfUnread
                 ? 'Nothing has been changed. Your books are still on disk — try reopening Paper.'
-                : 'Books you open appear here, with everything you have marked in them.'
+                : /* POINTS AT THE BUTTONS ABOVE, which are right there. "Books
+                     you open appear here" was written when Paper opened onto the
+                     reader and this screen was somewhere you arrived later — it
+                     described a consequence rather than telling a first-time
+                     reader what to do, and it is now the first thing they see. */
+                  'Add a book, or a folder of them — everything you highlight and tag stays with it.'
               : 'Try a different search, or clear the filter.'}
           </div>
         </div>

@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_STEP_IDX, READING_STEPS, readingStep } from './metrics'
 import { TYPEFACES } from './panes'
-import { initialState, reducer, type AppState } from './state'
+import { initialState, reducer, screenFor, type AppState } from './state'
 
 /**
  * The reducer's reading-size case.
@@ -213,5 +213,35 @@ describe('every offered typeface is a font that exists', () => {
 
   it('previews every face it offers, so no row is drawn in the wrong type', () => {
     for (const { id } of TYPEFACES) expect(settings).toContain(`${id}:`)
+  })
+})
+
+/**
+ * Which screen a launch starts on.
+ *
+ * Paper opened onto the reader, which for anyone not mid-book is an empty
+ * screen offering to be given something — and it is what you get after quitting
+ * with ten books on the shelf. The library is what the app HAS.
+ */
+describe('screenFor', () => {
+  it('opens on the library', () => {
+    expect(screenFor('')).toBe('library')
+    expect(screenFor('?theme=night')).toBe('library')
+  })
+
+  /* Asking for a book IS picking one, and it is the only launch that arrives
+   * already knowing what it wants. `?book=` also bypasses `openBook`, which is
+   * what dispatches to the reader everywhere else — so without this the book
+   * would load behind a library screen nobody asked for. */
+  it('opens on the reader when the launch named a book', () => {
+    expect(screenFor('?book=/sample.epub')).toBe('reader')
+    expect(screenFor('?theme=night&book=/sample.epub')).toBe('reader')
+  })
+
+  /* `?book=` with nothing after it names no book. Treating the empty string as
+   * a request opens the reader onto the same empty screen this change exists to
+   * stop showing. */
+  it('ignores an empty book parameter', () => {
+    expect(screenFor('?book=')).toBe('library')
   })
 })
