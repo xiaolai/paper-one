@@ -91,7 +91,7 @@
   background: transparent;
   color: var(--muted);
   cursor: pointer;
-  transition: background 120ms ease, color 120ms ease;
+  transition: background var(--motion-popover), color var(--motion-popover);
 }
 
 .more:hover,

@@ -4,7 +4,7 @@ import { shelfFor, tagKey } from '../lib/library'
 import type { LibraryOrder } from '../lib/library'
 import type { IndexedBook } from '../lib/bookIndex'
 import { withStatus, withoutTag } from '../lib/searchQuery'
-import { ICON, cellHeightFor } from '../lib/metrics'
+import { ICON } from '../lib/metrics'
 import type { Platform } from '../lib/metrics'
 import { VIRTUALISE_ABOVE, gridWindow } from '../lib/virtualGrid'
 import { BookCell } from './BookCell'
@@ -55,7 +55,8 @@ export interface LibraryProps {
   importNotice: string | null
   /** The search field's contents — held in app state, see `AppState.libraryQuery`. */
   libraryQuery: string
-  onQueryChange: (query: string) => void
+  /** Accepts a functional update, resolved by the reducer against current state. */
+  onQueryChange: (query: string | ((prev: string) => string)) => void
 }
 
 /* The three sorts, as marks. The words were dropped from the toolbar; the
@@ -113,11 +114,14 @@ export function Library({
   /* LIFTED into app state — see `AppState.libraryQuery`. The Library panel in
    * the side pane writes `tag:` and `is:` terms into the same string these
    * chips do, and a sibling cannot write local state; a copy in the pane would
-   * be the second source of truth this comment says was removed. `setQuery`
-   * keeps the updater signature the cells and chips already use. */
+   * be the second source of truth this comment says was removed.
+   *
+   * `setQuery` PASSES A FUNCTIONAL UPDATE THROUGH rather than resolving it: the
+   * reducer applies it to the state it actually holds. Resolved here against
+   * this render's `libraryQuery`, two updates in one batch read the same stale
+   * value and the second clobbered the first. */
   const query = libraryQuery
-  const setQuery = (next: string | ((prev: string) => string)) =>
-    onQueryChange(typeof next === 'function' ? next(libraryQuery) : next)
+  const setQuery = onQueryChange
 
   /* Deferred, not debounced. `useDeferredValue` lets the keystroke paint
    * immediately and re-filters at React's leisure, which is the behaviour a
@@ -137,54 +141,12 @@ export function Library({
   const [viewport, setViewport] = useState({ scrollTop: 0, height: 0, columns: 0, rowHeight: 0 })
   const virtualising = shelf.length > VIRTUALISE_ABOVE
 
-  /* The cell's height, from the column it actually got.
-   *
-   * ALWAYS, not only while virtualising. `--cell-height` was referenced by the
-   * stylesheet with a `268px` fallback and set by nothing, so the fallback did
-   * every bit of the work and could not follow a fluid column: at a 173px
-   * column the cover alone wants 259, leaving 9px for two lines of text and a
-   * progress rule, which `overflow: hidden` then ate in silence.
-   *
-   * Set on the grid rather than per cell, so every row is the one height
-   * virtualisation assumes — the reason the height is fixed at all. */
-  useEffect(() => {
-    const node = shelfRef.current
-    if (!node) return
-    /* THE WRITE IS DEFERRED TO THE NEXT FRAME, and that is what keeps this
-     * from spinning. Writing `--cell-height` changes every row's height, which
-     * resizes the grid, which is the very thing this observes — a loop the
-     * browser reports as "ResizeObserver loop completed with undelivered
-     * notifications" and then abandons, leaving the layout wherever it stopped.
-     *
-     * A same-width guard was tried first and was not enough. The pane's track
-     * ANIMATES over 220ms, so the column is a different width on every frame
-     * of it; each new width passed the guard, each write resized the grid
-     * inside the observer's own delivery, and the browser counted thirteen
-     * loops per pane toggle. Writing in `requestAnimationFrame` moves the
-     * mutation out of the observer's turn entirely — the resize it causes is
-     * delivered on the following turn like any other, and there is nothing
-     * left to be undelivered. The width guard stays as a cheap short-circuit;
-     * it is no longer what makes this correct. */
-    let lastWidth = 0
-    let pending = 0
-    const size = () => {
-      const cell = node.firstElementChild as HTMLElement | null
-      const width = Math.round(cell?.getBoundingClientRect().width ?? 0)
-      if (width <= 0 || width === lastWidth) return
-      lastWidth = width
-      cancelAnimationFrame(pending)
-      pending = requestAnimationFrame(() => {
-        node.style.setProperty('--cell-height', `${cellHeightFor(width)}px`)
-      })
-    }
-    size()
-    const observer = new ResizeObserver(size)
-    observer.observe(node)
-    return () => {
-      cancelAnimationFrame(pending)
-      observer.disconnect()
-    }
-  }, [shelf.length])
+  /* THERE IS NO CELL-HEIGHT MEASUREMENT ANY MORE. It measured the first
+   * card's width on every resize, computed the height, wrote `--cell-height`,
+   * and needed a `requestAnimationFrame` and a same-width guard to keep from
+   * looping through the ResizeObserver it triggered — all to derive a number
+   * from a column that was fluid. The card is a fixed `CARD_W` now, so the
+   * height is a constant and `applyMetrics` publishes it beside `--card-w`. */
 
   useEffect(() => {
     const node = shelfRef.current
@@ -202,10 +164,18 @@ export function Library({
        * few hundred books down. */
       const style = getComputedStyle(node)
       const rowGap = parseFloat(style.rowGap) || 0
-      const columnGap = parseFloat(style.columnGap) || 0
       const rowHeight = cell ? cell.offsetHeight + rowGap : 0
+      /* THE BROWSER'S OWN ANSWER, not arithmetic that has to agree with it.
+       * This divided `clientWidth` by the card width, and `clientWidth`
+       * includes the shelf's 80px of horizontal padding — so with the fixed
+       * 126px card it counted six columns where CSS laid out five, and every
+       * slice and spacer past `VIRTUALISE_ABOVE` was off by a column per row.
+       * Fluid columns had hidden it: they stretched to fill whatever the
+       * arithmetic said, so the two agreed by construction. The resolved
+       * `grid-template-columns` is one track per column, in pixels, and it is
+       * what was actually laid out. */
       const columns = cell && cell.offsetWidth > 0
-        ? Math.max(1, Math.round((node.clientWidth + columnGap) / (cell.offsetWidth + columnGap)))
+        ? Math.max(1, style.gridTemplateColumns.split(' ').filter(Boolean).length)
         : 0
       const scroller = node.closest('[data-scroll]') ?? node.parentElement
       /* SHELF-RELATIVE. The scroller's `scrollTop` counts from its own top,

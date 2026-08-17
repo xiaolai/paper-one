@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react'
+import { useRef, useState } from 'react'
 import { Hash, MoreHorizontal, Pencil, Trash2 } from 'lucide-react'
+import { TAG_MAX } from '../lib/library'
 import { ICON } from '../lib/metrics'
-import { usePlacement } from '../lib/usePlacement'
+import { useRowMenu } from '../lib/useRowMenu'
 import controls from '../styles/controls.module.css'
 import styles from './SidePane.module.css'
 
@@ -28,7 +29,10 @@ import styles from './SidePane.module.css'
  */
 export interface TagRowProps {
   readonly tag: string
+  /** Shown beside the row: books carrying the tag within the current scope. */
   readonly count: number
+  /** How many books a remove will actually touch — the confirm's number. */
+  readonly removes: number
   /** Whether any book carries this as the reader's own tag — see `tagCounts`. */
   readonly mine: boolean
   readonly on: boolean
@@ -43,6 +47,7 @@ export interface TagRowProps {
 export function TagRow({
   tag,
   count,
+  removes,
   mine,
   on,
   onToggle,
@@ -56,44 +61,31 @@ export function TagRow({
   const [draft, setDraft] = useState(tag)
   const [confirming, setConfirming] = useState(false)
   const rowRef = useRef<HTMLDivElement | null>(null)
-  const menuRef = useRef<HTMLDivElement | null>(null)
-  const moreRef = useRef<HTMLButtonElement | null>(null)
-  const { style: menuStyle, placement } = usePlacement(menuOpen, rowRef, menuRef, {
-    side: 'bottom',
-    align: 'end',
-  })
-
-  /* Close on a click anywhere else, and on Escape. Bound only while THIS row's
-   * menu is open. */
-  useEffect(() => {
-    if (!menuOpen) return
-    const close = () => {
+  /* One close path — see `useRowMenu`, which `BookCell` uses for the same
+   * reasons: every way out clears both the menu and the armed remove, the
+   * hook clears them if the row unmounts while open, and a detached menu
+   * closes rather than parking off screen. */
+  const { moreRef, menuRef, menuStyle, close: closeMenu } = useRowMenu(
+    menuOpen,
+    rowRef,
+    () => {
       setMenuFor(null)
       setConfirming(false)
-    }
-    const onPointer = (event: PointerEvent) => {
-      const target = event.target as Node
-      if (menuRef.current?.contains(target) || moreRef.current?.contains(target)) return
-      close()
-    }
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.stopPropagation()
-        close()
-      }
-    }
-    document.addEventListener('pointerdown', onPointer)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('pointerdown', onPointer)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [menuOpen, setMenuFor])
+    },
+    { side: 'bottom', align: 'end' },
+  )
 
+  /* A blank commit is a cancel, not a rename to nothing — the field goes back
+   * to the tag's name and closes, and nothing is written. Anything else is
+   * handed up, and the caller normalises it by the same rule the store uses. */
   const commitRename = () => {
     setRenaming(false)
     const next = draft.trim()
-    if (next && next !== tag) onRename(next)
+    if (!next) {
+      setDraft(tag)
+      return
+    }
+    if (next !== tag) onRename(next)
   }
 
   return (
@@ -112,6 +104,9 @@ export function TagRow({
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
             aria-label={`Rename the tag ${tag}`}
+            /* The store cuts a tag at `TAG_MAX`; the field says so up front
+               rather than letting the reader type past what will be kept. */
+            maxLength={TAG_MAX}
             autoFocus
             onFocus={(event) => event.target.select()}
             onBlur={commitRename}
@@ -164,18 +159,14 @@ export function TagRow({
               className={controls.menu}
               role="menu"
               aria-label={`Actions for the tag ${tag}`}
-              style={
-                menuStyle && placement?.fit !== 'detached'
-                  ? menuStyle
-                  : { top: -9999, left: -9999 }
-              }
+              style={menuStyle}
             >
               <button
                 type="button"
                 role="menuitem"
                 className={controls.menuItem}
                 onClick={() => {
-                  setMenuFor(null)
+                  closeMenu()
                   setDraft(tag)
                   setRenaming(true)
                 }}
@@ -191,8 +182,7 @@ export function TagRow({
                 data-confirming={confirming}
                 onClick={() => {
                   if (confirming) {
-                    setConfirming(false)
-                    setMenuFor(null)
+                    closeMenu()
                     onRemove()
                   } else {
                     setConfirming(true)
@@ -200,9 +190,11 @@ export function TagRow({
                 }}
               >
                 <Trash2 size={ICON.control} strokeWidth={ICON.stroke} />
+                {/* `removes`, not `count`: the consent number has to be the
+                    action's number. See `ownTagCount`. */}
                 {confirming
-                  ? `Remove from ${count} ${count === 1 ? 'book' : 'books'}? — click again`
-                  : `Remove from ${count} ${count === 1 ? 'book' : 'books'}`}
+                  ? `Remove from ${removes} ${removes === 1 ? 'book' : 'books'}? — click again`
+                  : `Remove from ${removes} ${removes === 1 ? 'book' : 'books'}`}
               </button>
             </div>
           )}

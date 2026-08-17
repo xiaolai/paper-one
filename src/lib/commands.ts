@@ -73,7 +73,6 @@ export function buildCommands(ctx: CommandContext): Command[] {
    * other than what it says is worse than one that is missing, because the
    * reader has already decided before they press return. */
   for (const pane of panesFor(state.screen)) {
-    if (pane.inPalette === false) continue
     const open = state.pane === pane.id
     commands.push({
       id: `pane:${pane.id}`,

@@ -55,9 +55,13 @@ const TAG = /(^|\s)tag:(?:"((?:[^"\\]|\\.)*)("?)|(\S*))/gi
  * status and is left as text, so a reader typing `is:` has not asked for
  * anything yet — the same rule `tag:` follows for an empty term.
  */
-const STATUS = /(^|\s)is:(reading|unread|finished)?(?=\s|$)/gi
-export type StatusTerm = 'reading' | 'unread' | 'finished'
-const STATUSES: readonly StatusTerm[] = ['reading', 'unread', 'finished']
+/* ONE LIST, and the type and the regex are both derived from it. The values
+ * were written three times — in the pattern, in the type, in an array — and
+ * a fourth time as `ReadingStatus` in `library.ts`; four places to add
+ * `abandoned` to, and three of them silent when missed. */
+const STATUSES = ['reading', 'unread', 'finished'] as const
+export type StatusTerm = (typeof STATUSES)[number]
+const STATUS = new RegExp(`(^|\\s)is:(${STATUSES.join('|')})?(?=\\s|$)`, 'gi')
 
 /** Undo `withTag`'s escaping: `\"` and `\\` become the characters they spell. */
 const unescape = (quoted: string): string => quoted.replace(/\\(.)/g, '$1')
@@ -127,9 +131,6 @@ export function withStatus(raw: string, status: StatusTerm | null): string {
   if (!status) return cleared
   return cleared ? `is:${status} ${cleared}` : `is:${status}`
 }
-
-/** The statuses `is:` accepts, for anything listing them. */
-export const STATUS_TERMS = STATUSES
 
 /**
  * Put a tag into a query the reader can then edit.

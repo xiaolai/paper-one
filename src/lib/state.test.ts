@@ -267,6 +267,23 @@ describe('the pane follows the screen', () => {
     }
   })
 
+  /* The mirror: the collection view is about the SHELF, and in the reader the
+   * shelf is hidden. Permitted everywhere it leaked onto the reader's rail and,
+   * worse, followed the reader into their first book as `lastPane`. */
+  it('knows which panels need the shelf', () => {
+    expect(paneFits('reader', 'library')).toBe(false)
+    for (const pane of ['notes', 'cards', 'stats', 'settings'] as const) {
+      expect(paneFits('reader', pane)).toBe(true)
+    }
+  })
+
+  it('does not carry the Library panel into the first book opened from the shelf', () => {
+    // As it is at boot: on the library, with the Library panel open and remembered.
+    const onShelf = at({ screen: 'library', pane: 'library', lastPane: 'library' })
+    const inBook = reducer(onShelf, { type: 'goScreen', screen: 'reader' })
+    expect(inBook.pane).toBe('companion')
+  })
+
   it('moves off a book-only panel on the way to the library', () => {
     const next = reducer(at({ screen: 'reader', pane: 'companion' }), {
       type: 'goScreen',
@@ -332,6 +349,27 @@ describe('the pane follows the screen', () => {
  * was the panel saying it was not available: the one moment it mattered most
  * was the one moment nothing checked. Found by looking at the running app.
  */
+/* The library's query is app state so the pane can write it. Functional
+ * updates are resolved by the REDUCER against the state it holds — the library
+ * screen used to resolve them against its render's value, so two updates in
+ * one batch read the same stale string and the second clobbered the first. */
+describe('setLibraryQuery', () => {
+  it('sets a plain string', () => {
+    expect(reducer(initialState, { type: 'setLibraryQuery', query: 'tag:Sea' }).libraryQuery).toBe('tag:Sea')
+  })
+  it('resolves a functional update against the state the reducer holds', () => {
+    const one = reducer(initialState, { type: 'setLibraryQuery', query: 'a' })
+    const two = reducer(one, { type: 'setLibraryQuery', query: (prev) => `${prev} b` })
+    const three = reducer(two, { type: 'setLibraryQuery', query: (prev) => `${prev} c` })
+    expect(three.libraryQuery).toBe('a b c')
+  })
+  it('returns the same state object when nothing changed, so nothing re-renders', () => {
+    const one = reducer(initialState, { type: 'setLibraryQuery', query: 'x' })
+    expect(reducer(one, { type: 'setLibraryQuery', query: 'x' })).toBe(one)
+    expect(reducer(one, { type: 'setLibraryQuery', query: (p) => p })).toBe(one)
+  })
+})
+
 describe('bootState', () => {
   it('does not open the library on a panel the library does not have', () => {
     const boot = bootState('')

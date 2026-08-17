@@ -448,10 +448,11 @@
 /* --- library ---------------------------------------------------------- */
 
 /* The collection view: rows that narrow the shelf, counts that describe it.
-   The row is `.settingRow`'s shape — same height, same radius, same hover — so
-   the pane reads as one surface whichever panel is showing; the difference is
-   the trailing number and the ON state, which is a scope in force rather than
-   a value being shown. */
+   The row is `.settingRow`'s shape — same radius, same hover, same padding —
+   at a tighter 36px rather than settings' 46px, since a scope list is scanned
+   and a settings list is read one row at a time; the difference that matters
+   is the trailing number and the ON state, which is a scope in force rather
+   than a value being shown. */
 .libraryPanel {
   display: flex;
   flex-direction: column;

@@ -17,7 +17,11 @@
   --line:#EDEEEB; --line-2:#E3E4E1; --line-3:#D6D8D3;
   --accent:#1B3A6B; --accent-bg:#EEF1F6; --accent-line:#DDE2EA;
   --amber:#9E5A16; --amber-bg:#FBF6EE; --amber-line:#E7D6BE;
-  --mark:#F3E6C0; --mark-rule:#E0BE55; --mark-ink:#9A8455; --ok:#7C9A6B; --danger:#B3261E;
+  --mark:#F3E6C0; --mark-rule:#E0BE55; --mark-ink:#9A8455; --ok:#7C9A6B;
+  /* Destructive ink. Checked against every theme's --surface AND --wash, since a
+     danger row is read on its hover fill: 6.5 / 5.9 here; sepia 5.8 / 5.0; slate
+     and sage fell to 4.15 / 4.24 on wash — under 4.5:1 — and carry their own. */
+  --danger:#B3261E;
   --tint-a:#F4F1EA; --tint-b:#EEF1F4; --tint-c:#F1F0F4; --tint-d:#EFF2F1; --tint-e:#F0E4D2;
   --shadow-window: 0 1px 2px rgba(20,24,28,.04), 0 12px 32px -20px rgba(20,24,28,.22);
   --shadow-card: 0 1px 2px rgba(20,24,28,.05), 0 14px 34px -22px rgba(20,24,28,.26);
@@ -40,6 +44,9 @@
   --accent:#23456F; --accent-bg:#CFD7DF; --accent-line:#B4BFCB;
   --amber:#8A4C11; --amber-bg:#DDD8CB; --amber-line:#C6B79C;
   --mark:#DCCB92; --mark-rule:#B99B3F; --mark-ink:#6F6034; --ok:#6A8858;
+  /* Darker than the root's: on this theme's --wash the root red measures under
+     4.5:1 (see the contrast note on --danger in :root). */
+  --danger:#9C1D16;
   --tint-a:#D2CFC6; --tint-b:#C9D0D5; --tint-c:#CFCCD4; --tint-d:#CBD3CC; --tint-e:#D6C9AE;
 }
 
@@ -50,6 +57,9 @@
   --accent:#2A4F6B; --accent-bg:#CDDCDE; --accent-line:#B3C6C9;
   --amber:#8F5013; --amber-bg:#DDDCC3; --amber-line:#C3BE97;
   --mark:#D8CE8C; --mark-rule:#AE9A3C; --mark-ink:#6A6231; --ok:#5F8050;
+  /* Darker than the root's: on this theme's --wash the root red measures under
+     4.5:1 (see the contrast note on --danger in :root). */
+  --danger:#9C1D16;
   --tint-a:#D2D2C0; --tint-b:#C6D3D2; --tint-c:#CCCFC9; --tint-d:#C8D6C4; --tint-e:#D5CFA9;
 }
 

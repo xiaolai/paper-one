@@ -1,10 +1,10 @@
-import { useEffect, useRef } from 'react'
+import { useRef } from 'react'
 import { BookCheck, MoreHorizontal, Tag, Trash2 } from 'lucide-react'
 import { CANNOT_OPEN, allTags, canOpen, displayTitle, statusOf, tagKey } from '../lib/library'
 import type { IndexedBook } from '../lib/bookIndex'
 import { ICON } from '../lib/metrics'
 import { withTag } from '../lib/searchQuery'
-import { usePlacement } from '../lib/usePlacement'
+import { useRowMenu } from '../lib/useRowMenu'
 import { BookCover } from './BookCover'
 import styles from './Library.module.css'
 
@@ -74,21 +74,6 @@ export function BookCell({
   const title = displayTitle(book)
   const status = statusOf(book)
   const menuOpen = menuFor === book.bookId
-  const menuRef = useRef<HTMLDivElement | null>(null)
-  /* Where the menu goes — decided by `usePlacement`, not by this cell.
-   *
-   * The first version set `{top, right}` from the button's rect and called it
-   * a position. On the first column the button already sits at the shelf's
-   * left edge, so a menu right-aligned to it hung 170px off the window. The
-   * helper is asked for `end` alignment below the button and slides it in, or
-   * flips it above, when the window says no — and it does that for every
-   * popover in the app the same way, which is why it is a helper and not
-   * another block of arithmetic here.
-   *
-   * FIXED positioning is still the constraint it always was: the cell clips
-   * its overflow for virtualisation's sake, and a menu that is a child of the
-   * cell is clipped by it. */
-  const moreRef = useRef<HTMLButtonElement | null>(null)
   /* ANCHORED TO THE CARD, NOT TO THE BUTTON. The ellipsis is a 24px mark at
    * the card's far right; anchored to it, a menu that has to flip to `start`
    * on the first column lands with its left edge on the button's left — 100px
@@ -97,48 +82,38 @@ export function BookCell({
    * menu is ABOUT, and its edges are the lines the shelf is drawn on. The
    * button shares the card's right edge and bottom, so when `end` fits nothing
    * moves; when it flips, the menu's left sits on the cover's left, which is
-   * exactly the border the eye expects. */
+   * exactly the border the eye expects.
+   *
+   * FIXED positioning is the constraint it always was: the cell clips its
+   * overflow for virtualisation's sake, and a menu that is a child of the cell
+   * is clipped by it. `useRowMenu` owns the rest — placement, dismissal, the
+   * close-on-unmount and close-on-detached — for the same reasons `TagRow`
+   * needs the same things. */
   const cellRef = useRef<HTMLDivElement | null>(null)
-  const { style: menuStyle, placement } = usePlacement(menuOpen, cellRef, menuRef, {
-    side: 'bottom',
-    align: 'end',
-    /* On the last row there is no room below, so it flips — and flipped CLEAR
-       of a 225px card it leapt the whole card and landed over the neighbour
-       above, reading as that book's menu. Overlaid, it drapes up over its own
-       jacket from the same bottom edge, which is fine: it is unmistakably this
-       book's menu, and a jacket is not something the reader needs to keep
-       seeing while they choose. */
-    overlayOnFlip: true,
-  })
-
-  /* Closes on a click anywhere else, and on Escape — the two ways every other
-   * transient surface in this app is dismissed. Bound only while THIS menu is
-   * open, so a shelf of three hundred cells is not three hundred listeners. */
-  useEffect(() => {
-    if (!menuOpen) return
-    const close = () => {
-      setMenuFor(null)
-      setConfirming(null)
-    }
-    const onPointer = (event: PointerEvent) => {
-      const target = event.target as Node
-      const inMenu = menuRef.current?.contains(target) ?? false
-      const onButton = moreRef.current?.contains(target) ?? false
-      if (!inMenu && !onButton) close()
-    }
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.stopPropagation()
-        close()
-      }
-    }
-    document.addEventListener('pointerdown', onPointer)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('pointerdown', onPointer)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [menuOpen, setMenuFor, setConfirming])
+  const { moreRef, menuRef, menuStyle, close: closeMenu } = useRowMenu(
+    menuOpen,
+    cellRef,
+    /* THE ONE WAY THE MENU CLOSES. There were four — outside click, Escape,
+     * choosing an item, and the remove's second click — and two of them cleared
+     * `menuFor` without clearing `confirming`, so choosing "Mark as finished"
+     * after arming the remove left the row armed for the next time it opened.
+     * Every path calls this. */
+    () => {
+      setMenuFor((at) => (at === book.bookId ? null : at))
+      setConfirming((at) => (at === book.bookId ? null : at))
+    },
+    {
+      side: 'bottom',
+      align: 'end',
+      /* On the last row there is no room below, so it flips — and flipped CLEAR
+         of a 225px card it leapt the whole card and landed over the neighbour
+         above, reading as that book's menu. Overlaid, it drapes up over its own
+         jacket from the same bottom edge, which is fine: it is unmistakably this
+         book's menu, and a jacket is not something the reader needs to keep
+         seeing while they choose. */
+      overlayOnFlip: true,
+    },
+  )
 
   return (
     <div key={book.bookId} className={styles.cell} ref={cellRef}>
@@ -233,18 +208,10 @@ export function BookCell({
               role="menu"
               aria-label={`Actions for ${title}`}
               /* Rendered even before the first placement lands, so the hook
-                 has a box to measure — but parked off screen until then, so it
-                 does not flash at 0,0 for the frame it takes to place.
-
-                 DETACHED IS HIDDEN, not drawn. If this card scrolls out of a
-                 virtualised shelf with its menu open, the anchor is off screen
-                 and the hook says so; a menu floating at the window's edge
-                 with no card under it is a menu that belongs to nothing. */
-              style={
-                menuStyle && placement?.fit !== 'detached'
-                  ? menuStyle
-                  : { top: -9999, left: -9999 }
-              }
+                 has a box to measure; `useRowMenu` parks it off screen until
+                 then, and CLOSES it if the card scrolls out of a virtualised
+                 shelf — a menu with no card under it belongs to nothing. */
+              style={menuStyle}
             >
               <button
                 type="button"
@@ -252,7 +219,7 @@ export function BookCell({
                 className={styles.menuItem}
                 onClick={() => {
                   onSetFinished(book.bookId, status !== 'finished')
-                  setMenuFor(null)
+                  closeMenu()
                 }}
               >
                 <BookCheck size={ICON.control} strokeWidth={ICON.stroke} />
@@ -268,7 +235,7 @@ export function BookCell({
                 onClick={() => {
                   setDraftTag('')
                   setTagging(book.bookId)
-                  setMenuFor(null)
+                  closeMenu()
                 }}
               >
                 <Tag size={ICON.control} strokeWidth={ICON.stroke} />
@@ -297,8 +264,7 @@ export function BookCell({
                 }
                 onClick={() => {
                   if (confirming === book.bookId) {
-                    setConfirming(null)
-                    setMenuFor(null)
+                    closeMenu()
                     onRemove(book)
                   } else {
                     setConfirming(book.bookId)

@@ -175,7 +175,7 @@ export const initialState: AppState = {
 
 export type Action =
   | { type: 'goScreen'; screen: Screen }
-  | { type: 'setLibraryQuery'; query: string }
+  | { type: 'setLibraryQuery'; query: string | ((prev: string) => string) }
   | { type: 'setTheme'; theme: Theme; fromOs?: boolean }
   | { type: 'setThemeFollowsOs'; follows: boolean }
   | { type: 'openPane'; pane: PaneId }
@@ -217,8 +217,17 @@ export function reducer(state: AppState, action: Action): AppState {
       return { ...state, screen: action.screen, pane, switcherOpen: false, paletteOpen: false }
     }
 
-    case 'setLibraryQuery':
-      return state.libraryQuery === action.query ? state : { ...state, libraryQuery: action.query }
+    case 'setLibraryQuery': {
+      /* A FUNCTIONAL update is resolved HERE, against the state the reducer
+       * holds — not in a component against the value it rendered with. The
+       * library screen adapted `setQuery((q) => …)` calls by applying them to
+       * its own render-captured `libraryQuery`, so two updates in one batch
+       * both read the same stale value and the second overwrote the first.
+       * `useReducer` guarantees `state` is current; that is the whole reason
+       * to put the resolution here. */
+      const query = typeof action.query === 'function' ? action.query(state.libraryQuery) : action.query
+      return state.libraryQuery === query ? state : { ...state, libraryQuery: query }
+    }
 
     case 'setTheme':
       // An explicit pick in Settings turns off OS following; a change pushed by
@@ -343,9 +352,22 @@ export type AppDispatch = Dispatch<Action>
  */
 const BOOK_ONLY: readonly PaneId[] = ['toc', 'search', 'companion']
 
+/**
+ * The panels that mean something only on the SHELF.
+ *
+ * `library` is the collection view — scopes and counts over the shelf. In the
+ * reader the shelf is hidden, so a panel that narrows it would be changing a
+ * screen the reader cannot see; and with it merely permitted everywhere, a
+ * launch onto the library left `lastPane` as `library`, which then followed
+ * the reader into the first book they opened instead of yielding to
+ * Companion. It also produced a palette entry "Open Library" beside "Go to the
+ * library" on the reader — near-identical words, different actions.
+ */
+const SHELF_ONLY: readonly PaneId[] = ['library']
+
 /** Whether a panel has anything to show on this screen. */
 export function paneFits(screen: Screen, pane: PaneId): boolean {
-  return screen === 'reader' || !BOOK_ONLY.includes(pane)
+  return screen === 'reader' ? !SHELF_ONLY.includes(pane) : !BOOK_ONLY.includes(pane)
 }
 
 /**

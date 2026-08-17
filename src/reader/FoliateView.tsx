@@ -153,7 +153,10 @@ export function applyLayout(renderer: Renderer, settings: Settings): void {
    * That is the same edge-to-edge symptom the pane threshold fixed from the
    * other direction, and it survived that fix because the grid was never what
    * drew the text. One number, computed once in `Reader`, now reaches both. */
-  renderer.setAttribute('max-inline-size', `${Math.round(settings.measure)}px`)
+  // FLOORED, not rounded: a rounded-up value can exceed the fractional width
+  // the grid actually allocated, by up to half a pixel — which is a column
+  // break's worth on a paginated page. Floor never asks for more than exists.
+  renderer.setAttribute('max-inline-size', `${Math.floor(settings.measure)}px`)
   /* The page slide, which foliate has always been able to do and Paper never
    * asked for: `#scrollTo` eases over 300ms when this attribute is present and
    * jumps when it is not. It was `0ms` in §08's motion table for exactly as long
@@ -435,7 +438,7 @@ export function FoliateView({
      * the effect and unmounted the React tree — the reader vanished instead of
      * the theme failing to change. */
     try {
-      applySettings(renderer, { stepIdx, measure, theme, typeface, animated, paginated })
+      applySettings(renderer, { stepIdx, measure: settings.current.measure, theme, typeface, animated, paginated })
       /* A theme change reaches the book through `setStyles`, which restyles the
        * document WITHOUT rebuilding the section — so no `create-overlay` fires
        * and the marks keep the colour they were painted in. Changing the step or
@@ -447,7 +450,31 @@ export function FoliateView({
       console.error('Paper: applying reader settings failed', cause)
       handlers.current.onError(generation, 'That setting could not be applied.')
     }
-  }, [stepIdx, measure, theme, typeface, animated, paginated, ready, generation])
+    /* `measure` is deliberately NOT a dependency here — see the effect below.
+     * It is read through the ref so a settings change carries the current
+     * measure without this effect re-running for measure alone. */
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stepIdx, theme, typeface, animated, paginated, ready, generation])
+
+  /* THE MEASURE ALONE, and only the layout attributes for it.
+   *
+   * The measure changes on every frame of a pane opening — 220ms of it — and it
+   * was in the effect above, so each frame rebuilt the whole book stylesheet
+   * (`bookCss` reads the host's `@font-face` rules out of `document.styleSheets`
+   * every time) and redrew every mark, for a change `bookCss` does not even
+   * take. Foliate re-renders on the attribute regardless; the stylesheet and
+   * the marks were pure waste, a dozen times over per animation. */
+  useEffect(() => {
+    const session = sessionRef.current
+    const renderer = session?.view?.renderer
+    if (!session || !renderer || ready === 0) return
+    try {
+      applyLayout(renderer, settings.current)
+    } catch (cause) {
+      console.error('Paper: applying the measure failed', cause)
+      handlers.current.onError(generation, 'That setting could not be applied.')
+    }
+  }, [measure, ready, generation])
 
   /* Redraw when the MARKS change, not only when a setting does.
    *

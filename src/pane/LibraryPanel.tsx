@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { BookOpen, Check, Circle, CircleDot, LibraryBig } from 'lucide-react'
 import type { IndexedBook } from '../lib/bookIndex'
-import { statusCounts, tagCounts, tagKey, type ReadingStatus } from '../lib/library'
+import { normalizeTag, statusCounts, tagCounts, tagKey, type ReadingStatus } from '../lib/library'
 import { ICON } from '../lib/metrics'
 import { parseQuery, withStatus, withTag, withoutTag } from '../lib/searchQuery'
 import type { AppDispatch } from '../lib/state'
@@ -58,9 +58,18 @@ export interface LibraryPanelProps {
   readonly onRenameTag: (from: string, to: string) => void
   /** Take one of the reader's tags off every book carrying it. */
   readonly onRemoveTag: (tag: string) => void
+  /** How many books `onRemoveTag` would touch — the number the confirm shows. */
+  readonly ownTagCount: (tag: string) => number
 }
 
-export function LibraryPanel({ books, query, dispatch, onRenameTag, onRemoveTag }: LibraryPanelProps) {
+export function LibraryPanel({
+  books,
+  query,
+  dispatch,
+  onRenameTag,
+  onRemoveTag,
+  ownTagCount,
+}: LibraryPanelProps) {
   /* Which tag's menu is open — one across the panel, held here for the same
    * reason the shelf holds `menuFor` for its cards. */
   const [menuFor, setMenuFor] = useState<string | null>(null)
@@ -70,8 +79,22 @@ export function LibraryPanel({ books, query, dispatch, onRenameTag, onRemoveTag 
    * `is:reading` answers "how many of these are tagged so" — which is what a
    * reader narrowing further is asking. Status counts are not scoped, for the
    * opposite reason: they describe the collection, not the current view. */
-  const tags = tagCounts(books, parsed.status ? { tags: [], status: parsed.status } : null)
+  const counted = tagCounts(books, parsed.status ? { tags: [], status: parsed.status } : null)
   const activeTags = new Set(parsed.tags.map(tagKey))
+  /* AN ACTIVE TAG IS ALWAYS LISTED, even at zero. Scoped to a status, a tag
+   * with no books in that status fell out of `tagCounts` — and with it went
+   * the lit row that was the reader's one way to clear it from the panel. The
+   * chip under the search field could still clear it, but a panel that hides
+   * the very scope it is applying is lying by omission. Merged in at count 0,
+   * so what is narrowing the shelf is always visible where the narrowing is
+   * done. `mine` is false for such a row — nothing on the shelf carries it —
+   * so it offers no menu, correctly. */
+  const tags = [
+    ...counted,
+    ...parsed.tags
+      .filter((tag) => !counted.some((one) => tagKey(one.tag) === tagKey(tag)))
+      .map((tag) => ({ tag, count: 0, mine: false })),
+  ]
   const nothingScoped = parsed.status === null && parsed.tags.length === 0
 
   const setQuery = (next: string) => dispatch({ type: 'setLibraryQuery', query: next })
@@ -125,6 +148,10 @@ export function LibraryPanel({ books, query, dispatch, onRenameTag, onRemoveTag 
                 key={tagKey(tag)}
                 tag={tag}
                 count={count}
+                /* The number a remove would actually touch — NOT `count`,
+                   which is scoped to the status and includes publisher
+                   subjects. See `ownTagCount`. */
+                removes={ownTagCount(tag)}
                 mine={mine}
                 on={on}
                 /* Tags ACCUMULATE — every tag, not any — because adding a
@@ -137,8 +164,14 @@ export function LibraryPanel({ books, query, dispatch, onRenameTag, onRemoveTag 
                    under its new name, or the shelf would silently un-narrow
                    the moment the reader corrected a spelling. */
                 onRename={(to) => {
-                  onRenameTag(tag, to)
-                  if (on) setQuery(withTag(withoutTag(query, tag, tagKey), to, tagKey))
+                  /* Normalised HERE, by the same function the store uses, so
+                     the tag the query names is the tag that was written. Raw,
+                     a 70-character rename scoped the shelf to a tag that never
+                     existed and the view emptied. */
+                  const stored = normalizeTag(to)
+                  if (!stored) return
+                  onRenameTag(tag, stored)
+                  if (on) setQuery(withTag(withoutTag(query, tag, tagKey), stored, tagKey))
                 }}
                 /* A removed tag comes out of the query too — a scope on a tag
                    that no book carries would empty the shelf with nothing to

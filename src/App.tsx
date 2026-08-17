@@ -994,6 +994,7 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
             books={library.books}
             onRenameTag={library.renameTag}
             onRemoveTag={library.removeTag}
+            ownTagCount={library.ownTagCount}
           />
         }
         onDismissPane={() => dispatch({ type: 'closePane' })}

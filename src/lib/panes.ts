@@ -23,13 +23,6 @@ export interface PaneEntry {
    * Linux, so anything DISPLAYING this has to translate — see `comboFor`.
    */
   readonly combo?: string
-  /**
-   * False for a panel the command palette should not list. Nothing sets it
-   * today; it exists because one panel once needed it (an "Add books" panel,
-   * one letter from the palette's own "Add books…"), and the next panel that
-   * shadows a palette command will need it again.
-   */
-  readonly inPalette?: false
 }
 
 export const PANES: readonly PaneEntry[] = [

@@ -113,10 +113,17 @@ export function SelectionTools({
     if (visible.length === 0) {
       setExtent(null)
     } else {
-      const top = Math.min(...visible.map((r) => r.top))
-      const left = Math.min(...visible.map((r) => r.left))
-      const bottom = Math.max(...visible.map((r) => r.top + r.height))
-      const right = Math.max(...visible.map((r) => r.left + r.width))
+      /* One pass, no spread. `Math.min(...rects)` puts every rect on the call
+       * stack as an argument, and a selection dragged across a whole chapter
+       * has enough line rects to throw `RangeError: Maximum call stack size`
+       * — on the one gesture that produces the most of them. */
+      let top = Infinity, left = Infinity, bottom = -Infinity, right = -Infinity
+      for (const r of visible) {
+        if (r.top < top) top = r.top
+        if (r.left < left) left = r.left
+        if (r.top + r.height > bottom) bottom = r.top + r.height
+        if (r.left + r.width > right) right = r.left + r.width
+      }
       setExtent({ top, left, width: right - left, height: bottom - top, bottom, right })
     }
   }, [selection, stage])

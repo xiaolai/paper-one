@@ -136,8 +136,13 @@ function check(input: PlacementInput): void {
   }
   if (![surface.width, surface.height].every(Number.isFinite)) bad('surface is not finite')
   if (surface.width < 0 || surface.height < 0) bad('surface has a negative size')
-  if (gap < 0) bad(`gap is negative (${gap})`)
-  if (edge < 0) bad(`edge is negative (${edge})`)
+  if (!Number.isFinite(gap) || gap < 0) bad(`gap must be a finite non-negative number (${gap})`)
+  if (!Number.isFinite(edge) || edge < 0) bad(`edge must be a finite non-negative number (${edge})`)
+  /* THE BRAND IS CHECKED AT RUNTIME TOO. `S` is a type parameter, and a caller
+   * with a rect typed as the union `Space` — or an `as any` — infers it as the
+   * union and passes both spaces through the compiler. The compile-time brand
+   * catches the honest mistake; this catches the rest, and it is one line. */
+  if (bounds.space !== anchor.space) bad('bounds is in a different space from the anchor')
   if (avoid && avoid.space !== anchor.space) bad('avoid is in a different space from the anchor')
 }
 
@@ -203,11 +208,23 @@ export function place<S extends Space>(input: PlacementInput<S>): Placement {
   const bMin = B.mStart + edge
   const bMax = B.mStart + B.mSize - edge
 
-  /* The obstacle on the main axis is the anchor together with `avoid`:
-   * hanging "after" means after the later of their ends, "before" means
-   * before the earlier of their starts. */
-  const obstacleStart = V ? Math.min(A.mStart, V.mStart) : A.mStart
-  const obstacleEnd = V ? Math.max(aEnd, V.mEnd) : aEnd
+  /* The obstacle on the main axis is the anchor together with `avoid` — but
+   * `avoid` counts ONLY if it lies in the surface's path. It was folded into a
+   * one-dimensional band, so an obstacle 600px to the side of the anchor still
+   * pushed the surface past it, as if it spanned the whole width: a menu that
+   * belonged at 124 landed at 524. The surface hangs from the anchor's cross
+   * extent, so `avoid` is in the way only when its cross extent overlaps the
+   * anchor's (widened by the surface, since the surface may extend past the
+   * anchor either way). Disjoint, it is not an obstacle at all. */
+  const Vc = avoid
+    ? vertical
+      ? { cStart: avoid.left, cEnd: avoid.left + avoid.width }
+      : { cStart: avoid.top, cEnd: avoid.top + avoid.height }
+    : null
+  const surfaceReach = { start: A.cStart - S.c, end: A.cStart + A.cSize + S.c }
+  const avoidInPath = V !== null && Vc !== null && Vc.cEnd > surfaceReach.start && Vc.cStart < surfaceReach.end
+  const obstacleStart = avoidInPath && V ? Math.min(A.mStart, V.mStart) : A.mStart
+  const obstacleEnd = avoidInPath && V ? Math.max(aEnd, V.mEnd) : aEnd
 
   /* Detached: the anchor is wholly outside the bounds. Placed inside anyway,
    * so a caller that insists on drawing gets something sane, but told. */
@@ -220,10 +237,15 @@ export function place<S extends Space>(input: PlacementInput<S>): Placement {
   const preferAfter = side === 'bottom' || side === 'right'
   const afterFrom = obstacleEnd + gap
   const beforeTo = obstacleStart - gap
-  // With overlay, a FLIPPED surface hangs from the near edge of the anchor
-  // instead of clearing it: flipped "before", its end sits on the anchor's end.
-  const flipBeforeTo = overlayOnFlip ? aEnd : beforeTo
-  const flipAfterFrom = overlayOnFlip ? A.mStart : afterFrom
+  // With overlay, a FLIPPED surface hangs from the near edge of the ANCHOR
+  // instead of clearing it: flipped "before", its end sits on the anchor's
+  // end. It may lie over the anchor — that is the option's meaning — but never
+  // over `avoid`, so if `avoid` extends past the anchor on that side the
+  // overlay edge is `avoid`'s edge, not the anchor's.
+  const overlayBeforeTo = avoidInPath && V && V.mStart < aEnd ? V.mStart - gap : aEnd
+  const overlayAfterFrom = avoidInPath && V && V.mEnd > A.mStart ? V.mEnd + gap : A.mStart
+  const flipBeforeTo = overlayOnFlip ? overlayBeforeTo : beforeTo
+  const flipAfterFrom = overlayOnFlip ? overlayAfterFrom : afterFrom
   const roomAfter = bMax - afterFrom
   const roomBefore = beforeTo - bMin
   const roomFlipBefore = flipBeforeTo - bMin
@@ -344,13 +366,17 @@ export function nextPlacement(
 ): Placement | null {
   if (!measured.anchor) return null
   return place({
+    /* Options FIRST, measurements after — so a structurally-assignable
+     * options object cannot smuggle an `anchor` in over the one that was
+     * measured. The `Omit` on the type says it should not; the spread order
+     * is what makes it unable to. */
+    ...options,
     anchor: measured.anchor,
     // Before the surface has rendered its size is unknown; place as if it were
     // a point and let the next measurement correct it.
     surface: measured.surface ?? { width: 0, height: 0 },
     bounds: measured.bounds,
     ...(measured.avoid ? { avoid: measured.avoid } : {}),
-    ...options,
   })
 }
 

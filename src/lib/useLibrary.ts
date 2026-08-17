@@ -13,7 +13,7 @@ import {
 import { BOOKS_DIR } from './bookFolder'
 import { hasContentFile, writeIndex, type IndexFs, type IndexedBook } from './bookIndex'
 import { rescueStrandedMarks, restoreBook, trashBook } from './bookTrash'
-import { tagKey } from './library'
+import { normalizeTag, tagKey } from './library'
 import type { WriteQueue } from './writeQueue'
 
 /**
@@ -84,6 +84,8 @@ export interface Library {
   renameTag: (from: string, to: string) => void
   /** Take one of the reader's tags off every book that carries it. */
   removeTag: (tag: string) => void
+  /** How many books a `removeTag` of this tag would touch — see the implementation. */
+  ownTagCount: (tag: string) => number
   /** The saved position for a book, or null. Stable across renders. */
   positionOf: (bookId: string | null) => string | null
   /**
@@ -496,7 +498,7 @@ export function useLibrary(
 
   const tag = useCallback(
     (bookId: string, raw: string) => {
-      const value = raw.trim().slice(0, 60)
+      const value = normalizeTag(raw)
       if (!value) return
       const key = tagKey(value)
       update(bookId, (record) => {
@@ -527,39 +529,69 @@ export function useLibrary(
 
   const renameTag = useCallback(
     (from: string, to: string) => {
-      const value = to.trim().slice(0, 60)
+      const value = normalizeTag(to)
       if (!value) return
       const fromKey = tagKey(from)
-      if (tagKey(value) === fromKey) {
-        /* Same key, different spelling — `Sea` to `sea`. `tag` would refuse
-         * the add as a duplicate and `untag` would then strip it, so this case
-         * needs to be a rewrite in place rather than an add-then-remove. */
-        for (const book of latest.current) {
-          if (!(book.tags ?? []).some((one) => tagKey(one) === fromKey)) continue
-          update(book.bookId, (record) => ({
-            ...record,
-            tags: (record.tags ?? []).map((one) => (tagKey(one) === fromKey ? value : one)),
-          }))
-        }
-        return
-      }
+      const toKey = tagKey(value)
+      /* ONE WRITE PER BOOK, and that is the whole point. This was `tag(new)`
+       * then `untag(old)` — two queued writes — with a comment promising that
+       * a failure between them left the book with both rather than neither.
+       * The write queue continues after a failed task, so if the add failed
+       * and the remove succeeded the reader's tag was simply gone. One `update`
+       * that adds and removes in the same record is what makes the promise
+       * true: `book.json` is written once, atomically, holding the result.
+       *
+       * The same `update` also reads the record it changes, so a book whose
+       * cached row is one write stale is judged by what is on disk — which is
+       * why this no longer pre-filters from `latest.current` and instead lets
+       * `update` return the record unchanged when the tag is not there.
+       * Merging onto an existing tag falls out: if `toKey` is already present
+       * the map just drops the old spelling and the fold keeps one. */
       for (const book of latest.current) {
-        if (!(book.tags ?? []).some((one) => tagKey(one) === fromKey)) continue
-        tag(book.bookId, value)
-        untag(book.bookId, from)
+        update(book.bookId, (record) => {
+          const own = record.tags ?? []
+          if (!own.some((one) => tagKey(one) === fromKey)) return record
+          const kept = own.filter((one) => tagKey(one) !== fromKey)
+          const alreadyThere = [...kept, ...(record.subjects ?? [])].some((one) => tagKey(one) === toKey)
+          return { ...record, tags: alreadyThere ? kept : [...kept, value] }
+        })
       }
     },
-    [tag, untag, update],
+    [update],
   )
 
   const removeTag = useCallback(
     (raw: string) => {
       const key = tagKey(raw)
+      // Judged per record, not from the cached row — see `renameTag`.
       for (const book of latest.current) {
-        if ((book.tags ?? []).some((one) => tagKey(one) === key)) untag(book.bookId, raw)
+        update(book.bookId, (record) => {
+          const own = record.tags ?? []
+          if (!own.some((one) => tagKey(one) === key)) return record
+          return { ...record, tags: own.filter((one) => tagKey(one) !== key) }
+        })
       }
     },
-    [untag],
+    [update],
+  )
+
+  /**
+   * How many books carry this as the READER's own tag — the number a
+   * collection-wide remove will touch.
+   *
+   * Distinct from what the Library panel shows beside the row, which is scoped
+   * to the current status and counts publisher subjects too. Showing that
+   * number as "Remove from N books" was a lie in both directions: under
+   * `is:reading` a tag on five books read "Remove from 2" and removed from
+   * five; a tag that was three subjects and one reader tag read "4" and removed
+   * from one. The consent number has to be the action's number.
+   */
+  const ownTagCount = useCallback(
+    (raw: string) => {
+      const key = tagKey(raw)
+      return latest.current.filter((book) => (book.tags ?? []).some((one) => tagKey(one) === key)).length
+    },
+    [],
   )
 
   const positionOf = useCallback(
@@ -569,7 +601,7 @@ export function useLibrary(
   )
 
   return useMemo<Library>(
-    () => ({ books, add, update, remove, tag, untag, renameTag, removeTag, positionOf, rekeyBook }),
-    [books, add, update, remove, tag, untag, renameTag, removeTag, positionOf, rekeyBook],
+    () => ({ books, add, update, remove, tag, untag, renameTag, removeTag, ownTagCount, positionOf, rekeyBook }),
+    [books, add, update, remove, tag, untag, renameTag, removeTag, ownTagCount, positionOf, rekeyBook],
   )
 }

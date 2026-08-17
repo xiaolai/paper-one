@@ -227,6 +227,62 @@ describe('place — avoid', () => {
   })
 })
 
+describe('place — what the branch audit found', () => {
+  /* Codex, auditing the branch after the grill: the brand is a type parameter,
+   * so a rect typed as the union — or an `as any` — infers `S` as the union
+   * and both spaces go through the compiler. Checked at runtime too. */
+  it('refuses bounds in a different space from the anchor, at runtime', () => {
+    const viewportAnchor = anchorAt(0, 0, 10, 10)
+    const containerBounds = { top: 0, left: 0, width: 800, height: 600, space: 'container' as const }
+    expect(() => place({ anchor: viewportAnchor, surface: menu, bounds: containerBounds as unknown as SpacedRect<'viewport'> })).toThrow(RangeError)
+  })
+
+  it('refuses a NaN or infinite gap and edge', () => {
+    for (const bad of [NaN, Infinity, -Infinity]) {
+      expect(() => place({ anchor: anchorAt(100, 100), surface: menu, bounds, gap: bad })).toThrow(RangeError)
+      expect(() => place({ anchor: anchorAt(100, 100), surface: menu, bounds, edge: bad })).toThrow(RangeError)
+    }
+  })
+
+  /* `avoid` was folded into a one-dimensional band, so an obstacle 600px to
+   * the side still pushed the surface past it: a menu that belonged at 124
+   * landed at 524. An obstacle is in the way only if it lies in the surface's
+   * path. */
+  it('ignores an `avoid` that is cross-axis disjoint from the anchor', () => {
+    const anchor = anchorAt(100, 100, 20, 20)
+    const farRight = { top: 120, left: 700, width: 20, height: 400, space: V }
+    const p = place({ anchor, surface: { width: 50, height: 40 }, bounds, side: 'bottom', avoid: farRight })
+    expect(p.top).toBe(100 + 20 + 4)
+    expect(p.side).toBe('bottom')
+  })
+
+  it('still honours an `avoid` that IS in the path', () => {
+    const anchor = anchorAt(100, 100, 20, 20)
+    const belowInPath = { top: 120, left: 90, width: 60, height: 400, space: V }
+    const p = place({ anchor, surface: { width: 50, height: 40 }, bounds, side: 'bottom', avoid: belowInPath })
+    // Hangs BELOW the obstacle, not below the anchor: there is room there, so
+    // no flip — but it must clear the whole of `avoid` first.
+    expect(p.side).toBe('bottom')
+    expect(p.top).toBe(120 + 400 + 4)
+    expect(overlaps(p, { width: 50, height: 40 }, belowInPath)).toBe(false)
+  })
+
+  /* `overlayOnFlip` may lie over the ANCHOR; it must never lie over `avoid`. */
+  it('overlays the anchor on flip but stays clear of `avoid`', () => {
+    const win: SpacedRect<'viewport'> = { top: 0, left: 0, width: 800, height: 400, space: V }
+    // Anchor near the bottom so it flips up; `avoid` sits just above the anchor,
+    // with only 10px between them — nowhere near enough for a 60px surface.
+    const anchor = { top: 300, left: 100, width: 100, height: 80, space: V }
+    const above = { top: 250, left: 100, width: 100, height: 40, space: V }
+    const p = place({ anchor, surface: { width: 120, height: 60 }, bounds: win, side: 'bottom', overlayOnFlip: true, avoid: above })
+    expect(p.side).toBe('top')
+    // Overlay would put it over the anchor's top; `avoid` sits there, so the
+    // overlay edge is `avoid`'s top instead and the surface lands above it.
+    expect(p.top + 60).toBe(250 - 4)
+    expect(overlaps(p, { width: 120, height: 60 }, above)).toBe(false)
+  })
+})
+
 describe('place — four sides', () => {
   /* CODEX #8. A tooltip to the right of a button, and to the left when there
    * is no room. */

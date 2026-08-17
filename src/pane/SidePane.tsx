@@ -130,6 +130,7 @@ export interface SidePaneProps {
   /** Collection-wide tag edits, for the Library panel — see `Library`. */
   onRenameTag: (from: string, to: string) => void
   onRemoveTag: (tag: string) => void
+  ownTagCount: (tag: string) => number
 }
 
 export function SidePane({
@@ -145,6 +146,7 @@ export function SidePane({
   books,
   onRenameTag,
   onRemoveTag,
+  ownTagCount,
 }: SidePaneProps) {
   /* Falls back to the last pane rather than unmounting. The slot stays mounted
    * at zero width and inert while closed, so keeping the panel rendered is what
@@ -234,6 +236,7 @@ export function SidePane({
             dispatch={dispatch}
             onRenameTag={onRenameTag}
             onRemoveTag={onRemoveTag}
+            ownTagCount={ownTagCount}
           />
         )}
       </div>

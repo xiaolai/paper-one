@@ -80,10 +80,11 @@ describe('the measure the renderer is given', () => {
    * if a value arrives without a unit — the tracks then size to content and
    * every attribute still looks correct. A fractional measure must not reach
    * it either. */
-  it('carries a unit and a whole number', () => {
+  it('carries a unit and a whole number — floored, never rounded up', () => {
     const renderer = fakeRenderer()
     applyLayout(renderer, { ...settings(true), measure: 623.6 })
-    expect(renderer.attributes.get('max-inline-size')).toBe('624px')
+    // Floor: 624 would ask for more width than the grid allocated.
+    expect(renderer.attributes.get('max-inline-size')).toBe('623px')
   })
 })
 

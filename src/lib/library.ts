@@ -96,6 +96,25 @@ export function tagKey(tag: string): string {
   return tag.trim().normalize('NFC').toLowerCase()
 }
 
+/** The longest a reader's tag may be. Kept here so the field and the store
+ *  enforce one number rather than two that could disagree. */
+export const TAG_MAX = 60
+
+/**
+ * A tag as it will be STORED: trimmed and cut to `TAG_MAX`. Empty when nothing
+ * is left.
+ *
+ * ONE FUNCTION, called by everyone who writes a tag AND by everyone who then
+ * refers to it. The store trimmed and truncated on the way in while the panel
+ * put the reader's raw text into the query — so a 70-character rename left the
+ * shelf scoped to a tag that had never been written, and the view emptied
+ * with nothing to say why. Whoever writes the tag and whoever names it must
+ * agree, and they agree by calling this.
+ */
+export function normalizeTag(raw: string): string {
+  return raw.trim().slice(0, TAG_MAX)
+}
+
 /**
  * Every tag on a book, whoever put it there.
  *

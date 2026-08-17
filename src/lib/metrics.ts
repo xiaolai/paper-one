@@ -369,7 +369,14 @@ export const COVER_ASPECT = 2 / 3
  * every book — an unread one gets a spacer where the rule would be — so read
  * and unread cells measure the same and there is no tallest case to pick.
  */
-export const CELL_FURNITURE = 36
+export const CELL_FURNITURE = 36 + 20
+
+/* The `+ 20` is the tag row: one 16px line of chips and the 4px above it. It
+ * is drawn only on a tagged book, so an untagged card carries 20px of air at
+ * its foot — the price of every row being one height, which virtualisation
+ * needs. Cheaper than the alternative, which was a tagged card silently
+ * clipping its chips. `.noCopy` costs nothing here: it is laid over the
+ * jacket, out of flow. */
 
 /**
  * How tall a shelf cell must be to hold a cover of this column's width.
@@ -484,10 +491,13 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
     // this rung, because publishing the other four would put four tokens that
     // nothing reads next to the one that does.
     '--icon-control': px(ICON.control),
-    // The shelf's card width, so the grid's `repeat()` reads the same number
-    // `cellHeightFor` is called with. Restated in the stylesheet, the two would
-    // agree by coincidence.
+    // The shelf's card: its width for the grid's `repeat()`, its cover's
+    // proportion for `aspect-ratio`, and its height — which, with a fixed
+    // width, is a CONSTANT, not something to measure at runtime. All three from
+    // one place, so the stylesheet cannot disagree with `cellHeightFor`.
     '--card-w': px(CARD_W),
+    '--cover-aspect': `${COVER_ASPECT}`,
+    '--cell-height': px(cellHeightFor(CARD_W)),
     // §12 layer order, published so stylesheets stop restating the numbers.
     '--z-ruler-band': String(Z.rulerBand),
     '--z-prose': String(Z.prose),

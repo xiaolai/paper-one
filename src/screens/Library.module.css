@@ -164,12 +164,11 @@
  * artwork — fills the whole box and takes the same shadow, so it reads as a
  * jacket too rather than as the well showing through. */
 .cover {
-  position: relative;
   display: flex;
   align-items: flex-end;
   justify-content: center;
   flex-shrink: 0;
-  aspect-ratio: 2 / 3;
+  aspect-ratio: var(--cover-aspect);
   margin-bottom: 8px;
   /* Transparent by default; the tint sets its own background inline, and
      `.coverTinted` gives that the jacket treatment. */
@@ -209,7 +208,6 @@
 /* The tint's title. It is inset by its OWN padding now — the well used to carry
    12px for it, and the well is bare so that artwork can meet the box's edges. */
 .coverTitle {
-  align-self: center;
   padding: 12px;
   font-family: 'Crimson Pro Variable', 'Crimson Pro', Georgia, serif;
   font-size: 15px;
@@ -223,11 +221,19 @@
 
 /* The one line that survives under a jacket: a book Paper holds no file for.
    Not a caption — a warning that the click will do nothing and why. */
+/* OVER THE JACKET, out of flow. In flow it added a line under the cover that
+   the fixed cell had no budget for, and was clipped. It is a stamp on the
+   book it warns about — where the eye is — and takes no height. */
 .noCopy {
-  align-self: flex-start;
-  margin-block-start: 6px;
+  position: absolute;
+  inset-inline-start: 6px;
+  inset-block-start: 6px;
+  padding: 2px 6px;
+  border-radius: var(--radius-chip);
+  background: var(--surface);
   font-size: 11px;
   color: var(--muted);
+  box-shadow: var(--shadow-pill);
 }
 
 .empty {
@@ -395,11 +401,18 @@
   font-size: 12px;
 }
 
+/* ONE LINE, and a line the cell has budgeted for. It wrapped, and a book with
+   four tags grew a second row that a fixed-height cell then clipped without a
+   word. Now it is a single row that ellipsises past its edge; the panel is
+   where every tag is seen in full. `TAG_ROW` in `metrics.ts` is this height
+   plus the gap above it, counted into `CELL_FURNITURE`. */
 .tagRow {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 4px;
+  height: 16px;
   margin-block-start: 4px;
+  overflow: hidden;
 }
 
 .bookTag {
@@ -469,7 +482,6 @@
    one is a place to read. Stays visible while its menu is open, because a
    control whose popover is up must not vanish under the pointer. */
 .menuAnchor {
-  position: relative;
   flex: 0 0 auto;
 }
 

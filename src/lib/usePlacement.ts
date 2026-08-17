@@ -115,5 +115,11 @@ export function usePlacement(
     // The refs are stable objects; what changes is `open` and the options.
   }, [open, anchorRef, surfaceRef, side, align, gap, edge, overlayOnFlip, within, avoid])
 
-  return { style: placement ? { top: placement.top, left: placement.left } : null, placement }
+  /* Gated on `open` as well as on state: the layout effect that clears the
+   * placement runs AFTER the render in which `open` became false, so for that
+   * one render the state still holds the last position. A caller reading
+   * `style` in render would draw a closed surface at its old place for a
+   * frame. `open` is known now; nothing waits for the effect. */
+  const live = open ? placement : null
+  return { style: live ? { top: live.top, left: live.left } : null, placement: live }
 }
