@@ -69,10 +69,6 @@ export interface LibraryProps {
   importing: { done: number; total: number; current: string } | null
   /** What the last import did, in one line. */
   importNotice: string | null
-  /** The folder Paper is watching, or null — see `watchedFolder.ts`. */
-  watchedFolder: string | null
-  onConnectFolder: () => void
-  onDisconnectFolder: () => void
 }
 
 const ORDERS: readonly { id: LibraryOrder; label: string }[] = [
@@ -94,9 +90,6 @@ export function Library({
   onAddFolder,
   importing,
   importNotice,
-  watchedFolder,
-  onConnectFolder,
-  onDisconnectFolder,
 }: LibraryProps) {
   const [order, setOrder] = useState<LibraryOrder>('recent')
   /* Which row is asking to be confirmed, by id.
@@ -240,17 +233,6 @@ export function Library({
         >
           <FolderPlus size={ICON.control} strokeWidth={ICON.stroke} />
           Add folder
-        </button>
-        {/* Connecting is not the same as adding: one copies a folder in once,
-            the other keeps looking. Both are here because a reader who wants the
-            second almost always tries the first. */}
-        <button
-          type="button"
-          className={styles.add}
-          onClick={watchedFolder ? onDisconnectFolder : onConnectFolder}
-          title={watchedFolder ?? undefined}
-        >
-          {watchedFolder ? 'Stop watching' : 'Watch a folder'}
         </button>
       </div>
 

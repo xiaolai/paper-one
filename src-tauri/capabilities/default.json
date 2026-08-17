@@ -19,7 +19,6 @@
     "fs:allow-read-file",
     "fs:allow-read-dir",
     "fs:allow-exists",
-    "fs:allow-watch",
 
     {
       "identifier": "fs:allow-write-file",

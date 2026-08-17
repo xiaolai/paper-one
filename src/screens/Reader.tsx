@@ -450,7 +450,7 @@ export function Reader({
             <p className={styles.emptyBody}>
               {libraryCount > 0
                 ? `Pick up where you left off, or drop a new book here.`
-                : 'Drop an EPUB, PDF, MOBI or CBZ here, or connect a folder to watch.'}
+                : 'Drop an EPUB, PDF, MOBI or CBZ here, or add a folder of them.'}
             </p>
             {book.error && <p className={styles.error}>{book.error}</p>}
             {libraryCount > 0 && (
