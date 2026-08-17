@@ -1,5 +1,6 @@
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import { tauriVaultFs } from './bookVault'
+import type { DirFs } from './importFolder'
 import { BaseDirectory, readDir, readFile } from '@tauri-apps/plugin-fs'
 import { ACCEPT_FORMATS } from './formats'
 
@@ -142,11 +143,28 @@ export const tauriDirOps = {
 
 
 /**
- * The filesystem a library needs: bytes, directories, and the reader's own
- * files when a folder has been picked.
+ * The filesystem the LIBRARY reads and writes: Paper's own data directory.
  *
- * One object rather than two spread together at each call site, because the
- * pieces are always used together and spreading them was already producing
- * `{ ...tauriVaultFs, ...tauriDirOps }` in three places.
+ * Its `readDir` is app-relative, because everything the shelf lists lives under
+ * `$APPDATA/books`. That is the whole distinction from `importFs` below, and it
+ * used to be invisible: one object carried both kinds of read, so an import had
+ * to override `readDir` with the other one and assert the result into the shape
+ * it needed. An `as unknown as` around a filesystem is not a cast, it is a
+ * promise that the object has a member nobody put there — and it did not.
  */
 export const libraryFs = { ...tauriVaultFs, ...tauriDirOps }
+
+/**
+ * The filesystem an IMPORT reads: the reader's own disk, and Paper's to write
+ * into.
+ *
+ * `readDir` walks an absolute path here — the folder they picked — while
+ * everything written still goes to the app's data directory. Two different
+ * roots in one object, which is exactly why they are named apart: the reader's
+ * files are read and never written, and Paper's are written and never walked.
+ */
+export const importFs: DirFs = {
+  ...tauriVaultFs,
+  readDir: tauriDirOps.readDirOutside,
+  readOutside: tauriDirOps.readOutside,
+}

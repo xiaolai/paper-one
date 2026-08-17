@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { buildCommands } from './lib/commands'
 import { PANE_SHORTCUTS } from './lib/panes'
 import { DEFAULT_STEP_IDX, applyMetrics } from './lib/metrics'
-import { pickBooks, pickFolder, readBookAt, tauriDirOps } from './lib/bookFiles'
+import { importFs as tauriImportFs, pickBooks, pickFolder, readBookAt } from './lib/bookFiles'
 import { positionRecorder, type PositionRecorder } from './lib/positionRecorder'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { isTauri, usePlatform, usePrefersDark, usePrefersReducedMotion } from './lib/platform'
@@ -22,7 +22,6 @@ import { coverTintFor } from './lib/bookAccent'
 import { extensionFor, readOwnedBook } from './lib/bookVault'
 import type { IndexedBook } from './lib/bookIndex'
 import type { IndexFs } from './lib/bookIndex'
-import type { DirFs } from './lib/importFolder'
 import { downscaleCover } from './lib/coverArt'
 import { contentPathIn, coverPathIn, folderOf, readBook } from './lib/bookFolder'
 import {
@@ -99,20 +98,14 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
    * directory reader rather than the app-relative one the shelf scan uses. They
    * are different operations and were one name, which is how the shelf came up
    * empty with ten books on disk. */
+  /* NAMED, not assembled here. The library's filesystem and an import's differ
+   * in exactly one member — whether `readDir` walks the app's data directory or
+   * the reader's own disk — and building the second out of the first at the call
+   * site is what let an `as unknown as DirFs` assert a `readOutside` that was
+   * never there. Both are declared in `bookFiles`, where the difference can be
+   * stated once. */
   const importFs = useMemo(
-    /* BUILT, not cast. `IndexFs` has no `readOutside`, and `as unknown as DirFs`
-     * asserted one into existence — so an import would have called a member that
-     * was never there. The two reads it needs are named explicitly, which is
-     * also what makes the difference between them visible: `readDir` walks the
-     * reader's own filesystem here, not the app's data directory. */
-    () =>
-      fs
-        ? ({
-            ...fs,
-            readDir: tauriDirOps.readDirOutside,
-            readOutside: tauriDirOps.readOutside,
-          } satisfies DirFs)
-        : null,
+    () => (fs ? tauriImportFs : null),
     [fs],
   )
   const library = useLibrary(fs, writes.current, initialBooks)

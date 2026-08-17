@@ -161,6 +161,130 @@ export interface MigrationSources {
 }
 
 /**
+ * Carry ONE phase-3 row into its folder, and say what happened to it.
+ *
+ * The body of the loop below, on its own — because the loop's own job is small
+ * and was invisible underneath a hundred lines of this: extract an id, refuse a
+ * folder two rows both want, skip what is already done, collect. Everything
+ * else is one book, and one book is what this is.
+ *
+ * It REPORTS rather than pushing, and never touches the ledger. What counts as
+ * done follows from the status, and deciding that in two places is how a book
+ * gets recorded as migrated when it was skipped.
+ */
+async function migrateOne(
+  fs: VaultFs,
+  row: LegacyRow,
+  bookId: string,
+  grouped: Map<string, unknown[]>,
+): Promise<MigrationOutcome> {
+    try {
+      /* ALREADY DONE, so nothing happens. This is what makes a second run — or
+       * a run after a crash — safe: a book whose record is FINISHED is left
+       * exactly as it is, because rewriting it would overwrite whatever the
+       * reader has done since.
+       *
+       * FINISHED, not merely present. The first version of this migration wrote
+       * a record for a row it had no bytes for, and this check then reported it
+       * `already` on every later run — so the one state that needed repairing
+       * was the one state guaranteed never to be revisited. A record with
+       * neither content nor a path back is unfinished business, and falls
+       * through to be tried again. */
+      /* ALREADY CARRIED ACROSS, whether or not its folder is there now. The
+       * folder can be absent because the reader REMOVED the book, and re-running
+       * the migration then undid that — see `readDone`. */
+      /* OR ITS REMOVED COPY IS SITTING IN THE TRASH, which proves the same
+       * thing: a book only reaches the trash by having been on the shelf. This
+       * is what covers a library removed BEFORE the ledger existed — without it,
+       * upgrading resurrects every such book exactly once, which is the bug the
+       * ledger was written for arriving through the door it left open. */
+      if (await fs.exists(trashOf(bookId))) {
+        return { bookId, status: 'already' }
+      }
+      const existing = await readBook(fs, bookId)
+      /* PRESENT BUT UNREADABLE IS NOT ABSENT. `readBook` answers both with null,
+       * and the retry below writes the phase-3 row when it gets one — so a
+       * momentary read failure on a finished book replaced everything the reader
+       * had done since with the state it was migrated from. This runs once, so
+       * that would be permanent. Reported and skipped instead. */
+      if (!existing && (await fs.exists(recordPath(bookId)))) {
+        return {
+          bookId,
+          status: 'failed',
+          reason: 'its record is there but could not be read — left untouched',
+        }
+      }
+      if (existing && ((await hasBytes(fs, bookId, existing)) || existing.origin)) {
+        return { bookId, status: 'already' }
+      }
+
+      /* WHAT IS ON DISK WINS over what the row says, when both exist. Falling
+       * through to retry must not undo a rename, a tag or a position the reader
+       * has applied since the incomplete record was written. */
+      const record = existing ? { ...recordFromRow(row), ...existing } : recordFromRow(row)
+      const name = `book.${record.ext ?? 'epub'}`
+
+      // The bytes first, then the cover, then the marks, and the RECORD LAST.
+      // A record is what puts a book on the shelf, so writing it last means a
+      // crash midway leaves a folder that is simply not a book yet, rather than
+      // a book missing its content.
+      const legacyContent = typeof row.vault === 'string' ? row.vault : null
+      const copied = legacyContent
+        ? await copy(fs, legacyContent, contentPathIn(bookId, name))
+        : false
+      /* A ROW WITH NO BYTES AND NO WAY BACK TO THEM IS NOT MIGRATED.
+       *
+       * Phase 3 only began keeping its own copies near the end, so most rows in
+       * a real library have no `vault` — and phase 4 dropped the `url` field
+       * that used to open those. Writing a record anyway put books on the shelf
+       * that could never be opened, and marked them `already` so the migration
+       * would never revisit them.
+       *
+       * `origin` is the reader's own file and IS a way back, so a row with one
+       * still migrates: `openStored` falls back to it. A row with neither is
+       * left in the phase-3 store, reported, and picked up by a later run if
+       * anything ever makes it recoverable. */
+      /* THE SAME TEST THE RECORD USES. `str` slices at 4000 and accepts what
+       * `origin` rejects past 8000 — so a row with a very long address passed
+       * this gate, then had that address DROPPED by `recordFromRow`, and was
+       * reported `migrated` as a book with neither content nor a way back. */
+      if (!copied && !record.origin) {
+        return {
+          bookId,
+          status: 'skipped',
+          reason: 'no stored copy and no original path — left in the previous library',
+        }
+      }
+      const legacyCover = typeof row.cover === 'string' ? row.cover : null
+      if (legacyCover) {
+        await copy(fs, legacyCover, `${folderOf(bookId)}/cover.webp`)
+      }
+
+      const mine = grouped.get(bookId) ?? []
+      /* ONLY IF THE FOLDER HAS NONE. A retry of an incomplete record reaches
+       * here a second time, and writing the phase-3 snapshot over `marks.json`
+       * would discard every highlight made since the first attempt. The phase-3
+       * store is the source only for a book that has no marks of its own yet. */
+      if (mine.length && !(await fs.exists(marksPathIn(bookId)))) {
+        await writeMarks(fs, bookId, mine)
+      }
+
+      await writeBook(fs, bookId, record)
+      return { bookId, status: 'migrated', marks: mine.length }
+    } catch (cause) {
+      /* Named, and the loop continues. A migration that fails whole is a
+       * migration that cannot be resumed, and the reader is left with neither
+       * layout complete. */
+      return {
+        bookId,
+        status: 'failed',
+        reason: cause instanceof Error ? cause.message : 'could not be migrated',
+      }
+    }
+
+}
+
+/**
  * Carry every phase-3 book into its own folder.
  *
  * The content and cover are COPIED rather than moved, so the old layout survives
@@ -233,116 +357,18 @@ export async function migrateToFolders(
       continue
     }
     claimed.set(folder, bookId)
-    try {
-      /* ALREADY DONE, so nothing happens. This is what makes a second run — or
-       * a run after a crash — safe: a book whose record is FINISHED is left
-       * exactly as it is, because rewriting it would overwrite whatever the
-       * reader has done since.
-       *
-       * FINISHED, not merely present. The first version of this migration wrote
-       * a record for a row it had no bytes for, and this check then reported it
-       * `already` on every later run — so the one state that needed repairing
-       * was the one state guaranteed never to be revisited. A record with
-       * neither content nor a path back is unfinished business, and falls
-       * through to be tried again. */
-      /* ALREADY CARRIED ACROSS, whether or not its folder is there now. The
-       * folder can be absent because the reader REMOVED the book, and re-running
-       * the migration then undid that — see `readDone`. */
-      /* OR ITS REMOVED COPY IS SITTING IN THE TRASH, which proves the same
-       * thing: a book only reaches the trash by having been on the shelf. This
-       * is what covers a library removed BEFORE the ledger existed — without it,
-       * upgrading resurrects every such book exactly once, which is the bug the
-       * ledger was written for arriving through the door it left open. */
-      if (done.has(bookId) || (await fs.exists(trashOf(bookId)))) {
-        done.add(bookId)
-        outcomes.push({ bookId, status: 'already' })
-        continue
-      }
-      const existing = await readBook(fs, bookId)
-      /* PRESENT BUT UNREADABLE IS NOT ABSENT. `readBook` answers both with null,
-       * and the retry below writes the phase-3 row when it gets one — so a
-       * momentary read failure on a finished book replaced everything the reader
-       * had done since with the state it was migrated from. This runs once, so
-       * that would be permanent. Reported and skipped instead. */
-      if (!existing && (await fs.exists(recordPath(bookId)))) {
-        outcomes.push({
-          bookId,
-          status: 'failed',
-          reason: 'its record is there but could not be read — left untouched',
-        })
-        continue
-      }
-      if (existing && ((await hasBytes(fs, bookId, existing)) || existing.origin)) {
-        done.add(bookId)
-        outcomes.push({ bookId, status: 'already' })
-        continue
-      }
-
-      /* WHAT IS ON DISK WINS over what the row says, when both exist. Falling
-       * through to retry must not undo a rename, a tag or a position the reader
-       * has applied since the incomplete record was written. */
-      const record = existing ? { ...recordFromRow(row), ...existing } : recordFromRow(row)
-      const name = `book.${record.ext ?? 'epub'}`
-
-      // The bytes first, then the cover, then the marks, and the RECORD LAST.
-      // A record is what puts a book on the shelf, so writing it last means a
-      // crash midway leaves a folder that is simply not a book yet, rather than
-      // a book missing its content.
-      const legacyContent = typeof row.vault === 'string' ? row.vault : null
-      const copied = legacyContent
-        ? await copy(fs, legacyContent, contentPathIn(bookId, name))
-        : false
-      /* A ROW WITH NO BYTES AND NO WAY BACK TO THEM IS NOT MIGRATED.
-       *
-       * Phase 3 only began keeping its own copies near the end, so most rows in
-       * a real library have no `vault` — and phase 4 dropped the `url` field
-       * that used to open those. Writing a record anyway put books on the shelf
-       * that could never be opened, and marked them `already` so the migration
-       * would never revisit them.
-       *
-       * `origin` is the reader's own file and IS a way back, so a row with one
-       * still migrates: `openStored` falls back to it. A row with neither is
-       * left in the phase-3 store, reported, and picked up by a later run if
-       * anything ever makes it recoverable. */
-      /* THE SAME TEST THE RECORD USES. `str` slices at 4000 and accepts what
-       * `origin` rejects past 8000 — so a row with a very long address passed
-       * this gate, then had that address DROPPED by `recordFromRow`, and was
-       * reported `migrated` as a book with neither content nor a way back. */
-      if (!copied && !record.origin) {
-        outcomes.push({
-          bookId,
-          status: 'skipped',
-          reason: 'no stored copy and no original path — left in the previous library',
-        })
-        continue
-      }
-      const legacyCover = typeof row.cover === 'string' ? row.cover : null
-      if (legacyCover) {
-        await copy(fs, legacyCover, `${folderOf(bookId)}/cover.webp`)
-      }
-
-      const mine = grouped.get(bookId) ?? []
-      /* ONLY IF THE FOLDER HAS NONE. A retry of an incomplete record reaches
-       * here a second time, and writing the phase-3 snapshot over `marks.json`
-       * would discard every highlight made since the first attempt. The phase-3
-       * store is the source only for a book that has no marks of its own yet. */
-      if (mine.length && !(await fs.exists(marksPathIn(bookId)))) {
-        await writeMarks(fs, bookId, mine)
-      }
-
-      await writeBook(fs, bookId, record)
-      done.add(bookId)
-      outcomes.push({ bookId, status: 'migrated', marks: mine.length })
-    } catch (cause) {
-      /* Named, and the loop continues. A migration that fails whole is a
-       * migration that cannot be resumed, and the reader is left with neither
-       * layout complete. */
-      outcomes.push({
-        bookId,
-        status: 'failed',
-        reason: cause instanceof Error ? cause.message : 'could not be migrated',
-      })
+    /* ALREADY CARRIED ACROSS, whether or not its folder is there now. The
+     * folder can be absent because the reader REMOVED the book, and re-running
+     * the migration then undid that — see `readDone`. */
+    if (done.has(bookId)) {
+      outcomes.push({ bookId, status: 'already' })
+      continue
     }
+    const outcome = await migrateOne(fs, row, bookId, grouped)
+    /* RECORDED FROM THE STATUS, in one place. A book is done when it arrived or
+     * was already there; a skip stays retryable, and a failure records nothing. */
+    if (outcome.status === 'migrated' || outcome.status === 'already') done.add(bookId)
+    outcomes.push(outcome)
   }
   /* Written LAST and best effort. Failing to record what was done costs a
    * repeat, which is idempotent; failing the migration over it would cost the
