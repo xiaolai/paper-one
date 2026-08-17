@@ -182,8 +182,25 @@ export type Action =
 
 export function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
-    case 'goScreen':
-      return { ...state, screen: action.screen, switcherOpen: false, paletteOpen: false }
+    case 'goScreen': {
+      /* THE PANE FOLLOWS THE SCREEN. Three panels need an open book — see
+       * `needsBook` — so arriving at the library on one of them shows a title
+       * above an apology, and that was the default: the first thing Paper
+       * offered a reader with a full shelf was a panel saying it was not
+       * available.
+       *
+       * PREFERRED FROM `lastPane` rather than from the current panel, and left
+       * alone. `lastPane` is the last panel the reader deliberately opened, so
+       * asking it "does this screen have that" is how popping to the library for
+       * a book and coming back returns you to Companion — rather than leaving
+       * you on whatever the library substituted, which you never chose. */
+      /* CLOSED STAYS CLOSED. `paneFor` answers "which panel", never "is the
+       * pane open" — so asking it about a null pane would have opened one on
+       * every screen change, which is the same conflation as a pane that shuts
+       * itself, arriving from the other side. */
+      const pane = state.pane === null ? null : paneFor(action.screen, state.lastPane)
+      return { ...state, screen: action.screen, pane, switcherOpen: false, paletteOpen: false }
+    }
 
     case 'setTheme':
       // An explicit pick in Settings turns off OS following; a change pushed by
@@ -196,12 +213,21 @@ export function reducer(state: AppState, action: Action): AppState {
       return { ...state, themeFollowsOs: action.follows }
 
     case 'openPane':
-      return { ...state, pane: action.pane, lastPane: action.pane, paletteOpen: false }
+      /* Asking for a panel this screen does not have is not an error to report,
+       * it is a request that cannot be honoured — from a ⌘-digit pressed on the
+       * library, or a palette entry. The nearest thing it can mean is opening
+       * the pane, so it opens on what the screen does offer. */
+      return {
+        ...state,
+        pane: paneFor(state.screen, action.pane),
+        lastPane: action.pane,
+        paletteOpen: false,
+      }
 
     case 'togglePane':
       return state.pane
         ? { ...state, pane: null }
-        : { ...state, pane: state.lastPane }
+        : { ...state, pane: paneFor(state.screen, state.lastPane) }
 
     case 'closePane':
       return { ...state, pane: null }
@@ -280,6 +306,54 @@ export type AppDispatch = Dispatch<Action>
  * Taking `search` rather than reading `window.location` keeps this testable and
  * keeps `state` a module that does not touch the DOM.
  */
+/**
+ * The panels that have nothing to show without an open book.
+ *
+ * Not a style question, and not a list anyone should keep a second copy of.
+ * `Contents` lists the open book's own table of contents, `Companion` says as
+ * much in its own subtitle — "grounded in this book only" — and `Search` takes
+ * a `Book` and scans it. On the library screen all three are a title above an
+ * apology, and the pane OPENED ONTO ONE OF THEM: the first thing Paper showed a
+ * reader with a full shelf was a panel saying it was not available.
+ *
+ * Notes and Cards are deliberately absent from this list. Both are cross-book
+ * by design — Notes shows every book's marks — and they are why the library has
+ * a side pane at all rather than none.
+ *
+ * It lives here rather than in the pane registry because the ids are declared
+ * here and the reducer below needs the same answer. The registry reads it.
+ */
+const BOOK_ONLY: readonly PaneId[] = ['toc', 'search', 'companion']
+
+/** Whether a panel has anything to show on this screen. */
+export function paneFits(screen: Screen, pane: PaneId): boolean {
+  return screen === 'reader' || !BOOK_ONLY.includes(pane)
+}
+
+/**
+ * Which panel a screen opens on when the one that was wanted is not there.
+ *
+ * The library's answer is Notes: the only panel that shows the reader's OWN
+ * work across the whole shelf, which is the nearest thing to what Companion is
+ * for a book. `import` would be a shortcut to a button already on the screen,
+ * and `settings` is somewhere you visit rather than land.
+ */
+export function defaultPaneFor(screen: Screen): PaneId {
+  return screen === 'reader' ? 'companion' : 'notes'
+}
+
+/**
+ * The panel to show, given a screen and the one that was wanted.
+ *
+ * Never null: this answers "which panel", not "is the pane open". The caller
+ * holds the second question, and conflating them is how a reader ends up with a
+ * pane that closes itself whenever they change screen.
+ */
+function paneFor(screen: Screen, wanted: PaneId | null): PaneId {
+  if (wanted && paneFits(screen, wanted)) return wanted
+  return defaultPaneFor(screen)
+}
+
 export function screenFor(search: string): Screen {
   return new URLSearchParams(search).get('book') ? 'reader' : 'library'
 }

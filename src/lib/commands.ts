@@ -1,5 +1,5 @@
 import { DEFAULT_STEP_IDX, READING_STEPS, readingStep } from './metrics'
-import { PANES, THEMES, TYPEFACES } from './panes'
+import { panesFor, THEMES, TYPEFACES } from './panes'
 import type { AppDispatch, AppState } from './state'
 
 /**
@@ -46,7 +46,11 @@ export function buildCommands(ctx: CommandContext): Command[] {
   const { state, dispatch } = ctx
   const commands: Command[] = []
 
-  for (const pane of PANES) {
+  /* THE PANELS THIS SCREEN HAS. Listing all eight from the library offered
+   * three that cannot open there — and a palette entry that does something
+   * other than what it says is worse than one that is missing, because the
+   * reader has already decided before they press return. */
+  for (const pane of panesFor(state.screen)) {
     if (pane.inPalette === false) continue
     const open = state.pane === pane.id
     commands.push({

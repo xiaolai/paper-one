@@ -34,12 +34,40 @@ describe('buildCommands', () => {
   })
 
   it('carries §11 combos, so the palette shows what the handler binds', () => {
-    const commands = buildCommands(context().ctx)
+    // On the READER, where every panel exists — see the library case below.
+    const commands = buildCommands(context({ screen: 'reader' }).ctx)
     expect(find(commands, 'pane:toc')?.combo).toBe('⌘1')
     expect(find(commands, 'pane:notes')?.combo).toBe('⌘2')
     expect(find(commands, 'pane:search')?.combo).toBe('⌘3')
     expect(find(commands, 'pane:stats')?.combo).toBe('⌘5')
     expect(find(commands, 'pane:toggle')?.combo).toBe('⌘\\')
+  })
+
+  /**
+   * One side pane, fitted.
+   *
+   * Three panels need an open book, and offering them from the library is a
+   * palette entry that does something other than what it says — which is worse
+   * than one that is missing, because the reader has already decided by the time
+   * they press return.
+   */
+  it('offers only the panels the screen has', () => {
+    const library = buildCommands(context({ screen: 'library' }).ctx)
+    expect(find(library, 'pane:toc')).toBeUndefined()
+    expect(find(library, 'pane:search')).toBeUndefined()
+    expect(find(library, 'pane:companion')).toBeUndefined()
+
+    // The cross-book ones stay: they are why the library has a pane at all.
+    expect(find(library, 'pane:notes')).toBeDefined()
+    expect(find(library, 'pane:cards')).toBeDefined()
+    expect(find(library, 'pane:settings')).toBeDefined()
+  })
+
+  it('offers all of them in a book', () => {
+    const reader = buildCommands(context({ screen: 'reader' }).ctx)
+    for (const id of ['toc', 'search', 'companion', 'notes', 'cards']) {
+      expect(find(reader, `pane:${id}`)).toBeDefined()
+    }
   })
 
   it('omits the ruler in paginated flow, where it cannot do anything', () => {

@@ -11,7 +11,7 @@ import {
 import type { CompanionProvider } from '../lib/companion'
 import { ICON } from '../lib/metrics'
 import { PANE_TITLES } from '../lib/panes'
-import type { AppDispatch, AppState, PaneId } from '../lib/state'
+import { paneFits, type AppDispatch, type AppState, type PaneId } from '../lib/state'
 import type { Book } from '../lib/useBook'
 import type { Mark } from '../lib/marks'
 import type { MarkFocus } from '../lib/useMarking'
@@ -90,6 +90,17 @@ const RAIL = RAIL_ORDER.map((id) => ({
   label: PANE_TITLES[id],
   Icon: PANE_ICONS[id],
 }))
+
+/**
+ * The rail for one screen, in the rail's own order.
+ *
+ * ONE SIDE PANE, FITTED. The library gets the same rail with the three
+ * book-only panels left out — see `paneFits` — rather than a second pane of its
+ * own, and rather than eight icons of which three do nothing. A control that is
+ * present and inert is a worse answer than one that is absent: the reader
+ * clicks it, gets an apology, and learns nothing about when it will work.
+ */
+const railFor = (screen: AppState['screen']) => RAIL.filter((tab) => paneFits(screen, tab.id))
 
 export interface SidePaneProps {
   state: AppState
@@ -231,7 +242,7 @@ export function SidePane({
           navigation, not the window's, so it reads better anchored to the
           surface it switches than stacked under the titlebar with it. */}
       <div className={styles.rail}>
-        {RAIL.map(({ id, label, Icon }) => (
+        {railFor(state.screen).map(({ id, label, Icon }) => (
           <button
             key={id}
             type="button"

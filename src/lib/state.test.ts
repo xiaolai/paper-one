@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_STEP_IDX, READING_STEPS, readingStep } from './metrics'
 import { TYPEFACES } from './panes'
-import { initialState, reducer, screenFor, type AppState } from './state'
+import { initialState, paneFits, reducer, screenFor, type AppState } from './state'
 
 /**
  * The reducer's reading-size case.
@@ -243,5 +243,78 @@ describe('screenFor', () => {
    * stop showing. */
   it('ignores an empty book parameter', () => {
     expect(screenFor('?book=')).toBe('library')
+  })
+})
+
+/**
+ * One side pane, fitted to the screen.
+ *
+ * Three panels have nothing to show without an open book, and the pane opened
+ * onto one of them by default — so the first thing Paper showed a reader with a
+ * full shelf was a panel saying it was not available.
+ */
+describe('the pane follows the screen', () => {
+  const at = (over: Partial<AppState>) => ({ ...initialState, ...over })
+
+  it('knows which panels need a book', () => {
+    for (const pane of ['toc', 'search', 'companion'] as const) {
+      expect(paneFits('reader', pane)).toBe(true)
+      expect(paneFits('library', pane)).toBe(false)
+    }
+    // Cross-book by design, and the reason the library has a pane at all.
+    for (const pane of ['notes', 'cards', 'stats', 'import', 'settings'] as const) {
+      expect(paneFits('library', pane)).toBe(true)
+    }
+  })
+
+  it('moves off a book-only panel on the way to the library', () => {
+    const next = reducer(at({ screen: 'reader', pane: 'companion' }), {
+      type: 'goScreen',
+      screen: 'library',
+    })
+    expect(next.pane).toBe('notes')
+  })
+
+  it('leaves a panel that works on both alone', () => {
+    const next = reducer(at({ screen: 'reader', pane: 'notes' }), {
+      type: 'goScreen',
+      screen: 'library',
+    })
+    expect(next.pane).toBe('notes')
+  })
+
+  /* `lastPane` is what the toggle reopens, and leaving it alone is how going to
+   * the library and back returns you to the panel you were reading with rather
+   * than to whatever the library substituted. */
+  it('gives the book panel back when you return to the book', () => {
+    const away = reducer(at({ screen: 'reader', pane: 'companion', lastPane: 'companion' }), {
+      type: 'goScreen',
+      screen: 'library',
+    })
+    expect(away.pane).toBe('notes')
+    expect(away.lastPane).toBe('companion')
+    const back = reducer(away, { type: 'goScreen', screen: 'reader' })
+    expect(back.pane).toBe('companion')
+  })
+
+  /* CLOSED STAYS CLOSED. `paneFor` answers "which panel", never "is the pane
+   * open", and asking it about a null pane opened one on every screen change —
+   * the same conflation as a pane that shuts itself, from the other side. */
+  it('does not open a pane the reader had closed', () => {
+    const shut = at({ screen: 'reader', pane: null, lastPane: 'companion' })
+    expect(reducer(shut, { type: 'goScreen', screen: 'library' }).pane).toBeNull()
+  })
+
+  it('reopens a fitting panel when the toggle is used on the library', () => {
+    const shut = at({ screen: 'library', pane: null, lastPane: 'companion' })
+    expect(reducer(shut, { type: 'togglePane' }).pane).toBe('notes')
+  })
+
+  /* A palette entry the reader chose BY NAME falls back rather than failing;
+   * the ⌘-digit is guarded at the key handler instead, because a key that
+   * silently does something else is worse than one that does nothing. */
+  it('falls back when asked for a panel this screen does not have', () => {
+    const next = reducer(at({ screen: 'library' }), { type: 'openPane', pane: 'toc' })
+    expect(next.pane).toBe('notes')
   })
 })

@@ -7,7 +7,7 @@ import { positionRecorder, type PositionRecorder } from './lib/positionRecorder'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { isTauri, usePlatform, usePrefersDark, usePrefersReducedMotion } from './lib/platform'
 import { NOT_CONFIGURED } from './lib/companion'
-import { hasOpenLayer, useAppState } from './lib/state'
+import { hasOpenLayer, paneFits, useAppState } from './lib/state'
 import type { MarkStorage } from './lib/marks'
 import { useBook } from './lib/useBook'
 import { useBookIntake } from './lib/useBookIntake'
@@ -767,7 +767,12 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
       }
 
       const shortcut = PANE_SHORTCUTS.find((entry) => entry.digit === event.key)
-      if (shortcut) {
+      /* NOT ON A SCREEN THAT HAS NO SUCH PANEL. `openPane` falls back rather
+       * than failing, which is right for a palette entry the reader chose by
+       * name — and wrong for a digit: pressing ⌘1 for Contents on the library
+       * and being given Notes is a key that does something else, silently. It
+       * does nothing there instead, which is what an unbound key does. */
+      if (shortcut && paneFits(state.screen, shortcut.pane)) {
         event.preventDefault()
         dispatch({ type: 'openPane', pane: shortcut.pane })
       }
