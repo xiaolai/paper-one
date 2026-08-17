@@ -233,12 +233,21 @@ async function readIndex(fs: IndexFs): Promise<{ books: readonly IndexedBook[] }
 }
 
 async function folderNames(fs: IndexFs): Promise<string[]> {
-  /* NOT SWALLOWED. Returning `[]` for a directory that would not read made an
-   * empty cached index "agree" with it, so the empty cache was trusted and the
-   * shelf came up empty without anything rescanning or reporting. A failure
-   * here means the cache cannot be checked, and an unchecked cache is one to
-   * rescan rather than believe. */
-  return (await fs.readDir(BOOKS_DIR)).filter((one) => one.isDirectory).map((one) => one.name)
+  try {
+    return (await fs.readDir(BOOKS_DIR)).filter((one) => one.isDirectory).map((one) => one.name)
+  } catch (cause) {
+    /* ABSENT AND UNREADABLE, distinguished — the same rule `scanBooks` follows,
+     * and leaving it out here broke the SECOND launch of a fresh install: the
+     * first wrote an empty index, the next found that cache, came here, and
+     * threw on a `books/` that had simply never been created. The reader was
+     * told their library could not be read before they had one.
+     *
+     * Swallowing it was the other error: `[]` made an empty cache "agree" with
+     * a directory nobody could read, so the empty cache was trusted and the
+     * shelf came up empty with nothing rescanning or reporting. */
+    if (await fs.exists(BOOKS_DIR)) throw cause
+    return []
+  }
 }
 
 /** Write the cache. Atomic, like every other write here. */

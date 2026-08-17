@@ -418,3 +418,35 @@ describe('removing a book that has been removed before', () => {
     expect(await trashBook(fakeFs(), 'book_a')).toBe(false)
   })
 })
+
+/**
+ * A removal that cannot finish must leave the book where it was.
+ *
+ * Moving one entry at a time is not one operation, so a failure part way left
+ * `book.json` in the trash and the content live — a book split across two
+ * directories, which is worse than a removal that did not happen and, unlike
+ * one, is not fixed by pressing the button again.
+ */
+describe('a removal interrupted half way', () => {
+  it('puts back everything it had already moved', async () => {
+    const fs = fakeFs(shelved())
+    await trashBook(fs, 'book_a')
+    fs.store.set(`${folderOf('book_a')}/content.epub`, new TextEncoder().encode('FRESH'))
+    await restoreBook(fs, 'book_a')
+
+    // The second removal takes the entry-by-entry path, and one entry refuses.
+    const rename = fs.rename
+    let moves = 0
+    fs.rename = async (from, to) => {
+      if (from.startsWith(folderOf('book_a')) && ++moves > 1) throw new Error('locked')
+      return rename(from, to)
+    }
+    expect(await trashBook(fs, 'book_a')).toBe(false)
+    fs.rename = rename
+
+    // Everything that was live is still live.
+    expect(fs.store.has(`${folderOf('book_a')}/book.json`)).toBe(true)
+    expect(fs.store.has(`${folderOf('book_a')}/content.epub`)).toBe(true)
+    expect(fs.store.has(`${folderOf('book_a')}/marks.json`)).toBe(true)
+  })
+})

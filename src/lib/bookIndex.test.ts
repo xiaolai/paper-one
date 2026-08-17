@@ -24,7 +24,11 @@ function fakeFs(files: Record<string, string> = {}) {
         const head = rest.split('/')[0]
         if (head) names.add(head)
       }
-      if (names.size === 0 && path === BOOKS_DIR && !store.size) throw new Error('no dir')
+      /* A MISSING DIRECTORY THROWS, whatever else is in the store. It used to
+       * throw only when the store was entirely empty — so a test that seeded
+       * `index.json` and no `books/` got an empty listing instead of the failure
+       * the real `readDir` gives, and the case it was written for never ran. */
+      if (names.size === 0 && path === BOOKS_DIR) throw new Error('no dir')
       return [...names].map((name) => ({ name, isDirectory: !name.includes('.') }))
     },
     readFile: async (path) => {
@@ -316,5 +320,21 @@ describe('a library whose records will not read', () => {
   it('is quiet about a folder that has no record yet', async () => {
     const fs = fakeFs({ [`${BOOKS_DIR}/book_a/content.epub`]: 'WHALE' })
     expect(await scanBooks(fs)).toEqual([])
+  })
+})
+
+/**
+ * The second launch of a fresh install.
+ *
+ * The first writes an empty index for a library that does not exist yet. The
+ * next finds that cache, goes to check it against the directory, and `books/`
+ * has still never been created — so refusing to swallow the read failure told a
+ * brand-new reader their library could not be read before they had one.
+ */
+describe('a cached index with no books directory', () => {
+  it('is an empty shelf, not an unreadable one', async () => {
+    const fs = fakeFs({ [INDEX_FILE]: JSON.stringify({ version: 1, books: [] }) })
+    const { books } = await loadShelf(fs)
+    expect(books).toEqual([])
   })
 })

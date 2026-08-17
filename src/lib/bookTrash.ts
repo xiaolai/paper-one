@@ -57,10 +57,27 @@ export async function trashBook(fs: TrashFs, bookId: string): Promise<boolean> {
      * The LIVE copy wins on a collision here, which is the mirror of restore:
      * it is the one the reader has been using. */
     if (await fs.exists(trashOf(bookId))) {
-      for (const entry of await fs.readDir(folderOf(bookId))) {
-        const to = `${trashOf(bookId)}/${entry.name}`
-        if (await fs.exists(to)) await fs.remove(to).catch(() => {})
-        await fs.rename(`${folderOf(bookId)}/${entry.name}`, to)
+      /* AND IT UNDOES ITSELF IF IT CANNOT FINISH. Renaming one entry at a time
+       * is not one operation, so a failure part way through — a locked file, a
+       * permission — left `book.json` in the trash and the content live, or the
+       * other way round. A book split across two directories is worse than a
+       * removal that did not happen, and only one of those is recoverable by
+       * pressing the button again. */
+      const moved: { from: string; to: string }[] = []
+      try {
+        for (const entry of await fs.readDir(folderOf(bookId))) {
+          const from = `${folderOf(bookId)}/${entry.name}`
+          const to = `${trashOf(bookId)}/${entry.name}`
+          if (await fs.exists(to)) await fs.remove(to).catch(() => {})
+          await fs.rename(from, to)
+          moved.push({ from, to })
+        }
+      } catch (cause) {
+        // Back where they came from, in reverse, best effort.
+        for (const one of moved.reverse()) {
+          await fs.rename(one.to, one.from).catch(() => {})
+        }
+        throw cause
       }
       await fs.removeDir(folderOf(bookId)).catch(() => {})
     } else {
