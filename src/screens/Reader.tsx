@@ -346,6 +346,10 @@ export function Reader({
                       file={book.source}
                       generation={book.generation}
                       stepIdx={state.stepIdx}
+                      /* The COMPUTED measure, not `measureForStep`. See
+                         `applyLayout` — the renderer drew over the gutter for
+                         as long as it derived this for itself. */
+                      measure={grid.measure}
                       theme={state.theme}
                       typeface={state.typeface}
                       animated={!reducedMotion}

@@ -2,7 +2,6 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { Renderer, TocItem, View } from 'foliate-js/view.js'
 import type { MarkPainter } from 'foliate-js/overlayer.js'
 import type { Theme, Typeface } from '../lib/state'
-import { measureForStep } from '../lib/metrics'
 import type { BookMeta, BookNavigator, ReaderPosition } from '../lib/useBook'
 import { isPdf } from '../lib/formats'
 import { bookCss, markPalette } from './bookCss'
@@ -20,6 +19,12 @@ export interface FoliateViewProps {
    *  can drop results from a reader that has since been replaced. */
   generation: number
   stepIdx: number
+  /**
+   * The measure the GRID actually settled on, which is not always the one
+   * the reading step asks for — see `proseGrid`, which shrinks it when the
+   * stage cannot hold it.
+   */
+  measure: number
   theme: Theme
   /** The face the BOOK is set in — never the interface's. */
   typeface: Typeface
@@ -73,6 +78,7 @@ export interface FoliateViewProps {
 
 interface Settings {
   stepIdx: number
+  measure: number
   theme: Theme
   typeface: Typeface
   paginated: boolean
@@ -133,9 +139,21 @@ export function applyLayout(renderer: Renderer, settings: Settings): void {
   renderer.setAttribute('margin', '0px')
   renderer.setAttribute('gap', '0px')
   renderer.setAttribute('max-column-count', '1')
-  // §09 gives every reading step its own measure; a single constant meant
-  // changing the size changed the type but never its designed line width.
-  renderer.setAttribute('max-inline-size', `${measureForStep(settings.stepIdx)}px`)
+  /* THE MEASURE THE GRID SETTLED ON, not the one the reading step asks for.
+   *
+   * §09 gives every step its own measure and this read it directly, which is
+   * right only while the stage can afford it. `proseGrid` shrinks the measure
+   * when it cannot — after the margin column and the gutter have already given
+   * what they can — and nothing told foliate. So the grid reserved a 24px
+   * gutter, the renderer went on laying text out at the step's full width, and
+   * the text was drawn straight over the gutter the grid had just protected:
+   * measured at a 760px window, a 688px renderer with `max-inline-size: 700`
+   * and zero space either side of the words.
+   *
+   * That is the same edge-to-edge symptom the pane threshold fixed from the
+   * other direction, and it survived that fix because the grid was never what
+   * drew the text. One number, computed once in `Reader`, now reaches both. */
+  renderer.setAttribute('max-inline-size', `${Math.round(settings.measure)}px`)
   /* The page slide, which foliate has always been able to do and Paper never
    * asked for: `#scrollTo` eases over 300ms when this attribute is present and
    * jumps when it is not. It was `0ms` in §08's motion table for exactly as long
@@ -214,6 +232,7 @@ export function FoliateView({
   file,
   generation,
   stepIdx,
+  measure,
   theme,
   typeface,
   animated,
@@ -273,7 +292,7 @@ export function FoliateView({
    * whenever a section's overlay is built, which happens as the reader scrolls
    * — long after any value captured at startup went stale. */
   const marksRef = useRef(marks)
-  const settings = useRef<Settings>({ stepIdx, theme, typeface, animated, paginated })
+  const settings = useRef<Settings>({ stepIdx, measure, theme, typeface, animated, paginated })
   /* Through a ref for the same reason, and for one that is specific to it: the
    * saved position is derived from the book's content id, which resolves a few
    * milliseconds AFTER the reader mounts. A prop read at mount is read before
@@ -287,7 +306,7 @@ export function FoliateView({
   useLayoutEffect(() => {
     handlers.current = currentHandlers
     marksRef.current = marks
-    settings.current = { stepIdx, theme, typeface, animated, paginated }
+    settings.current = { stepIdx, measure, theme, typeface, animated, paginated }
     lastLocationRef.current = lastLocation
   })
 
@@ -416,7 +435,7 @@ export function FoliateView({
      * the effect and unmounted the React tree — the reader vanished instead of
      * the theme failing to change. */
     try {
-      applySettings(renderer, { stepIdx, theme, typeface, animated, paginated })
+      applySettings(renderer, { stepIdx, measure, theme, typeface, animated, paginated })
       /* A theme change reaches the book through `setStyles`, which restyles the
        * document WITHOUT rebuilding the section — so no `create-overlay` fires
        * and the marks keep the colour they were painted in. Changing the step or
@@ -428,7 +447,7 @@ export function FoliateView({
       console.error('Paper: applying reader settings failed', cause)
       handlers.current.onError(generation, 'That setting could not be applied.')
     }
-  }, [stepIdx, theme, typeface, animated, paginated, ready, generation])
+  }, [stepIdx, measure, theme, typeface, animated, paginated, ready, generation])
 
   /* Redraw when the MARKS change, not only when a setting does.
    *

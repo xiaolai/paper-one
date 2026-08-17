@@ -40,10 +40,51 @@ function fakeRenderer() {
 
 const settings = (animated: boolean) => ({
   stepIdx: 2,
+  /* The measure the GRID settled on, which the renderer is told rather than
+   * deriving. It is deliberately NOT `measureForStep(2)` here: the two differ
+   * exactly when the stage is too narrow, which is the case that used to draw
+   * the text over its own gutter. */
+  measure: 624,
   theme: 'paper' as const,
   typeface: 'literata' as const,
   animated,
   paginated: true,
+})
+
+/* The renderer is what draws the text, so it is what has to be told how wide
+ * the text may be. It used to work that out for itself from the reading step,
+ * which is right only while the stage can afford that width — `proseGrid`
+ * shrinks the measure when it cannot, and nothing passed that on. The grid
+ * then reserved a gutter the renderer knew nothing about and drew straight
+ * over it: measured at a 760px window, a 688px renderer asking for 700 and
+ * zero space either side of the words. */
+describe('the measure the renderer is given', () => {
+  it('is the grid’s, not the reading step’s', () => {
+    const renderer = fakeRenderer()
+    applyLayout(renderer, { ...settings(true), stepIdx: 2, measure: 624 })
+    // 660 is `measureForStep(2)` — the width the step asks for, which is the
+    // number this must NOT reach for.
+    expect(renderer.attributes.get('max-inline-size')).toBe('624px')
+  })
+
+  it('follows the grid down as the stage narrows, at a fixed reading step', () => {
+    const widths = [660, 624, 540, 480].map((measure) => {
+      const renderer = fakeRenderer()
+      applyLayout(renderer, { ...settings(true), stepIdx: 2, measure })
+      return renderer.attributes.get('max-inline-size')
+    })
+    expect(widths).toEqual(['660px', '624px', '540px', '480px'])
+  })
+
+  /* Foliate builds its grid with `calc()`, which drops the whole declaration
+   * if a value arrives without a unit — the tracks then size to content and
+   * every attribute still looks correct. A fractional measure must not reach
+   * it either. */
+  it('carries a unit and a whole number', () => {
+    const renderer = fakeRenderer()
+    applyLayout(renderer, { ...settings(true), measure: 623.6 })
+    expect(renderer.attributes.get('max-inline-size')).toBe('624px')
+  })
 })
 
 describe('the page turn', () => {
