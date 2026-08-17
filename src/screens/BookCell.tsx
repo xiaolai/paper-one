@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { BookCheck, MoreHorizontal, Tag, Trash2 } from 'lucide-react'
-import { CANNOT_OPEN, allTags, canOpen, displayAuthor, displayTitle, statusOf, tagKey } from '../lib/library'
+import { CANNOT_OPEN, allTags, canOpen, displayTitle, statusOf, tagKey } from '../lib/library'
 import type { IndexedBook } from '../lib/bookIndex'
 import { ICON } from '../lib/metrics'
 import { withTag } from '../lib/searchQuery'
@@ -151,14 +151,23 @@ export function BookCell({
           tintedClassName={styles.coverTinted}
           titleClassName={styles.coverTitle}
         />
-        <span className={styles.bookTitle}>{title}</span>
-        <span className={styles.bookAuthor}>
-          {displayAuthor(book)}
-          {/* SAYS SO ON THE ROW. A shelf that shows a book it cannot
-              open, with nothing explaining why, is worse than one that
-              does not show it — the reader clicks and nothing happens. */}
-          {!openable && ' · no copy'}
-        </span>
+        {/* NO TITLE, NO AUTHOR UNDER THE JACKET. A shelf is scanned by its
+            covers — that is what a jacket is for — and a title and an author
+            printed under every one restated what the artwork already says, at
+            a size that could not be read without leaning in and a width that
+            truncated most of them to a fragment. Both live on the button's
+            `title`, so a hover names the book, and the tint carries the title
+            for a book that has no artwork to name it. The switcher lists
+            title and author because a LIST is read by its words; a shelf is
+            not.
+
+            One thing that used to ride on the author line stays, because it
+            is a signal and not a caption: a book Paper has no copy of. */}
+        {!openable && (
+          <span className={styles.noCopy} title={CANNOT_OPEN}>
+            no copy
+          </span>
+        )}
       </button>
 
       {/* THE META LINE: the progress rule, and the one control that reaches

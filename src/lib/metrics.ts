@@ -357,17 +357,19 @@ export const CARD_W = 126
 export const COVER_ASPECT = 2 / 3
 
 /**
- * What a shelf cell spends BELOW its cover: one line of title, one of author,
- * the progress rule, and the gaps and margin between them.
+ * What a shelf cell spends BELOW its cover: the cover's own bottom margin and
+ * the meta row — the progress rule beside the row's menu button.
  *
  * MEASURED off the rendered cell rather than added up from the stylesheet,
- * because it is font metrics as much as CSS. It was 60 with the progress rule
- * as a bare 3px line; the meta row that now holds the rule beside the row's
- * menu button is 24px tall, and it is drawn on every row — an unread book
- * gets a spacer where the rule would be — so read and unread cells measure
- * the same and there is no "tallest arrangement" to pick any more.
+ * because it is font metrics as much as CSS, and it has moved with the row's
+ * contents: 60 with a title, an author and a bare 3px rule; 75 once the rule
+ * shared a 24px row with the menu button; 36 now that the title and author
+ * are gone — a shelf is scanned by its jackets, and the words under each one
+ * restated the artwork at a size nobody could read. The meta row is drawn on
+ * every book — an unread one gets a spacer where the rule would be — so read
+ * and unread cells measure the same and there is no tallest case to pick.
  */
-export const CELL_FURNITURE = 75
+export const CELL_FURNITURE = 36
 
 /**
  * How tall a shelf cell must be to hold a cover of this column's width.

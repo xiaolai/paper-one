@@ -182,8 +182,10 @@
   height: auto;
   border-radius: 3px;
   /* Lifted off the surface — the offset is downward, so it reads as floating
-     over the window rather than embossed into it. */
-  box-shadow: var(--shadow-card);
+     over the window rather than embossed into it. Its OWN token: `--shadow-
+     card` is the pane's and the palette's, an elevation of a few pixels; a
+     jacket standing on a shelf is further off the board than that. */
+  box-shadow: var(--shadow-jacket);
 }
 
 /* The tint fills the well and takes the jacket's shadow, so a book with no
@@ -191,7 +193,7 @@
 .coverTinted {
   align-items: center;
   border-radius: 3px;
-  box-shadow: var(--shadow-card);
+  box-shadow: var(--shadow-jacket);
 }
 
 .book:hover:not(:disabled) .cover {
@@ -213,18 +215,12 @@
   overflow: hidden;
 }
 
-.bookTitle {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--ink);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.bookAuthor {
+/* The one line that survives under a jacket: a book Paper holds no file for.
+   Not a caption — a warning that the click will do nothing and why. */
+.noCopy {
+  align-self: flex-start;
+  margin-block-start: 6px;
   font-size: 11px;
-  line-height: 1.4;
   color: var(--muted);
 }
 
@@ -471,6 +467,13 @@
   flex: 0 0 auto;
 }
 
+/* ALWAYS DRAWN. It was hover-only, on the reasoning that a shelf covered in
+   affordances is a management screen — but a control that exists only under
+   the pointer is a control a trackpad-less or touch reader never finds, and
+   with the title and author gone this is the only thing on the row that says
+   the row can be acted on at all. Drawn quiet — the muted ink, no fill — it
+   is a mark rather than a button until it is wanted, and hover and open give
+   it the fill. */
 .more {
   display: grid;
   place-items: center;
@@ -481,17 +484,11 @@
   background: transparent;
   color: var(--muted);
   cursor: pointer;
-  opacity: 0;
-  transition: opacity 120ms ease, background 120ms ease;
-}
-
-.cell:hover .more,
-.more:focus-visible,
-.more[data-open='true'] {
-  opacity: 1;
+  transition: background 120ms ease, color 120ms ease;
 }
 
 .more:hover,
+.more:focus-visible,
 .more[data-open='true'] {
   background: var(--wash);
   color: var(--ink);
