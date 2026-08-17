@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_STEP_IDX, READING_STEPS, readingStep } from './metrics'
 import { TYPEFACES } from './panes'
-import { initialState, paneFits, reducer, screenFor, type AppState } from './state'
+import { bootState, initialState, paneFits, reducer, screenFor, type AppState } from './state'
 
 /**
  * The reducer's reading-size case.
@@ -316,5 +316,54 @@ describe('the pane follows the screen', () => {
   it('falls back when asked for a panel this screen does not have', () => {
     const next = reducer(at({ screen: 'library' }), { type: 'openPane', pane: 'toc' })
     expect(next.pane).toBe('notes')
+  })
+})
+
+/**
+ * The state a launch begins in, which no reducer case can vouch for.
+ *
+ * `paneFor` runs on TRANSITIONS, so moving the reader off Companion on the way
+ * to the library did nothing about arriving there — and Paper now opens on the
+ * library. `initialState.pane` was Companion, so the first thing a reader saw
+ * was the panel saying it was not available: the one moment it mattered most
+ * was the one moment nothing checked. Found by looking at the running app.
+ */
+describe('bootState', () => {
+  it('does not open the library on a panel the library does not have', () => {
+    const boot = bootState('')
+    expect(boot.screen).toBe('library')
+    expect(paneFits(boot.screen, boot.pane!)).toBe(true)
+    expect(boot.pane).toBe('notes')
+  })
+
+  it('keeps the book panel when the launch named a book', () => {
+    const boot = bootState('?book=/sample.epub')
+    expect(boot.screen).toBe('reader')
+    expect(boot.pane).toBe(initialState.pane)
+  })
+
+  /* `lastPane` is what the toggle reopens, so it has to agree with the panel
+   * that is actually showing — or the first ⌘\ closes and reopens onto
+   * something else. */
+  it('starts with lastPane agreeing with the panel on screen', () => {
+    const boot = bootState('')
+    expect(boot.lastPane).toBe(boot.pane)
+  })
+})
+
+/**
+ * That `useAppState` actually USES `bootState`.
+ *
+ * Testing the function proves it is right, not that it is reached — this suite
+ * passed with the hook still assembling its own state inline, which is exactly
+ * the bug. There is no renderer here to observe a hook, so the source is read
+ * instead, the same way the palette's combos are checked against the key
+ * handler in `commands.test.ts`.
+ */
+describe('the hook starts from bootState', () => {
+  it('does not assemble its own initial state', () => {
+    const source = readFileSync(fileURLToPath(new URL('./state.ts', import.meta.url)), 'utf8')
+    const hook = source.slice(source.indexOf('export function useAppState'))
+    expect(hook).toMatch(/useReducer\(\s*reducer,\s*bootState\(/)
   })
 })

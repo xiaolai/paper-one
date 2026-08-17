@@ -359,10 +359,28 @@ export function screenFor(search: string): Screen {
 }
 
 export function useAppState(): [AppState, AppDispatch] {
-  return useReducer(reducer, {
-    ...initialState,
-    screen: screenFor(typeof window === 'undefined' ? '' : window.location.search),
-  })
+  return useReducer(reducer, bootState(typeof window === 'undefined' ? '' : window.location.search))
+}
+
+/**
+ * The state a launch starts in — the screen, and a panel that belongs on it.
+ *
+ * THE PANE HAS TO BE FITTED HERE TOO, and forgetting that undid the whole
+ * point. `paneFor` runs on transitions, so a reducer that moves you off
+ * Companion when you walk to the library does nothing about ARRIVING there:
+ * Paper opens on the library, `initialState.pane` was Companion, and the first
+ * thing a reader saw was the panel saying it was not available. The one moment
+ * it mattered most was the one moment nothing checked.
+ *
+ * Exported because it is the honest thing to test — a reducer case cannot show
+ * that the state a launch begins in is coherent.
+ */
+export function bootState(search: string): AppState {
+  const screen = screenFor(search)
+  const pane = paneFits(screen, initialState.pane ?? defaultPaneFor(screen))
+    ? initialState.pane
+    : defaultPaneFor(screen)
+  return { ...initialState, screen, pane, lastPane: pane ?? initialState.lastPane }
 }
 
 /**
