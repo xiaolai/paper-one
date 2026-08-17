@@ -1,9 +1,8 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { buildCommands } from './lib/commands'
 import { PANE_SHORTCUTS } from './lib/panes'
 import { DEFAULT_STEP_IDX, applyMetrics } from './lib/metrics'
 import { pickBooks, pickFolder, readBookAt, tauriDirOps } from './lib/bookFiles'
-import { legacyBookIdFor } from './lib/idMigration'
 import { positionRecorder, type PositionRecorder } from './lib/positionRecorder'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { isTauri, usePlatform, usePrefersDark, usePrefersReducedMotion } from './lib/platform'
@@ -11,6 +10,7 @@ import { NOT_CONFIGURED } from './lib/companion'
 import { hasOpenLayer, useAppState } from './lib/state'
 import type { MarkStorage } from './lib/marks'
 import { useBook } from './lib/useBook'
+import { useBookIntake } from './lib/useBookIntake'
 import { flushBeforeClose } from './lib/beforeClose'
 import { writeQueue } from './lib/writeQueue'
 import { useFileDrop } from './lib/useFileDrop'
@@ -24,7 +24,7 @@ import type { IndexedBook } from './lib/bookIndex'
 import type { IndexFs } from './lib/bookIndex'
 import type { DirFs } from './lib/importFolder'
 import { downscaleCover } from './lib/coverArt'
-import { contentPathIn, coverPathIn, folderOf, readBook, recordPath } from './lib/bookFolder'
+import { contentPathIn, coverPathIn, folderOf, readBook } from './lib/bookFolder'
 import {
   importFolder,
   keepOwnCopy,
@@ -123,16 +123,6 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
   /* One file picker for the window. The reader's empty state, the palette and
    * the switcher all ask for books, and one input serves all three rather than
    * each surface growing its own. */
-  /* Where the open book lives on THIS machine, when it was opened from disk.
-   *
-   * Held beside the book rather than inside it: everything downstream takes a
-   * `File`, and neither foliate nor `bookIdFor` has any business knowing about
-   * the filesystem. It is written onto the library row so the shelf can open
-   * the book again — which is the whole point, and what a `File` could never
-   * support, since it is a handle to bytes granted for one session. */
-  const [openedPath, setOpenedPath] = useState<string | null>(null)
-  /** The path `openBook` was given, tagged with the source it belongs to. */
-  const pendingPath = useRef<{ source: File | string; path: string | null } | null>(null)
 
   /**
    * Open a book AND go to it.
@@ -152,26 +142,6 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
    * reappeared as if the click had been ignored. Nothing else can see that: the
    * effect's inputs do not change when a row is removed.
    */
-  /**
-   * Books the reader took off the shelf, and WHEN — as a count of removals
-   * rather than a clock, because only the order matters.
-   *
-   * Intake writes the bytes and then the record, with awaits in between, and a
-   * removal landing in that gap used to put the book straight back: the row
-   * reappeared as if the click had been ignored. Nothing else can see that,
-   * because the effect's inputs do not change when a row is removed.
-   *
-   * A TICK RATHER THAN A FLAG THAT GETS CLEARED. Clearing was the trap: the
-   * marker for a book removed under its legacy id could only be cleared after
-   * hashing the file, and a removal made during that hash was then cleared by
-   * it. Comparing counts asks the question that actually matters — did a removal
-   * happen AFTER this intake started — and needs nothing cleared, since one made
-   * before it is the reader opening the book again.
-   */
-  const removedWhileOpen = useRef(new Map<string, number>())
-  const removals = useRef(0)
-  /** The tick when the current book was ASKED FOR — see the effect below. */
-  const openedAt = useRef<{ source: File | string; at: number } | null>(null)
 
   const openBook = useCallback(
     (source: File | string, path: string | null = null) => {
@@ -179,7 +149,7 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
       /* Handed over WITH its source rather than set directly, so the effect that
        * notices the new source is the single place the path is decided. Set here
        * alone, it survived a route that does not come through this function. */
-      pendingPath.current = { source, path }
+      intake.noteOpen(source, path)
       book.open(source)
     },
     [book, dispatch],
@@ -316,29 +286,25 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
    * because that is when there is a title worth showing. */
   const { bookId, meta, source, cover } = book
 
-  /* Stamp the removal baseline the instant a new source appears.
-   *
-   * NOT IN `openBook`, which is only one of the ways a book arrives — a drop on
-   * the reader and a `?book=` on startup both go straight to `book.open`, and
-   * for those the baseline fell back to "now", which is captured only after the
-   * file has been hashed and parsed. A removal inside that window then became
-   * the baseline instead of being compared against it, so the book was
-   * resurrected under its new id with its tags and marks left in the trash.
-   *
-   * `useLayoutEffect` so it runs before the intake effect that reads it, and on
-   * `source` because that is set the moment an open begins, long before there
-   * is an id or a parse. */
-  useLayoutEffect(() => {
-    if (source && openedAt.current?.source !== source) {
-      openedAt.current = { source, at: removals.current }
-      /* AND THE PATH BELONGS TO THE SOURCE, not to whatever was opened last.
-       * `openBook` set it and the routes that bypass `openBook` did not clear
-       * it — so dropping a book onto the open reader recorded it with the
-       * PREVIOUS book's path as its origin, and clicking it later opened the
-       * wrong book. A source that arrived with no path of its own has none. */
-      setOpenedPath(pendingPath.current?.source === source ? pendingPath.current.path : null)
-    }
-  }, [source])
+  const { rekey: rekeyMarks } = marks
+  const { rekey: rekeyCards } = cards
+
+  /* Taking a book in — the bytes, the identity migration and the record, in one
+   * ordered sequence. It was four pieces of this component: two refs, a layout
+   * effect and a hundred and fifty lines of effect, and it has produced more
+   * defects than anything else in this app. On its own it is legible; here it
+   * read as a formality. See `useBookIntake`. */
+  const intake = useBookIntake({
+    bookId,
+    meta,
+    source,
+    fs,
+    add,
+    rekeyBook,
+    rekeyMarks,
+    rekeyCards,
+  })
+
 
   /* The open book's row, narrowed to the two fields the effects below depend on.
    *
@@ -455,8 +421,7 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
    */
   const removeBook = useCallback(
     (entry: IndexedBook) => {
-      removals.current += 1
-      removedWhileOpen.current.set(entry.bookId, removals.current)
+      intake.noteRemoval(entry.bookId)
       remove(entry.bookId)
     },
     [remove],
@@ -557,171 +522,7 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
    * simply not on the shelf yet — `scanBooks` skips it — and the next open of
    * the same file finishes the job. The reverse is a row that cannot open.
    */
-  /* The three halves of the identity migration are carried out TOGETHER, by
-   * the intake effect above, in one order. This used to be a second effect
-   * running beside it, and the two raced: the library's half renames a
-   * directory and the other two rewrite ids inside whatever directory the book
-   * ends up in, so only one of the two interleavings produced a whole book. */
-  const { rekey: rekeyMarks } = marks
-  const { rekey: rekeyCards } = cards
 
-  useEffect(() => {
-    if (!bookId || !meta) return
-    /* CLEARED FOR THIS BOOK, ONCE PER OPEN.
-     *
-     * Keyed on the SOURCE, because this effect also runs when the parse lands —
-     * and metadata arriving is not the reader asking for the book back. Clearing
-     * unconditionally there undid a removal made in the seconds between opening
-     * a book and it finishing parsing. A fresh open produces a new `File`, or a
-     * different path, so identity is exactly the right test. */
-    /* From the OPEN, not from here: this effect does not run until the book has
-     * been hashed and parsed, and a removal during that window belongs to the
-     * reader's current intent rather than a previous one. Falls back to now for
-     * a book that arrived without going through `openBook`. */
-    const startedAt = openedAt.current?.source === source ? openedAt.current.at : removals.current
-    const removedSince = (...ids: readonly string[]): boolean =>
-      ids.some((id) => (removedWhileOpen.current.get(id) ?? 0) > startedAt)
-    let cancelled = false
-    void (async () => {
-      /* THE IDENTITY MIGRATION FIRST, and awaited, which is the whole reason it
-       * lives here rather than in its own effect. `add` below creates the folder
-       * for the NEW id, and `rekeyBook` abandons the move when that folder is
-       * already there — so run as a separate effect the two raced, and losing
-       * the race meant a permanent duplicate row rather than a moved book.
-       *
-       * A book stored under the previous scheme only. `legacyBookIdFor` returns
-       * the same id for everything since, and `rekeyBook` returns immediately
-       * when it does. */
-      /* CARRY THE READER'S EXISTING WORK ACROSS FIRST, in one place and in one
-       * order, because the three halves of it cannot be independent.
-       *
-       * `bookIdFor` hashes content now rather than a file's ends, so everything
-       * stored under the previous scheme is filed under an id nothing will
-       * compute again. The library's half is a DIRECTORY RENAME and the other
-       * two are id rewrites inside whatever directory the book ends up in — so
-       * the rename has to finish before they run. Left as separate effects they
-       * raced, and only one of the two interleavings produced a whole book:
-       * marks migrated into a folder that was about to be renamed over them, or
-       * a folder renamed out from under a migration still reading it.
-       */
-      let legacy = bookId
-      try {
-        if (source) legacy = await legacyBookIdFor(source)
-      } catch (cause) {
-        console.error('Paper: could not check the legacy book id', cause)
-      }
-      if (legacy !== bookId) {
-        const carried = await rekeyBook(legacy, bookId)
-        /* STOP. Adding the book under its new id after a move that did not
-         * happen creates the second folder the move exists to prevent — and
-         * every later attempt then finds the destination occupied and gives up.
-         * Left alone, the book keeps the id it has and the next open retries. */
-        if (carried === 'failed') return
-        /* OCCUPIED means the book exists under both ids and neither is moving.
-         * The other stores must leave the old copy alone rather than migrating
-         * their half of it, or the same mark ends up in two folders under one id
-         * and neither read of it is authoritative. */
-        if (carried !== 'occupied') {
-          rekeyMarks(legacy, bookId)
-          rekeyCards(legacy, bookId)
-        }
-      }
-      /* THE LEGACY ID COUNTS AS THIS BOOK. `removeBook` records whatever id the
-       * ROW carried, which for a book stored under the previous scheme is the
-       * legacy one — so checking only the newly computed id meant removing a
-       * book while it was still parsing put it back under a different name,
-       * with the tags and marks it owned left in the old id's trash entry for
-       * the sweep. */
-      if (cancelled || removedSince(bookId, legacy)) return
-      if (source instanceof File && fs) {
-        try {
-          const at = contentPathIn(bookId, source.name)
-          /* Checked before the bytes are touched: `arrayBuffer()` copies the
-           * whole book into memory, and reopening a 40MB book should not do that
-           * to discover it is already here. */
-          if (!(await fs.exists(at))) {
-            const bytes = new Uint8Array(await source.arrayBuffer())
-            await fs.mkdir(folderOf(bookId))
-            /* Written to a temporary neighbour and renamed, like every other
-             * write here: a crash partway must not leave a truncated
-             * `content.epub`, because `exists` would then call it the book. */
-            const writing = `${at}.writing`
-            try {
-              await fs.writeFile(writing, bytes)
-              await fs.rename(writing, at)
-            } catch (cause) {
-              await fs.remove(writing).catch(() => {})
-              throw cause
-            }
-          }
-        } catch (cause) {
-          /* Reported and not fatal. The record is still written, and the shelf
-           * says the copy is missing rather than pretending the open failed. */
-          console.error('Paper: could not keep our own copy of the book', cause)
-        }
-        /* CHECKED AGAIN, because the write above is the long part — a 40MB book
-         * off a network volume — and a removal during it leaves the folder that
-         * `mkdir` recreated sitting there holding nothing but content.
-         *
-         * ONLY THE FILE THIS EFFECT WROTE, and only once the record is gone,
-         * which is what proves the removal finished and this folder is the shell
-         * we made. Removing the DIRECTORY here was catastrophic: lose the race
-         * the other way and it deletes the live book — content, record, tags,
-         * position and marks — before `trashBook` has moved anything, so there
-         * is no copy to recover. A stray file is worth incomparably less than
-         * the chance of that. */
-        if (removedSince(bookId, legacy) && fs && source instanceof File) {
-          const at = contentPathIn(bookId, source.name)
-          if (!(await fs.exists(recordPath(bookId)))) await fs.remove(at).catch(() => {})
-          return
-        }
-      }
-      /* The SAME question as everywhere else: did a removal arrive after the
-       * reader asked for this book. Membership was the old flag scheme, and it
-       * never forgot — so removing the open book and then deliberately opening
-       * the same file again was refused for the rest of the session. */
-      if (cancelled || removedSince(bookId, legacy)) return
-      /* `add`, which FOLDS a fresh parse into what the reader owns rather than
-       * replacing it — see `mergeParsed`. Phase 3 spread the parse over the row
-       * and erased the reader's tags on every reopen.
-       *
-       * `openedAt` is set here because this is the moment a book is opened, and
-       * the shelf is ordered by it. */
-      add(bookId, {
-        title: meta.title,
-        author: meta.author,
-        openedAt: Date.now(),
-        addedAt: Date.now(),
-        ...(meta.sortAs ? { sortAs: meta.sortAs } : {}),
-        ...(meta.series ? { series: meta.series } : {}),
-        ...(meta.seriesIndex === null ? {} : { seriesIndex: meta.seriesIndex }),
-        ...(meta.subjects.length ? { subjects: meta.subjects } : {}),
-        ...(meta.publisher ? { publisher: meta.publisher } : {}),
-        ...(meta.published ? { published: meta.published } : {}),
-        ...(meta.languages.length ? { languages: meta.languages } : {}),
-        /* NO `description`. It was passed here and dropped on the floor:
-         * `BookRecord` has no such field and `parseRecord` discards it, so every
-         * write serialised it and every read threw it away. Nothing displays a
-         * description yet — when something does, it belongs in the record first
-         * and here second. */
-        /* WHERE THE BOOK CAME FROM — a path, or a URL when that is what was
-         * opened. Phase 3 kept `url` as a separate field and phase 4 deleted it
-         * on the reasoning that a book is its own folder; but Paper only ever
-         * copies a `File`, so a book opened from a URL has no folder contents at
-         * all. Without this it became a row that could never be opened again,
-         * which is precisely the state `canOpen` had to be brought back to
-         * describe. One field, because a fallback is a fallback whatever kind of
-         * address it holds. */
-        ...(openedPath ?? (typeof source === 'string' ? source : null)
-          ? { origin: openedPath ?? (source as string) }
-          : {}),
-        ...(source instanceof File ? { ext: source.name.split('.').pop() ?? '' } : {}),
-      })
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [bookId, meta, source, add, openedPath, fs, rekeyBook, rekeyMarks, rekeyCards])
 
 
   /* File the book's own jacket, once.
