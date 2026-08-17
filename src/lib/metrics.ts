@@ -331,11 +331,13 @@ export const COVER_ASPECT = 2 / 3
  * the progress rule, and the gaps and margin between them.
  *
  * MEASURED off the rendered cell rather than added up from the stylesheet,
- * because it is font metrics as much as CSS. The tallest arrangement, not the
- * average: an unread book has no progress rule and comes out 13px shorter, and
- * a cell sized to that clips every book that has been opened.
+ * because it is font metrics as much as CSS. It was 60 with the progress rule
+ * as a bare 3px line; the meta row that now holds the rule beside the row's
+ * menu button is 24px tall, and it is drawn on every row — an unread book
+ * gets a spacer where the rule would be — so read and unread cells measure
+ * the same and there is no "tallest arrangement" to pick any more.
  */
-export const CELL_FURNITURE = 60
+export const CELL_FURNITURE = 75
 
 /**
  * How tall a shelf cell must be to hold a cover of this column's width.

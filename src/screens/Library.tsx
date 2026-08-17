@@ -83,6 +83,10 @@ export function Library({
    * all proportion to what happens. But it is also one pixel from Open, and a
    * misclick that silently empties a row is worse than one extra click. */
   const [confirming, setConfirming] = useState<string | null>(null)
+  /* Which row has its menu open, by id. Held here rather than in the cell for
+   * the same reason `confirming` and `tagging` are: exactly one may be open on
+   * the whole shelf, and per-cell state cannot enforce that across cells. */
+  const [menuFor, setMenuFor] = useState<string | null>(null)
   /** Which row has its tag input open, by id. */
   const [tagging, setTagging] = useState<string | null>(null)
   const [draftTag, setDraftTag] = useState('')
@@ -382,6 +386,8 @@ export function Library({
             <BookCell
               key={book.bookId}
               book={book}
+              menuFor={menuFor}
+              setMenuFor={setMenuFor}
               confirming={confirming}
               setConfirming={setConfirming}
               tagging={tagging}

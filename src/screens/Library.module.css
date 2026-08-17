@@ -270,58 +270,6 @@
   min-height: 0;
 }
 
-/* Hidden until the row is hovered or the control itself has focus. A shelf with
-   a delete affordance on every cell reads as a management screen; a shelf that
-   reveals one is a place to read. `:focus-visible` keeps it reachable by
-   keyboard, where there is no hover to depend on. */
-.remove {
-  position: absolute;
-  inset-block-start: 6px;
-  inset-inline-end: 6px;
-  display: grid;
-  place-items: center;
-  min-width: 26px;
-  height: 26px;
-  padding: 0 6px;
-  border: 0;
-  border-radius: 999px;
-  background: var(--surface-raised, rgb(0 0 0 / 0.55));
-  color: var(--text-on-raised, #fff);
-  font: inherit;
-  font-size: 11px;
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 120ms ease;
-}
-
-.cell:hover .remove,
-.remove:focus-visible {
-  opacity: 1;
-}
-
-/* Confirming shows a word rather than a glyph, because the second click is
-   destructive to the row and an icon cannot say "are you sure". */
-.remove[data-confirming='true'] {
-  opacity: 1;
-  background: var(--danger, #b3261e);
-}
-
-/* THE OTHER CONTROLS GET OUT OF THE WAY while a removal is pending.
-   "Remove?" is a word where there was a 26px circle, and it grows leftward from
-   the same right edge — straight over the tag button at 38px. So the button a
-   reader reached for to back out was covered by the one that destroys the row.
-   Hidden AND unclickable: `opacity: 0` alone leaves an invisible target. */
-.cell[data-confirming='true'] .tagButton,
-.cell[data-confirming='true'] .finishButton {
-  opacity: 0;
-  pointer-events: none;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .remove {
-    transition: none;
-  }
-}
 
 /* Search and the tag chips. One row above the grid, wrapping on a narrow
    window rather than scrolling sideways — a shelf is browsed by eye and a
@@ -376,7 +324,7 @@
   align-items: center;
   height: 28px;
   padding: 0 10px;
-  border: 1px solid var(--rule, rgb(0 0 0 / 0.12));
+  border: 1px solid var(--line-2);
   border-radius: 999px;
   background: transparent;
   color: inherit;
@@ -397,34 +345,13 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Tagging, on the cell. Same reveal-on-hover rule as remove: a shelf covered in
-   affordances reads as a management screen rather than a place to read. */
-.tagButton {
-  position: absolute;
-  inset-block-start: 6px;
-  inset-inline-end: 38px;
-  display: grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  border: 0;
-  border-radius: 999px;
-  background: var(--surface-raised, rgb(0 0 0 / 0.55));
-  color: var(--text-on-raised, #fff);
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 120ms ease;
-}
-
-.cell:hover .tagButton,
-.tagButton:focus-visible {
-  opacity: 1;
-}
-
+/* The tag field, laid over the cover's lower edge so the shelf does not reflow
+   while a tag is typed — a cell that grew would push every row below it. */
 .tagForm {
   position: absolute;
-  inset-block-start: 36px;
   inset-inline: 6px;
+  inset-block-start: 6px;
+  z-index: 1;
 }
 
 .tagInput {
@@ -452,7 +379,7 @@
 
 .bookTag {
   padding: 1px 7px;
-  border: 1px solid var(--rule, rgb(0 0 0 / 0.12));
+  border: 1px solid var(--line-2);
   border-radius: 999px;
   background: transparent;
   color: inherit;
@@ -470,21 +397,35 @@
   opacity: 1;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .tagButton {
-    transition: none;
-  }
+/* THE META ROW: the progress rule and the row's one control, side by side.
+   Every action a reader can take on a book used to be a dark circle drawn over
+   the top of its jacket on hover — three of them, and two had already collided
+   once. They are behind the ellipsis now, which sits on the surface in the
+   metadata line, where a control belongs, and leaves the artwork alone. */
+.metaRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-block-start: 4px;
 }
 
 /* Progress. Drawn only for a book that has been opened — a zero-width bar under
-   every unread book is a row of noise that says nothing. */
+   every unread book is a row of noise that says nothing. Takes the row's slack
+   so the ellipsis stays pinned to the trailing edge whether or not it is drawn. */
 .progress {
+  flex: 1 1 auto;
+  min-width: 0;
   display: block;
   block-size: 3px;
-  margin-block-start: 6px;
   border-radius: 999px;
-  background: var(--rule, rgb(0 0 0 / 0.1));
+  background: var(--line-2);
   overflow: hidden;
+}
+
+/* Holds the rule's place on an unread book, so the ellipsis lands in the same
+   spot on every row and the shelf's right edge stays a line. */
+.progressSpacer {
+  flex: 1 1 auto;
 }
 
 .progressFill {
@@ -498,36 +439,92 @@
   opacity: 0.28;
 }
 
-.finishButton {
-  position: absolute;
-  inset-block-start: 6px;
-  inset-inline-end: 70px;
+/* The ellipsis. Quiet until the row is hovered or it has focus — a shelf with an
+   affordance on every cell reads as a management screen, a shelf that reveals
+   one is a place to read. Stays visible while its menu is open, because a
+   control whose popover is up must not vanish under the pointer. */
+.menuAnchor {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.more {
   display: grid;
   place-items: center;
-  width: 26px;
-  height: 26px;
+  width: 24px;
+  height: 24px;
   border: 0;
-  border-radius: 999px;
-  background: var(--surface-raised, rgb(0 0 0 / 0.55));
-  color: var(--text-on-raised, #fff);
+  border-radius: var(--radius-chip);
+  background: transparent;
+  color: var(--muted);
   cursor: pointer;
   opacity: 0;
-  transition: opacity 120ms ease;
+  transition: opacity 120ms ease, background 120ms ease;
 }
 
-.cell:hover .finishButton,
-.finishButton:focus-visible {
+.cell:hover .more,
+.more:focus-visible,
+.more[data-open='true'] {
   opacity: 1;
 }
 
-/* Stays visible once set, because it is now state rather than an affordance. */
-.finishButton[data-finished='true'] {
-  opacity: 1;
-  background: var(--accent, #2b6b4f);
+.more:hover,
+.more[data-open='true'] {
+  background: var(--wash);
+  color: var(--ink);
+}
+
+/* Placed from the VIEWPORT, not from the cell — the cell clips its overflow
+   for virtualisation's sake and would clip this. `top` and `right` are set
+   inline from the ellipsis's measured rect, so it drops beneath the button and
+   keeps its right edge on the button's, whatever column the row is in. */
+.menu {
+  position: fixed;
+  z-index: var(--z-menu);
+  min-width: 190px;
+  padding: 4px;
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  box-shadow: var(--shadow-pop), 0 0 0 1px var(--line-2);
+}
+
+.menuItem {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: var(--radius-chip);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  text-align: start;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.menuItem:hover,
+.menuItem:focus-visible {
+  background: var(--wash);
+}
+
+.menuItem[data-danger='true'] {
+  color: var(--danger);
+}
+
+/* Confirming changes the row's words rather than growing a pill: the second
+   click is destructive and an icon cannot say "are you sure", so the row says
+   it, and it collides with nothing because it is already the width of the menu. */
+.menuItem[data-confirming='true'] {
+  background: var(--danger);
+  color: var(--surface);
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .finishButton {
+  .more,
+  .menuItem {
     transition: none;
   }
 }

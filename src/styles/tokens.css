@@ -17,7 +17,7 @@
   --line:#EDEEEB; --line-2:#E3E4E1; --line-3:#D6D8D3;
   --accent:#1B3A6B; --accent-bg:#EEF1F6; --accent-line:#DDE2EA;
   --amber:#9E5A16; --amber-bg:#FBF6EE; --amber-line:#E7D6BE;
-  --mark:#F3E6C0; --mark-rule:#E0BE55; --mark-ink:#9A8455; --ok:#7C9A6B;
+  --mark:#F3E6C0; --mark-rule:#E0BE55; --mark-ink:#9A8455; --ok:#7C9A6B; --danger:#B3261E;
   --tint-a:#F4F1EA; --tint-b:#EEF1F4; --tint-c:#F1F0F4; --tint-d:#EFF2F1; --tint-e:#F0E4D2;
   --shadow-window: 0 1px 2px rgba(20,24,28,.04), 0 12px 32px -20px rgba(20,24,28,.22);
   --shadow-card: 0 1px 2px rgba(20,24,28,.05), 0 14px 34px -22px rgba(20,24,28,.26);
@@ -64,7 +64,7 @@
   --line:#24282C; --line-2:#2F343A; --line-3:#3C4248;
   --accent:#8FB4E8; --accent-bg:#1A2431; --accent-line:#2B3A4E;
   --amber:#D9A25E; --amber-bg:#241C12; --amber-line:#3B2E1D;
-  --mark:#4A3B18; --mark-rule:#8A6E2C; --mark-ink:#C9B380; --ok:#86A874;
+  --mark:#4A3B18; --mark-rule:#8A6E2C; --mark-ink:#C9B380; --ok:#86A874; --danger:#E5735F;
   --tint-a:#2A2620; --tint-b:#1F262E; --tint-c:#262330; --tint-d:#202A26; --tint-e:#2E2716;
   /* Night is the only theme that re-values elevation: a light-theme shadow
    * disappears on a dark page. */
