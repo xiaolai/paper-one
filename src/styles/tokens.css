@@ -24,7 +24,6 @@
   --shadow-pop: 0 24px 60px -28px rgba(20,24,28,.5);
   --shadow-pill: 0 1px 2px rgba(20,24,28,.07);
   --shadow-knob: 0 1px 3px rgba(20,24,28,.16);
-  --shadow-thumb: 0 1px 1px rgba(20,24,28,.1);
   --scrim: rgba(20,24,28,.35);
   --tl-red: #F4655A; --tl-amber: #F5BD4F; --tl-green: #61C555; --tl-rim: rgba(23,25,27,.14);
 }
@@ -74,6 +73,5 @@
   --shadow-pop: 0 24px 60px -28px rgba(0,0,0,.9);
   --shadow-pill: 0 1px 2px rgba(0,0,0,.55);
   --shadow-knob: 0 1px 3px rgba(0,0,0,.6);
-  --shadow-thumb: 0 1px 1px rgba(0,0,0,.55);
   --scrim: rgba(0,0,0,.6);
 }

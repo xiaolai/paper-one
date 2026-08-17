@@ -110,12 +110,21 @@
   background: var(--wash);
 }
 
-.chipCover {
-  flex: 0 0 12px;
-  width: 12px;
-  height: 16px;
-  border-radius: 3px;
-  box-shadow: var(--shadow-thumb);
+/* The app mark, shown only when the chip is naming the app rather than a book.
+ *
+ * The TRAY source rather than the app icon, for the reason its own header
+ * gives: at this size a filled square reads as a blob. MASKED over
+ * `currentColor` rather than drawn, which is what removes the need for
+ * per-theme variants — a template image carries its design in the alpha
+ * channel, so it takes the chip's ink on all five themes by construction.
+ * Sized from `--icon-control`, the §08 rung its neighbours in this bar use. */
+.chipMark {
+  flex: 0 0 var(--icon-control);
+  width: var(--icon-control);
+  height: var(--icon-control);
+  background: currentColor;
+  -webkit-mask: url('../../src-tauri/icons/tray-icon-source.svg') center / contain no-repeat;
+  mask: url('../../src-tauri/icons/tray-icon-source.svg') center / contain no-repeat;
 }
 
 .chipTitle {

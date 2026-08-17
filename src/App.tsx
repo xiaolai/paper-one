@@ -18,7 +18,6 @@ import { useLibrary } from './lib/useLibrary'
 import { useCards } from './lib/useCards'
 import { useMarks } from './lib/useMarks'
 import { useMarking } from './lib/useMarking'
-import { coverTintFor } from './lib/bookAccent'
 import { extensionFor, readOwnedBook } from './lib/bookVault'
 import type { IndexedBook } from './lib/bookIndex'
 import type { IndexFs } from './lib/bookIndex'
@@ -824,8 +823,6 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
             platform={platform}
             bookTitle={title}
             bookSubtitle={subtitle}
-            // The same tint the shelf gives this book, so the chip and the cover agree.
-            coverTint={coverTintFor(book.bookId ?? '')}
             speech={speech}
             hasBook={book.source !== null}
           />

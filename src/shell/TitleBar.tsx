@@ -45,7 +45,6 @@ export interface TitleBarProps {
   platform: Platform
   bookTitle: string
   bookSubtitle: string
-  coverTint: string
   /** Reading aloud — the Listen control drives this directly. */
   speech: Speech
   /** False with no book open: there is nothing to read aloud. */
@@ -71,7 +70,6 @@ export function TitleBar({
   platform,
   bookTitle,
   bookSubtitle,
-  coverTint,
   speech,
   hasBook,
 }: TitleBarProps) {
@@ -166,7 +164,18 @@ export function TitleBar({
           aria-expanded={state.switcherOpen}
           onClick={() => dispatch({ type: 'toggleLayer', layer: 'switcherOpen' })}
         >
-          <span className={styles.chipCover} style={{ background: coverTint }} />
+          {/* ONLY WHEN THE CHIP IS NAMING THE APP. With nothing open the title
+              is the literal "Paper" — see `App.tsx` — and a bare word centred
+              in the titlebar reads as a caption rather than as the thing it
+              is. The mark makes it a lockup.
+
+              It is deliberately NOT the swatch that used to sit here. That was
+              a colour derived from the open book's id, and with no book open it
+              hashed the empty string and drew a spine for a book that did not
+              exist. The distinction is the whole point: this slot belongs to
+              whatever the chip is currently naming, and when there is no book,
+              what it is naming is the application. */}
+          {!hasBook && <span className={styles.chipMark} aria-hidden="true" />}
           <span className={styles.chipTitle}>{bookTitle}</span>
           <span className={styles.chipSub}>{bookSubtitle}</span>
         </button>
