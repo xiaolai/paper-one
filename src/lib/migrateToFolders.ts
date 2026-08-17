@@ -39,6 +39,7 @@ import {
   atomicWrite,
   marksPathIn,
   recordPath,
+  trashOf,
   readBook,
   writeBook,
   writeMarks,
@@ -247,7 +248,13 @@ export async function migrateToFolders(
       /* ALREADY CARRIED ACROSS, whether or not its folder is there now. The
        * folder can be absent because the reader REMOVED the book, and re-running
        * the migration then undid that — see `readDone`. */
-      if (done.has(bookId)) {
+      /* OR ITS REMOVED COPY IS SITTING IN THE TRASH, which proves the same
+       * thing: a book only reaches the trash by having been on the shelf. This
+       * is what covers a library removed BEFORE the ledger existed — without it,
+       * upgrading resurrects every such book exactly once, which is the bug the
+       * ledger was written for arriving through the door it left open. */
+      if (done.has(bookId) || (await fs.exists(trashOf(bookId)))) {
+        done.add(bookId)
         outcomes.push({ bookId, status: 'already' })
         continue
       }

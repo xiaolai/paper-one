@@ -3,6 +3,7 @@ import type { VaultFs } from './bookVault'
 import {
   contentPathIn,
   folderOf,
+  trashOf,
   readBook,
   readMarks,
   writeBook,
@@ -39,7 +40,12 @@ function fakeFs(seed: Record<string, string> = {}) {
       if (fs.failWrite && path.startsWith(fs.failWrite)) throw new Error('disk full')
       files.set(path, bytes)
     },
-    exists: async (path) => files.has(path),
+    /* A DIRECTORY EXISTS WHEN SOMETHING IS IN IT, which is what the real
+     * `exists` reports. An exact match made every directory look absent, so a
+     * guard that asks about one — "is this book's removed copy in the trash?" —
+     * passed here for the wrong reason and would have failed on disk. */
+    exists: async (path) =>
+      [...files.keys()].some((k) => k === path || k.startsWith(`${path}/`)),
     mkdir: async () => {},
     remove: async (path) => void files.delete(path),
     removeDir: async (path) => {
@@ -566,6 +572,17 @@ describe('a book the reader removed after it was migrated', () => {
     }
     const again = await migrateToFolders(fs, { rows: [row()], marks: [] })
     expect(again[0]?.status).toBe('already')
+    expect(fs.files.has(contentPathIn('book_a', 'book.epub'))).toBe(false)
+  })
+
+  /* A library removed BEFORE the ledger existed. Its trash entry proves it was
+   * on the shelf once, which is the same thing the ledger records — without
+   * this, upgrading resurrects every such book exactly once. */
+  it('honours a trash entry from before the ledger existed', async () => {
+    const fs = fakeFs(legacy)
+    fs.files.set(`${trashOf('book_a')}/book.json`, new TextEncoder().encode('{"title":"M"}'))
+    const out = await migrateToFolders(fs, { rows: [row()], marks: [] })
+    expect(out[0]?.status).toBe('already')
     expect(fs.files.has(contentPathIn('book_a', 'book.epub'))).toBe(false)
   })
 

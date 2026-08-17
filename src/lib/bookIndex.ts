@@ -278,7 +278,14 @@ export async function scanAllMarks(fs: IndexFs): Promise<unknown[]> {
   let entries: { name: string; isDirectory: boolean }[]
   try {
     entries = await fs.readDir(BOOKS_DIR)
-  } catch {
+  } catch (cause) {
+    /* ABSENT AND UNREADABLE, distinguished — the same rule `scanBooks` follows.
+     * Resolving with `[]` for both meant this function could not fail, so the
+     * caller's `.catch` was unreachable: a read failure arrived as a successful
+     * scan of nothing, which marked the cross-book list as loaded and emptied
+     * the Notes pane. The flag that was supposed to tell those apart was being
+     * set by the case it was meant to exclude. */
+    if (await fs.exists(BOOKS_DIR)) throw cause
     return []
   }
   const all: unknown[] = []

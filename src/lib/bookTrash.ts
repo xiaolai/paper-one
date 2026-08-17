@@ -63,6 +63,14 @@ export async function trashBook(fs: TrashFs, bookId: string): Promise<boolean> {
        * other way round. A book split across two directories is worse than a
        * removal that did not happen, and only one of those is recoverable by
        * pressing the button again. */
+      /* Anything a previous, interrupted removal held aside. It is superseded by
+       * whatever this one is about to move, and leaving it would collide with
+       * the name this run wants to use. */
+      for (const entry of await fs.readDir(trashOf(bookId))) {
+        if (entry.name.endsWith('.displaced')) {
+          await fs.remove(`${trashOf(bookId)}/${entry.name}`).catch(() => {})
+        }
+      }
       const moved: { from: string; to: string }[] = []
       /* The trashed copies displaced by a collision, held aside rather than
        * deleted. Deleting them first made the rollback a half-measure: it could
@@ -135,6 +143,12 @@ export async function restoreBook(fs: TrashFs, bookId: string): Promise<boolean>
     for (const entry of entries) {
       // The stamp belongs to the trash and is not part of the book.
       if (entry.name === '.removed') continue
+      /* Nor is a copy held aside mid-removal. A crash between displacing one and
+       * finishing the move leaves it behind, and restoring it would put
+       * `content.epub.displaced` into the live folder — a file the shelf cannot
+       * read and the sweep does not recognise. It stays in the trash and ages
+       * out with everything else there. */
+      if (entry.name.endsWith('.displaced')) continue
       const to = `${folderOf(bookId)}/${entry.name}`
       /* A NAME ALREADY LIVE WINS, and the trashed one STAYS WHERE IT IS.
        *
