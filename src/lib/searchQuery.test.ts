@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { tagKey } from './library'
-import { parseQuery, withTag, withoutTag } from './searchQuery'
+import { parseQuery, withStatus, withTag, withoutTag } from './searchQuery'
 
 /**
  * The query IS the scope, which is what let collections go away.
@@ -14,11 +14,11 @@ const parse = (raw: string) => parseQuery(raw, tagKey)
 
 describe('parseQuery', () => {
   it('is all text when there are no tags', () => {
-    expect(parse('moby dick')).toEqual({ tags: [], text: 'moby dick' })
+    expect(parse('moby dick')).toEqual({ tags: [], status: null, text: 'moby dick' })
   })
 
   it('pulls one tag out and leaves the text', () => {
-    expect(parse('tag:Sea whales')).toEqual({ tags: ['Sea'], text: 'whales' })
+    expect(parse('tag:Sea whales')).toEqual({ tags: ['Sea'], status: null, text: 'whales' })
   })
 
   it('takes several tags', () => {
@@ -26,12 +26,12 @@ describe('parseQuery', () => {
   })
 
   it('finds a tag written after the text', () => {
-    expect(parse('whales tag:Sea')).toEqual({ tags: ['Sea'], text: 'whales' })
+    expect(parse('whales tag:Sea')).toEqual({ tags: ['Sea'], status: null, text: 'whales' })
   })
 
   /* A tag with a space in it is ordinary — "Book club", "To reread". */
   it('takes a quoted tag with a space in it', () => {
-    expect(parse('tag:"Book club" notes')).toEqual({ tags: ['Book club'], text: 'notes' })
+    expect(parse('tag:"Book club" notes')).toEqual({ tags: ['Book club'], status: null, text: 'notes' })
   })
 
   it('is case-insensitive about the prefix itself', () => {
@@ -51,8 +51,8 @@ describe('parseQuery', () => {
    * "tag:" against titles would empty the shelf under their hands.
    */
   it('drops an empty term rather than searching for the word "tag:"', () => {
-    expect(parse('tag:')).toEqual({ tags: [], text: '' })
-    expect(parse('tag:"" whales')).toEqual({ tags: [], text: 'whales' })
+    expect(parse('tag:')).toEqual({ tags: [], status: null, text: '' })
+    expect(parse('tag:"" whales')).toEqual({ tags: [], status: null, text: 'whales' })
   })
 
   /* Removing a middle term must not weld the words on either side together. */
@@ -167,7 +167,7 @@ describe('an unterminated quoted tag', () => {
   const key = (t: string) => t.trim().toLowerCase()
 
   it('is dropped rather than applied', () => {
-    expect(parseQuery('tag:"Book club', key)).toEqual({ tags: [], text: '' })
+    expect(parseQuery('tag:"Book club', key)).toEqual({ tags: [], status: null, text: '' })
   })
 
   it('does not leak the opening quote into the text', () => {
@@ -186,5 +186,64 @@ describe('an unterminated quoted tag', () => {
    * is rather than swallowing what the reader is still writing. */
   it('survives withoutTag untouched', () => {
     expect(withoutTag('tag:"Book clu', 'Book club', key)).toBe('tag:"Book clu')
+  })
+})
+
+/* `is:` — the status axis, beside `tag:`. Same field, same discipline: what
+ * the reader can see is the whole query. */
+describe('is:', () => {
+  const key = (t: string) => t.toLowerCase()
+
+  it('pulls a status out and leaves the text', () => {
+    expect(parseQuery('is:reading whales', key)).toEqual({ tags: [], status: 'reading', text: 'whales' })
+  })
+
+  it('accepts all three, case-insensitively', () => {
+    expect(parseQuery('IS:Unread', key).status).toBe('unread')
+    expect(parseQuery('is:FINISHED', key).status).toBe('finished')
+  })
+
+  it('is null when no status was named', () => {
+    expect(parseQuery('whales tag:Sea', key).status).toBeNull()
+  })
+
+  /* A reader mid-word has not asked for anything yet — same rule as `tag:`. */
+  it('drops a bare `is:` rather than searching for the word', () => {
+    expect(parseQuery('is: whales', key)).toEqual({ tags: [], status: null, text: 'whales' })
+  })
+
+  /* An unknown value is not a status. It stays as text, which is the honest
+   * reading: the reader typed it, and the shelf should say nothing matches
+   * rather than silently ignore what they wrote. */
+  it('leaves an unknown value as text', () => {
+    expect(parseQuery('is:banana', key)).toEqual({ tags: [], status: null, text: 'is:banana' })
+  })
+
+  it('composes with tags and text in any order', () => {
+    const p = parseQuery('whales is:reading tag:Sea', key)
+    expect(p).toEqual({ tags: ['Sea'], status: 'reading', text: 'whales' })
+  })
+
+  it('last status wins, since a book has only one', () => {
+    expect(parseQuery('is:unread is:finished', key).status).toBe('finished')
+  })
+
+  describe('withStatus', () => {
+    it('sets a status on an empty field', () => {
+      expect(withStatus('', 'reading')).toBe('is:reading')
+    })
+    it('keeps what was typed', () => {
+      expect(withStatus('whales tag:Sea', 'unread')).toBe('is:unread whales tag:Sea')
+    })
+    it('replaces rather than adds — one status at a time', () => {
+      expect(withStatus('is:reading whales', 'finished')).toBe('is:finished whales')
+    })
+    it('clears with null and does not leave a hole', () => {
+      expect(withStatus('whales is:reading tag:Sea', null)).toBe('whales tag:Sea')
+    })
+    it('round-trips through parseQuery', () => {
+      const q = withStatus(withTag('', 'Sea', key), 'reading')
+      expect(parseQuery(q, key)).toEqual({ tags: ['Sea'], status: 'reading', text: '' })
+    })
   })
 })

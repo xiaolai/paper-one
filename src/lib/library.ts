@@ -135,13 +135,24 @@ export function matchesQuery(book: IndexedBook, query: string): boolean {
   )
 }
 
-/** A restriction on which books are in play — every tag, not any. */
+/**
+ * A restriction on which books are in play: every tag, not any; and at most
+ * one reading status, since a book has only one.
+ *
+ * Two axes, because a shelf is organised two ways at once — by what a book is
+ * ABOUT (tags) and by where the reader IS with it (status) — and the Library
+ * panel offers both. They compose: `is:reading tag:Sea` is the nautical books
+ * in flight.
+ */
 export interface Scope {
   readonly tags: readonly string[]
+  readonly status?: ReadingStatus | null
 }
 
 export function inScope(book: IndexedBook, scope: Scope | null): boolean {
-  if (!scope || scope.tags.length === 0) return true
+  if (!scope) return true
+  if (scope.status && statusOf(book) !== scope.status) return false
+  if (scope.tags.length === 0) return true
   /* EVERY tag: adding a second one narrows. `tag:Sea tag:Classics` meaning
    * "nautical or classical" would grow the shelf as the reader typed more,
    * which is the opposite of what typing more means anywhere else. */
@@ -178,9 +189,29 @@ export function shelfFor(
   books: readonly IndexedBook[],
   raw: string,
   order: LibraryOrder = 'recent',
-): { books: IndexedBook[]; tags: readonly string[] } {
-  const { tags, text } = parseQuery(raw, tagKey)
-  return { books: shelfView(books, { scope: { tags }, query: text, order }), tags }
+): { books: IndexedBook[]; tags: readonly string[]; status: ReadingStatus | null } {
+  const { tags, status, text } = parseQuery(raw, tagKey)
+  return { books: shelfView(books, { scope: { tags, status }, query: text, order }), tags, status }
+}
+
+/**
+ * How many books stand at each reading status — the numbers the Library
+ * panel puts beside its rows.
+ *
+ * Counted over the WHOLE shelf, not the scoped one, deliberately. The count is
+ * a fact about the collection — three in flight, two never opened — and it
+ * should read the same whichever row is currently on; a count that shrank to
+ * match the current filter would tell the reader only what they can already
+ * see. `tagCounts` is scoped for the opposite reason: a tag's number under a
+ * status filter answers "how many of THESE are tagged so", which is the
+ * question a reader narrowing further is asking.
+ */
+export function statusCounts(
+  books: readonly IndexedBook[],
+): Record<ReadingStatus, number> & { readonly all: number } {
+  const counts = { all: books.length, unread: 0, reading: 0, finished: 0 }
+  for (const book of books) counts[statusOf(book)] += 1
+  return counts
 }
 
 /**

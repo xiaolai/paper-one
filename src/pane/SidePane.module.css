@@ -445,6 +445,75 @@
   box-shadow: inset 0 -1px 0 var(--mark-rule);
 }
 
+/* --- library ---------------------------------------------------------- */
+
+/* The collection view: rows that narrow the shelf, counts that describe it.
+   The row is `.settingRow`'s shape — same height, same radius, same hover — so
+   the pane reads as one surface whichever panel is showing; the difference is
+   the trailing number and the ON state, which is a scope in force rather than
+   a value being shown. */
+.libraryPanel {
+  display: flex;
+  flex-direction: column;
+  padding: 4px 6px 12px;
+}
+
+.scopeRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 36px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--ink);
+  text-align: start;
+  cursor: pointer;
+}
+
+.scopeRow:hover {
+  background: var(--wash);
+}
+
+/* ON is a scope in force — persistent state, not hover — so it keeps the wash
+   and takes the accent, the same way a rail tab does. */
+.scopeRow[data-on='true'] {
+  background: var(--wash);
+  color: var(--accent);
+}
+
+.scopeLabel {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The count: muted, tabular, and it does not take the accent when the row is
+   on — a number is a fact about the shelf, not part of the selection. */
+.scopeCount {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+/* An empty shelf, stated once and quietly. Not the shelf's own empty state,
+   which says what to do; just the fact, so the pane is not a blank. */
+.scopeHint {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
 /* --- settings -------------------------------------------------------- */
 
 .groupTitle {

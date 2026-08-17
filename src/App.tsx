@@ -991,7 +991,7 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
                provider in this build — see `lib/companion` — and this is the
                line that changes when there is. */
             companion={NOT_CONFIGURED}
-            onAddBooks={addBooks}
+            books={library.books}
           />
         }
         onDismissPane={() => dispatch({ type: 'closePane' })}
@@ -1024,6 +1024,8 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
           <Library
             books={library.books}
             platform={platform}
+            libraryQuery={state.libraryQuery}
+            onQueryChange={(query) => dispatch({ type: 'setLibraryQuery', query })}
             // Opening from the library takes you to what you opened. Staying
             // on the shelf with a book loading behind it is the one thing a
             // reader does not want from a click on a cover.

@@ -2,12 +2,13 @@ import {
   ChartNoAxesColumn,
   Highlighter,
   Layers,
+  LibraryBig,
   List,
-  Plus,
   Search,
   Settings as SettingsIcon,
   Sparkles,
 } from 'lucide-react'
+import type { IndexedBook } from '../lib/bookIndex'
 import type { CompanionProvider } from '../lib/companion'
 import { ICON } from '../lib/metrics'
 import { PANE_TITLES } from '../lib/panes'
@@ -19,6 +20,7 @@ import type { CardStore } from '../lib/useCards'
 import type { MarkStore } from '../lib/useMarks'
 import { Companion } from './Companion'
 import { Contents } from './Contents'
+import { LibraryPanel } from './LibraryPanel'
 import { Cards } from './Cards'
 import { Notes } from './Notes'
 import { SearchPanel } from './SearchPanel'
@@ -56,7 +58,7 @@ const PANE_ICONS: Record<PaneId, typeof Search> = {
   cards: Layers,
   search: Search,
   stats: ChartNoAxesColumn,
-  import: Plus,
+  library: LibraryBig,
   settings: SettingsIcon,
 }
 
@@ -74,7 +76,7 @@ const RAIL_ORDER = [
   'cards',
   'search',
   'stats',
-  'import',
+  'library',
   'settings',
 ] as const satisfies readonly PaneId[]
 
@@ -123,8 +125,8 @@ export interface SidePaneProps {
    * App supplies it; App is where a real one would arrive.
    */
   companion: CompanionProvider
-  /** Opens the window's one file picker — see `addBooks` in App. */
-  onAddBooks: () => void
+  /** The shelf, for the Library panel's counts and scopes. */
+  books: readonly IndexedBook[]
 }
 
 export function SidePane({
@@ -137,7 +139,7 @@ export function SidePane({
   onDeleteMark,
   markFocus,
   companion,
-  onAddBooks,
+  books,
 }: SidePaneProps) {
   /* Falls back to the last pane rather than unmounting. The slot stays mounted
    * at zero width and inert while closed, so keeping the panel rendered is what
@@ -220,21 +222,8 @@ export function SidePane({
           </div>
         )}
 
-        {pane === 'import' && (
-          <div className={styles.empty}>
-            <div className={styles.emptyTitle}>Add books</div>
-            {/* It opens the picker now. It used to describe how to add a book
-                and offer no way to do it, while the palette's own "Add books…"
-                did the real thing two panels away — and it advertised folder
-                watching, which does not exist, while omitting PDF, which does. */}
-            <div className={styles.emptyBody}>
-              Drop an EPUB, PDF, MOBI, AZW3, CBZ or FB2 anywhere on the window,
-              or choose one from disk.
-            </div>
-            <button type="button" className={styles.emptyAction} onClick={onAddBooks}>
-              Choose books…
-            </button>
-          </div>
+        {pane === 'library' && (
+          <LibraryPanel books={books} query={state.libraryQuery} dispatch={dispatch} />
         )}
       </div>
 

@@ -1,0 +1,147 @@
+import { BookOpen, Check, Circle, CircleDot, Hash, LibraryBig } from 'lucide-react'
+import type { IndexedBook } from '../lib/bookIndex'
+import { statusCounts, tagCounts, tagKey, type ReadingStatus } from '../lib/library'
+import { ICON } from '../lib/metrics'
+import { parseQuery, withStatus, withTag, withoutTag } from '../lib/searchQuery'
+import type { AppDispatch } from '../lib/state'
+import styles from './SidePane.module.css'
+
+/**
+ * Library — the collection view.
+ *
+ * What the side pane holds when the SHELF is the screen. In the reader the pane
+ * is about this book; here it is about this collection: how many books stand
+ * at each stage of being read, what they are tagged, and a way to narrow the
+ * shelf to any of those with one click. The same job Notes does for marks,
+ * done for books.
+ *
+ * SELECTION IS SCOPE, NOT NAVIGATION. A row does not go anywhere; it narrows
+ * the shelf, exactly as typing `is:reading` or `tag:Sea` into the search field
+ * would — because that is literally what it does. The panel writes into the
+ * field and reads back out of it, so there is no scope here that the field
+ * does not show, and clicking here and typing there are one thing. Clicking
+ * an ON row clears it.
+ *
+ * THE COUNTS ARE THE POINT. A row without a number is a link; a row with one
+ * is a fact about the collection — three in flight, two never opened, one done
+ * — which is what makes opening the pane on the shelf worth doing.
+ *
+ * What is deliberately NOT here: adding books (the toolbar's `+` is the one
+ * place, and this panel replaced an "Add books" panel that was one paragraph
+ * and a second copy of that button); sorting (that is ORDER, not scope, and
+ * it stays in the toolbar); search (it sits above the grid, where the eye is
+ * when the grid is what is being searched); and any prose for an empty shelf
+ * (the shelf's own empty state does the talking — a second paragraph here
+ * would be two voices).
+ */
+
+interface StatusRow {
+  readonly status: ReadingStatus
+  readonly label: string
+  readonly Icon: typeof Circle
+}
+
+const STATUS_ROWS: readonly StatusRow[] = [
+  { status: 'reading', label: 'Reading', Icon: CircleDot },
+  { status: 'unread', label: 'Unread', Icon: Circle },
+  { status: 'finished', label: 'Finished', Icon: Check },
+]
+
+export interface LibraryPanelProps {
+  readonly books: readonly IndexedBook[]
+  /** The search field's contents — the one place scope lives. */
+  readonly query: string
+  readonly dispatch: AppDispatch
+}
+
+export function LibraryPanel({ books, query, dispatch }: LibraryPanelProps) {
+  const parsed = parseQuery(query, tagKey)
+  const counts = statusCounts(books)
+  /* Tag counts are SCOPED to the current status, so a tag's number under
+   * `is:reading` answers "how many of these are tagged so" — which is what a
+   * reader narrowing further is asking. Status counts are not scoped, for the
+   * opposite reason: they describe the collection, not the current view. */
+  const tags = tagCounts(books, parsed.status ? { tags: [], status: parsed.status } : null)
+  const activeTags = new Set(parsed.tags.map(tagKey))
+  const nothingScoped = parsed.status === null && parsed.tags.length === 0
+
+  const setQuery = (next: string) => dispatch({ type: 'setLibraryQuery', query: next })
+
+  return (
+    <div className={styles.libraryPanel}>
+      <button
+        type="button"
+        className={styles.scopeRow}
+        data-on={nothingScoped}
+        aria-pressed={nothingScoped}
+        /* The reset. ON when nothing is scoped, so the panel always shows one
+           row lit — the reader can see at a glance whether the shelf they are
+           looking at is the whole shelf. Clicking it clears every scope but
+           keeps free text, since the words typed are a search and not a
+           scope; clearing them would be doing more than was asked. */
+        onClick={() => setQuery(parseQuery(query, tagKey).text)}
+      >
+        <LibraryBig size={ICON.control} strokeWidth={ICON.stroke} />
+        <span className={styles.scopeLabel}>All books</span>
+        <span className={styles.scopeCount}>{counts.all}</span>
+      </button>
+
+      {STATUS_ROWS.map(({ status, label, Icon }) => {
+        const on = parsed.status === status
+        return (
+          <button
+            key={status}
+            type="button"
+            className={styles.scopeRow}
+            data-on={on}
+            aria-pressed={on}
+            /* One status at a time — a book has one — so clicking a second
+               row replaces the first rather than narrowing to nothing. */
+            onClick={() => setQuery(withStatus(query, on ? null : status))}
+          >
+            <Icon size={ICON.control} strokeWidth={ICON.stroke} />
+            <span className={styles.scopeLabel}>{label}</span>
+            <span className={styles.scopeCount}>{counts[status]}</span>
+          </button>
+        )
+      })}
+
+      {tags.length > 0 && (
+        <>
+          <div className={styles.groupTitle}>Tags</div>
+          {tags.map(({ tag, count }) => {
+            const on = activeTags.has(tagKey(tag))
+            return (
+              <button
+                key={tagKey(tag)}
+                type="button"
+                className={styles.scopeRow}
+                data-on={on}
+                aria-pressed={on}
+                /* Tags ACCUMULATE — every tag, not any — because adding a
+                   second one is narrowing, and that is what `tag:` has always
+                   meant in the field. */
+                onClick={() =>
+                  setQuery(on ? withoutTag(query, tag, tagKey) : withTag(query, tag, tagKey))
+                }
+              >
+                <Hash size={ICON.control} strokeWidth={ICON.stroke} />
+                <span className={styles.scopeLabel}>{tag}</span>
+                <span className={styles.scopeCount}>{count}</span>
+              </button>
+            )
+          })}
+        </>
+      )}
+
+      {books.length === 0 && (
+        /* Not prose — the shelf's own empty state says what to do. Just the
+           quiet fact, in the panel's own idiom, so the pane is not blank. */
+        <div className={styles.scopeHint}>
+          <BookOpen size={ICON.control} strokeWidth={ICON.stroke} />
+          Nothing on the shelf yet
+        </div>
+      )}
+    </div>
+  )
+}

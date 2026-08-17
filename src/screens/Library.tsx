@@ -1,9 +1,9 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
-import { FolderPlus, Plus } from 'lucide-react'
-import { shelfFor, tagCounts, tagKey } from '../lib/library'
+import { CaseSensitive, Clock, FolderPlus, Plus, User } from 'lucide-react'
+import { shelfFor, tagKey } from '../lib/library'
 import type { LibraryOrder } from '../lib/library'
 import type { IndexedBook } from '../lib/bookIndex'
-import { withTag, withoutTag } from '../lib/searchQuery'
+import { withStatus, withoutTag } from '../lib/searchQuery'
 import { ICON, cellHeightFor } from '../lib/metrics'
 import type { Platform } from '../lib/metrics'
 import { VIRTUALISE_ABOVE, gridWindow } from '../lib/virtualGrid'
@@ -53,12 +53,24 @@ export interface LibraryProps {
   shelfUnread?: boolean
   /** What the last import did, in one line. */
   importNotice: string | null
+  /** The search field's contents — held in app state, see `AppState.libraryQuery`. */
+  libraryQuery: string
+  onQueryChange: (query: string) => void
 }
 
-const ORDERS: readonly { id: LibraryOrder; label: string }[] = [
-  { id: 'recent', label: 'Recent' },
-  { id: 'title', label: 'Title' },
-  { id: 'author', label: 'Author' },
+/* The three sorts, as marks. The words were dropped from the toolbar; the
+ * icons were chosen so each is the one thing it could be, since a sort glyph
+ * that reads as something else is worse than the word:
+ *   Clock          — recency, unambiguously. Not `History`, which says "go
+ *                    back", and not `Calendar`, which says "a date".
+ *   CaseSensitive  — letterforms, so alphabetical by name.
+ *   User           — the person.
+ * Each carries its label as `title` and `aria-label`, so a hover and a screen
+ * reader both get the word the sighted reader gave up. */
+const ORDERS: readonly { id: LibraryOrder; label: string; Icon: typeof Clock }[] = [
+  { id: 'recent', label: 'Sort by recent', Icon: Clock },
+  { id: 'title', label: 'Sort by title', Icon: CaseSensitive },
+  { id: 'author', label: 'Sort by author', Icon: User },
 ]
 
 export function Library({
@@ -74,6 +86,8 @@ export function Library({
   importing,
   importNotice,
   shelfUnread = false,
+  libraryQuery,
+  onQueryChange,
 }: LibraryProps) {
   const [order, setOrder] = useState<LibraryOrder>('recent')
   /* Which row is asking to be confirmed, by id.
@@ -96,7 +110,14 @@ export function Library({
    * that could disagree — a chip could say Philosophy while the field said
    * something else. The query now carries both: `tag:Philosophy whales` is the
    * scope AND the text, visible, editable, and copyable out of the box. */
-  const [query, setQuery] = useState('')
+  /* LIFTED into app state — see `AppState.libraryQuery`. The Library panel in
+   * the side pane writes `tag:` and `is:` terms into the same string these
+   * chips do, and a sibling cannot write local state; a copy in the pane would
+   * be the second source of truth this comment says was removed. `setQuery`
+   * keeps the updater signature the cells and chips already use. */
+  const query = libraryQuery
+  const setQuery = (next: string | ((prev: string) => string)) =>
+    onQueryChange(typeof next === 'function' ? next(libraryQuery) : next)
 
   /* Deferred, not debounced. `useDeferredValue` lets the keystroke paint
    * immediately and re-filters at React's leisure, which is the behaviour a
@@ -105,13 +126,6 @@ export function Library({
   const deferredQuery = useDeferredValue(query)
   const view = useMemo(() => shelfFor(books, deferredQuery, order), [books, deferredQuery, order])
   const shelf = view.books
-  /* Counted WITHIN the active tags, so the numbers describe what is reachable
-   * from here — adding a second tag shows what is left, not what exists. */
-  const tags = useMemo(
-    () => tagCounts(books, { tags: view.tags }),
-    [books, view.tags],
-  )
-
   /* Virtualisation, but only past the point where it pays.
    *
    * Below `VIRTUALISE_ABOVE` the window arithmetic, the spacers and the scroll
@@ -244,16 +258,18 @@ export function Library({
         )}
         {books.length > 1 && (
           <div className={styles.orders}>
-            {ORDERS.map(({ id, label }) => (
+            {ORDERS.map(({ id, label, Icon }) => (
               <button
                 key={id}
                 type="button"
                 className={styles.order}
                 data-on={order === id}
                 aria-pressed={order === id}
+                title={label}
+                aria-label={label}
                 onClick={() => setOrder(id)}
               >
-                {label}
+                <Icon size={ICON.control} strokeWidth={ICON.stroke} />
               </button>
             ))}
           </div>
@@ -299,45 +315,42 @@ export function Library({
             className={styles.search}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search, or tag:Name to narrow"
+            placeholder="Search — or tag:Name, is:reading to narrow"
             aria-label="Search the library"
           />
-          {/* Counts are DERIVED and counted within the scope, so they describe
-              what the reader can actually reach. The chips these replace were a
-              prototype constant reading `All 2,418`. */}
-          {/* NOT conditional on `tags.length` alone: the control that clears an
-              active scope lives here, so gating on tag counts could strand a
-              reader inside a scope whose last matching tag had just been
-              removed, with no way back out. */}
-          {(tags.length > 0 || view.tags.length > 0) && (
+          {/* ONLY WHAT IS ACTIVE. This strip used to also offer the eight most
+              used tags to click into — discovery — and it was the weak version
+              of that: capped at eight, and it vanished the moment a filter
+              left no tags behind. Discovery is the Library panel's job now,
+              where every tag has a row and a count. What stays here is the
+              read-back: the scopes currently applied, each one a click from
+              being lifted, so a reader can always see and undo what is
+              narrowing the shelf without hunting for it in the field. */}
+          {(view.tags.length > 0 || view.status) && (
             <div className={styles.chips}>
-              {/* The ACTIVE tags, read back out of the query. Clicking one
-                  removes its term from the field rather than setting hidden
-                  state, so the field and the chips cannot disagree. */}
+              {view.status && (
+                <button
+                  type="button"
+                  className={styles.chip}
+                  data-active="true"
+                  title="Clear this filter"
+                  onClick={() => setQuery((q) => withStatus(q, null))}
+                >
+                  {view.status} ✕
+                </button>
+              )}
               {view.tags.map((tag) => (
                 <button
                   key={tagKey(tag)}
                   type="button"
                   className={styles.chip}
                   data-active="true"
+                  title="Clear this filter"
                   onClick={() => setQuery((q) => withoutTag(q, tag, tagKey))}
                 >
                   {tag} ✕
                 </button>
               ))}
-              {tags
-                .filter(({ tag }) => !view.tags.some((one) => tagKey(one) === tagKey(tag)))
-                .slice(0, 8)
-                .map(({ tag, count }) => (
-                  <button
-                    key={tagKey(tag)}
-                    type="button"
-                    className={styles.chip}
-                    onClick={() => setQuery((q) => withTag(q, tag, tagKey))}
-                  >
-                    {tag} <span className={styles.chipCount}>{count}</span>
-                  </button>
-                ))}
             </div>
           )}
         </div>

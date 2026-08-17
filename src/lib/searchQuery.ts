@@ -10,6 +10,15 @@
  *   whales                  every book
  *   tag:Sea whales          inside one tag
  *   tag:Sea tag:Classics    inside both — AND, not OR
+ *   is:reading              only books in flight; also is:unread, is:finished
+ *   is:reading tag:Sea      both, as you would expect
+ *
+ * `is:` is the OTHER axis a shelf is organised on — not what a book is about
+ * but where the reader is with it — and it lives in the same field for the
+ * same reason `tag:` does: what the reader can see is the whole query. The
+ * Library panel writes it when a status row is clicked, so clicking there and
+ * typing here are one thing. It is EXCLUSIVE, since a book has one status, so
+ * writing a second `is:` replaces the first rather than narrowing to nothing.
  *
  * AND rather than OR, because narrowing is what a reader is doing when they add
  * a second tag. `tag:Sea tag:Classics` asking for everything nautical PLUS
@@ -40,13 +49,25 @@ const TAG = /(^|\s)tag:(?:"((?:[^"\\]|\\.)*)("?)|(\S*))/gi
  * an unterminated term can be DROPPED, which is what happens to every other
  * incomplete one and what the note on `parseQuery` has always claimed. */
 
+/**
+ * `is:reading`, `is:unread`, `is:finished`. No quoting, because the values are
+ * a closed set and never contain a space; anything else after `is:` is not a
+ * status and is left as text, so a reader typing `is:` has not asked for
+ * anything yet — the same rule `tag:` follows for an empty term.
+ */
+const STATUS = /(^|\s)is:(reading|unread|finished)?(?=\s|$)/gi
+export type StatusTerm = 'reading' | 'unread' | 'finished'
+const STATUSES: readonly StatusTerm[] = ['reading', 'unread', 'finished']
+
 /** Undo `withTag`'s escaping: `\"` and `\\` become the characters they spell. */
 const unescape = (quoted: string): string => quoted.replace(/\\(.)/g, '$1')
 
 export interface ParsedQuery {
   /** Tags to restrict to, in the order typed. Deduplicated by key. */
   readonly tags: readonly string[]
-  /** Everything that was not a `tag:` term, for the text matcher. */
+  /** The reading status to restrict to, if one was named. Last one wins. */
+  readonly status: StatusTerm | null
+  /** Everything that was not a `tag:` or `is:` term, for the text matcher. */
   readonly text: string
 }
 
@@ -62,7 +83,15 @@ export interface ParsedQuery {
 export function parseQuery(raw: string, key: (tag: string) => string): ParsedQuery {
   const tags: string[] = []
   const seen = new Set<string>()
+  let status: StatusTerm | null = null
   const text = raw
+    .replace(STATUS, (_match, lead: string, value?: string) => {
+      // `is:` on its own, or `is:something-else`, is not a status. The bare
+      // `is:` is dropped like an empty `tag:`; an unknown value never matched
+      // the regex and stays as text, which is the honest reading of it.
+      if (value) status = value.toLowerCase() as StatusTerm
+      return lead
+    })
     .replace(TAG, (_match, lead: string, quoted?: string, closed?: string, bare?: string) => {
       // Opened and not closed: the reader is still typing the name. Dropped,
       // like `tag:` on its own, rather than applied as though they had finished.
@@ -85,8 +114,22 @@ export function parseQuery(raw: string, key: (tag: string) => string): ParsedQue
      * containing a single space. */
     .replace(/\s+/g, ' ')
     .trim()
-  return { tags, text }
+  return { tags, status, text }
 }
+
+/**
+ * Set the status term, replacing any that was there — one status at a time.
+ * `null` clears it. Written at the front, like `withTag`, so the reader sees
+ * what changed.
+ */
+export function withStatus(raw: string, status: StatusTerm | null): string {
+  const cleared = raw.replace(STATUS, (_m, lead: string) => lead).replace(/\s+/g, ' ').trim()
+  if (!status) return cleared
+  return cleared ? `is:${status} ${cleared}` : `is:${status}`
+}
+
+/** The statuses `is:` accepts, for anything listing them. */
+export const STATUS_TERMS = STATUSES
 
 /**
  * Put a tag into a query the reader can then edit.

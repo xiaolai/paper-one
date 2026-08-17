@@ -24,11 +24,10 @@ export interface PaneEntry {
    */
   readonly combo?: string
   /**
-   * False for a panel the command palette should not list.
-   *
-   * Only "Add books" sets it. The palette already carries "Add books…", which
-   * opens the picker, and an "Open Add books" beside it — one letter apart,
-   * doing something else — is a choice no reader can make correctly.
+   * False for a panel the command palette should not list. Nothing sets it
+   * today; it exists because one panel once needed it (an "Add books" panel,
+   * one letter from the palette's own "Add books…"), and the next panel that
+   * shadows a palette command will need it again.
    */
   readonly inPalette?: false
 }
@@ -40,7 +39,7 @@ export const PANES: readonly PaneEntry[] = [
   { id: 'cards', label: 'Cards', combo: '⌘4' },
   { id: 'companion', label: 'Companion' },
   { id: 'stats', label: 'Reading', combo: '⌘5' },
-  { id: 'import', label: 'Add books', inPalette: false },
+  { id: 'library', label: 'Library' },
   { id: 'settings', label: 'Settings' },
 ]
 

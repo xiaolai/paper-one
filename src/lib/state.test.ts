@@ -262,7 +262,7 @@ describe('the pane follows the screen', () => {
       expect(paneFits('library', pane)).toBe(false)
     }
     // Cross-book by design, and the reason the library has a pane at all.
-    for (const pane of ['notes', 'cards', 'stats', 'import', 'settings'] as const) {
+    for (const pane of ['notes', 'cards', 'stats', 'library', 'settings'] as const) {
       expect(paneFits('library', pane)).toBe(true)
     }
   })
@@ -272,11 +272,15 @@ describe('the pane follows the screen', () => {
       type: 'goScreen',
       screen: 'library',
     })
-    expect(next.pane).toBe('notes')
+    expect(next.pane).toBe('library')
   })
 
   it('leaves a panel that works on both alone', () => {
-    const next = reducer(at({ screen: 'reader', pane: 'notes' }), {
+    /* `lastPane` too — the reducer prefers it, and with it left at the initial
+     * `companion` this test only ever passed because the fallback happened to
+     * be Notes. Setting it is what makes this test "leave alone" rather than
+     * "fall back to the same answer by luck". */
+    const next = reducer(at({ screen: 'reader', pane: 'notes', lastPane: 'notes' }), {
       type: 'goScreen',
       screen: 'library',
     })
@@ -291,7 +295,7 @@ describe('the pane follows the screen', () => {
       type: 'goScreen',
       screen: 'library',
     })
-    expect(away.pane).toBe('notes')
+    expect(away.pane).toBe('library')
     expect(away.lastPane).toBe('companion')
     const back = reducer(away, { type: 'goScreen', screen: 'reader' })
     expect(back.pane).toBe('companion')
@@ -307,7 +311,7 @@ describe('the pane follows the screen', () => {
 
   it('reopens a fitting panel when the toggle is used on the library', () => {
     const shut = at({ screen: 'library', pane: null, lastPane: 'companion' })
-    expect(reducer(shut, { type: 'togglePane' }).pane).toBe('notes')
+    expect(reducer(shut, { type: 'togglePane' }).pane).toBe('library')
   })
 
   /* A palette entry the reader chose BY NAME falls back rather than failing;
@@ -315,7 +319,7 @@ describe('the pane follows the screen', () => {
    * silently does something else is worse than one that does nothing. */
   it('falls back when asked for a panel this screen does not have', () => {
     const next = reducer(at({ screen: 'library' }), { type: 'openPane', pane: 'toc' })
-    expect(next.pane).toBe('notes')
+    expect(next.pane).toBe('library')
   })
 })
 
@@ -333,7 +337,8 @@ describe('bootState', () => {
     const boot = bootState('')
     expect(boot.screen).toBe('library')
     expect(paneFits(boot.screen, boot.pane!)).toBe(true)
-    expect(boot.pane).toBe('notes')
+    // The panel about the shelf, on the shelf — see `defaultPaneFor`.
+    expect(boot.pane).toBe('library')
   })
 
   it('keeps the book panel when the launch named a book', () => {

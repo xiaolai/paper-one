@@ -68,9 +68,10 @@ export type Typeface = 'literata' | 'crimson' | 'instrument' | 'plex'
  * meant two surfaces competing for the same job. One pane holds every tool;
  * the reader stays the only permanent full-width surface.
  *
- * `notes` and `import` rather than "annotation" and "add": §15's lexicon is
- * explicit that the word is Note, not annotation, and the pane title is
- * "Add books".
+ * `notes` rather than "annotation": §15's lexicon is explicit that the word is
+ * Note. `library` is the collection panel — what the pane holds when the shelf
+ * is the screen; it replaced an `import` panel that was one paragraph and a
+ * button the toolbar already had.
  */
 export type PaneId =
   | 'toc'
@@ -79,7 +80,7 @@ export type PaneId =
   | 'cards'
   | 'search'
   | 'stats'
-  | 'import'
+  | 'library'
   | 'settings'
 export type Side = 'left' | 'right'
 
@@ -125,6 +126,18 @@ export interface AppState {
    */
   readonly progressLineOn: boolean
   readonly pageLayout: PageLayout
+  /**
+   * What is typed in the library's search field — and therefore what the
+   * shelf is scoped to, since `tag:` and `is:` live in the same string.
+   *
+   * IN APP STATE rather than local to the library screen, because two surfaces
+   * write it: the field itself, and the Library panel in the side pane, whose
+   * rows put `tag:` and `is:` terms into it. Local state in one component
+   * cannot be written by a sibling, and a second copy in the pane would be the
+   * hidden scope the whole `tag:` design exists to avoid — a filter the field
+   * does not show.
+   */
+  readonly libraryQuery: string
 }
 
 export const initialState: AppState = {
@@ -147,6 +160,7 @@ export const initialState: AppState = {
   lastPane: 'companion',
   side: 'right',
   paletteOpen: false,
+  libraryQuery: '',
   switcherOpen: false,
   chromeOn: false,
   rulerOn: false,
@@ -161,6 +175,7 @@ export const initialState: AppState = {
 
 export type Action =
   | { type: 'goScreen'; screen: Screen }
+  | { type: 'setLibraryQuery'; query: string }
   | { type: 'setTheme'; theme: Theme; fromOs?: boolean }
   | { type: 'setThemeFollowsOs'; follows: boolean }
   | { type: 'openPane'; pane: PaneId }
@@ -201,6 +216,9 @@ export function reducer(state: AppState, action: Action): AppState {
       const pane = state.pane === null ? null : paneFor(action.screen, state.lastPane)
       return { ...state, screen: action.screen, pane, switcherOpen: false, paletteOpen: false }
     }
+
+    case 'setLibraryQuery':
+      return state.libraryQuery === action.query ? state : { ...state, libraryQuery: action.query }
 
     case 'setTheme':
       // An explicit pick in Settings turns off OS following; a change pushed by
@@ -333,13 +351,14 @@ export function paneFits(screen: Screen, pane: PaneId): boolean {
 /**
  * Which panel a screen opens on when the one that was wanted is not there.
  *
- * The library's answer is Notes: the only panel that shows the reader's OWN
- * work across the whole shelf, which is the nearest thing to what Companion is
- * for a book. `import` would be a shortcut to a button already on the screen,
- * and `settings` is somewhere you visit rather than land.
+ * The library's answer is Library — the panel about the collection, which is
+ * what the screen is. It used to be Notes, on the reasoning that Notes was
+ * "the nearest thing to what Companion is for a book"; nearest was the tell.
+ * The pane in the reader holds things about this book; on the shelf it should
+ * hold things about this shelf, and now there is a panel that does.
  */
 export function defaultPaneFor(screen: Screen): PaneId {
-  return screen === 'reader' ? 'companion' : 'notes'
+  return screen === 'reader' ? 'companion' : 'library'
 }
 
 /**
