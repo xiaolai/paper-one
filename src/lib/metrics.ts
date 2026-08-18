@@ -478,12 +478,13 @@ export const TOC_INDENT = 16
 /**
  * An Appearance swatch: a tile that previews a theme by being drawn in it.
  *
- * Taller than any control on the ramp because it is not a control — it holds
- * two lines, a specimen and a name, and a tile that fits them exactly reads as
- * cramped. Not on the ramp for the same reason a book's cover is not: it is a
- * picture of something, sized to what it has to show.
+ * Not on the control ramp, for the same reason a book's cover is not: it is a
+ * picture of something, sized to what it has to show. What it has to show is a
+ * 15px specimen, 6px of air and a 10px name — 31px — so this leaves about 10
+ * either side. Enough that the two lines sit IN the tile rather than fill it,
+ * and no more: five of these are a row of choices, not five panels.
  */
-export const THEME_SWATCH_H = 60
+export const THEME_SWATCH_H = 52
 
 /**
  * THE WINDOW WIDTHS THE LAYOUT CHANGES AT.
