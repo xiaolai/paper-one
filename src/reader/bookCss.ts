@@ -1,4 +1,4 @@
-import type { SpacingIndices, Theme, Typeface } from '../lib/state'
+import type { Align, SpacingIndices, Theme, Typeface } from '../lib/state'
 import { readingStep, spacingAt } from '../lib/metrics'
 import { dimBackground, inkFor } from '../lib/palette'
 import { faceById } from '../lib/typefaces'
@@ -172,7 +172,14 @@ export interface BookCssOptions {
   readonly stepIdx: number
   readonly theme: Theme
   readonly typeface: Typeface
-  readonly justify: boolean
+  /**
+   * Justified, or flush to the reading edge.
+   *
+   * REPLACES a `justify` boolean and a `hyphenate` boolean, which were two
+   * settings for one decision and allowed a combination that is simply bad
+   * typography — see the note where it is used.
+   */
+  readonly align: Align
   /** How open the type is set — see `SPACING`. */
   readonly spacing: SpacingIndices
   /**
@@ -184,15 +191,13 @@ export interface BookCssOptions {
    */
   readonly brightness: number
   readonly contrast: number
-  readonly hyphenate: boolean
 }
 
 export function bookCss({
   stepIdx,
   theme,
   typeface,
-  justify,
-  hyphenate,
+  align,
   spacing,
   brightness,
   contrast,
@@ -255,9 +260,29 @@ body {
    * mean two different things depending on the book. */
   letter-spacing: ${letter}em;
   word-spacing: ${word}em;
-  text-align: ${justify ? 'justify' : 'start'};
-  -webkit-hyphens: ${hyphenate ? 'auto' : 'manual'};
-  hyphens: ${hyphenate ? 'auto' : 'manual'};
+  /* START, NEVER LEFT — and no backticks in here, per the rule this file states
+   * further up: it is a template literal and one would end the string.
+   *
+   * The flush edge is on the left in English, on the right in Arabic and at the
+   * top in vertical Japanese: one behaviour, three appearances, and the
+   * document says which it is. Nothing here detects anything. A logical value
+   * follows the book's own dir and writing-mode, and a heuristic guessing
+   * direction from character ranges would be worse than the declaration it was
+   * overriding. */
+  text-align: ${align === 'justified' ? 'justify' : 'start'};
+  /* HYPHENATION FOLLOWS THE ALIGNMENT rather than being its own switch.
+   * Justifying without it stretches the word spaces to fill the line instead,
+   * which at this measure opens rivers — measured on a real book at a narrow
+   * measure, hyphenation absorbed two lines' worth of slack that would
+   * otherwise have become white space. Ragged text has nowhere for that slack
+   * to go: the line simply ends early, so hyphens buy nothing and cost an
+   * interruption.
+   *
+   * Hyphenating needs the document's language and does nothing at all without
+   * it, silently — which is why the session supplies one when the book has not.
+   * See ensureLang there. */
+  -webkit-hyphens: ${align === 'justified' ? 'auto' : 'manual'};
+  hyphens: ${align === 'justified' ? 'auto' : 'manual'};
   -webkit-font-smoothing: antialiased;
   overflow-wrap: break-word;
 }

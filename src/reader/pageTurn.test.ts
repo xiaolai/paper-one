@@ -49,6 +49,7 @@ const settings = (animated: boolean) => ({
   typeface: 'literata' as const,
   spacing: { letter: 1, word: 0, line: 1, paragraph: 2 },
   /* The theme untouched: this suite is about layout attributes. */
+  align: 'justified' as const,
   brightness: 1,
   contrast: 0,
   animated,

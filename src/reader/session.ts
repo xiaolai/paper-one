@@ -516,6 +516,7 @@ export class ReaderSession {
       this.#onTeardown(doc, () => this.#sections.delete(index))
 
       this.#redrawWhenFontsLand(doc)
+      ensureLang(doc, view)
 
       this.#cb.onDocument(doc)
     })
@@ -1536,6 +1537,34 @@ function message(cause: unknown, fallback: string): string {
 
 /** foliate's metadata is loosely typed: title may be a language map, author a
  *  string, an object, or an array of either. */
+/**
+ * Give a section document a language when it has not declared one.
+ *
+ * HYPHENATION NEEDS IT AND FAILS SILENTLY WITHOUT IT. `hyphens: auto` asks the
+ * engine to break words by the rules of a language, and with no `lang` there is
+ * no language and therefore no rule — so the setting is applied, reports
+ * nothing, and does nothing. A reader sees justified text with rivers in it and
+ * no way to tell that the control they turned on is inert.
+ *
+ * The book almost always knows. `dc:language` is in the OPF and this app
+ * already parses it into `BookMeta.languages`; a section that omits `xml:lang`
+ * is common in older EPUBs and is exactly the case that goes quiet.
+ *
+ * Only when the document is silent. A section that declares its own language —
+ * a quotation in another one, a bilingual edition — is the authority, and
+ * overwriting it would hyphenate French by English rules.
+ */
+function ensureLang(doc: Document, view: { book?: { metadata?: unknown } }): void {
+  /* A document need not have a root element — a section that failed to parse
+     hands back an empty one, and this runs on every section that loads. */
+  const html = doc.documentElement as HTMLElement | null
+  if (!html) return
+  if (html.getAttribute('lang') || html.getAttribute('xml:lang')) return
+  const declared = readMeta(view.book ?? {}).languages[0]
+  if (!declared) return
+  html.setAttribute('lang', declared)
+}
+
 export function readMeta(book: { metadata?: unknown }): BookMeta {
   const md = (book.metadata ?? {}) as Record<string, unknown>
   const text = (value: unknown): string => {

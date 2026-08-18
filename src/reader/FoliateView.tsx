@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { Renderer, TocItem, View } from 'foliate-js/view.js'
 import type { MarkPainter } from 'foliate-js/overlayer.js'
-import type { SpacingIndices, Theme, Typeface } from '../lib/state'
+import type { Align, SpacingIndices, Theme, Typeface } from '../lib/state'
 import type { BookMeta, BookNavigator, ReaderPosition } from '../lib/useBook'
 import { useFontsReady } from '../lib/fontProbe'
 import { isPdf } from '../lib/formats'
@@ -31,6 +31,8 @@ export interface FoliateViewProps {
   typeface: Typeface
   /** How open the type is set — see `SPACING`. */
   spacing: SpacingIndices
+  /** Justified, or flush to the reading edge. */
+  align: Align
   /** The reader's brightness and contrast, resolved — see `bookColours`. */
   brightness: number
   contrast: number
@@ -86,6 +88,8 @@ interface Settings {
   stepIdx: number
   /** How open the type is set — see `SPACING`. */
   spacing: SpacingIndices
+  /** Justified, or flush to the reading edge. */
+  align: Align
   /** Resolved brightness and contrast — see `bookColours`. */
   brightness: number
   contrast: number
@@ -120,8 +124,7 @@ export function applySettings(renderer: Renderer, settings: Settings): void {
       spacing: settings.spacing,
       brightness: settings.brightness,
       contrast: settings.contrast,
-      justify: true,
-      hyphenate: true,
+      align: settings.align,
     }),
   )
 }
@@ -253,6 +256,7 @@ export function FoliateView({
   theme,
   typeface,
   spacing,
+  align,
   brightness,
   contrast,
   animated,
@@ -313,7 +317,7 @@ export function FoliateView({
    * whenever a section's overlay is built, which happens as the reader scrolls
    * — long after any value captured at startup went stale. */
   const marksRef = useRef(marks)
-  const settings = useRef<Settings>({ stepIdx, measure, theme, typeface, spacing, brightness, contrast, animated, paginated })
+  const settings = useRef<Settings>({ stepIdx, measure, theme, typeface, spacing, align, brightness, contrast, animated, paginated })
   /* Through a ref for the same reason, and for one that is specific to it: the
    * saved position is derived from the book's content id, which resolves a few
    * milliseconds AFTER the reader mounts. A prop read at mount is read before
@@ -327,7 +331,7 @@ export function FoliateView({
   useLayoutEffect(() => {
     handlers.current = currentHandlers
     marksRef.current = marks
-    settings.current = { stepIdx, measure, theme, typeface, spacing, brightness, contrast, animated, paginated }
+    settings.current = { stepIdx, measure, theme, typeface, spacing, align, brightness, contrast, animated, paginated }
     lastLocationRef.current = lastLocation
   })
 
@@ -461,7 +465,7 @@ export function FoliateView({
      * the effect and unmounted the React tree — the reader vanished instead of
      * the theme failing to change. */
     try {
-      applySettings(renderer, { stepIdx, measure: settings.current.measure, theme, typeface, spacing, brightness, contrast, animated, paginated })
+      applySettings(renderer, { stepIdx, measure: settings.current.measure, theme, typeface, spacing, align, brightness, contrast, animated, paginated })
       /* A theme change reaches the book through `setStyles`, which restyles the
        * document WITHOUT rebuilding the section — so no `create-overlay` fires
        * and the marks keep the colour they were painted in. Changing the step or
@@ -487,7 +491,7 @@ export function FoliateView({
      * controls that change how the type is set, so the pips moved and the page
      * did not. Its identity is stable — the reducer returns the SAME state when
      * a spacing has not moved — so depending on the object cannot loop. */
-  }, [stepIdx, theme, typeface, spacing, brightness, contrast, animated, paginated, ready, generation, fontsReady])
+  }, [stepIdx, theme, typeface, spacing, align, brightness, contrast, animated, paginated, ready, generation, fontsReady])
 
   /* THE MEASURE ALONE, and only the layout attributes for it.
    *

@@ -82,6 +82,17 @@ export interface SpacingIndices {
 
 /** The four, named, so a caller cannot pass a key the scale does not have. */
 export type SpacingKey = keyof SpacingIndices
+
+/**
+ * How a line of prose fills its measure.
+ *
+ * NOT "left" AND "right", which is the obvious pair and the wrong one: a line
+ * set flush to the reading edge is on the LEFT in English, on the RIGHT in
+ * Arabic, and at the TOP in vertical Japanese. There is one behaviour and three
+ * appearances, and naming it by one of them would be wrong in the other two.
+ * `ragged` names what the far edge does, which is the same in all three.
+ */
+export type Align = 'justified' | 'ragged'
 /**
  * The panels of the single side pane — see `lib/panes` for their metadata.
  *
@@ -139,6 +150,8 @@ export interface AppState {
    * reducer can then take one action for all four.
    */
   readonly spacing: SpacingIndices
+  /** Justified, or flush to the reading edge — see `Align`. */
+  readonly align: Align
   /**
    * How much of the theme's light the app emits, and how hard the text sits on
    * it — indices into `BRIGHTNESS` and `CONTRAST`.
@@ -219,6 +232,8 @@ export const initialState: AppState = {
     line: SPACING.line.def,
     paragraph: SPACING.paragraph.def,
   },
+  /* Justified, which is what the book has always been set as. */
+  align: 'justified',
   /* The theme exactly as designed, until a reader says otherwise. */
   brightness: BRIGHTNESS.def,
   contrast: CONTRAST.def,
@@ -245,6 +260,7 @@ export type Action =
   | { type: 'pinRuler' }
   | { type: 'setStepIdx'; idx: number }
   | { type: 'setSpacing'; key: SpacingKey; idx: number }
+  | { type: 'setAlign'; align: Align }
   | { type: 'setBrightness'; idx: number }
   | { type: 'setContrast'; idx: number }
   | { type: 'setTypeface'; typeface: Typeface }
@@ -379,6 +395,9 @@ export function reducer(state: AppState, action: Action): AppState {
       const idx = Math.min(Math.max(Math.round(action.idx), 0), scale.steps.length - 1)
       return state[key] === idx ? state : { ...state, [key]: idx }
     }
+
+    case 'setAlign':
+      return state.align === action.align ? state : { ...state, align: action.align }
 
     case 'setTypeface':
       return { ...state, typeface: action.typeface }

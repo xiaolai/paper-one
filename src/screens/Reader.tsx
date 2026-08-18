@@ -369,6 +369,7 @@ export function Reader({
                       theme={state.theme}
                       typeface={state.typeface}
                     spacing={state.spacing}
+                    align={state.align}
                     /* RESOLVED here, not passed as indices: the book is an
                        iframe and cannot read the app's custom properties, so it
                        is told the numbers. */

@@ -3,7 +3,15 @@ import { BRIGHTNESS, CONTRAST, READING_STEPS, SPACING, readingStep } from '../li
 import { THEMES } from '../lib/panes'
 import type { Face } from '../lib/typefaces'
 import { FacePicker } from './FacePicker'
-import type { PageLayout, Side, SpacingIndices, SpacingKey, Theme, Typeface } from '../lib/state'
+import type {
+  Align,
+  PageLayout,
+  Side,
+  SpacingIndices,
+  SpacingKey,
+  Theme,
+  Typeface,
+} from '../lib/state'
 import { SettingGroup } from './SettingGroup'
 import { StepRow } from './StepRow'
 import styles from './SidePane.module.css'
@@ -59,6 +67,8 @@ export interface SettingsProps {
   onStepIdx: (idx: number) => void
   spacing: SpacingIndices
   onSpacing: (key: SpacingKey, idx: number) => void
+  align: Align
+  onAlign: (align: Align) => void
   brightness: number
   onBrightness: (idx: number) => void
   contrast: number
@@ -87,6 +97,8 @@ export function Settings({
   onStepIdx,
   spacing,
   onSpacing,
+  align,
+  onAlign,
   brightness,
   onBrightness,
   contrast,
@@ -202,6 +214,27 @@ export function Settings({
           Nothing here touches the MEASURE. That is the size step's, and letting
           a second control move it would make the line length depend on which
           one was touched last. */}
+      {/* ONE DECISION, NOT TWO. It was `justify` and `hyphenate`, both hardcoded
+          on and neither reachable — and as a pair they allowed justified text
+          with no hyphens, which is the one combination that is simply worse:
+          the word spaces stretch to fill the line instead, and at this measure
+          that opens rivers. Ragged text has nowhere for the slack to go, so
+          hyphens there buy nothing and cost an interruption.
+
+          Not "Left" and "Justified": the flush edge is on the left in English,
+          the right in Arabic and the top in vertical Japanese, and the book
+          says which. See `Align`. */}
+      <button
+        type="button"
+        className={styles.settingRow}
+        onClick={() => onAlign(align === 'justified' ? 'ragged' : 'justified')}
+      >
+        <span style={{ flex: 1 }}>Alignment</span>
+        <span className={styles.settingValue}>
+          {align === 'justified' ? 'Justified' : 'Ragged'}
+        </span>
+      </button>
+
       {/* HOW MUCH LIGHT THE APP GIVES OFF, and how hard the text sits on it.
           Its own group rather than a tail on Appearance: that one is which
           theme, and these two are how much of it reaches the reader.
