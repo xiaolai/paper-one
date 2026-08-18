@@ -185,12 +185,39 @@ export function parseCards(raw: string | null): Card[] {
     return []
   }
   if (!Array.isArray(parsed)) return []
-  return parsed.filter(isCard).map((card) => {
+  const rows = parsed.filter(isCard).map((card) => {
     const { updatedAt, deletedAt, ...rest } = card as Card & { updatedAt?: unknown; deletedAt?: unknown }
+    const updated = isHlc(updatedAt) ? updatedAt : undefined
+    const deleted = isHlc(deletedAt) ? deletedAt : undefined
+    /* LATEST ACTION WINS ON THE ROW ITSELF — `validMarks`' rule, for the
+     * same reason: an edit newer than the tombstone means the card is
+     * alive, and the read models decide by the tombstone's presence, so
+     * the older action is cleared at the door. */
+    const tombstone =
+      deleted !== undefined && !(updated !== undefined && updated > deleted) ? deleted : undefined
     return {
       ...rest,
-      ...(isHlc(updatedAt) ? { updatedAt } : {}),
-      ...(isHlc(deletedAt) ? { deletedAt } : {}),
+      ...(updated !== undefined ? { updatedAt: updated } : {}),
+      ...(tombstone !== undefined ? { deletedAt: tombstone } : {}),
     }
   })
+  /* ONE ROW PER ID, decided the way `mergeCards` would decide it: newest
+   * stamp wins, ties to the serialised row. Duplicates in the stored list —
+   * a hand-edit, a legacy write — otherwise made `mergeCards` order-
+   * sensitive (`new Map` silently kept the LAST duplicate) and the digest
+   * a function of file order, which is not state. */
+  const byId = new Map<string, Card>()
+  for (const card of rows) {
+    const held = byId.get(card.id)
+    if (!held) {
+      byId.set(card.id, card)
+      continue
+    }
+    const mine = cardStamp(held)
+    const theirs = cardStamp(card)
+    const winner =
+      mine < theirs ? card : mine > theirs ? held : JSON.stringify(held) < JSON.stringify(card) ? card : held
+    byId.set(card.id, winner)
+  }
+  return [...byId.values()]
 }

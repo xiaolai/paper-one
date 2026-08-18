@@ -8,13 +8,14 @@ import {
   validMarks,
   writeQueue,
   type BookRecord,
+  type Card,
   type IndexedBook,
   type KernelServices,
   type Mark,
 } from '../../../kernel'
 import { createPeerPort, fakeWire, linkWires, type FakeWire, type PeerPort } from '../../peer'
-import { createClock, type Clock } from './clock'
-import { createJournal, type Journal } from './journal'
+import { createClock, makeHlc, type Clock } from './clock'
+import { JOURNAL_KEY, createJournal, type Journal } from './journal'
 import { crashableFs, fsOver, type CrashableFs } from './journalFs.testkit'
 import { SYNC_CURSOR_SETTING, createLedger, type Ledger, type SyncChannel } from './ledger'
 import { canonicalJson, toWire } from './merge'
@@ -42,6 +43,8 @@ interface Stack {
   readonly storage: { map: Map<string, string>; getItem(k: string): string | null; setItem(k: string, v: string): void }
   readonly clock: Clock
   readonly journal: Journal
+  /** The journal's own write queue — so a test can hold journal appends. */
+  readonly journalQueue: ReturnType<typeof writeQueue>
   readonly services: KernelServices
   readonly ledger: Ledger
   readonly wire: FakeWire
@@ -75,7 +78,8 @@ async function makeStack(
 ): Promise<Stack> {
   const storage = flatStorage()
   const clock = createClock({ deviceId, now: nextWall })
-  const journal = createJournal({ fs, queue: writeQueue(), clock: () => clock.now(), storage })
+  const journalQueue = writeQueue()
+  const journal = createJournal({ fs, queue: journalQueue, clock: () => clock.now(), storage })
   await journal.open()
   const services = createKernelServices({ fs, storage, initialBooks: booksOn(fs) })
   services.bindRecorder(journal)
@@ -96,7 +100,7 @@ async function makeStack(
     hashFile: (folder, name) => wire.hashFile(folder, name),
     pageLimit: 3,
   })
-  return { fs, storage, clock, journal, services, ledger, wire, port }
+  return { fs, storage, clock, journal, journalQueue, services, ledger, wire, port }
 }
 
 interface World {
@@ -145,6 +149,17 @@ const mark = (id: string, bookId: string, note = ''): Mark => ({
   note,
   kind: 'highlight',
   chapter: 'One',
+  createdAt: nextWall(),
+})
+
+const cardOf = (id: string): Card => ({
+  id,
+  bookId: 'book:a',
+  kind: 'Excerpt',
+  body: `body ${id}`,
+  answer: '',
+  source: 'One',
+  cfi: null,
   createdAt: nextWall(),
 })
 
@@ -487,6 +502,148 @@ describe('the star protocol over two real stacks (WI-C.2)', () => {
     await session()
     expect(shelf.services.library.getSnapshot()).toEqual([])
     expect((await readPresence(shelf.fs))['book:b']?.state).toBe('removed')
+    expect(pushableOutbox(satchel.journal)).toEqual([])
+  })
+
+  it('a book.json that will not read blocks the ack and holds the cursor — never a silently absent row', async () => {
+    // PUSH side: the pusher's own copy breaks between the commit and the push.
+    const pushWorld = await makeWorld()
+    await pushWorld.satchel.services.library.add('book:x', rec('Xenon'))
+    pushWorld.satchel.fs.store.set('books/book_x/book.json', new TextEncoder().encode('not json at all'))
+    await expect(pushWorld.session()).rejects.toMatchObject({ code: 'unreadable' })
+    // Nothing was acked; the row is still what there is to push.
+    expect(pushableOutbox(pushWorld.satchel.journal).map((e) => `${e.what} ${e.book}`)).toContain('record book:x')
+
+    // PULL side: the shelf cannot serve a row it holds but cannot read — the
+    // page fails and the cursor must not advance past the unserved row.
+    const pullWorld = await makeWorld()
+    await pullWorld.shelf.services.library.add('book:z', rec('Zeta'))
+    pullWorld.shelf.fs.store.set('books/book_z/book.json', new TextEncoder().encode('not json at all'))
+    await expect(pullWorld.session()).rejects.toMatchObject({ error: { code: 'unreadable' } })
+    expect(pullWorld.satchel.services.settings.get(SYNC_CURSOR_SETTING)).toBeNull()
+  })
+
+  it('an ack that does not name the pushed group acks nothing', async () => {
+    const { shelf, satchel, session } = await makeWorld()
+    await satchel.services.library.add('book:m', rec('Mismatch'))
+    const channel = await satchel.port.connect(shelf.wire.id)
+    const lying: SyncChannel = {
+      peerId: channel.peerId,
+      call: async (service, body) => {
+        const answer = await channel.call(service, body)
+        // A perfectly valid SHAPE that confirms nothing it was sent.
+        if (service === 'sync.push') return { book: (body as { book: string }).book, revs: {} }
+        return answer
+      },
+    }
+    await expect(satchel.ledger.runSession(lying)).rejects.toThrow(/does not match/)
+    await channel.close()
+    expect(pushableOutbox(satchel.journal).map((e) => `${e.what} ${e.book}`)).toContain('record book:m')
+
+    // An honest session then settles exactly that revision.
+    await session()
+    expect(pushableOutbox(satchel.journal)).toEqual([])
+  })
+
+  it('a pull page is judged against the cursor: non-advancing and regressing pages are refused', async () => {
+    const { satchel } = await makeWorld()
+    const answering = (page: unknown, hubSeq: number): SyncChannel => ({
+      peerId: 'fake-shelf',
+      call: async (service) => {
+        if (service === 'sync.hello') {
+          return {
+            clock: makeHlc(1, 0, 'eeeeeeeeeeeeeeee'),
+            epoch: 'e-fake',
+            hubSeq,
+            journalFormat: 1,
+            services: { sync: [1, 1] },
+          }
+        }
+        if (service === 'sync.pull') return page
+        throw new Error(`unexpected call: ${service}`)
+      },
+    })
+    // Not advancing and not terminal: an infinite loop, refused instead.
+    await expect(
+      satchel.ledger.runSession(answering({ rows: [], removals: [], nextSince: 0, done: false }, 10)),
+    ).rejects.toThrow(/does not advance/)
+    // Regressing behind the held cursor: a skip or a replay, refused.
+    satchel.services.settings.set(SYNC_CURSOR_SETTING, { peerId: 'fake-shelf', epoch: 'e-fake', since: 5 })
+    await expect(
+      satchel.ledger.runSession(answering({ rows: [], removals: [], nextSince: 3, done: true }, 10)),
+    ).rejects.toThrow(/outside/)
+    // Past the head the hello promised: refused.
+    await expect(
+      satchel.ledger.runSession(answering({ rows: [], removals: [], nextSince: 99, done: true }, 10)),
+    ).rejects.toThrow(/outside/)
+    // And the refused pages moved the cursor nowhere.
+    expect(satchel.services.settings.get(SYNC_CURSOR_SETTING)).toMatchObject({ since: 5 })
+  })
+
+  it('every stamp a pushed message carries is witnessed — a later local stamp beats it', async () => {
+    const { shelf } = await makeWorld()
+    const future = makeHlc(4_000_000_000_000, 0, 'ffffffffffffffff')
+    const push = shelf.ledger.services().find((one) => one.name === 'sync.push')!
+    await push.handler(
+      {
+        book: 'book:far',
+        revs: { record: 1 },
+        hasContent: false,
+        record: { title: 'From the future', author: 'A', position: 'cfi-far', positionAt: future },
+      },
+      { peer: 'satchel-x' } as unknown as Parameters<typeof push.handler>[1],
+    )
+    // Post-hello state on a skewed clock must not outrank the shelf's next
+    // local edit: the merge already applied `future`, so the next stamp the
+    // shelf issues has to be strictly above it.
+    expect(shelf.clock.now() > future).toBe(true)
+  })
+
+  it('a local card edit interleaved with a remote card apply keeps the local edit pushable', async () => {
+    const { shelf, satchel, session } = await makeWorld()
+    await shelf.services.cards.add(cardOf('c-shelf'))
+
+    /* Hold the satchel's journal, so begins QUEUE rather than run — the
+     * window in which a local edit and the remote apply are both in flight
+     * on the one cards surface. */
+    let openGate!: () => void
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve
+    })
+    void satchel.journalQueue.append(JOURNAL_KEY, () => gate)
+
+    let localEdit: Promise<void> | null = null
+    const channel = await satchel.port.connect(shelf.wire.id)
+    const interleaved: SyncChannel = {
+      peerId: channel.peerId,
+      call: async (service, body) => {
+        const answer = await channel.call(service, body)
+        if (service === 'sync.pull' && localEdit === null) {
+          /* Enqueued between the shelf's answer and the satchel applying the
+           * page — with cards unfenced, the local begin consumed the remote
+           * expectation here and the edit was journaled `remote`: an edit
+           * that never pushes. NOT awaited: it interleaves on the queue. */
+          localEdit = satchel.services.cards.add(cardOf('c-local'))
+          setTimeout(openGate, 20)
+        }
+        return answer
+      },
+    }
+    const summary = await satchel.ledger.runSession(interleaved)
+    await localEdit
+    await channel.close()
+    expect(summary.pulledCards).toBe(true)
+
+    // The remote apply journaled remote; the local edit stayed local and pushable.
+    const origins = satchel.journal.entries().filter((e) => e.kind === 'commit' && e.what === 'cards').map((e) => e.origin)
+    expect(origins).toContain('local')
+    expect(origins).toContain('remote')
+    expect(pushableOutbox(satchel.journal).map((e) => e.what)).toContain('cards')
+
+    // And the next session carries the local card to the shelf.
+    await session()
+    const held = JSON.parse(shelf.storage.map.get('paper.cards.v1') ?? '[]') as { id: string }[]
+    expect(held.map((one) => one.id).sort()).toEqual(['c-local', 'c-shelf'])
     expect(pushableOutbox(satchel.journal)).toEqual([])
   })
 

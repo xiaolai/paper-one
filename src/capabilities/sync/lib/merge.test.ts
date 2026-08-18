@@ -1,6 +1,15 @@
 import fc from 'fast-check'
 import { describe, expect, it } from 'vitest'
-import { parseRecord, type BookRecord, type Card, type Mark } from '../../../kernel'
+import {
+  liveCards,
+  liveMarks,
+  parseCards,
+  parseRecord,
+  validMarks,
+  type BookRecord,
+  type Card,
+  type Mark,
+} from '../../../kernel'
 import { hlcOf, makeHlc } from './clock'
 import {
   canonicalJson,
@@ -173,6 +182,24 @@ describe('mergeRecord is a semilattice', () => {
     )
   })
 
+  it('self-merge is a fixed point — mergeRecord(x, x) IS x, for every parsed record', () => {
+    fc.assert(
+      fc.property(arbRecord, (x) => {
+        expect(mergeRecord(x, x)).toEqual(x)
+      }),
+      RUNS,
+    )
+  })
+
+  it('self-merge invents no tag clock on a legacy record and keeps an orphan stamp', () => {
+    const legacy = parseRecord(JSON.stringify({ title: 'T', author: 'A', tags: ['Sea'], addedAt: 5 }))!
+    expect(mergeRecord(legacy, legacy)).toEqual(legacy)
+    expect(mergeRecord(legacy, legacy).tagClock).toBeUndefined()
+    // A positionAt with no position — parseRecord keeps it — must survive.
+    const orphan = parseRecord(JSON.stringify({ title: 'T', author: 'A', positionAt: makeHlc(10, 0, DEVICES[0]) }))!
+    expect(mergeRecord(orphan, orphan)).toEqual(orphan)
+  })
+
   it('three replicas converge under every delivery order', () => {
     fc.assert(
       fc.property(arbRecord, arbRecord, arbRecord, (a, b, c) => {
@@ -264,6 +291,49 @@ describe('mergeRecord — the registers, one by one', () => {
       expect(merged.openedAt).toBe(100)
     }
   })
+
+  it('parsedAt is ordered as a NUMBER — an exponent spelling does not lose to a smaller value', () => {
+    // (1e21).toString() is "1e+21"; padded lexical order called it smaller
+    // than 2e20's 21 plain digits. Numeric order says otherwise.
+    const bigger: BookRecord = { ...base, title: 'Newest parse', parsedAt: 1e21 }
+    const smaller: BookRecord = { ...base, title: 'Older parse', parsedAt: 2e20 }
+    for (const merged of [mergeRecord(bigger, smaller), mergeRecord(smaller, bigger)]) {
+      expect(merged.title).toBe('Newest parse')
+      expect(merged.parsedAt).toBe(1e21)
+    }
+    // Absent still loses to any parse, including a parse at time zero.
+    const never: BookRecord = { ...base, title: 'Never parsed' }
+    const atZero: BookRecord = { ...base, title: 'Parsed at zero', parsedAt: 0 }
+    for (const merged of [mergeRecord(never, atZero), mergeRecord(atZero, never)]) {
+      expect(merged.title).toBe('Parsed at zero')
+    }
+  })
+
+  it('parseRecord bounds parsedAt: negative or non-finite is dropped, a wide finite value is kept', () => {
+    expect(parseRecord(JSON.stringify({ title: 'T', author: 'A', parsedAt: -5 }))!.parsedAt).toBeUndefined()
+    expect(parseRecord(JSON.stringify({ title: 'T', author: 'A', parsedAt: null }))!.parsedAt).toBeUndefined()
+    expect(parseRecord(JSON.stringify({ title: 'T', author: 'A', parsedAt: 1e21 }))!.parsedAt).toBe(1e21)
+    expect(parseRecord(JSON.stringify({ title: 'T', author: 'A', parsedAt: 0 }))!.parsedAt).toBe(0)
+  })
+
+  it('a tag named __proto__ survives parse, merge, tags and the digest', async () => {
+    const at = makeHlc(10, 0, DEVICES[0])
+    const bare = parseRecord(JSON.stringify({ title: 'T', author: 'A' }))!
+    const clocked = parseRecord(
+      JSON.stringify({ title: 'T', author: 'A', tagClock: { ['__proto__']: { at, on: true, spelling: '__proto__' } } }),
+    )!
+    expect(clocked.tags).toEqual(['__proto__'])
+    for (const merged of [mergeRecord(clocked, bare), mergeRecord(bare, clocked)]) {
+      expect(merged.tagClock?.['__proto__']).toEqual({ at, on: true, spelling: '__proto__' })
+      expect(merged.tags).toEqual(['__proto__'])
+      expect(await recordDigest(merged)).not.toBe(await recordDigest(bare))
+    }
+    // The legacy synthesis path reaches the same register, not the prototype.
+    const legacy = parseRecord(JSON.stringify({ title: 'T', author: 'A', tags: ['__proto__'], addedAt: 5 }))!
+    const merged = mergeRecord(legacy, parseRecord(JSON.stringify({ title: 'T', author: 'A', addedAt: 5 }))!)
+    expect(merged.tags).toEqual(['__proto__'])
+    expect(merged.tagClock?.['__proto__']?.on).toBe(true)
+  })
 })
 
 /* ------------------------------------------------------- marks and cards */
@@ -314,6 +384,43 @@ describe('mergeMarks / mergeCards are semilattices with latest-action-wins', () 
     expect(mergeMarks([legacy], [acted])).toEqual([acted])
     expect(mergeMarks([acted], [legacy])).toEqual([acted])
   })
+
+  it('a row whose edit is newer than its tombstone reads LIVE — the parsers clear the older action', () => {
+    const t = (ms: number) => makeHlc(ms, 0, DEVICES[0])
+    // Edit at 20, tombstone at 10: latest action is the edit, so the row lives.
+    const revivedMark = { ...markOf('m1', 'kept', {}), updatedAt: t(20), deletedAt: t(10) }
+    const marks = validMarks([revivedMark])
+    expect(marks[0]!.deletedAt).toBeUndefined()
+    expect(marks[0]!.updatedAt).toBe(t(20))
+    expect(liveMarks(marks)).toHaveLength(1)
+    // Tombstone at or above the edit: still deleted, both stamps kept.
+    const deadMark = { ...markOf('m2', '', {}), updatedAt: t(10), deletedAt: t(20) }
+    expect(liveMarks(validMarks([deadMark]))).toHaveLength(0)
+    // Cards canonicalise by the same rule at their own parser.
+    const revivedCard = { ...cardOf('c1', 'kept', {}), updatedAt: t(20), deletedAt: t(10) }
+    const cards = parseCards(JSON.stringify([revivedCard]))
+    expect(cards[0]!.deletedAt).toBeUndefined()
+    expect(liveCards(cards)).toHaveLength(1)
+    const deadCard = { ...cardOf('c2', 'x', {}), updatedAt: t(10), deletedAt: t(20) }
+    expect(liveCards(parseCards(JSON.stringify([deadCard])))).toHaveLength(0)
+  })
+
+  it('parseCards holds one row per id — newest stamp wins — so mergeCards(a, a) is a', () => {
+    const t = (ms: number) => makeHlc(ms, 0, DEVICES[0])
+    const older = { ...cardOf('c1', 'older', {}), updatedAt: t(10) }
+    const newer = { ...cardOf('c1', 'newer', {}), updatedAt: t(20) }
+    for (const order of [
+      [older, newer],
+      [newer, older],
+    ]) {
+      const parsed = parseCards(JSON.stringify(order))
+      expect(parsed).toHaveLength(1)
+      expect(parsed[0]!.body).toBe('newer')
+      // A deduplicated list self-merges to ITSELF, by identity — the
+      // no-write convention the store's change detection reads.
+      expect(mergeCards(parsed, parsed)).toBe(parsed)
+    }
+  })
 })
 
 /* --------------------------------------------------------------- wire */
@@ -354,6 +461,21 @@ describe('the wire', () => {
     expect(fromWire([])).toBeNull()
     expect(fromWire('a record')).toBeNull()
   })
+
+  it('answers null — never throws — on input that cannot be serialised', () => {
+    const circular: Record<string, unknown> = { title: 'T', author: 'A' }
+    circular['self'] = circular
+    expect(fromWire(circular)).toBeNull()
+    expect(fromWire({ title: 'T', author: 'A', size: BigInt(7) })).toBeNull()
+    const trapped: Record<string, unknown> = { title: 'T', author: 'A' }
+    Object.defineProperty(trapped, 'boom', {
+      enumerable: true,
+      get() {
+        throw new Error('boom')
+      },
+    })
+    expect(fromWire(trapped)).toBeNull()
+  })
 })
 
 /* ------------------------------------------------------------- digests */
@@ -375,6 +497,17 @@ describe('digests', () => {
     const b = cardOf('c2', 'y', {})
     expect(await cardsDigest([a, b])).toBe(await cardsDigest([b, a]))
     expect(await cardsDigest([a, b])).not.toBe(await cardsDigest([{ ...a, updatedAt: t(11) }, b]))
+  })
+
+  it('two rows divergent under ONE stamp digest differently — the pull cannot skip their merge', async () => {
+    // Same id, same newest stamp, different content: an (id, stamp) digest
+    // called these equal, and the merge that would reconcile them never ran.
+    const mine = markOf('m1', 'my thought', { updatedAt: t(10) })
+    const theirs = markOf('m1', 'their thought', { updatedAt: t(10) })
+    expect(await marksDigest([mine])).not.toBe(await marksDigest([theirs]))
+    const myCard = cardOf('c1', 'x', { updatedAt: t(10) })
+    const theirCard = cardOf('c1', 'y', { updatedAt: t(10) })
+    expect(await cardsDigest([myCard])).not.toBe(await cardsDigest([theirCard]))
   })
 
   it('record digest ignores map order and device-local fields, and sees a stamp change', async () => {

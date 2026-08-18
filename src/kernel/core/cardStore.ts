@@ -3,6 +3,16 @@ import { hlcOf, type Hlc } from './hlc'
 import { rekeyBook } from './idMigration'
 import { newMarkId, type MarkStorage } from './marks'
 import { NOOP_RECORDER, recorded, type MutationRecorder } from './ports'
+import type { WriteQueue } from './writeQueue'
+
+/**
+ * The book the cards surface is recorded — and queued — under. Cards are
+ * ONE cross-book collection, so the recorder's `(book, what)` key must be
+ * one key whatever card was touched: recording each write under the card's
+ * own `bookId` split the surface into per-book journal streams, and a
+ * card's push rev could name a stream its payload never travelled on.
+ */
+const CARDS_BOOK = ''
 
 /**
  * The card store — cards, as a service with no React in it.
@@ -75,6 +85,16 @@ export interface CardsOptions {
   readonly recorder?: MutationRecorder
   /** The stamp for tombstones — see `MarkStoreOptions.clock`, whose rule this is. */
   readonly clock?: () => Hlc
+  /**
+   * The SHARED write queue, when the composition has one. Card writes then
+   * run on it under `CARDS_BOOK` — the same key the sync ledger fences its
+   * remote card applies on — so a local edit and a remote apply are ordered
+   * by the queue, not by the tick they happened to start in. Unqueued (the
+   * default), a started local write could consume the ledger's one-shot
+   * remote expectation and be journaled `remote`: an edit that never
+   * pushes. Absent, writes run inline, exactly as before.
+   */
+  readonly queue?: WriteQueue
 }
 
 /** Mint a card: the draft, plus an id and a time. Same identity scheme as marks. */
@@ -86,6 +106,7 @@ export function createCards({
   storage,
   recorder = NOOP_RECORDER,
   clock = () => hlcOf(Date.now()),
+  queue,
 }: CardsOptions): Cards {
   /* Loaded once. A storage that throws on READ — disabled mid-session, or a
    * hostile stub — must not stop the pane from rendering. */
@@ -114,34 +135,44 @@ export function createCards({
    * rejection is what a caller that awaited durability needs. Both, because
    * they are answers to different questions.
    */
-  const persist = async (book: string): Promise<void> => {
-    if (!storage) {
-      if (persistent) {
-        persistent = false
-        publish()
+  const persist = (): Promise<void> => {
+    const write = async (): Promise<void> => {
+      if (!storage) {
+        if (persistent) {
+          persistent = false
+          publish()
+        }
+        return
       }
-      return
+      const target = storage
+      try {
+        /* Recorded under `CARDS_BOOK`, whichever card was touched — one
+         * surface, one journal stream. The write serialises the WHOLE held
+         * list, read at run time, so a queued write persists the newest
+         * state and never a stale snapshot. */
+        await recorded(recorder, CARDS_BOOK, 'cards', async () => {
+          target.setItem(CARDS_STORAGE_KEY, JSON.stringify(all))
+          await target.flush?.()
+        })
+        if (!persistent) {
+          persistent = true
+          publish()
+        }
+      } catch (cause) {
+        if (persistent) {
+          persistent = false
+          publish()
+        }
+        throw cause
+      }
     }
-    const target = storage
-    try {
-      await recorded(recorder, book, 'cards', async () => {
-        target.setItem(CARDS_STORAGE_KEY, JSON.stringify(all))
-        await target.flush?.()
-      })
-      if (!persistent) {
-        persistent = true
-        publish()
-      }
-    } catch (cause) {
-      if (persistent) {
-        persistent = false
-        publish()
-      }
-      throw cause
-    }
+    /* ENQUEUED SYNCHRONOUSLY when a queue exists — the ordering the sync
+     * ledger's fence relies on: whatever was on the cards key before this
+     * call has already begun by the time this write's bracket opens. */
+    return queue ? queue.append(CARDS_BOOK, write) : write()
   }
 
-  const applyFor = (book: string, mutate: (prev: readonly Card[]) => readonly Card[]): Promise<void> => {
+  const applyCards = (mutate: (prev: readonly Card[]) => readonly Card[]): Promise<void> => {
     const next = mutate(all)
     /* NOTHING MOVED, so nothing is written. The mutation is applied to the
      * held list, which is authoritative and updated synchronously — so a
@@ -149,7 +180,7 @@ export function createCards({
     if (next === all) return Promise.resolve()
     all = next
     publish()
-    return persist(book)
+    return persist()
   }
 
   return {
@@ -160,18 +191,15 @@ export function createCards({
         listeners.delete(listener)
       }
     },
-    add: (card) => applyFor(card.bookId, (prev) => addCard(prev, card)),
-    remove: (id) => {
-      const owner = all.find((card) => card.id === id)?.bookId ?? ''
-      // A tombstone, not a vanished row — see `removeCard`.
-      return applyFor(owner, (prev) => removeCard(prev, id, clock()))
-    },
-    apply: (mutate) => applyFor('', mutate),
+    add: (card) => applyCards((prev) => addCard(prev, card)),
+    // A tombstone, not a vanished row — see `removeCard`.
+    remove: (id) => applyCards((prev) => removeCard(prev, id, clock())),
+    apply: (mutate) => applyCards(mutate),
     /* `apply` persists whatever the mutation returns even when nothing changed,
      * and this runs on every open — so the guard is here, reading the identity
      * `rekeyBook` returns when it found nothing to move. */
     rekey: (from, to) =>
-      applyFor(to, (prev) => {
+      applyCards((prev) => {
         const next = rekeyBook(prev, from, to)
         return next === prev ? prev : [...next]
       }),

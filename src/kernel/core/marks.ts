@@ -512,6 +512,20 @@ export function validMarks(parsed: unknown): Mark[] {
   return dedupeById(
     parsed.filter(isMark).map((row) => {
       const { updatedAt, deletedAt, ...rest } = row
+      /* The stamps, kept only when they ARE stamps — a malformed one is
+       * dropped alone, and the mark stands as a legacy row (`markStamp`
+       * falls back to `createdAt`). Dropping the whole mark over a bad
+       * stamp would let one hand-edit delete a highlight. */
+      const updated = isHlc(updatedAt) ? updatedAt : undefined
+      const deleted = isHlc(deletedAt) ? deletedAt : undefined
+      /* LATEST ACTION WINS ON THE ROW ITSELF. A row carrying an edit NEWER
+       * than its tombstone is a row the merge rule says is alive — but every
+       * read model decides liveness by the tombstone's mere presence, so the
+       * two disagreed. Canonicalised here, at the one door rows come through:
+       * the older action is cleared, and field presence IS the merge's
+       * answer. A tombstone at or above the edit stays — deleted. */
+      const tombstone =
+        deleted !== undefined && !(updated !== undefined && updated > deleted) ? deleted : undefined
       return {
         ...rest,
         // Absent for every mark made before context was stored, which is most of
@@ -519,12 +533,8 @@ export function validMarks(parsed: unknown): Mark[] {
         // with — NOT a reason to drop a mark the reader made.
         prefix: readContext(row.prefix),
         suffix: readContext(row.suffix),
-        /* The stamps, kept only when they ARE stamps — a malformed one is
-         * dropped alone, and the mark stands as a legacy row (`markStamp`
-         * falls back to `createdAt`). Dropping the whole mark over a bad
-         * stamp would let one hand-edit delete a highlight. */
-        ...(isHlc(updatedAt) ? { updatedAt } : {}),
-        ...(isHlc(deletedAt) ? { deletedAt } : {}),
+        ...(updated !== undefined ? { updatedAt: updated } : {}),
+        ...(tombstone !== undefined ? { deletedAt: tombstone } : {}),
       }
     }),
   )

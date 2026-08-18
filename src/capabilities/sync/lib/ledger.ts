@@ -8,6 +8,7 @@ import {
   readBook,
   readMarks,
   readPresence,
+  recordPath,
   validMarks,
   type BookRecord,
   type KernelServices,
@@ -16,7 +17,7 @@ import {
   type ServiceContribution,
   type Setting,
 } from '../../../kernel'
-import type { Clock, Hlc } from './clock'
+import { isHlc, type Clock, type Hlc } from './clock'
 import type { Journal, JournalKeyRef } from './journal'
 import { canonicalJson, cardsDigest, marksDigest, mergeRecord, toWire } from './merge'
 import {
@@ -167,23 +168,54 @@ export function createLedger({
   const { library, marks, cards, settings, fs, storage } = services
 
   const ownCards = () => parseCards(storage?.getItem(CARDS_STORAGE_KEY) ?? null)
+  /* ABSENT AND UNREADABLE ARE NOT THE SAME ANSWER — `updateBook`'s rule,
+   * held here too. `readMarks` already draws the line (absent is `[]`,
+   * unreadable throws); swallowing the throw made a momentary read failure
+   * look like "no marks", so a push acked rows it never sent and a pull
+   * advanced `since` past rows it never served. The error propagates: the
+   * push fails un-acked, the page fails un-advanced, and the next session
+   * retries. */
   const ownMarks = async (book: string) => {
     if (!fs) return []
-    try {
-      return validMarks(await readMarks(fs, book))
-    } catch {
-      return []
-    }
+    return validMarks(await readMarks(fs, book))
   }
   const ownRecord = async (book: string): Promise<BookRecord | null> => {
     if (!fs) return null
-    try {
-      return await readBook(fs, book)
-    } catch {
-      return null
+    const record = await readBook(fs, book)
+    if (record !== null) return record
+    /* `readBook` answers null for gone AND for broken. Present but
+     * unreadable is a row this device CANNOT SERVE — never one it does not
+     * have. Retryable: a repaired file resumes exactly where this stopped. */
+    if (await fs.exists(recordPath(book))) {
+      throw refuse('unreadable', `book.json for ${book} is there but could not be read`, true)
     }
+    return null
   }
   const rowOf = (book: string) => library.getSnapshot().find((one) => one.bookId === book)
+
+  /**
+   * Witness EVERY stamp a received message carries — records' register
+   * stamps, marks' and cards' edit and tombstone stamps, removal times —
+   * before it is applied. The hello exchanges the clocks, but the state
+   * that follows can carry stamps far past either clock (a peer that
+   * itself merged from a skewed device), and a local edit made after
+   * applying such state must still beat it: LWW without a witnessed floor
+   * silently loses the newer edit. Structural, not schema-bound, so a
+   * field added to the protocol cannot quietly ship unwitnessed stamps.
+   */
+  const witnessStamps = (value: unknown): void => {
+    if (typeof value === 'string') {
+      if (isHlc(value)) clock.witness(value)
+      return
+    }
+    if (Array.isArray(value)) {
+      for (const one of value) witnessStamps(one)
+      return
+    }
+    if (typeof value === 'object' && value !== null) {
+      for (const key of Object.keys(value)) witnessStamps((value as Record<string, unknown>)[key])
+    }
+  }
 
   /**
    * Merge-or-keep, identity-guarded so an echo writes nothing. The incoming
@@ -211,36 +243,36 @@ export function createLedger({
 
   /**
    * Run remote applications with EXACT provenance. For each key, a fence
-   * task is enqueued on the book's own write queue that arms the journal's
-   * one-shot remote expectation, and the apply is enqueued in the SAME
-   * synchronous block — so nothing can land between fence and apply, a
+   * task is enqueued on the surface's own write queue that arms the
+   * journal's one-shot remote expectation, and the apply is enqueued in the
+   * SAME synchronous block — so nothing can land between fence and apply, a
    * local edit enqueued EARLIER has already begun (and stayed `local`,
    * unarmed), and one enqueued LATER begins after the apply consumed the
    * expectation. This is the lock-scope §2.4 describes, made literal; a
    * plain "register, then await the applies" had a window in which an
    * already-enqueued local edit's begin consumed the expectation and the
-   * edit silently never pushed. Expectations left unconsumed (an identity
-   * merge writes nothing) are taken back at the end. The one key with no
-   * shared queue is `cards` (its store orders its own writes); its
-   * expectation is armed directly, and the residual same-tick window there
-   * is stated rather than hidden.
+   * edit silently never pushed. Cards ride the SAME mechanism: the card
+   * store writes on the shared queue under its canonical book `''`, so the
+   * fence that used to be impossible for cards — and left a same-tick
+   * window a local card edit fell into, journaled `remote`, never pushed —
+   * is now the ordinary one. Expectations left unconsumed (an identity
+   * merge writes nothing) are taken back at the end, each BY ITS TICKET, so
+   * one operation's clear can never cancel a concurrent operation's
+   * still-armed expectation.
    */
   const applyRemote = async (applies: readonly RemoteApply[]): Promise<void> => {
-    const armed: JournalKeyRef[] = []
+    const armed: { book: string; what: JournalKeyRef['what']; ticket: number | null }[] = []
     const fences: Promise<void>[] = []
     const pending: Promise<unknown>[] = []
     for (const apply of applies) {
       for (const key of apply.keys) {
-        armed.push(key)
-        if (key.what === 'cards') {
-          journal.expectRemote(key.book, key.what)
-        } else {
-          fences.push(
-            services.writes.append(key.book, async () => {
-              journal.expectRemote(key.book, key.what)
-            }),
-          )
-        }
+        const slot = { book: key.book, what: key.what, ticket: null as number | null }
+        armed.push(slot)
+        fences.push(
+          services.writes.append(key.book, async () => {
+            slot.ticket = journal.expectRemote(key.book, key.what)
+          }),
+        )
       }
       pending.push(apply.run())
     }
@@ -254,7 +286,9 @@ export function createLedger({
        * a not-yet-armed one would leave the later arming loaded for the
        * next local edit, which is the exact defect this helper closes. */
       await Promise.allSettled(fences)
-      for (const key of armed) journal.clearRemote(key.book, key.what)
+      for (const slot of armed) {
+        if (slot.ticket !== null) journal.clearRemote(slot.book, slot.what, slot.ticket)
+      }
     }
   }
 
@@ -269,11 +303,24 @@ export function createLedger({
     }
   }
 
-  const applyIncomingCards = async (incoming: PushGroup['cards']): Promise<void> => {
-    if (!incoming) return
-    const current = ownCards()
-    if ((await cardsDigest(mergeCards(current, incoming))) === (await cardsDigest(current))) return
-    await cards.apply((prev) => mergeCards(prev, incoming))
+  /**
+   * Merge incoming cards, ENQUEUED SYNCHRONOUSLY — the property `applyRemote`
+   * fences on. `mergeCards` returns its input by identity when nothing
+   * changed and the store writes (and brackets) nothing for an identity, so
+   * the digest pre-check this used to await added no protection and broke
+   * the synchronous-enqueue contract for the one surface with no book queue.
+   * Answers whether anything moved, for the session summary.
+   */
+  const applyIncomingCards = (incoming: PushGroup['cards']): Promise<boolean> => {
+    if (!incoming) return Promise.resolve(false)
+    let changed = false
+    return cards
+      .apply((prev) => {
+        const next = mergeCards(prev, incoming)
+        changed = next !== prev
+        return next
+      })
+      .then(() => changed)
   }
 
   /* ------------------------------------------------------------ the shelf */
@@ -310,6 +357,7 @@ export function createLedger({
     const group = parsePushGroup(raw)
     if (group === null) throw refuse('malformed', 'not a push group')
     requireReady()
+    witnessStamps(group)
 
     /* The content identity guard (§2.3): both sides hold bytes and the
      * hashes differ ⇒ conflict — never merge, never fetch. Judged BEFORE any
@@ -542,6 +590,16 @@ export function createLedger({
   }
 
   const applyAck = async (group: PushGroup, ack: PushAck): Promise<void> => {
+    /* THE ACK MUST NAME THE PUSH IT ANSWERS — same book, same revs, exactly.
+     * The revs to clear come from the GROUP, so an empty or misdirected ack
+     * with a perfectly valid shape would otherwise clear revisions its
+     * sender never confirmed — an edit marked pushed that never arrived.
+     * Zero trust at the boundary: a mismatch is a broken peer, and the
+     * session fails loudly with every rev still pushable. */
+    if (ack.book !== group.book || PUSHABLE.some((what) => ack.revs[what] !== group.revs[what])) {
+      throw new Error('sync.push answered an ack that does not match the pushed group')
+    }
+    witnessStamps(ack)
     /* AS A MERGE, NEVER AN ASSIGNMENT (§2.3): a delayed ack meeting a newer
      * local (or pulled) state loses on stamps and changes nothing. */
     const applies: RemoteApply[] = []
@@ -581,6 +639,7 @@ export function createLedger({
   }
 
   const applyPage = async (channel: SyncChannel, page: PullPage): Promise<{ rows: number; removals: number; marksPulled: number; cardsApplied: boolean }> => {
+    witnessStamps(page)
     const known = new Set(library.getSnapshot().map((one) => one.bookId))
     const adds: PullRow[] = []
     const updates: RemoteRow[] = []
@@ -608,12 +667,11 @@ export function createLedger({
         ? [
             {
               keys: [{ book: '', what: 'cards' } as JournalKeyRef],
-              run: async () => {
-                const incoming = page.cards as NonNullable<PullPage['cards']>
-                const before = await cardsDigest(ownCards())
-                await applyIncomingCards(incoming)
-                cardsApplied = (await cardsDigest(ownCards())) !== before
-              },
+              /* Enqueued synchronously — see `applyIncomingCards`. */
+              run: () =>
+                applyIncomingCards(page.cards as NonNullable<PullPage['cards']>).then((changed) => {
+                  cardsApplied = cardsApplied || changed
+                }),
             } satisfies RemoteApply,
           ]
         : []),
@@ -633,6 +691,7 @@ export function createLedger({
       const rows = Array.isArray(parsed?.marks) ? validMarks(parsed.marks) : null
       if (rows === null) throw new Error('sync.marks answered something that is not a marks list')
       if (rows.length === 0) continue
+      witnessStamps(rows)
       await applyRemote([{ keys: [{ book: row.book, what: 'marks' }], run: () => marks.mergeRemote(row.book, rows) }])
       marksPulled += 1
     }
@@ -656,6 +715,28 @@ export function createLedger({
       })
       const page = parsePullPage(raw)
       if (page === null) throw new Error('sync.pull answered something that is not a page')
+      /* THE PAGE IS JUDGED AGAINST THE CURSOR before a row of it is
+       * applied. Shape-valid is not cursor-valid: a `nextSince` behind
+       * `since` would replay or — persisted — skip what sat between; one
+       * past `until` claims seqs the hello never promised; a non-advancing
+       * page that is not terminal loops this session forever. Sequences
+       * must climb inside the window, or the shelf is serving a feed that
+       * disagrees with itself. */
+      if (page.nextSince < since || page.nextSince > until) {
+        throw new Error(`sync.pull answered nextSince ${page.nextSince} outside [${since}, ${until}]`)
+      }
+      if (!page.done && page.nextSince === since) {
+        throw new Error('sync.pull answered a page that does not advance and is not terminal')
+      }
+      for (const list of [page.rows, page.removals] as const) {
+        let prev = since
+        for (const one of list) {
+          if (one.seq <= prev || one.seq > page.nextSince) {
+            throw new Error(`sync.pull answered seq ${one.seq} outside its page window`)
+          }
+          prev = one.seq
+        }
+      }
       const applied = await applyPage(channel, page)
       totals.rows += applied.rows
       totals.removals += applied.removals

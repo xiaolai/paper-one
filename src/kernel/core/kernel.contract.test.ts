@@ -578,8 +578,10 @@ describe('every writer is bracketed by the recorder, begin before the write and 
     expect(log.indexOf('begin content book:a #6')).toBeLessThan(log.indexOf('commit content book:a #6'))
     expect(w.kernel.library.getSnapshot()[0]).toMatchObject({ hasContent: true })
 
+    /* Cards bracket under the CANONICAL cards book '' — one cross-book
+     * surface, one recorder stream, whichever card was touched. */
     await cards.add(CARD_1)
-    expect(between(log, 'begin cards book:a #7', 'commit cards book:a #7')).toEqual(['set paper.cards.v1'])
+    expect(between(log, 'begin cards  #7', 'commit cards  #7')).toEqual(['set paper.cards.v1'])
 
     await library.remove('book:a')
     const removal = between(log, 'begin removed book:a #8', 'commit removed book:a #8')

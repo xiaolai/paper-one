@@ -108,7 +108,7 @@ export function createKernelServices({
   const writes = writeQueue()
   const library = createLibrary({ fs, queue: writes, initial: initialBooks, recorder: recorderPort, clock: clockPort })
   const marks = createMarkStore({ fs, queue: writes, recorder: recorderPort, clock: clockPort })
-  const cards = createCards({ storage, recorder: recorderPort, clock: clockPort })
+  const cards = createCards({ storage, recorder: recorderPort, clock: clockPort, queue: writes })
   const settings = createSettingsStore(
     settingsMigration ? { storage, migrate: settingsMigration } : { storage },
   )

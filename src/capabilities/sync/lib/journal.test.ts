@@ -14,7 +14,7 @@ import {
   type Journal,
   type JournalEntry,
 } from './journal'
-import { crashableFs, journalLines, memoryStorage, type CrashableFs } from './journalFs.testkit'
+import { crashableFs, fsOver, journalLines, memoryStorage, type CrashableFs } from './journalFs.testkit'
 import { recordDigest } from './merge'
 
 const DEV = 'a1b2c3d4e5f60718'
@@ -79,6 +79,26 @@ describe('the bracket: begin, commit, seq and rev', () => {
     // And the lines are really in the file, one JSON per line.
     expect(journalLines(fs, JOURNAL_PATH)).toHaveLength(6)
   })
+
+  it('a commit settles only ITS OWN begin — an overlapped bracket is still recovered after a crash', async () => {
+    const fs = crashableFs()
+    const journal = journalOver(fs)
+    await journal.open()
+    // Two brackets in flight on ONE key — cards writes are not serialised by
+    // the book queue, so this shape is reachable — and only the first commits.
+    const a = await journal.begin('book:a', 'record')
+    await journal.begin('book:a', 'record')
+    await journal.commit(a, 'v-a')
+
+    // Crash here: reopen over the exact bytes. The second begin must still
+    // dangle and be recovered — a commit that swept the whole key lost it.
+    const reopened = journalOver(fsOver(new Map(fs.store)))
+    await reopened.open()
+    const commits = reopened.entries().filter((e) => e.kind === 'commit')
+    expect(commits).toHaveLength(2)
+    expect(commits[0]).toMatchObject({ digest: 'v-a', rev: 1 })
+    expect(commits[1]).toMatchObject({ book: 'book:a', what: 'record', rev: 2, origin: 'local' })
+  })
 })
 
 describe('load tolerance', () => {
@@ -115,6 +135,23 @@ describe('load tolerance', () => {
     await expect(journalOver(fs).open()).rejects.toThrow(/not the tail/)
   })
 
+  it('a COMPLETE last line that is not an entry is corruption, not a torn tail', async () => {
+    const fs = crashableFs()
+    const journal = journalOver(fs)
+    await journal.open()
+    const token = await journal.begin('book:a', 'record')
+    await journal.commit(token)
+    await journal.close()
+    /* Whole valid JSON, wrong shape. A torn append cannot leave this — a
+     * byte prefix of `{...}` either fails to parse or IS the whole line —
+     * so tolerating it would erase a line somebody wrote. */
+    const held = fs.store.get(JOURNAL_PATH)!
+    const withBadTail = new Uint8Array([...held, ...new TextEncoder().encode('{"seq":99}\n')])
+    fs.store.set(JOURNAL_PATH, withBadTail)
+
+    await expect(journalOver(fs).open()).rejects.toThrow(/not a journal entry/)
+  })
+
   it('commits a dangling begin with a fresh seq at load', async () => {
     const fs = crashableFs()
     const journal = journalOver(fs)
@@ -133,6 +170,40 @@ describe('load tolerance', () => {
     const again = journalOver(fs)
     await again.open()
     expect(again.entries()).toEqual(reopened.entries())
+  })
+})
+
+describe('load validation — a corrupt journal is refused, not absorbed', () => {
+  const at = makeHlc(1, 0, DEV)
+  const line = (entry: Record<string, unknown>): string => `${JSON.stringify(entry)}\n`
+  const beginLine = (seq: number, epoch = 'e1') =>
+    line({ seq, kind: 'begin', epoch, book: 'book:a', what: 'record', at, origin: 'local' })
+  const commitLine = (seq: number, rev: number) =>
+    line({ seq, kind: 'commit', epoch: 'e1', book: 'book:a', what: 'record', at, rev, origin: 'local' })
+  const overFile = (text: string) => {
+    const fs = crashableFs()
+    fs.store.set(JOURNAL_PATH, new TextEncoder().encode(text))
+    return journalOver(fs)
+  }
+
+  it('throws on a seq that does not strictly increase', async () => {
+    await expect(overFile(beginLine(5) + beginLine(3)).open()).rejects.toThrow(/does not increase/)
+    await expect(overFile(beginLine(4) + beginLine(4)).open()).rejects.toThrow(/does not increase/)
+  })
+
+  it('throws on a second epoch', async () => {
+    await expect(overFile(beginLine(1, 'e1') + beginLine(2, 'e2')).open()).rejects.toThrow(/second epoch/)
+  })
+
+  it('throws on a commit rev that regresses its key', async () => {
+    await expect(overFile(commitLine(1, 2) + commitLine(2, 1)).open()).rejects.toThrow(/regresses/)
+    await expect(overFile(commitLine(1, 3) + commitLine(2, 3)).open()).rejects.toThrow(/regresses/)
+  })
+
+  it('still opens a valid file written the same way', async () => {
+    const journal = overFile(beginLine(1) + commitLine(2, 1))
+    await journal.open()
+    expect(journal.head()).toBeGreaterThanOrEqual(2)
   })
 })
 
@@ -210,6 +281,26 @@ describe('origin — the echo fix', () => {
     const token = await journal.begin('book:a', 'record')
     await journal.commit(token)
     expect(journal.entries().filter((e) => e.kind === 'commit')[0]!.origin).toBe('local')
+  })
+
+  it('a clear takes back only ITS OWN expectation — a concurrent operation keeps its arm', async () => {
+    const journal = journalOver(crashableFs())
+    await journal.open()
+    // Two operations arm the same key; the first one's apply consumes one.
+    const first = journal.expectRemote('book:a', 'record')
+    journal.expectRemote('book:a', 'record')
+    const consumed = await journal.begin('book:a', 'record')
+    await journal.commit(consumed)
+    // Its clear is a no-op now — under a shared counter it took back the
+    // SECOND operation's still-armed expectation, whose apply then
+    // journaled `local`: an echo.
+    journal.clearRemote('book:a', 'record', first)
+    const second = await journal.begin('book:a', 'record')
+    await journal.commit(second)
+    const after = await journal.begin('book:a', 'record')
+    await journal.commit(after)
+    const commits = journal.entries().filter((e) => e.kind === 'commit')
+    expect(commits.map((e) => e.origin)).toEqual(['remote', 'remote', 'local'])
   })
 })
 
@@ -315,6 +406,29 @@ describe('compaction', () => {
     expect(reopened.feed(0, reopened.head()).map((e) => e.digest)).toEqual(['v5', 'm1', undefined])
     expect(reopened.entries().filter((e) => e.kind === 'commit' && e.book === 'book:b')).toHaveLength(1)
   })
+
+  it('keeps the unacked LOCAL commit under a later remote one — the outbox survives compact and reopen', async () => {
+    const fs = crashableFs()
+    const journal = journalOver(fs)
+    await journal.open()
+    const local = await journal.begin('book:a', 'record')
+    await journal.commit(local, 'v-local')
+    await journal.markRemote([{ book: 'book:a', what: 'record' }], async () => {
+      const remote = await journal.begin('book:a', 'record')
+      await journal.commit(remote, 'v-remote')
+    })
+
+    await journal.compact()
+    // The local rev 1 is still unacked and still the thing to push…
+    expect(journal.outbox()).toEqual([expect.objectContaining({ book: 'book:a', what: 'record', rev: 1 })])
+    // …and the feed still serves the LAST commit, the remote one.
+    expect(journal.feed(0, journal.head()).map((e) => e.digest)).toEqual(['v-remote'])
+
+    await journal.close()
+    const reopened = journalOver(fs)
+    await reopened.open()
+    expect(reopened.outbox()).toEqual([expect.objectContaining({ book: 'book:a', what: 'record', rev: 1 })])
+  })
 })
 
 describe('bootstrap — building to ready over an existing shelf', () => {
@@ -408,6 +522,28 @@ describe('bootstrap — building to ready over an existing shelf', () => {
       'removed book:cccc',
     ])
   })
+
+  it('a runtime cards write joins the bootstrap baseline on the ONE (book "", cards) stream', async () => {
+    const fs = shelf()
+    const storage = memoryStorage({ 'paper.cards.v1': CARD })
+    const journal = journalOver(fs, { storage })
+    await journal.open()
+
+    // A caller names its own book id; the journal canonicalises to ''. Split
+    // by caller, the runtime rev named a stream the payload never travels on.
+    const token = await journal.begin('book:aaaa', 'cards')
+    await journal.commit(token)
+
+    const cardCommits = journal.entries().filter((e) => e.kind === 'commit' && e.what === 'cards')
+    expect(cardCommits.map((e) => [e.book, e.rev])).toEqual([
+      ['', 1],
+      ['', 2],
+    ])
+    // The feed coalesces the surface to one entry, and the outbox pushes
+    // the runtime rev on the canonical stream.
+    expect(journal.feed(0, journal.head()).filter((e) => e.what === 'cards')).toHaveLength(1)
+    expect(journal.outbox()).toContainEqual(expect.objectContaining({ book: '', what: 'cards', rev: 2 }))
+  })
 })
 
 /* ------------------------------------------------------------------------ */
@@ -470,14 +606,15 @@ describe('every kernel writer brackets through the journal', () => {
     expect(commits.length).toBe(begins.length) // every begin has its commit
     const kinds = commits.map((e) => `${e.what} ${e.book}`)
     // add, update, restore-merge write the record; marks twice; content twice
-    // (keepContent + refreshContent); one cover; cards; remove + restore.
+    // (keepContent + refreshContent); one cover; cards — journaled under the
+    // canonical cards book '', ONE cross-book surface; remove + restore.
     for (const expected of [
       'record book:a',
       'marks book:a',
       'cover book:a',
       'content book:a',
       'removed book:a',
-      'cards book:a',
+      'cards ',
     ]) {
       expect(kinds).toContain(expected)
     }

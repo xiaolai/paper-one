@@ -14,12 +14,16 @@
  *   sync/journal.dirty        exists while a session is open — see below
  *
  * Entry lines: `{seq, kind: begin|commit|acked, epoch, book, what, at, rev,
- * origin: local|remote, digest?}` — `rev` and `digest` on commits, `rev` on
- * acks. `seq` is one strictly-increasing sequence over every line;
- * `rev` is per-`(book, what)` and monotone, allocated at commit. The meta
- * file's `nextSeq` is a FLOOR, not the truth: the truth is the highest seq
- * in the journal, recomputed at load, so the meta file does not need a
- * write per append.
+ * begin?, origin: local|remote, digest?}` — `rev` and `digest` on commits,
+ * `rev` on acks, `begin` (the settled begin's seq) on runtime commits so a
+ * commit clears only its OWN bracket. `seq` is one strictly-increasing
+ * sequence over every line; `rev` is per-`(book, what)` and monotone,
+ * allocated at commit — both VALIDATED at load, with the single epoch: a
+ * violation is corruption and throws rather than seeding `nextSeq` from a
+ * lie. Cards are one cross-book surface and journal under `book: ''`
+ * whatever a caller names. The meta file's `nextSeq` is a FLOOR, not the
+ * truth: the truth is the highest seq in the journal, recomputed at load,
+ * so the meta file does not need a write per append.
  *
  * DURABILITY. Appends are serialised on one write-queue key (`journal`),
  * appended (never rewritten), and `fsync`ed through the injected hook — the
@@ -97,6 +101,15 @@ export interface JournalEntry {
   readonly at: Hlc
   /** On commits and acks. */
   readonly rev?: number
+  /**
+   * On a runtime commit: the `seq` of the begin this commit settles. A
+   * commit must clear ONLY its own bracket — brackets on one key can
+   * overlap (cards are not serialised by the book queue), and a commit that
+   * swept every dangling begin for the key silently un-announced a write
+   * still in flight. Absent on baseline/verify commits, which follow no
+   * begin; those clear the key whole, the pre-token behaviour.
+   */
+  readonly begin?: number
   readonly origin: JournalOrigin
   readonly digest?: string
 }
@@ -158,13 +171,18 @@ export interface Journal extends MutationRecorder {
   /**
    * The one-shot pair `markRemote` is made of, for a caller that must ARM
    * IN LINE (the ledger): `expectRemote` registers one expectation NOW —
-   * synchronous, so it can run inside the book's own queued task, after
-   * every earlier-enqueued local edit has already begun — and `clearRemote`
-   * takes one unconsumed expectation back (a no-op when the apply consumed
-   * it). An expectation left armed would relabel the NEXT local edit.
+   * synchronous, so it can run inside the surface's own queued task, after
+   * every earlier-enqueued local edit has already begun — and returns a
+   * TICKET naming exactly that expectation. `clearRemote` takes THAT ticket
+   * back when the apply did not consume it (a no-op once it has been):
+   * ticket-scoped, because a shared per-key counter let one operation's
+   * clear cancel a DIFFERENT operation's still-armed expectation, whose
+   * apply then journaled `local` — an echo. An expectation left armed
+   * would relabel the NEXT local edit; one cleared by a stranger relabels
+   * the remote apply itself.
    */
-  expectRemote(book: string, what: MutationKind): void
-  clearRemote(book: string, what: MutationKind): void
+  expectRemote(book: string, what: MutationKind): number
+  clearRemote(book: string, what: MutationKind, ticket: number): void
   /** Commits with `since < seq ≤ until`, coalesced to the last per
    *  `(book, what)`, in seq order — the shelf's change feed. */
   feed(since: number, until: number): readonly JournalEntry[]
@@ -194,6 +212,15 @@ const MUTATION_KINDS: ReadonlySet<string> = new Set(['record', 'marks', 'cover',
 
 const keyOf = (book: string, what: MutationKind): string => `${what} ${book}`
 
+/**
+ * The book a `(book, what)` is journaled under. Cards are ONE cross-book
+ * surface and their canonical book is `''` — the same key the bootstrap
+ * baseline uses. The kernel's card writer records under `''` too; this is
+ * the belt for any other caller and for lines written before the rule, so
+ * one surface can never split into unrelated rev and outbox streams again.
+ */
+const canonicalBook = (book: string, what: MutationKind): string => (what === 'cards' ? '' : book)
+
 interface KeyState {
   lastCommit?: JournalEntry
   lastLocalCommit?: JournalEntry
@@ -204,13 +231,14 @@ interface KeyState {
   dangling: JournalEntry[]
 }
 
-function parseEntry(line: string): JournalEntry | null {
-  let raw: unknown
-  try {
-    raw = JSON.parse(line)
-  } catch {
-    return null
-  }
+/**
+ * Validate one PARSED line into an entry — the schema half only. The JSON
+ * half stays with the loader, because the two failures mean different
+ * things: bytes that do not parse can be a torn append (tolerable at the
+ * tail), while a COMPLETE line that is not an entry is corruption wherever
+ * it sits, the tail included.
+ */
+function entryOf(raw: unknown): JournalEntry | null {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
   const e = raw as Record<string, unknown>
   if (typeof e['seq'] !== 'number' || !Number.isInteger(e['seq']) || e['seq'] < 1) return null
@@ -222,14 +250,19 @@ function parseEntry(line: string): JournalEntry | null {
   if (e['origin'] !== 'local' && e['origin'] !== 'remote') return null
   const needsRev = e['kind'] === 'commit' || e['kind'] === 'acked'
   if (needsRev && (typeof e['rev'] !== 'number' || !Number.isInteger(e['rev']) || e['rev'] < 1)) return null
+  const beginRef = e['begin']
+  if (beginRef !== undefined && (e['kind'] !== 'commit' || typeof beginRef !== 'number' || !Number.isInteger(beginRef) || beginRef < 1)) {
+    return null
+  }
   return {
     seq: e['seq'],
     kind: e['kind'],
     epoch: e['epoch'],
-    book: e['book'],
+    book: canonicalBook(e['book'], e['what'] as MutationKind),
     what: e['what'] as MutationKind,
     at: e['at'],
     ...(needsRev ? { rev: e['rev'] as number } : {}),
+    ...(beginRef === undefined ? {} : { begin: beginRef as number }),
     origin: e['origin'],
     ...(typeof e['digest'] === 'string' ? { digest: e['digest'] } : {}),
   }
@@ -253,8 +286,10 @@ export function createJournal({
   let nextSeq = 1
   let all: JournalEntry[] = []
   const byKey = new Map<string, KeyState>()
-  /** One-shot remote expectations: key → how many begins to stamp remote. */
-  const expectedRemote = new Map<string, number>()
+  /** One-shot remote expectations: key → the armed tickets, oldest first.
+   *  A begin consumes the oldest; a clear removes exactly its own. */
+  const expectedRemote = new Map<string, number[]>()
+  let nextTicket = 1
   let opened = false
   /** Runtime local-commit listeners — see `subscribe`. */
   const listeners = new Set<() => void>()
@@ -281,7 +316,13 @@ export function createJournal({
       state.lastCommit = entry
       if (entry.origin === 'local') state.lastLocalCommit = entry
       state.lastRev = Math.max(state.lastRev, entry.rev!)
-      state.dangling = []
+      /* ONLY ITS OWN BRACKET. Brackets on one key can overlap, and a commit
+       * that swept the key's every dangling begin dropped a write still in
+       * flight from the crash record. A commit with no begin ref (baseline,
+       * verify, a legacy line) still clears whole — those commit the key's
+       * observed state, not one bracket. */
+      state.dangling =
+        entry.begin === undefined ? [] : state.dangling.filter((begin) => begin.seq !== entry.begin)
     } else {
       if (entry.rev! >= state.lastAckedRev) {
         state.lastAckedRev = entry.rev!
@@ -362,21 +403,59 @@ export function createJournal({
     }
     let torn = false
     const lines = text.split('\n')
+    /* The load-time invariants (#4): one epoch, strictly-increasing seq,
+     * strictly-increasing commit and ack revs per key. A journal violating
+     * them is not a crash artefact — a crash leaves a PREFIX, and a prefix
+     * of a valid journal holds all three — it is corruption, and deriving
+     * `nextSeq` from it would serve a feed that disagrees with itself. */
+    let lastSeq = 0
+    let epoch: string | null = null
+    const commitRev = new Map<string, number>()
+    const ackedRev = new Map<string, number>()
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i]!
       if (line === '') continue
-      const entry = parseEntry(line)
-      if (entry === null) {
-        /* THE LAST LINE ONLY. A crash mid-append truncates the tail and that
-         * is ordinary; a malformed line with valid lines AFTER it is
-         * corruption, and pretending otherwise would serve a feed with a
-         * hole in it. */
+      let raw: unknown
+      try {
+        raw = JSON.parse(line)
+      } catch {
+        /* INCOMPLETE JSON, LAST LINE ONLY. A crash mid-append truncates the
+         * tail and that is ordinary; bytes that do not parse with valid
+         * lines AFTER them are corruption, and pretending otherwise would
+         * serve a feed with a hole in it. */
         const isTail = lines.slice(i + 1).every((rest) => rest === '')
         if (isTail) {
           torn = true
           break
         }
         throw new Error(`journal: malformed line ${i + 1} is not the tail`)
+      }
+      const entry = entryOf(raw)
+      if (entry === null) {
+        /* COMPLETE JSON that is not an entry. A torn append cannot leave
+         * this — a byte prefix of `{...}` either fails to parse or IS the
+         * whole line — so it is corruption wherever it sits, tail included. */
+        throw new Error(`journal: line ${i + 1} is complete but not a journal entry`)
+      }
+      if (entry.seq <= lastSeq) {
+        throw new Error(`journal: seq ${entry.seq} at line ${i + 1} does not increase past ${lastSeq}`)
+      }
+      lastSeq = entry.seq
+      if (epoch === null) epoch = entry.epoch
+      else if (entry.epoch !== epoch) {
+        throw new Error(`journal: line ${i + 1} names a second epoch`)
+      }
+      const key = keyOf(entry.book, entry.what)
+      if (entry.kind === 'commit') {
+        if (entry.rev! <= (commitRev.get(key) ?? 0)) {
+          throw new Error(`journal: commit rev ${entry.rev} at line ${i + 1} regresses its key`)
+        }
+        commitRev.set(key, entry.rev!)
+      } else if (entry.kind === 'acked') {
+        if (entry.rev! <= (ackedRev.get(key) ?? 0)) {
+          throw new Error(`journal: ack rev ${entry.rev} at line ${i + 1} regresses its key`)
+        }
+        ackedRev.set(key, entry.rev!)
       }
       absorb(entry)
     }
@@ -410,6 +489,7 @@ export function createJournal({
           what: begin.what,
           at: clock(),
           rev: state.lastRev + 1,
+          begin: begin.seq,
           origin: begin.origin,
         }
         await appendLine(entry, true)
@@ -607,19 +687,20 @@ export function createJournal({
       opened = false
     })
 
-  const begin: MutationRecorder['begin'] = (book, what) => {
+  const begin: MutationRecorder['begin'] = (rawBook, what) => {
     /* Per-call, NOT shared: two books' begins can be in flight at once, and
      * a shared slot would hand one caller the other's token. */
     let token: JournalToken | null = null
+    const book = canonicalBook(rawBook, what)
     return queue
       .append(JOURNAL_KEY, async () => {
         if (!opened) throw new Error('journal: begin before open')
         const key = keyOf(book, what)
-        const expected = expectedRemote.get(key) ?? 0
-        const origin: JournalOrigin = expected > 0 ? 'remote' : 'local'
-        if (expected > 0) {
-          if (expected === 1) expectedRemote.delete(key)
-          else expectedRemote.set(key, expected - 1)
+        const armed = expectedRemote.get(key)
+        const origin: JournalOrigin = armed !== undefined && armed.length > 0 ? 'remote' : 'local'
+        if (origin === 'remote') {
+          armed!.shift()
+          if (armed!.length === 0) expectedRemote.delete(key)
         }
         const entry: JournalEntry = {
           seq: nextSeq++,
@@ -650,6 +731,7 @@ export function createJournal({
         what: mine.what,
         at: clock(),
         rev: state.lastRev + 1,
+        begin: mine.seq,
         origin: mine.origin,
         ...(digest === undefined ? {} : { digest }),
       }
@@ -658,27 +740,35 @@ export function createJournal({
       if (entry.origin === 'local') notifyLocalCommit()
     })
 
-  const expectRemote = (book: string, what: MutationKind): void => {
-    const key = keyOf(book, what)
-    expectedRemote.set(key, (expectedRemote.get(key) ?? 0) + 1)
+  const expectRemote = (rawBook: string, what: MutationKind): number => {
+    const key = keyOf(canonicalBook(rawBook, what), what)
+    const ticket = nextTicket++
+    const armed = expectedRemote.get(key) ?? []
+    armed.push(ticket)
+    expectedRemote.set(key, armed)
+    return ticket
   }
 
-  const clearRemote = (book: string, what: MutationKind): void => {
+  const clearRemote = (rawBook: string, what: MutationKind, ticket: number): void => {
     /* An expectation the apply did not consume — a row that changed
      * nothing writes nothing — must not lie in wait for the NEXT local
-     * edit on that key. */
-    const key = keyOf(book, what)
-    const left = expectedRemote.get(key) ?? 0
-    if (left <= 1) expectedRemote.delete(key)
-    else expectedRemote.set(key, left - 1)
+     * edit on that key. Removed BY TICKET: taking back "one" from a shared
+     * count could take back a concurrent operation's still-armed one. */
+    const key = keyOf(canonicalBook(rawBook, what), what)
+    const armed = expectedRemote.get(key)
+    if (!armed) return
+    const at = armed.indexOf(ticket)
+    if (at < 0) return
+    armed.splice(at, 1)
+    if (armed.length === 0) expectedRemote.delete(key)
   }
 
   const markRemote = async <T,>(keys: readonly JournalKeyRef[], fn: () => Promise<T>): Promise<T> => {
-    for (const { book, what } of keys) expectRemote(book, what)
+    const tickets = keys.map(({ book, what }) => ({ book, what, ticket: expectRemote(book, what) }))
     try {
       return await fn()
     } finally {
-      for (const { book, what } of keys) clearRemote(book, what)
+      for (const { book, what, ticket } of tickets) clearRemote(book, what, ticket)
     }
   }
 
@@ -702,8 +792,9 @@ export function createJournal({
     return out.sort((a, b) => a.seq - b.seq)
   }
 
-  const ack: Journal['ack'] = (book, what, rev) => {
+  const ack: Journal['ack'] = (rawBook, what, rev) => {
     let done = false
+    const book = canonicalBook(rawBook, what)
     return queue
       .append(JOURNAL_KEY, async () => {
         if (!opened) throw new Error('journal: ack before open')
@@ -737,6 +828,13 @@ export function createJournal({
       const keep: JournalEntry[] = []
       for (const state of byKey.values()) {
         if (state.lastCommit) keep.push(state.lastCommit)
+        /* AND the last LOCAL commit when a remote one landed after it: the
+         * outbox is rebuilt from these lines on reopen, and keeping only
+         * the remote head silently unpushed a local edit the peer had not
+         * acknowledged yet. */
+        if (state.lastLocalCommit && state.lastLocalCommit !== state.lastCommit) {
+          keep.push(state.lastLocalCommit)
+        }
         if (state.lastAcked) keep.push(state.lastAcked)
         keep.push(...state.dangling)
       }

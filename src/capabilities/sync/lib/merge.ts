@@ -46,8 +46,6 @@ import {
   tagsFromClock,
   mergeCards as mergeCardsInKernel,
   mergeMarks as mergeMarksInKernel,
-  cardStamp,
-  markStamp,
   type BookRecord,
   type Card,
   type Mark,
@@ -57,11 +55,15 @@ import {
 /* ------------------------------------------------------------- canonical */
 
 /** A value with every object's keys sorted, recursively — one serialisation
- *  for one meaning, whatever order a map was built in. */
+ *  for one meaning, whatever order a map was built in. The accumulator has a
+ *  NULL PROTOTYPE: a tag clock's keys are reader-chosen, `JSON.parse` makes
+ *  `__proto__` an own key, and assigning that onto a plain `{}` hits the
+ *  prototype setter instead of the dictionary — the key silently vanished
+ *  from every digest. */
 function sortedDeep(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sortedDeep)
   if (typeof value === 'object' && value !== null) {
-    const out: Record<string, unknown> = {}
+    const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>
     for (const key of Object.keys(value).sort()) {
       out[key] = sortedDeep((value as Record<string, unknown>)[key])
     }
@@ -117,23 +119,36 @@ const finishedGroup = (r: BookRecord): Group | null =>
         value: { finished: r.finished, ...(r.finishedAt ? { finishedAt: r.finishedAt } : {}) },
       }
 
-const metadataGroup = (r: BookRecord): Group => ({
-  // The parse's own clock is a number; absent means never parsed and loses
-  // to any parse. Padded to a fixed width so string order is numeric order.
-  at: (r.parsedAt ?? -1).toString().padStart(16, '0'),
-  value: {
-    title: r.title,
-    author: r.author,
-    ...(r.sortAs ? { sortAs: r.sortAs } : {}),
-    ...(r.series ? { series: r.series } : {}),
-    ...(r.seriesIndex === undefined ? {} : { seriesIndex: r.seriesIndex }),
-    ...(r.publisher ? { publisher: r.publisher } : {}),
-    ...(r.published ? { published: r.published } : {}),
-    ...(r.languages ? { languages: r.languages } : {}),
-    ...(r.subjects ? { subjects: r.subjects } : {}),
-    ...(r.parsedAt === undefined ? {} : { parsedAt: r.parsedAt }),
-  },
+const metadataValue = (r: BookRecord): Partial<BookRecord> => ({
+  title: r.title,
+  author: r.author,
+  ...(r.sortAs ? { sortAs: r.sortAs } : {}),
+  ...(r.series ? { series: r.series } : {}),
+  ...(r.seriesIndex === undefined ? {} : { seriesIndex: r.seriesIndex }),
+  ...(r.publisher ? { publisher: r.publisher } : {}),
+  ...(r.published ? { published: r.published } : {}),
+  ...(r.languages ? { languages: r.languages } : {}),
+  ...(r.subjects ? { subjects: r.subjects } : {}),
+  ...(r.parsedAt === undefined ? {} : { parsedAt: r.parsedAt }),
 })
+
+/**
+ * The metadata group, taken whole from the later PARSE. `parsedAt` is a
+ * NUMBER and is compared as one — the old fixed-width decimal encoding broke
+ * on anything `toString` spells with an exponent, and lexical order quietly
+ * stopped being numeric order. Absent means never parsed and loses to any
+ * parse; equal stamps fall to the canonical serialisation, `pick`'s own tie.
+ */
+const mergeMetadata = (a: BookRecord, b: BookRecord): Partial<BookRecord> => {
+  const va = metadataValue(a)
+  const vb = metadataValue(b)
+  if (a.parsedAt === undefined && b.parsedAt !== undefined) return vb
+  if (b.parsedAt === undefined && a.parsedAt !== undefined) return va
+  if (a.parsedAt !== undefined && b.parsedAt !== undefined && a.parsedAt !== b.parsedAt) {
+    return a.parsedAt > b.parsedAt ? va : vb
+  }
+  return canonicalJson(va) < canonicalJson(vb) ? vb : va
+}
 
 /** A group merge where an absent side always loses: absence is "never set". */
 const mergeGroup = (a: Group | null, b: Group | null): Partial<BookRecord> =>
@@ -153,13 +168,22 @@ function scalar<T>(a: T | undefined, b: T | undefined): T | undefined {
  * module note for the register groups and the legacy rules.
  */
 export function mergeRecord(a: BookRecord, b: BookRecord): BookRecord {
+  /* SELF-MERGE IS A FIXED POINT. Two identical replicas have nothing to
+   * reconcile, and the answer must be the record ITSELF — not the record
+   * with a tag clock synthesised onto it and its orphan stamps dropped,
+   * which is what running the register machinery over two equal legacy
+   * sides produced. That non-identity re-journalled — and re-pushed — a
+   * book that had not changed, every time an echo of it came back. */
+  if (canonicalJson(a) === canonicalJson(b)) return a
+
   /* The tag registers: per-key LWW over both sides' clocks (synthesised for
-   * a legacy side), keys sorted so the output is canonical. */
+   * a legacy side), keys sorted so the output is canonical. Null prototype:
+   * the keys are reader-chosen, and `__proto__` is a legal tag. */
   const clockA = tagRegisters(a)
   const clockB = tagRegisters(b)
   let tags: Pick<BookRecord, 'tags' | 'tagClock'> = {}
   if (clockA || clockB) {
-    const merged: Record<string, TagClockEntry> = {}
+    const merged: Record<string, TagClockEntry> = Object.create(null) as Record<string, TagClockEntry>
     const keys = [...new Set([...Object.keys(clockA ?? {}), ...Object.keys(clockB ?? {})])].sort()
     for (const key of keys) {
       const mine = clockA?.[key]
@@ -185,7 +209,7 @@ export function mergeRecord(a: BookRecord, b: BookRecord): BookRecord {
     /* Each group taken WHOLE from its winner — a field from the losing
      * side's group must not leak under the winner's, which is why nothing
      * here spreads a group's two sides in sequence. */
-    ...mergeGroup(metadataGroup(a), metadataGroup(b)),
+    ...mergeMetadata(a, b),
     ...mergeGroup(positionGroup(a), positionGroup(b)),
     ...mergeGroup(finishedGroup(a), finishedGroup(b)),
     ...tags,
@@ -233,7 +257,16 @@ export function toWire(record: BookRecord): BookRecord {
  */
 export function fromWire(obj: unknown): BookRecord | null {
   if (typeof obj !== 'object' || obj === null || Array.isArray(obj)) return null
-  const parsed = parseRecord(JSON.stringify(obj))
+  /* The serialisation itself can throw — a cycle, a BigInt, a getter that
+   * traps. This is a trust boundary; anything unserialisable is "not a
+   * record", never an exception escaping into the protocol machine. */
+  let raw: string
+  try {
+    raw = JSON.stringify(obj)
+  } catch {
+    return null
+  }
+  const parsed = parseRecord(raw)
   return parsed === null ? null : toWire(parsed)
 }
 
@@ -245,20 +278,26 @@ async function sha256(text: string): Promise<string> {
 }
 
 /**
- * The digest a `marks` commit carries (§2.4): canonical over each mark's
- * `(id, newest stamp)`, sorted by id — so a satchel compares digests rather
- * than `max stamp + count`, and the order rows happen to sit in a file is
- * not state.
+ * One digest pipeline for both row collections: sort by id, canonical JSON
+ * of the WHOLE rows, hash. The rows themselves are in the digest — not just
+ * `(id, newest stamp)` — because two replicas that diverged under ONE stamp
+ * (two legacy rows edited apart, then stamped alike) digested identically,
+ * and the pull that should have merged them was skipped forever. Row order
+ * is still not state: the sort is the canonicalisation.
  */
+function rowsDigest(rows: readonly { readonly id: string }[]): Promise<string> {
+  const sorted = [...rows].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+  return sha256(canonicalJson(sorted))
+}
+
+/** The digest a `marks` commit carries (§2.4) — see `rowsDigest`. */
 export function marksDigest(marks: readonly Mark[]): Promise<string> {
-  const rows = [...marks].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).map((mark) => [mark.id, markStamp(mark)])
-  return sha256(canonicalJson(rows))
+  return rowsDigest(marks)
 }
 
 /** The same, for the one cross-book card collection. */
 export function cardsDigest(cards: readonly Card[]): Promise<string> {
-  const rows = [...cards].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).map((card) => [card.id, cardStamp(card)])
-  return sha256(canonicalJson(rows))
+  return rowsDigest(cards)
 }
 
 /**

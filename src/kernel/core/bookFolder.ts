@@ -85,7 +85,10 @@ export function tagRegisters(record: BookRecord): TagClock | undefined {
   if (record.tagClock) return record.tagClock
   if (!record.tags || record.tags.length === 0) return undefined
   const at = hlcOf(record.addedAt)
-  const clock: Record<string, TagClockEntry> = {}
+  /* Null prototype, `readTagClock`'s own rule: `__proto__` is a legal tag,
+   * and on a plain `{}` it hits the prototype setter (losing the register)
+   * while `key in clock` answers true for every inherited name. */
+  const clock: Record<string, TagClockEntry> = Object.create(null) as Record<string, TagClockEntry>
   for (const spelling of record.tags) {
     const key = tagKey(spelling)
     if (key && !(key in clock)) clock[key] = { at, on: true, spelling }
@@ -401,7 +404,12 @@ export function parseRecord(raw: string | null): BookRecord | null {
     ...(typeof r['finished'] === 'boolean' ? { finished: r['finished'] } : {}),
     ...(num(r['addedAt']) === undefined ? {} : { addedAt: num(r['addedAt'])! }),
     ...(num(r['openedAt']) === undefined ? {} : { openedAt: num(r['openedAt'])! }),
-    ...(num(r['parsedAt']) === undefined ? {} : { parsedAt: num(r['parsedAt'])! }),
+    /* A timestamp, so BOUNDED: non-negative and finite, or dropped — the
+     * merge orders the metadata group by this number, and a hand-edited
+     * negative "parse time" would outrank... nothing, but claim a parse
+     * that never happened. Dropped, the record reads "never parsed", which
+     * is the honest floor. */
+    ...(num(r['parsedAt']) === undefined || num(r['parsedAt'])! < 0 ? {} : { parsedAt: num(r['parsedAt'])! }),
     /* NOT `text`, which SLICES — see `MAX_ORIGIN`. A shortened path or URL is
      * not a rougher way back, it is a broken one, and it survived the next merge
      * to be written over the good value. */
