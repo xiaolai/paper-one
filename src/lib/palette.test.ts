@@ -4,10 +4,12 @@ import { adjustPalette, contrastRatio, luminance, mix, type Palette } from './pa
 /* The two polarities, read from `tokens.css` rather than invented. */
 const PAPER: Palette = {
   surface: '#FFFFFF', bg: '#FBFBFA', wash: '#F2F3F1',
+  line: '#EDEEEB', line2: '#E3E4E1', line3: '#D6D8D3',
   ink: '#17191B', ink2: '#3D4348', muted: '#5F666C',
 }
 const NIGHT: Palette = {
   surface: '#16191C', bg: '#101315', wash: '#1E2226',
+  line: '#24282C', line2: '#2F343A', line3: '#3C4248',
   ink: '#E9EAE8', ink2: '#C2C7C9', muted: '#8B9196',
 }
 
@@ -46,39 +48,61 @@ describe('brightness dims whatever is emitting the light', () => {
     expect(adjustPalette(NIGHT, 1, 0)).toEqual(NIGHT)
   })
 
-  /* On a light theme the page is what the screen is emitting. */
-  it('darkens the page on a light theme, and not the text', () => {
-    const dim = adjustPalette(PAPER, 0.7, 0)
-    expect(luminance(dim.surface)).toBeLessThan(luminance(PAPER.surface))
-    expect(luminance(dim.bg)).toBeLessThan(luminance(PAPER.bg))
-    // The text is where it was, or darker to hold the floor — never lighter.
-    expect(luminance(dim.ink)).toBeLessThanOrEqual(luminance(PAPER.ink) + 1e-9)
+  /* ONE DIRECTION IN EVERY THEME. A control called Brightness that moved the
+   * text on one theme and the background on another would be one a reader
+   * cannot predict — which is what the first version did. */
+  it('darkens the background on every theme', () => {
+    for (const [name, theme] of [['Paper', PAPER], ['Night', NIGHT]] as const) {
+      const dim = adjustPalette(theme, 0.75, 0)
+      for (const key of ['surface', 'bg', 'wash'] as const) {
+        expect(luminance(dim[key]), `${name} ${key}`).toBeLessThan(luminance(theme[key]))
+      }
+    }
   })
 
-  /* On a dark theme the page is already near-black; the text is the emitter. */
-  it('dims the text on a dark theme, and leaves the page alone', () => {
-    const dim = adjustPalette(NIGHT, 0.7, 0)
-    expect(dim.surface).toBe(NIGHT.surface)
-    expect(dim.bg).toBe(NIGHT.bg)
-    expect(luminance(dim.ink)).toBeLessThan(luminance(NIGHT.ink))
+  /* `--line` on Paper is luminance 0.85 and the dimmed surface reaches 0.52, so
+   * a rule left alone would be LIGHTER than the page it divides. */
+  it('darkens the rules with the background, so no border out-lights its page', () => {
+    for (const [name, theme] of [['Paper', PAPER], ['Night', NIGHT]] as const) {
+      const dim = adjustPalette(theme, 0.75, 0)
+      for (const key of ['line', 'line2', 'line3'] as const) {
+        expect(luminance(dim[key]), `${name} ${key}`).toBeLessThan(luminance(theme[key]))
+      }
+      // On a light theme the rules must stay under the page they sit on.
+      if (luminance(theme.surface) > luminance(theme.ink)) {
+        expect(luminance(dim.line), `${name} line vs surface`).toBeLessThan(luminance(dim.surface))
+      }
+    }
   })
 
-  it('reduces the light on screen in both polarities', () => {
-    const brightPaper = luminance(PAPER.surface)
-    const dimPaper = luminance(adjustPalette(PAPER, 0.7, 0).surface)
-    expect(dimPaper).toBeLessThan(brightPaper)
-    const brightNight = luminance(NIGHT.ink)
-    const dimNight = luminance(adjustPalette(NIGHT, 0.7, 0).ink)
-    expect(dimNight).toBeLessThan(brightNight)
+  it('does not move the font at all', () => {
+    for (const theme of [PAPER, NIGHT]) {
+      const dim = adjustPalette(theme, 0.75, 0)
+      // Unchanged, unless the floor had to step in — which it must not here.
+      expect(dim.ink).toBe(theme.ink)
+      expect(dim.ink2).toBe(theme.ink2)
+    }
   })
 })
 
-describe('contrast moves the text, never the page', () => {
-  it('leaves the page where brightness put it', () => {
-    for (const c of [-0.3, 0, 0.3]) {
-      expect(adjustPalette(PAPER, 0.8, c).surface).toBe(adjustPalette(PAPER, 0.8, 0).surface)
-      expect(adjustPalette(NIGHT, 0.8, c).surface).toBe(NIGHT.surface)
+describe('contrast moves the font, never the background', () => {
+  it('leaves every background colour where brightness put it', () => {
+    for (const theme of [PAPER, NIGHT]) {
+      const neutral = adjustPalette(theme, 0.8, 0)
+      for (const c of [-0.35, 0.35]) {
+        const moved = adjustPalette(theme, 0.8, c)
+        for (const key of ['surface', 'bg', 'wash', 'line', 'line2', 'line3'] as const) {
+          expect(moved[key], key).toBe(neutral[key])
+        }
+      }
     }
+  })
+
+  /* On a dark theme, more contrast means BRIGHTER text — the opposite move
+   * from a light theme, and the one place polarity still matters. */
+  it('brightens the text on a dark theme when asked for more', () => {
+    const more = adjustPalette(NIGHT, 1, 0.35)
+    expect(luminance(more.ink)).toBeGreaterThan(luminance(NIGHT.ink))
   })
 
   it('separates the text from the page when asked for more', () => {

@@ -9,6 +9,9 @@ import {
   paneTakesTrack,
   proseBleed,
   proseGrid,
+  BRIGHTNESS,
+  CONTRAST,
+  stepAt,
 } from '../lib/metrics'
 import { bookAccent } from '../lib/bookAccent'
 import { marginMarks } from '../lib/marks'
@@ -366,6 +369,11 @@ export function Reader({
                       theme={state.theme}
                       typeface={state.typeface}
                     spacing={state.spacing}
+                    /* RESOLVED here, not passed as indices: the book is an
+                       iframe and cannot read the app's custom properties, so it
+                       is told the numbers. */
+                    brightness={stepAt(BRIGHTNESS, state.brightness)}
+                    contrast={stepAt(CONTRAST, state.contrast)}
                       animated={!reducedMotion}
                       paginated={state.pageLayout === 'paginated'}
                       lastLocation={lastLocation}

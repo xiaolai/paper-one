@@ -31,6 +31,9 @@ export interface FoliateViewProps {
   typeface: Typeface
   /** How open the type is set — see `SPACING`. */
   spacing: SpacingIndices
+  /** The reader's brightness and contrast, resolved — see `bookColours`. */
+  brightness: number
+  contrast: number
   /** False only when the system asks for reduced motion. Not a preference. */
   animated: boolean
   paginated: boolean
@@ -83,6 +86,9 @@ interface Settings {
   stepIdx: number
   /** How open the type is set — see `SPACING`. */
   spacing: SpacingIndices
+  /** Resolved brightness and contrast — see `bookColours`. */
+  brightness: number
+  contrast: number
   measure: number
   theme: Theme
   typeface: Typeface
@@ -112,6 +118,8 @@ export function applySettings(renderer: Renderer, settings: Settings): void {
       theme: settings.theme,
       typeface: settings.typeface,
       spacing: settings.spacing,
+      brightness: settings.brightness,
+      contrast: settings.contrast,
       justify: true,
       hyphenate: true,
     }),
@@ -245,6 +253,8 @@ export function FoliateView({
   theme,
   typeface,
   spacing,
+  brightness,
+  contrast,
   animated,
   paginated,
   lastLocation,
@@ -303,7 +313,7 @@ export function FoliateView({
    * whenever a section's overlay is built, which happens as the reader scrolls
    * — long after any value captured at startup went stale. */
   const marksRef = useRef(marks)
-  const settings = useRef<Settings>({ stepIdx, measure, theme, typeface, spacing, animated, paginated })
+  const settings = useRef<Settings>({ stepIdx, measure, theme, typeface, spacing, brightness, contrast, animated, paginated })
   /* Through a ref for the same reason, and for one that is specific to it: the
    * saved position is derived from the book's content id, which resolves a few
    * milliseconds AFTER the reader mounts. A prop read at mount is read before
@@ -317,7 +327,7 @@ export function FoliateView({
   useLayoutEffect(() => {
     handlers.current = currentHandlers
     marksRef.current = marks
-    settings.current = { stepIdx, measure, theme, typeface, spacing, animated, paginated }
+    settings.current = { stepIdx, measure, theme, typeface, spacing, brightness, contrast, animated, paginated }
     lastLocationRef.current = lastLocation
   })
 
@@ -353,7 +363,12 @@ export function FoliateView({
       onPageIntent: (intent) => handlers.current.onPageIntent(intent),
       onFixedLayout: (fixed) => handlers.current.onFixedLayout(gen, fixed),
       getMarks: () => marksRef.current,
-      getPalette: () => markPalette(settings.current.theme),
+      getPalette: () =>
+        markPalette(
+          settings.current.theme,
+          settings.current.brightness,
+          settings.current.contrast,
+        ),
     })
     sessionRef.current = session
 
@@ -446,7 +461,7 @@ export function FoliateView({
      * the effect and unmounted the React tree — the reader vanished instead of
      * the theme failing to change. */
     try {
-      applySettings(renderer, { stepIdx, measure: settings.current.measure, theme, typeface, spacing, animated, paginated })
+      applySettings(renderer, { stepIdx, measure: settings.current.measure, theme, typeface, spacing, brightness, contrast, animated, paginated })
       /* A theme change reaches the book through `setStyles`, which restyles the
        * document WITHOUT rebuilding the section — so no `create-overlay` fires
        * and the marks keep the colour they were painted in. Changing the step or
@@ -472,7 +487,7 @@ export function FoliateView({
      * controls that change how the type is set, so the pips moved and the page
      * did not. Its identity is stable — the reducer returns the SAME state when
      * a spacing has not moved — so depending on the object cannot loop. */
-  }, [stepIdx, theme, typeface, spacing, animated, paginated, ready, generation, fontsReady])
+  }, [stepIdx, theme, typeface, spacing, brightness, contrast, animated, paginated, ready, generation, fontsReady])
 
   /* THE MEASURE ALONE, and only the layout attributes for it.
    *

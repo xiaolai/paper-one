@@ -14,11 +14,22 @@
  * the page simply gets murkier — less readable, no more comfortable. It would
  * also dim book covers, which are content rather than chrome.
  *
- * So the palette moves instead, and it moves in opposite directions depending
- * on what is actually emitting the light: on a light theme that is the page, so
- * the page darkens; on a dark theme the page is already near-black and the
- * light comes from the TEXT, so the text dims. One control, the right physical
- * effect in both polarities.
+ * So the palette moves instead, and the two controls divide it the way their
+ * names do:
+ *
+ *   BRIGHTNESS is the window's background — the surface, the page behind it,
+ *   the hover fills and the rules. Every theme, one direction: down toward
+ *   black. It was polarity-dependent first, dimming the TEXT on a dark theme on
+ *   the reasoning that the text is what a dark screen emits — true, and beside
+ *   the point: a control called Brightness that moves the text on one theme and
+ *   the background on another is a control a reader cannot predict.
+ *
+ *   CONTRAST is the font, and only the font.
+ *
+ * THE RULES DIM WITH THE BACKGROUND, which is not obvious and is not optional.
+ * `--line` on Paper has a luminance of 0.85; at the dimmest step the surface
+ * reaches 0.52 — so a border left alone would be LIGHTER than the page it sits
+ * on, and every hairline in the app would read as an inverted seam.
  */
 
 /** A colour as this app writes them: `#RRGGBB`. */
@@ -70,9 +81,14 @@ export function mix(from: Hex, to: Hex, amount: number): Hex {
 
 /** The six colours a theme's brightness and contrast can move. */
 export interface Palette {
+  /* The background, all of it — what `brightness` moves. */
   readonly surface: Hex
   readonly bg: Hex
   readonly wash: Hex
+  readonly line: Hex
+  readonly line2: Hex
+  readonly line3: Hex
+  /* The font — what `contrast` moves. */
   readonly ink: Hex
   readonly ink2: Hex
   readonly muted: Hex
@@ -121,6 +137,32 @@ function clearFloor(ink: Hex, page: Hex): Hex {
 }
 
 /**
+ * A background at a reader's brightness.
+ *
+ * Exported because the BOOK is not this palette. It is an iframe with its own
+ * document, and a custom property set on the app does not cross that boundary —
+ * so the book is drawn from its own table of concrete colours (the Overlayer
+ * paints marks as presentation attributes, where `var()` is not valid). That
+ * table has to be adjusted by the same rules, and the way to keep two things
+ * following one rule is one function, not two copies of it.
+ */
+export function dimBackground(colour: Hex, brightness: number): Hex {
+  return mix(colour, BLACK, 1 - Math.max(0, Math.min(1, brightness)))
+}
+
+/**
+ * A text colour at a reader's contrast, never under the floor.
+ *
+ * `page` is the background it will be read on — after dimming, since that is
+ * what it has to contrast with.
+ */
+export function inkFor(colour: Hex, page: Hex, contrast: number): Hex {
+  const away = luminance(page) > luminance(colour) ? BLACK : WHITE
+  const pushed = contrast >= 0 ? mix(colour, away, contrast) : mix(colour, page, -contrast)
+  return clearFloor(pushed, page)
+}
+
+/**
  * The palette a reader's brightness and contrast produce.
  *
  * `brightness` is the fraction of the theme's own light to keep, 1 being the
@@ -133,31 +175,30 @@ function clearFloor(ink: Hex, page: Hex): Hex {
  * means a theme added later needs no entry anywhere.
  */
 export function adjustPalette(base: Palette, brightness: number, contrast: number): Palette {
-  const dim = 1 - Math.max(0, Math.min(1, brightness))
-  const lightTheme = luminance(base.surface) > luminance(base.ink)
+  /* THE BACKGROUND, in every theme and in one direction. A light page darkens
+   * toward grey; a dark page darkens toward black, which is a real preference
+   * and what an OLED screen does with it. The rules come too — see the note at
+   * the top for what happens when they do not. */
+  const surface = dimBackground(base.surface, brightness)
+  const bg = dimBackground(base.bg, brightness)
+  const wash = dimBackground(base.wash, brightness)
+  const line = dimBackground(base.line, brightness)
+  const line2 = dimBackground(base.line2, brightness)
+  const line3 = dimBackground(base.line3, brightness)
 
-  const surface = lightTheme ? mix(base.surface, BLACK, dim) : base.surface
-  const bg = lightTheme ? mix(base.bg, BLACK, dim) : base.bg
-  const wash = lightTheme ? mix(base.wash, BLACK, dim) : base.wash
-
-  /* Text dims on a dark theme, where it is what the screen is emitting. */
-  const dimmedInk = lightTheme ? base.ink : mix(base.ink, BLACK, dim)
-  const dimmedInk2 = lightTheme ? base.ink2 : mix(base.ink2, BLACK, dim)
-  const dimmedMuted = lightTheme ? base.muted : mix(base.muted, BLACK, dim)
-
-  /* Contrast moves the text, never the page: a reader asking for stronger text
-   * means stronger text, and moving the page under it would change the amount
-   * of light on screen — which is the other control's job. */
-  const away = lightTheme ? BLACK : WHITE
-  const push = (colour: Hex, page: Hex): Hex =>
-    contrast >= 0 ? mix(colour, away, contrast) : mix(colour, page, -contrast)
-
+  /* THE FONT, and only the font. Away from the page means darker on a light one
+   * and lighter on a dark one, judged against the page AFTER dimming — on a
+   * theme dimmed far enough the polarity is not the one the theme started
+   * with. */
   return {
     surface,
     bg,
     wash,
-    ink: clearFloor(push(dimmedInk, surface), surface),
-    ink2: clearFloor(push(dimmedInk2, surface), surface),
-    muted: clearFloor(push(dimmedMuted, surface), surface),
+    line,
+    line2,
+    line3,
+    ink: inkFor(base.ink, surface, contrast),
+    ink2: inkFor(base.ink2, surface, contrast),
+    muted: inkFor(base.muted, surface, contrast),
   }
 }

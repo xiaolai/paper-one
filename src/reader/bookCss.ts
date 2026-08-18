@@ -1,5 +1,6 @@
 import type { SpacingIndices, Theme, Typeface } from '../lib/state'
 import { readingStep, spacingAt } from '../lib/metrics'
+import { dimBackground, inkFor } from '../lib/palette'
 import { faceById } from '../lib/typefaces'
 import { opticalScale } from '../lib/fontProbe'
 
@@ -41,6 +42,31 @@ const BOOK_COLOURS: Record<Theme, BookColours> = {
 }
 
 /**
+ * A theme's book colours at the reader's brightness and contrast.
+ *
+ * The BACKGROUNDS dim — the page, the ruler's band, and a highlight's fill,
+ * which is a background however it is drawn. The INK moves with contrast and is
+ * floored. The accent and the rule colours are left alone, as `--accent` is in
+ * the app: they are brand and annotation, not the page and not the prose.
+ *
+ * THE BOOK NEEDS ITS OWN because it is an iframe with its own document, and the
+ * custom properties the app writes for brightness and contrast do not cross
+ * that boundary — a dimmed app had a page dimmed everywhere except the one
+ * surface the reader is looking at. Same two rules, different table.
+ */
+function bookColours(theme: Theme, brightness: number, contrast: number): BookColours {
+  const base = BOOK_COLOURS[theme]
+  const surface = dimBackground(base.surface, brightness)
+  return {
+    ...base,
+    surface,
+    band: dimBackground(base.band, brightness),
+    mark: dimBackground(base.mark, brightness),
+    ink: inkFor(base.ink, surface, contrast),
+  }
+}
+
+/**
  * The colours the Overlayer paints marks with, for one theme.
  *
  * Concrete values rather than custom properties: the Overlayer sets `fill` as a
@@ -51,12 +77,19 @@ const BOOK_COLOURS: Record<Theme, BookColours> = {
  * Night is the exception §05 calls for: a pale fill glares on a dark page, so
  * the reader's own mark becomes a rule and takes the rule's colour.
  */
-export function markPalette(theme: Theme): {
+export function markPalette(
+  theme: Theme,
+  brightness: number,
+  contrast: number,
+): {
   highlight: string
   companion: string
   highlightAsRule: boolean
 } {
-  const c = BOOK_COLOURS[theme]
+  /* The same adjusted table the stylesheet uses: read from `BOOK_COLOURS`
+     directly, a dimmed book would have kept full-brightness highlights — the
+     one thing on the page that had not moved. */
+  const c = bookColours(theme, brightness, contrast)
   const night = theme === 'night'
   return {
     highlight: night ? c.markRule : c.mark,
@@ -142,6 +175,15 @@ export interface BookCssOptions {
   readonly justify: boolean
   /** How open the type is set — see `SPACING`. */
   readonly spacing: SpacingIndices
+  /**
+   * The reader's brightness and contrast, RESOLVED rather than as indices.
+   *
+   * The book is an iframe with its own document, so the custom properties the
+   * app writes for these do not reach it — it has to be told. See
+   * `bookColours`.
+   */
+  readonly brightness: number
+  readonly contrast: number
   readonly hyphenate: boolean
 }
 
@@ -152,9 +194,11 @@ export function bookCss({
   justify,
   hyphenate,
   spacing,
+  brightness,
+  contrast,
 }: BookCssOptions): string {
   const step = readingStep(stepIdx)
-  const c = BOOK_COLOURS[theme]
+  const c = bookColours(theme, brightness, contrast)
   const face = faceById(typeface)
   const stack = face.stack
   /* THE SIZE THE READER ASKED FOR, CORRECTED FOR THIS FACE. Two faces at 21px

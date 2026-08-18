@@ -22,7 +22,20 @@ import type { Theme } from './state'
  * paints. In a plain effect the app paints once at full brightness and then
  * dims, which at night is precisely the flash the setting exists to avoid.
  */
-const KEYS = ['--surface', '--bg', '--wash', '--ink', '--ink-2', '--muted'] as const
+const KEYS = [
+  /* The background, which `brightness` moves — the rules included, or a dimmed
+     page ends up lighter than its own borders. */
+  '--surface',
+  '--bg',
+  '--wash',
+  '--line',
+  '--line-2',
+  '--line-3',
+  /* The font, which `contrast` moves. */
+  '--ink',
+  '--ink-2',
+  '--muted',
+] as const
 
 /** Read a theme's own palette, uninfluenced by any override in force. */
 function baseFor(theme: Theme): Palette | null {
@@ -37,6 +50,9 @@ function baseFor(theme: Theme): Palette | null {
     surface: read('--surface'),
     bg: read('--bg'),
     wash: read('--wash'),
+    line: read('--line'),
+    line2: read('--line-2'),
+    line3: read('--line-3'),
     ink: read('--ink'),
     ink2: read('--ink-2'),
     muted: read('--muted'),
@@ -60,6 +76,9 @@ export function useAppPalette(
       '--surface': next.surface,
       '--bg': next.bg,
       '--wash': next.wash,
+      '--line': next.line,
+      '--line-2': next.line2,
+      '--line-3': next.line3,
       '--ink': next.ink,
       '--ink-2': next.ink2,
       '--muted': next.muted,
