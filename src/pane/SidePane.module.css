@@ -714,33 +714,46 @@
   padding: var(--space-8) var(--space-10) var(--space-4);
 }
 
+/* THE TILE IS THE THEME. It carries `data-theme`, so `--surface`, `--ink` and
+   `--muted` inside it are that theme's — the specimen and the name are drawn in
+   the colours the reader is choosing between rather than described in the
+   colours of the one they already have. */
 .themeSwatch {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: var(--space-8);
+  justify-content: center;
+  gap: var(--space-2);
+  height: var(--theme-swatch-h);
+  padding: 0 var(--space-2);
   border: none;
-  background: transparent;
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  box-shadow: 0 0 0 1px var(--line-2);
   font-family: inherit;
-  font-size: var(--text-small);
-  color: var(--muted);
   cursor: pointer;
 }
 
+/* The ring is the THEME's own accent, because the whole tile is that theme and
+   a ring in the current theme's blue around a Sepia tile would be the one part
+   of the preview that is not the preview. */
 .themeSwatch[data-on='true'] {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+/* The specimen. Large enough to have colour in it — an `Aa` at caption size is
+   a grey mark rather than a sample of ink. */
+.themeAa {
+  font-size: var(--text-body);
+  font-weight: 600;
+  line-height: 1;
   color: var(--ink);
 }
 
-.themeChip {
-  display: block;
-  width: 100%;
-  height: var(--row-book);
-  border-radius: var(--radius-control);
-  box-shadow: 0 0 0 1px var(--line-2);
-}
-
-.themeSwatch[data-on='true'] .themeChip {
-  box-shadow: 0 0 0 2px var(--accent);
+.themeName {
+  font-size: var(--text-micro);
+  line-height: 1;
+  color: var(--muted);
 }
 
 /* --- empty ----------------------------------------------------------- */

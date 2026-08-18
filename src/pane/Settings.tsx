@@ -23,21 +23,16 @@ const PREVIEW_STACKS: Record<Typeface, string> = {
  * §05 theme chips — the page colour of each theme, as a literal, because a
  * swatch has to show the theme it offers rather than the one in use.
  *
- * The fills are this panel's own business and stay here. The ids and labels do
- * not: they came from a second copy of the theme table that the command palette
- * also carried, so renaming a theme meant editing two files and noticing. They
- * now come from `lib/panes`, and the fill map is typed as a total Record so a
- * new theme without a swatch fails to compile.
+ * THE SWATCHES CARRY `data-theme` AND ARE DRAWN IN IT. There was a table of
+ * one hex per theme here, which is a copy of a value `tokens.css` already
+ * owns — and a copy of ONE of them: a theme is an ink, a surface, a muted and
+ * an accent, and a swatch showing only the surface could not show the thing a
+ * reader is actually choosing between, which is how the text will look on it.
+ * Every theme selector in `tokens.css` is an attribute selector, so a tile that
+ * carries the attribute resolves the whole set and previews the real pairing.
+ * Retune a theme and its swatch follows with no second edit.
  */
-const THEME_FILLS: Record<Theme, string> = {
-  paper: '#FFFFFF',
-  slate: '#DFE1DE',
-  sepia: '#F8F0E1',
-  sage: '#DDE6D8',
-  night: '#16191C',
-}
-
-const THEME_CHIPS = THEMES.map(({ id, label }) => ({ id, label, fill: THEME_FILLS[id] }))
+const THEME_CHIPS = THEMES
 
 /**
  * Only what this panel reads and changes.
@@ -93,16 +88,26 @@ export function Settings({
     <div className={styles.panel}>
       <div className={styles.groupTitle}>Appearance</div>
       <div className={styles.themeGrid}>
-        {THEME_CHIPS.map(({ id, label, fill }) => (
+        {THEME_CHIPS.map(({ id, label }) => (
           <button
             key={id}
             type="button"
             className={styles.themeSwatch}
+            /* Drawn IN the theme it offers — see the note above the table. */
+            data-theme={id}
             data-on={theme === id}
+            aria-pressed={theme === id}
             onClick={() => onTheme(id)}
           >
-            <span className={styles.themeChip} style={{ background: fill }} />
-            {label}
+            {/* A SPECIMEN, not a colour. What a reader picks a theme for is how
+                text sits on it, and a plain fill could not show that: Sepia and
+                Sage differ far more in their ink than in their paper. The
+                interface's own face, not a book's — the typeface below is a
+                separate choice and this must not look like it previews one. */}
+            <span className={styles.themeAa} aria-hidden="true">
+              Aa
+            </span>
+            <span className={styles.themeName}>{label}</span>
           </button>
         ))}
       </div>

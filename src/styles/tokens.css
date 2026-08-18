@@ -11,7 +11,16 @@
  * publishes measured (not estimated) ratios for five pairs across five themes.
  */
 
-:root {
+/* `:root` IS Paper, and `[data-theme='paper']` says so out loud.
+ *
+ * Every other theme is an attribute selector, so any element can be put into
+ * one by carrying the attribute — which is how the Appearance swatches preview
+ * a theme by BEING it rather than by copying its colours into TypeScript.
+ * Paper had no such selector, only the default, so a Paper swatch inside a
+ * Night window inherited Night and previewed the wrong thing. Two selectors on
+ * one block rather than a second copy of the values. */
+:root,
+[data-theme='paper'] {
   --ink:#17191B; --ink-2:#3D4348; --muted:#5F666C;
   --surface:#FFFFFF; --bg:#FBFBFA; --wash:#F2F3F1;
   --line:#EDEEEB; --line-2:#E3E4E1; --line-3:#D6D8D3;

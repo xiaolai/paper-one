@@ -476,6 +476,16 @@ export const MENU_MIN_W = 190
 export const TOC_INDENT = 16
 
 /**
+ * An Appearance swatch: a tile that previews a theme by being drawn in it.
+ *
+ * Taller than any control on the ramp because it is not a control — it holds
+ * two lines, a specimen and a name, and a tile that fits them exactly reads as
+ * cramped. Not on the ramp for the same reason a book's cover is not: it is a
+ * picture of something, sized to what it has to show.
+ */
+export const THEME_SWATCH_H = 60
+
+/**
  * THE WINDOW WIDTHS THE LAYOUT CHANGES AT.
  *
  * Two, and only two, because each one is a decision about what to give up and
@@ -696,6 +706,7 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
     '--sheet-max-h': px(SHEET.maxHeight),
     '--menu-min-w': px(MENU_MIN_W),
     '--toc-indent': px(TOC_INDENT),
+    '--theme-swatch-h': px(THEME_SWATCH_H),
     '--track-w': px(TRACK_W),
     '--traffic-light': px(TRAFFIC_LIGHT),
     '--scrollbar-w': px(SCROLLBAR_W),
