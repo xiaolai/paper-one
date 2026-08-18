@@ -467,6 +467,16 @@ export const SHEET = { max: 640, inset: 48, top: 96, maxHeight: 560 } as const
 export const MENU_MIN_W = 190
 
 /**
+ * A menu opened from inside the side pane, which is narrower than the window.
+ *
+ * Wide enough to hold the longest face name this app can offer set in that
+ * face — "Instrument Sans" in Instrument Sans — and no wider, because a menu
+ * that overhangs the pane it belongs to reads as a window rather than as a
+ * choice within one.
+ */
+export const PANE_MENU_W = 220
+
+/**
  * How far a nested chapter steps in per level of the table of contents.
  *
  * The indent was written out per level — 26 and 42 — which is a base plus one
@@ -706,6 +716,7 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
     '--sheet-top': px(SHEET.top),
     '--sheet-max-h': px(SHEET.maxHeight),
     '--menu-min-w': px(MENU_MIN_W),
+    '--pane-menu-w': px(PANE_MENU_W),
     '--toc-indent': px(TOC_INDENT),
     '--theme-swatch-h': px(THEME_SWATCH_H),
     '--track-w': px(TRACK_W),

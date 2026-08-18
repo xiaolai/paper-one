@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { ALL_FACES, scaleFor, type Face } from './typefaces'
 
 /**
@@ -23,7 +24,13 @@ import { ALL_FACES, scaleFor, type Face } from './typefaces'
 const SAMPLE = 'Handgloves 0123 mnop'
 const GENERICS = ['serif', 'sans-serif', 'monospace'] as const
 
-/** A canvas measured once — building one per probe is the slow way to do this. */
+/**
+ * A canvas, for FINDING fonts only — never for measuring one.
+ *
+ * Width comparison is what detection needs and a canvas is the cheapest way to
+ * get it. Measuring a face's proportions is a different question and this is
+ * the wrong instrument for it: see `xHeightOf`.
+ */
 function context(): CanvasRenderingContext2D | null {
   if (typeof document === 'undefined') return null
   return document.createElement('canvas').getContext('2d')
@@ -56,34 +63,93 @@ export function presentFaces(): Set<string> {
 }
 
 /**
- * A face's x-height as a fraction of its em, measured.
+ * A face's x-height as a fraction of its em.
  *
- * `actualBoundingBoxAscent` of a lowercase `x` is the x-height by definition —
- * no table lookup, no per-face constant to keep up to date, and it works for a
- * face this app has never heard of. Zero when there is no canvas, which
- * `scaleFor` reads as "do not correct".
+ * `1ex` IS the x-height — that is the definition of the unit — so an element
+ * one ex tall, in the face, measured, is the answer with no glyph rasterising
+ * and no metrics table.
+ *
+ * NOT A CANVAS, which is where this started and where it was wrong. A canvas
+ * resolves `ctx.font` against the fonts the CANVAS knows, and a webfont the
+ * page has loaded is not among them until it is explicitly loaded again — so
+ * measuring Literata returned Georgia's x-height, the next family in its
+ * stack. The scale was then computed for the wrong face: Literata is the
+ * REFERENCE and must come out at exactly 1, and it was coming out at 1.06.
+ * Every bundled face was being corrected by a number measured off a fallback.
+ *
+ * An element resolves the stack the same way the text it describes will, which
+ * is the only property that makes the measurement mean anything.
+ *
+ * Zero when there is no document, which `scaleFor` reads as "do not correct".
  */
 export function xHeightOf(stack: string): number {
-  const ctx = context()
-  if (!ctx) return 0
-  ctx.font = `100px ${stack}`
-  const metrics = ctx.measureText('x')
-  return (metrics.actualBoundingBoxAscent ?? 0) / 100
+  if (typeof document === 'undefined') return 0
+  const probe = document.createElement('span')
+  probe.style.cssText =
+    `position:absolute;visibility:hidden;pointer-events:none;` +
+    `font-family:${stack};font-size:1000px;width:1ex;height:1ex;padding:0;border:0`
+  document.body.appendChild(probe)
+  const ex = probe.getBoundingClientRect().height
+  probe.remove()
+  return ex / 1000
 }
 
-/* Measured once per stack. The value cannot change while the app is running —
- * a face is the shape it is — and the reading settings are re-applied on every
- * theme change, page turn and pane animation. */
+/* Measured once per stack, but ONLY ONCE THE FONTS ARE THERE. A face is the
+ * shape it is and cannot change while the app runs — but until its webfont has
+ * loaded, the stack resolves to the next family down and the shape being
+ * measured is somebody else's. */
 const scales = new Map<string, number>()
+
+/** Whether webfonts have finished loading, so a measurement is of the real face. */
+function fontsSettled(): boolean {
+  return typeof document === 'undefined' || document.fonts === undefined
+    ? true
+    : document.fonts.status === 'loaded'
+}
 
 /**
  * The correction to apply to a reading size in this face, so the size a reader
  * chose means the same thing in all of them — see `typefaces.ts`.
+ *
+ * MEASURED EARLY IS MEASURED WRONG, and cached early is wrong for the rest of
+ * the session. `'Literata Variable'` before its webfont arrives resolves to
+ * Georgia, the next family in its own stack — so the reference face, which must
+ * come out at exactly 1, was being corrected by 6% against a measurement of a
+ * different typeface. It was right in a console a second later, which is what
+ * made it look like it worked.
+ *
+ * So nothing is remembered until `document.fonts` says it has finished. Before
+ * that the answer is still returned — an early paint is better slightly wrong
+ * than blank — it is simply not kept, and the next call after loading measures
+ * the real face and keeps that.
  */
 export function opticalScale(face: Face): number {
   const cached = scales.get(face.stack)
   if (cached !== undefined) return cached
   const scale = scaleFor(xHeightOf(face.stack))
-  scales.set(face.stack, scale)
+  if (fontsSettled()) scales.set(face.stack, scale)
   return scale
+}
+
+/**
+ * True once webfonts have loaded, so a caller can measure again.
+ *
+ * Not a convenience: without it the correction is only picked up by whatever
+ * happens to re-render after loading. A book opened during startup would keep
+ * the size it was given from a measurement of Georgia until the reader changed
+ * some other setting.
+ */
+export function useFontsReady(): boolean {
+  const [ready, setReady] = useState(fontsSettled())
+  useEffect(() => {
+    if (ready || typeof document === 'undefined' || !document.fonts) return
+    let live = true
+    void document.fonts.ready.then(() => {
+      if (live) setReady(true)
+    })
+    return () => {
+      live = false
+    }
+  }, [ready])
+  return ready
 }

@@ -1,6 +1,8 @@
+import { useState } from 'react'
 import { READING_STEPS, readingStep } from '../lib/metrics'
 import { THEMES } from '../lib/panes'
-import { GROUP_LABEL, type Face } from '../lib/typefaces'
+import type { Face } from '../lib/typefaces'
+import { FacePicker } from './FacePicker'
 import type { PageLayout, Side, Theme, Typeface } from '../lib/state'
 import styles from './SidePane.module.css'
 
@@ -78,6 +80,7 @@ export function Settings({
   onTypeface,
 }: SettingsProps) {
   const step = readingStep(stepIdx)
+  const [faceMenuOpen, setFaceMenuOpen] = useState(false)
   /* Handed in, not probed here: `App` probes once and gives the same list to
      this panel and to the command palette, so the two cannot come to offer
      different faces. */
@@ -120,15 +123,23 @@ export function Settings({
 
       <div className={styles.groupTitle}>Reading</div>
 
-      {/* §09's seven steps, as a stepper rather than a slider: each step carries
-          its own measure and line box, so the sizes between them do not exist.
-          A row, not a <button> — a button cannot contain buttons, and the two
-          ends must be separately disablable. */}
-      <div className={`${styles.settingRow} ${styles.settingStatic}`}>
-        {/* "Text size", not "Font size" — the control directly below chooses the
-            FONT, and two rows both beginning "Font" read as one setting split
-            in two rather than as the two different decisions they are. */}
-        <span style={{ flex: 1 }}>Text size</span>
+      {/* ONE ROW FOR HOW THE BOOK IS SET: which face, and how big. They are the
+          same decision asked twice — a reader adjusting one is looking at the
+          other — and they were a labelled row and an eight-row list a screen
+          apart. There is no "Text size" label because there is nothing to
+          label: two A's and a number beside a font's name can only be its size.
+
+          §09's seven steps, as a stepper rather than a slider: each step carries
+          its own measure and line box, so the sizes between them do not exist. A
+          row, not a <button> — a button cannot contain buttons. */}
+      <div className={`${styles.settingRow} ${styles.settingStatic} ${styles.readingRow}`}>
+        <FacePicker
+          value={typeface}
+          offered={offered}
+          onChange={onTypeface}
+          open={faceMenuOpen}
+          setOpen={setFaceMenuOpen}
+        />
         <div className={styles.stepper}>
           {/* A SMALL A AND A LARGE ONE, which say what grows. `−` and `+` beside
               a number say only "more", and next to a numeral they read as a
@@ -163,42 +174,6 @@ export function Settings({
           </button>
         </div>
       </div>
-
-      {/* GROUPED BY WHAT IS BEING CHOSEN — a serif to read in, a sans, a
-          monospace — and nothing else. No row says where its font came from:
-          a reader cannot act on "bundled" or "system", and a list that named a
-          font this machine does not have would be a list that lies, so absent
-          faces are simply not in it.
-
-          Each row is SET IN the face it offers, which is the only honest way to
-          show a typeface — four proper nouns in the interface font tell a
-          reader nothing about what their book will look like. The sample IS the
-          description, so there is no note beside it any more. */}
-      {(['serif', 'sans', 'mono'] as const).map((group) => {
-        const faces = offered.filter((face) => face.group === group)
-        if (faces.length === 0) return null
-        return (
-          <div key={group}>
-            <div className={styles.groupTitle}>{GROUP_LABEL[group]}</div>
-            <div className={styles.typefaceList}>
-              {faces.map((face) => (
-                <button
-                  key={face.id}
-                  type="button"
-                  className={styles.typefaceRow}
-                  data-on={typeface === face.id}
-                  aria-pressed={typeface === face.id}
-                  onClick={() => onTypeface(face.id)}
-                >
-                  <span className={styles.typefaceSample} style={{ fontFamily: face.stack }}>
-                    {face.label}
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
-        )
-      })}
 
       <button
         type="button"

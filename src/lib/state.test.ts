@@ -230,9 +230,18 @@ describe('every offered typeface is a font that exists', () => {
    * asserted here rather than trusted, because it is one edit from being a
    * copy again. */
   it('samples a face in the same stack the book is set in', () => {
-    const settings = read('../pane/Settings.tsx')
-    expect(settings).toContain('fontFamily: face.stack')
-    expect(settings).not.toContain('PREVIEW_STACKS')
+    const picker = read('../pane/FacePicker.tsx')
+    expect(picker).toContain('fontFamily: face.stack')
+    expect(read('../pane/Settings.tsx')).not.toContain('PREVIEW_STACKS')
+  })
+
+  /* The picker corrects each sample by the same x-height scale the book gets,
+   * or a list of eight faces at one nominal size is a list of eight sizes —
+   * measured on this machine, 8.0px to 9.3px of x-height at a flat 17. */
+  it('shows every sample at the same optical size', () => {
+    const picker = read('../pane/FacePicker.tsx')
+    expect(picker).toContain('opticalScale(face)')
+    expect(picker).toContain('--face-scale')
   })
 })
 

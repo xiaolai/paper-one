@@ -685,47 +685,10 @@
   color: var(--ink);
 }
 
-.typefaceList {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  padding: var(--space-2) 0;
-}
 
-/* One row, one font name, set in that font. There is no second column any
-   more: the note beside each sample said "Serif, for reading" or "Sans", which
-   the group heading above now says once instead of four times — and for a
-   reader's own fonts there was nothing useful to put there at all. The sample
-   IS the description. */
-.typefaceRow {
-  display: flex;
-  align-items: center;
-  gap: var(--space-10);
-  width: 100%;
-  padding: var(--space-10) var(--space-10);
-  border: none;
-  border-radius: var(--radius-control);
-  background: transparent;
-  color: var(--ink);
-  text-align: start;
-  cursor: pointer;
-}
 
-.typefaceRow:hover {
-  background: var(--wash);
-}
 
-.typefaceRow[data-on='true'] {
-  background: var(--accent-bg);
-}
 
-/* The sample carries the face; 17px is §09's smallest reading step, so the
-   preview is drawn no smaller than the book could ever be set. */
-.typefaceSample {
-  flex: 1;
-  font-size: var(--text-prose);
-  line-height: 1.3;
-}
 
 .themeGrid {
   display: grid;
@@ -844,3 +807,96 @@
  * import. It happened to be the behaviour §07 asks for, which is exactly why
  * it survived: the effect was right and the mechanism was accidental, and it
  * would have vanished the moment this pane stopped being rendered. */
+
+/* --- how the book is set ---------------------------------------------- */
+
+/* The face and the size on one line. The picker takes the slack so the two A's
+   and the number stay pinned to the trailing edge wherever the pane is. */
+.readingRow {
+  gap: var(--space-10);
+}
+
+.facePicker {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+/* Reads as a field rather than as a row: it opens something, and a row that
+   opens something and one that toggles a value should not look alike. */
+.faceButton {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-6);
+  width: 100%;
+  height: var(--control-pill);
+  /* A PILL, like every other field in this app. The library's search and this
+     pane's own are both `--control-pill` tall with a `--line-2` border and a
+     full radius; this had the first two and a 10px radius, so a control that
+     does the same job in the same places was drawn as a different kind of
+     thing. The padding is wider at the leading edge because a round end eats
+     into where the text would start. */
+  padding: 0 var(--space-10) 0 var(--space-14);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.faceButton:hover,
+.faceButton[data-open='true'] {
+  background: var(--wash);
+}
+
+/* SET IN THE FACE IT NAMES, at the size that face needs to look like the
+   others — see `--face-scale`, which is the same correction the book gets. A
+   picker that shows eight faces at one nominal size shows eight sizes, and
+   size is not what a reader is choosing here. */
+.faceName {
+  min-width: 0;
+  overflow: hidden;
+  font-size: calc(var(--text-ui) * var(--face-scale, 1));
+  color: var(--ink);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* The width comes from the field, measured — see `FacePicker`. `min-width` is
+   dropped with it: a fixed minimum would fight the measured width the moment
+   the pane was narrower than it. */
+.faceMenu {
+  composes: menu from '../styles/controls.module.css';
+  min-width: 0;
+  max-height: var(--sheet-max-h);
+  overflow-y: auto;
+}
+
+/* What a reader is choosing between, said once per group instead of once per
+   row. */
+.faceGroup {
+  padding: var(--space-8) var(--space-10) var(--space-4);
+  font-size: var(--text-caption);
+  font-weight: 600;
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.faceItem {
+  composes: menuItem from '../styles/controls.module.css';
+}
+
+/* SET IN THE FACE, at the size that face needs to look like the others. On a
+   child rather than on `.faceItem` itself: that composes `menuItem`, which sets
+   a font-size of its own, and `composes` decides nothing about which of two
+   classes the bundler emits last — see the note in `controls.module.css`. */
+.faceItemLabel {
+  font-size: calc(var(--text-body) * var(--face-scale, 1));
+  line-height: 1.2;
+}
+
+.faceItem[data-on='true'] {
+  color: var(--accent);
+}

@@ -3,6 +3,7 @@ import type { Renderer, TocItem, View } from 'foliate-js/view.js'
 import type { MarkPainter } from 'foliate-js/overlayer.js'
 import type { Theme, Typeface } from '../lib/state'
 import type { BookMeta, BookNavigator, ReaderPosition } from '../lib/useBook'
+import { useFontsReady } from '../lib/fontProbe'
 import { isPdf } from '../lib/formats'
 import { bookCss, markPalette } from './bookCss'
 import { balanceRects } from './markGeometry'
@@ -261,6 +262,7 @@ export function FoliateView({
 
   /** Bumped once the book is open and its renderer exists. */
   const [ready, setReady] = useState(0)
+  const fontsReady = useFontsReady()
 
   /* Callbacks and settings live in refs so changing one does not tear the book
    * down and reopen it — reopening loses the reading position.
@@ -454,7 +456,12 @@ export function FoliateView({
      * It is read through the ref so a settings change carries the current
      * measure without this effect re-running for measure alone. */
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stepIdx, theme, typeface, animated, paginated, ready, generation])
+    /* `fontsReady` is in here so the book is re-set once webfonts land. The
+     * size a face is given is corrected by that face's x-height, and before its
+     * webfont arrives the stack resolves to a fallback whose x-height is
+     * somebody else's — a book opened during startup would otherwise keep a
+     * size measured off Georgia until the reader changed some other setting. */
+  }, [stepIdx, theme, typeface, animated, paginated, ready, generation, fontsReady])
 
   /* THE MEASURE ALONE, and only the layout attributes for it.
    *
