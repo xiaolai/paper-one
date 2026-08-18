@@ -15,8 +15,20 @@
   The file must be exported as `tray-iconTemplate@2x.png`. The `Template`
   suffix is what triggers the auto-tint; `tray-icon@2x.png` would be rendered
   as-is, in full colour, and would not adapt to the menu bar.
+
+  The mark is 640 units inside a 720-unit canvas, so 40 units of nothing sit on
+  every side. That margin is the ONLY size control there is: `tray-icon` scales
+  whatever bitmap it is handed to exactly 18pt tall, so exporting a bigger or
+  smaller PNG changes the resolution and not the size. Drawn edge to edge the
+  mark came out 18pt — the tallest thing in the menu bar, a point above the
+  circles beside it and two above the boxed input-source glyph, which is the
+  same rounded-rectangle outline this is. 640/720 renders it at 16pt and puts
+  it back among its neighbours.
+
+  Export at 36x36 for `@2x` and 18x18 for `@1x` — 18pt at each scale, so the
+  bitmap lands on the backing store one pixel to one and nothing is resampled.
 -->
-<svg xmlns="http://www.w3.org/2000/svg" width="640" height="640" viewBox="0 0 640 640" fill="none">
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="720" viewBox="-40 -40 720 720" fill="none">
   <!-- Frame. -->
   <rect x="14" y="14" width="612" height="612" rx="130" fill="none" stroke="#000000" stroke-width="28"/>
   <!-- Gutter rule, held back so the ribbon reads as the figure. -->

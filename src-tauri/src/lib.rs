@@ -16,6 +16,11 @@ const MCP_BRIDGE_PORT: u16 = 31415;
 /// automatic light/dark tint off the `Template` filename suffix. A file named
 /// `tray-icon@2x.png` is drawn verbatim in full colour and will not adapt to
 /// the menu bar. `icon_as_template(true)` is the matching half of that.
+///
+/// The size is not set here and cannot be: `tray-icon` scales whatever bitmap
+/// it is given to 18pt tall. How large the mark reads is decided in
+/// `tray-icon-source.svg`, by how much transparent margin the export carries —
+/// see the note in that file before changing either.
 #[cfg(desktop)]
 fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     use tauri::{
