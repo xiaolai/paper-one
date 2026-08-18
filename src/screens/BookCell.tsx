@@ -258,9 +258,18 @@ export function BookCell({
       {/* The reader's OWN tags carry a remove control; a publisher's
           subject does not, because it is a fact about the book rather
           than a choice, and it comes back on the next open anyway. */}
-      {tags.length > 0 && (
-        <div className={styles.tagRow}>
-          {tags.slice(0, 4).map((tag) => {
+      {/* ALWAYS DRAWN, empty when the book has no tags — the same trick the
+          progress rule uses two rows up, and for the same reason. The cell
+          reserves 20px for this row because virtualisation needs every row to
+          be one height; rendered only when there are tags, that 20px became
+          slack, and slack has to sit somewhere. At the foot it left every
+          untagged card floating at the top of its cell with a gap beneath;
+          inside the book box it pushed the progress rule and the `⋯` a further
+          16px from the jacket they belong to. Occupied by the same element in
+          both cases there is no slack to place: the card fills its cell, and
+          the meta row sits under the cover at the 12px its margins ask for. */}
+      <div className={styles.tagRow}>
+        {tags.slice(0, 4).map((tag) => {
             const mine = (book.tags ?? []).includes(tag)
             return (
               <button
@@ -280,9 +289,8 @@ export function BookCell({
                 {tag}
               </button>
             )
-          })}
-        </div>
-      )}
+        })}
+      </div>
     </div>
   )
 }

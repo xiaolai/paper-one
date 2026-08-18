@@ -595,8 +595,20 @@
   overflow: hidden;
 }
 
+/* THE BOOK TAKES ITS COVER'S HEIGHT AND NO MORE.
+ *
+ * It grew — `flex: 1 1 auto` — so every cell's spare height was absorbed here,
+ * between the jacket and the row under it. The cell reserves 20px for a tag row
+ * that an untagged book never draws, and all of it was landing in that gap:
+ * measured, a 193px cover inside a 217px box, putting the progress rule and the
+ * `⋯` 28px below the jacket they belong to.
+ *
+ * Not growing, the spare height falls to the BOTTOM of the cell, which is where
+ * the tag row appears when there is one — so the space is reserved where it is
+ * actually used, and the meta row sits under the cover at the 12px the two
+ * margins ask for. */
 .cell > .book {
-  flex: 1 1 auto;
+  flex: 0 0 auto;
   min-width: 0;
   min-height: 0;
 }
