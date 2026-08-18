@@ -321,7 +321,20 @@ export function Reader({
                       else in the reading area reaches, so it needs no layer of
                       its own under §12. */}
                   {state.progressLineOn && accent && (
-                    <div className={styles.progressTrack} aria-hidden="true">
+                    <div
+                      className={styles.progressTrack}
+                      /* THE EDGE THE PANE IS NOT ON. The rule is a property of
+                         the page, and the page's free edge is whichever one the
+                         pane has not taken — put them on the same side and the
+                         rule ends up in the seam between the book and the pane,
+                         reading as a divider between two panels rather than as
+                         how far through the book the reader is.
+                         The pane's SETTING, not whether it happens to be open,
+                         so the rule does not jump across the window every time
+                         the pane is shown or hidden. */
+                      data-edge={state.side === 'left' ? 'end' : 'start'}
+                      aria-hidden="true"
+                    >
                       <div
                         className={styles.progressFill}
                         style={{

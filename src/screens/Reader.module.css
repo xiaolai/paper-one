@@ -49,24 +49,41 @@
 /*
  * How far through the BOOK the reader is, down the leading edge.
  *
- * At the stage's very edge — `inset-inline-start: 0` on the padding box, so it
- * sits outside the 24px the scroll port respects and shares a lane with
- * nothing. That is the point: it reads as a property of the page rather than as
- * a control on it, and 3px is the width at which a colour is an edge and not a
- * bar. Logical rather than `left`, so it follows the reading direction.
+ * At the stage's very edge, on the padding box, so it sits outside the 24px the
+ * scroll port respects and shares a lane with nothing. That is the point: it
+ * reads as a property of the page rather than as a control on it, and 3px is
+ * the width at which a colour is an edge and not a bar.
  *
- * Not on §12's layer list, and it does not need to be: x = 0…3 is territory
- * nothing else in the reading area reaches — the scroll port starts at 24 and
- * the prose grid well after that — so there is no stacking question to answer.
+ * WHICH EDGE FOLLOWS THE PANE. It was always the leading one, which is right
+ * only while the pane is on the trailing side — moved to the left, the pane put
+ * itself against the rule, and the two together read as a divider between two
+ * panels rather than as a page with a measure of progress down its free side.
+ * `data-edge` says which, and the reader sets it to whichever side the pane is
+ * not on.
+ *
+ * Logical properties throughout, so this composes with reading direction rather
+ * than fighting it.
+ *
+ * Not on §12's layer list, and it does not need to be: the outermost 3px of the
+ * stage is territory nothing else in the reading area reaches — the scroll port
+ * starts at 24 on both sides and the prose grid well after that — so there is no
+ * stacking question to answer at either edge.
  */
 .progressTrack {
   position: absolute;
   inset-block: 0;
-  inset-inline-start: 0;
   width: var(--track-w);
   /* The unread part. A token rather than a tint of the book's own colour, so
      the track reads the same on all five themes and only the fill carries hue. */
   background: var(--line-2);
+}
+
+.progressTrack[data-edge='start'] {
+  inset-inline-start: 0;
+}
+
+.progressTrack[data-edge='end'] {
+  inset-inline-end: 0;
 }
 
 .progressFill {
