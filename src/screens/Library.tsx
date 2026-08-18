@@ -109,10 +109,10 @@ const ORDERS: readonly ToolbarOption<LibraryOrder>[] = [
  */
 type LibraryLayout = 'grid' | 'list'
 
-const LAYOUTS: readonly ToolbarOption<LibraryLayout>[] = [
-  { id: 'grid', label: 'Grid of covers', Icon: LayoutGrid },
-  { id: 'list', label: 'List with details', Icon: List },
-]
+/* THERE IS NO LAYOUTS TABLE. A registry earns its place when a list has to be
+ * rendered from it; with two mutually exclusive values the toggle names both in
+ * the one line that switches them, and a table would be a second place to keep
+ * them in step. `ORDERS` below has four and stays. */
 
 export function Library({
   books,
@@ -136,9 +136,9 @@ export function Library({
      being looked at right now, neither survives a launch, and splitting the
      two across two homes would be one of them for no reason. */
   const [layout, setLayout] = useState<LibraryLayout>('grid')
-  /* One at a time, like the shelf's book menus: opening either toolbar menu
-     closes the other, so two dropdowns can never overlap each other. */
-  const [toolMenu, setToolMenu] = useState<'view' | 'sort' | null>(null)
+  /* One menu left on this toolbar, so this is a boolean rather than a union of
+     which one is open — the view became a toggle and has nothing to open. */
+  const [sortOpen, setSortOpen] = useState(false)
   /* Read ONCE per render, not per row. `relativeTime` needs a now to measure
      from, and a hundred rows each calling `Date.now()` would be a hundred
      slightly different nows — so two books opened in the same second could
@@ -306,24 +306,36 @@ export function Library({
           {/* ONE ROW, and the whole of it. Searching, choosing a view, choosing
               an order and adding a book are the four things this screen does;
               they belong on one line rather than spread over a header and a
-              filter row with a title between them. Two of the four are
-              decisions rather than actions, so they are menus that wear their
-              own answer — see `ToolbarMenu`. */}
-          <ToolbarMenu
-            name="View"
-            value={layout}
-            options={LAYOUTS}
-            onChange={setLayout}
-            open={toolMenu === 'view'}
-            setOpen={(open) => setToolMenu(open ? 'view' : null)}
-          />
+              filter row with a title between them.
+
+              THE VIEW IS A TOGGLE AND THE ORDER IS A MENU, because two options
+              and four are different problems. A menu of two costs a click to
+              show the reader the one thing they did not choose — they already
+              know what the other one is — and then a second click to take it. A
+              toggle is the whole decision in one press. */}
+          <button
+            type="button"
+            className={styles.tool}
+            /* The icon is what pressing it GIVES you, not what you have: a
+               toggle's mark is a destination. The label says so in words, since
+               an icon alone cannot distinguish the two readings. */
+            aria-label={layout === 'grid' ? 'Switch to list view' : 'Switch to grid view'}
+            title={layout === 'grid' ? 'List view' : 'Grid view'}
+            onClick={() => setLayout(layout === 'grid' ? 'list' : 'grid')}
+          >
+            {layout === 'grid' ? (
+              <List size={ICON.control} strokeWidth={ICON.stroke} />
+            ) : (
+              <LayoutGrid size={ICON.control} strokeWidth={ICON.stroke} />
+            )}
+          </button>
           <ToolbarMenu
             name="Sort"
             value={order}
             options={ORDERS}
             onChange={setOrder}
-            open={toolMenu === 'sort'}
-            setOpen={(open) => setToolMenu(open ? 'sort' : null)}
+            open={sortOpen}
+            setOpen={setSortOpen}
           />
           {/* ONE ACTION, because there was only ever one intent. "Add books"
               and "Add folder" sat at equal weight and made the reader classify
