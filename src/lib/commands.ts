@@ -1,5 +1,6 @@
 import { DEFAULT_STEP_IDX, READING_STEPS, readingStep } from './metrics'
-import { panesFor, THEMES, TYPEFACES } from './panes'
+import { panesFor, THEMES } from './panes'
+import { BUNDLED_FACES, GROUP_LABEL, type Face } from './typefaces'
 import type { AppDispatch, AppState } from './state'
 
 /**
@@ -35,6 +36,12 @@ export interface CommandContext {
   dispatch: AppDispatch
   /** Null when the reader has no book open — book commands are then omitted. */
   hasBook: boolean
+  /**
+   * The faces to offer, which depends on what this machine has — see
+   * `offeredFaces`. Omitted, only the bundled three are listed, which is the
+   * conservative answer rather than a wrong one.
+   */
+  faces?: readonly Face[]
   /** Marks the current selection, when there is one. */
   markSelection: (() => void) | null
   openBookPicker: () => void
@@ -209,12 +216,16 @@ export function buildCommands(ctx: CommandContext): Command[] {
    * both are Appearance, and both are a choice from a fixed registry. The
    * label names the face rather than describing it — a palette row is read by
    * someone who already knows which one they want. */
-  for (const face of TYPEFACES) {
+  /* The SAME faces the settings panel offers, which depends on what this
+   * machine has — so they are handed in rather than looked up. Defaulted to the
+   * bundled three, which exist everywhere: a palette listing a face the reader
+   * does not have would run and silently change nothing. */
+  for (const face of ctx.faces ?? BUNDLED_FACES) {
     commands.push({
       id: `typeface:${face.id}`,
       label: `Typeface — ${face.label}`,
       group: 'Appearance',
-      keywords: `font family type ${face.note.toLowerCase()}`,
+      keywords: `font family type ${GROUP_LABEL[face.group].toLowerCase()}`,
       on: state.typeface === face.id,
       run: () => dispatch({ type: 'setTypeface', typeface: face.id }),
     })

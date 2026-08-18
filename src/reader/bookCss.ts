@@ -1,5 +1,7 @@
 import type { Theme, Typeface } from '../lib/state'
 import { readingStep } from '../lib/metrics'
+import { faceById } from '../lib/typefaces'
+import { opticalScale } from '../lib/fontProbe'
 
 /**
  * The stylesheet injected into the book document.
@@ -78,14 +80,9 @@ export function markPalette(theme: Theme): {
  * Fontsource does not cover degrades within its own genre rather than to a
  * serif in the middle of a sans-set book.
  */
-const READING_STACKS: Record<Typeface, string> = {
-  // Literata leads for Latin, Cyrillic and Greek; the per-script Noto faces and
-  // the CJK packs are appended as they are embedded.
-  literata: "'Literata Variable', Literata, 'Charis SIL', Georgia, serif",
-  crimson: "'Crimson Pro Variable', 'Crimson Pro', Georgia, serif",
-  instrument: "'Instrument Sans Variable', 'Instrument Sans', system-ui, sans-serif",
-  plex: "'IBM Plex Mono', ui-monospace, Menlo, monospace",
-}
+/* THE STACKS LIVE IN `typefaces.ts` NOW, with the faces themselves. They were
+ * a table here and a second table in the settings panel, and a third of the
+ * decision — which faces exist at all — was in `panes.ts`. One registry. */
 
 /**
  * The host's `@font-face` rules, for injection into the book.
@@ -155,7 +152,14 @@ export function bookCss({
 }: BookCssOptions): string {
   const step = readingStep(stepIdx)
   const c = BOOK_COLOURS[theme]
-  const stack = READING_STACKS[typeface]
+  const face = faceById(typeface)
+  const stack = face.stack
+  /* THE SIZE THE READER ASKED FOR, CORRECTED FOR THIS FACE. Two faces at 21px
+   * do not read the same size — see `typefaces.ts` — so a reader who switched
+   * face found their book had silently changed size and raised the step to
+   * compensate, which changed their measure as well. Rounded, because a
+   * fractional font-size lands text on half pixels. */
+  const size = Math.round(step.size * opticalScale(face))
 
   return `
 @namespace epub "http://www.idpf.org/2007/ops";
@@ -184,7 +188,7 @@ body {
    * literal, and one would end the string. */
   background: transparent;
   font-family: ${stack};
-  font-size: ${step.size}px;
+  font-size: ${size}px;
   line-height: ${step.line}px;
   text-align: ${justify ? 'justify' : 'start'};
   -webkit-hyphens: ${hyphenate ? 'auto' : 'manual'};

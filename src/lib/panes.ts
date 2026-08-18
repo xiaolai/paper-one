@@ -1,4 +1,4 @@
-import { paneFits, type PaneId, type Screen, type Theme, type Typeface } from './state'
+import { paneFits, type PaneId, type Screen, type Theme } from './state'
 
 /**
  * The side pane's panels — one registry, for everyone who names them.
@@ -72,24 +72,11 @@ export const THEMES: readonly { id: Theme; label: string }[] = [
   { id: 'night', label: 'Night' },
 ]
 
-/**
- * The faces a book can be set in — the four `main.tsx` bundles, and no others.
- *
- * A registry rather than two lists, for the reason the themes above give. The
- * `note` is what a reader needs in order to CHOOSE, which for type is not the
- * name: three of these four are unfamiliar outside typography, and a picker
- * that offers four proper nouns and no guidance is a coin toss.
- *
- * Adding a family here without importing it in `main.tsx` produces a book set
- * in Georgia and reports nothing — an unknown family is not an error, it is the
- * next entry in the fallback chain. See `READING_STACKS`.
- */
-export const TYPEFACES: readonly { id: Typeface; label: string; note: string }[] = [
-  { id: 'literata', label: 'Literata', note: 'Serif, for reading' },
-  { id: 'crimson', label: 'Crimson Pro', note: 'Serif, lighter' },
-  { id: 'instrument', label: 'Instrument Sans', note: 'Sans' },
-  { id: 'plex', label: 'IBM Plex Mono', note: 'Monospaced' },
-]
+/* THE TYPEFACE TABLE MOVED to `typefaces.ts`, which is where the faces, their
+ * stacks and their optical sizes now live together. It was three tables in
+ * three files — this one, a preview table in the settings panel and a reading
+ * table in `bookCss` — so a face could be listed here, previewed in a second
+ * stack and read in a third, and nothing compared them. */
 
 /** Labels by id, for the pane header and anywhere else that names one. */
 export const PANE_TITLES = Object.fromEntries(

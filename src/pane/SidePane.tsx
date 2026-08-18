@@ -20,6 +20,7 @@ import type { CardStore } from '../lib/useCards'
 import type { MarkStore } from '../lib/useMarks'
 import { Companion } from './Companion'
 import { Contents } from './Contents'
+import type { Face } from '../lib/typefaces'
 import { LibraryPanel } from './LibraryPanel'
 import { Cards } from './Cards'
 import { Notes } from './Notes'
@@ -131,6 +132,8 @@ export interface SidePaneProps {
   onRenameTag: (from: string, to: string) => void
   onRemoveTag: (tag: string) => void
   ownTagCount: (tag: string) => number
+  /** The faces this machine can offer — passed straight to Settings. */
+  offered: readonly Face[]
 }
 
 export function SidePane({
@@ -147,6 +150,7 @@ export function SidePane({
   onRenameTag,
   onRemoveTag,
   ownTagCount,
+  offered,
 }: SidePaneProps) {
   /* Falls back to the last pane rather than unmounting. The slot stays mounted
    * at zero width and inert while closed, so keeping the panel rendered is what
@@ -194,6 +198,7 @@ export function SidePane({
 
         {pane === 'settings' && (
           <Settings
+            offered={offered}
             theme={state.theme}
             themeFollowsOs={state.themeFollowsOs}
             pageLayout={state.pageLayout}

@@ -1,23 +1,14 @@
 import { READING_STEPS, readingStep } from '../lib/metrics'
-import { THEMES, TYPEFACES } from '../lib/panes'
+import { THEMES } from '../lib/panes'
+import { GROUP_LABEL, type Face } from '../lib/typefaces'
 import type { PageLayout, Side, Theme, Typeface } from '../lib/state'
 import styles from './SidePane.module.css'
 
-/**
- * What each face should be PREVIEWED in, as a CSS stack.
- *
- * Deliberately not imported from `bookCss`: that stack is the book's, with
- * script fallbacks and a generic tail that exist so an unusual document
- * degrades gracefully. A preview wants the bundled face or nothing — falling
- * back to Georgia here would show the reader a sample of a typeface they cannot
- * choose, labelled with the name of one they can.
+/* THERE IS NO PREVIEW TABLE HERE ANY MORE. A face's stack was written once for
+ * the book and again for its sample, so a face could be previewed in something
+ * other than what the reader would get. One registry — `typefaces.ts` — and the
+ * sample is set in the same stack the book is.
  */
-const PREVIEW_STACKS: Record<Typeface, string> = {
-  literata: "'Literata Variable', serif",
-  crimson: "'Crimson Pro Variable', serif",
-  instrument: "'Instrument Sans Variable', sans-serif",
-  plex: "'IBM Plex Mono', monospace",
-}
 
 /**
  * §05 theme chips — the page colour of each theme, as a literal, because a
@@ -52,6 +43,8 @@ export interface SettingsProps {
   /** Index into §09's seven reading steps — see `lib/metrics`. */
   stepIdx: number
   typeface: Typeface
+  /** The faces this machine can offer — see `offeredFaces`. */
+  offered: readonly Face[]
   onTheme: (theme: Theme) => void
   onFollowOs: (follows: boolean) => void
   onPageLayout: (layout: PageLayout) => void
@@ -73,6 +66,7 @@ export function Settings({
   side,
   stepIdx,
   typeface,
+  offered,
   onTheme,
   onFollowOs,
   onPageLayout,
@@ -84,6 +78,9 @@ export function Settings({
   onTypeface,
 }: SettingsProps) {
   const step = readingStep(stepIdx)
+  /* Handed in, not probed here: `App` probes once and gives the same list to
+     this panel and to the command palette, so the two cannot come to offer
+     different faces. */
   return (
     <div className={styles.panel}>
       <div className={styles.groupTitle}>Appearance</div>
@@ -128,60 +125,80 @@ export function Settings({
           A row, not a <button> — a button cannot contain buttons, and the two
           ends must be separately disablable. */}
       <div className={`${styles.settingRow} ${styles.settingStatic}`}>
-        <span style={{ flex: 1 }}>Type size</span>
+        {/* "Text size", not "Font size" — the control directly below chooses the
+            FONT, and two rows both beginning "Font" read as one setting split
+            in two rather than as the two different decisions they are. */}
+        <span style={{ flex: 1 }}>Text size</span>
         <div className={styles.stepper}>
+          {/* A SMALL A AND A LARGE ONE, which say what grows. `−` and `+` beside
+              a number say only "more", and next to a numeral they read as a
+              numeric field — the reader has to work out what the number is of.
+              An A is the answer and the demonstration at once. */}
           <button
             type="button"
             className={styles.stepperButton}
             disabled={stepIdx <= 0}
-            aria-label="Smaller type"
+            aria-label="Smaller text"
             onClick={() => onStepIdx(stepIdx - 1)}
           >
-            −
+            <span className={styles.stepperSmall} aria-hidden="true">
+              A
+            </span>
           </button>
-          {/* Shown at its own size, capped at the row: the point of the control
-              is the type, and a number in interface type says nothing about
-              how the page will read. §09 keeps interface type off this ramp. */}
-          <span className={styles.stepperValue} style={{ fontSize: Math.min(step.size, 22) }}>
-            {step.size}
-          </span>
+          {/* AT A STEADY SIZE. It used to be drawn at the size it names, which
+              made the number a demonstration — but the two A's demonstrate it
+              now, and a value that changes size makes the row change height
+              every time it is pressed. It reports; they show. */}
+          <span className={styles.stepperValue}>{step.size}</span>
           <button
             type="button"
             className={styles.stepperButton}
             disabled={stepIdx >= READING_STEPS.length - 1}
-            aria-label="Larger type"
+            aria-label="Larger text"
             onClick={() => onStepIdx(stepIdx + 1)}
           >
-            +
+            <span className={styles.stepperLarge} aria-hidden="true">
+              A
+            </span>
           </button>
         </div>
       </div>
 
-      {/* Each row is SET IN the face it offers, which is the only honest way to
-          show a typeface — a list of four proper nouns in the interface font
-          tells a reader nothing about what their book will look like. §09 keeps
-          interface type off this ramp, so the label below each sample stays in
-          the interface face at its own size. */}
-      <div className={styles.typefaceList}>
-        {TYPEFACES.map(({ id, label, note }) => (
-          <button
-            key={id}
-            type="button"
-            className={styles.typefaceRow}
-            data-on={typeface === id}
-            aria-pressed={typeface === id}
-            onClick={() => onTypeface(id)}
-          >
-            <span
-              className={styles.typefaceSample}
-              style={{ fontFamily: PREVIEW_STACKS[id] }}
-            >
-              {label}
-            </span>
-            <span className={styles.typefaceNote}>{note}</span>
-          </button>
-        ))}
-      </div>
+      {/* GROUPED BY WHAT IS BEING CHOSEN — a serif to read in, a sans, a
+          monospace — and nothing else. No row says where its font came from:
+          a reader cannot act on "bundled" or "system", and a list that named a
+          font this machine does not have would be a list that lies, so absent
+          faces are simply not in it.
+
+          Each row is SET IN the face it offers, which is the only honest way to
+          show a typeface — four proper nouns in the interface font tell a
+          reader nothing about what their book will look like. The sample IS the
+          description, so there is no note beside it any more. */}
+      {(['serif', 'sans', 'mono'] as const).map((group) => {
+        const faces = offered.filter((face) => face.group === group)
+        if (faces.length === 0) return null
+        return (
+          <div key={group}>
+            <div className={styles.groupTitle}>{GROUP_LABEL[group]}</div>
+            <div className={styles.typefaceList}>
+              {faces.map((face) => (
+                <button
+                  key={face.id}
+                  type="button"
+                  className={styles.typefaceRow}
+                  data-on={typeface === face.id}
+                  aria-pressed={typeface === face.id}
+                  onClick={() => onTypeface(face.id)}
+                >
+                  <span className={styles.typefaceSample} style={{ fontFamily: face.stack }}>
+                    {face.label}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )
+      })}
 
       <button
         type="button"

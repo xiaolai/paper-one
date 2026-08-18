@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_STEP_IDX, READING_STEPS, readingStep } from './metrics'
-import { TYPEFACES } from './panes'
+import { BUNDLED_FACES, faceById } from './typefaces'
 import { bootState, initialState, paneFits, reducer, screenFor, type AppState } from './state'
 
 /**
@@ -181,38 +181,58 @@ describe('every offered typeface is a font that exists', () => {
   const read = (path: string) =>
     readFileSync(fileURLToPath(new URL(path, import.meta.url)), 'utf8')
   const main = read('../main.tsx')
-  const stacks = read('../reader/bookCss.ts')
-  const settings = read('../pane/Settings.tsx')
 
-  it('offers exactly the four families main.tsx bundles', () => {
-    const imported = [...main.matchAll(/@fontsource[^'"]*\/([a-z-]+)/g)].map((m) => m[1])
-    expect(new Set(imported)).toEqual(
-      new Set(['instrument-sans', 'crimson-pro', 'literata', 'ibm-plex-mono']),
+  /* Crimson Pro is still BUNDLED and no longer OFFERED: the interface sets its
+   * empty states and note bodies in it, so the webfont must stay, while as a
+   * reading choice it duplicated Literata's role and was the face whose small
+   * x-height made a size mean two different things. Bundled and offered are
+   * separate lists now, and this asserts the relationship rather than an equal
+   * count — every offered bundled face must be one main.tsx actually loads. */
+  it('bundles a family for every face it offers as bundled', () => {
+    const imported = new Set(
+      [...main.matchAll(/@fontsource[^'"]*\/([a-z-]+)/g)].map((m) => m[1]),
     )
-    expect(TYPEFACES).toHaveLength(4)
+    const wanted: Record<string, string> = {
+      literata: 'literata',
+      instrument: 'instrument-sans',
+      plex: 'ibm-plex-mono',
+    }
+    for (const face of BUNDLED_FACES) {
+      const pkg = wanted[face.id]
+      expect(pkg, `no @fontsource package known for ${face.id}`).toBeDefined()
+      expect(imported.has(pkg as string), `main.tsx must import ${pkg}`).toBe(true)
+    }
   })
 
-  it('leads every book stack with a family the app actually loads', () => {
-    // The names verified against the live document's registered @font-face
-    // rules: an approximation here would be the exact bug this test is for.
+  it('leads every BUNDLED book stack with a family the app actually loads', () => {
+    /* Only the bundled ones. A system face's stack leads with a family this app
+     * never loads — that is what makes it a system face — so asserting a
+     * `@font-face` behind every entry would have failed the moment the reader's
+     * own fonts were offered, and asserting it behind none would have stopped
+     * catching the bug this test exists for: a bundled face named slightly
+     * wrong falls through to Georgia with nothing on screen to say so. */
     const LEADS: Record<string, string> = {
       literata: "'Literata Variable'",
-      crimson: "'Crimson Pro Variable'",
       instrument: "'Instrument Sans Variable'",
       plex: "'IBM Plex Mono'",
     }
-    for (const { id } of TYPEFACES) {
-      const lead = LEADS[id]
-      expect(lead, `no expected family for ${id}`).toBeDefined()
-      // `id: "'Family Name', …` — the double quote is the TS string opening,
-      // the single quotes are CSS's, and the family must come FIRST in the
-      // chain or the fallbacks decide what the book is set in.
-      expect(stacks, `bookCss must lead ${id} with ${lead}`).toContain(`${id}: "${lead},`)
+    for (const [id, lead] of Object.entries(LEADS)) {
+      const face = faceById(id)
+      expect(face.id, `${id} is not in the registry`).toBe(id)
+      expect(face.stack.startsWith(lead), `${id} must lead with ${lead}`).toBe(true)
     }
   })
 
-  it('previews every face it offers, so no row is drawn in the wrong type', () => {
-    for (const { id } of TYPEFACES) expect(settings).toContain(`${id}:`)
+  /* THE PREVIEW IS THE BOOK'S OWN STACK. There used to be a second table of
+   * preview stacks in the settings panel, so a face could be sampled in one
+   * thing and read in another with nothing comparing them. The panel reads
+   * `face.stack` now, which is the same string `bookCss` sets the book in —
+   * asserted here rather than trusted, because it is one edit from being a
+   * copy again. */
+  it('samples a face in the same stack the book is set in', () => {
+    const settings = read('../pane/Settings.tsx')
+    expect(settings).toContain('fontFamily: face.stack')
+    expect(settings).not.toContain('PREVIEW_STACKS')
   })
 })
 

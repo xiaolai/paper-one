@@ -60,7 +60,17 @@ export type Theme = 'paper' | 'slate' | 'sepia' | 'sage' | 'night'
  * not an error — it is silently the next entry in the fallback chain, which is
  * how every book rendered in Georgia for a month while claiming Literata.
  */
-export type Typeface = 'literata' | 'crimson' | 'instrument' | 'plex'
+/**
+ * A face id, from the registry in `typefaces.ts`.
+ *
+ * A STRING rather than a union, because the set is no longer fixed at compile
+ * time: which faces exist depends on what the reader's machine has, and a union
+ * would have to name every face on every platform in order to describe one.
+ * `faceById` resolves an unknown id to the default, so nothing downstream has
+ * to handle a face that is not there — a setting carried to a machine without
+ * that font falls back rather than failing.
+ */
+export type Typeface = string
 /**
  * The panels of the single side pane — see `lib/panes` for their metadata.
  *

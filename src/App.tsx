@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { buildCommands } from './lib/commands'
+import { offeredFaces } from './lib/typefaces'
+import { presentFaces } from './lib/fontProbe'
 import { PANE_SHORTCUTS } from './lib/panes'
 import { DEFAULT_STEP_IDX, applyMetrics } from './lib/metrics'
 import { importFs as tauriImportFs, pickBooks, pickFolder, readBookAt } from './lib/bookFiles'
@@ -73,6 +75,10 @@ export interface AppProps {
 
 export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps) {
   const platform = usePlatform()
+  /* Probed once for the app's lifetime: which fonts this machine has cannot
+     change while it is running. Shared by the settings panel and the palette so
+     the two cannot come to offer different lists. */
+  const offeredHere = useMemo(() => offeredFaces(presentFaces()), [])
   const prefersDark = usePrefersDark()
   /* The one thing that can stop a page turn sliding. Not a setting — see the
    * hook, which explains why there is deliberately no control for it. */
@@ -762,6 +768,8 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
   const commands = useMemo(
     () =>
       buildCommands({
+        /* The same faces the settings panel offers — see `offeredFaces`. */
+        faces: offeredHere,
         state,
         dispatch,
         hasBook: book.source !== null,
@@ -1026,6 +1034,7 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
             onRenameTag={library.renameTag}
             onRemoveTag={library.removeTag}
             ownTagCount={library.ownTagCount}
+            offered={offeredHere}
           />
         }
         onDismissPane={() => dispatch({ type: 'closePane' })}
