@@ -227,11 +227,40 @@ export const SPACING: Record<'letter' | 'word' | 'line' | 'paragraph', SpacingSc
   paragraph: { steps: [0, 0.5, 1, 1.5, 2], def: 2, unit: 'x' },
 }
 
-/** A spacing value from an index, clamped — an index from anywhere may be stale. */
-export function spacingAt(key: keyof typeof SPACING, idx: number): number {
-  const scale = SPACING[key]
+/**
+ * How much of the theme's own light to keep, and how hard the text sits on it.
+ *
+ * BOUNDED AT 0.75, and the bound is measured rather than chosen. Dimming a
+ * light theme darkens the page, and past about half the page reaches mid grey —
+ * where the most any text can manage is 5.3:1 against it, leaving the contrast
+ * control no room and the page reading as grey rather than as dimmed paper. At
+ * 0.75 the page is #bfbfbf with about 11:1 available, which is headroom.
+ *
+ * Contrast is symmetric about zero and deliberately narrow. It moves the text
+ * only — see `adjustPalette` — and everything it produces is clamped to 4.5:1,
+ * so the ends are a preference rather than a way to make the page unreadable.
+ */
+export const BRIGHTNESS: SpacingScale = {
+  steps: [0.75, 0.8125, 0.875, 0.9375, 1],
+  def: 4,
+  unit: 'x',
+}
+
+export const CONTRAST: SpacingScale = {
+  steps: [-0.35, -0.175, 0, 0.175, 0.35],
+  def: 2,
+  unit: 'x',
+}
+
+/** A value from either scale, clamped for the reason `spacingAt` gives. */
+export function stepAt(scale: SpacingScale, idx: number): number {
   const at = Math.min(scale.steps.length - 1, Math.max(0, Math.round(idx)))
   return scale.steps[at] ?? scale.steps[scale.def] ?? 0
+}
+
+/** A spacing value from an index, clamped — an index from anywhere may be stale. */
+export function spacingAt(key: keyof typeof SPACING, idx: number): number {
+  return stepAt(SPACING[key], idx)
 }
 
 /** Index into READING_STEPS for the 21/34/660 default. */

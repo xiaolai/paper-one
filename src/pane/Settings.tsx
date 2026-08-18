@@ -1,10 +1,10 @@
 import { useState } from 'react'
-import { READING_STEPS, readingStep } from '../lib/metrics'
+import { BRIGHTNESS, CONTRAST, READING_STEPS, SPACING, readingStep } from '../lib/metrics'
 import { THEMES } from '../lib/panes'
 import type { Face } from '../lib/typefaces'
 import { FacePicker } from './FacePicker'
 import type { PageLayout, Side, SpacingIndices, SpacingKey, Theme, Typeface } from '../lib/state'
-import { SpacingRow } from './SpacingRow'
+import { StepRow } from './StepRow'
 import styles from './SidePane.module.css'
 
 /* THERE IS NO PREVIEW TABLE HERE ANY MORE. A face's stack was written once for
@@ -58,6 +58,10 @@ export interface SettingsProps {
   onStepIdx: (idx: number) => void
   spacing: SpacingIndices
   onSpacing: (key: SpacingKey, idx: number) => void
+  brightness: number
+  onBrightness: (idx: number) => void
+  contrast: number
+  onContrast: (idx: number) => void
   onTypeface: (typeface: Typeface) => void
 }
 
@@ -82,6 +86,10 @@ export function Settings({
   onStepIdx,
   spacing,
   onSpacing,
+  brightness,
+  onBrightness,
+  contrast,
+  onContrast,
   onTypeface,
 }: SettingsProps) {
   const step = readingStep(stepIdx)
@@ -116,6 +124,18 @@ export function Settings({
           </button>
         ))}
       </div>
+
+      {/* HOW MUCH LIGHT THE APP GIVES OFF, and how hard the text sits on it.
+          In Appearance rather than Reading because they move the whole window —
+          a dimmed page inside bright chrome makes the frame the brightest thing
+          on screen and pulls the eye off the text.
+
+          Independent of the system on purpose: dimming the display to read at
+          night dims everything else with it, and turning it back up to answer a
+          message undoes the reading setting. Nothing either control produces
+          can go under 4.5:1 — see `adjustPalette`. */}
+      <StepRow label="Brightness" scale={BRIGHTNESS} value={brightness} onChange={onBrightness} />
+      <StepRow label="Contrast" scale={CONTRAST} value={contrast} onChange={onContrast} />
 
       <button
         type="button"
@@ -189,15 +209,14 @@ export function Settings({
           a second control move it would make the line length depend on which
           one was touched last. */}
       <div className={styles.groupTitle}>Spacing</div>
-      <SpacingRow label="Letter" settingKey="letter" value={spacing.letter} onChange={onSpacing} />
-      <SpacingRow label="Word" settingKey="word" value={spacing.word} onChange={onSpacing} />
-      <SpacingRow label="Line" settingKey="line" value={spacing.line} onChange={onSpacing} />
-      <SpacingRow
-        label="Paragraph"
-        settingKey="paragraph"
-        value={spacing.paragraph}
-        onChange={onSpacing}
-      />
+      <StepRow label="Letter" scale={SPACING.letter} value={spacing.letter}
+        onChange={(idx) => onSpacing('letter', idx)} />
+      <StepRow label="Word" scale={SPACING.word} value={spacing.word}
+        onChange={(idx) => onSpacing('word', idx)} />
+      <StepRow label="Line" scale={SPACING.line} value={spacing.line}
+        onChange={(idx) => onSpacing('line', idx)} />
+      <StepRow label="Paragraph" scale={SPACING.paragraph} value={spacing.paragraph}
+        onChange={(idx) => onSpacing('paragraph', idx)} />
 
       <button
         type="button"

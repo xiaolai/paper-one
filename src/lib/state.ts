@@ -1,5 +1,5 @@
 import { useReducer, type Dispatch } from 'react'
-import { DEFAULT_STEP_IDX, READING_STEPS, SPACING } from './metrics'
+import { BRIGHTNESS, CONTRAST, DEFAULT_STEP_IDX, READING_STEPS, SPACING } from './metrics'
 
 /**
  * Application state.
@@ -139,6 +139,17 @@ export interface AppState {
    * reducer can then take one action for all four.
    */
   readonly spacing: SpacingIndices
+  /**
+   * How much of the theme's light the app emits, and how hard the text sits on
+   * it — indices into `BRIGHTNESS` and `CONTRAST`.
+   *
+   * Independent of the system, which is the point: a reader dimming their whole
+   * display to read at night dims everything else with it, and turning the
+   * display back up to answer a message undoes the reading setting. This is the
+   * app's own.
+   */
+  readonly brightness: number
+  readonly contrast: number
   readonly typeface: Typeface
   /**
    * Whether the book's scrollbar is drawn. Off by default.
@@ -208,6 +219,9 @@ export const initialState: AppState = {
     line: SPACING.line.def,
     paragraph: SPACING.paragraph.def,
   },
+  /* The theme exactly as designed, until a reader says otherwise. */
+  brightness: BRIGHTNESS.def,
+  contrast: CONTRAST.def,
   scrollbarOn: false,
   progressLineOn: false,
   pageLayout: 'scrolled',
@@ -231,6 +245,8 @@ export type Action =
   | { type: 'pinRuler' }
   | { type: 'setStepIdx'; idx: number }
   | { type: 'setSpacing'; key: SpacingKey; idx: number }
+  | { type: 'setBrightness'; idx: number }
+  | { type: 'setContrast'; idx: number }
   | { type: 'setTypeface'; typeface: Typeface }
   | { type: 'toggleScrollbar' }
   | { type: 'toggleProgressLine' }
@@ -352,6 +368,16 @@ export function reducer(state: AppState, action: Action): AppState {
       const idx = Math.min(Math.max(Math.round(action.idx), 0), scale.steps.length - 1)
       if (state.spacing[action.key] === idx) return state
       return { ...state, spacing: { ...state.spacing, [action.key]: idx } }
+    }
+
+    case 'setBrightness':
+    case 'setContrast': {
+      /* Finite-checked and clamped, for the reason `setStepIdx` gives. */
+      if (!Number.isFinite(action.idx)) return state
+      const key = action.type === 'setBrightness' ? 'brightness' : 'contrast'
+      const scale = action.type === 'setBrightness' ? BRIGHTNESS : CONTRAST
+      const idx = Math.min(Math.max(Math.round(action.idx), 0), scale.steps.length - 1)
+      return state[key] === idx ? state : { ...state, [key]: idx }
     }
 
     case 'setTypeface':

@@ -218,6 +218,10 @@ export function SidePane({
             onStepIdx={(idx) => dispatch({ type: 'setStepIdx', idx })}
             spacing={state.spacing}
             onSpacing={(key, idx) => dispatch({ type: 'setSpacing', key, idx })}
+            brightness={state.brightness}
+            onBrightness={(idx) => dispatch({ type: 'setBrightness', idx })}
+            contrast={state.contrast}
+            onContrast={(idx) => dispatch({ type: 'setContrast', idx })}
             onTypeface={(typeface) => dispatch({ type: 'setTypeface', typeface })}
           />
         )}

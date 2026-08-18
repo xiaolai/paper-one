@@ -1,11 +1,9 @@
 import { Minus, Plus } from 'lucide-react'
-import { SPACING, spacingAt, type SpacingScale } from '../lib/metrics'
-import { ICON } from '../lib/metrics'
-import type { SpacingKey } from '../lib/state'
+import { ICON, stepAt, type SpacingScale } from '../lib/metrics'
 import styles from './SidePane.module.css'
 
 /**
- * One of the four spacings, as a stepper.
+ * A setting that moves through a closed set of steps.
  *
  * A STEPPER AND NOT A SLIDER, for the reason `READING_STEPS` gives: a value
  * between two steps is not a decision anybody made, and a slider invites
@@ -19,19 +17,22 @@ import styles from './SidePane.module.css'
  * each direction. Pips do that at a glance and take less width than the number
  * would, which matters in a 400px pane holding four of these.
  */
-export interface SpacingRowProps {
+export interface StepRowProps {
   readonly label: string
-  readonly settingKey: SpacingKey
+  /** The scale this row steps through — see `SPACING`, `BRIGHTNESS`, `CONTRAST`. */
+  readonly scale: SpacingScale
   readonly value: number
-  readonly onChange: (key: SpacingKey, idx: number) => void
+  readonly onChange: (idx: number) => void
 }
 
-export function SpacingRow({ label, settingKey, value, onChange }: SpacingRowProps) {
-  const scale: SpacingScale = SPACING[settingKey]
+/* ONE ROW FOR EVERY STEPPED SETTING. It was written for the four spacings and
+ * brightness and contrast want exactly the same control — a label, two ends
+ * that go dead, and a report of where in the scale you are. Two copies would
+ * have drifted on the disabled state or the pips within a week. */
+export function StepRow({ label, scale, value, onChange }: StepRowProps) {
   const last = scale.steps.length - 1
   const at = Math.min(last, Math.max(0, value))
-  /* Named for what it does to the page, not for its own units — see above. */
-  const amount = spacingAt(settingKey, at)
+  const amount = stepAt(scale, at)
   const title = `${label}: ${amount}${scale.unit === 'em' ? 'em' : '×'}`
 
   return (
@@ -43,7 +44,7 @@ export function SpacingRow({ label, settingKey, value, onChange }: SpacingRowPro
           className={styles.stepperButton}
           disabled={at <= 0}
           aria-label={`Less ${label.toLowerCase()}`}
-          onClick={() => onChange(settingKey, at - 1)}
+          onClick={() => onChange(at - 1)}
         >
           <Minus size={ICON.control} strokeWidth={ICON.stroke} />
         </button>
@@ -60,7 +61,7 @@ export function SpacingRow({ label, settingKey, value, onChange }: SpacingRowPro
           className={styles.stepperButton}
           disabled={at >= last}
           aria-label={`More ${label.toLowerCase()}`}
-          onClick={() => onChange(settingKey, at + 1)}
+          onClick={() => onChange(at + 1)}
         >
           <Plus size={ICON.control} strokeWidth={ICON.stroke} />
         </button>

@@ -1,8 +1,10 @@
+import { useState } from 'react'
 import type { ReactNode } from 'react'
 import { PANE_W, paneTakesTrack, type Platform } from '../lib/metrics'
 import { useAvailableWidth } from '../lib/useAvailableWidth'
 import type { AppState } from '../lib/state'
 import { LeadingCard } from './LeadingCard'
+import { useAppPalette } from '../lib/useAppPalette'
 import styles from './WindowShell.module.css'
 
 export interface WindowShellProps {
@@ -37,6 +39,13 @@ export function WindowShell({
   pane,
   onDismissPane,
 }: WindowShellProps) {
+  /* The element that carries `data-theme` is also where the reader's brightness
+     and contrast are written, as inline custom properties — an inline
+     declaration beats the attribute rule on the same element, so the override
+     lands without disturbing the cascade anywhere else. */
+  const [root, setRoot] = useState<HTMLDivElement | null>(null)
+  useAppPalette(root, state.theme, state.brightness, state.contrast)
+
   /* §06: below 1024px the pane stops taking a track and becomes a sheet over
    * the reader — the design's own word for it.
    *
@@ -55,7 +64,7 @@ export function WindowShell({
   const paneOpen = state.pane !== null
 
   return (
-    <div className={styles.root} data-theme={state.theme} data-platform={platform}>
+    <div className={styles.root} ref={setRoot} data-theme={state.theme} data-platform={platform}>
       <div className={styles.main}>
         <div className={styles.window}>
           {titleBar}
