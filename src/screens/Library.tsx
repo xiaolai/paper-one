@@ -1,5 +1,15 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
-import { CaseSensitive, Clock, FolderPlus, LayoutGrid, List, Plus, Sparkles, User } from 'lucide-react'
+import {
+  CaseSensitive,
+  Clock,
+  FolderPlus,
+  Gauge,
+  LayoutGrid,
+  List,
+  Plus,
+  Sparkles,
+  User,
+} from 'lucide-react'
 import { shelfFor, tagKey } from '../lib/library'
 import type { LibraryOrder } from '../lib/library'
 import type { IndexedBook } from '../lib/bookIndex'
@@ -9,6 +19,7 @@ import type { Platform } from '../lib/metrics'
 import { VIRTUALISE_ABOVE, gridWindow } from '../lib/virtualGrid'
 import { BookCell } from './BookCell'
 import { BookRow } from './BookRow'
+import { ToolbarMenu, type ToolbarOption } from './ToolbarMenu'
 import styles from './Library.module.css'
 
 /**
@@ -77,10 +88,14 @@ export interface LibraryProps {
  *   User           — the person.
  * Each carries its label as `title` and `aria-label`, so a hover and a screen
  * reader both get the word the sighted reader gave up. */
-const ORDERS: readonly { id: LibraryOrder; label: string; Icon: typeof Clock }[] = [
-  { id: 'recent', label: 'Sort by recent', Icon: Clock },
-  { id: 'title', label: 'Sort by title', Icon: CaseSensitive },
-  { id: 'author', label: 'Sort by author', Icon: User },
+/* The labels are the MENU's, so they name the ordering rather than the act of
+   ordering: the button already says "Sort:", and "Sort: Sort by recent" is what
+   the old labels produced once they moved inside a menu. */
+const ORDERS: readonly ToolbarOption<LibraryOrder>[] = [
+  { id: 'recent', label: 'Recently opened', Icon: Clock },
+  { id: 'title', label: 'Title', Icon: CaseSensitive },
+  { id: 'author', label: 'Author', Icon: User },
+  { id: 'progress', label: 'Progress', Icon: Gauge },
 ]
 
 /**
@@ -94,7 +109,7 @@ const ORDERS: readonly { id: LibraryOrder; label: string; Icon: typeof Clock }[]
  */
 type LibraryLayout = 'grid' | 'list'
 
-const LAYOUTS: readonly { id: LibraryLayout; label: string; Icon: typeof Clock }[] = [
+const LAYOUTS: readonly ToolbarOption<LibraryLayout>[] = [
   { id: 'grid', label: 'Grid of covers', Icon: LayoutGrid },
   { id: 'list', label: 'List with details', Icon: List },
 ]
@@ -121,6 +136,9 @@ export function Library({
      being looked at right now, neither survives a launch, and splitting the
      two across two homes would be one of them for no reason. */
   const [layout, setLayout] = useState<LibraryLayout>('grid')
+  /* One at a time, like the shelf's book menus: opening either toolbar menu
+     closes the other, so two dropdowns can never overlap each other. */
+  const [toolMenu, setToolMenu] = useState<'view' | 'sort' | null>(null)
   /* Read ONCE per render, not per row. `relativeTime` needs a now to measure
      from, and a hundred rows each calling `Date.now()` would be a hundred
      slightly different nows — so two books opened in the same second could
@@ -252,68 +270,13 @@ export function Library({
 
   return (
     <div className={styles.library} data-platform={platform}>
-      <div className={styles.head}>
-        <h1 className={styles.title}>Library</h1>
-        {/* THE COUNT IS NOT HERE ANY MORE. It sat beside the title, which is
-            the one place on this screen that never changes — and a count is
-            the opposite: it answers "how much of the library am I looking at",
-            which only matters once something is narrowing it. It reports from
-            the status bar at the foot now, where it can say "24 of 1,965"
-            without crowding a heading. */}
-        {books.length > 0 && (
-          <div className={styles.orders}>
-            {LAYOUTS.map(({ id, label, Icon }) => (
-              <button
-                key={id}
-                type="button"
-                className={styles.order}
-                data-on={layout === id}
-                aria-pressed={layout === id}
-                title={label}
-                aria-label={label}
-                onClick={() => setLayout(id)}
-              >
-                <Icon size={ICON.control} strokeWidth={ICON.stroke} />
-              </button>
-            ))}
-          </div>
-        )}
-        {books.length > 1 && (
-          <div className={styles.orders}>
-            {ORDERS.map(({ id, label, Icon }) => (
-              <button
-                key={id}
-                type="button"
-                className={styles.order}
-                data-on={order === id}
-                aria-pressed={order === id}
-                title={label}
-                aria-label={label}
-                onClick={() => setOrder(id)}
-              >
-                <Icon size={ICON.control} strokeWidth={ICON.stroke} />
-              </button>
-            ))}
-          </div>
-        )}
-        {/* ONE ACTION, because there was only ever one intent. "Add books" and
-            "Add folder" sat here at equal weight and made the reader classify
-            files-or-folder before a picker had opened — `pickBooks()` against
-            `pickFolder()` showing through — and they are not equally frequent
-            either: seeding a shelf from a folder happens once in a library's
-            life. The folder route moved to where its moment is, the empty state
-            below and ⌘K, and the label moved to `title`/`aria-label` where a
-            label belongs on an icon control. */}
-        <button
-          type="button"
-          className={styles.add}
-          onClick={onAddBooks}
-          title="Add books…"
-          aria-label="Add books"
-        >
-          <Plus size={ICON.control} strokeWidth={ICON.stroke} />
-        </button>
-      </div>
+      {/* THE WORD "LIBRARY" IS GONE. It sat in a 38px serif over the library
+          screen, reached from a rail whose Library tab is lit and beside a pane
+          already headed "Library" — a caption on a photograph of itself. What
+          it cost was a whole row of chrome above the only two controls anyone
+          uses here. The heading survives for a screen reader, which has no rail
+          and no pane to read the context off. */}
+      <h1 className={styles.srOnly}>Library</h1>
 
       {/* Per BOOK, not a spinner. An import of three hundred books that says
           only "working…" is indistinguishable from one that has hung. */}
@@ -340,6 +303,41 @@ export function Library({
             placeholder="Search — or tag:Name, is:reading to narrow"
             aria-label="Search the library"
           />
+          {/* ONE ROW, and the whole of it. Searching, choosing a view, choosing
+              an order and adding a book are the four things this screen does;
+              they belong on one line rather than spread over a header and a
+              filter row with a title between them. Two of the four are
+              decisions rather than actions, so they are menus that wear their
+              own answer — see `ToolbarMenu`. */}
+          <ToolbarMenu
+            name="View"
+            value={layout}
+            options={LAYOUTS}
+            onChange={setLayout}
+            open={toolMenu === 'view'}
+            setOpen={(open) => setToolMenu(open ? 'view' : null)}
+          />
+          <ToolbarMenu
+            name="Sort"
+            value={order}
+            options={ORDERS}
+            onChange={setOrder}
+            open={toolMenu === 'sort'}
+            setOpen={(open) => setToolMenu(open ? 'sort' : null)}
+          />
+          {/* ONE ACTION, because there was only ever one intent. "Add books"
+              and "Add folder" sat at equal weight and made the reader classify
+              files-or-folder before a picker had opened; the folder route moved
+              to where its moment is, the empty state below and ⌘K. */}
+          <button
+            type="button"
+            className={styles.add}
+            onClick={onAddBooks}
+            title="Add books…"
+            aria-label="Add books"
+          >
+            <Plus size={ICON.control} strokeWidth={ICON.stroke} />
+          </button>
           {/* ONLY WHAT IS ACTIVE. This strip used to also offer the eight most
               used tags to click into — discovery — and it was the weak version
               of that: capped at eight, and it vanished the moment a filter
@@ -348,6 +346,11 @@ export function Library({
               read-back: the scopes currently applied, each one a click from
               being lifted, so a reader can always see and undo what is
               narrowing the shelf without hunting for it in the field. */}
+        </div>
+      )}
+
+      {books.length > 0 && (view.tags.length > 0 || view.status) && (
+        <>
           {(view.tags.length > 0 || view.status) && (
             <div className={styles.chips}>
               {view.status && (
@@ -375,7 +378,7 @@ export function Library({
               ))}
             </div>
           )}
-        </div>
+        </>
       )}
 
       <div className={styles.body} data-scroll>
@@ -431,48 +434,13 @@ export function Library({
         </div>
       ) : (
         <>
-        {/* THE COLUMN LABELS, in the scroll box so they share its width — see
-            `.listHead`. Three of them sort, and they drive the SAME `order` the
-            toolbar icons do rather than a second sort of their own: one state,
-            two ways to read it and set it, which is how the search field and
-            its chips already work on this screen. */}
-        {layout === 'list' && (
-          <div className={styles.listHead}>
-            <span />
-            <button
-              type="button"
-              className={styles.listSort}
-              data-on={order === 'title'}
-              aria-pressed={order === 'title'}
-              onClick={() => setOrder('title')}
-            >
-              Title
-            </button>
-            <button
-              type="button"
-              className={`${styles.listSort} ${styles.listAuthor}`}
-              data-on={order === 'author'}
-              aria-pressed={order === 'author'}
-              onClick={() => setOrder('author')}
-            >
-              Author
-            </button>
-            {/* A LABEL, NOT A CONTROL. The shelf has three orders and progress
-                is not one of them; a header that looked clickable and did
-                nothing would be worse than one that plainly does not. */}
-            <span>Progress</span>
-            <button
-              type="button"
-              className={`${styles.listSort} ${styles.listWhen}`}
-              data-on={order === 'recent'}
-              aria-pressed={order === 'recent'}
-              onClick={() => setOrder('recent')}
-            >
-              Opened
-            </button>
-            <span />
-          </div>
-        )}
+        {/* THERE IS NO COLUMN HEADER ROW. It labelled the columns and sorted
+            three of them — and once sorting moved into the toolbar's own menu,
+            what was left was a row of grey words repeating what the columns
+            plainly are: a jacket, a title, a name, a bar, a date. Nothing in it
+            was load-bearing, and it cost a line of chrome at the top of every
+            list. The `Sort` menu is where ordering is chosen now, from one
+            place, in both views. */}
         <div
           className={layout === 'list' ? styles.list : styles.shelf}
           ref={shelfRef}

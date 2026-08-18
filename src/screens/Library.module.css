@@ -28,6 +28,10 @@
  * end, and a status strip along the foot. `overflow: hidden` here is what makes
  * the middle the only thing that moves. */
 .library {
+  /* ONE GUTTER for the whole screen: the toolbar, the chips, the books, the
+     list header and the status bar all read it, so nothing can sit a few pixels
+     out from the column of covers it belongs to. */
+  --shelf-pad-x: 40px;
   position: absolute;
   inset: 0;
   z-index: 1;
@@ -81,7 +85,7 @@
   justify-content: space-between;
   gap: 16px;
   height: var(--status-bar-h);
-  padding: 0 40px;
+  padding: 0 var(--shelf-pad-x);
   background: var(--surface);
   font-size: 11px;
   color: var(--muted);
@@ -105,81 +109,42 @@
   padding-top: var(--titlebar-h);
 }
 
-/* LEVEL WITH THE PANE'S OWN HEADING, and by construction rather than by a
-   number that happens to work.
-
-   The pane beside this draws "Notes", "Settings" and the rest in a row that is
-   12px of padding plus one 13px line: its text sits centred at about 22px from
-   the pane's top. This head sat 24px down and its 38px title put "Library"
-   centred a further 11px below that, so two headings sharing one horizon read
-   as two rows. Measured, before: pane text centred at y=72, "Library" at y=83.
-
-   So the head is a row of the same height as the pane's title row, and the
-   title is centred in it — `--pane-title-row` is one number the two share,
-   and if the pane's heading ever moves, this follows. `align-items: center`
-   rather than `baseline` because the count and the sort chips are lines of
-   different sizes, and centring keeps them on the title's optical middle
-   instead of on a baseline the 38px glyphs drag well below the small caps
-   beside them. */
-.head {
+/* §07's primary action, shared — see styles/controls.module.css. */
+/* A DECISION, as a mark. The same 34px circle as the `+` beside it, so the
+   toolbar is one row of one shape — but neutral, because adding a book is the
+   action here and the other two are settings. It wears the icon of whatever is
+   currently chosen: the toolbar still reports the state the six lit icons used
+   to spell out. */
+.toolMenu {
+  position: relative;
   flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  min-height: var(--pane-title-row);
-  padding: 0 40px 12px;
 }
 
-/* The count sits with the title it describes; the sort chips take the slack, so
-   Add books stays pinned to the trailing edge wherever the shelf is. */
-.count {
-  font-size: 13px;
-  color: var(--muted);
-}
-
-.orders {
-  margin-inline-start: auto;
-  display: flex;
-  gap: 2px;
-}
-
-/* A sort, as a mark. Square, so three of them read as one segmented control
-   rather than three words of different lengths; sized to the control pill so
-   they sit level with the `+` beside them. */
-.order {
+.tool {
   display: grid;
   place-items: center;
-  width: 30px;
-  height: 30px;
-  border: none;
-  border-radius: var(--radius-control, 10px);
-  background: transparent;
-  padding: 0;
-  font-family: inherit;
+  width: var(--control-pill);
+  height: var(--control-pill);
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  background: var(--surface);
   color: var(--muted);
   cursor: pointer;
+  transition: background var(--motion-popover), color var(--motion-popover);
 }
 
-.order:hover {
-  background: var(--wash);
-}
-
-.order[data-on='true'] {
+.tool:hover,
+.tool[data-open='true'] {
   background: var(--wash);
   color: var(--ink);
 }
 
-.title {
-  margin: 0;
-  font-family: 'Crimson Pro Variable', 'Crimson Pro', Georgia, serif;
-  font-size: 38px;
-  font-weight: 400;
-  line-height: 1.05;
-  letter-spacing: -0.02em;
-  color: var(--ink);
+/* The chosen row, in a menu of choices — the tick is the icon being lit, since
+   a checkmark beside an icon is two marks saying one thing. */
+.menuItem[data-on='true'] {
+  color: var(--accent);
 }
 
-/* §07's primary action, shared — see styles/controls.module.css. */
 /* The primary action, as a mark rather than a phrase — see `.iconOnly`, which
  * has to be composed rather than restated here or `.primary`'s padding wins. */
 .add {
@@ -206,8 +171,7 @@
  * title pushes the row wider than the window instead of ellipsising, and the
  * whole list scrolls sideways.
  */
-.list,
-.listHead {
+.list {
   --list-cols: 22px minmax(0, 3fr) minmax(0, 2fr) 104px 82px 28px;
 }
 
@@ -220,67 +184,6 @@
   display: grid;
   grid-template-columns: 1fr;
   padding: 0 40px 40px;
-}
-
-/* The column labels, which is what makes the numbers mean something: "62%" and
-   "3 days" are not self-describing, and a list that shows them unlabelled is a
-   denser grid rather than a more informative view.
-
-   STICKY INSIDE THE SCROLL BOX rather than pinned above it with the search.
-   Above it, the header would sit outside the scrollbar and be exactly its
-   width out of alignment with the columns it labels — the classic table-header
-   misalignment, and unfixable without measuring the scrollbar. Here it shares
-   the box, so it shares the width by construction. */
-.listHead {
-  position: sticky;
-  inset-block-start: 0;
-  z-index: 2;
-  display: grid;
-  grid-template-columns: var(--list-cols);
-  align-items: center;
-  gap: 14px;
-  height: 26px;
-  margin: 0 40px;
-  /* The surface, so rows scrolling underneath do not show through it. */
-  background: var(--surface);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--muted);
-  user-select: none;
-}
-
-/* A label that also sorts. Only three of the columns can: the shelf orders by
-   recency, title and author, and a header that looked clickable and did
-   nothing would be worse than one that plainly does not. The rest are plain
-   labels — no hover, no cursor, no pretence. */
-.listSort {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 0;
-  border: none;
-  background: none;
-  font: inherit;
-  letter-spacing: inherit;
-  text-transform: inherit;
-  color: inherit;
-  cursor: pointer;
-}
-
-.listSort:hover {
-  color: var(--ink-2);
-}
-
-.listSort[data-on='true'] {
-  color: var(--ink);
-}
-
-/* Right-aligned labels, over right-aligned data. */
-.listHead > .listWhen {
-  justify-content: flex-end;
-  text-align: end;
 }
 
 .row {
@@ -480,13 +383,11 @@
    always are. The header's track has to go with it or the two stop lining up,
    which is the whole reason the template is one declaration. */
 @media (max-width: 860px) {
-  .list,
-  .listHead {
+  .list {
     --list-cols: 22px minmax(0, 1fr) 0 104px 82px 28px;
   }
 
-  .rowAuthor,
-  .listAuthor {
+  .rowAuthor {
     display: none;
   }
 }
@@ -499,7 +400,7 @@
   display: grid;
   grid-template-columns: repeat(auto-fill, var(--card-w));
   gap: 28px 20px;
-  padding: 4px 40px 40px;
+  padding: 4px var(--shelf-pad-x) 40px;
 }
 
 .book {
@@ -677,22 +578,36 @@
   min-height: 0;
 }
 
-
 /* Search and the tag chips. One row above the grid, wrapping on a narrow
    window rather than scrolling sideways — a shelf is browsed by eye and a
    horizontally scrolled filter bar hides its own options. */
+/* THE WHOLE TOOLBAR, on one line: search, the two decisions, and the one
+   action. It was a 38px title with two rows of icons above a search field on a
+   row of its own — four rows of chrome for four controls.
+
+   `--shelf-pad-x` rather than `--stage-pad-x`, which is the READER's gutter and
+   is not set on this screen at all: the fallback was doing the work, so the
+   search field sat at 24px while the books below it started at 40px, and the
+   two never lined up.
+
+   The row is as tall as the pane's own title row, so the first thing on this
+   screen sits level with the first thing in the pane beside it — the alignment
+   the deleted heading used to carry. */
 .filters {
+  flex: 0 0 auto;
   display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
   align-items: center;
-  padding: 0 var(--stage-pad-x, 24px) 12px;
+  gap: 8px;
+  min-height: var(--pane-title-row);
+  padding: 4px var(--shelf-pad-x) 12px;
 }
 
 .search {
-  flex: 1 1 260px;
+  flex: 1;
   min-width: 0;
-  height: 32px;
+  /* The control ramp's own height, so the field and the three round buttons
+     beside it are one row of one size rather than a 32 next to three 34s. */
+  height: var(--control-pill);
   padding: 0 12px;
   /* `--line-2` is the themed border token the rest of the app draws fields
    * with. This asked for `--rule`, which does not exist in `tokens.css` — so
@@ -719,10 +634,17 @@
   outline-offset: 1px;
 }
 
+/* A ROW OF THEIR OWN, below the toolbar. They lived inside it, so a book with
+   three tags in force pushed the search field and the buttons onto a second
+   line and the toolbar changed height as the reader filtered. What is narrowing
+   the shelf belongs between the controls and the shelf anyway — it reads as a
+   caption on the books rather than as another control. */
 .chips {
+  flex: 0 0 auto;
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  padding: 0 var(--shelf-pad-x) 12px;
 }
 
 .chip {
@@ -891,3 +813,17 @@
 }
 
 
+/* Present to a screen reader, absent to the eye — the screen's heading, which
+   the rail and the pane give a sighted reader for free and give a screen
+   reader not at all. Clipped rather than `display: none`, which would take it
+   out of the accessibility tree along with the layout. */
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}

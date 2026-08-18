@@ -20,7 +20,7 @@ import type { IndexedBook } from './bookIndex'
 import { parseQuery } from './searchQuery'
 
 /** How a shelf can be arranged. Presentation, not a domain verb. */
-export type LibraryOrder = 'recent' | 'title' | 'author'
+export type LibraryOrder = 'recent' | 'title' | 'author' | 'progress'
 
 /** Newest first. A switcher is a recency list, not an alphabetical one. */
 export function byRecency(books: readonly IndexedBook[]): IndexedBook[] {
@@ -60,6 +60,24 @@ export function sortTitle(book: IndexedBook): string {
  */
 export function inOrder(books: readonly IndexedBook[], order: LibraryOrder): IndexedBook[] {
   if (order === 'recent') return byRecency(books)
+  /* HOW FAR IN, most-read first — the order that answers "what am I in the
+   * middle of", which on a shelf of two thousand mostly-unopened books is the
+   * question a reader has. Finished counts as one, so a book that is done sorts
+   * with the fullest rather than falling in with the untouched: `finished` is
+   * set by hand and does not move `progress`, so the two disagree constantly
+   * and only one of them is what the reader meant.
+   *
+   * Recency breaks the tie, which matters here more than in the other orders:
+   * an unread shelf is thousands of books all at exactly zero. */
+  if (order === 'progress') {
+    const far = (book: IndexedBook) => (book.finished ? 1 : (book.progress ?? 0))
+    return [...books].sort(
+      (a, b) =>
+        far(b) - far(a) ||
+        (b.openedAt ?? b.addedAt ?? 0) - (a.openedAt ?? a.addedAt ?? 0) ||
+        a.bookId.localeCompare(b.bookId),
+    )
+  }
   const key = order === 'title' ? sortTitle : displayAuthor
   return [...books].sort(
     (a, b) =>
