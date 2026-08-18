@@ -33,6 +33,7 @@ const GENERICS = ['serif', 'sans-serif', 'monospace'] as const
  */
 function context(): CanvasRenderingContext2D | null {
   if (typeof document === 'undefined') return null
+  if (typeof document.createElement !== 'function') return null
   return document.createElement('canvas').getContext('2d')
 }
 
@@ -83,7 +84,12 @@ export function presentFaces(): Set<string> {
  * Zero when there is no document, which `scaleFor` reads as "do not correct".
  */
 export function xHeightOf(stack: string): number {
+  /* Capability, not existence. A `document` can be present and not be a
+     document — a test stub, a non-browser host — and `scaleFor` reads 0 as "do
+     not correct", which is the right answer in every one of those cases. This
+     builds a stylesheet; it must not be the thing that throws. */
   if (typeof document === 'undefined') return 0
+  if (typeof document.createElement !== 'function' || !document.body) return 0
   const probe = document.createElement('span')
   probe.style.cssText =
     `position:absolute;visibility:hidden;pointer-events:none;` +

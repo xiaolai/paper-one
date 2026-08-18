@@ -289,12 +289,32 @@ body {
 
 /* Prose spacing is a multiple of the line box, so consecutive paragraphs stay
  * on grid even though headings and figures will not. */
+/* THE READER'S OWN SETTINGS, AND THEREFORE NOT DEFAULTS.
+ *
+ * Everything else this stylesheet injects is a default that a book may override
+ * — that is stated at the top of the file and it is right. These four are not:
+ * they are controls a reader operated, and a control that silently does nothing
+ * is worse than no control.
+ *
+ * A BOOK BEATS AN ELEMENT SELECTOR WITHOUT TRYING. Measured on a real one, On
+ * China ships p.nonindent { margin-bottom: 0em } — one class, specificity
+ * (0,1,1), against our (0,0,1) — so paragraph spacing computed to 0px and the
+ * control did nothing at all on that book. Calibre writes rules like it by the
+ * hundred. Raising the selector only starts an arms race a book can always win
+ * with one more class, so the reader's four are marked instead.
+ *
+ * Declared on the prose elements rather than left to inherit from body: an
+ * inherited value loses to any rule that matches the element, so body-level
+ * tracking would have been defeated by the same p.class it was meant to survive.
+ */
 p, li, blockquote, dd {
-  line-height: var(--paper-line);
+  line-height: var(--paper-line) !important;
+  letter-spacing: ${letter}em !important;
+  word-spacing: ${word}em !important;
 }
 
 p {
-  margin: 0 0 calc(var(--paper-line) * ${para});
+  margin: 0 0 calc(var(--paper-line) * ${para}) !important;
 }
 
 /* An adjacent-sibling paragraph rule was here, zeroing margin-top, and it did

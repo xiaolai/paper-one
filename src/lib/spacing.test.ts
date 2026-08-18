@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest'
-import { BRIGHTNESS, CONTRAST, SPACING, spacingAt, stepAt } from './metrics'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { BRIGHTNESS, CONTRAST, DEFAULT_STEP_IDX, SPACING, spacingAt, stepAt } from './metrics'
+import { bookCss } from '../reader/bookCss'
 import { initialState, reducer, type SpacingKey } from './state'
 
 const KEYS: readonly SpacingKey[] = ['letter', 'word', 'line', 'paragraph']
@@ -136,5 +137,57 @@ describe('light: the theme is the ceiling', () => {
   it('gives both five steps', () => {
     expect(BRIGHTNESS.steps.length).toBe(5)
     expect(CONTRAST.steps.length).toBe(5)
+  })
+})
+
+/* A CONTROL THAT DOES NOTHING IS WORSE THAN NO CONTROL, and on a real book
+ * three of these four were one class away from doing nothing: On China ships
+ * `p.nonindent { margin-bottom: 0em }`, which beats an element selector and
+ * computed paragraph spacing to 0px. The marks are the only mechanism that
+ * reliably wins, so this asserts they are still there — a well-meaning cleanup
+ * removing them would break the settings on a large share of the library and
+ * break nothing that any other test can see. */
+describe('the reader’s spacings survive a book’s own stylesheet', () => {
+  /* `bookCss` copies the host's `@font-face` rules into the book, so it reads
+     `document.styleSheets`. There is no document here and none is needed —
+     this is about which declarations carry the mark. */
+  beforeAll(() => {
+    vi.stubGlobal('document', { styleSheets: [] })
+  })
+  afterAll(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const css = () => bookCss({
+    stepIdx: DEFAULT_STEP_IDX,
+    theme: 'paper',
+    typeface: 'literata',
+    align: 'justified',
+    spacing: { letter: 1, word: 1, line: 1, paragraph: 1 },
+    brightness: 1,
+    contrast: 0,
+  })
+
+  it('marks the paragraph spacing', () => {
+    expect(css()).toMatch(/margin:[^;]*--paper-line[^;]*!important/)
+  })
+
+  it('marks the line, letter and word spacing', () => {
+    for (const prop of ['line-height', 'letter-spacing', 'word-spacing']) {
+      expect(css(), prop).toMatch(new RegExp(`${prop}:[^;]*!important`))
+    }
+  })
+
+  /* And nothing else. The rest of the sheet IS a default — a book that styles
+   * its own headings, links or blockquotes must go on winning. */
+  it('marks nothing that is not one of the four', () => {
+    /* Comments stripped first: this file's prose says "not" and "important" in
+       several places, and a regex over the whole sheet reads those as
+       declarations. */
+    const code = css().replace(/\/\*[\s\S]*?\*\//g, '')
+    const marked = [...code.matchAll(/([a-z-]+)\s*:[^;{}]*!important/g)].map((m) => m[1])
+    expect(new Set(marked)).toEqual(
+      new Set(['margin', 'line-height', 'letter-spacing', 'word-spacing']),
+    )
   })
 })
