@@ -365,6 +365,7 @@ export function Reader({
                       measure={grid.measure}
                       theme={state.theme}
                       typeface={state.typeface}
+                    spacing={state.spacing}
                       animated={!reducedMotion}
                       paginated={state.pageLayout === 'paginated'}
                       lastLocation={lastLocation}

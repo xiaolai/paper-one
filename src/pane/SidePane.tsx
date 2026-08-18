@@ -216,6 +216,8 @@ export function SidePane({
             onToggleProgressLine={() => dispatch({ type: 'toggleProgressLine' })}
             onSide={(side) => dispatch({ type: 'setSide', side })}
             onStepIdx={(idx) => dispatch({ type: 'setStepIdx', idx })}
+            spacing={state.spacing}
+            onSpacing={(key, idx) => dispatch({ type: 'setSpacing', key, idx })}
             onTypeface={(typeface) => dispatch({ type: 'setTypeface', typeface })}
           />
         )}

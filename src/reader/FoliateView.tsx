@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { Renderer, TocItem, View } from 'foliate-js/view.js'
 import type { MarkPainter } from 'foliate-js/overlayer.js'
-import type { Theme, Typeface } from '../lib/state'
+import type { SpacingIndices, Theme, Typeface } from '../lib/state'
 import type { BookMeta, BookNavigator, ReaderPosition } from '../lib/useBook'
 import { useFontsReady } from '../lib/fontProbe'
 import { isPdf } from '../lib/formats'
@@ -29,6 +29,8 @@ export interface FoliateViewProps {
   theme: Theme
   /** The face the BOOK is set in — never the interface's. */
   typeface: Typeface
+  /** How open the type is set — see `SPACING`. */
+  spacing: SpacingIndices
   /** False only when the system asks for reduced motion. Not a preference. */
   animated: boolean
   paginated: boolean
@@ -79,6 +81,8 @@ export interface FoliateViewProps {
 
 interface Settings {
   stepIdx: number
+  /** How open the type is set — see `SPACING`. */
+  spacing: SpacingIndices
   measure: number
   theme: Theme
   typeface: Typeface
@@ -107,6 +111,7 @@ export function applySettings(renderer: Renderer, settings: Settings): void {
       stepIdx: settings.stepIdx,
       theme: settings.theme,
       typeface: settings.typeface,
+      spacing: settings.spacing,
       justify: true,
       hyphenate: true,
     }),
@@ -239,6 +244,7 @@ export function FoliateView({
   measure,
   theme,
   typeface,
+  spacing,
   animated,
   paginated,
   lastLocation,
@@ -297,7 +303,7 @@ export function FoliateView({
    * whenever a section's overlay is built, which happens as the reader scrolls
    * — long after any value captured at startup went stale. */
   const marksRef = useRef(marks)
-  const settings = useRef<Settings>({ stepIdx, measure, theme, typeface, animated, paginated })
+  const settings = useRef<Settings>({ stepIdx, measure, theme, typeface, spacing, animated, paginated })
   /* Through a ref for the same reason, and for one that is specific to it: the
    * saved position is derived from the book's content id, which resolves a few
    * milliseconds AFTER the reader mounts. A prop read at mount is read before
@@ -311,7 +317,7 @@ export function FoliateView({
   useLayoutEffect(() => {
     handlers.current = currentHandlers
     marksRef.current = marks
-    settings.current = { stepIdx, measure, theme, typeface, animated, paginated }
+    settings.current = { stepIdx, measure, theme, typeface, spacing, animated, paginated }
     lastLocationRef.current = lastLocation
   })
 
@@ -440,7 +446,7 @@ export function FoliateView({
      * the effect and unmounted the React tree — the reader vanished instead of
      * the theme failing to change. */
     try {
-      applySettings(renderer, { stepIdx, measure: settings.current.measure, theme, typeface, animated, paginated })
+      applySettings(renderer, { stepIdx, measure: settings.current.measure, theme, typeface, spacing, animated, paginated })
       /* A theme change reaches the book through `setStyles`, which restyles the
        * document WITHOUT rebuilding the section — so no `create-overlay` fires
        * and the marks keep the colour they were painted in. Changing the step or
@@ -461,7 +467,12 @@ export function FoliateView({
      * webfont arrives the stack resolves to a fallback whose x-height is
      * somebody else's — a book opened during startup would otherwise keep a
      * size measured off Georgia until the reader changed some other setting. */
-  }, [stepIdx, theme, typeface, animated, paginated, ready, generation, fontsReady])
+    /* `spacing` is here because it is part of the stylesheet: without it the
+     * settings were re-applied for a theme or a face and not for the four
+     * controls that change how the type is set, so the pips moved and the page
+     * did not. Its identity is stable — the reducer returns the SAME state when
+     * a spacing has not moved — so depending on the object cannot loop. */
+  }, [stepIdx, theme, typeface, spacing, animated, paginated, ready, generation, fontsReady])
 
   /* THE MEASURE ALONE, and only the layout attributes for it.
    *

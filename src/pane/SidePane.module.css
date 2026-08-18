@@ -900,3 +900,26 @@
 .faceItem[data-on='true'] {
   color: var(--accent);
 }
+
+/* The position in a spacing scale, as pips: how much room is left in each
+   direction, which is the only thing a reader needs from this control. A
+   number would be true and useless — nobody adjusts word spacing by its em
+   value — and it would cost more width in a pane already holding four of
+   these side by side with two buttons. */
+.pips {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: 0 var(--space-4);
+}
+
+.pip {
+  inline-size: var(--track-w);
+  block-size: var(--track-w);
+  border-radius: var(--radius-pill);
+  background: var(--line-3);
+}
+
+.pip[data-on='true'] {
+  background: var(--accent);
+}

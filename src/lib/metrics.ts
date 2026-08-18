@@ -184,6 +184,56 @@ export const READING_STEPS: readonly ReadingStep[] = [
   { size: 30, line: 48, measure: 820, note: 'Maximum. Beyond this the page turns into a large-print edition.' },
 ] as const
 
+/**
+ * The four spacings a reader can open up, each as a closed set of steps.
+ *
+ * STEPS, NOT SLIDERS, for the same reason `READING_STEPS` is: a value between
+ * two of these is not a decision anybody made, and a slider invites hunting for
+ * one. Each of these also has a floor and a ceiling that are typographic facts
+ * rather than preferences, and a stepper is where those live.
+ *
+ * The defaults are all the current behaviour, so a reader who never opens this
+ * gets exactly the book they have now.
+ *
+ * WHY THESE FOUR. Letter and word spacing are the two that help a reader who
+ * finds dense type hard to track — the evidence for both is about legibility,
+ * not taste. Line and paragraph spacing are how much air the page has, which is
+ * the oldest reading preference there is. Nothing here changes the MEASURE:
+ * that is set by the size step, and letting two controls move it would make the
+ * line length depend on which one the reader touched last.
+ */
+export interface SpacingScale {
+  readonly steps: readonly number[]
+  readonly def: number
+  /** How the value is written into the book's CSS. */
+  readonly unit: 'em' | 'x'
+}
+
+export const SPACING: Record<'letter' | 'word' | 'line' | 'paragraph', SpacingScale> = {
+  /* Tracking, in em so it follows the size. Negative is offered because a face
+   * set loose by its designer can be tightened, but only one step of it: past
+   * that the letters touch. */
+  letter: { steps: [-0.01, 0, 0.01, 0.02, 0.04], def: 1, unit: 'em' },
+  /* Word spacing opens the gaps between words without touching the letters,
+   * which is the pair a reader who loses their place usually wants. */
+  word: { steps: [0, 0.04, 0.08, 0.16], def: 0, unit: 'em' },
+  /* A MULTIPLE of the step's own line box, not a length: every reading step
+   * carries a line height chosen for its size, and a fixed leading would be
+   * loose at 17px and tight at 30. */
+  line: { steps: [0.85, 1, 1.15, 1.3, 1.5], def: 1, unit: 'x' },
+  /* Also a multiple of the line box, which is what keeps consecutive paragraphs
+   * on the grid — see `bookCss`. Zero is offered because a book that indents
+   * its paragraphs does not want space between them as well. */
+  paragraph: { steps: [0, 0.5, 1, 1.5, 2], def: 2, unit: 'x' },
+}
+
+/** A spacing value from an index, clamped — an index from anywhere may be stale. */
+export function spacingAt(key: keyof typeof SPACING, idx: number): number {
+  const scale = SPACING[key]
+  const at = Math.min(scale.steps.length - 1, Math.max(0, Math.round(idx)))
+  return scale.steps[at] ?? scale.steps[scale.def] ?? 0
+}
+
 /** Index into READING_STEPS for the 21/34/660 default. */
 export const DEFAULT_STEP_IDX = 2
 

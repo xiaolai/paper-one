@@ -1,5 +1,5 @@
 import { useReducer, type Dispatch } from 'react'
-import { DEFAULT_STEP_IDX, READING_STEPS } from './metrics'
+import { DEFAULT_STEP_IDX, READING_STEPS, SPACING } from './metrics'
 
 /**
  * Application state.
@@ -71,6 +71,17 @@ export type Theme = 'paper' | 'slate' | 'sepia' | 'sage' | 'night'
  * that font falls back rather than failing.
  */
 export type Typeface = string
+
+/** Which step each spacing is on — see `SPACING` in `metrics.ts`. */
+export interface SpacingIndices {
+  readonly letter: number
+  readonly word: number
+  readonly line: number
+  readonly paragraph: number
+}
+
+/** The four, named, so a caller cannot pass a key the scale does not have. */
+export type SpacingKey = keyof SpacingIndices
 /**
  * The panels of the single side pane — see `lib/panes` for their metadata.
  *
@@ -117,6 +128,17 @@ export interface AppState {
   readonly rulerOn: boolean
   readonly rulerPinned: boolean
   readonly stepIdx: number
+  /**
+   * How open the reader wants the type: letter, word, line and paragraph, each
+   * an index into its own scale in `SPACING`.
+   *
+   * Indices rather than values, exactly like `stepIdx`: the steps are the
+   * decision and a stored value would let a build with a different scale
+   * resolve to something between two of them. Grouped rather than four fields
+   * because they are one thing a reader adjusts together, and because the
+   * reducer can then take one action for all four.
+   */
+  readonly spacing: SpacingIndices
   readonly typeface: Typeface
   /**
    * Whether the book's scrollbar is drawn. Off by default.
@@ -178,6 +200,14 @@ export const initialState: AppState = {
   stepIdx: DEFAULT_STEP_IDX,
   // §14's face, and the one the whole reading typography is specified around.
   typeface: 'literata',
+  /* Every spacing at its own default, which is the book exactly as it reads
+     today — a reader who never opens these gets no change. */
+  spacing: {
+    letter: SPACING.letter.def,
+    word: SPACING.word.def,
+    line: SPACING.line.def,
+    paragraph: SPACING.paragraph.def,
+  },
   scrollbarOn: false,
   progressLineOn: false,
   pageLayout: 'scrolled',
@@ -200,6 +230,7 @@ export type Action =
   | { type: 'toggleRuler' }
   | { type: 'pinRuler' }
   | { type: 'setStepIdx'; idx: number }
+  | { type: 'setSpacing'; key: SpacingKey; idx: number }
   | { type: 'setTypeface'; typeface: Typeface }
   | { type: 'toggleScrollbar' }
   | { type: 'toggleProgressLine' }
@@ -311,6 +342,17 @@ export function reducer(state: AppState, action: Action): AppState {
         ...state,
         stepIdx: Math.min(Math.max(Math.round(action.idx), 0), READING_STEPS.length - 1),
       }
+
+    case 'setSpacing': {
+      /* Clamped and finite-checked for the reason `setStepIdx` gives at length:
+         these index a scale, and NaN survives `Math.min`/`Math.max` untouched
+         and reaches the array. */
+      if (!Number.isFinite(action.idx)) return state
+      const scale = SPACING[action.key]
+      const idx = Math.min(Math.max(Math.round(action.idx), 0), scale.steps.length - 1)
+      if (state.spacing[action.key] === idx) return state
+      return { ...state, spacing: { ...state.spacing, [action.key]: idx } }
+    }
 
     case 'setTypeface':
       return { ...state, typeface: action.typeface }

@@ -3,7 +3,8 @@ import { READING_STEPS, readingStep } from '../lib/metrics'
 import { THEMES } from '../lib/panes'
 import type { Face } from '../lib/typefaces'
 import { FacePicker } from './FacePicker'
-import type { PageLayout, Side, Theme, Typeface } from '../lib/state'
+import type { PageLayout, Side, SpacingIndices, SpacingKey, Theme, Typeface } from '../lib/state'
+import { SpacingRow } from './SpacingRow'
 import styles from './SidePane.module.css'
 
 /* THERE IS NO PREVIEW TABLE HERE ANY MORE. A face's stack was written once for
@@ -55,6 +56,8 @@ export interface SettingsProps {
   onToggleProgressLine: () => void
   onSide: (side: Side) => void
   onStepIdx: (idx: number) => void
+  spacing: SpacingIndices
+  onSpacing: (key: SpacingKey, idx: number) => void
   onTypeface: (typeface: Typeface) => void
 }
 
@@ -77,6 +80,8 @@ export function Settings({
   onToggleProgressLine,
   onSide,
   onStepIdx,
+  spacing,
+  onSpacing,
   onTypeface,
 }: SettingsProps) {
   const step = readingStep(stepIdx)
@@ -174,6 +179,25 @@ export function Settings({
           </button>
         </div>
       </div>
+
+      {/* HOW OPEN THE TYPE IS SET. Four things, grouped, because a reader
+          adjusting one is usually adjusting the next — and separated from the
+          face and size above because those two decide what the page IS and
+          these decide how much air it has.
+
+          Nothing here touches the MEASURE. That is the size step's, and letting
+          a second control move it would make the line length depend on which
+          one was touched last. */}
+      <div className={styles.groupTitle}>Spacing</div>
+      <SpacingRow label="Letter" settingKey="letter" value={spacing.letter} onChange={onSpacing} />
+      <SpacingRow label="Word" settingKey="word" value={spacing.word} onChange={onSpacing} />
+      <SpacingRow label="Line" settingKey="line" value={spacing.line} onChange={onSpacing} />
+      <SpacingRow
+        label="Paragraph"
+        settingKey="paragraph"
+        value={spacing.paragraph}
+        onChange={onSpacing}
+      />
 
       <button
         type="button"

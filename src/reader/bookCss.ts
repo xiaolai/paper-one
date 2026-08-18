@@ -1,5 +1,5 @@
-import type { Theme, Typeface } from '../lib/state'
-import { readingStep } from '../lib/metrics'
+import type { SpacingIndices, Theme, Typeface } from '../lib/state'
+import { readingStep, spacingAt } from '../lib/metrics'
 import { faceById } from '../lib/typefaces'
 import { opticalScale } from '../lib/fontProbe'
 
@@ -140,6 +140,8 @@ export interface BookCssOptions {
   readonly theme: Theme
   readonly typeface: Typeface
   readonly justify: boolean
+  /** How open the type is set — see `SPACING`. */
+  readonly spacing: SpacingIndices
   readonly hyphenate: boolean
 }
 
@@ -149,6 +151,7 @@ export function bookCss({
   typeface,
   justify,
   hyphenate,
+  spacing,
 }: BookCssOptions): string {
   const step = readingStep(stepIdx)
   const c = BOOK_COLOURS[theme]
@@ -160,6 +163,14 @@ export function bookCss({
    * compensate, which changed their measure as well. Rounded, because a
    * fractional font-size lands text on half pixels. */
   const size = Math.round(step.size * opticalScale(face))
+  /* THE LINE BOX IS THE GRID, and everything else is measured against it.
+   * Paragraph spacing is a multiple of it rather than a length so that opening
+   * the leading opens the space between paragraphs with it — otherwise a reader
+   * who loosened their lines got paragraphs that looked tighter than before. */
+  const line = Math.round(step.line * spacingAt('line', spacing.line))
+  const letter = spacingAt('letter', spacing.letter)
+  const word = spacingAt('word', spacing.word)
+  const para = spacingAt('paragraph', spacing.paragraph)
 
   return `
 @namespace epub "http://www.idpf.org/2007/ops";
@@ -173,7 +184,11 @@ html {
   color: ${c.ink};
   background: ${c.surface};
   /* The line box is the unit everything else is a multiple of. */
-  --paper-line: ${step.line}px;
+  /* THE READER'S LINE, not the step's. Paragraphs, lists and quotes all read
+     this rather than the body's own line-height, so leaving the step's value
+     here would have let the setting move the body and nothing else — which is
+     every block of prose in the book. */
+  --paper-line: ${line}px;
   hanging-punctuation: allow-end last;
 }
 
@@ -189,7 +204,13 @@ body {
   background: transparent;
   font-family: ${stack};
   font-size: ${size}px;
-  line-height: ${step.line}px;
+  line-height: ${line}px;
+  /* Written unconditionally, including at zero: an author stylesheet may set
+   * either of these, and a rule that appears only when the reader has moved it
+   * would leave the book's own tracking in force at the default — so "0" would
+   * mean two different things depending on the book. */
+  letter-spacing: ${letter}em;
+  word-spacing: ${word}em;
   text-align: ${justify ? 'justify' : 'start'};
   -webkit-hyphens: ${hyphenate ? 'auto' : 'manual'};
   hyphens: ${hyphenate ? 'auto' : 'manual'};
@@ -204,7 +225,7 @@ p, li, blockquote, dd {
 }
 
 p {
-  margin: 0 0 var(--paper-line);
+  margin: 0 0 calc(var(--paper-line) * ${para});
 }
 
 /* An adjacent-sibling paragraph rule was here, zeroing margin-top, and it did

@@ -47,6 +47,7 @@ const settings = (animated: boolean) => ({
   measure: 624,
   theme: 'paper' as const,
   typeface: 'literata' as const,
+  spacing: { letter: 1, word: 0, line: 1, paragraph: 2 },
   animated,
   paginated: true,
 })
