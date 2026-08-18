@@ -131,6 +131,8 @@ export interface SidePaneProps {
   onRenameTag: (from: string, to: string) => void
   onRemoveTag: (tag: string) => void
   ownTagCount: (tag: string) => number
+  /** Books still waiting on a background parse — see `LibraryPanel`. */
+  enriching: number
 }
 
 export function SidePane({
@@ -147,6 +149,7 @@ export function SidePane({
   onRenameTag,
   onRemoveTag,
   ownTagCount,
+  enriching,
 }: SidePaneProps) {
   /* Falls back to the last pane rather than unmounting. The slot stays mounted
    * at zero width and inert while closed, so keeping the panel rendered is what
@@ -237,6 +240,7 @@ export function SidePane({
             onRenameTag={onRenameTag}
             onRemoveTag={onRemoveTag}
             ownTagCount={ownTagCount}
+            enriching={enriching}
           />
         )}
       </div>

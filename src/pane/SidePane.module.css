@@ -556,6 +556,25 @@
   color: var(--muted);
 }
 
+/* The background parse, while there is one. `.scopeHint`'s shape — it is the
+   same kind of thing, a quiet fact rather than a control — with a rule above
+   it, because it is a note ABOUT the list rather than another row in it. */
+.enriching {
+  composes: scopeHint;
+  align-items: flex-start;
+  margin-block-start: 8px;
+  padding-block-start: 14px;
+  border-block-start: 1px solid var(--line);
+  line-height: 1.5;
+}
+
+.enriching svg {
+  /* The icon sits on the first line's cap height rather than centred against
+     two wrapped lines, which is where a leading icon belongs. */
+  flex: 0 0 auto;
+  margin-block-start: 2px;
+}
+
 /* --- settings -------------------------------------------------------- */
 
 .groupTitle {

@@ -67,6 +67,25 @@ export interface BookRecord {
   readonly addedAt?: number
   readonly openedAt?: number
   /**
+   * When the PARSER last ran on this book — not when the parse succeeded.
+   *
+   * A book arrives on the shelf as a placeholder: an import writes a row from
+   * the filename, because parsing three hundred books to learn three hundred
+   * titles would make importing a folder as slow as reading one. Something has
+   * to come back for the rest, and this is how it knows what it has already
+   * been back for. Absent means never parsed.
+   *
+   * SET EVEN WHEN THE PARSE FAILS, which is the part worth stating plainly. A
+   * file the parser cannot read will fail identically on every launch, and a
+   * library holding five hundred of them would spend every launch failing on
+   * all five hundred. Marking the attempt is what makes the pass converge.
+   * Opening the book parses it again through the reader's own path, so a book
+   * wrongly given up on is one click from being read properly — that is the
+   * escape hatch, and it is why this may be a one-way door without being a
+   * trap.
+   */
+  readonly parsedAt?: number
+  /**
    * Where this book was imported from, for provenance only.
    *
    * DEVICE-LOCAL, and the one field here that is. A macOS path replicated onto
@@ -235,6 +254,7 @@ export function parseRecord(raw: string | null): BookRecord | null {
     ...(typeof r['finished'] === 'boolean' ? { finished: r['finished'] } : {}),
     ...(num(r['addedAt']) === undefined ? {} : { addedAt: num(r['addedAt'])! }),
     ...(num(r['openedAt']) === undefined ? {} : { openedAt: num(r['openedAt'])! }),
+    ...(num(r['parsedAt']) === undefined ? {} : { parsedAt: num(r['parsedAt'])! }),
     /* NOT `text`, which SLICES — see `MAX_ORIGIN`. A shortened path or URL is
      * not a rougher way back, it is a broken one, and it survived the next merge
      * to be written over the good value. */
@@ -416,6 +436,50 @@ export function mergeStranded(stranded: BookRecord, live: BookRecord): BookRecor
 }
 
 /**
+ * What a PARSE knows about a book, as a record.
+ *
+ * ONE PROJECTION, called from both places a parse can happen: the reader, when
+ * a book is opened, and the enrichment pass, when one is parsed in the
+ * background. Written out twice they would drift, and the drift would be
+ * invisible — a book would simply hold different fields depending on which
+ * route had reached it first, and nothing would ever compare the two.
+ *
+ * Every field is omitted when the book declares nothing, rather than written
+ * empty: `mergeParsed` treats what it is given as the book's own account of
+ * itself, so an empty string here is the book SAYING it has no publisher, and
+ * that would overwrite one the reader's record already had.
+ *
+ * It deliberately does NOT carry `title` and `author` conditionally — those two
+ * are `BookRecord`'s only required fields and a parse always has an answer for
+ * them, even if the answer is empty.
+ */
+export function recordFromMeta(meta: {
+  readonly title: string
+  readonly author: string
+  readonly sortAs?: string
+  readonly series?: string
+  readonly seriesIndex?: number | null
+  readonly subjects?: readonly string[]
+  readonly publisher?: string
+  readonly published?: string
+  readonly languages?: readonly string[]
+}): BookRecord {
+  return {
+    title: meta.title,
+    author: meta.author,
+    ...(meta.sortAs ? { sortAs: meta.sortAs } : {}),
+    ...(meta.series ? { series: meta.series } : {}),
+    ...(meta.seriesIndex === null || meta.seriesIndex === undefined
+      ? {}
+      : { seriesIndex: meta.seriesIndex }),
+    ...(meta.subjects?.length ? { subjects: meta.subjects } : {}),
+    ...(meta.publisher ? { publisher: meta.publisher } : {}),
+    ...(meta.published ? { published: meta.published } : {}),
+    ...(meta.languages?.length ? { languages: meta.languages } : {}),
+  }
+}
+
+/**
  * Fold what a parse learned into what the reader owns.
  *
  * The book is the authority on its own metadata; the reader is the authority on
@@ -442,6 +506,38 @@ export function mergeParsed(previous: BookRecord | null, parsed: BookRecord): Bo
      * of it. A fresh one still wins, because that is the reader telling us where
      * the book is now. */
     ...(parsed.origin ? {} : previous.origin ? { origin: previous.origin } : {}),
+    /* AND THE SAME FOR THE OTHER THREE THAT ARE NOT THE BOOK'S TO SAY.
+     *
+     * `origin` was found and fixed alone, and it was never alone: `ext`,
+     * `openedAt` and `bookId` sit on exactly the same side of the line and were
+     * all being dropped by the same spread. It went unnoticed because the only
+     * caller was the reader opening a book, which happens to supply an
+     * `openedAt` and an `ext` every time — so `parsed` always had them and
+     * `previous` never had to be consulted.
+     *
+     * The enrichment pass is a second caller that supplies NONE of the three,
+     * because it knows nothing about this copy — only about the book. Left as
+     * it was, parsing a book in the background would have set its title and
+     * taken away the extension that says which file to open: `openStored`
+     * defaults a record with no `ext` to `.epub`, so every enriched PDF on the
+     * shelf would have become a book that opens nothing. A pass meant to fill
+     * the shelf in would have broken every book on it.
+     *
+     * The rule, stated once so the next field added has to be classified: what
+     * the BOOK declares about itself, a parse may replace; what is true of the
+     * READER or of THIS COPY, a parse may not. `parsedAt` is neither — it is the
+     * parse's own provenance — and belongs to the parse, so it is left to the
+     * spread above. */
+    ...(parsed.ext ? {} : previous.ext ? { ext: previous.ext } : {}),
+    ...(parsed.bookId ? {} : previous.bookId ? { bookId: previous.bookId } : {}),
+    /* `openedAt` is kept the same way rather than unconditionally: it means
+       "when the reader last opened this", so an open MUST be able to move it
+       forward, and only a parse that is not an open leaves it alone. */
+    ...(parsed.openedAt === undefined
+      ? previous.openedAt === undefined
+        ? {}
+        : { openedAt: previous.openedAt }
+      : {}),
   }
 }
 

@@ -11,6 +11,7 @@ import { hasOpenLayer, paneFits, useAppState } from './lib/state'
 import type { MarkStorage } from './lib/marks'
 import { useBook } from './lib/useBook'
 import { useBookIntake } from './lib/useBookIntake'
+import { useEnrichment } from './lib/useEnrichment'
 import { flushBeforeClose } from './lib/beforeClose'
 import { writeQueue } from './lib/writeQueue'
 import { useFileDrop, type DropHaul } from './lib/useFileDrop'
@@ -38,6 +39,7 @@ import { WindowShell } from './shell/WindowShell'
 import { Library } from './screens/Library'
 import { Reader } from './screens/Reader'
 import { SidePane } from './pane/SidePane'
+import { parseBook } from './reader/parseBook'
 import { useSpeech } from './reader/useSpeech'
 
 export interface AppProps {
@@ -260,6 +262,40 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
 
   /* The drop hook now lives below `dropBooks`, which it takes as its handler —
    * a `const` read at call time, so it has to be declared first. */
+
+  /**
+   * Fill the shelf in for the books nobody has opened.
+   *
+   * An import writes a placeholder — a filename for a title, no jacket —
+   * because parsing a folder of three hundred books at import time would make
+   * importing as slow as reading. That was always meant to be corrected on
+   * first open, and nothing ever opens most of a two-thousand-book library: the
+   * shelf built to show jackets showed almost none, and every row read like the
+   * file it came from.
+   *
+   * So the same parse, in the background, over the books that have not had one.
+   * `useEnrichment` owns the pacing; what is supplied here is the three things
+   * only this component knows — where the bytes are, what parses them, and
+   * whether the reader is currently in a book.
+   */
+  const enrichment = useEnrichment({
+    books: library.books,
+    fs,
+    /* THE SCREEN, not whether a book is loaded. A book stays loaded when the
+     * reader steps back to the shelf, and the shelf is exactly where they want
+     * jackets appearing; gated on the open book, the pass would stop the first
+     * time anything was read and never start again that session. */
+    reading: state.screen === 'reader',
+    add,
+    readBook: (entry) => {
+      /* The same name `openStored` builds, and for the same reason: the parser
+       * routes on the EXTENSION, and the vault stores by hash — so a file named
+       * for its content id is a book of unknown format to both backends. */
+      const name = `${entry.title || 'book'}.${entry.ext || 'epub'}`
+      return readOwnedBook(fs!, contentPathIn(entry.bookId, name), name)
+    },
+    parse: (file) => parseBook(file),
+  })
 
   useEffect(() => {
     applyMetrics(document.documentElement, platform)
@@ -995,6 +1031,7 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
             onRenameTag={library.renameTag}
             onRemoveTag={library.removeTag}
             ownTagCount={library.ownTagCount}
+            enriching={enrichment.pending}
           />
         }
         onDismissPane={() => dispatch({ type: 'closePane' })}

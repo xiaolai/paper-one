@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { BookOpen, Check, Circle, CircleDot, LibraryBig } from 'lucide-react'
+import { BookOpen, Check, Circle, CircleDot, LibraryBig, Sparkles } from 'lucide-react'
 import type { IndexedBook } from '../lib/bookIndex'
 import { normalizeTag, statusCounts, tagCounts, tagKey, type ReadingStatus } from '../lib/library'
 import { ICON } from '../lib/metrics'
@@ -60,6 +60,15 @@ export interface LibraryPanelProps {
   readonly onRemoveTag: (tag: string) => void
   /** How many books `onRemoveTag` would touch — the number the confirm shows. */
   readonly ownTagCount: (tag: string) => number
+  /**
+   * How many books are still waiting to be parsed in the background.
+   *
+   * Shown because a pass that quietly spends CPU for several minutes on a large
+   * library, with nothing on screen, is indistinguishable from an app that has
+   * become mysteriously warm. Zero means the shelf is complete and the line is
+   * not drawn at all.
+   */
+  readonly enriching: number
 }
 
 export function LibraryPanel({
@@ -69,6 +78,7 @@ export function LibraryPanel({
   onRenameTag,
   onRemoveTag,
   ownTagCount,
+  enriching,
 }: LibraryPanelProps) {
   /* Which tag's menu is open — one across the panel, held here for the same
    * reason the shelf holds `menuFor` for its cards. */
@@ -194,6 +204,21 @@ export function LibraryPanel({
         <div className={styles.scopeHint}>
           <BookOpen size={ICON.control} strokeWidth={ICON.stroke} />
           Nothing on the shelf yet
+        </div>
+      )}
+
+      {/* The background parse, while there is one. A book imported from a
+          folder arrives as its filename with no jacket — parsing three hundred
+          at import would make importing as slow as reading — and this is the
+          pass that comes back for them. It says what it is doing and how much
+          is left, then disappears; a reader whose fans have spun up is owed the
+          sentence. No control: it pauses itself while a book is open, and it
+          resumes on the next launch, so there is nothing to decide. */}
+      {enriching > 0 && (
+        <div className={styles.enriching} role="status">
+          <Sparkles size={ICON.control} strokeWidth={ICON.stroke} />
+          Reading {enriching.toLocaleString()} {enriching === 1 ? 'book' : 'books'} for titles and
+          covers
         </div>
       )}
     </div>

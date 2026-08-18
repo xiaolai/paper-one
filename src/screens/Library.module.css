@@ -368,7 +368,13 @@
    scope and there is nothing to save. */
 .chip[data-active='true'] {
   border-color: transparent;
-  background: var(--accent-soft, rgb(0 0 0 / 0.08));
+  /* `--accent-bg`, the token that exists. This read `--accent-soft` with a
+     grey fallback, and `--accent-soft` is defined by no theme — so the chip
+     has never once been accent-tinted; it has drawn the fallback on every
+     theme since it was written, and looked deliberate doing it. That is the
+     whole failure mode of a var() with a fallback: the design never applies
+     and nothing is ever wrong enough to notice. */
+  background: var(--accent-bg);
 }
 
 .chipCount {
@@ -431,7 +437,7 @@
    the book and cannot be removed, so it must not look like it can. */
 .bookTag[data-mine='true'] {
   border-color: transparent;
-  background: var(--accent-soft, rgb(0 0 0 / 0.08));
+  background: var(--accent-bg);
   opacity: 1;
 }
 

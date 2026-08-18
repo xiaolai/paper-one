@@ -247,6 +247,66 @@ describe('mergeParsed', () => {
     const parsed = book({ title: 'New' })
     expect(mergeParsed(null, parsed)).toBe(parsed)
   })
+
+  /* THE WHOLE PARTITION, in one place, so a field added to `BookRecord` has to
+   * be classified rather than silently landing on the parse's side.
+   *
+   * A parse from the ENRICHMENT PASS supplies none of the copy-local fields —
+   * it knows about the book, not about this copy of it — and the spread that
+   * builds the merge puts the parse first. `origin` had already been found and
+   * fixed alone; it was never alone. `ext` is the one that mattered: dropped,
+   * `openStored` defaults the record to `.epub` and every enriched PDF becomes
+   * a book that opens nothing. */
+  it('keeps what belongs to the reader and to this copy when a parse omits it', () => {
+    const owned = book({
+      bookId: 'book:abc',
+      ext: 'pdf',
+      origin: '/Users/reader/Books/moby.pdf',
+      openedAt: 1700,
+      addedAt: 1,
+      tags: ['To reread'],
+      position: 'epubcfi(/6/4)',
+      progress: 0.4,
+      finished: true,
+    })
+    // What a background parse knows: the book's own account of itself, nothing else.
+    const parsed = book({ title: 'Moby-Dick; or, The Whale', author: 'Melville, Herman' })
+    const merged = mergeParsed(owned, parsed)
+
+    expect(merged.title).toBe('Moby-Dick; or, The Whale')
+    expect(merged.author).toBe('Melville, Herman')
+    for (const [field, value] of Object.entries({
+      bookId: 'book:abc',
+      ext: 'pdf',
+      origin: '/Users/reader/Books/moby.pdf',
+      openedAt: 1700,
+      addedAt: 1,
+      position: 'epubcfi(/6/4)',
+      progress: 0.4,
+      finished: true,
+    })) {
+      expect(merged[field as keyof BookRecord], field).toEqual(value)
+    }
+    expect(merged.tags).toEqual(['To reread'])
+  })
+
+  /* The other direction: a parse that DOES supply a copy-local field wins,
+   * because that is the reader telling us where the book is now. */
+  it('lets a fresh open replace the copy-local fields it does supply', () => {
+    const owned = book({ ext: 'epub', origin: '/old/path.epub', openedAt: 1 })
+    const merged = mergeParsed(owned, book({ ext: 'pdf', origin: '/new/path.pdf', openedAt: 2 }))
+    expect(merged.ext).toBe('pdf')
+    expect(merged.origin).toBe('/new/path.pdf')
+    expect(merged.openedAt).toBe(2)
+  })
+
+  /* `parsedAt` is the parse's OWN provenance, so it is the one timestamp the
+   * parse may replace — that is what stops the enrichment pass revisiting a
+   * book it has already been to. */
+  it('takes the parse’s own timestamp', () => {
+    const merged = mergeParsed(book({ parsedAt: 100 }), book({ parsedAt: 200 }))
+    expect(merged.parsedAt).toBe(200)
+  })
 })
 
 /**

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { legacyBookIdFor } from './idMigration'
-import { contentPathIn, folderOf, recordPath } from './bookFolder'
+import { contentPathIn, folderOf, recordPath, recordFromMeta } from './bookFolder'
 import type { BookMeta } from './useBook'
 import type { IndexFs } from './bookIndex'
 import type { BookRecord } from './bookFolder'
@@ -268,17 +268,12 @@ export function useBookIntake({
        * `openedAt` is set here because this is the moment a book is opened, and
        * the shelf is ordered by it. */
       add(bookId, {
-        title: meta.title,
-        author: meta.author,
+        /* The parse's own fields — see `recordFromMeta`, which the enrichment
+         * pass shares, so a book parsed in the background and a book opened
+         * agree about what a parse knows. */
+        ...recordFromMeta(meta),
         openedAt: Date.now(),
         addedAt: Date.now(),
-        ...(meta.sortAs ? { sortAs: meta.sortAs } : {}),
-        ...(meta.series ? { series: meta.series } : {}),
-        ...(meta.seriesIndex === null ? {} : { seriesIndex: meta.seriesIndex }),
-        ...(meta.subjects.length ? { subjects: meta.subjects } : {}),
-        ...(meta.publisher ? { publisher: meta.publisher } : {}),
-        ...(meta.published ? { published: meta.published } : {}),
-        ...(meta.languages.length ? { languages: meta.languages } : {}),
         /* NO `description`. It was passed here and dropped on the floor:
          * `BookRecord` has no such field and `parseRecord` discards it, so every
          * write serialised it and every read threw it away. Nothing displays a

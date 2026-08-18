@@ -17,7 +17,7 @@
  */
 
 import type { VaultFs } from './bookVault'
-import { coverPathIn, legacyCoverPathIn } from './bookFolder'
+import { coverPathIn, folderOf, legacyCoverPathIn } from './bookFolder'
 
 /**
  * Roughly twice the widest the shelf draws a cover.
@@ -200,4 +200,43 @@ export async function coverUrl(fs: VaultFs, path: string): Promise<string | null
  */
 export async function coverIn(fs: VaultFs, bookId: string): Promise<string | null> {
   return (await coverUrl(fs, coverPathIn(bookId))) ?? coverUrl(fs, legacyCoverPathIn(bookId))
+}
+
+/**
+ * Put a book's jacket in its folder, if it has not got one already.
+ *
+ * ONE WRITE PATH, for the two places a jacket now arrives from: the reader
+ * opening a book, and the enrichment pass parsing one nobody has opened. They
+ * were about to be the same eight lines twice — downscale, make the folder,
+ * write the file, swallow the failure — and the second copy is where the
+ * `exists` check or the downscale quietly goes missing.
+ *
+ * RETURNS whether a jacket is now on disk, which is not the same as whether one
+ * was written: a book that already had one answers true without doing anything.
+ * The pass uses that to report progress honestly.
+ *
+ * NEVER THROWS. A book without a picture is not a book that failed — the shelf
+ * has drawn a derived tint for jacketless books all along, and that is a
+ * legitimate answer rather than an error state.
+ */
+export async function keepCover(
+  fs: VaultFs,
+  bookId: string,
+  cover: Blob | null,
+): Promise<boolean> {
+  if (!cover) return false
+  try {
+    const at = coverPathIn(bookId)
+    /* Already there — and this is the common case on any launch after the
+     * first, so it comes before the expensive part rather than after it. */
+    if (await fs.exists(at)) return true
+    const small = await downscaleCover(cover)
+    if (!small) return false
+    await fs.mkdir(folderOf(bookId))
+    await fs.writeFile(at, new Uint8Array(await small.arrayBuffer()))
+    return true
+  } catch (cause) {
+    console.error('Paper: could not keep the cover', cause)
+    return false
+  }
 }
