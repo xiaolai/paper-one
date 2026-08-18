@@ -32,6 +32,34 @@ body {
 }
 
 /*
+ * THE BROWSER'S BUTTON PADDING, RESET ONCE.
+ *
+ * WebKit gives every `<button>` a default `padding: 2px 6px 3px` — asymmetric
+ * top to bottom, and 6px either side. Every button in this app either declares
+ * its own padding or is a fixed-size box with an icon centred in it, so that
+ * default is never what is wanted, and where it survived it did damage of two
+ * kinds.
+ *
+ * The 1px kind: `2px` top against `3px` bottom shifts a centred icon half a
+ * pixel up in EVERY fixed-size icon button — the rail, the titlebar actions,
+ * the stepper, all of them.
+ *
+ * The visible kind: when the icon is WIDER than what the padding leaves, the
+ * centring has nothing to work with. A 24px `⋯` button keeps a 12px content
+ * box, a 15px icon does not fit in it, and an item larger than its grid area is
+ * aligned to the START rather than overflowing evenly — so it sat 6px from the
+ * left and 3px from the right. Invisible until a hover fill drew the box it was
+ * supposed to be centred in, which is how it shipped.
+ *
+ * A bare element selector, so any class that wants padding still wins whatever
+ * the source order — which matters here, because `composes` decides nothing
+ * about which of two classes comes last (see `controls.module.css`).
+ */
+button {
+  padding: 0;
+}
+
+/*
  * The highlight overlay's two knobs, declared HERE because the Overlayer's SVG
  * is in the view's shadow tree in this document — declared inside the book they
  * resolve to nothing and fall back to foliate's defaults.

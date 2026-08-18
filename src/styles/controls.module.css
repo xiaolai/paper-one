@@ -86,6 +86,9 @@
   place-items: center;
   width: 24px;
   height: 24px;
+  /* No padding of its own — the browser's default is reset globally, in
+     `global.css`, which explains what it was doing to this button in
+     particular. */
   border: 0;
   border-radius: var(--radius-chip);
   background: transparent;
