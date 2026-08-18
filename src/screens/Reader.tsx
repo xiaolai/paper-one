@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState, type CSSProperties } from 'react'
+import { useCallback, useLayoutEffect, useMemo, useState, type CSSProperties } from 'react'
 import { Library, Plus } from 'lucide-react'
 import type { Platform } from '../lib/metrics'
 import {
@@ -204,6 +204,28 @@ export function Reader({
     book.deselect()
     setSelection(null)
   }, [book])
+
+  /* Leaving the reader takes the selection with it.
+   *
+   * This screen stays MOUNTED under the library so foliate is not torn down,
+   * and the popup sits on §12's popover layer — far above the shelf's own, so
+   * nothing about being covered hides it. A passage selected and then left
+   * behind therefore put a toolbar over the covers: controls belonging to a
+   * book nobody can see, offering to mark text that is not on screen. The
+   * palette's "Mark this passage" outlived the reader by the same route, since
+   * it is offered whenever a selection exists.
+   *
+   * Exactly the reasoning of the page turn below — the popup is anchored to a
+   * passage that has stopped being shown — so it is taken down the same way,
+   * the book's own selection with it.
+   *
+   * A LAYOUT effect, because an ordinary one runs after the paint that put the
+   * shelf up: the popup would be drawn over the covers for a frame and then
+   * disappear, which is the flicker rather than the fix.
+   */
+  useLayoutEffect(() => {
+    if (inert) clearSelection()
+  }, [inert, clearSelection])
 
   /* A wheel gesture turns one page — the policy half of `wheelPaging`.
    *
