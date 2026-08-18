@@ -1,0 +1,85 @@
+[package]
+name = "tauri-plugin-peer"
+version = "0.1.0"
+description = "Paper's peer transport: an iroh endpoint, identity, pairing and blob streams, behind Tauri commands"
+authors = ["Paper"]
+license = ""
+edition = "2021"
+# iroh 1.0.3 and iroh-mdns-address-lookup 0.4.0 declare 1.91; the app crate
+# says the same, and the toolchain itself is pinned by the root
+# rust-toolchain.toml.
+rust-version = "1.91"
+# Not a crates.io crate: it is a workspace member of the app and reaches the
+# app by path only.
+publish = false
+# `tauri_plugin::Builder` refuses to build without `links`, and it must equal
+# the package name: that is how the app's tauri-build finds this plugin's
+# permission files (through the DEP_TAURI_PLUGIN_PEER_* variables cargo
+# exports for a linked crate).
+links = "tauri-plugin-peer"
+
+[lib]
+name = "tauri_plugin_peer"
+path = "src/lib.rs"
+
+# One switch per mobile platform. Empty today: nothing in the scaffold differs
+# by feature (mobile behaviour is keyed on `cfg(mobile)`, which the plugin
+# build emits from the target). They exist so the app's `ios` / `android`
+# features have somewhere to forward to when platform-only dependencies land
+# (a Swift/Kotlin half, the barcode scanner's hooks) — and so WI-5.9's
+# "Cargo features describe the same set as the manifest" check has one name
+# per platform on the plugin side as well as the app's.
+[features]
+ios = []
+android = []
+
+[build-dependencies]
+tauri-plugin = { version = "2.6", features = ["build"] }
+
+[dependencies]
+# default-features = false: the plugin does not choose the webview or the
+# app-level features; the app does. Only the runtime types are needed here.
+tauri = { version = "2.11.3", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+# rt + sync for the lazily started node (`OnceCell`, mutexes, channels), fs
+# for file work without blocking Tauri's async runtime, io-util for the
+# framed streams (`AsyncReadExt` over iroh's `RecvStream`), time for the
+# pairing/handshake timeouts, macros for `select!` in the session loops.
+tokio = { version = "1", features = ["rt", "fs", "sync", "io-util", "time", "macros"] }
+# Frames cross the plugin as `Bytes` so an inbox drain does not copy.
+bytes = "1"
+# The pairing URI (`paper://pair?…`): parsing and percent-encoding of the
+# address hints and the relay URL, instead of a hand-rolled query parser.
+url = "2"
+# The 128-bit pairing secret. 0.10, the line iroh-base already pulls in.
+rand = "0.10"
+# base32 (no padding) for the secret in the pairing URI: shorter than hex in
+# a QR, and no ambiguous characters.
+data-encoding = "2"
+
+# The transport (dev-docs/mobile-sync/plan.md III.2.1). `tls-ring`, not
+# `tls-aws-lc-rs`: aws-lc-rs needs a C/asm build (cmake, and on Android an
+# NDK-configured clang) that has no place in a cross-compiled mobile plugin;
+# ring cross-compiles with nothing but the target's linker. `default-features =
+# false` states that choice; note that iroh-mdns-address-lookup re-enables
+# iroh's defaults through unification, which is fine — the defaults are
+# `metrics`, `fast-apple-datapath`, `portmapper`, `tls-ring`, and none of
+# them is aws-lc-rs (WI-5.8's tree check proves it).
+iroh = { version = "1", default-features = false, features = ["tls-ring"] }
+# LAN discovery on desktop; best-effort on Android; not used on iOS in v1
+# (raw multicast needs Apple's entitlement — plan III.2.7).
+iroh-mdns-address-lookup = "0.4"
+# Blob integrity and the pairing MAC.
+blake3 = "1"
+# The one thing the plugin logs on its own: mDNS failing to start (the app
+# bridges `log` through tauri-plugin-log).
+log = "0.4"
+# The pairing QR is rendered in Rust as SVG so the secret never enters JS
+# state; no raster output, so no `image`.
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+
+[dev-dependencies]
+# A runtime for the one test that binds an endpoint; the app supplies its own.
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

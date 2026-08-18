@@ -3,6 +3,7 @@ import { createReadStream } from 'node:fs'
 import { extname, join, normalize, resolve } from 'node:path'
 import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
+import { paperComposition } from './scripts/vite/assert-bundle.mjs'
 
 /**
  * Serve pdf.js's runtime data at `/pdfjs/`, from OUTSIDE `public/`.
@@ -154,7 +155,12 @@ function foliatePdfStub(): Plugin {
 const host = process.env.TAURI_DEV_HOST
 
 export default defineConfig({
-  plugins: [react(), pdfjsAssets(), foliatePdfStub()],
+  // `paperComposition()` resolves `virtual:paper-composition` (imported by
+  // src/main.tsx) to this build's platform composition from
+  // `TAURI_ENV_PLATFORM`, and at `generateBundle` fails the build unless the
+  // bundle holds exactly that platform's manifest set — the WI-5.9 assertion,
+  // inside the build. See scripts/vite/assert-bundle.mjs.
+  plugins: [paperComposition(), react(), pdfjsAssets(), foliatePdfStub()],
 
   // foliate-js ships as unbundled ESM source whose modules import each other by
   // relative path. Pre-bundling it rewrites those specifiers and breaks the

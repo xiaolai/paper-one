@@ -69,6 +69,12 @@ dist/
 *.tsbuildinfo
 .DS_Store
 
+# Declaration-only output of `tsc -b` (`pnpm typecheck`), one directory per
+# TS project. Nothing runs from it; `scripts/check-kernel-declarations.mjs`
+# reads `.types/kernel` to prove the kernel's type surface names no
+# capability. Rebuilt from clean on every typecheck.
+.types/
+
 # pdf.js runtime data, copied out of node_modules by
 # scripts/sync-pdfjs-assets.mjs on predev/prebuild. A copy of a dependency,
 # not authored content. Outside public/ on purpose — see vite.config.ts.
@@ -82,3 +88,8 @@ public/sample.pdf
 # repository's — none of them belong in version control.
 public/*.pdf
 public/*.epub
+
+# Coverage output of `pnpm test:coverage` (`vitest run --coverage`):
+# `coverage-summary.json`, `lcov.info` and the HTML report. Rebuilt on every
+# run; `scripts/check-coverage.mjs` reads the summary and refuses an empty one.
+coverage/

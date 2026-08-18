@@ -1,3 +1,15 @@
+// The platform set is closed and the switch is a Cargo feature, so a mobile
+// build has to say so: `--no-default-features --features ios|android`. Left to
+// the default, `desktop` would compile the tray, the automation bridge and the
+// persisted scope into a phone build — silently, since all three are inert
+// there. This turns that into a build error naming the fix. (`tauri ios build`
+// forwards trailing runner args to cargo: `-- --no-default-features`.)
+#[cfg(all(mobile, feature = "desktop"))]
+compile_error!(
+    "the `desktop` feature is on for a mobile target; build with \
+     `--no-default-features --features ios` (or `android`)"
+);
+
 /// Base port for the MCP automation bridge.
 ///
 /// Pinned and project-unique on purpose. The plugin defaults to 9223 and, if
@@ -7,8 +19,29 @@
 ///
 /// Ports already spoken for on this machine: 9223 (the plugin default) and
 /// 9323 (vmark). 31415 clears both by far more than the 100-port scan window.
-#[cfg(debug_assertions)]
+#[cfg(all(feature = "desktop", debug_assertions))]
 const MCP_BRIDGE_PORT: u16 = 31415;
+
+/// The bridge port for this process: `PAPER_MCP_PORT` if set, else the pin.
+///
+/// The override exists for the two-instance harness (a shelf and a satchel
+/// on one machine, each with its own `PAPER_TEST_DATA_DIR`): the plugin would
+/// scan past a taken 31415 on its own, but the MCP host attaches to a port it
+/// was told, so the second instance has to be given one on purpose. Debug
+/// desktop builds only, like the bridge itself. A value that is not a port
+/// number stops the launch with the value named rather than quietly falling
+/// back to the pin — a harness that thinks it set a port must not attach to
+/// the wrong instance.
+#[cfg(all(feature = "desktop", debug_assertions))]
+fn mcp_bridge_port() -> u16 {
+    match std::env::var("PAPER_MCP_PORT") {
+        Ok(value) => value
+            .trim()
+            .parse()
+            .unwrap_or_else(|_| panic!("PAPER_MCP_PORT must be a port number, got {value:?}")),
+        Err(_) => MCP_BRIDGE_PORT,
+    }
+}
 
 /// Put the menu-bar icon up and make it toggle the window.
 ///
@@ -16,7 +49,11 @@ const MCP_BRIDGE_PORT: u16 = 31415;
 /// automatic light/dark tint off the `Template` filename suffix. A file named
 /// `tray-icon@2x.png` is drawn verbatim in full colour and will not adapt to
 /// the menu bar. `icon_as_template(true)` is the matching half of that.
-#[cfg(desktop)]
+///
+/// Gated on the `desktop` feature rather than the `desktop` cfg: the feature
+/// is what turns `tauri/tray-icon` on, and without it the tray types do not
+/// exist to compile against, even on a desktop host.
+#[cfg(feature = "desktop")]
 fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     use tauri::{
         image::Image,
@@ -41,8 +78,8 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             } = event
             {
                 if let Some(window) = tray.app_handle().get_webview_window("main") {
-                    let showing =
-                        window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false);
+                    let showing = window.is_visible().unwrap_or(false)
+                        && window.is_focused().unwrap_or(false);
                     if showing {
                         let _ = window.hide();
                     } else {
@@ -59,62 +96,74 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    #[allow(unused_mut)]
     let mut builder = tauri::Builder::default()
         // Scoped by `capabilities/default.json`, not by these registrations —
         // registering a plugin grants nothing on its own.
         .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_dialog::init())
-        /* MUST come after fs and dialog: it restores the saved scope into the
-         * fs plugin's state, so the plugin it is restoring into has to exist.
-         *
-         * What it fixes: a path the reader chose in the dialog is added to the
-         * filesystem scope in memory, and the shelf stores that path — so
-         * reopening worked until the app quit and failed silently afterwards.
-         *
-         * PHASE 3 WAS EXPECTED TO DELETE THIS AND DOES NOT. Paper now keeps its
-         * own copy of every book under $APPDATA, which is in scope permanently,
-         * so reopening no longer depends on any scope being restored — that was
-         * the plugin's whole justification and it is gone.
-         *
-         * One job remains, and it is a migration rather than a feature. A row
-         * shelved BEFORE the vault existed has no copy, only a path into the
-         * reader's own filesystem. It gets its copy the next time it is opened
-         * — there is no startup sweep, because that would turn a cold launch
-         * into a disk copy of the whole library — and that open has to succeed
-         * for the migration to happen at all. Without this plugin it would fail
-         * after the first relaunch, and every book on an existing shelf would be
-         * stranded exactly where phase 2 left it.
-         *
-         * So this comes out when pre-vault rows can no longer exist, not now. */
-        .plugin(tauri_plugin_persisted_scope::init())
+        .plugin(tauri_plugin_dialog::init());
+
+    /* MUST come after fs and dialog: it restores the saved scope into the
+     * fs plugin's state, so the plugin it is restoring into has to exist.
+     *
+     * What it fixes: a path the reader chose in the dialog is added to the
+     * filesystem scope in memory, and the shelf stores that path — so
+     * reopening worked until the app quit and failed silently afterwards.
+     *
+     * PHASE 3 WAS EXPECTED TO DELETE THIS AND DOES NOT. Paper now keeps its
+     * own copy of every book under $APPDATA, which is in scope permanently,
+     * so reopening no longer depends on any scope being restored — that was
+     * the plugin's whole justification and it is gone.
+     *
+     * One job remains, and it is a migration rather than a feature. A row
+     * shelved BEFORE the vault existed has no copy, only a path into the
+     * reader's own filesystem. It gets its copy the next time it is opened
+     * — there is no startup sweep, because that would turn a cold launch
+     * into a disk copy of the whole library — and that open has to succeed
+     * for the migration to happen at all. Without this plugin it would fail
+     * after the first relaunch, and every book on an existing shelf would be
+     * stranded exactly where phase 2 left it.
+     *
+     * So this comes out when pre-vault rows can no longer exist, not now.
+     *
+     * Desktop only: a pre-vault row can only exist on a desktop shelf, so a
+     * mobile build has nothing for this plugin to do and does not compile it. */
+    #[cfg(feature = "desktop")]
+    {
+        builder = builder.plugin(tauri_plugin_persisted_scope::init());
+    }
+
+    builder = builder
+        // The peer transport, every platform. Its commands are granted by
+        // `peer:default` in capabilities/default.json.
+        .plugin(tauri_plugin_peer::init())
         .setup(|app| {
-        if cfg!(debug_assertions) {
-            app.handle().plugin(
-                tauri_plugin_log::Builder::default()
-                    .level(log::LevelFilter::Info)
-                    .build(),
-            )?;
-        }
+            if cfg!(debug_assertions) {
+                app.handle().plugin(
+                    tauri_plugin_log::Builder::default()
+                        .level(log::LevelFilter::Info)
+                        .build(),
+                )?;
+            }
 
-        #[cfg(desktop)]
-        setup_tray(app.handle())?;
+            #[cfg(feature = "desktop")]
+            setup_tray(app.handle())?;
 
-        Ok(())
-    });
+            Ok(())
+        });
 
     // Automation bridge for end-to-end testing: drives the webview, reads the
-    // DOM and captures window screenshots. Debug builds only — it opens a
-    // local socket into the app and has no place in a shipped binary.
+    // DOM and captures window screenshots. Debug desktop builds only — it
+    // opens a local socket into the app and has no place in a shipped binary,
+    // or on a phone.
     //
     // bind_address is set explicitly because the plugin's own default is
     // 0.0.0.0, which would expose the bridge to the LAN.
-    #[cfg(debug_assertions)]
+    #[cfg(all(feature = "desktop", debug_assertions))]
     {
         builder = builder.plugin(
             tauri_plugin_mcp_bridge::Builder::new()
                 .bind_address("127.0.0.1")
-                .base_port(MCP_BRIDGE_PORT)
+                .base_port(mcp_bridge_port())
                 .build(),
         );
     }

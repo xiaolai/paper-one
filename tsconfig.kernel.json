@@ -1,0 +1,13 @@
+{
+  // The kernel: `src/kernel/**` without its tests. Its declarations land in
+  // `.types/kernel`, which `pnpm boundaries:decls` scans for any mention of
+  // `capabilities/` — the kernel's public type surface must not name one.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src/kernel",
+    "outDir": ".types/kernel",
+    "tsBuildInfoFile": ".types/kernel.tsbuildinfo"
+  },
+  "include": ["src/kernel/**/*", "src/vite-env.d.ts"],
+  "exclude": ["src/kernel/**/*.test.ts", "src/kernel/**/*.test.tsx"]
+}

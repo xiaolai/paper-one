@@ -1,0 +1,310 @@
+//! Where a blob may be read from or written to: `<root>/books/<folder>/<name>`
+//! and nowhere else.
+//!
+//! The plugin serves and fetches book bytes and covers on behalf of a peer.
+//! Both halves of the target are validated against closed grammars before a
+//! path is ever built — a folder is `^[A-Za-z0-9_]{1,80}$` (the kernel's
+//! bookId alphabet) and a name is one of a fixed list — so escape by name is
+//! impossible by construction, and [`BlobTarget::checked`] adds the symlink
+//! check on top for the day something inside `books/` points elsewhere.
+//!
+//! `cover.webp` is the legacy cover name: served so an old shelf can still
+//! hand its jackets over, never written, so nothing new is created under it.
+
+use std::path::{Path, PathBuf};
+
+use crate::data_root::checked_target;
+use crate::error::{Error, Result};
+
+/// The content extensions the kernel's `formats.ts` knows, plus `bin` for a
+/// book whose format could not be sniffed.
+pub const CONTENT_EXTENSIONS: &[&str] =
+    &["epub", "pdf", "mobi", "azw3", "cbz", "fb2", "fbz", "bin"];
+
+/// The subdirectory of the data root that holds one folder per book.
+pub const BOOKS_DIR: &str = "books";
+
+/// Read or write. `cover.webp` is refused for `Write`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    Read,
+    Write,
+}
+
+/// A validated blob target. Construct one through [`BlobTarget::resolve`];
+/// the fields are read-only afterwards.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlobTarget {
+    folder: String,
+    name: String,
+    /// `<root>/books/<folder>` — the directory a transfer must find still
+    /// there before promoting a `.part`.
+    folder_dir: PathBuf,
+    /// `<root>/books/<folder>/<name>`.
+    path: PathBuf,
+}
+
+impl BlobTarget {
+    /// Validate `folder` and `name` and build the target under `root`. Pure:
+    /// touches no filesystem.
+    pub fn resolve(root: &Path, folder: &str, name: &str, access: Access) -> Result<Self> {
+        validate_folder(folder)?;
+        validate_name(name, access)?;
+        let folder_dir = root.join(BOOKS_DIR).join(folder);
+        let path = folder_dir.join(name);
+        Ok(Self {
+            folder: folder.to_owned(),
+            name: name.to_owned(),
+            folder_dir,
+            path,
+        })
+    }
+
+    pub fn folder(&self) -> &str {
+        &self.folder
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn folder_dir(&self) -> &Path {
+        &self.folder_dir
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The `.part` sibling a fetch writes into before the rename.
+    pub fn part_path(&self) -> PathBuf {
+        let mut name = self.path.as_os_str().to_owned();
+        name.push(".part");
+        PathBuf::from(name)
+    }
+
+    /// The symlink check: the folder directory, canonicalized, must still be
+    /// under the canonicalized root. Requires the folder to exist — a target
+    /// whose folder is missing is [`Error::FolderGone`], which is the answer
+    /// both a serve (nothing to serve) and a fetch (nothing to write into)
+    /// need.
+    pub fn checked(&self, root: &Path) -> Result<()> {
+        if !self.folder_dir.is_dir() {
+            return Err(Error::FolderGone(self.folder.clone()));
+        }
+        checked_target(root, &self.folder_dir).map(|_| ())
+    }
+}
+
+/// `^[A-Za-z0-9_]{1,80}$`.
+pub fn validate_folder(folder: &str) -> Result<()> {
+    let ok = !folder.is_empty()
+        && folder.len() <= 80
+        && folder
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    if ok {
+        Ok(())
+    } else {
+        Err(Error::InvalidFolder(folder.to_owned()))
+    }
+}
+
+/// One of `content.<ext>` (ext in [`CONTENT_EXTENSIONS`]), `cover.jpg`, or —
+/// for reads only — `cover.webp`.
+pub fn validate_name(name: &str, access: Access) -> Result<()> {
+    if name == "cover.jpg" {
+        return Ok(());
+    }
+    if name == "cover.webp" {
+        return match access {
+            Access::Read => Ok(()),
+            Access::Write => Err(Error::ReadOnlyBlobName(name.to_owned())),
+        };
+    }
+    if let Some(ext) = name.strip_prefix("content.") {
+        if CONTENT_EXTENSIONS.contains(&ext) {
+            return Ok(());
+        }
+    }
+    Err(Error::InvalidBlobName(name.to_owned()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::ScratchDir;
+
+    fn root() -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(r"C:\paper\data")
+        } else {
+            PathBuf::from("/paper/data")
+        }
+    }
+
+    fn kind(result: Result<BlobTarget>) -> &'static str {
+        match result {
+            Ok(_) => "ok",
+            Err(err) => err.kind(),
+        }
+    }
+
+    #[test]
+    fn accepts_a_plain_folder_and_content_name() {
+        let target = BlobTarget::resolve(&root(), "book_a", "content.epub", Access::Write).unwrap();
+        assert_eq!(
+            target.path(),
+            root().join("books").join("book_a").join("content.epub")
+        );
+        assert_eq!(target.folder_dir(), root().join("books").join("book_a"));
+        assert_eq!(
+            target.part_path(),
+            root()
+                .join("books")
+                .join("book_a")
+                .join("content.epub.part")
+        );
+        assert_eq!(target.folder(), "book_a");
+        assert_eq!(target.name(), "content.epub");
+    }
+
+    #[test]
+    fn every_content_extension_is_accepted() {
+        for ext in CONTENT_EXTENSIONS {
+            let name = format!("content.{ext}");
+            assert_eq!(
+                kind(BlobTarget::resolve(&root(), "b", &name, Access::Write)),
+                "ok",
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_dot_dot_and_separators_in_the_folder() {
+        for bad in [
+            "..",
+            "../x",
+            "a/b",
+            "a\\b",
+            "book:a",
+            "book a",
+            "book.a",
+            "",
+            "book\u{2028}a",
+            "book\u{ff0f}a",
+            "book\0a",
+            "café",
+        ] {
+            assert_eq!(
+                kind(BlobTarget::resolve(
+                    &root(),
+                    bad,
+                    "content.epub",
+                    Access::Read
+                )),
+                "invalidFolder",
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn folder_length_is_capped_at_80() {
+        let ok = "a".repeat(80);
+        let long = "a".repeat(81);
+        assert_eq!(
+            kind(BlobTarget::resolve(&root(), &ok, "cover.jpg", Access::Read)),
+            "ok"
+        );
+        assert_eq!(
+            kind(BlobTarget::resolve(
+                &root(),
+                &long,
+                "cover.jpg",
+                Access::Read
+            )),
+            "invalidFolder"
+        );
+    }
+
+    #[test]
+    fn rejects_names_outside_the_closed_set() {
+        for bad in [
+            "content.exe",
+            "content",
+            "content.",
+            "content.epub.part",
+            "book.json",
+            "marks.json",
+            "../content.epub",
+            "content.EPUB",
+            "cover.png",
+            "content.epub\0",
+            "",
+        ] {
+            assert_eq!(
+                kind(BlobTarget::resolve(&root(), "b", bad, Access::Read)),
+                "invalidBlobName",
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_webp_cover_is_read_only() {
+        assert_eq!(
+            kind(BlobTarget::resolve(
+                &root(),
+                "b",
+                "cover.webp",
+                Access::Read
+            )),
+            "ok"
+        );
+        assert_eq!(
+            kind(BlobTarget::resolve(
+                &root(),
+                "b",
+                "cover.webp",
+                Access::Write
+            )),
+            "readOnlyBlobName"
+        );
+        assert_eq!(
+            kind(BlobTarget::resolve(
+                &root(),
+                "b",
+                "cover.jpg",
+                Access::Write
+            )),
+            "ok"
+        );
+    }
+
+    #[test]
+    fn checked_needs_the_folder_to_exist() {
+        let dir = ScratchDir::new("paths-missing");
+        let target = BlobTarget::resolve(dir.path(), "b", "content.epub", Access::Write).unwrap();
+        assert_eq!(target.checked(dir.path()).unwrap_err().kind(), "folderGone");
+        std::fs::create_dir_all(target.folder_dir()).unwrap();
+        target.checked(dir.path()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checked_refuses_a_folder_that_is_a_symlink_out_of_the_root() {
+        let dir = ScratchDir::new("paths-symlink");
+        let root = dir.path().join("root");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(root.join("books")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("books").join("escape")).unwrap();
+        let target = BlobTarget::resolve(&root, "escape", "content.epub", Access::Write).unwrap();
+        assert_eq!(
+            target.checked(&root).unwrap_err().kind(),
+            "pathOutsideDataRoot"
+        );
+    }
+}

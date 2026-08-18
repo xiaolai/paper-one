@@ -44,7 +44,7 @@ import { inlineModules } from './lib/inline-ts.mjs'
  *  names the modules before it export. */
 const MODULES = ['classify.ts', 'snapWordRange.ts']
 
-const WORD_SNAP = new URL('../src/reader/wordSnap/', import.meta.url)
+const WORD_SNAP = new URL('../src/kernel/ui/reader/wordSnap/', import.meta.url)
 
 /** The whole snapping implementation as one self-contained fragment, read from
  *  disk on every call. `inline-ts.mjs` carries the rationale — including why

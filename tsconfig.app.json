@@ -1,0 +1,15 @@
+{
+  // The composition layer: `src/main.tsx` and, once WI-5.6 creates it,
+  // `src/app/**` (the per-platform composition roots). It sees the kernel and
+  // the capabilities through their declaration output only.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": ".types/app",
+    "tsBuildInfoFile": ".types/app.tsbuildinfo"
+  },
+  "files": ["src/main.tsx", "src/vite-env.d.ts"],
+  "include": ["src/app/**/*"],
+  "exclude": ["src/app/**/*.test.ts", "src/app/**/*.test.tsx"],
+  "references": [{ "path": "./tsconfig.kernel.json" }, { "path": "./tsconfig.capabilities.json" }]
+}

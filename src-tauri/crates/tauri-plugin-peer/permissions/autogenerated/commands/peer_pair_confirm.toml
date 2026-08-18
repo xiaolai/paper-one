@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-peer-pair-confirm"
+description = "Enables the peer_pair_confirm command without any pre-configured scope."
+commands.allow = ["peer_pair_confirm"]
+
+[[permission]]
+identifier = "deny-peer-pair-confirm"
+description = "Denies the peer_pair_confirm command without any pre-configured scope."
+commands.deny = ["peer_pair_confirm"]

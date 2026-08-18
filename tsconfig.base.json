@@ -1,0 +1,47 @@
+{
+  // Compiler options shared by every project in the graph (`tsconfig.json`
+  // is references only). A project overrides only what makes it a project:
+  // its inputs, its declaration output, and — for the tests — `types`.
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "jsx": "react-jsx",
+
+    // Every project emits DECLARATIONS ONLY, under `.types/`. Nothing runs
+    // from that output — Vite bundles from source. It exists so that
+    // `scripts/check-kernel-declarations.mjs` can read the kernel's public
+    // type surface as a consumer would see it and assert it names no
+    // capability, and so `tsc -b` can build the projects in dependency order.
+    "composite": true,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+
+    "baseUrl": ".",
+    // `virtual:paper-composition` is how `src/main.tsx` names THIS BUILD'S
+    // platform composition; Vite resolves it from `TAURI_ENV_PLATFORM` at
+    // build time (`scripts/vite/assert-bundle.mjs`). For the type-checker and
+    // for dependency-cruiser — which reads these `paths` — it is the desktop
+    // file: all three compositions export the same shape, and mapping the
+    // specifier to a real file keeps the edge resolvable, so every boundary
+    // rule still sees it. Only the app project can use it: the kernel and
+    // capability projects do not reference the app project, so an import of
+    // it from either fails `tsc -b`.
+    "paths": { "@/*": ["src/*"], "virtual:paper-composition": ["src/app/composition.desktop.ts"] }
+  }
+}

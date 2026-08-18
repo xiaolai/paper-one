@@ -1,0 +1,79 @@
+# The mobile matrix — real `tauri ios build` (and `android build` when an SDK is
+# present) on a clean clone, on a schedule, so SDK/CI rot is found weekly rather
+# than the day someone needs a phone build. Informational IPA/APK sizes are
+# recorded as artifacts. (docs/plans/phase-05-kernel-capabilities.md, K.11/K.12)
+name: mobile
+
+on:
+  schedule:
+    - cron: '17 6 * * 1'   # Mondays 06:17 UTC
+  workflow_dispatch:
+
+jobs:
+  ios:
+    name: iOS (aarch64, debug, unsigned archive)
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - run: pnpm install --frozen-lockfile
+      - name: cargo check (ios feature set)
+        run: cargo check --manifest-path src-tauri/Cargo.toml -p app --target aarch64-apple-ios --release --no-default-features --features ios
+      - name: No aws-lc-rs in the tree
+        run: '! cargo tree --manifest-path src-tauri/Cargo.toml -i aws-lc-rs'
+      - name: tauri ios build
+        run: pnpm tauri ios build --ci --debug --target aarch64 --no-sign --archive-only -- --no-default-features --features ios
+      - name: Record archive size
+        run: du -sh src-tauri/gen/apple/build/**/*.xcarchive 2>/dev/null || true
+  android:
+    name: Android (aarch64, debug apk)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install NDK
+        run: sdkmanager "ndk;27.2.12479018" "platforms;android-34" "build-tools;34.0.0"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - run: pnpm install --frozen-lockfile
+      - name: tauri android init
+        env:
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
+        run: pnpm tauri android init --ci
+      - name: cargo check (android feature set)
+        env:
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
+        run: cargo check --manifest-path src-tauri/Cargo.toml -p app --target aarch64-linux-android --release --no-default-features --features android
+      - name: tauri android build
+        env:
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
+        run: pnpm tauri android build --ci --debug --target aarch64 --apk -- --no-default-features --features android
+      - name: Record apk size
+        run: du -sh src-tauri/gen/android/app/build/outputs/apk/**/*.apk 2>/dev/null || true

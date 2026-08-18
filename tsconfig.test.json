@@ -1,0 +1,21 @@
+{
+  // Every test file under `src/`, in one project, with Node's types: tests
+  // read fixtures and package files with `node:fs`, and the modules under test
+  // are reached through the referenced projects' declarations — so a test
+  // that leans on a kernel type the kernel does not export fails here, before
+  // a capability could.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": ".types/test",
+    "tsBuildInfoFile": ".types/test.tsbuildinfo",
+    "types": ["node"]
+  },
+  "files": ["src/vite-env.d.ts"],
+  "include": ["src/**/*.test.ts", "src/**/*.test.tsx"],
+  "references": [
+    { "path": "./tsconfig.kernel.json" },
+    { "path": "./tsconfig.capabilities.json" },
+    { "path": "./tsconfig.app.json" }
+  ]
+}

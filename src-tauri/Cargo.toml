@@ -6,7 +6,7 @@ authors = ["Paper"]
 license = ""
 repository = ""
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.91"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -21,9 +21,19 @@ tauri-build = { version = "2.6.3", features = [] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-# macos-private-api is required for `titleBarStyle: "Overlay"` to honour
-# `trafficLightPosition`; without it the position is silently ignored.
-tauri = { version = "2.11.3", features = ["macos-private-api", "tray-icon", "image-png"] }
+# `macos-private-api` is required for `titleBarStyle: "Overlay"` to honour
+# `trafficLightPosition`; without it the position is silently ignored. It
+# stays on THIS line, unconditionally, and cannot move behind the `desktop`
+# feature: tauri-build's allowlist check (tauri-build/src/manifest.rs) reads
+# the `features = [...]` array of this dependency as manifest text and, with
+# `macOSPrivateApi: true` in tauri.conf.json, refuses to build unless the
+# feature is literally listed here — it knows nothing about `[features]`
+# forwarding, and the same check runs against the same config on every target,
+# so a per-platform config would only flip which platform fails. The feature
+# is inert on iOS and Android. `tray-icon` is exempt from that check and does
+# ride on `desktop`. `image-png` decodes the tray asset and the window icon
+# on every platform.
+tauri = { version = "2.11.3", features = ["macos-private-api", "image-png"] }
 tauri-plugin-log = "2"
 # Reopening a book, and the reader's own work outliving the webview's storage.
 # A picked `File` is a handle to bytes granted for one session, and localStorage
@@ -38,9 +48,40 @@ tauri-plugin-fs = "2"
 tauri-plugin-dialog = "2"
 # The dialog grants a chosen path into the fs scope for that RUNTIME only, so a
 # stored path is unreadable after a relaunch and the shelf cannot reopen the
-# book. This persists the scope and restores it at launch.
-tauri-plugin-persisted-scope = "2"
-# Automation bridge for e2e testing. Registered only in debug builds (see
-# lib.rs); kept a normal dependency rather than a dev-dependency because
+# book. This persists the scope and restores it at launch. Desktop only: it
+# exists for pre-vault rows, which only a desktop shelf can have.
+tauri-plugin-persisted-scope = { version = "2", optional = true }
+# Automation bridge for e2e testing. Registered only in debug desktop builds
+# (see lib.rs); kept a normal dependency rather than a dev-dependency because
 # dev-dependencies do not apply to a binary's own debug profile.
-tauri-plugin-mcp-bridge = "0.12"
+tauri-plugin-mcp-bridge = { version = "0.12", optional = true }
+# The peer transport, on every platform (crates/tauri-plugin-peer).
+tauri-plugin-peer = { path = "crates/tauri-plugin-peer" }
+
+# One feature per platform, and the platform set is closed: `desktop` (the
+# default), `ios`, `android`. A mobile check runs with `--no-default-features
+# --features ios`, which is what keeps the tray, the automation bridge and the
+# persisted scope from being compiled — not just skipped — on a phone.
+# `tauri/tray-icon` rides here too (the tray code in lib.rs is gated on this
+# feature, since without it the tray types do not exist); `macos-private-api`
+# cannot, for the reason on the `tauri` line above. `ios` and `android`
+# forward to the plugin's features of the same name so one flag reaches both
+# crates (WI-5.9 checks that features, registration and the manifest agree).
+[features]
+default = ["desktop"]
+desktop = [
+    "dep:tauri-plugin-mcp-bridge",
+    "dep:tauri-plugin-persisted-scope",
+    "tauri/tray-icon",
+]
+ios = ["tauri-plugin-peer/ios"]
+android = ["tauri-plugin-peer/android"]
+
+# Nested workspace: the app is the root package and every Tauri plugin crate
+# lives under crates/. Nested (not repo‑root) so Cargo.lock, the icon paths and
+# scripts/bump-version.sh keep their location. `resolver = "2"` is the edition‑
+# 2021 resolver, stated explicitly because a workspace root sets it, not the
+# member.
+[workspace]
+members = ["crates/*"]
+resolver = "2"

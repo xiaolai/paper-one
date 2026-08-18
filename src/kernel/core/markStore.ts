@@ -1,0 +1,461 @@
+import { folderOf, marksPathIn, readMarks, trashOf, writeMarks } from './bookFolder'
+import { scanAllMarks, type IndexFs } from './bookIndex'
+import { hlcOf, type Hlc } from './hlc'
+import { upsertOverlapping } from './markMatch'
+import { liveMarks, mergeMarks, removeMark, updateNote as updateNoteIn, validMarks, type Mark } from './marks'
+import { NOOP_RECORDER, recorded, type MutationRecorder } from './ports'
+import type { WriteQueue } from './writeQueue'
+
+/**
+ * The annotation store — marks, as a service with no React in it.
+ *
+ * All the rules live in `marks.ts`; this holds the state, persists after every
+ * change, and narrows the whole collection to the open book. Writing on every
+ * change rather than on an interval or on unload is deliberate: a reader who
+ * highlights a line and then force-quits should still have the highlight, and
+ * the payload is small enough that debouncing would buy nothing.
+ *
+ * ONE WRITE PATH, and the reason is the bug that had two. A snapshot write
+ * captures the list at the moment the reader highlights something, and
+ * anything else still in flight for that book is not in it — highlight A while
+ * the file is being read, highlight B before A's write lands, and B persists a
+ * list without A in it. Every version of this that wrote a captured list had
+ * some version of that hole in it. So the CHANGE goes to disk, not the result:
+ * read, modify, write, in order, on the book's queue, and the optimistic
+ * update is for the screen only, corrected by whatever the write finds. A
+ * remote merge (`mergeRemote`) is the same read-modify-write with a different
+ * change, which is why it can be trusted next to a local edit.
+ *
+ * `useMarks` used to hold all of this in `useState`; it is an adapter over
+ * `getSnapshot`/`subscribe` now, so a change made through any caller — the
+ * reader, the Notes pane, a service answering a peer — reaches every
+ * subscriber exactly once. Every mutator returns a promise that settles when
+ * the write is on disk, or with the write's error.
+ */
+
+/** One shared empty list, so a book with no marks does not re-render on identity. */
+const EMPTY: readonly Mark[] = []
+
+export interface MarkSnapshot {
+  /** Every LIVE mark, across every book — what the Notes panel browses.
+   *  Empty until `loadAll` has run, because it costs a read per book.
+   *  Tombstoned rows stay in the files and in the store's own working lists
+   *  (a merge needs them); no snapshot ever shows one. */
+  readonly all: readonly Mark[]
+  /** The open book's LIVE marks. `EMPTY` until its file is read. */
+  readonly current: readonly Mark[]
+  /** Which book `current` is for. */
+  readonly bookId: string | null
+  /**
+   * False once a write has failed. Surfaced rather than swallowed so the
+   * reader can be told their marks are not being saved; a store that silently
+   * stops persisting is indistinguishable from one that works.
+   */
+  readonly persistent: boolean
+}
+
+export interface MarkStore {
+  /** The same object until something changes. */
+  getSnapshot(): MarkSnapshot
+  subscribe(listener: () => void): () => void
+  /**
+   * Make a book the open one and read its marks, on that book's queue.
+   *
+   * THE READ GOES ON THE QUEUE TOO, which is the point rather than a detail.
+   * A highlight made before this lands is written as a change and reaches the
+   * file first; an unqueued read then returned the file as it was BEFORE that
+   * change and installed it as the open book's list, so the next highlight
+   * wrote a snapshot without the first one in it. Ordering the read against
+   * the writes is what makes the answer it gets the current answer.
+   *
+   * Resolves when the list is installed — or, for a file that will not read,
+   * when the empty list is. Never rejects. `null` closes the book.
+   */
+  open(bookId: string | null): Promise<void>
+  /** One book's marks as its file holds them now, read in order with its writes. */
+  forBook(bookId: string): Promise<readonly Mark[]>
+  /**
+   * Read every book's marks into `all`.
+   *
+   * Called by the Notes pane when it mounts. Marks live in book folders, so
+   * answering "every book's marks" costs one read per book — paid at the moment
+   * somebody asks for cross-book notes rather than at boot, where nobody did.
+   * A failed scan leaves `all` empty rather than pretending it ran.
+   */
+  loadAll(): Promise<void>
+  /**
+   * Add a mark to its book, replacing any it OVERLAPS — a mark is reached by
+   * any selection that covers part of it, so the row a new mark replaces is
+   * the row that selection resolved to. The caller mints the mark
+   * (`createMark`) because it needs the id and anchor at once, to draw it.
+   */
+  add(mark: Mark): Promise<void>
+  /**
+   * Remove a mark wherever it lives. Routed by id: the open book's list is
+   * consulted first, then `all`, then `bookId` when the caller knows it —
+   * a mark none of them know is a rejection, not a silent no-op.
+   */
+  remove(id: string, bookId?: string): Promise<void>
+  updateNote(id: string, note: string, bookId?: string): Promise<void>
+  /**
+   * Carry marks written under a superseded book id onto this one.
+   *
+   * With marks in book folders this MOVES a file rather than rewriting rows: the
+   * old id named a different folder, so its marks are read from there and merged
+   * into this book's. A no-op unless the reader has marks under the previous
+   * identity scheme — see `idMigration`.
+   */
+  rekey(from: string, to: string): Promise<void>
+  /**
+   * Fold marks that arrived from elsewhere into one book's file — the same
+   * read-modify-write as every local edit, on the same queue. BY ID, the
+   * NEWEST STAMP wins (`mergeMarks`): an incoming tombstone deletes, an
+   * incoming edit newer than a held tombstone resurrects, and a stale row
+   * changes nothing — which is what lets an ack be applied as a merge,
+   * never as an assignment. Every incoming mark must belong to `bookId`;
+   * one that does not rejects the whole call.
+   */
+  mergeRemote(bookId: string, marks: readonly Mark[]): Promise<void>
+}
+
+export interface MarkStoreOptions {
+  readonly fs: IndexFs | null
+  /** THE SHELF'S QUEUE, not one of its own — see `LibraryOptions.queue`. */
+  readonly queue: WriteQueue
+  readonly recorder?: MutationRecorder
+  /**
+   * The stamp for edits and tombstones (`updatedAt`, `deletedAt`). The
+   * default is the legacy clock — wall time under the zero device — monotone
+   * only as far as the wall clock is, which is enough with no sync composed;
+   * the sync capability injects its real HLC at composition.
+   */
+  readonly clock?: () => Hlc
+}
+
+/** Two lists say the same marks in the same order. Serialised, because that is what is stored. */
+function sameMarks(a: readonly Mark[], b: readonly Mark[]): boolean {
+  if (a === b) return true
+  if (a.length !== b.length) return false
+  return a.every((mark, i) => JSON.stringify(mark) === JSON.stringify(b[i]))
+}
+
+export function createMarkStore({
+  fs,
+  queue,
+  recorder = NOOP_RECORDER,
+  clock = () => hlcOf(Date.now()),
+}: MarkStoreOptions): MarkStore {
+  /* THE OPEN BOOK'S MARKS ONLY, held here.
+   *
+   * They live in that book's folder, so there is nothing to load until a book is
+   * open and nothing to filter once one is — `current` used to be
+   * `marksForBook(everything)`, which is what a shared store forces.
+   *
+   * HELD WITH THEIR BOOK, not beside it. A bare list kept the previous book's
+   * marks until the new book's read resolved — so the reader could be shown,
+   * and the overlay could DRAW, another book's highlights. Pairing them means a
+   * mismatch is simply an empty list, and a read that resolves after the reader
+   * has moved on is discarded because its generation no longer matches. */
+  let loaded: { bookId: string | null; marks: readonly Mark[] } = { bookId: null, marks: [] }
+  let openId: string | null = null
+  let all: readonly Mark[] = []
+  let persistent = true
+  /** Whether a write has failed since the last successful load — see `applyElsewhere`. */
+  let failed = false
+  /** Which `open` is the current one, so a read that lands late is discarded. */
+  let generation = 0
+
+  const listeners = new Set<() => void>()
+  let snapshot: MarkSnapshot = { all, current: EMPTY, bookId: null, persistent }
+  const publish = () => {
+    /* FILTERED TO LIVE AT THE ONE DOOR a subscriber reads through. The
+     * working lists keep their tombstones — a merge and a write both need
+     * them — and nothing outside this store ever sees one. */
+    snapshot = {
+      all: liveMarks(all),
+      current: loaded.bookId === openId ? liveMarks(loaded.marks) : EMPTY,
+      bookId: openId,
+      persistent,
+    }
+    for (const listener of [...listeners]) listener()
+  }
+
+  /**
+   * Write a change to one book's marks file — the only thing that writes one.
+   *
+   * Named for the case it was added for, which is a mark belonging to a book
+   * that is NOT open: Notes lists every book's marks, so a reader can edit or
+   * delete one from a book they are not reading. Reads that book's file,
+   * changes it, writes it back, on the same per-book queue as everything else.
+   * `all` is updated so the row stays changed, and the open book's list when
+   * this is that book.
+   */
+  const applyElsewhere = (targetId: string, mutate: (prev: readonly Mark[]) => readonly Mark[]): Promise<void> => {
+    if (!fs) {
+      /* SAID OUT LOUD. With nowhere to write, a mark is drawn and gone at the
+       * next redraw — and a store that silently stops persisting is
+       * indistinguishable from one that works, which is the whole reason this
+       * flag exists. */
+      if (persistent) {
+        persistent = false
+        publish()
+      }
+      return Promise.resolve()
+    }
+    const target = fs
+    return queue
+      /* APPEND. Unlike a whole-list write, which makes its predecessors
+       * redundant, this one READS the file and changes part of it. Coalescing
+       * two — delete a mark, then recolour another — drops the first, and the
+       * row it belonged to reappears. */
+      .append(targetId, async () => {
+        /* `writeMarks` creates the folder it writes into, so a change landing
+         * after a removal puts a marks-only directory back where the book had
+         * been. Checked before — and, because a removal can land between the
+         * check and the write, checked AFTER as well: the trash entry the
+         * removal leaves is the evidence, exactly as `updateBook` uses it. */
+        if (!(await target.exists(folderOf(targetId)))) return
+        const trashedBefore = await target.exists(trashOf(targetId))
+        const before = validMarks(await readMarks(target, targetId))
+        const next = mutate(before)
+        if (next === before) return
+        await recorded(recorder, targetId, 'marks', () => writeMarks(target, targetId, next))
+        if (!trashedBefore && (await target.exists(trashOf(targetId)))) {
+          /* The removal won. What was just written is a fragment of this
+           * book's marks in a folder that is no longer the book — and leaving
+           * it there is worse than losing the edit, because a later re-add
+           * lets that fragment beat the complete list waiting in the trash. */
+          await target.remove(marksPathIn(targetId)).catch(() => {})
+          return
+        }
+        /* WHAT THE WRITE FOUND, back into memory — and published only when it
+         * differs from what the optimistic update predicted, so a subscriber
+         * hears once per change rather than once more per confirmation. */
+        let changed = false
+        const nextAll = [...next, ...all.filter((mark) => mark.bookId !== targetId)]
+        if (!sameMarks(nextAll, all)) {
+          all = nextAll
+          changed = true
+        }
+        /* AND THE OPEN BOOK'S OWN LIST, when this is that book. It is, every
+         * time a change routes here before the file has been read — and
+         * leaving the list behind meant the mark just made was missing from
+         * it, so the NEXT mark wrote a snapshot that erased the first. */
+        if (openId === targetId && (loaded.bookId !== targetId || !sameMarks(loaded.marks, next))) {
+          loaded = { bookId: targetId, marks: next }
+          changed = true
+        }
+        /* NOT AFTER A FAILURE, until the book is read again. A write that
+         * fails is an edit that is gone: the next one is computed from the
+         * file WITHOUT it, so reporting "saving" again on that success hides
+         * the loss behind the very thing that caused it. `open` is what clears
+         * this, because that is the point at which what is on screen agrees
+         * with what is on disk. */
+        if (!failed && !persistent) {
+          persistent = true
+          changed = true
+        }
+        if (changed) publish()
+      })
+      .catch((cause: unknown) => {
+        failed = true
+        persistent = false
+        publish()
+        throw cause
+      })
+  }
+
+  /**
+   * Change one book's marks: the screen at once, the file as a change.
+   *
+   * The screen first, and only when the book is the open one AND its file has
+   * been read — before that the held list is not this book's, and predicting
+   * from it would show marks appearing and vanishing. The write lands either
+   * way. `all` is kept in step so a Notes row does not revert to the old value
+   * the moment it is edited.
+   */
+  const applyTo = (targetId: string, mutate: (prev: readonly Mark[]) => readonly Mark[]): Promise<void> => {
+    if (openId === targetId && loaded.bookId === targetId) {
+      const next = mutate(loaded.marks)
+      if (next !== loaded.marks) {
+        loaded = { bookId: targetId, marks: next }
+        all = [...next, ...all.filter((mark) => mark.bookId !== targetId)]
+        publish()
+      }
+    }
+    return applyElsewhere(targetId, mutate)
+  }
+
+  /**
+   * Which book a mark belongs to: the caller's word, else the open book's own
+   * list, else `all` — a mark can be in `all` and not yet in `current`,
+   * because the two are read separately. NOT conditional on a book being
+   * open: Notes is reachable with nothing open, and its edits must land.
+   */
+  const ownerOf = (id: string, hint: string | undefined): string | undefined => {
+    if (hint) return hint
+    if (openId && loaded.bookId === openId && loaded.marks.some((mark) => mark.id === id)) return openId
+    return all.find((mark) => mark.id === id)?.bookId
+  }
+
+  const applyToMark = (
+    id: string,
+    hint: string | undefined,
+    mutate: (prev: readonly Mark[]) => readonly Mark[],
+  ): Promise<void> => {
+    const owner = ownerOf(id, hint)
+    if (!owner) return Promise.reject(new Error(`no mark ${id} is known to the store`))
+    return applyTo(owner, mutate)
+  }
+
+  const open: MarkStore['open'] = (bookId) => {
+    openId = bookId
+    generation += 1
+    const mine = generation
+    if (!bookId || !fs) {
+      loaded = { bookId: null, marks: [] }
+      publish()
+      return Promise.resolve()
+    }
+    const target = fs
+    failed = false
+    publish()
+    return queue
+      .append(bookId, async () => {
+        const raw = await readMarks(target, bookId)
+        // Parsed through the same validator every read uses: this is a file on
+        // disk, and a mark with no CFI cannot be drawn.
+        if (mine !== generation) return
+        loaded = { bookId, marks: validMarks(raw) }
+        publish()
+      })
+      .catch(() => {
+        if (mine !== generation) return
+        loaded = { bookId, marks: [] }
+        publish()
+      })
+  }
+
+  const forBook: MarkStore['forBook'] = async (bookId) => {
+    if (!fs) return EMPTY
+    const target = fs
+    let marks: readonly Mark[] = EMPTY
+    await queue.append(bookId, async () => {
+      // LIVE only — a read model, like every other. The file keeps its rows.
+      marks = liveMarks(validMarks(await readMarks(target, bookId)))
+    })
+    return marks
+  }
+
+  const loadAll: MarkStore['loadAll'] = () => {
+    if (!fs) return Promise.resolve()
+    return scanAllMarks(fs)
+      .then((raw) => {
+        all = validMarks(raw)
+        publish()
+      })
+      .catch(() => {
+        // A failed scan has not established that there is nothing; it has
+        // established nothing. Empty, and the next mount asks again.
+        all = []
+        publish()
+      })
+  }
+
+  const add: MarkStore['add'] = (mark) =>
+    /* Overlapping, not byte-identical. A mark is reached by any selection
+     * that covers part of it, so the row a new mark replaces is the row that
+     * selection resolved to — otherwise re-marking a passage the reader was
+     * just told is marked writes a second, overlapping row. The superseded
+     * row is TOMBSTONED under this clock, so the replacement travels. */
+    applyTo(mark.bookId, (prev) => upsertOverlapping(prev, mark, clock()))
+
+  const remove: MarkStore['remove'] = (id, bookId) =>
+    // A tombstone, not a vanished row — see `removeMark`.
+    applyToMark(id, bookId, (prev) => removeMark(prev, id, clock()))
+
+  const updateNote: MarkStore['updateNote'] = (id, note, bookId) =>
+    applyToMark(id, bookId, (prev) => updateNoteIn(prev, id, note, clock()))
+
+  const rekey: MarkStore['rekey'] = async (from, to) => {
+    if (!fs || from === to) return
+    /* TWO PLACES, because the library may have got here first.
+     *
+     * `rekeyBook` renames the whole folder, `marks.json` included — so by
+     * the time this runs the marks are usually already in the new book's
+     * file, with the OLD id still written inside every one of them. Reading
+     * only the old folder therefore found nothing and did nothing, and Notes
+     * then sorted the reader's own highlights under a book that no longer
+     * existed and refused to navigate to them.
+     *
+     * So: rewrite what is already here, AND merge anything still sitting in
+     * the old folder if the rename has not happened. Whichever order the two
+     * ran in, the answer is the same. */
+    let waiting: Mark[] = []
+    try {
+      waiting = validMarks(await readMarks(fs, from))
+    } catch (cause) {
+      // The old file is there and will not read. Left alone, and said out
+      // loud, rather than quietly treated as a book with no marks.
+      console.error('Paper: could not read the marks under the old book id', cause)
+    }
+    await applyTo(to, (prev) => {
+      let rewrote = false
+      const mine = prev.map((mark) => {
+        if (mark.bookId !== from) return mark
+        rewrote = true
+        return { ...mark, bookId: to }
+      })
+      /* BY ID, and the set grows as it goes — a file holding two marks with
+       * one id would otherwise let both through. Nothing is deleted from the
+       * old folder: this ran on every open and only ever copied, so before
+       * the deduplication a reader who opened a migrated book five times had
+       * five of every highlight. Removing the source after the write is
+       * queued would delete the original before the copy was durable — so it
+       * stays, and the duplicate is what is prevented. */
+      const held = new Set(mine.map((mark) => mark.id))
+      const fresh: Mark[] = []
+      for (const mark of waiting) {
+        if (held.has(mark.id)) continue
+        held.add(mark.id)
+        fresh.push({ ...mark, bookId: to })
+      }
+      if (!rewrote && fresh.length === 0) return prev
+      return [...mine, ...fresh]
+    })
+  }
+
+  const mergeRemote: MarkStore['mergeRemote'] = (bookId, incoming) => {
+    const marks = validMarks(incoming)
+    const stray = marks.find((mark) => mark.bookId !== bookId)
+    if (stray) {
+      return Promise.reject(new Error(`mergeRemote: mark ${stray.id} belongs to ${stray.bookId}, not ${bookId}`))
+    }
+    if (marks.length === 0) return Promise.resolve()
+    /* LATEST ACTION WINS, per id — `mergeMarks`, the same semilattice the
+     * sync capability property-tests. Tombstones are respected in BOTH
+     * directions: an incoming tombstone newer than the held edit deletes,
+     * an incoming edit newer than the held tombstone resurrects, and an
+     * incoming row OLDER than what is held changes nothing — which is what
+     * makes applying an ack a merge rather than an assignment. */
+    return applyTo(bookId, (prev) => mergeMarks(prev, marks))
+  }
+
+  return {
+    getSnapshot: () => snapshot,
+    subscribe: (listener) => {
+      listeners.add(listener)
+      return () => {
+        listeners.delete(listener)
+      }
+    },
+    open,
+    forBook,
+    loadAll,
+    add,
+    remove,
+    updateNote,
+    rekey,
+    mergeRemote,
+  }
+}

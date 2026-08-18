@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-peer-pair-from-uri"
+description = "Enables the peer_pair_from_uri command without any pre-configured scope."
+commands.allow = ["peer_pair_from_uri"]
+
+[[permission]]
+identifier = "deny-peer-pair-from-uri"
+description = "Denies the peer_pair_from_uri command without any pre-configured scope."
+commands.deny = ["peer_pair_from_uri"]

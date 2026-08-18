@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-paper-data-root"
+description = "Enables the paper_data_root command without any pre-configured scope."
+commands.allow = ["paper_data_root"]
+
+[[permission]]
+identifier = "deny-paper-data-root"
+description = "Denies the paper_data_root command without any pre-configured scope."
+commands.deny = ["paper_data_root"]

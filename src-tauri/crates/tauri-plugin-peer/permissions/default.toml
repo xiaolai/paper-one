@@ -1,0 +1,32 @@
+"$schema" = "schemas/schema.json"
+
+[default]
+description = """
+The commands a Paper webview needs from the peer plugin: the endpoint's status,
+the device's role, the storage root, fsync of a file inside that root; the
+paired-peer list with grants; pairing (offer, cancel, confirm, dial-from-URI);
+sessions (ready, connect, send, recv, close) and blob transfers (fetch, hash).
+Every path the plugin touches is validated to lie inside the data root, and
+every session is accepted only from a persisted peer.
+"""
+permissions = [
+    "allow-peer-status",
+    "allow-peer-local-role",
+    "allow-paper-data-root",
+    "allow-fs-fsync",
+    "allow-peer-list-peers",
+    "allow-peer-forget-peer",
+    "allow-peer-set-grants",
+    "allow-peer-has-grant",
+    "allow-peer-pair-begin",
+    "allow-peer-pair-cancel",
+    "allow-peer-pair-confirm",
+    "allow-peer-pair-from-uri",
+    "allow-peer-ready",
+    "allow-peer-connect",
+    "allow-peer-send",
+    "allow-peer-session-recv",
+    "allow-peer-close",
+    "allow-peer-blob-fetch",
+    "allow-peer-hash-file",
+]

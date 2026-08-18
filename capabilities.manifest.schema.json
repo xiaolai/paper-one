@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/xiaolai/paper-one/main/capabilities.manifest.schema.json",
+  "title": "Paper capabilities manifest",
+  "description": "The list of Paper's first-party capabilities: ids, what each requires, where its TypeScript and Rust live, which platforms compose it, and the Tauri plugin and permissions it brings. This schema is the editor-facing restatement of scripts/lib/architecture.mjs, which is the enforcement (`pnpm architecture:check`); it does not check cross-item uniqueness, resolvability, acyclicity, or that the directories exist. Meaning of each field: docs/adr/0001-kernel-capabilities.md; the field-by-field rules: docs/capabilities-manifest.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["capabilities"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Relative path of this schema, so editors validate the file in place."
+    },
+    "capabilities": {
+      "type": "array",
+      "description": "One entry per capability, in declaration order. Registration order is decided by `requires`, not by position.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "ts", "platforms"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]*$",
+            "description": "The capability's name: lowercase, starts with a letter, then letters, digits and hyphens. Unique across the manifest (checked by the validator, not by this schema)."
+          },
+          "requires": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]*$"
+            },
+            "description": "Ids of the capabilities this one may import ports from. Each must resolve to another entry and the graph must be acyclic (validator only)."
+          },
+          "ts": {
+            "type": "string",
+            "pattern": "^(?!\\.\\.?$)[^/\\\\]+$",
+            "description": "Directory name under src/capabilities/ holding this capability's TypeScript; src/capabilities/<ts>/index.ts must exist."
+          },
+          "platforms": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "enum": ["desktop", "ios", "android"]
+            },
+            "description": "The per-platform compositions that include this capability."
+          },
+          "crate": {
+            "type": "string",
+            "pattern": "^(?!\\.\\.?$)[^/\\\\]+$",
+            "description": "Directory name under src-tauri/crates/ holding this capability's Rust crate, if it has one."
+          },
+          "plugin": {
+            "type": "string",
+            "description": "The Tauri plugin name the crate registers, if it has one."
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tauri ACL permission identifiers this capability needs granted."
+          }
+        }
+      }
+    }
+  }
+}

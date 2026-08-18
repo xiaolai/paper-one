@@ -1,0 +1,41 @@
+# The unified gate, on a clean clone. `pnpm verify` is the copy‑paste command a
+# developer runs locally; CI runs exactly the same thing so "green here" and
+# "green there" are one fact. (docs/plans/phase-05-kernel-capabilities.md, K.12)
+name: verify
+
+on:
+  push:
+    branches: [main, ui-polish, kernel-carve]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host:
+    name: host (macOS, desktop target)
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        # version comes from package.json#packageManager
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # rust-toolchain.toml at the repo root pins the channel; this action
+          # installs rustup and defers to it.
+          toolchain: 1.97.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm verify
+      - name: Deletion is an operation (temp checkout)
+        run: pnpm verify:without example

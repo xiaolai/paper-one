@@ -1,0 +1,26 @@
+{
+  "$schema": "./capabilities.manifest.schema.json",
+  "capabilities": [
+    {
+      "id": "example",
+      "requires": [],
+      "ts": "example",
+      "platforms": ["desktop", "ios", "android"]
+    },
+    {
+      "id": "peer",
+      "requires": [],
+      "ts": "peer",
+      "platforms": ["desktop", "ios", "android"],
+      "crate": "tauri-plugin-peer",
+      "plugin": "tauri-plugin-peer",
+      "permissions": ["peer:default"]
+    },
+    {
+      "id": "sync",
+      "requires": ["peer"],
+      "ts": "sync",
+      "platforms": ["desktop", "ios", "android"]
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+xcuserdata/
+build/
+Externals/
+# Build products of `tauri ios build`/`dev`. `assets/` is the frontend dist
+# copied in for the resources phase (project.yml: path: assets); a copy of the
+# built webview bundle, not authored content.
+assets/

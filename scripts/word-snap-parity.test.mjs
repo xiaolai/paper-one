@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { CORPUS } from '../src/reader/wordSnap/corpus.ts'
+import { CORPUS } from '../src/kernel/ui/reader/wordSnap/corpus.ts'
 import { assertTransportable, buildSnippet, evaluateSnippet } from './word-snap-parity.mjs'
 
 /**

@@ -1,0 +1,6 @@
+# Repo root, not src-tauri/: rustup resolves this file by walking up from the
+# cwd, and every documented cargo command runs from the root with
+# --manifest-path. 1.97.0 is the installed toolchain; the MSRV (1.91, iroh 1.0.3)
+# lives in src-tauri/Cargo.toml as rust-version.
+[toolchain]
+channel = "1.97.0"

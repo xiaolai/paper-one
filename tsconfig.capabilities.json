@@ -1,0 +1,20 @@
+{
+  // Product capabilities: `src/capabilities/<id>/**` without their tests —
+  // `example` and the peer envelope since WI-5.6. The explicit empty `files`
+  // stays beside the `include`, on purpose: an `include` that matches nothing
+  // is normally the error TS18003 "No inputs were found", and a config that
+  // names `files` or `references` is allowed to have no inputs (the same rule
+  // that lets `tsconfig.json` be a references-only solution). So the deletion
+  // test (WI-5.12: remove every capability, `pnpm verify` stays green) does
+  // not need a placeholder planted in the tree.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src/capabilities",
+    "outDir": ".types/capabilities",
+    "tsBuildInfoFile": ".types/capabilities.tsbuildinfo"
+  },
+  "files": [],
+  "include": ["src/capabilities/**/*", "src/vite-env.d.ts"],
+  "exclude": ["src/capabilities/**/*.test.ts", "src/capabilities/**/*.test.tsx"],
+  "references": [{ "path": "./tsconfig.kernel.json" }]
+}

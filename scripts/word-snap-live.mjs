@@ -80,7 +80,7 @@ const MODULES = [
   'applySnap.ts',
 ]
 
-const WORD_SNAP = new URL('../src/reader/wordSnap/', import.meta.url)
+const WORD_SNAP = new URL('../src/kernel/ui/reader/wordSnap/', import.meta.url)
 
 /**
  * The programmatic checks, and what each one is FOR.

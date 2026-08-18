@@ -1,0 +1,127 @@
+import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
+import { isProcessEntry } from './lib/entry.mjs'
+
+/**
+ * `pnpm verify` — the unified gate (WI-5.12), one command, the same one CI
+ * runs. Every check the phase added, in an order that fails fast and cheap:
+ * the manifest, the compositions, the boundaries (and the selftest that
+ * proves each rule still bites, and the check that every test file is in
+ * exactly one project), the types, the tests with their coverage floors, the
+ * literal desktop build (which asserts its own bundle), then Cargo — the
+ * lockfile, formatting, clippy, tests — for the whole workspace.
+ *
+ * Sequential, with a header per step and a stop at the first failure, whose
+ * exit code becomes this script's. There is no "continue past a red step":
+ * a summary that distinguishes "my failures" from "their failures" is
+ * bookkeeping, not a gate.
+ *
+ * `--list` prints the steps and exits; `--from <name>` starts at a step
+ * (for re-running the tail after a fix); `--only <name>` runs one.
+ */
+
+export const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
+const CARGO = ['--manifest-path', 'src-tauri/Cargo.toml']
+
+/** The steps, in order. `cmd` is argv[0], `args` the rest. */
+export const STEPS = Object.freeze([
+  { name: 'architecture:check', cmd: 'pnpm', args: ['architecture:check'] },
+  { name: 'compositions:check', cmd: 'pnpm', args: ['compositions:check'] },
+  { name: 'boundaries', cmd: 'pnpm', args: ['boundaries'] },
+  // The two K.4 gates that guard the gates: every boundary rule still
+  // rejects the edge it owns, and every test file still belongs to exactly
+  // one project. Cheap, and a gate CI never runs is a comment.
+  { name: 'boundaries:selftest', cmd: 'pnpm', args: ['boundaries:selftest'] },
+  { name: 'test:projects', cmd: 'pnpm', args: ['test:projects'] },
+  { name: 'typecheck', cmd: 'pnpm', args: ['typecheck'] },
+  { name: 'test:coverage', cmd: 'pnpm', args: ['test:coverage'] },
+  { name: 'build', cmd: 'pnpm', args: ['build'] },
+  { name: 'cargo metadata --locked', cmd: 'cargo', args: ['metadata', '--locked', '--format-version', '1', ...CARGO], quiet: true },
+  { name: 'cargo fmt --check', cmd: 'cargo', args: ['fmt', ...CARGO, '--all', '--', '--check'] },
+  { name: 'cargo clippy -D warnings', cmd: 'cargo', args: ['clippy', ...CARGO, '--workspace', '--all-targets', '--', '-D', 'warnings'] },
+  { name: 'cargo test --workspace', cmd: 'cargo', args: ['test', ...CARGO, '--workspace', '--all-targets'] },
+])
+
+/**
+ * Run `steps` in order with `run(step)` → exit code (0 ok), writing headers
+ * through `log`. Stops at the first non-zero code and returns it; 0 when
+ * every step passed. Pure but for the two functions it is handed, so a test
+ * can drive it with a fake runner.
+ */
+export function runSteps(steps, run, log = (line) => process.stdout.write(`${line}\n`)) {
+  const started = Date.now()
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i]
+    log(`\n▶ verify [${i + 1}/${steps.length}] ${step.name} — ${[step.cmd, ...step.args].join(' ')}`)
+    const t = Date.now()
+    const code = run(step)
+    const took = `${((Date.now() - t) / 1000).toFixed(1)}s`
+    if (code !== 0) {
+      log(`\n✗ verify: ${step.name} failed (exit ${code}) after ${took}; ${i} of ${steps.length} steps had passed`)
+      return code
+    }
+    log(`✓ verify: ${step.name} passed in ${took}`)
+  }
+  log(`\n✓ verify: all ${steps.length} steps passed in ${((Date.now() - started) / 1000).toFixed(1)}s`)
+  return 0
+}
+
+/** Run one step as a child process in `cwd`, inheriting the terminal (or
+ *  discarding stdout for a `quiet` step, whose output is a JSON blob). */
+export function spawnStep(step, cwd = REPO_ROOT) {
+  const result = spawnSync(step.cmd, step.args, {
+    cwd,
+    stdio: step.quiet ? ['inherit', 'ignore', 'inherit'] : 'inherit',
+    env: process.env,
+  })
+  if (result.error) {
+    process.stderr.write(`verify: could not start ${step.cmd}: ${result.error.message}\n`)
+    return 127
+  }
+  if (result.status === null) {
+    process.stderr.write(`verify: ${step.name} was killed by ${result.signal}\n`)
+    return 128
+  }
+  return result.status
+}
+
+/** `{ steps }` to run, or `{ error }`; `{ list: true }` for `--list`. */
+export function parseArgs(argv, steps = STEPS) {
+  let from
+  let only
+  let list = false
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]
+    if (arg === '--list') list = true
+    else if (arg === '--from' || arg === '--only') {
+      const value = argv[i + 1]
+      if (value === undefined || value.startsWith('--')) return { error: `${arg} needs a step name` }
+      if (!steps.some((s) => s.name === value)) return { error: `no step named ${JSON.stringify(value)}; see --list` }
+      if (arg === '--from') from = value
+      else only = value
+      i++
+    } else return { error: `unknown argument ${JSON.stringify(arg)}` }
+  }
+  if (list) return { list: true }
+  let selected = [...steps]
+  if (from !== undefined) selected = selected.slice(selected.findIndex((s) => s.name === from))
+  if (only !== undefined) selected = selected.filter((s) => s.name === only)
+  return { steps: selected }
+}
+
+function main(argv) {
+  const args = parseArgs(argv)
+  if (args.error !== undefined) {
+    process.stderr.write(`verify: ${args.error}\nusage: node scripts/verify.mjs [--list] [--from <step>] [--only <step>]\n`)
+    return 2
+  }
+  if (args.list) {
+    for (const step of STEPS) process.stdout.write(`${step.name.padEnd(28)} ${[step.cmd, ...step.args].join(' ')}\n`)
+    return 0
+  }
+  return runSteps(args.steps, (step) => spawnStep(step, REPO_ROOT))
+}
+
+if (isProcessEntry(import.meta)) {
+  process.exitCode = main(process.argv.slice(2))
+}

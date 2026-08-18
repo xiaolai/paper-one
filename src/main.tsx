@@ -11,17 +11,33 @@ import '@fontsource-variable/literata'
 import '@fontsource/ibm-plex-mono/400.css'
 import '@fontsource/ibm-plex-mono/500.css'
 
-import './styles/tokens.css'
-import './styles/global.css'
-
-import { App } from './App'
-import { inTauri, openAppStorage } from './lib/appStorage'
-import type { IndexedBook } from './lib/bookIndex'
-import { loadShelf } from './lib/bookIndex'
-import { emptyExpired } from './lib/bookTrash'
-import { migrateToFolders, summariseMigration } from './lib/migrateToFolders'
-import { libraryFs } from './lib/bookFiles'
-import { installFatalHandlers } from './lib/reportFatal'
+/* THE COMPOSITION ROOT. Two kernel entries and one composition, nothing
+ * else: `./kernel` is the React-free public entry every capability sees too,
+ * `./kernel/ui` is the UI entry only a composition root may import (it brings
+ * the stylesheet with it), and `virtual:paper-composition` is THIS BUILD'S
+ * platform composition — `src/app/composition.desktop.ts`, `.ios.ts` or
+ * `.android.ts`, chosen once, at build time, by `vite.config.ts` from the
+ * `TAURI_ENV_PLATFORM` the Tauri CLI sets (unset means desktop). Chosen by
+ * resolution rather than by an `if` here so that the other two compositions,
+ * and every capability only they import, never enter this build's module
+ * graph; `assert-bundle` fails the build if one does. For `tsc` and
+ * dependency-cruiser the specifier maps to the desktop file
+ * (`tsconfig.base.json` `paths`): all three export the same shape.
+ * `.dependency-cruiser.cjs` holds this file to exactly these imports. */
+import { composeCapabilities, createKernelServices, defaultDiagnostics, kernelApi } from './kernel'
+import {
+  App,
+  emptyExpired,
+  inTauri,
+  installFatalHandlers,
+  libraryFs,
+  loadShelf,
+  migrateToFolders,
+  openAppStorage,
+  summariseMigration,
+  type IndexedBook,
+} from './kernel/ui'
+import { capabilities } from 'virtual:paper-composition'
 
 installFatalHandlers()
 
@@ -31,8 +47,8 @@ if (!host) throw new Error('#root is missing from index.html')
 /* The store is read BEFORE the first render, and this is the reason boot is
  * asynchronous at all.
  *
- * `useStoredCollection` reads its storage once, in a `useState` initialiser, so
- * a store that arrived later would be a store the app never saw. Rendering
+ * The card and settings stores read their storage once, when the services are
+ * built, so a store that arrived later would be a store the app never saw. Rendering
  * first and filling in afterwards is worse than a moment's delay either way:
  * every reader would get one frame of an empty shelf and an unannotated book.
  *
@@ -117,9 +133,32 @@ async function boot(root: HTMLElement): Promise<void> {
    * and `emptyExpired` errs towards keeping anything it cannot age. */
   if (fs) void emptyExpired(fs).catch(() => [])
 
+  /* THE KERNEL'S SERVICES, built once, here — the composition root — over the
+   * store and the shelf resolved above, and handed to the UI. The hooks are
+   * adapters over these instances; a capability's service handler will hold
+   * the same ones. The ports keep their defaults until a capability supplies
+   * an implementation: no recorder journals, and diagnostics go to the console
+   * in a dev build and nowhere in a release. */
+  const services = createKernelServices({
+    fs,
+    storage,
+    initialBooks,
+    diagnostics: defaultDiagnostics(),
+  })
+
+  /* THE CAPABILITIES, composed onto those services — validated, ordered and
+   * started before the first render, so the pane and the palette are complete
+   * on the first frame rather than filling in. A capability that fails to
+   * start is a build defect, not a runtime condition to soften: nothing stays
+   * registered (the registry rolls back), the rejection reaches the fatal
+   * handlers, and the reader sees why. The lifetime signal is the window's;
+   * nothing aborts it today, and `dispose()` is what a close would call. */
+  const lifetime = new AbortController()
+  const composition = await composeCapabilities(capabilities, kernelApi(services), lifetime.signal)
+
   createRoot(root).render(
     <StrictMode>
-      <App storage={storage} fs={fs} initialBooks={initialBooks} shelfUnread={shelfUnread} />
+      <App services={services} fs={fs} shelfUnread={shelfUnread} composition={composition} />
     </StrictMode>,
   )
 }

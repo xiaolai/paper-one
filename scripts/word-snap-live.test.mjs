@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Script } from 'node:vm'
 import { describe, expect, it } from 'vitest'
-import { CORPUS } from '../src/reader/wordSnap/corpus.ts'
+import { CORPUS } from '../src/kernel/ui/reader/wordSnap/corpus.ts'
 import { evaluateSnippet } from './word-snap-parity.mjs'
 import { CHECKS, assertRan, buildDomSnippet } from './word-snap-live.mjs'
 
