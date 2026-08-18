@@ -429,7 +429,13 @@
   flex: 0 0 auto;
   display: grid;
   grid-template-columns: repeat(auto-fill, var(--card-w));
-  gap: var(--space-28) var(--space-20);
+  /* THE ROW GAP IS SMALL BECAUSE THE CARD IS NOT. Between two covers there is
+     already the whole of the lower card furniture — a progress rule, the `⋯`
+     and the reserved tag line, about 52px of mostly white — so the gap is not
+     the separation, it is what is added to it. At 28 the rows read as further
+     apart than the columns despite the columns having more actual air between
+     them. */
+  gap: var(--space-12) var(--space-20);
   /* THE ROW ENDS WHERE THE TOOLBAR DOES. Fixed-width tracks almost never divide
      a window evenly — at 1440 with the pane open, six 126px cards and five 20px
      gaps leave 73px over — and packed to the start, all of it piled up on the
@@ -658,7 +664,12 @@
      always reserves — see `.body`. Without it this row is wider than the books
      it sits over by exactly that much, and the `+` can never line up with the
      last cover. */
-  padding: var(--space-4) calc(var(--shelf-pad-x) + var(--scrollbar-w)) var(--space-12)
+  /* The trailing padding carries the scrollbar's width, which the shelf below
+     always reserves — see `.body`. The BOTTOM one is the air under the toolbar,
+     and it has to live here rather than on the shelf: virtualisation writes
+     `padding-block` onto the shelf inline, so a `padding-top` in the stylesheet
+     is overwritten the moment the shelf is long enough to virtualise. */
+  padding: var(--space-4) calc(var(--shelf-pad-x) + var(--scrollbar-w)) var(--space-20)
     var(--shelf-pad-x);
 }
 
@@ -704,7 +715,7 @@
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-6);
-  padding: 0 calc(var(--shelf-pad-x) + var(--scrollbar-w)) var(--space-12)
+  padding: 0 calc(var(--shelf-pad-x) + var(--scrollbar-w)) var(--space-20)
     var(--shelf-pad-x);
 }
 
