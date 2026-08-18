@@ -61,6 +61,13 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  /* THE SCROLLBAR'S SPACE IS ALWAYS RESERVED, so the books sit in the same
+     column as the toolbar above them whether the shelf scrolls or not. Without
+     it the scroll area is 15px narrower than the chrome exactly when there is
+     something to scroll — so the shelf and the search field were measured
+     against two different widths and could not be made to line up in both
+     states at once. */
+  scrollbar-gutter: stable;
   /* A column, so the empty state can still take the full height and centre
      itself in it — it did that as a flex child of `.library` and would
      otherwise collapse to its own text now that it lives in here. */
@@ -85,7 +92,7 @@
   justify-content: space-between;
   gap: var(--space-16);
   height: var(--status-bar-h);
-  padding: 0 var(--shelf-pad-x);
+  padding: 0 calc(var(--shelf-pad-x) + var(--scrollbar-w)) 0 var(--shelf-pad-x);
   background: var(--surface);
   font-size: var(--text-caption);
   color: var(--muted);
@@ -423,6 +430,19 @@
   display: grid;
   grid-template-columns: repeat(auto-fill, var(--card-w));
   gap: var(--space-28) var(--space-20);
+  /* THE ROW ENDS WHERE THE TOOLBAR DOES. Fixed-width tracks almost never divide
+     a window evenly — at 1440 with the pane open, six 126px cards and five 20px
+     gaps leave 73px over — and packed to the start, all of it piled up on the
+     right, so the last cover stopped 88px short of the `+` above it.
+     `space-between` puts that leftover into the gaps instead of the margin.
+
+     THE COLUMNS STAY 126 WIDE, which is the trade being made. Letting them
+     stretch instead — `minmax(var(--card-w), 1fr)` — would hold the gaps at 20
+     and end flush too, but a card that changes width changes the height of its
+     cover well, and the cell height is a CONSTANT derived from `CARD_W`. That
+     constant is what let the runtime cell measurement go; making the card fluid
+     brings it back. So the gaps give, and the covers do not. */
+  justify-content: space-between;
   padding: var(--space-4) var(--shelf-pad-x) var(--space-40);
 }
 
@@ -634,7 +654,12 @@
   align-items: center;
   gap: var(--space-8);
   min-height: var(--pane-title-row);
-  padding: var(--space-4) var(--shelf-pad-x) var(--space-12);
+  /* The extra on the trailing edge is the scrollbar's, which the shelf below
+     always reserves — see `.body`. Without it this row is wider than the books
+     it sits over by exactly that much, and the `+` can never line up with the
+     last cover. */
+  padding: var(--space-4) calc(var(--shelf-pad-x) + var(--scrollbar-w)) var(--space-12)
+    var(--shelf-pad-x);
 }
 
 .search {
@@ -679,7 +704,8 @@
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-6);
-  padding: 0 var(--shelf-pad-x) var(--space-12);
+  padding: 0 calc(var(--shelf-pad-x) + var(--scrollbar-w)) var(--space-12)
+    var(--shelf-pad-x);
 }
 
 .chip {
