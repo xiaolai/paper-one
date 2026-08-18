@@ -216,7 +216,11 @@ export const SPACING: Record<'letter' | 'word' | 'line' | 'paragraph', SpacingSc
   letter: { steps: [-0.01, 0, 0.01, 0.02, 0.04], def: 1, unit: 'em' },
   /* Word spacing opens the gaps between words without touching the letters,
    * which is the pair a reader who loses their place usually wants. */
-  word: { steps: [0, 0.04, 0.08, 0.16], def: 0, unit: 'em' },
+  /* Five steps with one that TIGHTENS, so this scale is shaped like `letter`
+     above: a step below the default, then the default, then three that open up.
+     It had four and started at its own floor, which made it the one row whose
+     minus was dead before the reader touched anything. */
+  word: { steps: [-0.02, 0, 0.04, 0.08, 0.16], def: 1, unit: 'em' },
   /* A MULTIPLE of the step's own line box, not a length: every reading step
    * carries a line height chosen for its size, and a fixed leading would be
    * loose at 17px and tight at 30. */
@@ -224,7 +228,11 @@ export const SPACING: Record<'letter' | 'word' | 'line' | 'paragraph', SpacingSc
   /* Also a multiple of the line box, which is what keeps consecutive paragraphs
    * on the grid — see `bookCss`. Zero is offered because a book that indents
    * its paragraphs does not want space between them as well. */
-  paragraph: { steps: [0, 0.5, 1, 1.5, 2], def: 2, unit: 'x' },
+  /* Re-based so one line — what the book has always had between paragraphs —
+     is the second step rather than the third, without that value changing. The
+     zero step went with it: nothing here indents a paragraph, so no space
+     between them runs the prose together rather than setting it tightly. */
+  paragraph: { steps: [0.5, 1, 1.5, 2, 2.5], def: 1, unit: 'x' },
 }
 
 /**
@@ -246,9 +254,21 @@ export const BRIGHTNESS: SpacingScale = {
   unit: 'x',
 }
 
+/**
+ * THE THEME IS THE CEILING. Contrast runs from softest up to the theme exactly
+ * as designed, and stops there — it used to run past it, pushing the ink toward
+ * pure black on a light theme and pure white on a dark one, which is a reader
+ * overriding a decision that was measured. Softening is a preference; hardening
+ * past the design is a second opinion about a contrast ratio that was already
+ * checked.
+ *
+ * That also puts its default at the top of its scale, where `BRIGHTNESS`
+ * already was: both controls now start at "the theme untouched" and only take
+ * away, which is one idea rather than two.
+ */
 export const CONTRAST: SpacingScale = {
-  steps: [-0.35, -0.175, 0, 0.175, 0.35],
-  def: 2,
+  steps: [-0.35, -0.2625, -0.175, -0.0875, 0],
+  def: 4,
   unit: 'x',
 }
 

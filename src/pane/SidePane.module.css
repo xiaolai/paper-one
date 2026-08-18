@@ -923,3 +923,31 @@
 .pip[data-on='true'] {
   background: var(--accent);
 }
+
+/* A group heading that is also its own disclosure. Built from `.groupTitle` so
+   a group that can be put away and one that cannot read as the same rank —
+   the only difference is the mark, and that it can be pressed. */
+.groupToggle {
+  composes: groupTitle;
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+  width: 100%;
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: start;
+}
+
+.groupToggle:hover {
+  color: var(--ink-2);
+}
+
+.groupChevron {
+  flex: 0 0 auto;
+  transition: transform var(--motion-popover);
+}
+
+.groupChevron[data-open='true'] {
+  transform: rotate(90deg);
+}

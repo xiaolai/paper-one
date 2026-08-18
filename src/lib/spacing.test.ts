@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { SPACING, spacingAt } from './metrics'
+import { BRIGHTNESS, CONTRAST, SPACING, spacingAt, stepAt } from './metrics'
 import { initialState, reducer, type SpacingKey } from './state'
 
 const KEYS: readonly SpacingKey[] = ['letter', 'word', 'line', 'paragraph']
@@ -15,7 +15,9 @@ describe('the spacing scales', () => {
 
   /* A reader who never opens these must get exactly the book they have now:
    * no tracking, no word spacing, the step's own line, one line between
-   * paragraphs. */
+   * paragraphs. The SCALES have been re-based since — every one of them now
+   * starts its default at the same position — and this is what says the values
+   * did not move when the positions did. */
   it('defaults to the typography that was there before it was adjustable', () => {
     expect(spacingAt('letter', SPACING.letter.def)).toBe(0)
     expect(spacingAt('word', SPACING.word.def)).toBe(0)
@@ -25,6 +27,17 @@ describe('the spacing scales', () => {
 
   it('starts every reader on those defaults', () => {
     for (const key of KEYS) expect(initialState.spacing[key], key).toBe(SPACING[key].def)
+  })
+
+  /* Every spacing starts at the same position, so the four rows read as one
+   * control repeated rather than four that happen to be near each other — and
+   * each has a step below its default, so no row's minus is dead before the
+   * reader has touched anything. */
+  it('starts every spacing at the second step, with room below', () => {
+    for (const key of KEYS) {
+      expect(SPACING[key].def, key).toBe(1)
+      expect(SPACING[key].steps.length, key).toBe(5)
+    }
   })
 
   it('runs each scale in one direction, with no repeated step', () => {
@@ -97,5 +110,31 @@ describe('setSpacing', () => {
     expect(reducer(initialState, { type: 'setSpacing', key: 'paragraph', idx: at })).toBe(
       initialState,
     )
+  })
+})
+
+describe('light: the theme is the ceiling', () => {
+  /* Both controls start at the theme exactly as designed and only take away.
+   * Contrast used to run PAST it, hardening the ink beyond a ratio somebody had
+   * already measured — softening is a preference, and overriding a measurement
+   * is a second opinion. */
+  it('defaults both to the top of their scale', () => {
+    expect(BRIGHTNESS.def).toBe(BRIGHTNESS.steps.length - 1)
+    expect(CONTRAST.def).toBe(CONTRAST.steps.length - 1)
+  })
+
+  it('leaves the theme untouched at those defaults', () => {
+    expect(stepAt(BRIGHTNESS, BRIGHTNESS.def)).toBe(1)
+    expect(stepAt(CONTRAST, CONTRAST.def)).toBe(0)
+  })
+
+  it('offers only reduction — no step brightens or hardens past the theme', () => {
+    for (const v of BRIGHTNESS.steps) expect(v).toBeLessThanOrEqual(1)
+    for (const v of CONTRAST.steps) expect(v).toBeLessThanOrEqual(0)
+  })
+
+  it('gives both five steps', () => {
+    expect(BRIGHTNESS.steps.length).toBe(5)
+    expect(CONTRAST.steps.length).toBe(5)
   })
 })

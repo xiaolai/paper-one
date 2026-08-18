@@ -4,6 +4,7 @@ import { THEMES } from '../lib/panes'
 import type { Face } from '../lib/typefaces'
 import { FacePicker } from './FacePicker'
 import type { PageLayout, Side, SpacingIndices, SpacingKey, Theme, Typeface } from '../lib/state'
+import { SettingGroup } from './SettingGroup'
 import { StepRow } from './StepRow'
 import styles from './SidePane.module.css'
 
@@ -94,6 +95,11 @@ export function Settings({
 }: SettingsProps) {
   const step = readingStep(stepIdx)
   const [faceMenuOpen, setFaceMenuOpen] = useState(false)
+  /* Closed to begin with — see `SettingGroup`. Local, like every other piece of
+     this panel's own view state: which groups a reader had open is not
+     something the app should remember on their behalf. */
+  const [lightOpen, setLightOpen] = useState(false)
+  const [spacingOpen, setSpacingOpen] = useState(false)
   /* Handed in, not probed here: `App` probes once and gives the same list to
      this panel and to the command palette, so the two cannot come to offer
      different faces. */
@@ -124,18 +130,6 @@ export function Settings({
           </button>
         ))}
       </div>
-
-      {/* HOW MUCH LIGHT THE APP GIVES OFF, and how hard the text sits on it.
-          In Appearance rather than Reading because they move the whole window —
-          a dimmed page inside bright chrome makes the frame the brightest thing
-          on screen and pulls the eye off the text.
-
-          Independent of the system on purpose: dimming the display to read at
-          night dims everything else with it, and turning it back up to answer a
-          message undoes the reading setting. Nothing either control produces
-          can go under 4.5:1 — see `adjustPalette`. */}
-      <StepRow label="Brightness" scale={BRIGHTNESS} value={brightness} onChange={onBrightness} />
-      <StepRow label="Contrast" scale={CONTRAST} value={contrast} onChange={onContrast} />
 
       <button
         type="button"
@@ -208,7 +202,21 @@ export function Settings({
           Nothing here touches the MEASURE. That is the size step's, and letting
           a second control move it would make the line length depend on which
           one was touched last. */}
-      <div className={styles.groupTitle}>Spacing</div>
+      {/* HOW MUCH LIGHT THE APP GIVES OFF, and how hard the text sits on it.
+          Its own group rather than a tail on Appearance: that one is which
+          theme, and these two are how much of it reaches the reader.
+
+          Independent of the system on purpose — dimming the display to read at
+          night dims everything else with it, and turning it back up to answer a
+          message undoes the reading setting. Both start at the theme untouched
+          and only take away, and nothing either produces can go under 4.5:1;
+          see `adjustPalette`. */}
+      <SettingGroup title="Light" open={lightOpen} onToggle={() => setLightOpen(!lightOpen)}>
+        <StepRow label="Brightness" scale={BRIGHTNESS} value={brightness} onChange={onBrightness} />
+        <StepRow label="Contrast" scale={CONTRAST} value={contrast} onChange={onContrast} />
+      </SettingGroup>
+
+      <SettingGroup title="Spacing" open={spacingOpen} onToggle={() => setSpacingOpen(!spacingOpen)}>
       <StepRow label="Letter" scale={SPACING.letter} value={spacing.letter}
         onChange={(idx) => onSpacing('letter', idx)} />
       <StepRow label="Word" scale={SPACING.word} value={spacing.word}
@@ -217,6 +225,7 @@ export function Settings({
         onChange={(idx) => onSpacing('line', idx)} />
       <StepRow label="Paragraph" scale={SPACING.paragraph} value={spacing.paragraph}
         onChange={(idx) => onSpacing('paragraph', idx)} />
+      </SettingGroup>
 
       <button
         type="button"
@@ -271,13 +280,17 @@ export function Settings({
         </span>
       </button>
 
-      <div className={styles.groupTitle}>Side pane</div>
+      {/* NO HEADING OF ITS OWN. A section is a promise of more than one thing
+          in it, and this one had a single row — so "Side pane" and "Position"
+          together took two lines to say what one line says, and the heading
+          read as the start of a group that never arrived. The row carries the
+          whole name instead. */}
       <button
         type="button"
         className={styles.settingRow}
         onClick={() => onSide(side === 'left' ? 'right' : 'left')}
       >
-        <span style={{ flex: 1 }}>Position</span>
+        <span style={{ flex: 1 }}>Side pane position</span>
         <span className={styles.settingValue}>{side === 'left' ? 'Left' : 'Right'}</span>
       </button>
     </div>
