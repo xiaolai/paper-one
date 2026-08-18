@@ -88,7 +88,24 @@ declare module 'foliate-js/view.js' {
     readonly metadata?: BookMetadata
     readonly toc?: readonly TocItem[]
     readonly sections: readonly unknown[]
-    getCover?: () => Promise<Blob | null>
+    /**
+     * The jacket, when the backend has one.
+     *
+     * DELIBERATELY NOT `Promise<Blob | null>`: foliate's FB2 backend assigns
+     * `book.getCover = () => null` for a book with no cover art — a SYNCHRONOUS
+     * null, not a resolved promise. Typed as always-thenable, every caller
+     * wrote `.catch()` straight onto the result and threw a TypeError on
+     * exactly those books. The type says what the fork does.
+     */
+    getCover?: () => Promise<Blob | null> | Blob | null
+    /**
+     * Release whatever the parse acquired — object URLs, a zip loader, a worker.
+     *
+     * Optional because not every backend defines it, and undeclared until now,
+     * which is why nothing called it: `epub.js`, `fb2.js` and `comic-book.js`
+     * all have one, and FB2 makes an object URL per section.
+     */
+    destroy?: () => void
   }
 
   /** `relocate` detail — the progress fields are spread in at the top level. */

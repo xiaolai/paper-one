@@ -8,6 +8,7 @@ import type {
 } from 'foliate-js/view.js'
 import type { MarkKind } from '../lib/marks'
 import type { BookMeta, ReaderPosition } from '../lib/useBook'
+import { coverFrom } from '../lib/coverArt'
 import { deferSnap } from './wordSnap/deferredSnap'
 import { watchGestureProvenance } from './wordSnap/gestureProvenance'
 import { createReflowGuard } from './wordSnap/invalidate'
@@ -639,7 +640,10 @@ export class ReaderSession {
       if (typeof view.book?.getCover !== 'function') {
         console.warn('Paper: this book backend implements no getCover — no jacket will be filed')
       }
-      const cover = await view.book?.getCover?.().catch(() => null)
+      /* `coverFrom`, not `.catch()` on the result: a backend may return the
+       * jacket synchronously — see the function, and the FB2 case that makes
+       * this not merely defensive. */
+      const cover = view.book ? await coverFrom(view.book) : null
       if (!this.#disposed) this.#cb.onCover(cover ?? null)
     })()
     this.#cb.onNavigator({
@@ -1344,7 +1348,10 @@ function reportNavigation(what: string, target?: string): (cause: unknown) => vo
 
 function destroyQuietly(prepared: Destroyable): void {
   try {
-    prepared.destroy()
+    /* Not awaited: disposal is synchronous by contract and the session is
+       being torn down either way. The promise is there for the enrichment
+       pass, which parses serially and does need the worker gone. */
+    void prepared.destroy()
   } catch (cause) {
     console.error('Paper: failed to destroy the prepared book', cause)
   }

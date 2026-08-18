@@ -104,6 +104,20 @@ export function extensionFor(name: string): string {
 }
 
 
+/**
+ * The filename a stored book must be handed to a parser under.
+ *
+ * The vault names files by content hash so two copies cannot collide; every
+ * parser Paper uses routes on the EXTENSION, and foliate rejects a name with no
+ * suffix as an unsupported type. So the name is rebuilt from the record each
+ * time a stored book is opened — by the reader, and now by the enrichment pass
+ * as well. Two copies of this reconstruction is one of them keeping a different
+ * fallback when the rule changes.
+ */
+export function storedBookName(entry: { title?: string; ext?: string }): string {
+  return `${entry.title || 'book'}.${entry.ext || 'epub'}`
+}
+
 /** Read a book Paper owns back as a `File`, ready for the reader. */
 export async function readOwnedBook(
   fs: VaultFs,

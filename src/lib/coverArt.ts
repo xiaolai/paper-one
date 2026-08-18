@@ -203,6 +203,36 @@ export async function coverIn(fs: VaultFs, bookId: string): Promise<string | nul
 }
 
 /**
+ * A jacket out of a parsed book, however the backend chooses to hand one over.
+ *
+ * `getCover` IS NOT ALWAYS A PROMISE. foliate's FB2 backend assigns
+ * `book.getCover = () => null` for a book with no cover art, so `.catch()`
+ * written straight onto the result is `undefined.catch` — a TypeError. Both
+ * callers had written exactly that: the reader's own open, where it would have
+ * turned a jacketless FB2 into a failed cover fetch inside a floating promise,
+ * and the enrichment pass, where the throw escaped the parse and failed the
+ * WHOLE book — and a failed parse still stamps `parsedAt`, so every jacketless
+ * FB2 would have been marked done and left at its filename permanently.
+ *
+ * ONE FUNCTION because there were two copies of the mistake, and only one was
+ * found by reading; the other fell out of correcting the `Book` type, which had
+ * promised something the fork never delivered.
+ *
+ * `Promise.resolve` takes both shapes and the `try` takes the throwing ones. A
+ * book without a picture is not a book that failed.
+ */
+export async function coverFrom(book: {
+  getCover?: () => Promise<Blob | null> | Blob | null
+}): Promise<Blob | null> {
+  try {
+    return (await Promise.resolve(book.getCover?.())) ?? null
+  } catch (cause) {
+    console.warn('Paper: could not read the jacket out of this book', cause)
+    return null
+  }
+}
+
+/**
  * Put a book's jacket in its folder, if it has not got one already.
  *
  * ONE WRITE PATH, for the two places a jacket now arrives from: the reader
@@ -213,7 +243,10 @@ export async function coverIn(fs: VaultFs, bookId: string): Promise<string | nul
  *
  * RETURNS whether a jacket is now on disk, which is not the same as whether one
  * was written: a book that already had one answers true without doing anything.
- * The pass uses that to report progress honestly.
+ * No caller consults it today — the comment used to claim the enrichment pass
+ * reported progress with it, which it never did. It is kept because the
+ * question "is this book's jacket handled" is the one a caller would ask, and
+ * answering it costs nothing here while re-deriving it costs two `exists`.
  *
  * NEVER THROWS. A book without a picture is not a book that failed — the shelf
  * has drawn a derived tint for jacketless books all along, and that is a
@@ -224,16 +257,23 @@ export async function keepCover(
   bookId: string,
   cover: Blob | null,
 ): Promise<boolean> {
-  if (!cover) return false
   try {
-    const at = coverPathIn(bookId)
-    /* Already there — and this is the common case on any launch after the
-     * first, so it comes before the expensive part rather than after it. */
-    if (await fs.exists(at)) return true
+    /* ALREADY THERE beats everything else, and it is asked FIRST — before the
+     * cover is even looked at. Asked after, a book that already had a jacket
+     * but was handed a null answered "no jacket on disk", which is the opposite
+     * of the truth this function claims to return.
+     *
+     * BOTH NAMES, because `coverUrl` reads both: a library written before the
+     * name was made honest is full of `cover.webp`, and checking only the
+     * current name meant the pass decided every one of those books had no
+     * jacket and wrote a second one beside the perfectly good first. */
+    if (await fs.exists(coverPathIn(bookId))) return true
+    if (await fs.exists(legacyCoverPathIn(bookId))) return true
+    if (!cover) return false
     const small = await downscaleCover(cover)
     if (!small) return false
     await fs.mkdir(folderOf(bookId))
-    await fs.writeFile(at, new Uint8Array(await small.arrayBuffer()))
+    await fs.writeFile(coverPathIn(bookId), new Uint8Array(await small.arrayBuffer()))
     return true
   } catch (cause) {
     console.error('Paper: could not keep the cover', cause)

@@ -1,9 +1,8 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef } from 'react'
 import type { IndexedBook } from './bookIndex'
 import type { BookRecord } from './bookFolder'
 import type { VaultFs } from './bookVault'
-import { keepCover } from './coverArt'
-import { enrichOne, nextStep, pendingFor, type EnrichDeps } from './enrich'
+import { enrichOne, needsEnrichment, nextStep, pendingCount, type EnrichDeps } from './enrich'
 
 /**
  * Fill the shelf in, one book at a time, out of the way.
@@ -46,8 +45,6 @@ const BREATH_MS = 120
 export interface EnrichmentProgress {
   /** How many books still have no parse. Zero means the shelf is complete. */
   readonly pending: number
-  /** Whether a book is being parsed right now. */
-  readonly running: boolean
 }
 
 export interface EnrichmentDeps {
@@ -65,6 +62,8 @@ export interface EnrichmentDeps {
   readonly reading: boolean
   /** Fold a parse into the shelf — the same `add` the reader's own open uses. */
   readonly add: (bookId: string, record: BookRecord) => void
+  /** File the jacket, in order with this book's other writes — see `keepJacket`. */
+  readonly keepJacket: (bookId: string, cover: Blob) => void
   /** Read a book's bytes back as a `File` — see `EnrichDeps.readBook`. */
   readonly readBook: EnrichDeps['readBook']
   /** The reader's own parser — see `EnrichDeps.parse`. */
@@ -74,7 +73,6 @@ export interface EnrichmentDeps {
 export function useEnrichment(deps: EnrichmentDeps): EnrichmentProgress {
   // Only what this function itself reads; the loop reaches the rest through `live`.
   const { books, fs, reading } = deps
-  const [running, setRunning] = useState(false)
 
   /* The whole of `deps` behind a ref. The loop is a single long-lived async
    * function, and everything it needs changes underneath it — the shelf grows
@@ -84,24 +82,52 @@ export function useEnrichment(deps: EnrichmentDeps): EnrichmentProgress {
   const live = useRef(deps)
   live.current = deps
 
+  /* THERE IS NO `running` STATE. There was, and nothing ever read it — the app
+   * uses only `pending` — while `setRunning(true)`/`setRunning(false)` fired
+   * once each per book. On a two-thousand-book shelf that is four thousand
+   * re-renders of a tree containing the shelf itself, to maintain a value with
+   * no consumer, from a pass whose entire purpose is to stay out of the way. A
+   * progress indicator that costs more than the work it reports is not
+   * observability. */
+
   /* Derived, not counted: the shelf IS the progress. A number kept alongside
    * would be a second source of truth about the same thing, and the one that
-   * goes stale. */
-  const pending = pendingFor(books).length
+   * goes stale. `pendingCount` rather than `pendingFor(...).length`, because
+   * this runs on every render and the ordering is of no use to it. */
+  const pending = pendingCount(books)
+
+  /**
+   * WHICH LOOP IS ALLOWED TO ACT.
+   *
+   * The effect can be torn down and replaced — `reading` flips, or StrictMode
+   * double-invokes it in development, which this app enables. Cleanup cannot
+   * await, so an obsolete loop is still mid-parse when its replacement starts:
+   * a boolean `stopped` per closure stopped the old loop at its next CHECK but
+   * did nothing about the parse already in flight, so two ran at once and the
+   * one-at-a-time guarantee held only between checks.
+   *
+   * A generation counter fixes both halves. The replacement waits for the
+   * previous loop to actually finish before parsing anything, and any loop
+   * whose generation is stale writes nothing — a parse that outlived its effect
+   * is thrown away rather than committed.
+   */
+  const generation = useRef(0)
+  const inFlight = useRef<Promise<void>>(Promise.resolve())
 
   useEffect(() => {
     if (!fs || reading || pending === 0) return
-    let stopped = false
-    /* NOT `void (async () => …)()`. The cleanup has to be able to wait for the
-     * loop to notice it has been stopped — see the end of this effect. */
+    const mine = (generation.current += 1)
+    const current = () => generation.current === mine
+
+    const previous = inFlight.current
     const done = (async () => {
-      /* Re-derived every turn rather than taken once. The shelf changes as this
-       * writes to it, and an import can land three hundred more books while the
-       * pass is halfway through the last batch; a list captured at the start
-       * would finish and stop with the new ones untouched until the next
-       * launch. */
+      /* WAIT FOR THE LOOP THIS ONE REPLACES. Without it, StrictMode's second
+       * mount starts parsing while the first mount's parse is still running —
+       * two foliate books, or two pdf.js workers, for a pass that promises
+       * one. */
+      await previous.catch(() => {})
       for (;;) {
-        if (stopped) return
+        if (!current()) return
         /* ASKED EVERY TURN, and asked of `nextStep` rather than decided here:
          * the reader can open a book DURING a parse, and the guard that started
          * this loop ran a minute and four hundred books ago. It is also the
@@ -112,48 +138,60 @@ export function useEnrichment(deps: EnrichmentDeps): EnrichmentProgress {
           reading: live.current.reading,
         })
         if (step.kind === 'idle') return
-        setRunning(true)
+
         /* ONE BOOK, because `nextStep` hands back one book — the rule is in the
          * return type rather than in a constant that could be set to two and
          * change nothing. Parsing is CPU work on the main thread; two in flight
          * doubles the jank to halve a wall-clock nobody is watching. */
-        {
-          const enriched = await enrichOne(
-            {
-              readBook: (one) => live.current.readBook(one),
-              parse: (file) => live.current.parse(file),
-              now: () => Date.now(),
-            },
-            step.book,
-          )
-          if (stopped) return
-          /* THE RECORD FIRST, THE JACKET SECOND, and it matters which way round.
-           * `parsedAt` is what stops the pass returning to this book, so a crash
-           * between the two lines leaves a book with its title and no picture —
-           * which the reader can fix by opening it, and which looks like a book
-           * that has no cover. The other order leaves a jacket on disk for a
-           * book that will be parsed again on the next launch, and `keepCover`
-           * would then decline to write the real one because a file is already
-           * there. */
-          live.current.add(enriched.bookId, enriched.record)
-          if (enriched.cover) await keepCover(live.current.fs!, enriched.bookId, enriched.cover)
-        }
-        setRunning(false)
+        const enriched = await enrichOne(
+          {
+            readBook: (one) => live.current.readBook(one),
+            parse: (file) => live.current.parse(file),
+            now: () => Date.now(),
+          },
+          step.book,
+        )
+        if (!current()) return
+
+        /* STILL ON THE SHELF? A parse takes seconds, and in those seconds the
+         * reader can remove the book. `add` is not a plain write — it restores
+         * a book from the trash, because its job is "this book exists, take it
+         * in" — so committing a parse for a book that has just been removed
+         * pulls the folder back OUT of the trash and puts the row back on the
+         * shelf. The reader deletes a book and it reappears.
+         *
+         * Re-resolved from `live`, not from `step.book`, because that snapshot
+         * is as old as the parse. `needsEnrichment` is re-checked with it: if
+         * something else has parsed this book meanwhile, this result is stale
+         * and worth nothing. */
+        const still = live.current.books.find((one) => one.bookId === enriched.bookId)
+        if (!still || !needsEnrichment(still)) continue
+
+        /* THE RECORD FIRST, THE JACKET SECOND, and it matters which way round.
+         * `parsedAt` is what stops the pass returning to this book, so a crash
+         * between the two lines leaves a book with its title and no picture —
+         * which the reader can fix by opening it, and which looks like a book
+         * that has no cover. The other order leaves a jacket on disk for a book
+         * that will be parsed again on the next launch, and `keepCover` would
+         * then decline to write the real one because a file is already there. */
+        live.current.add(enriched.bookId, enriched.record)
+        if (enriched.cover) live.current.keepJacket(enriched.bookId, enriched.cover)
+
         /* The breath. Also the loop's only yield point when every book fails
          * fast — without it a shelf of unreadable files would spin the main
          * thread flat rather than failing politely. */
         await new Promise((resolve) => setTimeout(resolve, BREATH_MS))
       }
     })()
+    inFlight.current = done
 
     return () => {
-      stopped = true
-      /* The flag is set synchronously, so the loop stops at its next check; this
-       * only makes sure `running` is not left true by an effect that was torn
-       * down mid-parse. A parse already in flight is allowed to finish — it is
-       * about to be thrown away, and cancelling a pdf.js render midway is more
-       * likely to leak a worker than to save anything. */
-      void done.finally(() => setRunning(false))
+      /* Bumped synchronously, so every check in the loop above fails from here
+       * on and nothing it produces is written. The parse already in flight is
+       * allowed to finish — cancelling a pdf.js render midway is more likely to
+       * leak a worker than to save anything — and the NEXT effect waits for it
+       * through `inFlight` rather than racing it. */
+      generation.current += 1
     }
     // `books` is deliberately absent: `pending` is derived from it and is the
     // only part of it this effect reacts to, and the loop reads the rest
@@ -161,5 +199,5 @@ export function useEnrichment(deps: EnrichmentDeps): EnrichmentProgress {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fs, reading, pending === 0])
 
-  return { pending, running }
+  return { pending }
 }

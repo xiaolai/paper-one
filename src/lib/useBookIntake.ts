@@ -274,6 +274,15 @@ export function useBookIntake({
         ...recordFromMeta(meta),
         openedAt: Date.now(),
         addedAt: Date.now(),
+        /* THIS IS A PARSE, so it stamps the parse marker — the enrichment pass
+         * must not come back for a book the reader has just read. `mergeParsed`
+         * gives the parse authority over `parsedAt`, which is right: it is the
+         * parse's own provenance. But authority means the parse has to SUPPLY
+         * it, and this route did not — so opening a book DELETED its marker and
+         * put it back in the queue, and every book the reader actually read was
+         * re-parsed on the next launch, forever. The pass converged only for
+         * books nobody opened, which is the opposite of the intended guarantee. */
+        parsedAt: Date.now(),
         /* NO `description`. It was passed here and dropped on the floor:
          * `BookRecord` has no such field and `parseRecord` discards it, so every
          * write serialised it and every read threw it away. Nothing displays a

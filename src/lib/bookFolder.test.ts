@@ -5,19 +5,20 @@ import {
   atomicWrite,
   contentPathIn,
   coverPathIn,
-  legacyCoverPathIn,
   folderOf,
+  legacyCoverPathIn,
   marksPathIn,
   mergeParsed,
   mergeStranded,
   parseRecord,
   readBook,
-  recordPath,
   readMarks,
+  recordFromMeta,
+  recordPath,
   trashOf,
+  type BookRecord,
   updateBook,
   writeBook,
-  type BookRecord,
 } from './bookFolder'
 
 /**
@@ -248,46 +249,113 @@ describe('mergeParsed', () => {
     expect(mergeParsed(null, parsed)).toBe(parsed)
   })
 
-  /* THE WHOLE PARTITION, in one place, so a field added to `BookRecord` has to
-   * be classified rather than silently landing on the parse's side.
+  /* THE WHOLE PARTITION, and the COMPILER enforces that it is whole.
    *
-   * A parse from the ENRICHMENT PASS supplies none of the copy-local fields —
-   * it knows about the book, not about this copy of it — and the spread that
-   * builds the merge puts the parse first. `origin` had already been found and
-   * fixed alone; it was never alone. `ext` is the one that mattered: dropped,
-   * `openStored` defaults the record to `.epub` and every enriched PDF becomes
-   * a book that opens nothing. */
-  it('keeps what belongs to the reader and to this copy when a parse omits it', () => {
-    const owned = book({
-      bookId: 'book:abc',
-      ext: 'pdf',
-      origin: '/Users/reader/Books/moby.pdf',
-      openedAt: 1700,
-      addedAt: 1,
-      tags: ['To reread'],
-      position: 'epubcfi(/6/4)',
-      progress: 0.4,
-      finished: true,
-    })
-    // What a background parse knows: the book's own account of itself, nothing else.
-    const parsed = book({ title: 'Moby-Dick; or, The Whale', author: 'Melville, Herman' })
-    const merged = mergeParsed(owned, parsed)
+   * `Record<keyof BookRecord, …>` means a field added to the record fails to
+   * compile until somebody says which side of the line it falls on. The first
+   * version of this test was an object literal of the fields that happened to
+   * come to mind, with a cast that let TypeScript shrug — it asserted a
+   * "whole partition" it had no way to know was whole, which is the same shape
+   * of claim as the `origin` fix that was made alone when four fields needed
+   * it.
+   *
+   * PRESERVE   — true of the reader or of this copy; a parse may not touch it.
+   * REPLACE    — the book's own account of itself; a parse is the authority.
+   * PROVENANCE — about the parse itself, so it belongs to the parse. */
+  const SIDE: Record<keyof BookRecord, 'preserve' | 'replace' | 'provenance'> = {
+    bookId: 'preserve',
+    ext: 'preserve',
+    origin: 'preserve',
+    openedAt: 'preserve',
+    addedAt: 'preserve',
+    tags: 'preserve',
+    position: 'preserve',
+    progress: 'preserve',
+    finished: 'preserve',
+    title: 'replace',
+    author: 'replace',
+    sortAs: 'replace',
+    series: 'replace',
+    seriesIndex: 'replace',
+    subjects: 'replace',
+    publisher: 'replace',
+    published: 'replace',
+    languages: 'replace',
+    parsedAt: 'provenance',
+  }
 
-    expect(merged.title).toBe('Moby-Dick; or, The Whale')
-    expect(merged.author).toBe('Melville, Herman')
-    for (const [field, value] of Object.entries({
-      bookId: 'book:abc',
-      ext: 'pdf',
-      origin: '/Users/reader/Books/moby.pdf',
-      openedAt: 1700,
-      addedAt: 1,
-      position: 'epubcfi(/6/4)',
-      progress: 0.4,
-      finished: true,
-    })) {
-      expect(merged[field as keyof BookRecord], field).toEqual(value)
+  /** A record with every single field set, so nothing is asserted vacuously. */
+  const everything: Required<BookRecord> = {
+    bookId: 'book:abc',
+    ext: 'pdf',
+    origin: '/Users/reader/Books/moby.pdf',
+    openedAt: 1700,
+    addedAt: 1,
+    tags: ['To reread'],
+    position: 'epubcfi(/6/4)',
+    progress: 0.4,
+    finished: true,
+    title: 'moby-dick-1851',
+    author: '',
+    sortAs: 'Moby-Dick',
+    series: 'Everyman',
+    seriesIndex: 3,
+    subjects: ['Whaling'],
+    publisher: 'Harper & Brothers',
+    published: '1851',
+    languages: ['en'],
+    parsedAt: 100,
+  }
+
+  it('keeps every preserve-side field when a parse omits it', () => {
+    // What a BACKGROUND parse knows: the book's own account, nothing else.
+    const parsed = book({ title: 'Moby-Dick; or, The Whale', author: 'Melville, Herman' })
+    const merged = mergeParsed(everything, parsed)
+
+    for (const [field, side] of Object.entries(SIDE) as [keyof BookRecord, string][]) {
+      if (side !== 'preserve') continue
+      expect(everything, `fixture must seed ${field}`).toHaveProperty(field)
+      expect(merged[field], field).toEqual(everything[field])
     }
-    expect(merged.tags).toEqual(['To reread'])
+    expect(merged.title).toBe('Moby-Dick; or, The Whale')
+  })
+
+  /* The other half, and the one that was missing: a parse that omits a
+   * BOOK-side field must not silently erase it either. That gap is exactly how
+   * a failed background parse could strip a book of its subjects, publisher,
+   * series and languages while marking it complete. */
+  it('does not let an omitted book-side field read as a denial', () => {
+    const parsed = book({ title: 'Moby-Dick; or, The Whale', author: 'Melville, Herman' })
+    const merged = mergeParsed(everything, parsed)
+    for (const [field, side] of Object.entries(SIDE) as [keyof BookRecord, string][]) {
+      if (side !== 'replace' || field === 'title' || field === 'author') continue
+      expect(everything, `fixture must seed ${field}`).toHaveProperty(field)
+      /* THIS IS THE DOCUMENTED BEHAVIOUR, not the desired one: `mergeParsed`
+       * gives the parse authority, so an omission IS a denial and the field
+       * goes. It is asserted rather than wished away because the safety lives
+       * one level up — `enrichOne` never omits, it repeats the row's own
+       * account when a parse fails, which is what `enrich.test.ts` pins. */
+      expect(merged[field], field).toBeUndefined()
+    }
+  })
+
+  it('lets the book replace every book-side field it does supply', () => {
+    const parsed: BookRecord = {
+      title: 'T',
+      author: 'A',
+      sortAs: 'S',
+      series: 'Se',
+      seriesIndex: 9,
+      subjects: ['New'],
+      publisher: 'P',
+      published: '1900',
+      languages: ['fr'],
+    }
+    const merged = mergeParsed(everything, parsed)
+    for (const [field, side] of Object.entries(SIDE) as [keyof BookRecord, string][]) {
+      if (side !== 'replace') continue
+      expect(merged[field], field).toEqual(parsed[field])
+    }
   })
 
   /* The other direction: a parse that DOES supply a copy-local field wins,
@@ -306,6 +374,28 @@ describe('mergeParsed', () => {
   it('takes the parse’s own timestamp', () => {
     const merged = mergeParsed(book({ parsedAt: 100 }), book({ parsedAt: 200 }))
     expect(merged.parsedAt).toBe(200)
+  })
+
+  /* THE OTHER EDGE OF THE SAME RULE, and the one that bit.
+   *
+   * Authority means the parse must SUPPLY the field — a parse that omits it
+   * DELETES the marker. The first version of this test fabricated an incoming
+   * record that carried `parsedAt`, so it proved the happy half and never asked
+   * what a real record looks like. A real fresh-open record is built by
+   * `recordFromMeta`, which omits `parsedAt` by construction; the reader's open
+   * therefore erased the marker on every book it touched, and the enrichment
+   * pass re-parsed every book the reader had actually read, on every launch,
+   * forever. Asserted with the REAL shape now, so the fabrication cannot come
+   * back. */
+  it('drops the marker when a parse omits it — which is why every parse must stamp one', () => {
+    const fromRealParse = recordFromMeta({ title: 'Moby-Dick', author: 'Melville' })
+    expect(fromRealParse, 'recordFromMeta must not invent a marker').not.toHaveProperty('parsedAt')
+    expect(mergeParsed(book({ parsedAt: 100 }), fromRealParse).parsedAt).toBeUndefined()
+  })
+
+  it('keeps the marker when the parse stamps its own, as every caller must', () => {
+    const stamped = { ...recordFromMeta({ title: 'Moby-Dick', author: 'Melville' }), parsedAt: 200 }
+    expect(mergeParsed(book({ parsedAt: 100 }), stamped).parsedAt).toBe(200)
   })
 })
 

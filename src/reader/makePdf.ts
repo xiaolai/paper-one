@@ -59,7 +59,17 @@ export interface PdfBook {
   getTOCFragment: (doc: Document) => Element
   /** Page one, rendered. Null when it will not render — see the implementation. */
   getCover: () => Promise<Blob | null>
-  destroy: () => void
+  /**
+   * Release the object URLs, the document and its worker.
+   *
+   * RETURNS THE PROMISE rather than firing and forgetting, so a caller that
+   * needs the worker actually gone can wait for it. The enrichment pass does:
+   * it parses one book at a time, and discarding this promise meant `parseBook`
+   * resolved while the worker was still shutting down — so the next book's
+   * parse overlapped the previous one's teardown and "one at a time" held only
+   * for the cheap part. Callers that do not care may ignore it.
+   */
+  destroy: () => Promise<void>
 }
 
 /**
@@ -459,8 +469,10 @@ export async function makePdf(file: File | string, hooks: PdfHooks = {}): Promis
       sources.clear()
       // Reported rather than discarded: this is what releases the worker, and a
       // failure here is a leak that grows one book at a time with nothing on
-      // screen to suggest it.
-      void task.destroy().catch((cause: unknown) => {
+      // screen to suggest it. Handed back so a caller can await the release;
+      // still resolving on failure, because a teardown that cannot finish must
+      // not become an unhandled rejection at the window.
+      return task.destroy().catch((cause: unknown) => {
         console.error('Paper: could not destroy the PDF loading task', cause)
       })
     },

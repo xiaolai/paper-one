@@ -12,6 +12,7 @@ import {
 } from './bookFolder'
 import { BOOKS_DIR } from './bookFolder'
 import { hasContentFile, writeIndex, type IndexFs, type IndexedBook } from './bookIndex'
+import { keepCover } from './coverArt'
 import { rescueStrandedMarks, restoreBook, trashBook } from './bookTrash'
 import { normalizeTag, tagKey } from './library'
 import type { WriteQueue } from './writeQueue'
@@ -86,6 +87,18 @@ export interface Library {
   removeTag: (tag: string) => void
   /** How many books a `removeTag` of this tag would touch — see the implementation. */
   ownTagCount: (tag: string) => number
+  /**
+   * Put a jacket in a book's folder, in order with that book's other writes.
+   *
+   * `keepCover` does the work; this is about WHEN. Every other write to a
+   * book's folder — its record, and the rename that removes it — goes through
+   * the per-book queue, and a cover written outside that queue can land after
+   * the removal that was supposed to precede it: `mkdir` recreates the folder
+   * that was just moved to the trash, leaving a directory containing nothing
+   * but a picture of a book that is gone. Serialised, the removal happens
+   * first and the write finds no book to write for.
+   */
+  keepJacket: (bookId: string, cover: Blob) => void
   /** The saved position for a book, or null. Stable across renders. */
   positionOf: (bookId: string | null) => string | null
   /**
@@ -586,6 +599,18 @@ export function useLibrary(
    * five; a tag that was three subjects and one reader tag read "4" and removed
    * from one. The consent number has to be the action's number.
    */
+  const keepJacket = useCallback(
+    (bookId: string, cover: Blob) => {
+      if (!fs) return
+      // The book's OWN key, which is what puts it in line behind that book's
+      // record write and its removal rather than beside them.
+      void queue.current.append(bookId, async () => {
+        await keepCover(fs, bookId, cover)
+      })
+    },
+    [fs],
+  )
+
   const ownTagCount = useCallback(
     (raw: string) => {
       const key = tagKey(raw)
@@ -601,7 +626,20 @@ export function useLibrary(
   )
 
   return useMemo<Library>(
-    () => ({ books, add, update, remove, tag, untag, renameTag, removeTag, ownTagCount, positionOf, rekeyBook }),
-    [books, add, update, remove, tag, untag, renameTag, removeTag, ownTagCount, positionOf, rekeyBook],
+    () => ({
+      books,
+      add,
+      update,
+      remove,
+      tag,
+      untag,
+      renameTag,
+      removeTag,
+      ownTagCount,
+      keepJacket,
+      positionOf,
+      rekeyBook,
+    }),
+    [books, add, update, remove, tag, untag, renameTag, removeTag, ownTagCount, keepJacket, positionOf, rekeyBook],
   )
 }

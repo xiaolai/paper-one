@@ -19,11 +19,10 @@ import { useLibrary } from './lib/useLibrary'
 import { useCards } from './lib/useCards'
 import { useMarks } from './lib/useMarks'
 import { useMarking } from './lib/useMarking'
-import { extensionFor, readOwnedBook } from './lib/bookVault'
+import { extensionFor, readOwnedBook, storedBookName } from './lib/bookVault'
 import type { IndexedBook } from './lib/bookIndex'
 import type { IndexFs } from './lib/bookIndex'
-import { downscaleCover } from './lib/coverArt'
-import { contentPathIn, coverPathIn, folderOf, readBook } from './lib/bookFolder'
+import { contentPathIn, readBook } from './lib/bookFolder'
 import {
   MAX_FILES,
   importFolder,
@@ -209,7 +208,7 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
   const openStored = useCallback(
     (entry: IndexedBook) => {
       if (!fs) return
-      const name = `${entry.title || 'book'}.${entry.ext || 'epub'}`
+      const name = storedBookName(entry)
       void readOwnedBook(fs, contentPathIn(entry.bookId, name), name)
         .then((file) => openBook(file, entry.origin ?? null))
         .catch((cause: unknown) => {
@@ -287,11 +286,11 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
      * time anything was read and never start again that session. */
     reading: state.screen === 'reader',
     add,
+    keepJacket: library.keepJacket,
     readBook: (entry) => {
-      /* The same name `openStored` builds, and for the same reason: the parser
-       * routes on the EXTENSION, and the vault stores by hash — so a file named
-       * for its content id is a book of unknown format to both backends. */
-      const name = `${entry.title || 'book'}.${entry.ext || 'epub'}`
+      // `storedBookName`, the same reconstruction `openStored` uses — the
+      // parser routes on the extension and the vault stores by hash.
+      const name = storedBookName(entry)
       return readOwnedBook(fs!, contentPathIn(entry.bookId, name), name)
     },
     parse: (file) => parseBook(file),
@@ -688,24 +687,20 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
    */
   useEffect(() => {
     if (!bookId || !cover || !isShelved || !fs) return
-    let cancelled = false
-    void (async () => {
-      try {
-        const at = coverPathIn(bookId)
-        if (await fs.exists(at)) return
-        const small = await downscaleCover(cover)
-        if (!small || cancelled) return
-        await fs.mkdir(folderOf(bookId))
-        await fs.writeFile(at, new Uint8Array(await small.arrayBuffer()))
-      } catch (cause) {
-        // A book without a picture, not a book that failed. The shelf falls back
-        // to the derived tint, which is what it drew for everything before.
-        console.error('Paper: could not keep the cover', cause)
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
+    /* `keepCover`, which IS the one write path — this was its own copy of the
+     * same exists/downscale/mkdir/write sequence, written before the helper
+     * existed and left behind when it did, so the comment claiming a single
+     * path was describing an intention rather than the code. Two copies of a
+     * write is one of them missing the `exists` check later.
+     *
+     * There is no `cancelled` flag any more. It only ever guarded the write,
+     * and writing this book's jacket into this book's folder is correct whether
+     * or not the reader has since moved on — the path is derived from the id,
+     * so a late write cannot land on the wrong book. */
+    /* `keepJacket`, not `keepCover` directly: the write goes in line behind
+     * this book's record write and its removal. Called straight, it could
+     * recreate a folder that had just been moved to the trash. */
+    library.keepJacket(bookId, cover)
   }, [bookId, cover, isShelved, fs])
 
   /* Remember where the reader is, so the next open starts there.

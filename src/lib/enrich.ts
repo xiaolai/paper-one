@@ -34,9 +34,13 @@ export interface Enriched {
   readonly record: BookRecord
   /** The jacket, or null when the book has none or would not give one up. */
   readonly cover: Blob | null
-  /** False when the parser could not read the file at all. */
-  readonly parsed: boolean
 }
+
+/* There is no `parsed: boolean` here. Nothing outside the tests read it — the
+ * driver acts identically either way, because a failure is already expressed in
+ * what the record says: it repeats what the row had and moves only `parsedAt`.
+ * A flag kept for a reporting feature nobody has asked for is the same
+ * speculative mechanism `inPalette` was, and it goes for the same reason. */
 
 /** The pieces `enrichOne` needs, injected so this module can be tested. */
 export interface EnrichDeps {
@@ -92,10 +96,35 @@ export function needsEnrichment(book: IndexedBook): boolean {
  * unparsed for a long time already and one more pass changes nothing for them.
  */
 export function pendingFor(books: readonly IndexedBook[]): readonly IndexedBook[] {
-  return books
-    .filter(needsEnrichment)
-    .slice()
-    .sort((a, b) => (b.addedAt ?? 0) - (a.addedAt ?? 0))
+  // `filter` already returns a fresh array; the `slice` that used to be here
+  // copied it a second time before sorting.
+  return books.filter(needsEnrichment).sort((a, b) => (b.addedAt ?? 0) - (a.addedAt ?? 0))
+}
+
+/**
+ * HOW MANY books still need parsing — without ordering them.
+ *
+ * Separate from `pendingFor` because the progress line wants a number and
+ * nothing else, and it wants it on every render. Taking `pendingFor(...).length`
+ * sorted two thousand books to read one integer off the result, on every render
+ * of the whole app, for the entire length of a pass that itself causes renders.
+ */
+export function pendingCount(books: readonly IndexedBook[]): number {
+  let count = 0
+  for (const book of books) if (needsEnrichment(book)) count += 1
+  return count
+}
+
+/**
+ * A shelf row as the record it came from — the shelf's own extra fields dropped.
+ *
+ * `IndexedBook` is a `BookRecord` plus `bookId` and the derived `hasContent`.
+ * Neither belongs in a record being written back: `hasContent` is derived on
+ * scan and storing it is the exact disagreement `bookIndex` exists to avoid.
+ */
+function recordOf(book: IndexedBook): BookRecord {
+  const { hasContent: _hasContent, ...record } = book
+  return record
 }
 
 /**
@@ -150,8 +179,9 @@ export function nextStep(state: {
  * NEVER THROWS. A shelf is full of files Paper did not write — a truncated
  * download, a DRM'd EPUB, something renamed `.epub` that is not one — and a
  * pass that stops at the first of them enriches nothing after it. A failure is
- * a result: `parsed: false`, and a record that carries only `parsedAt`, so the
- * book keeps the filename it had and the pass does not come back to it.
+ * a result: the row's own account of itself repeated back unchanged, with only
+ * `parsedAt` moved — so the book keeps everything it had and the pass does not
+ * come back to it.
  *
  * The record deliberately does NOT carry `openedAt`, `ext`, `origin` or
  * `bookId`: a parse knows about the book, not about this copy of it, and
@@ -169,7 +199,6 @@ export async function enrichOne(deps: EnrichDeps, book: IndexedBook): Promise<En
       bookId: book.bookId,
       record: { ...recordFromMeta(meta), parsedAt },
       cover,
-      parsed: true,
     }
   } catch (cause) {
     /* Logged, not surfaced. There is no reader watching this and nothing they
@@ -178,14 +207,23 @@ export async function enrichOne(deps: EnrichDeps, book: IndexedBook): Promise<En
     console.warn(`Paper: could not parse ${book.bookId} in the background`, cause)
     return {
       bookId: book.bookId,
-      /* `title` and `author` are `BookRecord`'s required fields, so a failure
-       * still has to supply them — and it supplies WHAT THE ROW ALREADY HAS,
-       * not empty strings. `mergeParsed` treats a parse as the book's own
-       * account of itself, so writing `title: ''` here would erase the filename
-       * the import put there and leave the reader an untitled row. */
-      record: { title: book.title, author: book.author, parsedAt },
+      /* A FAILURE REPEATS WHAT THE ROW ALREADY SAYS, field for field, and that
+       * is not defensive padding — it is the only safe thing to write.
+       *
+       * `mergeParsed` treats a record from a parse as the book's OWN ACCOUNT OF
+       * ITSELF, and an account that omits a field is the book saying it has
+       * none. A failure that wrote just `{title, author, parsedAt}` would
+       * therefore be read as "this book has no subjects, no publisher, no
+       * series, no languages" and would DELETE all of them. That is not
+       * hypothetical: a book the reader has read has all of those, and a
+       * re-parse of it that hit a transient failure would strip the record bare
+       * while marking it complete.
+       *
+       * So a failure claims nothing new. It carries the record forward
+       * unchanged and moves only `parsedAt`, which is the one field a failed
+       * attempt has actually learned something about. */
+      record: { ...recordOf(book), parsedAt },
       cover: null,
-      parsed: false,
     }
   }
 }

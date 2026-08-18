@@ -215,10 +215,18 @@ export function LibraryPanel({
           sentence. No control: it pauses itself while a book is open, and it
           resumes on the next launch, so there is nothing to decide. */}
       {enriching > 0 && (
-        <div className={styles.enriching} role="status">
+        /* NOT a live region. It was `role="status"`, and this number falls by
+           about six a second for the length of a large import — every decrement
+           announced, for several minutes, over whatever the reader was actually
+           doing. A count that changes that fast is something to look at, not
+           something to be told. It stays reachable and readable where it is.
+
+           And it says what the number IS. "Reading N books" named the pending
+           total as though all of them were being read at once; one is being
+           read and N are waiting. */
+        <div className={styles.enriching}>
           <Sparkles size={ICON.control} strokeWidth={ICON.stroke} />
-          Reading {enriching.toLocaleString()} {enriching === 1 ? 'book' : 'books'} for titles and
-          covers
+          Reading books for their titles and covers — {enriching.toLocaleString()} to go
         </div>
       )}
     </div>
