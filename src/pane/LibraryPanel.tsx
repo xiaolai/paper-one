@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { BookOpen, Check, Circle, CircleDot, LibraryBig, Sparkles } from 'lucide-react'
+import { BookOpen, Check, Circle, CircleDot, LibraryBig } from 'lucide-react'
 import type { IndexedBook } from '../lib/bookIndex'
 import { normalizeTag, statusCounts, tagCounts, tagKey, type ReadingStatus } from '../lib/library'
 import { ICON } from '../lib/metrics'
@@ -60,15 +60,10 @@ export interface LibraryPanelProps {
   readonly onRemoveTag: (tag: string) => void
   /** How many books `onRemoveTag` would touch — the number the confirm shows. */
   readonly ownTagCount: (tag: string) => number
-  /**
-   * How many books are still waiting to be parsed in the background.
-   *
-   * Shown because a pass that quietly spends CPU for several minutes on a large
-   * library, with nothing on screen, is indistinguishable from an app that has
-   * become mysteriously warm. Zero means the shelf is complete and the line is
-   * not drawn at all.
-   */
-  readonly enriching: number
+  /* THE BACKGROUND PASS IS NOT REPORTED HERE ANY MORE. It was, and it was only
+   * visible when this panel happened to be open — which is the wrong condition
+   * for "what is the app doing". It reports from the shelf's own status bar
+   * now, which is always on screen while the shelf is. */
 }
 
 export function LibraryPanel({
@@ -78,7 +73,6 @@ export function LibraryPanel({
   onRenameTag,
   onRemoveTag,
   ownTagCount,
-  enriching,
 }: LibraryPanelProps) {
   /* Which tag's menu is open — one across the panel, held here for the same
    * reason the shelf holds `menuFor` for its cards. */
@@ -214,21 +208,6 @@ export function LibraryPanel({
           is left, then disappears; a reader whose fans have spun up is owed the
           sentence. No control: it pauses itself while a book is open, and it
           resumes on the next launch, so there is nothing to decide. */}
-      {enriching > 0 && (
-        /* NOT a live region. It was `role="status"`, and this number falls by
-           about six a second for the length of a large import — every decrement
-           announced, for several minutes, over whatever the reader was actually
-           doing. A count that changes that fast is something to look at, not
-           something to be told. It stays reachable and readable where it is.
-
-           And it says what the number IS. "Reading N books" named the pending
-           total as though all of them were being read at once; one is being
-           read and N are waiting. */
-        <div className={styles.enriching}>
-          <Sparkles size={ICON.control} strokeWidth={ICON.stroke} />
-          Reading books for their titles and covers — {enriching.toLocaleString()} to go
-        </div>
-      )}
     </div>
   )
 }

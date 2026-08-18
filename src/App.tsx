@@ -1026,7 +1026,6 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
             onRenameTag={library.renameTag}
             onRemoveTag={library.removeTag}
             ownTagCount={library.ownTagCount}
-            enriching={enrichment.pending}
           />
         }
         onDismissPane={() => dispatch({ type: 'closePane' })}
@@ -1075,6 +1074,7 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
             importing={importing}
             importNotice={importNotice}
             shelfUnread={shelfUnread}
+            enriching={enrichment.pending}
             onAddBooks={addBooks}
           />
         )}

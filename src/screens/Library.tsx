@@ -1,5 +1,5 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
-import { CaseSensitive, Clock, FolderPlus, Plus, User } from 'lucide-react'
+import { CaseSensitive, Clock, FolderPlus, LayoutGrid, List, Plus, Sparkles, User } from 'lucide-react'
 import { shelfFor, tagKey } from '../lib/library'
 import type { LibraryOrder } from '../lib/library'
 import type { IndexedBook } from '../lib/bookIndex'
@@ -8,6 +8,7 @@ import { ICON } from '../lib/metrics'
 import type { Platform } from '../lib/metrics'
 import { VIRTUALISE_ABOVE, gridWindow } from '../lib/virtualGrid'
 import { BookCell } from './BookCell'
+import { BookRow } from './BookRow'
 import styles from './Library.module.css'
 
 /**
@@ -51,6 +52,14 @@ export interface LibraryProps {
   importing: { done: number; total: number; current: string } | null
   /** The shelf could not be read — see `Reader`'s prop of the same name. */
   shelfUnread?: boolean
+  /**
+   * Books still waiting on a background parse — reported in the status bar.
+   *
+   * Zero means the shelf is complete and nothing is drawn. Passed in rather
+   * than read here because the pass is driven at the top of the app, where the
+   * filesystem and the parser live.
+   */
+  enriching: number
   /** What the last import did, in one line. */
   importNotice: string | null
   /** The search field's contents — held in app state, see `AppState.libraryQuery`. */
@@ -74,6 +83,22 @@ const ORDERS: readonly { id: LibraryOrder; label: string; Icon: typeof Clock }[]
   { id: 'author', label: 'Sort by author', Icon: User },
 ]
 
+/**
+ * Two ways to look at the same shelf, and they answer different questions.
+ *
+ * The GRID is for recognition: a wall of jackets, found by eye. The LIST is for
+ * scanning and comparing — who wrote it, how far in, when it was last open —
+ * which is what a reader wants once a library is bigger than they can picture.
+ * Neither is a fallback for the other, so both are offered rather than one
+ * being a density setting on the other.
+ */
+type LibraryLayout = 'grid' | 'list'
+
+const LAYOUTS: readonly { id: LibraryLayout; label: string; Icon: typeof Clock }[] = [
+  { id: 'grid', label: 'Grid of covers', Icon: LayoutGrid },
+  { id: 'list', label: 'List with details', Icon: List },
+]
+
 export function Library({
   books,
   platform,
@@ -87,10 +112,20 @@ export function Library({
   importing,
   importNotice,
   shelfUnread = false,
+  enriching,
   libraryQuery,
   onQueryChange,
 }: LibraryProps) {
   const [order, setOrder] = useState<LibraryOrder>('recent')
+  /* Alongside `order` rather than in app state: both are how this screen is
+     being looked at right now, neither survives a launch, and splitting the
+     two across two homes would be one of them for no reason. */
+  const [layout, setLayout] = useState<LibraryLayout>('grid')
+  /* Read ONCE per render, not per row. `relativeTime` needs a now to measure
+     from, and a hundred rows each calling `Date.now()` would be a hundred
+     slightly different nows — so two books opened in the same second could
+     disagree about which was more recent. */
+  const now = Date.now()
   /* Which row is asking to be confirmed, by id.
    *
    * A second click rather than a dialog. Removal here is not destructive — the
@@ -219,12 +254,29 @@ export function Library({
     <div className={styles.library} data-platform={platform}>
       <div className={styles.head}>
         <h1 className={styles.title}>Library</h1>
-        {/* Says what is on the shelf. A count is the one thing a grid cannot
-            show at a glance once it scrolls. */}
+        {/* THE COUNT IS NOT HERE ANY MORE. It sat beside the title, which is
+            the one place on this screen that never changes — and a count is
+            the opposite: it answers "how much of the library am I looking at",
+            which only matters once something is narrowing it. It reports from
+            the status bar at the foot now, where it can say "24 of 1,965"
+            without crowding a heading. */}
         {books.length > 0 && (
-          <span className={styles.count}>
-            {books.length} {books.length === 1 ? 'book' : 'books'}
-          </span>
+          <div className={styles.orders}>
+            {LAYOUTS.map(({ id, label, Icon }) => (
+              <button
+                key={id}
+                type="button"
+                className={styles.order}
+                data-on={layout === id}
+                aria-pressed={layout === id}
+                title={label}
+                aria-label={label}
+                onClick={() => setLayout(id)}
+              >
+                <Icon size={ICON.control} strokeWidth={ICON.stroke} />
+              </button>
+            ))}
+          </div>
         )}
         {books.length > 1 && (
           <div className={styles.orders}>
@@ -326,6 +378,7 @@ export function Library({
         </div>
       )}
 
+      <div className={styles.body} data-scroll>
       {shelf.length === 0 ? (
         <div className={styles.empty}>
           <div className={styles.emptyTitle}>
@@ -377,10 +430,77 @@ export function Library({
           )}
         </div>
       ) : (
-        <div className={styles.shelf} ref={shelfRef} style={
-          virtualising ? { paddingBlockStart: win.padTop, paddingBlockEnd: win.padBottom } : undefined
-        }>
-          {visible.map((book) => (
+        <>
+        {/* THE COLUMN LABELS, in the scroll box so they share its width — see
+            `.listHead`. Three of them sort, and they drive the SAME `order` the
+            toolbar icons do rather than a second sort of their own: one state,
+            two ways to read it and set it, which is how the search field and
+            its chips already work on this screen. */}
+        {layout === 'list' && (
+          <div className={styles.listHead}>
+            <span />
+            <button
+              type="button"
+              className={styles.listSort}
+              data-on={order === 'title'}
+              aria-pressed={order === 'title'}
+              onClick={() => setOrder('title')}
+            >
+              Title
+            </button>
+            <button
+              type="button"
+              className={`${styles.listSort} ${styles.listAuthor}`}
+              data-on={order === 'author'}
+              aria-pressed={order === 'author'}
+              onClick={() => setOrder('author')}
+            >
+              Author
+            </button>
+            {/* A LABEL, NOT A CONTROL. The shelf has three orders and progress
+                is not one of them; a header that looked clickable and did
+                nothing would be worse than one that plainly does not. */}
+            <span>Progress</span>
+            <button
+              type="button"
+              className={`${styles.listSort} ${styles.listWhen}`}
+              data-on={order === 'recent'}
+              aria-pressed={order === 'recent'}
+              onClick={() => setOrder('recent')}
+            >
+              Opened
+            </button>
+            <span />
+          </div>
+        )}
+        <div
+          className={layout === 'list' ? styles.list : styles.shelf}
+          ref={shelfRef}
+          style={
+            virtualising ? { paddingBlockStart: win.padTop, paddingBlockEnd: win.padBottom } : undefined
+          }
+        >
+          {layout === 'list'
+            ? visible.map((book) => (
+                <BookRow
+                  key={book.bookId}
+                  book={book}
+                  now={now}
+                  menuFor={menuFor}
+                  setMenuFor={setMenuFor}
+                  confirming={confirming}
+                  setConfirming={setConfirming}
+                  setTagging={setTagging}
+                  tagging={tagging}
+                  draftTag={draftTag}
+                  setDraftTag={setDraftTag}
+                  onTag={onTag}
+                  onOpen={onOpen}
+                  onRemove={onRemove}
+                  onSetFinished={onSetFinished}
+                />
+              ))
+            : visible.map((book) => (
             <BookCell
               key={book.bookId}
               book={book}
@@ -401,7 +521,39 @@ export function Library({
             />
           ))}
         </div>
+        </>
       )}
+      </div>
+
+      {/* THE FOOT: what is on the shelf, and what is being done to it.
+          Never a control — a status bar that can be clicked is a toolbar, and
+          this one reports two things a reader would otherwise have to work out.
+
+          The count says how much of the library is showing, and says it as a
+          fraction the moment anything is narrowing the shelf: "24 of 1,965" is
+          the answer to a question "24 books" leaves open. Filtering to nothing
+          is the state this matters most in, so it is drawn even at zero. */}
+      <div className={styles.status}>
+        <span>
+          {books.length === 0
+            ? shelfUnread
+              ? 'Library could not be read'
+              : 'No books yet'
+            : shelf.length === books.length
+              ? `${books.length.toLocaleString()} ${books.length === 1 ? 'book' : 'books'}`
+              : `${shelf.length.toLocaleString()} of ${books.length.toLocaleString()} books`}
+        </span>
+        {/* Background work, while there is any — moved here from the Library
+            panel, where it was only visible if that panel happened to be open.
+            A pass that quietly spends CPU for minutes belongs where a reader
+            looks to find out what the app is doing. */}
+        {enriching > 0 && (
+          <span className={styles.statusWork}>
+            <Sparkles size={ICON.control} strokeWidth={ICON.stroke} />
+            Reading books for their titles and covers — {enriching.toLocaleString()} to go
+          </span>
+        )}
+      </div>
     </div>
   )
 }

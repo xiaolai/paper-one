@@ -125,6 +125,33 @@ export const PANE_TAB_H = 44
  */
 export const PANE_TITLE_ROW = 34
 
+/**
+ * The shelf's status bar — the narrow strip along the foot of the library.
+ *
+ * A row of one 11px line with 6px either side. Narrow ON PURPOSE: it reports,
+ * it is never operated, and anything tall enough to look like a toolbar invites
+ * being clicked. It is a token because two things need the same number — the
+ * bar draws it, and the scroll region above stops there — and because a bar
+ * whose height is written twice is a bar that overlaps its own content the
+ * first time one of them changes.
+ */
+export const STATUS_BAR_H = 24
+
+/**
+ * A row in the list view.
+ *
+ * 44px carries a 33px jacket with 5px of air either side — tall enough that a
+ * cover is recognisable and a row is comfortably clickable, short enough that a
+ * screen shows fifteen books rather than eight, which is the entire reason a
+ * reader switches to a list.
+ *
+ * A CONSTANT, and it has to be: every row is the same height, which is what
+ * lets the shelf's virtualiser drive this view unchanged — it measures the
+ * first child and assumes the rest match. A row that grew for a long title
+ * would put the window a row out further down the list every time.
+ */
+export const ROW_H = 44
+
 /* THERE IS NO `PANE_COLLAPSE_W` ANY MORE. It was a flat 1024, and a flat number
  * cannot answer this question: whether the pane can afford a track of its own
  * depends on what the grid costs, and the grid costs `measure + …`, which §09
@@ -472,6 +499,8 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
     '--sys-zone-w': px(SYS_ZONE_W[platform]),
     '--pane-tab-h': px(PANE_TAB_H),
     '--pane-title-row': px(PANE_TITLE_ROW),
+    '--status-bar-h': px(STATUS_BAR_H),
+    '--row-h': px(ROW_H),
     '--control-pill': px(CONTROL_PILL),
     '--row-book': px(ROW_BOOK),
     '--radius-pill': `${RADIUS.pill}px`,

@@ -1,10 +1,11 @@
 import { useRef } from 'react'
-import { BookCheck, MoreHorizontal, Tag, Trash2 } from 'lucide-react'
+import { MoreHorizontal } from 'lucide-react'
 import { CANNOT_OPEN, allTags, canOpen, displayTitle, statusOf, tagKey } from '../lib/library'
 import type { IndexedBook } from '../lib/bookIndex'
 import { ICON } from '../lib/metrics'
 import { withTag } from '../lib/searchQuery'
 import { useRowMenu } from '../lib/useRowMenu'
+import { BookMenu } from './BookMenu'
 import { BookCover } from './BookCover'
 import styles from './Library.module.css'
 
@@ -213,67 +214,19 @@ export function BookCell({
                  shelf — a menu with no card under it belongs to nothing. */
               style={menuStyle}
             >
-              <button
-                type="button"
-                role="menuitem"
-                className={styles.menuItem}
-                onClick={() => {
-                  onSetFinished(book.bookId, status !== 'finished')
-                  closeMenu()
-                }}
-              >
-                <BookCheck size={ICON.control} strokeWidth={ICON.stroke} />
-                {/* Names the STATE it will produce, because the tick alone
-                    could not — a bare ✓ on a card that can be selected,
-                    confirmed or dismissed read as any of those. */}
-                {status === 'finished' ? 'Mark as unread' : 'Mark as finished'}
-              </button>
-              <button
-                type="button"
-                role="menuitem"
-                className={styles.menuItem}
-                onClick={() => {
-                  setDraftTag('')
-                  setTagging(book.bookId)
-                  closeMenu()
-                }}
-              >
-                <Tag size={ICON.control} strokeWidth={ICON.stroke} />
-                Add a tag…
-              </button>
-              {/* TWO CLICKS TO REMOVE, still — one to ask, one to mean it —
-                  because this is the one thing here that takes something
-                  away. The confirm used to be a red pill grown over the
-                  neighbouring control; inside a menu it is a row that
-                  changes its words, and it collides with nothing. */}
-              <button
-                type="button"
-                role="menuitem"
-                className={styles.menuItem}
-                data-danger="true"
-                data-confirming={confirming === book.bookId}
-                aria-label={
-                  confirming === book.bookId
-                    ? `Remove ${title} — the file you imported is kept, and this is recoverable for two weeks`
-                    : `Remove ${title}`
-                }
-                title={
-                  confirming === book.bookId
-                    ? 'The file you imported is untouched. Your tags, place and notes are recoverable for two weeks.'
-                    : 'Remove from the library'
-                }
-                onClick={() => {
-                  if (confirming === book.bookId) {
-                    closeMenu()
-                    onRemove(book)
-                  } else {
-                    setConfirming(book.bookId)
-                  }
-                }}
-              >
-                <Trash2 size={ICON.control} strokeWidth={ICON.stroke} />
-                {confirming === book.bookId ? 'Remove? — click again' : 'Remove from library'}
-              </button>
+              <BookMenu
+                book={book}
+                title={title}
+                status={status}
+                confirming={confirming}
+                setConfirming={setConfirming}
+                setTagging={setTagging}
+                setDraftTag={setDraftTag}
+                onRemove={onRemove}
+                onSetFinished={onSetFinished}
+                closeMenu={closeMenu}
+                itemClass={styles.menuItem ?? ''}
+              />
             </div>
           )}
         </div>

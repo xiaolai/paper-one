@@ -16,6 +16,17 @@
  * Covering it keeps the reader at its full size, so it never sees a resize to
  * zero either — which is what `display: none` would have done instead.
  */
+/* A CONTAINER, not a scrolling surface.
+ *
+ * This used to scroll as a whole — `overflow-y: auto` here — so the heading,
+ * the sort controls and the search field scrolled away with the books, and the
+ * shelf ran off the top and bottom edges of the window with nothing to say
+ * where it began or ended. A reader four hundred books down had no title, no
+ * search, and no sense of how much shelf was left.
+ *
+ * Three parts now: chrome that stays, a scroll region with a boundary at each
+ * end, and a status strip along the foot. `overflow: hidden` here is what makes
+ * the middle the only thing that moves. */
 .library {
   position: absolute;
   inset: 0;
@@ -23,8 +34,71 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  overflow-y: auto;
+  overflow: hidden;
   background: var(--surface);
+}
+
+/* THE ONLY THING THAT SCROLLS.
+ *
+ * NO RULE ALONG THE TOP. There was one, and the chrome above does not need
+ * separating from the shelf: the search field is already a bordered pill on the
+ * same surface, so a hairline directly beneath it read as a second edge on the
+ * same control. The books scrolling under it is the boundary.
+ *
+ * `min-height: 0` because a flex child defaults to `min-height: auto`, which
+ * refuses to shrink below its content — without it this box grows to fit two
+ * thousand books and the page scrolls again, from the outside, exactly as
+ * before but with the chrome now pinned over the top of it.
+ *
+ * `data-scroll` is what the virtualiser looks for: it asks for the nearest
+ * `[data-scroll]` ancestor before falling back to `parentElement`, so marking
+ * this is what keeps the row arithmetic reading the box that actually moves. */
+.body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  /* A column, so the empty state can still take the full height and centre
+     itself in it — it did that as a flex child of `.library` and would
+     otherwise collapse to its own text now that it lives in here. */
+  display: flex;
+  flex-direction: column;
+}
+
+/* The foot: what is on the shelf, and what is being done to it in the
+   background. A report, never a control — see `STATUS_BAR_H`.
+
+   NO RULES ANYWHERE ON THIS SCREEN. Neither this bar nor the scroll region
+   above it draws a border. The chrome is 11px muted type on the same surface
+   as everything else, and it separates itself by being quiet — a hairline
+   across the window is a heavier statement than anything either strip is
+   saying, and it would have drawn the eye to the frame rather than to the
+   books. The shelf scrolling under the search, and stopping short of the foot,
+   is the boundary. */
+.status {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  height: var(--status-bar-h);
+  padding: 0 40px;
+  background: var(--surface);
+  font-size: 11px;
+  color: var(--muted);
+  /* A status line is read, not selected; and a stray drag across the foot of
+     the window highlighting "1,965 books" is nothing anybody wanted. */
+  user-select: none;
+}
+
+/* The right-hand end: background work, while there is any. */
+.statusWork {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .library[data-platform='macos'] {
@@ -119,7 +193,309 @@
  * width now (`--card-w`, from `CARD_W`) and only how many fit per row moves.
  * `auto-fill` still decides that count from whatever width the row has, pane
  * open or not. */
+/* ══ LIST VIEW ═══════════════════════════════════════════════════════════
+ *
+ * ONE COLUMN TEMPLATE, declared once and used by both the header and every
+ * row. Written out twice — which is the obvious way to build a table out of
+ * divs — the header drifts from its own columns by a pixel the first time
+ * either changes, and a header that does not sit over its column is worse than
+ * no header at all.
+ *
+ * `minmax(0, …)` on the two elastic columns because a grid track's default
+ * `min-width: auto` refuses to shrink below its content: without it a long
+ * title pushes the row wider than the window instead of ellipsising, and the
+ * whole list scrolls sideways.
+ */
+.list,
+.listHead {
+  --list-cols: 22px minmax(0, 3fr) minmax(0, 2fr) 104px 82px 28px;
+}
+
+/* A GRID OF ONE COLUMN, which is what lets the same virtualiser drive this
+   view as drives the shelf: it reads the resolved `grid-template-columns` for
+   the count and the first child's height for the row, and both answers are
+   right here without it knowing there are two views. */
+.list {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: 1fr;
+  padding: 0 40px 40px;
+}
+
+/* The column labels, which is what makes the numbers mean something: "62%" and
+   "3 days" are not self-describing, and a list that shows them unlabelled is a
+   denser grid rather than a more informative view.
+
+   STICKY INSIDE THE SCROLL BOX rather than pinned above it with the search.
+   Above it, the header would sit outside the scrollbar and be exactly its
+   width out of alignment with the columns it labels — the classic table-header
+   misalignment, and unfixable without measuring the scrollbar. Here it shares
+   the box, so it shares the width by construction. */
+.listHead {
+  position: sticky;
+  inset-block-start: 0;
+  z-index: 2;
+  display: grid;
+  grid-template-columns: var(--list-cols);
+  align-items: center;
+  gap: 14px;
+  height: 26px;
+  margin: 0 40px;
+  /* The surface, so rows scrolling underneath do not show through it. */
+  background: var(--surface);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  user-select: none;
+}
+
+/* A label that also sorts. Only three of the columns can: the shelf orders by
+   recency, title and author, and a header that looked clickable and did
+   nothing would be worse than one that plainly does not. The rest are plain
+   labels — no hover, no cursor, no pretence. */
+.listSort {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.listSort:hover {
+  color: var(--ink-2);
+}
+
+.listSort[data-on='true'] {
+  color: var(--ink);
+}
+
+/* Right-aligned labels, over right-aligned data. */
+.listHead > .listWhen {
+  justify-content: flex-end;
+  text-align: end;
+}
+
+.row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+}
+
+/* Everything except the menu, and all of it one target: a row clickable only
+   along its title is a row a reader misses. */
+.rowOpen {
+  display: grid;
+  grid-template-columns: var(--list-cols);
+  align-items: center;
+  gap: 14px;
+  /* BOTH TRACKS AND ROW ONE, explicitly. The menu button claims row 1 column
+     2, and grid auto-placement will not put an auto-row item across a track
+     that is already taken — so this landed in an implicit SECOND row and every
+     row was 68px tall with its own ⋯ floating above it. Placed explicitly, the
+     two overlap as intended. */
+  grid-column: 1 / -1;
+  grid-row: 1;
+  height: var(--row-h);
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  font-family: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.rowOpen:hover,
+.row[data-open='true'] .rowOpen {
+  background: var(--wash);
+}
+
+.rowOpen[data-disabled='true'] {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.rowOpen[data-disabled='true']:hover {
+  background: none;
+}
+
+/* The jacket, small enough to be an anchor for the eye rather than the subject
+   of the row — recognition is still the fastest way to find a known book. */
+.rowCover {
+  inline-size: 22px;
+  block-size: 33px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--wash);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.16);
+}
+
+.rowCover img {
+  inline-size: 100%;
+  block-size: 100%;
+  object-fit: cover;
+}
+
+.rowCoverTinted {
+  align-items: center;
+}
+
+/* No fallback lettering at 22px — it would be one illegible glyph. The tint
+   alone is the placeholder here, unlike on a card where the title fits. */
+.rowCoverTitle {
+  display: none;
+}
+
+.rowTitle {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  overflow: hidden;
+}
+
+/* THE TEXT NEEDS ITS OWN BOX. `text-overflow` applies to a block container's
+   own inline content — a flex container's text child is a flex item, and it
+   is clipped rather than ellipsised. The titles were being cut mid-word with
+   no ellipsis to say so, which reads as data missing rather than truncated. */
+.rowTitleText {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  color: var(--ink);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.rowSeries {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.rowAuthor,
+.rowWhen {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.rowWhen {
+  text-align: end;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Three states, said three ways — see the component, which explains why a bar
+   at 100% and a bar at 97% are the same picture. */
+.rowProgress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.rowBar {
+  flex: 1;
+  min-width: 0;
+  block-size: 3px;
+  border-radius: 999px;
+  background: var(--line-2);
+  overflow: hidden;
+}
+
+.rowBarFill {
+  display: block;
+  block-size: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.rowPercent {
+  flex: 0 0 auto;
+  inline-size: 30px;
+  text-align: end;
+}
+
+.rowFinished {
+  color: var(--ok);
+}
+
+.rowNone {
+  color: var(--line-3);
+}
+
+/* OVER the row, not in it: a field that pushed the row taller would move every
+   row below it, and in a virtualised list that is the whole page jumping under
+   the pointer. Inset from the jacket so the book being tagged stays visible. */
+.rowTagForm {
+  position: absolute;
+  inset-block: 5px;
+  inset-inline: 36px 40px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+}
+
+.rowTagInput {
+  inline-size: 100%;
+  block-size: 100%;
+  padding: 0 10px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--surface);
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--ink);
+}
+
+/* Always drawn, like the card's — a control that appears on hover is a control
+   a reader has to discover by accident. */
+.rowMore {
+  composes: more from '../styles/controls.module.css';
+  grid-column: 2;
+  grid-row: 1;
+  justify-self: end;
+  z-index: 1;
+}
+
+/* AT THE NARROW END the author goes first: it is the column a reader is least
+   often scanning for, and the title it would otherwise squeeze is the one they
+   always are. The header's track has to go with it or the two stop lining up,
+   which is the whole reason the template is one declaration. */
+@media (max-width: 860px) {
+  .list,
+  .listHead {
+    --list-cols: 22px minmax(0, 1fr) 0 104px 82px 28px;
+  }
+
+  .rowAuthor,
+  .listAuthor {
+    display: none;
+  }
+}
+
+/* `flex: 0 0 auto` because the body is a flex column now: a grid of two
+   thousand rows would otherwise be shrunk to the height of the box that is
+   supposed to scroll it, and nothing would move. */
 .shelf {
+  flex: 0 0 auto;
   display: grid;
   grid-template-columns: repeat(auto-fill, var(--card-w));
   gap: 28px 20px;
