@@ -1,7 +1,10 @@
 import { cp } from 'node:fs/promises'
 import { createReadStream } from 'node:fs'
 import { extname, join, normalize, resolve } from 'node:path'
-import { defineConfig, type Plugin } from 'vite'
+import { type Plugin } from 'vite'
+// `defineConfig` from vitest rather than from vite, so the `test` block below
+// is typed. It is the same function; vitest re-exports it with its own field.
+import { defaultExclude, defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 
 /**
@@ -168,6 +171,21 @@ export default defineConfig({
     host: host || false,
     hmr: host ? { protocol: 'ws', host, port: 14202 } : undefined,
     watch: { ignored: ['**/src-tauri/**'] },
+  },
+
+  /* TEST DISCOVERY STOPS AT THIS CHECKOUT.
+   *
+   * Agent worktrees live under `.claude/worktrees/`, and each one is a separate
+   * checkout with its own `node_modules` — usually none at all. Vitest's default
+   * `include` walks the whole tree, so one leftover worktree turned `pnpm test`
+   * red on a missing dependency in a checkout nobody was working in: a failing
+   * gate that says nothing about this one, on a file this branch does not have.
+   *
+   * Extended from `defaultExclude` rather than written out, so excluding this
+   * does not quietly stop excluding `node_modules` and `dist`.
+   */
+  test: {
+    exclude: [...defaultExclude, '.claude/worktrees/**'],
   },
 
   envPrefix: ['VITE_', 'TAURI_ENV_'],
