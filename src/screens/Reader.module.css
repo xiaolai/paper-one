@@ -34,7 +34,7 @@
   justify-content: center;
   margin: 0 auto;
   width: 100%;
-  padding: 12px var(--stage-pad-x) 0;
+  padding: var(--space-12) var(--stage-pad-x) 0;
   /* Track widths come from `proseGrid()` in metrics.ts, not from minmax():
    * grid cannot express which track should yield first, and left to itself it
    * shrinks the measure and keeps the margin column. */
@@ -63,7 +63,7 @@
   position: absolute;
   inset-block: 0;
   inset-inline-start: 0;
-  width: 3px;
+  width: var(--track-w);
   /* The unread part. A token rather than a tint of the book's own colour, so
      the track reads the same on all five themes and only the fill carries hue. */
   background: var(--line-2);
@@ -75,7 +75,7 @@
      foliate easing between two discrete pages. This is a continuous value being
      reported rather than a transition between states, and snapping it would
      make a 1% move look like a glitch instead of progress. */
-  transition: height 120ms linear;
+  transition: height var(--motion-readout);
 }
 
 /* The gutter and margin are OVERLAYS on the same grid row as the book, not
@@ -183,7 +183,7 @@
    * Only an `auto` placement falls back to the grid container's padding box. */
   grid-column: auto;
   grid-row: auto;
-  inset-block: 12px 0;
+  inset-block: var(--space-12) 0;
   inset-inline: var(--stage-pad-x, 24px);
   margin-inline: 0;
 }
@@ -212,9 +212,9 @@
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 8px 24px;
-  font-size: 13px;
+  gap: var(--space-12);
+  padding: var(--space-8) var(--space-24);
+  font-size: var(--text-ui);
   color: var(--amber);
 }
 
@@ -224,7 +224,7 @@
   padding: 0;
   color: var(--muted);
   font-family: inherit;
-  font-size: 12px;
+  font-size: var(--text-small);
   text-decoration: underline;
   cursor: pointer;
 }
@@ -234,12 +234,12 @@
 .footer {
   flex: 0 0 auto;
   height: var(--row-book);
-  padding: 0 18px;
+  padding: 0 var(--space-20);
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 12px;
-  font-size: 12px;
+  gap: var(--space-12);
+  font-size: var(--text-small);
   color: var(--muted);
   transition: opacity var(--motion-chrome);
 }
@@ -253,8 +253,8 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 16px;
-  padding: 40px;
+  gap: var(--space-16);
+  padding: var(--space-40);
   text-align: center;
 }
 
@@ -264,18 +264,18 @@
 
 .emptyTitle {
   font-family: 'Crimson Pro Variable', 'Crimson Pro', Georgia, serif;
-  font-size: 44px;
+  font-size: var(--text-display);
   font-weight: 400;
   line-height: 1.1;
-  letter-spacing: -0.02em;
+  letter-spacing: var(--track-tight);
   color: var(--ink);
   margin: 0;
 }
 
 .emptyBody {
-  max-width: 420px;
+  max-width: var(--prose-wide);
   margin: 0;
-  font-size: 15px;
+  font-size: var(--text-body);
   line-height: 1.6;
   color: var(--muted);
   text-wrap: pretty;
@@ -296,8 +296,8 @@
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 12px 24px;
+  gap: var(--space-12);
+  padding: var(--space-12) var(--space-24);
 }
 
 .error {
@@ -306,13 +306,13 @@
    * the error bar taller than it is written to be — by a different amount in
    * the bar than in the empty state, since the two sit in different contexts. */
   margin: 0;
-  max-width: 420px;
-  padding: 14px;
-  border-radius: 10px;
+  max-width: var(--prose-wide);
+  padding: var(--space-14);
+  border-radius: var(--radius-control);
   background: var(--amber-bg);
   border: 1px solid var(--amber-line);
   color: var(--amber);
-  font-size: 13px;
+  font-size: var(--text-ui);
   line-height: 1.6;
   text-align: start;
 }

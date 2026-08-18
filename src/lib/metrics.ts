@@ -356,10 +356,173 @@ export function proseBleed(grid: ProseGrid): { start: number; end: number } {
   }
 }
 
-/** §03 control and row heights. Published as CSS custom properties below so
- *  stylesheets consume these values rather than repeating them. */
-export const CONTROL_PILL = 34
-export const ROW_BOOK = 46
+/**
+ * §03 control and row heights — the RAMP, not a list.
+ *
+ * A control's height was written wherever a control was drawn, and the app
+ * accumulated twelve of them: 24, 26, 27, 28, 30, 32, 34, 36, 38, 44, 46, 52.
+ * Twelve heights inside a 28px span is not a design decision repeated, it is
+ * twelve separate decisions nobody can now reconstruct — a chip 27 high beside
+ * a chip 28 high, a scope row 36 beside a chapter row 38.
+ *
+ * Four steps, each with a job:
+ */
+export const CONTROL = {
+  /** An icon and nothing else: a `⋯`, a delete, a close. */
+  xs: 24,
+  /** A chip, a stepper, an inline field — a control inside a row. */
+  sm: 28,
+  /** THE DEFAULT. A button, a search field, a rail tab. */
+  md: 34,
+  /** A control that contains controls: a composer, a shelf row. */
+  lg: 44,
+} as const
+
+/**
+ * `CONTROL.md` under its older name, kept because the pill's SHAPE depends on
+ * it: `--control-pill` is read as a width as well as a height to make a circle,
+ * and renaming it would only move the coupling somewhere less obvious.
+ */
+export const CONTROL_PILL = CONTROL.md
+
+/**
+ * Rows in a list, as opposed to controls in a row.
+ *
+ * `compact` is deliberately tighter than `book`: a scope list is SCANNED and a
+ * settings list is read one row at a time. That difference is the only reason
+ * two row heights exist, and it is why 38 (a chapter row) folds into 36 rather
+ * than becoming a third.
+ */
+export const ROW = {
+  /** A scope, a chapter, a search result — a row that is scanned. */
+  compact: 36,
+  /** A setting, a theme, a book in the reader's bar — a row that is read. */
+  book: 46,
+} as const
+
+/** `ROW.book` under its older name — see `CONTROL_PILL`. */
+export const ROW_BOOK = ROW.book
+
+/**
+ * A control in the TITLE BAR, which is not on the control ramp and cannot be.
+ *
+ * The bar is `TITLEBAR_H` tall — 52 on macOS, 44 elsewhere — and on macOS its
+ * contents have to clear the traffic lights, whose position is set from
+ * `tauri.conf.json` and measured, not guessed (see `docs/traffic-lights.md`).
+ * 30 is what fits: `CONTROL.md` at 34 leaves 9px of margin in a 52px bar and
+ * crowds the lights; `CONTROL.sm` at 28 reads as small beside them. It is a
+ * token rather than a ramp step because the constraint is the window's, not the
+ * design's, and folding it into the ramp would let a change to the ramp move
+ * something the operating system decides.
+ */
+export const CONTROL_TITLEBAR = 30
+
+/**
+ * The command palette's own field, which is the largest control in the app.
+ *
+ * A palette is one field the reader types into with nothing else on screen, so
+ * it is deliberately a step above `CONTROL.lg` — the ramp describes controls
+ * that sit among other controls, and this one does not.
+ */
+export const CONTROL_FIELD = 52
+
+/**
+ * The widths a paragraph of interface prose is allowed to reach.
+ *
+ * Not `MEASURE`, which is the BOOK's line length and a reading decision. These
+ * are empty states and error messages — a sentence or two that must not run the
+ * width of a window. Two values because they sit in boxes of different sizes,
+ * and they were 380, 420 and 420 chosen separately.
+ */
+export const PROSE_MAX = { narrow: 380, wide: 420 } as const
+
+/**
+ * The list view's own columns.
+ *
+ * `thumb` is a jacket small enough to be an anchor for the eye rather than the
+ * subject of the row; its height falls out of `COVER_ASPECT`, so the one
+ * proportion the shelf draws covers at is the one the list draws them at.
+ *
+ * The two data columns are sized to their WIDEST CONTENT rather than to taste:
+ * progress has to hold a bar and "100%", and the date has to hold the longest
+ * thing `relativeTime` produces — "Yesterday", or a full "12 Mar 2024".
+ */
+export const LIST_COL = { thumb: 22, progress: 104, when: 82, percent: 30 } as const
+
+/**
+ * The command palette's sheet: how wide it may get, and how much window it must
+ * leave either side of itself when it cannot.
+ *
+ * `inset` is what stops a sheet touching the window edge on a small screen —
+ * the palette is a floating surface and a floating surface with no margin reads
+ * as a panel that failed to fit.
+ */
+export const SHEET = { max: 640, inset: 48, top: 96, maxHeight: 560 } as const
+
+/**
+ * A menu's narrowest. Wide enough that "Remove from library" — the longest
+ * thing any menu in the app says — does not wrap, which is what actually
+ * decides it.
+ */
+export const MENU_MIN_W = 190
+
+/**
+ * How far a nested chapter steps in per level of the table of contents.
+ *
+ * The indent was written out per level — 26 and 42 — which is a base plus one
+ * step and a base plus two, with both sums done by hand and neither stated. A
+ * third level would have needed a third number guessed to match.
+ */
+export const TOC_INDENT = 16
+
+/**
+ * THE WINDOW WIDTHS THE LAYOUT CHANGES AT.
+ *
+ * Two, and only two, because each one is a decision about what to give up and
+ * there are only two things this app can give up.
+ *
+ * `compact` — the shelf's list drops its author column, and the screen's gutter
+ * narrows. Below this the row cannot hold five columns without the title, which
+ * is the one nobody scans past, being squeezed to nothing.
+ *
+ * `min` — the window's own minimum, from `tauri.conf.json`. Nothing is allowed
+ * to break above it, which is what makes it a number worth stating: it is the
+ * width every layout in this app is TESTED at, not a width anything reacts to.
+ *
+ * A CSS `@media` query cannot read a custom property — the cascade resolves
+ * variables long after the media query has already matched — so these numbers
+ * are necessarily written out in the stylesheets as well. `tokens.test.ts`
+ * asserts that every breakpoint in every stylesheet is one of these, which is
+ * the only way the two copies can be kept honest.
+ */
+export const BREAKPOINT = { compact: 860, min: 720 } as const
+
+/**
+ * A progress track: the thin rule under a book's title, and the reader's own.
+ *
+ * 3px because 1px is a hairline — a boundary, which a reader reads as the edge
+ * of something — and this is a QUANTITY, which has to read as a bar however
+ * little of it is filled.
+ */
+export const TRACK_W = 3
+
+/**
+ * macOS's own traffic lights: 12px each, which is Apple's, not ours.
+ *
+ * Here so that nothing else in the app can be 12px "to match the lights"
+ * without saying so — and so the one place that draws them names where the
+ * number comes from. See `docs/traffic-lights.md`.
+ */
+export const TRAFFIC_LIGHT = 12
+
+/**
+ * The scrollbar, where the app draws its own.
+ *
+ * A platform value in spirit: wide enough to grab with a pointer, which is what
+ * decides it. The thumb is inset from this by a transparent border so the track
+ * reads narrower than the target actually is.
+ */
+export const SCROLLBAR_W = 15
 
 /**
  * §03 a shelf card's width, and the box its cover is drawn in.
@@ -396,7 +559,8 @@ export const COVER_ASPECT = 2 / 3
  * every book — an unread one gets a spacer where the rule would be — so read
  * and unread cells measure the same and there is no tallest case to pick.
  */
-export const CELL_FURNITURE = 36 + 20
+export const TAG_LINE = 16
+export const CELL_FURNITURE = 36 + TAG_LINE + 4
 
 /* The `+ 20` is the tag row: one 16px line of chips and the 4px above it. It
  * is drawn only on a tagged book, so an untagged card carries 20px of air at
@@ -464,6 +628,17 @@ export const MOTION = {
   rulerTrack: '90ms ease',
   paneOpen: '220ms ease-out',
   popover: '120ms ease-out',
+  /**
+   * A CONTINUOUS VALUE being reported, not a transition between two states.
+   *
+   * Linear, and that is the whole point of it having its own name: everything
+   * else in this table eases, because it is a thing arriving or leaving. A
+   * progress bar is neither — it is a quantity, and easing one makes a 1% move
+   * look like a glitch rather than like progress. Tokenizing the stylesheet
+   * folded this into `popover` on the strength of the two sharing a duration,
+   * which is exactly the mistake a name prevents.
+   */
+  readout: '120ms linear',
   pageTurn: '300ms',
 } as const
 
@@ -501,7 +676,29 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
     '--pane-title-row': px(PANE_TITLE_ROW),
     '--status-bar-h': px(STATUS_BAR_H),
     '--row-h': px(ROW_H),
-    '--control-pill': px(CONTROL_PILL),
+    '--control-xs': px(CONTROL.xs),
+    '--control-sm': px(CONTROL.sm),
+    '--control-pill': px(CONTROL.md),
+    '--control-lg': px(CONTROL.lg),
+    '--row-compact': px(ROW.compact),
+    '--control-titlebar': px(CONTROL_TITLEBAR),
+    '--control-field': px(CONTROL_FIELD),
+    '--prose-narrow': px(PROSE_MAX.narrow),
+    '--prose-wide': px(PROSE_MAX.wide),
+    '--row-thumb': px(LIST_COL.thumb),
+    '--col-progress': px(LIST_COL.progress),
+    '--col-when': px(LIST_COL.when),
+    '--col-percent': px(LIST_COL.percent),
+    '--tag-line': px(TAG_LINE),
+    '--sheet-max': px(SHEET.max),
+    '--sheet-inset': px(SHEET.inset),
+    '--sheet-top': px(SHEET.top),
+    '--sheet-max-h': px(SHEET.maxHeight),
+    '--menu-min-w': px(MENU_MIN_W),
+    '--toc-indent': px(TOC_INDENT),
+    '--track-w': px(TRACK_W),
+    '--traffic-light': px(TRAFFIC_LIGHT),
+    '--scrollbar-w': px(SCROLLBAR_W),
     '--row-book': px(ROW_BOOK),
     '--radius-pill': `${RADIUS.pill}px`,
     '--radius-card': `${RADIUS.card}px`,
@@ -545,6 +742,7 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
     '--motion-ruler': MOTION.rulerTrack,
     '--motion-pane': MOTION.paneOpen,
     '--motion-popover': MOTION.popover,
+    '--motion-readout': MOTION.readout,
   }
   for (const [name, value] of Object.entries(vars)) {
     root.style.setProperty(name, value)

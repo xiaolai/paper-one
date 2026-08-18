@@ -13,14 +13,14 @@
   inset-inline: 0;
   display: block;
   width: 100%;
-  padding: 4px 8px;
+  padding: var(--space-4) var(--space-8);
   border: none;
   border-inline-start: 2px solid var(--line-3);
   border-radius: 0 var(--radius-chip) var(--radius-chip) 0;
   background: none;
   color: var(--muted);
   font-family: inherit;
-  font-size: 12px;
+  font-size: var(--text-small);
   line-height: 1.45;
   text-align: start;
   cursor: pointer;
@@ -50,10 +50,10 @@
 
 .kind {
   display: block;
-  margin-bottom: 2px;
-  font-size: 10px;
+  margin-bottom: var(--space-2);
+  font-size: var(--text-micro);
   font-weight: 600;
-  letter-spacing: 0.04em;
+  letter-spacing: var(--track-caps);
   text-transform: uppercase;
   color: var(--amber);
 }

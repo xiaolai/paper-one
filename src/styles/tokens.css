@@ -1,4 +1,4 @@
-/* Paper — colour and elevation tokens.
+/* Paper — the design system's values: colour, elevation, spacing and type.
  *
  * Copied verbatim from `dev-docs/design/Paper.dc.html`. The design handoff is
  * explicit that this block is the whole colour system: every colour in the app
@@ -90,4 +90,89 @@
   --shadow-pill: 0 1px 2px rgba(0,0,0,.55);
   --shadow-knob: 0 1px 3px rgba(0,0,0,.6);
   --scrim: rgba(0,0,0,.6);
+}
+
+/* ── SPACING ────────────────────────────────────────────────────────────────
+ *
+ * A CLOSED SET, named for its own value. Spacing is the one scale where naming
+ * by intent is a mistake — the same 8px is a gap between chips here and the
+ * padding of a menu row there, and a name like `--space-tight` would be argued
+ * about at every use. What a spacing token has to do is make the SET finite:
+ * you cannot write 9px, you have to pick a step, and the design stops
+ * accumulating values nobody chose.
+ *
+ * The steps are the ones the app already used. 164 spacing values across the
+ * stylesheets resolved to twenty-one distinct numbers; twelve of them accounted
+ * for 93% of the uses and are these. The other nine — 1, 5, 7, 9, 18, 26, 42,
+ * 60 — were each used once or twice, and they are what a scale exists to
+ * prevent: not one of them was a decision anybody could reconstruct.
+ *
+ * 2px steps to 16, then 4px steps. Fine-grained where the eye can tell 2px
+ * apart — inside a control — and coarse where it cannot.
+ */
+:root {
+  --space-2: 2px;
+  --space-4: 4px;
+  --space-6: 6px;
+  --space-8: 8px;
+  --space-10: 10px;
+  --space-12: 12px;
+  --space-14: 14px;
+  --space-16: 16px;
+  --space-20: 20px;
+  --space-24: 24px;
+  --space-28: 28px;
+  --space-32: 32px;
+  --space-40: 40px;
+  --space-56: 56px;
+}
+
+/* ── TYPE ───────────────────────────────────────────────────────────────────
+ *
+ * NAMED BY ROLE, which is the opposite choice from spacing and for the opposite
+ * reason: a font size IS a decision about what a piece of text is. Every use of
+ * 11px in this app is a caption; every use of 13px is a control's own words. A
+ * name that says so survives a change of value, and a size that has no role has
+ * no business existing.
+ *
+ * Derived from what was there. Naming them turned up one genuine inconsistency:
+ * the library's empty-state body was 14px and the reader's was 15px — the same
+ * sentence in the same situation, at two sizes, because nothing made them one
+ * decision. There is no 14px step; both read `--text-body`.
+ */
+:root {
+  /* A mark's kind, a tag chip — the smallest thing that is still a word. */
+  --text-micro: 10px;
+  /* Captions, group headings, the status bar: text about other text. */
+  --text-caption: 11px;
+  /* Secondary interface text — counts, sub-rows, tool labels. */
+  --text-small: 12px;
+  /* THE INTERFACE'S OWN VOICE. Rows, fields, menus, tabs. The default. */
+  --text-ui: 13px;
+  /* An empty state's sentence, a stepper's value: interface text with room. */
+  --text-body: 15px;
+  /* PROSE, and only prose — a note's own words, a typeface sample. Serif. */
+  --text-prose: 17px;
+  /* The library's empty-state heading. */
+  --text-title: 28px;
+  /* The reader's empty state — the largest type in the app. */
+  --text-display: 44px;
+}
+
+/* ── TRACKING ───────────────────────────────────────────────────────────────
+ *
+ * Two directions and one reason each. LARGE type is tightened, because the gaps
+ * a typeface builds in for 13px are too wide once the glyphs are 28 or 44 and
+ * the word starts to come apart. SMALL CAPS are opened, because a run of
+ * uppercase at 10 or 11px sets too tight to read as words rather than as a
+ * block — the wider the setting, the more that is true.
+ *
+ * Seven separate values were in use — 0.04, 0.06, 0.08, 0.09em to open, and
+ * -0.01, -0.02em to tighten — none of them related to any other.
+ */
+:root {
+  --track-tight: -0.02em;
+  --track-snug: -0.01em;
+  --track-caps: 0.06em;
+  --track-caps-wide: 0.09em;
 }

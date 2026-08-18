@@ -14,15 +14,15 @@
 .primary {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-6);
   height: var(--control-pill);
-  padding: 0 16px;
+  padding: 0 var(--space-16);
   border: none;
   border-radius: var(--radius-pill);
   background: var(--accent);
   color: var(--surface);
   font-family: inherit;
-  font-size: 13px;
+  font-size: var(--text-ui);
   font-weight: 600;
   cursor: pointer;
 }
@@ -84,8 +84,8 @@
 .more {
   display: grid;
   place-items: center;
-  width: 24px;
-  height: 24px;
+  width: var(--control-xs);
+  height: var(--control-xs);
   /* No padding of its own — the browser's default is reset globally, in
      `global.css`, which explains what it was doing to this button in
      particular. */
@@ -109,8 +109,8 @@
 .menu {
   position: fixed;
   z-index: var(--z-menu);
-  min-width: 190px;
-  padding: 4px;
+  min-width: var(--menu-min-w);
+  padding: var(--space-4);
   border-radius: var(--radius-control);
   background: var(--surface);
   box-shadow: var(--shadow-pop), 0 0 0 1px var(--line-2);
@@ -119,15 +119,15 @@
 .menuItem {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-10);
   width: 100%;
-  padding: 7px 10px;
+  padding: var(--space-8) var(--space-10);
   border: 0;
   border-radius: var(--radius-chip);
   background: transparent;
   color: var(--ink);
   font: inherit;
-  font-size: 13px;
+  font-size: var(--text-ui);
   text-align: start;
   white-space: nowrap;
   cursor: pointer;

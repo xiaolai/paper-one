@@ -11,8 +11,8 @@
 .bar {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 0 12px;
+  gap: var(--space-10);
+  padding: 0 var(--space-12);
   height: var(--titlebar-h);
 }
 
@@ -43,32 +43,32 @@
 .sysZone[data-platform='macos'] {
   order: 1;
   justify-content: flex-start;
-  gap: 8px;
-  padding-left: 14px;
+  gap: var(--space-8);
+  padding-left: var(--space-14);
 }
 
 .sysZone:not([data-platform='macos']) {
   order: 3;
   justify-content: flex-end;
-  gap: 2px;
+  gap: var(--space-2);
 }
 
 /* Drawn only when previewing the macOS chrome outside Tauri; inside the app
  * the real traffic lights are painted by AppKit over this zone. */
 .light {
-  width: 12px;
-  height: 12px;
-  border-radius: 999px;
+  width: var(--traffic-light);
+  height: var(--traffic-light);
+  border-radius: var(--radius-pill);
   box-shadow: inset 0 0 0 0.5px var(--tl-rim);
 }
 
 .windowButton {
-  width: 34px;
-  height: 30px;
+  width: var(--control-pill);
+  height: var(--control-titlebar);
   display: grid;
   place-items: center;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-chip);
   background: transparent;
   color: var(--muted);
   cursor: pointer;
@@ -94,12 +94,12 @@
 .chip {
   display: flex;
   align-items: center;
-  gap: 8px;
-  max-width: 420px;
-  height: 30px;
-  padding: 0 12px;
+  gap: var(--space-8);
+  max-width: var(--prose-wide);
+  height: var(--control-titlebar);
+  padding: 0 var(--space-12);
   border: none;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: transparent;
   font-family: inherit;
   color: var(--ink);
@@ -128,16 +128,16 @@
 }
 
 .chipTitle {
-  font-size: 13px;
+  font-size: var(--text-ui);
   font-weight: 600;
-  letter-spacing: -0.01em;
+  letter-spacing: var(--track-snug);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .chipSub {
-  font-size: 12px;
+  font-size: var(--text-small);
   color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -150,7 +150,7 @@
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-8);
   transition: opacity var(--motion-chrome);
 }
 
@@ -165,16 +165,16 @@
 .toggleGroup {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: var(--space-2);
 }
 
 .action {
-  width: 30px;
-  height: 30px;
+  width: var(--control-titlebar);
+  height: var(--control-titlebar);
   display: grid;
   place-items: center;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-chip);
   background: transparent;
   color: var(--muted);
   cursor: pointer;

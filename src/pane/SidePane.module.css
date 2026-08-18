@@ -14,19 +14,19 @@
   align-items: center;
   justify-content: space-between;
   height: var(--pane-tab-h);
-  margin: 8px 12px 0;
-  padding: 0 4px;
-  border-radius: 14px;
+  margin: var(--space-8) var(--space-12) 0;
+  padding: 0 var(--space-4);
+  border-radius: var(--radius-card);
   background: var(--wash);
 }
 
 .railButton {
-  width: 34px;
-  height: 34px;
+  width: var(--control-pill);
+  height: var(--control-pill);
   display: grid;
   place-items: center;
   border: none;
-  border-radius: 10px;
+  border-radius: var(--radius-control);
   background: transparent;
   color: var(--muted);
   cursor: pointer;
@@ -51,10 +51,10 @@
   display: flex;
   align-items: center;
   min-height: var(--pane-title-row);
-  padding: 0 16px;
-  font-size: 13px;
+  padding: 0 var(--space-16);
+  font-size: var(--text-ui);
   font-weight: 600;
-  letter-spacing: -0.01em;
+  letter-spacing: var(--track-snug);
   color: var(--ink);
 }
 
@@ -67,35 +67,35 @@
 }
 
 .panel {
-  padding: 4px 14px 28px;
+  padding: var(--space-4) var(--space-14) var(--space-28);
 }
 
 .panelMeta {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 0 6px 12px;
-  font-size: 12px;
+  gap: var(--space-6);
+  padding: 0 var(--space-6) var(--space-12);
+  font-size: var(--text-small);
   color: var(--muted);
 }
 
 .filters {
   display: flex;
-  gap: 6px;
-  padding: 0 6px 12px;
+  gap: var(--space-6);
+  padding: 0 var(--space-6) var(--space-12);
   flex-wrap: wrap;
 }
 
 .filter {
-  height: 27px;
-  padding: 0 12px;
+  height: var(--control-sm);
+  padding: 0 var(--space-12);
   display: grid;
   place-items: center;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   border: 1px solid var(--line-2);
   background: var(--surface);
   font-family: inherit;
-  font-size: 12px;
+  font-size: var(--text-small);
   color: var(--muted);
   cursor: pointer;
 }
@@ -111,21 +111,21 @@
 .tocList {
   flex: 1;
   min-height: 0;
-  padding: 0 12px 20px;
+  padding: 0 var(--space-12) var(--space-20);
 }
 
 .tocRow {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-8);
   width: 100%;
-  height: 38px;
-  padding: 0 10px;
+  height: var(--row-compact);
+  padding: 0 var(--space-10);
   border: none;
-  border-radius: 10px;
+  border-radius: var(--radius-control);
   background: transparent;
   font-family: inherit;
-  font-size: 13px;
+  font-size: var(--text-ui);
   color: var(--ink-2);
   text-align: start;
   cursor: pointer;
@@ -169,8 +169,8 @@
 }
 
 /* Nested TOC entries step in by one control unit per level. */
-.tocRow[data-depth='1'] { padding-left: 26px; }
-.tocRow[data-depth='2'] { padding-left: 42px; }
+.tocRow[data-depth='1'] { padding-left: calc(var(--space-10) + var(--toc-indent)); }
+.tocRow[data-depth='2'] { padding-left: calc(var(--space-10) + 2 * var(--toc-indent)); }
 
 /* --- companion ------------------------------------------------------- */
 
@@ -183,8 +183,8 @@
 
 .companionHead {
   flex: 0 0 auto;
-  padding: 0 16px 10px;
-  font-size: 11px;
+  padding: 0 var(--space-16) var(--space-10);
+  font-size: var(--text-caption);
   color: var(--muted);
 }
 
@@ -196,11 +196,11 @@
 .composer {
   display: flex;
   align-items: center;
-  gap: 8px;
-  height: 44px;
-  margin: 0 12px;
-  padding: 0 6px 0 14px;
-  border-radius: 999px;
+  gap: var(--space-8);
+  height: var(--control-lg);
+  margin: 0 var(--space-12);
+  padding: 0 var(--space-6) 0 var(--space-14);
+  border-radius: var(--radius-pill);
   background: var(--wash);
 }
 
@@ -214,7 +214,7 @@
   border: none;
   background: transparent;
   font-family: inherit;
-  font-size: 13px;
+  font-size: var(--text-ui);
   color: var(--ink);
 }
 
@@ -232,12 +232,12 @@
 }
 
 .send {
-  width: 26px;
-  height: 26px;
+  width: var(--control-sm);
+  height: var(--control-sm);
   display: grid;
   place-items: center;
   border: none;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--accent);
   color: var(--surface);
   cursor: pointer;
@@ -252,10 +252,10 @@
   display: block;
   width: 100%;
   text-align: start;
-  padding: 12px 14px;
-  margin-bottom: 8px;
+  padding: var(--space-12) var(--space-14);
+  margin-bottom: var(--space-8);
   border: 1px solid transparent;
-  border-radius: 14px;
+  border-radius: var(--radius-card);
   background: transparent;
   font-family: inherit;
 }
@@ -289,13 +289,13 @@
 
 .noteJump:focus-visible {
   outline: 2px solid var(--accent);
-  outline-offset: 2px;
-  border-radius: 4px;
+  outline-offset: var(--space-2);
+  border-radius: var(--radius-mark);
 }
 
 .noteBody {
   font-family: 'Crimson Pro Variable', 'Crimson Pro', Georgia, serif;
-  font-size: 17px;
+  font-size: var(--text-prose);
   line-height: 1.5;
   color: var(--ink);
 }
@@ -309,12 +309,12 @@
 .noteComment {
   display: block;
   width: 100%;
-  padding: 8px 0 0;
+  padding: var(--space-8) 0 0;
   border: none;
   background: none;
   text-align: start;
   font-family: inherit;
-  font-size: 12px;
+  font-size: var(--text-small);
   line-height: 1.6;
   color: var(--muted);
   cursor: text;
@@ -322,17 +322,17 @@
 
 .noteInput {
   width: 100%;
-  margin-top: 8px;
-  padding: 6px 8px;
+  margin-top: var(--space-8);
+  padding: var(--space-6) var(--space-8);
   border: 1px solid var(--line-2);
-  border-radius: 8px;
+  border-radius: var(--radius-control);
   background: var(--surface);
   color: var(--ink);
   font-family: inherit;
-  font-size: 12px;
+  font-size: var(--text-small);
   line-height: 1.6;
   resize: vertical;
-  min-height: 56px;
+  min-height: var(--space-56);
 }
 
 .noteInput:focus-visible {
@@ -344,9 +344,9 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding-top: 8px;
-  font-size: 11px;
+  gap: var(--space-8);
+  padding-top: var(--space-8);
+  font-size: var(--text-caption);
   color: var(--muted);
 }
 
@@ -354,10 +354,10 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  width: var(--control-xs);
+  height: var(--control-xs);
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-chip);
   background: none;
   color: var(--muted);
   cursor: pointer;
@@ -370,7 +370,7 @@
 
 .noteDelete:focus-visible {
   outline: 2px solid var(--accent);
-  outline-offset: -2px;
+  outline-offset: calc(-1 * var(--space-2));
 }
 
 /* The row Notes was asked to reveal. A tint rather than a border, so the row
@@ -380,9 +380,9 @@
 }
 
 .noteKind {
-  font-size: 11px;
+  font-size: var(--text-caption);
   font-weight: 600;
-  letter-spacing: 0.06em;
+  letter-spacing: var(--track-caps);
   text-transform: uppercase;
   color: var(--muted);
 }
@@ -403,11 +403,11 @@
 .searchField {
   display: flex;
   align-items: center;
-  gap: 8px;
-  height: 34px;
-  margin: 0 6px 12px;
-  padding: 0 12px;
-  border-radius: 999px;
+  gap: var(--space-8);
+  height: var(--control-pill);
+  margin: 0 var(--space-6) var(--space-12);
+  padding: 0 var(--space-12);
+  border-radius: var(--radius-pill);
   background: var(--wash);
 }
 
@@ -415,9 +415,9 @@
   display: block;
   width: 100%;
   text-align: start;
-  padding: 10px 14px;
+  padding: var(--space-10) var(--space-14);
   border: none;
-  border-radius: 10px;
+  border-radius: var(--radius-control);
   background: transparent;
   font-family: inherit;
   cursor: pointer;
@@ -428,14 +428,14 @@
 }
 
 .resultAt {
-  font-size: 11px;
+  font-size: var(--text-caption);
   color: var(--muted);
-  padding-left: 6px;
+  padding-left: var(--space-6);
 }
 
 .resultSnippet {
-  padding-top: 4px;
-  font-size: 13px;
+  padding-top: var(--space-4);
+  font-size: var(--text-ui);
   line-height: 1.55;
   color: var(--ink-2);
 }
@@ -456,21 +456,21 @@
 .libraryPanel {
   display: flex;
   flex-direction: column;
-  padding: 4px 6px 12px;
+  padding: var(--space-4) var(--space-6) var(--space-12);
 }
 
 .scopeRow {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-10);
   width: 100%;
-  height: 36px;
-  padding: 0 10px;
+  height: var(--row-compact);
+  padding: 0 var(--space-10);
   border: none;
-  border-radius: 10px;
+  border-radius: var(--radius-control);
   background: transparent;
   font-family: inherit;
-  font-size: 13px;
+  font-size: var(--text-ui);
   color: var(--ink);
   text-align: start;
   cursor: pointer;
@@ -499,7 +499,7 @@
    on — a number is a fact about the shelf, not part of the selection. */
 .scopeCount {
   flex: 0 0 auto;
-  font-size: 12px;
+  font-size: var(--text-small);
   font-variant-numeric: tabular-nums;
   color: var(--muted);
 }
@@ -512,7 +512,7 @@
   position: relative;
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: var(--space-2);
 }
 
 .tagRow > .scopeRow {
@@ -526,22 +526,22 @@
   flex: 1 1 auto;
   display: flex;
   align-items: center;
-  gap: 10px;
-  height: 36px;
-  padding: 0 10px;
+  gap: var(--space-10);
+  height: var(--row-compact);
+  padding: 0 var(--space-10);
   color: var(--ink);
 }
 
 .tagRenameInput {
   flex: 1 1 auto;
   min-width: 0;
-  height: 26px;
-  padding: 0 8px;
+  height: var(--control-sm);
+  padding: 0 var(--space-8);
   border: 1px solid var(--line-2);
   border-radius: var(--radius-chip);
   background: var(--surface);
   font: inherit;
-  font-size: 13px;
+  font-size: var(--text-ui);
   color: var(--ink);
 }
 
@@ -550,9 +550,9 @@
 .scopeHint {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px;
-  font-size: 12px;
+  gap: var(--space-10);
+  padding: var(--space-10);
+  font-size: var(--text-small);
   color: var(--muted);
 }
 
@@ -562,8 +562,8 @@
 .enriching {
   composes: scopeHint;
   align-items: flex-start;
-  margin-block-start: 8px;
-  padding-block-start: 14px;
+  margin-block-start: var(--space-8);
+  padding-block-start: var(--space-14);
   border-block-start: 1px solid var(--line);
   line-height: 1.5;
 }
@@ -572,16 +572,16 @@
   /* The icon sits on the first line's cap height rather than centred against
      two wrapped lines, which is where a leading icon belongs. */
   flex: 0 0 auto;
-  margin-block-start: 2px;
+  margin-block-start: var(--space-2);
 }
 
 /* --- settings -------------------------------------------------------- */
 
 .groupTitle {
-  padding: 16px 10px 6px;
-  font-size: 11px;
+  padding: var(--space-16) var(--space-10) var(--space-6);
+  font-size: var(--text-caption);
   font-weight: 600;
-  letter-spacing: 0.09em;
+  letter-spacing: var(--track-caps-wide);
   text-transform: uppercase;
   color: var(--muted);
 }
@@ -589,15 +589,15 @@
 .settingRow {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-10);
   width: 100%;
-  height: 46px;
-  padding: 0 10px;
+  height: var(--row-book);
+  padding: 0 var(--space-10);
   border: none;
-  border-radius: 10px;
+  border-radius: var(--radius-control);
   background: transparent;
   font-family: inherit;
-  font-size: 13px;
+  font-size: var(--text-ui);
   color: var(--ink);
   text-align: start;
   cursor: pointer;
@@ -608,7 +608,7 @@
 }
 
 .settingValue {
-  font-size: 12px;
+  font-size: var(--text-small);
   color: var(--muted);
 }
 
@@ -626,20 +626,20 @@
 .stepper {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: var(--space-2);
 }
 
 .stepperButton {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: var(--control-sm);
+  height: var(--control-sm);
   border: none;
   border-radius: var(--radius-control, 10px);
   background: var(--wash);
   font-family: inherit;
-  font-size: 15px;
+  font-size: var(--text-body);
   line-height: 1;
   color: var(--ink);
   cursor: pointer;
@@ -657,7 +657,7 @@
 }
 
 .stepperValue {
-  min-width: 42px;
+  min-width: calc(var(--control-pill) + var(--space-8));
   font-variant-numeric: tabular-nums;
   line-height: 1;
   text-align: center;
@@ -667,18 +667,18 @@
 .typefaceList {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: 2px 0;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
 }
 
 .typefaceRow {
   display: flex;
   align-items: baseline;
-  gap: 10px;
+  gap: var(--space-10);
   width: 100%;
-  padding: 9px 10px;
+  padding: var(--space-10) var(--space-10);
   border: none;
-  border-radius: 10px;
+  border-radius: var(--radius-control);
   background: transparent;
   color: var(--ink);
   text-align: start;
@@ -697,12 +697,12 @@
    preview is drawn no smaller than the book could ever be set. */
 .typefaceSample {
   flex: 1;
-  font-size: 17px;
+  font-size: var(--text-prose);
   line-height: 1.3;
 }
 
 .typefaceNote {
-  font-size: 11px;
+  font-size: var(--text-caption);
   color: var(--muted);
   white-space: nowrap;
 }
@@ -710,19 +710,19 @@
 .themeGrid {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
-  gap: 8px;
-  padding: 8px 10px 4px;
+  gap: var(--space-8);
+  padding: var(--space-8) var(--space-10) var(--space-4);
 }
 
 .themeSwatch {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-8);
   border: none;
   background: transparent;
   font-family: inherit;
-  font-size: 12px;
+  font-size: var(--text-small);
   color: var(--muted);
   cursor: pointer;
 }
@@ -734,8 +734,8 @@
 .themeChip {
   display: block;
   width: 100%;
-  height: 46px;
-  border-radius: 10px;
+  height: var(--row-book);
+  border-radius: var(--radius-control);
   box-shadow: 0 0 0 1px var(--line-2);
 }
 
@@ -746,19 +746,19 @@
 /* --- empty ----------------------------------------------------------- */
 
 .empty {
-  padding: 40px 20px;
+  padding: var(--space-40) var(--space-20);
   text-align: center;
 }
 
 .emptyTitle {
-  font-size: 15px;
+  font-size: var(--text-body);
   font-weight: 600;
   color: var(--ink);
 }
 
 .emptyBody {
-  padding-top: 8px;
-  font-size: 13px;
+  padding-top: var(--space-8);
+  font-size: var(--text-ui);
   line-height: 1.6;
   color: var(--muted);
   text-wrap: pretty;
@@ -766,14 +766,14 @@
 
 /* An empty state that can do something about being empty. */
 .emptyAction {
-  margin-top: 16px;
-  padding: 7px 14px;
+  margin-top: var(--space-16);
+  padding: var(--space-8) var(--space-14);
   border: 1px solid var(--line-2);
   border-radius: var(--radius-control);
   background: var(--surface);
   color: var(--ink);
   font-family: inherit;
-  font-size: 13px;
+  font-size: var(--text-ui);
   cursor: pointer;
   transition: background var(--motion-chrome), border-color var(--motion-chrome);
 }

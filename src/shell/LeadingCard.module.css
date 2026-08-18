@@ -24,7 +24,7 @@
   border-radius: var(--leading-card-radius);
   /* Keeps scrolling content off the rounded bottom corners. At this radius a
    * list running flush to the edge collides with the curve. */
-  padding-bottom: 12px;
+  padding-bottom: var(--space-12);
 }
 
 /* macOS: the card runs the full height of the window and slides under the
@@ -48,5 +48,5 @@
  * made the card 410px wide while the reader always reserved 412px, drifting
  * the layout by 2px on Windows and Linux only. */
 .card:not([data-platform='macos']) {
-  margin: 0 var(--concentric-inset) 10px var(--concentric-inset);
+  margin: 0 var(--concentric-inset) var(--space-10) var(--concentric-inset);
 }

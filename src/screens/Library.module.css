@@ -31,7 +31,7 @@
   /* ONE GUTTER for the whole screen: the toolbar, the chips, the books, the
      list header and the status bar all read it, so nothing can sit a few pixels
      out from the column of covers it belongs to. */
-  --shelf-pad-x: 40px;
+  --shelf-pad-x: var(--space-40);
   position: absolute;
   inset: 0;
   z-index: 1;
@@ -83,11 +83,11 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: var(--space-16);
   height: var(--status-bar-h);
   padding: 0 var(--shelf-pad-x);
   background: var(--surface);
-  font-size: 11px;
+  font-size: var(--text-caption);
   color: var(--muted);
   /* A status line is read, not selected; and a stray drag across the foot of
      the window highlighting "1,965 books" is nothing anybody wanted. */
@@ -98,7 +98,7 @@
 .statusWork {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-6);
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
@@ -126,7 +126,7 @@
   width: var(--control-pill);
   height: var(--control-pill);
   border: 1px solid var(--line-2);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--surface);
   color: var(--muted);
   cursor: pointer;
@@ -172,7 +172,14 @@
  * whole list scrolls sideways.
  */
 .list {
-  --list-cols: 22px minmax(0, 3fr) minmax(0, 2fr) 104px 82px 28px;
+  /* The jacket's own width, the two elastic text columns, and the three fixed
+     ones. Each named where it is decided: the thumbnail is a cover at
+     `--row-thumb`, the trailing controls are a `--control-sm` box, and the two
+     data columns are wide enough for "100%" and for "Yesterday" — which is what
+     104 and 82 were, arrived at by trying them. */
+  --list-cols:
+    var(--row-thumb) minmax(0, 3fr) minmax(0, 2fr)
+    var(--col-progress) var(--col-when) var(--control-sm);
 }
 
 /* A GRID OF ONE COLUMN, which is what lets the same virtualiser drive this
@@ -183,7 +190,7 @@
   flex: 0 0 auto;
   display: grid;
   grid-template-columns: 1fr;
-  padding: 0 40px 40px;
+  padding: 0 var(--space-40) var(--space-40);
 }
 
 .row {
@@ -199,7 +206,7 @@
   display: grid;
   grid-template-columns: var(--list-cols);
   align-items: center;
-  gap: 14px;
+  gap: var(--space-14);
   /* BOTH TRACKS AND ROW ONE, explicitly. The menu button claims row 1 column
      2, and grid auto-placement will not put an auto-row item across a track
      that is already taken — so this landed in an implicit SECOND row and every
@@ -210,7 +217,7 @@
   height: var(--row-h);
   padding: 0;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-control);
   background: none;
   font-family: inherit;
   text-align: start;
@@ -234,15 +241,15 @@
 /* The jacket, small enough to be an anchor for the eye rather than the subject
    of the row — recognition is still the fastest way to find a known book. */
 .rowCover {
-  inline-size: 22px;
-  block-size: 33px;
+  inline-size: var(--row-thumb);
+  aspect-ratio: var(--cover-aspect);
   display: flex;
   align-items: flex-end;
   justify-content: center;
   overflow: hidden;
-  border-radius: 2px;
+  border-radius: var(--radius-mark);
   background: var(--wash);
-  box-shadow: 0 1px 2px rgb(0 0 0 / 0.16);
+  box-shadow: var(--shadow-pill);
 }
 
 .rowCover img {
@@ -265,7 +272,7 @@
   min-width: 0;
   display: flex;
   align-items: baseline;
-  gap: 8px;
+  gap: var(--space-8);
   overflow: hidden;
 }
 
@@ -276,7 +283,7 @@
 .rowTitleText {
   min-width: 0;
   overflow: hidden;
-  font-size: 13px;
+  font-size: var(--text-ui);
   color: var(--ink);
   white-space: nowrap;
   text-overflow: ellipsis;
@@ -284,7 +291,7 @@
 
 .rowSeries {
   flex: 0 0 auto;
-  font-size: 11px;
+  font-size: var(--text-caption);
   color: var(--muted);
 }
 
@@ -292,7 +299,7 @@
 .rowWhen {
   min-width: 0;
   overflow: hidden;
-  font-size: 12px;
+  font-size: var(--text-small);
   color: var(--muted);
   white-space: nowrap;
   text-overflow: ellipsis;
@@ -308,8 +315,8 @@
 .rowProgress {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 11px;
+  gap: var(--space-8);
+  font-size: var(--text-caption);
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
@@ -317,8 +324,8 @@
 .rowBar {
   flex: 1;
   min-width: 0;
-  block-size: 3px;
-  border-radius: 999px;
+  block-size: var(--track-w);
+  border-radius: var(--radius-pill);
   background: var(--line-2);
   overflow: hidden;
 }
@@ -326,13 +333,13 @@
 .rowBarFill {
   display: block;
   block-size: 100%;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--accent);
 }
 
 .rowPercent {
   flex: 0 0 auto;
-  inline-size: 30px;
+  inline-size: var(--col-percent);
   text-align: end;
 }
 
@@ -349,8 +356,8 @@
    the pointer. Inset from the jacket so the book being tagged stays visible. */
 .rowTagForm {
   position: absolute;
-  inset-block: 5px;
-  inset-inline: 36px 40px;
+  inset-block: var(--space-4);
+  inset-inline: calc(var(--row-thumb) + var(--space-14)) var(--space-40);
   z-index: 3;
   display: flex;
   align-items: center;
@@ -359,12 +366,12 @@
 .rowTagInput {
   inline-size: 100%;
   block-size: 100%;
-  padding: 0 10px;
+  padding: 0 var(--space-10);
   border: 1px solid var(--accent);
-  border-radius: 8px;
+  border-radius: var(--radius-control);
   background: var(--surface);
   font-family: inherit;
-  font-size: 12px;
+  font-size: var(--text-small);
   color: var(--ink);
 }
 
@@ -383,12 +390,28 @@
    always are. The header's track has to go with it or the two stop lining up,
    which is the whole reason the template is one declaration. */
 @media (max-width: 860px) {
-  .list {
-    --list-cols: 22px minmax(0, 1fr) 0 104px 82px 28px;
+  /* THE GUTTER NARROWS TOO. 40px either side is 11% of a 720px window — a
+     margin that reads as generous at 1440 and as wasted at the minimum. The
+     whole screen reads it, so the toolbar, the chips, the books and the status
+     bar all move together and nothing comes out of alignment. */
+  .library {
+    --shelf-pad-x: var(--space-24);
   }
 
+  .list {
+    --list-cols:
+      var(--row-thumb) minmax(0, 1fr) 0
+      var(--col-progress) var(--col-when) var(--control-sm);
+  }
+
+  /* NOT `display: none`. A grid item that is not displayed does not occupy its
+     track — it leaves the grid — so every column after it slid one track to the
+     left: progress landed in the zero-width track and its bar disappeared, and
+     the date took the progress column. The element stays and its TRACK goes to
+     zero, which clips it against the `overflow: hidden` it already carries and
+     leaves every other column where its header says it is. */
   .rowAuthor {
-    display: none;
+    padding: 0;
   }
 }
 
@@ -399,14 +422,14 @@
   flex: 0 0 auto;
   display: grid;
   grid-template-columns: repeat(auto-fill, var(--card-w));
-  gap: 28px 20px;
-  padding: 4px var(--shelf-pad-x) 40px;
+  gap: var(--space-28) var(--space-20);
+  padding: var(--space-4) var(--shelf-pad-x) var(--space-40);
 }
 
 .book {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--space-4);
   padding: 0;
   border: none;
   background: none;
@@ -421,8 +444,8 @@
 
 .book:focus-visible {
   outline: 2px solid var(--accent);
-  outline-offset: 4px;
-  border-radius: 4px;
+  outline-offset: var(--space-4);
+  border-radius: var(--radius-mark);
 }
 
 /* THE COVER WELL: a 2:3 box the artwork stands in, not a frame it is cut to.
@@ -446,7 +469,7 @@
   justify-content: center;
   flex-shrink: 0;
   aspect-ratio: var(--cover-aspect);
-  margin-bottom: 8px;
+  margin-bottom: var(--space-8);
   /* Transparent by default; the tint sets its own background inline, and
      `.coverTinted` gives that the jacket treatment. */
   background: transparent;
@@ -462,7 +485,7 @@
   max-height: 100%;
   width: auto;
   height: auto;
-  border-radius: 3px;
+  border-radius: var(--radius-mark);
   /* Lifted off the surface — the offset is downward, so it reads as floating
      over the window rather than embossed into it. Its OWN token: `--shadow-
      card` is the pane's and the palette's, an elevation of a few pixels; a
@@ -474,20 +497,20 @@
    artwork is a plain jacket among the others rather than the well laid bare. */
 .coverTinted {
   align-items: center;
-  border-radius: 3px;
+  border-radius: var(--radius-mark);
   box-shadow: var(--shadow-jacket);
 }
 
 .book:hover:not(:disabled) .cover {
-  transform: translateY(-2px);
+  transform: translateY(calc(-1 * var(--space-2)));
 }
 
 /* The tint's title. It is inset by its OWN padding now — the well used to carry
    12px for it, and the well is bare so that artwork can meet the box's edges. */
 .coverTitle {
-  padding: 12px;
+  padding: var(--space-12);
   font-family: 'Crimson Pro Variable', 'Crimson Pro', Georgia, serif;
-  font-size: 15px;
+  font-size: var(--text-body);
   line-height: 1.2;
   color: var(--ink-2);
   display: -webkit-box;
@@ -503,12 +526,12 @@
    book it warns about — where the eye is — and takes no height. */
 .noCopy {
   position: absolute;
-  inset-inline-start: 6px;
-  inset-block-start: 6px;
-  padding: 2px 6px;
+  inset-inline-start: var(--space-6);
+  inset-block-start: var(--space-6);
+  padding: var(--space-2) var(--space-6);
   border-radius: var(--radius-chip);
   background: var(--surface);
-  font-size: 11px;
+  font-size: var(--text-caption);
   color: var(--muted);
   box-shadow: var(--shadow-pill);
 }
@@ -519,20 +542,20 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 10px;
-  padding: 60px 40px;
+  gap: var(--space-10);
+  padding: var(--space-56) var(--space-40);
   text-align: center;
 }
 
 .emptyTitle {
   font-family: 'Crimson Pro Variable', 'Crimson Pro', Georgia, serif;
-  font-size: 28px;
+  font-size: var(--text-title);
   color: var(--ink);
 }
 
 .emptyBody {
-  max-width: 380px;
-  font-size: 14px;
+  max-width: var(--prose-narrow);
+  font-size: var(--text-body);
   line-height: 1.6;
   color: var(--muted);
   text-wrap: pretty;
@@ -547,7 +570,7 @@
  * letting it crowd the sentence above it. */
 .emptyImport {
   composes: secondary from '../styles/controls.module.css';
-  margin-top: 6px;
+  margin-top: var(--space-6);
 }
 
 /* The cell wraps the open button so the remove control can sit on top of it.
@@ -597,9 +620,9 @@
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-8);
   min-height: var(--pane-title-row);
-  padding: 4px var(--shelf-pad-x) 12px;
+  padding: var(--space-4) var(--shelf-pad-x) var(--space-12);
 }
 
 .search {
@@ -608,18 +631,18 @@
   /* The control ramp's own height, so the field and the three round buttons
      beside it are one row of one size rather than a 32 next to three 34s. */
   height: var(--control-pill);
-  padding: 0 12px;
+  padding: 0 var(--space-12);
   /* `--line-2` is the themed border token the rest of the app draws fields
    * with. This asked for `--rule`, which does not exist in `tokens.css` — so
    * the hardcoded fallback was doing all the work, and being a fixed black at
    * 12% it did not follow the theme at all: on Night that is black-on-dark,
    * which is no border. */
   border: 1px solid var(--line-2);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--surface, transparent);
   color: inherit;
   font: inherit;
-  font-size: 13px;
+  font-size: var(--text-ui);
 }
 
 /* The border is dropped by the global input rule in `global.css`, so this is
@@ -643,22 +666,22 @@
   flex: 0 0 auto;
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  padding: 0 var(--shelf-pad-x) 12px;
+  gap: var(--space-6);
+  padding: 0 var(--shelf-pad-x) var(--space-12);
 }
 
 .chip {
   display: inline-flex;
-  gap: 6px;
+  gap: var(--space-6);
   align-items: center;
-  height: 28px;
-  padding: 0 10px;
+  height: var(--control-sm);
+  padding: 0 var(--space-10);
   border: 1px solid var(--line-2);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: transparent;
   color: inherit;
   font: inherit;
-  font-size: 12px;
+  font-size: var(--text-small);
   cursor: pointer;
 }
 
@@ -684,25 +707,25 @@
    while a tag is typed — a cell that grew would push every row below it. */
 .tagForm {
   position: absolute;
-  inset-inline: 6px;
-  inset-block-start: 6px;
+  inset-inline: var(--space-6);
+  inset-block-start: var(--space-6);
   z-index: 1;
 }
 
 .tagInput {
   width: 100%;
-  height: 28px;
-  padding: 0 10px;
+  height: var(--control-sm);
+  padding: 0 var(--space-10);
   /* `--line-2`, for the reason `.search` gives — and this one asked for the
    * same absent token with a DIFFERENT fallback (0.2 against 0.12), so the two
    * fields sat at two border weights that were never chosen relative to each
    * other. */
   border: 1px solid var(--line-2);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--surface, #fff);
   color: inherit;
   font: inherit;
-  font-size: 12px;
+  font-size: var(--text-small);
 }
 
 /* ONE LINE, and a line the cell has budgeted for. It wrapped, and a book with
@@ -713,20 +736,20 @@
 .tagRow {
   display: flex;
   flex-wrap: nowrap;
-  gap: 4px;
-  height: 16px;
-  margin-block-start: 4px;
+  gap: var(--space-4);
+  height: var(--tag-line);
+  margin-block-start: var(--space-4);
   overflow: hidden;
 }
 
 .bookTag {
-  padding: 1px 7px;
+  padding: var(--space-2) var(--space-8);
   border: 1px solid var(--line-2);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: transparent;
   color: inherit;
   font: inherit;
-  font-size: 10px;
+  font-size: var(--text-micro);
   opacity: 0.75;
   cursor: pointer;
 }
@@ -747,8 +770,8 @@
 .metaRow {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-block-start: 4px;
+  gap: var(--space-8);
+  margin-block-start: var(--space-4);
 }
 
 /* Progress. Drawn only for a book that has been opened — a zero-width bar under
@@ -758,8 +781,8 @@
   flex: 1 1 auto;
   min-width: 0;
   display: block;
-  block-size: 3px;
-  border-radius: 999px;
+  block-size: var(--track-w);
+  border-radius: var(--radius-pill);
   background: var(--line-2);
   overflow: hidden;
 }
@@ -806,8 +829,8 @@
 /* The import report. Per book rather than a spinner — an import of three hundred
    books that says only "working…" is indistinguishable from one that has hung. */
 .importing {
-  padding: 0 var(--stage-pad-x, 24px) 10px;
-  font-size: 12px;
+  padding: 0 var(--stage-pad-x, 24px) var(--space-10);
+  font-size: var(--text-small);
   opacity: 0.7;
   font-variant-numeric: tabular-nums;
 }

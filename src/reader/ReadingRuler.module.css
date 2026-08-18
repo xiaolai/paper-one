@@ -20,7 +20,7 @@
    * across the first words of the line the ruler was pointing at — the one
    * place it must not cover. */
   right: 0;
-  font-size: 11px;
+  font-size: var(--text-caption);
   line-height: 1.4;
   color: var(--muted);
   text-wrap: pretty;

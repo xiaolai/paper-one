@@ -19,11 +19,11 @@
 .sheet {
   position: absolute;
   z-index: var(--z-scrim);
-  top: 96px;
+  top: var(--sheet-top);
   left: 50%;
   transform: translateX(-50%);
-  width: min(640px, calc(100% - 96px));
-  max-height: min(560px, calc(100% - 160px));
+  width: min(var(--sheet-max), calc(100% - 2 * var(--sheet-inset)));
+  max-height: min(var(--sheet-max-h), calc(100% - var(--sheet-top) - var(--sheet-inset)));
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -42,7 +42,7 @@
 @keyframes rise {
   from {
     opacity: 0;
-    transform: translateX(-50%) translateY(6px);
+    transform: translateX(-50%) translateY(var(--space-6));
   }
   to {
     opacity: 1;
@@ -63,9 +63,9 @@
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 0 16px;
-  height: 52px;
+  gap: var(--space-10);
+  padding: 0 var(--space-16);
+  height: var(--control-field);
   border-bottom: 1px solid var(--line);
   color: var(--muted);
 }
@@ -78,7 +78,7 @@
   background: none;
   color: var(--ink);
   font-family: inherit;
-  font-size: 15px;
+  font-size: var(--text-body);
 }
 
 .input::placeholder {
@@ -91,14 +91,14 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 6px;
+  padding: var(--space-6);
 }
 
 .group {
-  padding: 10px 10px 4px;
-  font-size: 11px;
+  padding: var(--space-10) var(--space-10) var(--space-4);
+  font-size: var(--text-caption);
   font-weight: 600;
-  letter-spacing: 0.08em;
+  letter-spacing: var(--track-caps-wide);
   text-transform: uppercase;
   color: var(--muted);
 }
@@ -106,15 +106,15 @@
 .row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-10);
   width: 100%;
-  padding: 9px 10px;
+  padding: var(--space-10) var(--space-10);
   border: none;
   border-radius: var(--radius-control);
   background: none;
   color: var(--ink-2);
   font-family: inherit;
-  font-size: 13px;
+  font-size: var(--text-ui);
   text-align: start;
   cursor: pointer;
 }
@@ -137,7 +137,7 @@
 
 .rowSub {
   display: block;
-  font-size: 11px;
+  font-size: var(--text-caption);
   color: var(--muted);
 }
 
@@ -145,14 +145,14 @@
  * well as tinted. */
 .rowOn {
   color: var(--accent);
-  font-size: 11px;
+  font-size: var(--text-caption);
   font-weight: 600;
 }
 
 .combo {
   flex: 0 0 auto;
   font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
+  font-size: var(--text-caption);
   color: var(--muted);
 }
 
@@ -162,17 +162,21 @@
 }
 
 .empty {
-  padding: 28px 16px;
+  padding: var(--space-28) var(--space-16);
   text-align: center;
-  font-size: 13px;
+  font-size: var(--text-ui);
   line-height: 1.6;
   color: var(--muted);
 }
 
+/* A JACKET, not a control — so it takes the shelf's own proportion rather than
+   a control height, and it was 26 wide by 34 tall, which is that proportion
+   arrived at by hand. Stated as the aspect it always was, it cannot drift out
+   of step with the covers everywhere else. */
 .cover {
   flex: 0 0 auto;
-  width: 26px;
-  height: 34px;
-  border-radius: 3px;
+  height: var(--control-pill);
+  aspect-ratio: var(--cover-aspect);
+  border-radius: var(--radius-mark);
   border: 1px solid var(--line-2);
 }
