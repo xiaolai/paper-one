@@ -31,6 +31,10 @@
      danger row is read on its hover fill: 6.5 / 5.9 here; sepia 5.8 / 5.0; slate
      and sage fell to 4.15 / 4.24 on wash — under 4.5:1 — and carry their own. */
   --danger:#B3261E;
+  /* The edge a theme's OWN swatch is drawn with when it is the chosen one:
+     the densest line the theme has, so it reads against that theme's paper
+     rather than against the app's. */
+  --swatch-edge:#D6D8D3;
   --tint-a:#F4F1EA; --tint-b:#EEF1F4; --tint-c:#F1F0F4; --tint-d:#EFF2F1; --tint-e:#F0E4D2;
   --shadow-window: 0 1px 2px rgba(20,24,28,.04), 0 12px 32px -20px rgba(20,24,28,.22);
   --shadow-card: 0 1px 2px rgba(20,24,28,.05), 0 14px 34px -22px rgba(20,24,28,.26);
@@ -51,6 +55,7 @@
   --surface:#DFE1DE; --bg:#D6D9D5; --wash:#CBCFCA;
   --line:#C6CAC5; --line-2:#B8BDB8; --line-3:#A6ABA6;
   --accent:#23456F; --accent-bg:#CFD7DF; --accent-line:#B4BFCB;
+  --swatch-edge:#A6ABA6;
   --amber:#8A4C11; --amber-bg:#DDD8CB; --amber-line:#C6B79C;
   --mark:#DCCB92; --mark-rule:#B99B3F; --mark-ink:#6F6034; --ok:#6A8858;
   /* Darker than the root's: on this theme's --wash the root red measures under
@@ -64,6 +69,7 @@
   --surface:#DDE6D8; --bg:#D3DECD; --wash:#C7D4C1;
   --line:#C6D2BF; --line-2:#B6C4AE; --line-3:#A2B29A;
   --accent:#2A4F6B; --accent-bg:#CDDCDE; --accent-line:#B3C6C9;
+  --swatch-edge:#A2B29A;
   --amber:#8F5013; --amber-bg:#DDDCC3; --amber-line:#C3BE97;
   --mark:#D8CE8C; --mark-rule:#AE9A3C; --mark-ink:#6A6231; --ok:#5F8050;
   /* Darker than the root's: on this theme's --wash the root red measures under
@@ -77,6 +83,7 @@
   --surface:#F8F0E1; --bg:#F3EAD9; --wash:#EBDFC9;
   --line:#E5D9C2; --line-2:#DCCDB0; --line-3:#C9B694;
   --accent:#2C5578; --accent-bg:#E7E9E4; --accent-line:#CFD6D2;
+  --swatch-edge:#C9B694;
   --amber:#985614; --amber-bg:#F3E7D2; --amber-line:#DCC49E;
   --mark:#EEDBA6; --mark-rule:#C9A44E; --mark-ink:#8A7443; --ok:#6E8C5C;
   --tint-a:#EEE3CE; --tint-b:#E3E5DE; --tint-c:#E9E1D5; --tint-d:#E4E6D9; --tint-e:#EDDCBB;
@@ -87,6 +94,12 @@
   --surface:#16191C; --bg:#101315; --wash:#1E2226;
   --line:#24282C; --line-2:#2F343A; --line-3:#3C4248;
   --accent:#8FB4E8; --accent-bg:#1A2431; --accent-line:#2B3A4E;
+  /* WHITE, not `--line-3`. On a #16191C surface the densest line this theme
+     has is #3C4248, which is a shade of the dark it sits on — a border nobody
+     can see is not a selection. The rule is the same as the light themes',
+     which is "the edge must read against this theme's own paper"; on dark
+     paper that means going the other way. */
+  --swatch-edge:#FFFFFF;
   --amber:#D9A25E; --amber-bg:#241C12; --amber-line:#3B2E1D;
   --mark:#4A3B18; --mark-rule:#8A6E2C; --mark-ink:#C9B380; --ok:#86A874; --danger:#E5735F;
   --tint-a:#2A2620; --tint-b:#1F262E; --tint-c:#262330; --tint-d:#202A26; --tint-e:#2E2716;

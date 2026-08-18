@@ -729,24 +729,36 @@
      heading sits about 0.4 of its own size above its caption, which for a 15px
      `Aa` is this. */
   gap: var(--space-6);
-  height: var(--theme-swatch-h);
+  /* A CIRCLE — square, then fully rounded. A pill takes its shape from the
+     column it happens to sit in and would change with the pane's width; a
+     circle is the same object at any size, which is what a sample of paper
+     should be. Centred in its cell rather than filling it. */
+  inline-size: var(--theme-swatch-h);
+  block-size: var(--theme-swatch-h);
+  justify-self: center;
   padding: 0 var(--space-2);
   border: none;
-  /* A step rounder than a control, because it is not one — a card's radius on
-     a tile this size reads as an object being offered rather than as a button
-     waiting to be pressed. */
-  border-radius: var(--radius-card);
+  border-radius: var(--radius-pill);
   background: var(--surface);
-  box-shadow: 0 0 0 1px var(--line-2);
   font-family: inherit;
   cursor: pointer;
 }
 
-/* The ring is the THEME's own accent, because the whole tile is that theme and
-   a ring in the current theme's blue around a Sepia tile would be the one part
-   of the preview that is not the preview. */
+/* THE CHOSEN ONE GETS AN EDGE, and only it. The other four are the colour and
+   nothing else — no border, no lift — so the one line in the row is
+   unambiguous.
+
+   `--swatch-edge` is the THEME's, not the app's: each one is the densest line
+   that theme has, so the edge reads against that theme's own paper. Night is
+   the exception the rule produces rather than an exception to it — its densest
+   line is a shade of the dark it sits on, so it goes the other way and uses
+   white. See `tokens.css`.
+
+   A shadow was tried here first and was wrong: a lift says "this one is above
+   the others", and choosing paper is not a stack. `aria-pressed` carries the
+   same state for anyone who cannot see either. */
 .themeSwatch[data-on='true'] {
-  box-shadow: 0 0 0 2px var(--accent);
+  box-shadow: 0 0 0 1px var(--swatch-edge);
 }
 
 /* The specimen. Large enough to have colour in it — an `Aa` at caption size is
