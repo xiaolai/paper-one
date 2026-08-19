@@ -1,6 +1,5 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
 import {
-  BOOKS_DIR,
   folderOf,
   mergeParsed,
   mergeStranded,
@@ -163,6 +162,34 @@ export function withTagsAdded(own: readonly string[], values: readonly string[])
   return next
 }
 
+/**
+ * A record as a shelf row, with the flag no record can supply.
+ *
+ * `hasContent` is DERIVED — the scan measures it, and it is deliberately not a
+ * field of `BookRecord`, because a stored flag is one more thing that can
+ * disagree with the folder. The corollary is easy to get wrong and was: any
+ * row rebuilt FROM a record has lost the flag unless it is handed back here.
+ *
+ * Losing it was not cosmetic. `loadShelf` refuses to trust an index in which
+ * any row lacks the flag, so one flagless row — which every `add` produced, on
+ * every import, every open and every background parse — turned the cache off
+ * for the next launch, quietly. A freshly imported library then paid a full
+ * scan of every book folder on every single launch, serial IPC before the
+ * window could draw, and called it opening the app.
+ *
+ * ONE FUNCTION under `add` and `reconcile`, so what "a record becomes a row"
+ * means is decided once. The flag is whatever the caller actually knows: the
+ * row it is replacing, or a fresh measurement. Undefined stays undefined —
+ * this carries knowledge, it does not invent any.
+ */
+export function asRow(
+  record: BookRecord,
+  bookId: string,
+  hasContent: boolean | undefined,
+): IndexedBook {
+  return { ...record, bookId, ...(hasContent === undefined ? {} : { hasContent }) }
+}
+
 /** One file as text, or null when it is not there or will not read. */
 async function readText(fs: IndexFs, path: string): Promise<string | null> {
   try {
@@ -238,12 +265,15 @@ export function useLibrary(
    * write's own task, while that task is still counted — hence the guard reads
    * "more than one": someone queued after me, so my photograph is stale.
    */
-  const reconcile = useCallback((bookId: string, record: BookRecord) => {
+  const reconcile = useCallback((bookId: string, record: BookRecord, hasContent?: boolean) => {
     if ((pending.current.get(bookId) ?? 0) > 1) return
     const at = latest.current.findIndex((one) => one.bookId === bookId)
     if (at === -1) return
     const next = [...latest.current]
-    next[at] = { ...record, bookId, ...(latest.current[at]!.hasContent === undefined ? {} : { hasContent: latest.current[at]!.hasContent }) }
+    /* A fresh measurement wins; otherwise the row's own flag is CARRIED — see
+     * `asRow`. A write that measured nothing has learned nothing about the
+     * bytes, and must not un-know what the scan established. */
+    next[at] = asRow(record, bookId, hasContent ?? latest.current[at]!.hasContent)
     latest.current = next
     setBooks(next)
   }, [])
@@ -367,7 +397,7 @@ export function useLibrary(
                * stale flag was trusted on every launch after. The advertised
                * repair repaired nothing. */
               if (previous.hasContent === false) {
-                const now = await hasContentFile(fs, folderOf(bookId).slice(BOOKS_DIR.length + 1))
+                const now = await hasContentFile(fs, bookId)
                 if (now) {
                   const where = latest.current.findIndex((one) => one.bookId === previous.bookId)
                   if (where !== -1) {
@@ -437,7 +467,11 @@ export function useLibrary(
        * `writeBook` stamps it into the record — means `update`, `remove` and
        * `positionOf` see one id from this point on, instead of an alias that
        * resolves to the same folder and matches none of them. */
-      const entry: IndexedBook = { ...merged, bookId }
+      /* THE FLAG IS CARRIED, not dropped — see `asRow`. `mergeParsed` folds
+       * records, and a record does not know whether the bytes are there, so the
+       * row this replaces is the only thing here that does. The write below
+       * measures for real and corrects it. */
+      const entry: IndexedBook = asRow(merged, bookId, previous?.hasContent)
       const list =
         at === -1
           ? [entry, ...latest.current]
@@ -487,6 +521,15 @@ export function useLibrary(
          * after the partial restore, which is a fresh way to lose the same thing
          * this rescue exists to save. */
         const existing = stranded ? (live ? mergeStranded(stranded, live) : stranded) : live
+        /* WHAT THE FOLDER ACTUALLY HOLDS, measured here because this task is
+         * the one place that knows the folder has settled: the restore above
+         * has run, and every route into `add` writes the bytes before the
+         * record — an import copies them first, an open keeps its own copy
+         * first, the background pass has just read them. One listing, and the
+         * row and the index learn the flag without waiting for a rescan —
+         * which is what keeps the index trusted at the next launch, for a row
+         * the scan has never seen. */
+        const bytesThere = await hasContentFile(target, bookId)
         /* SPARSE IS CHECKED AGAINST THE DISK TOO. The early return above guards
          * the in-memory row, and a record can be on disk without being in that
          * list — a removal shown optimistically before its trash landed, or an
@@ -502,7 +545,7 @@ export function useLibrary(
           }
           await writeBook(target, bookId, kept)
           if (stranded) await target.remove(`${trashOf(bookId)}/book.json`).catch(() => {})
-          reconcile(bookId, kept)
+          reconcile(bookId, kept, bytesThere)
           return
         }
         const written = existing ? mergeParsed(existing, record) : merged
@@ -515,7 +558,7 @@ export function useLibrary(
          * is one write behind — so a tag or a position on disk but not in the
          * cache stayed invisible, and the next thing to save the row wrote the
          * cache's version over it. */
-        reconcile(bookId, written)
+        reconcile(bookId, written, bytesThere)
       })
     },
     [commit, reconcile],

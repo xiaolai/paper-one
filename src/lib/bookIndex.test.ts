@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import { BOOKS_DIR } from './bookFolder'
-import { INDEX_FILE, loadShelf, parseIndex, scanBooks, writeIndex, type IndexFs } from './bookIndex'
+import {
+  INDEX_FILE,
+  hasContentFile,
+  loadShelf,
+  parseIndex,
+  scanBooks,
+  writeIndex,
+  type IndexFs,
+} from './bookIndex'
 
 /**
  * The index is a CACHE and the folders are the truth.
@@ -379,5 +387,97 @@ describe('a stray folder beside the books', () => {
     await loadShelf(fs)
     fs.store.delete(`${BOOKS_DIR}/half_done/content.epub`)
     expect((await loadShelf(fs)).rescanned).toBe(true)
+  })
+})
+
+/**
+ * What a scan is allowed to COST.
+ *
+ * Every filesystem call is an IPC round-trip into the Tauri process, and
+ * `main.tsx` awaits the scan before React mounts — so the call count IS the
+ * time the window stays blank. The scan used to probe each folder up to ten
+ * times, one at a time: `exists` for the record, the read, then `exists` once
+ * per known format for the bytes. One listing per folder answers everything
+ * the probes asked, and this pins the budget so the probes cannot creep back.
+ */
+describe('what a scan costs', () => {
+  function countedFs(files: Record<string, string>) {
+    const fs = fakeFs(files)
+    const calls = { readDir: 0, readFile: 0, exists: 0 }
+    const counted: IndexFs = {
+      ...fs,
+      readDir: (path) => {
+        calls.readDir += 1
+        return fs.readDir(path)
+      },
+      readFile: (path) => {
+        calls.readFile += 1
+        return fs.readFile(path)
+      },
+      exists: (path) => {
+        calls.exists += 1
+        return fs.exists(path)
+      },
+    }
+    return { counted, calls }
+  }
+
+  it('pays one listing per folder, one read per book, and no probes', async () => {
+    const { counted, calls } = countedFs({
+      ...twoBooks,
+      [`${BOOKS_DIR}/book_a/content.epub`]: 'WHALE',
+      // A stray folder costs its listing and nothing more.
+      [`${BOOKS_DIR}/half_done/content.epub`]: 'PARTIAL',
+    })
+    const books = await scanBooks(counted)
+    expect(books).toHaveLength(2)
+    expect(calls.readDir).toBe(1 + 3)
+    expect(calls.readFile).toBe(2)
+    expect(calls.exists).toBe(0)
+  })
+
+  /* Concurrency must not reorder the shelf: the rows come back in the order
+   * the directory listed them, exactly as the serial walk produced. */
+  it('keeps the rows in listing order', async () => {
+    const files: Record<string, string> = {}
+    const names = ['book_e', 'book_a', 'book_c', 'book_b', 'book_d']
+    for (const name of names) files[`${BOOKS_DIR}/${name}/book.json`] = record(name)
+    const fs = fakeFs(files)
+    const listed = (await fs.readDir(BOOKS_DIR)).map((one) => one.name)
+    const books = await scanBooks(fs)
+    expect(books.map((one) => one.title)).toEqual(listed)
+  })
+})
+
+describe('hasContentFile', () => {
+  it('finds the bytes from one listing', async () => {
+    const fs = fakeFs({
+      [`${BOOKS_DIR}/book_a/book.json`]: record('Alpha'),
+      [`${BOOKS_DIR}/book_a/content.pdf`]: 'bytes',
+    })
+    expect(await hasContentFile(fs, 'book_a')).toBe(true)
+  })
+
+  /* A half-finished write is not the book: `content.epub.writing` must not
+   * count, or a crash mid-import produces a row that claims bytes it lost. */
+  it('does not mistake a temporary neighbour for the book', async () => {
+    const fs = fakeFs({
+      [`${BOOKS_DIR}/book_a/book.json`]: record('Alpha'),
+      [`${BOOKS_DIR}/book_a/content.epub.writing`]: 'half',
+    })
+    expect(await hasContentFile(fs, 'book_a')).toBe(false)
+  })
+
+  it('is false for a record with no bytes, and for no folder at all', async () => {
+    const fs = fakeFs({ [`${BOOKS_DIR}/book_a/book.json`]: record('Alpha') })
+    expect(await hasContentFile(fs, 'book_a')).toBe(false)
+    expect(await hasContentFile(fs, 'book_gone')).toBe(false)
+  })
+
+  /* Takes the book's ID — `book:abc` lives in `book_abc`, and the caller must
+   * not have to know that. */
+  it('resolves the folder from the id', async () => {
+    const fs = fakeFs({ [`${BOOKS_DIR}/book_abc/content.epub`]: 'bytes' })
+    expect(await hasContentFile(fs, 'book:abc')).toBe(true)
   })
 })

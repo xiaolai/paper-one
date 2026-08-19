@@ -39,18 +39,37 @@ export interface IndexedBook extends BookRecord {
 }
 
 /**
- * Does this folder hold a content file? One `exists` per known extension.
- *
- * THE LIST COMES FROM `bookVault`, which is the module that decides what a
- * stored book may be called. This kept its own copy, so adding a format to one
- * and not the other made every book of that format look contentless — the row
- * went disabled with its bytes sitting beside the record.
+ * Every name a stored content file may have — derived from `bookVault`, which
+ * is the module that decides what a stored book may be called. An earlier copy
+ * of the list lived here, so adding a format to one and not the other made
+ * every book of that format look contentless.
  */
-export async function hasContentFile(fs: IndexFs, folder: string): Promise<boolean> {
-  for (const ext of CONTENT_EXTENSIONS) {
-    if (await fs.exists(`${BOOKS_DIR}/${folder}/content.${ext}`)) return true
+const CONTENT_NAMES: readonly string[] = CONTENT_EXTENSIONS.map((ext) => `content.${ext}`)
+
+/** Does this listing contain a content file? Shared by the scan and the probe. */
+function listsContent(names: ReadonlySet<string>): boolean {
+  return CONTENT_NAMES.some((name) => names.has(name))
+}
+
+/**
+ * Does this book's folder hold a content file? ONE listing, not one probe per
+ * format.
+ *
+ * Every filesystem call here is an IPC round-trip into the Tauri process, so
+ * the unit of cost is the CALL, not the bytes. Probing `exists` per extension
+ * cost up to eight round-trips to learn what one `readDir` says outright —
+ * and the scan asks this question once per book on the shelf.
+ *
+ * False for a folder that is not there: a listed folder can be removed while
+ * the question is in flight, and a book that is gone has no bytes.
+ */
+export async function hasContentFile(fs: IndexFs, bookId: string): Promise<boolean> {
+  try {
+    const entries = await fs.readDir(folderOf(bookId))
+    return listsContent(new Set(entries.map((one) => one.name)))
+  } catch {
+    return false
   }
-  return false
 }
 
 export interface IndexFs extends VaultFs {
@@ -124,6 +143,43 @@ export function parseIndex(raw: string | null): readonly IndexedBook[] | null {
 }
 
 /**
+ * How many folders a scan reads at once.
+ *
+ * The scan's cost is IPC round-trips, and one at a time means paying every
+ * round-trip's latency in full, in a row, before the first window can draw —
+ * `main.tsx` awaits this before React mounts. A handful in flight overlaps the
+ * waiting without contending for anything real: the work per folder is two
+ * small reads, not computation.
+ */
+const SCAN_WIDTH = 16
+
+/**
+ * Run `work` over every item, at most `width` in flight.
+ *
+ * Results keep the ITEMS' order, not completion order — the walk is concurrent,
+ * what it produces is not allowed to be. `null` is "nothing came of this item",
+ * so a worker can decline without a slot going missing.
+ */
+async function pooledMap<T, R>(
+  items: readonly T[],
+  width: number,
+  work: (item: T) => Promise<R | null>,
+): Promise<(R | null)[]> {
+  const results: (R | null)[] = new Array<R | null>(items.length).fill(null)
+  let cursor = 0
+  const worker = async () => {
+    for (;;) {
+      const at = cursor
+      cursor += 1
+      if (at >= items.length) return
+      results[at] = await work(items[at]!)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(width, items.length) }, worker))
+  return results
+}
+
+/**
  * Rebuild by reading every book's record.
  *
  * A folder whose `book.json` is missing or unreadable is SKIPPED rather than
@@ -131,6 +187,13 @@ export function parseIndex(raw: string | null): readonly IndexedBook[] | null {
  * also means a half-written import — a folder with content but no record yet —
  * is simply not on the shelf until it is finished, which is the correct
  * behaviour rather than a special case.
+ *
+ * TWO ROUND-TRIPS PER BOOK, a few folders at a time — see `SCAN_WIDTH`. This
+ * walk used to be strictly serial and probed each folder up to ten times —
+ * `exists` for the record, a read, then `exists` once per known format for the
+ * bytes — which put thousands of back-to-back IPC waits between launching the
+ * app and the first paint of a library big enough to matter. One listing per
+ * folder answers both questions the probes asked.
  */
 export async function scanBooks(fs: IndexFs): Promise<IndexedBook[]> {
   let entries: { name: string; isDirectory: boolean }[]
@@ -150,17 +213,17 @@ export async function scanBooks(fs: IndexFs): Promise<IndexedBook[]> {
     if (await fs.exists(BOOKS_DIR)) throw cause
     return []
   }
-  const books: IndexedBook[] = []
   /* Folders whose record IS THERE and would not read — as distinct from one
    * that simply has no record yet, which is a half-written import and is
    * correctly skipped. See the throw below. */
   let unreadable = 0
-  for (const entry of entries) {
-    if (!entry.isDirectory) continue
+  const folders = entries.filter((entry) => entry.isDirectory)
+  const scanned = await pooledMap(folders, SCAN_WIDTH, async (entry): Promise<IndexedBook | null> => {
     try {
-      const at = `${BOOKS_DIR}/${entry.name}/book.json`
-      if (!(await fs.exists(at))) continue
-      const bytes = await fs.readFile(at)
+      const listing = await fs.readDir(`${BOOKS_DIR}/${entry.name}`)
+      const names = new Set(listing.map((one) => one.name))
+      if (!names.has('book.json')) return null
+      const bytes = await fs.readFile(`${BOOKS_DIR}/${entry.name}/book.json`)
       const record = parseRecord(new TextDecoder().decode(bytes))
       /* A record that is THERE and parses to nothing is unreadable too — which
        * is what a truncated or corrupt `book.json` actually looks like, since
@@ -168,7 +231,7 @@ export async function scanBooks(fs: IndexFs): Promise<IndexedBook[]> {
        * throw missed the commonest shape of the thing being counted. */
       if (!record) {
         unreadable += 1
-        continue
+        return null
       }
       /* THE RECORD'S OWN ID — but only when it names the folder it is sitting
        * in. `safeId` is not reversible, so `book:abc` lives in `book_abc` and
@@ -188,13 +251,14 @@ export async function scanBooks(fs: IndexFs): Promise<IndexedBook[]> {
        * or a migrated row whose copy never existed — and the shelf has to be
        * able to say so. `scanBooks` already skips a folder with no record for
        * exactly this reasoning; this is the same rule applied to the other half. */
-      const hasContent = await hasContentFile(fs, entry.name)
-      books.push({ ...record, bookId, hasContent })
+      const hasContent = listsContent(names)
+      return { ...record, bookId, hasContent }
     } catch {
       unreadable += 1
-      continue
+      return null
     }
-  }
+  })
+  const books = scanned.filter((one): one is IndexedBook => one !== null)
   /* EVERY RECORD UNREADABLE IS NOT AN EMPTY LIBRARY. One damaged book costs
    * that book — the rule the loop above is written around, and the right one.
    * But a whole library that will not read is the state where the shelf says
@@ -330,16 +394,22 @@ export async function scanAllMarks(fs: IndexFs): Promise<unknown[]> {
     if (await fs.exists(BOOKS_DIR)) throw cause
     return []
   }
-  const all: unknown[] = []
-  for (const entry of entries) {
-    if (!entry.isDirectory) continue
-    try {
-      const bytes = await fs.readFile(`${BOOKS_DIR}/${entry.name}/marks.json`)
-      const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes))
-      if (Array.isArray(parsed)) all.push(...parsed)
-    } catch {
-      continue
-    }
-  }
-  return all
+  /* The same pooled walk the shelf scan uses, for the same reason: one read
+   * per book, serial, is a wall of back-to-back IPC waits in front of the one
+   * pane that asked. Order is the ITEMS' order either way — see `pooledMap` —
+   * so the pane draws the same list a serial walk produced. */
+  const marks = await pooledMap(
+    entries.filter((entry) => entry.isDirectory),
+    SCAN_WIDTH,
+    async (entry) => {
+      try {
+        const bytes = await fs.readFile(`${BOOKS_DIR}/${entry.name}/marks.json`)
+        const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes))
+        return Array.isArray(parsed) ? parsed : null
+      } catch {
+        return null
+      }
+    },
+  )
+  return marks.flatMap((one) => one ?? [])
 }
