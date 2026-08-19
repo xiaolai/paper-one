@@ -1,0 +1,198 @@
+/* The tag editor — see `TagEditor.tsx`.
+ *
+ * The BOX only. Whoever opens it gives it a place: the shelf's card and row
+ * wrap it in a `.popover` (below), placed by `useRowMenu` the way a menu is;
+ * the reader shows it inside a sheet. Both get the same inside, which is the
+ * point of it being one component. */
+
+.editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  width: var(--tag-editor-w);
+  max-width: 100%;
+  padding: var(--space-10) var(--space-12) var(--space-12);
+  color: var(--ink);
+  font-size: var(--text-ui);
+}
+
+/* In the reader's sheet: the sheet's width is the editor's, and the sheet's
+   own inset is the padding. */
+.editor[data-fill='true'] {
+  width: 100%;
+  padding: var(--space-16) var(--space-20) var(--space-20);
+}
+
+/* Over a card or a row: a menu's surface, fixed and placed from the viewport,
+   because the surfaces that open it clip their overflow. `composes` so it is
+   the same surface a menu is and cannot drift from it. */
+.popover {
+  composes: menu from '../styles/controls.module.css';
+  padding: 0;
+  min-width: 0;
+}
+
+.heading {
+  font-size: var(--text-caption);
+  font-weight: 600;
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The chips wrap. This is the one place tags are seen in full on a book, so
+   nothing here truncates. */
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  height: var(--control-xs);
+  padding-inline-start: var(--space-8);
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  background: var(--accent-bg);
+  font-size: var(--text-small);
+  max-width: 100%;
+}
+
+/* A publisher's subject: a fact about the book, not the reader's — drawn as
+   the card draws it, so the two agree about whose it is. No ✕, so its
+   padding is symmetric. */
+.chip[data-mine='false'] {
+  padding-inline-end: var(--space-8);
+  border-color: var(--line-2);
+  background: transparent;
+  color: var(--muted);
+}
+
+/* On a selection, a tag some of the books carry: dashed, because it is not
+   yet a fact about the whole selection, and one click from being one. */
+.chip[data-partial='true'] {
+  border-style: dashed;
+  border-color: var(--accent);
+  background: transparent;
+}
+
+.chipLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The clickable body of a partial chip — the whole label is the target. */
+.chipFill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.chipCount {
+  font-size: var(--text-micro);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.chipRemove {
+  display: grid;
+  place-items: center;
+  width: var(--control-xs);
+  height: var(--control-xs);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.chipRemove:hover,
+.chipRemove:focus-visible {
+  color: var(--ink);
+}
+
+.field {
+  width: 100%;
+  height: var(--control-sm);
+  padding: 0 var(--space-10);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-chip);
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--text-ui);
+}
+
+.field:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* The list under the field. Rows the arrows walk and the pointer hovers; the
+   active one takes the wash, the same way a menu row does. */
+.suggestions {
+  display: flex;
+  flex-direction: column;
+}
+
+.suggestion {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  width: 100%;
+  height: var(--control-sm);
+  padding: 0 var(--space-8);
+  border: 0;
+  border-radius: var(--radius-chip);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--text-ui);
+  text-align: start;
+  cursor: pointer;
+}
+
+.suggestion[data-active='true'] {
+  background: var(--wash);
+}
+
+.suggestion[data-create='true'] {
+  color: var(--accent);
+}
+
+.suggestionLabel {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.suggestionKind {
+  flex: 0 0 auto;
+  font-size: var(--text-micro);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.suggestionCount {
+  flex: 0 0 auto;
+  font-size: var(--text-small);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
