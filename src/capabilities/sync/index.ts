@@ -43,6 +43,27 @@ import { StoragePane } from './ui/StoragePane'
  */
 
 /** The clock floor, persisted before any stamp escapes (`clock.ts`). */
+/**
+ * An app-relative path, resolved against the data root — the rule behind
+ * `absoluteInDataRoot`, kept pure so it can be tested without a peer.
+ *
+ * Exported for that test and for no other caller: everything inside the
+ * capability goes through the memoised wrapper, which is what makes the root
+ * one question asked once.
+ */
+export function absoluteIn(root: string, path: string): string {
+  /* The root must already be absolute — it is Rust's answer for the data
+   * directory, and a relative or blank one would silently anchor the journal
+   * to whatever the working directory happens to be. Same check, and the same
+   * reason, as `contentBlobPort`. */
+  if (typeof root !== 'string' || (!root.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(root))) {
+    throw new Error('sync: the data root must be an absolute path')
+  }
+  const base = root.replace(/[\\/]+$/, '')
+  if (base === '') throw new Error('sync: the data root must name a directory, not the filesystem root')
+  return `${base}/${path.replace(/^[\\/]+/, '')}`
+}
+
 export const CLOCK_FLOOR_SETTING: Setting<string> = defineSetting('sync.clockFloor', '', (raw) =>
   typeof raw === 'string' ? raw : undefined,
 )
@@ -256,6 +277,30 @@ export const sync: Capability = {
     unbindClock = services.bindClock(() => clock.now())
 
     const port = peerPort()
+    /**
+     * The journal's paths, made absolute for the ONE call that is not an fs
+     * call.
+     *
+     * Every path the journal hands its filesystem is app-relative — the
+     * kernel's fs resolves them against `BaseDirectory.AppData`, which is what
+     * `sync/journal.jsonl` means everywhere else in this file. `fsync` is not
+     * an fs-plugin call: it is the peer plugin's own command, it takes a real
+     * path, and it refuses one that is not absolute and inside the data root.
+     * Handed the relative path it answered `pathNotAbsolute`, `journal.open()`
+     * threw, and the composition rolled the whole set back — so a build with
+     * `sync` composed showed the fatal screen instead of the library, with the
+     * cause two `cause` links down.
+     *
+     * The root is Rust's answer (`paper_data_root`), asked for ONCE and reused:
+     * a debug build may be pointed at `PAPER_TEST_DATA_DIR`, so TypeScript
+     * resolving `appDataDir()` on its own would disagree with the process that
+     * owns the files — the same reasoning `contentBlobPort` is built on.
+     */
+    let dataRoot: Promise<string> | null = null
+    const absoluteInDataRoot = async (path: string): Promise<string> => {
+      dataRoot ??= port!.dataRoot()
+      return absoluteIn(await dataRoot, path)
+    }
     const fs = services.fs
     let journal: Journal | null = null
     if (fs) {
@@ -273,7 +318,7 @@ export const sync: Capability = {
         /* NOT swallowed: the fsync hook is the journal's durability
          * barrier, and a barrier that reports success on failure is no
          * barrier — the append must fail loudly and stay retryable. */
-        ...(port ? { fsync: (path: string) => port.fsync(path) } : {}),
+        ...(port ? { fsync: async (path: string) => port.fsync(await absoluteInDataRoot(path)) } : {}),
         /* The canonical rows, tombstones included, off the kernel's card
          * store — sync holds no raw flat-store handle (WI-10.4). */
         cards: () => services.cards.stored(),
