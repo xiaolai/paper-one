@@ -21,6 +21,7 @@ import { loadShelf } from './lib/bookIndex'
 import { emptyExpired } from './lib/bookTrash'
 import { migrateToFolders, summariseMigration } from './lib/migrateToFolders'
 import { libraryFs } from './lib/bookFiles'
+import { countingFs, moment, onFirstPaint, reportFs, timed, watchFs } from './lib/devTiming'
 import { installFatalHandlers } from './lib/reportFatal'
 
 installFatalHandlers()
@@ -43,7 +44,11 @@ if (!host) throw new Error('#root is missing from index.html')
  * that supports it, and raising the target for the whole bundle to avoid four
  * lines here would be the wrong trade. */
 async function boot(root: HTMLElement): Promise<void> {
-  const storage = await openAppStorage()
+  /* EVERY PHASE BELOW RUNS WHILE THE WINDOW IS BLANK, which is why they are
+   * measured rather than reasoned about. Dev only, and gone from a build —
+   * see `devTiming`. */
+  const bootFrom = performance.now()
+  const storage = await timed('open the store', () => openAppStorage())
   /* THE SHELF IS AWAITED TOO, for the same reason the store is: rendering first
    * and filling in afterwards gives every reader one frame of an empty library,
    * and this one would be a frame of "Your library is empty" over a full one.
@@ -51,7 +56,10 @@ async function boot(root: HTMLElement): Promise<void> {
    * `loadShelf` reads the index — one file — or rescans when it is missing or
    * disagrees with the folders. Outside Tauri there is no filesystem and the
    * shelf starts empty, which is the honest answer in a browser. */
-  const fs = inTauri() ? libraryFs : null
+  /* COUNTED, in dev. The scan's own comment says the call count is the time the
+   * window stays blank, so the count is the measurement that matters most here;
+   * `countingFs` is the identity function in a build. */
+  const fs = inTauri() ? countingFs(libraryFs) : null
 
   /* CARRY A PHASE-3 LIBRARY ACROSS, before the shelf is read.
    *
@@ -73,7 +81,8 @@ async function boot(root: HTMLElement): Promise<void> {
        * stopped every valid library row migrating — and the migration itself
        * already treats unreadable marks as none, so the strict read was the only
        * thing standing between a reader and their books. */
-      const outcomes = await migrateToFolders(fs, {
+      const outcomes = await timed('carry a legacy library across', () =>
+        migrateToFolders(fs, {
         /* CHECKED, not asserted. `as []` told the compiler this was a list and
          * told the runtime nothing — so a store holding a valid JSON OBJECT
          * threw inside the migration and skipped every legacy book, which is
@@ -81,7 +90,8 @@ async function boot(root: HTMLElement): Promise<void> {
          * to prevent. */
         rows: asRows(readJson(storage.getItem('paper.library.v1'), [])),
         marks: readJson(storage.getItem('paper.marks.v1'), []),
-      })
+        }),
+      )
       const said = summariseMigration(outcomes)
       if (said) console.info(`Paper: ${said}`)
     } catch (cause) {
@@ -96,7 +106,16 @@ async function boot(root: HTMLElement): Promise<void> {
   let shelfUnread = false
   if (fs) {
     try {
-      initialBooks = (await loadShelf(fs)).books
+      /* THE ANSWER TO "why is launch slow" IS USUALLY `rescanned`. A trusted
+       * cache is one file read and one listing; a rescan is two round-trips per
+       * book, and a library of a few thousand feels every one of them. If this
+       * says `rescanned=true` on every launch, the cache is being distrusted
+       * rather than the scan being slow, and that is a different bug. */
+      const shelf = await timed('load the shelf', () => loadShelf(fs), (one) => ({
+        books: one.books.length,
+        rescanned: one.rescanned,
+      }))
+      initialBooks = shelf.books
     } catch (cause) {
       /* SAID, not swallowed. Logging it and carrying on with `[]` still drew
        * "Your library is empty" over a library that is sitting on disk, which is
@@ -117,11 +136,23 @@ async function boot(root: HTMLElement): Promise<void> {
    * and `emptyExpired` errs towards keeping anything it cannot age. */
   if (fs) void emptyExpired(fs).catch(() => [])
 
+  moment('everything before the first render', { ms: Math.round(performance.now() - bootFrom) })
+  reportFs('filesystem, up to the first render')
+
   createRoot(root).render(
     <StrictMode>
       <App storage={storage} fs={fs} initialBooks={initialBooks} shelfUnread={shelfUnread} />
     </StrictMode>,
   )
+
+  /* AFTER THE FIRST PAINT, and after that whenever the filesystem moves. A
+   * shelf that comes up quickly and then reads a thousand covers is slow in a
+   * way no boot measurement can see. */
+  onFirstPaint('the window drew its first frame', {
+    ms: Math.round(performance.now() - bootFrom),
+    books: initialBooks.length,
+  })
+  watchFs()
 }
 
 /** A legacy library value that is not a list is not a library. */

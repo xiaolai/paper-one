@@ -146,6 +146,49 @@ function foliatePdfStub(): Plugin {
   }
 }
 
+/**
+ * Put the app's launch timings in THIS terminal.
+ *
+ * `console.info` in the webview goes to devtools and to the automation bridge,
+ * and neither is where someone running `pnpm app` is looking. The webview has
+ * no other channel to the terminal: `tauri-plugin-log` prints what RUST logs,
+ * and forwarding the JS console into it needs `@tauri-apps/plugin-log` and a
+ * capability grant — a dependency and a permission for a dev-only diagnostic.
+ *
+ * The dev server is already connected to the page over the HMR socket, so the
+ * message rides that. Nothing here exists in a build: `import.meta.hot` is
+ * undefined outside dev, and this plugin only ever installs a server handler.
+ *
+ * See `src/lib/devTiming.ts` for what is sent.
+ */
+function timingLog(): Plugin {
+  return {
+    name: 'paper:timing-log',
+    apply: 'serve',
+    configureServer(server) {
+      server.ws.on('paper:timing', (data: unknown) => {
+        const row = (data ?? {}) as {
+          name?: string
+          took?: number | null
+          at?: number | null
+          hidden?: boolean
+          detail?: object
+        }
+        const when =
+          (typeof row.took === 'number' ? ` took=${row.took.toFixed(0)}ms` : '') +
+          (typeof row.at === 'number' ? ` at=${row.at.toFixed(0)}ms` : '')
+        const rest = Object.entries(row.detail ?? {})
+          .map(([key, value]) => `${key}=${String(value)}`)
+          .join(' ')
+        /* HIDDEN IS SHOUTED, because a timing taken behind another window
+           measures the window server rather than the app. */
+        const seen = row.hidden ? ' HIDDEN' : ''
+        console.log(`[timing] ${row.name ?? '?'}${when}${rest ? ' ' + rest : ''}${seen}`)
+      })
+    },
+  }
+}
+
 // Tauri drives the dev server, so the port is fixed and failures must be loud
 // rather than silently hopping to 14202 — a moved port shows up as a white window.
 //
@@ -157,7 +200,7 @@ function foliatePdfStub(): Plugin {
 const host = process.env.TAURI_DEV_HOST
 
 export default defineConfig({
-  plugins: [react(), pdfjsAssets(), foliatePdfStub()],
+  plugins: [react(), pdfjsAssets(), foliatePdfStub(), timingLog()],
 
   // foliate-js ships as unbundled ESM source whose modules import each other by
   // relative path. Pre-bundling it rewrites those specifiers and breaks the

@@ -28,6 +28,7 @@ import { writeBookDrag } from '../lib/bookDrag'
 import type { IndexedBook } from '../lib/bookIndex'
 import { TRASH_KEPT_FOR } from '../lib/bookTrash'
 import { withStatus, withUntagged, withoutTag } from '../lib/searchQuery'
+import { moment, onFirstPaint } from '../lib/devTiming'
 import { ICON } from '../lib/metrics'
 import type { Platform } from '../lib/metrics'
 import { useRowMenu } from '../lib/useRowMenu'
@@ -506,6 +507,25 @@ export function Library({
     [shelf.length, viewport],
   )
   const visible = virtualising ? shelf.slice(win.firstIndex, win.endIndex) : shelf
+
+  /* WHAT THE SHELF ACTUALLY COST, once. `books` is the whole library, `shelf`
+   * is what the current scope leaves, and `cells` is what this render hands to
+   * React — three numbers that are usually assumed equal and are the first
+   * thing to check when the screen is slow. A `cells` equal to `shelf` on a
+   * large library means the virtualiser did not engage, which is a different
+   * problem from a scan that took too long. Dev only, and gone from a build. */
+  const measured = useRef(false)
+  useEffect(() => {
+    if (measured.current) return
+    measured.current = true
+    moment('the shelf rendered', {
+      library: books.length,
+      shelf: shelf.length,
+      cells: visible.length,
+      virtualising,
+    })
+    onFirstPaint('the shelf drew its first frame')
+  }, [books.length, shelf.length, visible.length, virtualising])
 
   return (
     <div className={styles.library} data-platform={platform}>
