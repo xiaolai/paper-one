@@ -64,11 +64,24 @@ export function useRowMenu(
   open: boolean,
   anchorRef: RefObject<HTMLElement | null>,
   onClose: () => void,
-  options: Parameters<typeof usePlacement>[3] = {},
+  options: Parameters<typeof usePlacement>[3] & {
+    /**
+     * ARIA-menu keyboard behaviour: focus moves into the first item on open,
+     * ↑/↓ walk the items with wraparound, Home/End jump, and focus returns to
+     * the `⋯` on close. OPT-IN, because this hook also positions the tag
+     * editor — a popover whose first focusable is a remove button and whose
+     * field autofocuses itself; stealing focus there would put "delete the
+     * first tag" one keypress away. Declaring `role="menu"` without this was
+     * the worse state: semantics promising keyboard behaviour that did not
+     * exist, so a screen-reader user was told "menu" and given nothing.
+     */
+    menu?: boolean
+  } = {},
 ): RowMenu {
+  const { menu = false, ...placementOptions } = options
   const moreRef = useRef<HTMLButtonElement | null>(null)
   const menuRef = useRef<HTMLDivElement | null>(null)
-  const { style, placement } = usePlacement(open, anchorRef, menuRef, options)
+  const { style, placement } = usePlacement(open, anchorRef, menuRef, placementOptions)
 
   /* Read through a ref so the effect below does not rebind on every render:
    * `onClose` is recreated per render by every caller, and listing it as a
@@ -79,6 +92,8 @@ export function useRowMenu(
   useEffect(() => {
     if (!open) return
     const close = () => closeRef.current()
+    const items = () =>
+      Array.from(menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])
     const onPointer = (event: PointerEvent) => {
       const target = event.target as Node
       if (menuRef.current?.contains(target) || moreRef.current?.contains(target)) return
@@ -88,20 +103,66 @@ export function useRowMenu(
       if (event.key === 'Escape') {
         event.stopPropagation()
         close()
+        return
       }
+      if (!menu) return
+      /* Tab CLOSES a menu — the ARIA pattern, and the behaviour every native
+       * menu has: a menu is a modal little world, and Tab is the reader
+       * leaving it. Left unhandled, Tab walked the menuitems like ordinary
+       * buttons with the menu still up. Not prevented, so focus moves on as
+       * Tab means it to; the restore-to-trigger in cleanup only fires when
+       * focus is still inside, which by then it is not. */
+      if (event.key === 'Tab') {
+        close()
+        return
+      }
+      const list = items()
+      if (list.length === 0) return
+      const at = list.findIndex((item) => item === document.activeElement)
+      const to =
+        event.key === 'ArrowDown'
+          ? (at + 1) % list.length
+          : event.key === 'ArrowUp'
+            ? (at - 1 + list.length) % list.length
+            : event.key === 'Home'
+              ? 0
+              : event.key === 'End'
+                ? list.length - 1
+                : null
+      if (to === null) return
+      event.preventDefault()
+      list[to]?.focus()
+    }
+    /* Focus moves INTO the menu on open — after this task, so the placement
+     * pass has run and the box is where it will stay. `preventScroll` because
+     * the first frame can still be parked off screen. */
+    let focusTimer: number | undefined
+    if (menu) {
+      focusTimer = window.setTimeout(() => {
+        items()[0]?.focus({ preventScroll: true })
+      }, 0)
     }
     document.addEventListener('pointerdown', onPointer)
     document.addEventListener('keydown', onKey)
     return () => {
+      if (focusTimer !== undefined) window.clearTimeout(focusTimer)
       document.removeEventListener('pointerdown', onPointer)
       document.removeEventListener('keydown', onKey)
+      /* Focus goes back where it came from — the control that opened the
+       * menu — rather than falling to the document, which for a keyboard
+       * user means starting over from the top of the window. Only if focus
+       * is still INSIDE the menu: a pointer user who clicked elsewhere has
+       * already put it where they meant it. */
+      if (menu && menuRef.current?.contains(document.activeElement)) {
+        moreRef.current?.focus({ preventScroll: true })
+      }
       /* ALSO ON CLEANUP — which is unmount, or `open` flipping false. A
        * virtualised row that scrolls away while its menu is open takes the
        * listeners with it but not the caller's state; without this the menu
        * came back armed when the row scrolled back in. */
       close()
     }
-  }, [open])
+  }, [open, menu])
 
   /* A DETACHED menu closes rather than parking at -9999. Parked, its items
    * stayed focusable and exposed to assistive technology while the row was
