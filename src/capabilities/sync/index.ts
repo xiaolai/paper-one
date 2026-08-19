@@ -172,6 +172,17 @@ export const sync: Capability = {
     {
       id: 'sync:storage',
       title: 'Storage',
+      /* NEAR BEFORE FAR. Storage is what this machine is holding — the books
+       * whose bytes are here, what the covers cost, how the last sync went.
+       * Devices is the machines it talks to. A reader arriving at the bottom
+       * of Settings is far more often asking "what is this using?" than
+       * "what else is paired?", and the first answer should not be behind
+       * the second.
+       *
+       * DECLARED rather than inherited: unordered, these two fell out of
+       * `composeCapabilities`, which is topological by `requires` — so this
+       * section sat below Devices purely because sync depends on peer. */
+      order: 10,
       render: () => (storageModel ? createElement(StoragePane, { model: storageModel }) : null),
     },
   ],

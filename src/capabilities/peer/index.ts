@@ -50,6 +50,11 @@ export const peer: Capability = {
     {
       id: 'peer:devices',
       title: 'Devices',
+      /* After Storage — see the note there. Both declare a number rather than
+       * one of them leaning on the default, so neither moves when the other
+       * changes its mind, and the gap leaves room to slot something between
+       * them without renumbering either. */
+      order: 20,
       render: () => (model ? createElement(DevicesPane, { model, syncNow }) : null),
     },
   ],

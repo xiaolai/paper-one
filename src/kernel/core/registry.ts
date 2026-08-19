@@ -465,13 +465,30 @@ const EMPTY_ACTIONS: readonly BookAction[] = Object.freeze([])
 const EMPTY_CLIENTS: readonly ClientContribution[] = Object.freeze([])
 const EMPTY_SERVICES: ReadonlyMap<string, ServiceContribution> = new Map()
 
-/** Panes across the composition: by `order` (unset last), then registration. */
-function sortPanes(all: readonly PaneContribution[]): readonly PaneContribution[] {
+/**
+ * A contributed list, arranged: by `order` (unset last), then registration.
+ *
+ * ONE HELPER FOR EVERY SUCH LIST. It was `sortPanes`, and the settings
+ * sections went unsorted beside it — so the panel's running order fell out of
+ * the start order, which is TOPOLOGICAL BY `requires`. Devices sat above
+ * Storage because sync depends on peer, and for no other reason: a capability
+ * gaining a dependency would have reordered a panel nobody had touched.
+ *
+ * Stability is load-bearing rather than incidental. `sort` is stable in every
+ * engine this runs on, and the index tiebreak makes it so regardless — an
+ * unordered contribution has to stay exactly where registration put it, or
+ * declaring nothing would mean something different on each build.
+ */
+function byOrder<T extends { readonly order?: number }>(all: readonly T[]): readonly T[] {
   return Object.freeze(
     all
-      .map((pane, i) => ({ pane, i }))
-      .sort((a, b) => (a.pane.order ?? Number.MAX_SAFE_INTEGER) - (b.pane.order ?? Number.MAX_SAFE_INTEGER) || a.i - b.i)
-      .map(({ pane }) => pane),
+      .map((one, at) => ({ one, at }))
+      .sort(
+        (a, b) =>
+          (a.one.order ?? Number.MAX_SAFE_INTEGER) - (b.one.order ?? Number.MAX_SAFE_INTEGER) ||
+          a.at - b.at,
+      )
+      .map(({ one }) => one),
   )
 }
 
@@ -686,8 +703,8 @@ export async function composeCapabilities(
   const live = new Set(started.map((one) => one.id))
   const startedOrdered = ordered.filter((cap) => live.has(cap.id))
   const kept = snapshot.filter((one) => live.has(one.id))
-  const panes = sortPanes(Object.freeze(kept.flatMap((one) => [...one.panes])))
-  const settings = Object.freeze(kept.flatMap((one) => [...one.settings]))
+  const panes = byOrder(kept.flatMap((one) => [...one.panes]))
+  const settings = byOrder(kept.flatMap((one) => [...one.settings]))
   const bookActions = Object.freeze(kept.flatMap((one) => [...one.bookActions]))
   const clients = Object.freeze(kept.flatMap((one) => [...one.clients]))
   const services: ReadonlyMap<string, ServiceContribution> = new Map(

@@ -935,6 +935,69 @@ describe('panes', () => {
   })
 })
 
+/* ------------------------------------------------- settings section order */
+
+/**
+ * THE SETTINGS PANEL'S ORDER IS DECLARED, NOT INHERITED.
+ *
+ * Contributed sections went unsorted while panes beside them were sorted, so
+ * the panel's running order was whatever `composeCapabilities` produced — and
+ * that is TOPOLOGICAL BY `requires`. Devices sat above Storage because sync
+ * depends on peer, and for no other reason. Nothing said so, and a capability
+ * gaining a dependency would have rearranged a panel nobody had touched.
+ */
+describe('settings sections', () => {
+  const section = (id: string, order?: number) => ({
+    id: id as `${string}:${string}`,
+    title: id,
+    render: () => null,
+    ...(order === undefined ? {} : { order }),
+  })
+
+  it('are sorted by order, unset last, ties by registration', async () => {
+    const composition = await composeCapabilities(
+      [
+        cap('a', { settings: [section('a:late'), section('a:second', 2)] }),
+        cap('b', { settings: [section('b:first', 1), section('b:also-late')] }),
+      ],
+      api(),
+      new AbortController().signal,
+    )
+    expect(composition.settings.map((one) => one.id)).toEqual([
+      'b:first',
+      'a:second',
+      'a:late',
+      'b:also-late',
+    ])
+    composition.dispose()
+  })
+
+  /**
+   * THE ONE THAT MATTERS. `b` requires `a`, so `a` always starts first — that
+   * is the ADR's ordering and it is not negotiable. The panel's order is a
+   * separate question, and `order` is what separates them: a section may sit
+   * above one belonging to a capability it depends on.
+   *
+   * This is the real arrangement it was found in — sync requires peer, and
+   * Storage belongs above Devices.
+   */
+  it('lets a section outrank one from a capability it depends on', async () => {
+    const composition = await composeCapabilities(
+      [
+        cap('a', { settings: [section('a:second', 20)] }),
+        cap('b', { requires: ['a'], settings: [section('b:first', 10)] }),
+      ],
+      api(),
+      new AbortController().signal,
+    )
+    // Start order is still topological — the dependency decides that.
+    expect(composition.order).toEqual(['a', 'b'])
+    // The panel's order is the sections' own.
+    expect(composition.settings.map((one) => one.id)).toEqual(['b:first', 'a:second'])
+    composition.dispose()
+  })
+})
+
 /* ------------------------------------------------------- stale pane ids */
 
 describe('resolvePaneId — a persisted lastPane naming an absent pane', () => {
@@ -991,5 +1054,25 @@ describe('the platform compositions', () => {
     for (const pane of composition.panes) expect(composition.order.some((id) => pane.id.startsWith(`${id}:`))).toBe(true)
     composition.dispose()
     expect(vi.getTimerCount()).toBe(0)
+  })
+
+  /**
+   * EVERY SETTINGS SECTION SAYS WHERE IT SITS, and no two say the same thing.
+   *
+   * A rule rather than a running order, so this stays true — and stays
+   * name-free — as capabilities come and go. What it catches is the state the
+   * panel was actually in: sections with no `order` fall back to registration,
+   * registration is topological by `requires`, and a section's position in
+   * Settings then depends on which capability happens to depend on which.
+   * Distinctness matters for the same reason — a tie falls through to exactly
+   * that accident.
+   */
+  it.each(Object.keys(roots) as (keyof typeof roots)[])('%s declares a distinct order for every settings section', async (platform) => {
+    const composition = await composeCapabilities(roots[platform], api(), new AbortController().signal)
+    const orders = composition.settings.map((one) => one.order)
+    const undeclared = composition.settings.filter((one) => one.order === undefined).map((one) => one.id)
+    expect(undeclared, `settings sections with no declared order: ${undeclared.join(', ')}`).toEqual([])
+    expect(new Set(orders).size, `two sections claim the same order: ${orders.join(', ')}`).toBe(orders.length)
+    composition.dispose()
   })
 })

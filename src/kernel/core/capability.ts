@@ -130,6 +130,20 @@ export interface CommandContext {
 export interface SettingsSection {
   readonly id: `${string}:${string}`
   readonly title: string
+  /**
+   * Where this section sits in the panel. Lower first; unset last; ties keep
+   * registration order. The same rule and the same field as
+   * `PaneContribution.order`, arranged by the same helper, because two ways to
+   * order a contributed list is one way too many.
+   *
+   * IT HAS TO BE DECLARED, and the reason is not preference. Without it the
+   * panel's running order fell out of `composeCapabilities`, which is
+   * TOPOLOGICAL BY `requires` — so Devices came before Storage because sync
+   * depends on peer, and nothing else. A capability that gained a dependency
+   * would have silently moved somebody else's settings section, and no test
+   * anywhere would have said so.
+   */
+  readonly order?: number
   readonly render: PaneRenderer
 }
 
