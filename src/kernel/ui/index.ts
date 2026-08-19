@@ -18,6 +18,9 @@
 
 import './styles/tokens.css'
 import './styles/global.css'
+/* The vocabulary contributed UI draws with — global class names, handed across
+ * the boundary as strings by `core/capabilityUi`. */
+import './styles/capability.css'
 
 export { App } from './App'
 export type { AppProps } from './App'

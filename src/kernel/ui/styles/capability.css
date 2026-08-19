@@ -1,0 +1,214 @@
+/* The vocabulary a CAPABILITY draws with — the kernel's controls, as public API.
+ *
+ * WHY THIS FILE EXISTS. A capability contributes panes and settings sections,
+ * and the kernel renders them (`renderContribution`). But a capability may
+ * import the kernel only through `src/kernel/index.ts`
+ * (`kernel-public-entry-only`), and the kernel's own controls are a CSS Module
+ * — `controls.module.css`, whose class names are hashed at build time and
+ * reachable only by importing it. So a capability had no way to ask for a
+ * Paper button, and the two that shipped drew with raw `<button>`/`<input>`
+ * and two hand-rolled inline objects. They rendered in the browser's default
+ * chrome: a system-blue submit button and a default-bordered field, inside a
+ * pane where everything else was Paper's. The boundary did not cause that —
+ * it removed the lazy option and nothing replaced it. This is the replacement.
+ *
+ * GLOBAL, not a module, and that is the whole mechanism: a global class name
+ * is a STRING, so the kernel can hand it across the boundary as data
+ * (`core/capabilityUi.ts`, re-exported from the public entry) without a
+ * capability importing a stylesheet, and without the React-free entry growing
+ * a CSS import. `capabilityUi.test.ts` holds the names here and the names
+ * exported there to each other — a name that styles nothing renders silently
+ * unstyled, which is the failure this whole file is fixing.
+ *
+ * IT DOES NOT DUPLICATE `controls.module.css`. Both are written from the same
+ * tokens — `--control-pill`, `--radius-pill`, `--accent`, `--text-ui` — so
+ * they agree because the scale is the single source, not because two blocks
+ * are being kept in step by hand. That is the difference between this and the
+ * drift `controls.module.css` was lifted out to prevent: two consumers of one
+ * scale, not two copies of one block. `tokens.test.ts` reads this file like
+ * every other and fails on a raw value, which is what keeps that true.
+ *
+ * WHAT IS IN IT is what the two real capability surfaces need — the Devices
+ * section and the Storage section — and nothing else. A vocabulary invented
+ * ahead of a caller is a vocabulary nobody's use has corrected yet.
+ */
+
+/* --- structure ---------------------------------------------------------- */
+
+.paper-cap-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* A label and its value, the shape every settings row in the app already has,
+   so a contributed row sits in the same rhythm as the kernel's own. */
+.paper-cap-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  min-height: var(--row-compact);
+  font-size: var(--text-ui);
+}
+
+/* The label half: takes the slack and truncates, so a long device name pushes
+   the value off the row rather than wrapping it under the label. */
+.paper-cap-grow {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The value half — quiet, because the label is what the reader is scanning. */
+.paper-cap-value {
+  color: var(--muted);
+  font-size: var(--text-small);
+}
+
+/* A sentence under a row, explaining what the control just above it means.
+   Its own class rather than a `.paper-cap-value` in a div: it is a block, it
+   wraps, and it carries the bottom margin that separates it from the next row. */
+.paper-cap-hint {
+  margin-bottom: var(--space-6);
+  color: var(--muted);
+  font-size: var(--text-small);
+  line-height: 1.4;
+}
+
+/* Buttons offered together. */
+.paper-cap-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  flex-wrap: wrap;
+  padding: var(--space-4) 0;
+}
+
+/* --- buttons ------------------------------------------------------------ */
+
+/* THE DEFAULT IS THE QUIET ONE, deliberately. Almost every action a capability
+   offers is secondary — "Pair a new device…", "Sync now", "Revoke" — and a
+   pane of filled accent buttons reads as a form to complete rather than a
+   panel of settings. The primary below is for the one action a surface is
+   actually FOR. */
+.paper-cap-button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-6);
+  height: var(--control-sm);
+  padding: 0 var(--space-12);
+  /* THE LABEL IS ONE LINE. A button in a row beside a title that truncates
+     will be squeezed by it, and a flex item's default `min-width: auto` lets
+     it shrink until its own words wrap — which is what "Remove download"
+     did next to a long book title: a two-line button in a one-line row. The
+     row's slack belongs to the label (`paper-cap-grow`); the action keeps its
+     width. */
+  flex: 0 0 auto;
+  white-space: nowrap;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: inherit;
+  box-shadow: inset 0 0 0 1px var(--line-2);
+  font: inherit;
+  font-size: var(--text-small);
+  cursor: pointer;
+  transition: background var(--motion-popover);
+}
+
+.paper-cap-button:hover,
+.paper-cap-button:focus-visible {
+  background: var(--wash);
+}
+
+.paper-cap-button-primary {
+  background: var(--accent);
+  color: var(--surface);
+  box-shadow: none;
+  font-weight: 600;
+}
+
+.paper-cap-button-primary:hover,
+.paper-cap-button-primary:focus-visible {
+  background: var(--accent);
+}
+
+/* Destructive, and coloured rather than filled: it sits in a row beside
+   ordinary actions, and a filled red block in a settings list reads as an
+   error that has already happened rather than as an action available. The
+   kernel's own row menu makes the same choice — see `menuItem[data-danger]`. */
+.paper-cap-button-danger {
+  color: var(--danger);
+}
+
+.paper-cap-button-danger:hover,
+.paper-cap-button-danger:focus-visible {
+  background: var(--wash);
+  color: var(--danger);
+}
+
+/* --- fields ------------------------------------------------------------- */
+
+.paper-cap-field {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: var(--control-field);
+  padding: 0 var(--space-10);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--text-small);
+}
+
+.paper-cap-field::placeholder {
+  color: var(--muted);
+}
+
+/* A field holding a number, sized to the number. `flex: none` so it does not
+   take the row's slack the way the text field is meant to. */
+.paper-cap-field-narrow {
+  flex: 0 0 auto;
+  width: var(--tag-editor-w);
+  max-width: 30%;
+}
+
+/* The reader's own accent on a native checkbox, which is the whole of what was
+   missing: the control was unstyled, not the wrong control. */
+.paper-cap-toggle {
+  flex: 0 0 auto;
+  width: var(--icon-control);
+  height: var(--icon-control);
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* --- blocks ------------------------------------------------------------- */
+
+/* A pairing URL: long, unbreakable, and meant to be selected rather than read. */
+.paper-cap-code {
+  display: block;
+  padding: var(--space-8) var(--space-10);
+  border-radius: var(--radius-chip);
+  background: var(--wash);
+  color: var(--muted);
+  font-size: var(--text-micro);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.paper-cap-figure {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  padding: var(--space-8) 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .paper-cap-button {
+    transition: none;
+  }
+}
