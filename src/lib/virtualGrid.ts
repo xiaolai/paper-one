@@ -45,6 +45,14 @@ export interface GridMetrics {
   readonly overscanRows?: number
 }
 
+/**
+ * How many cells the unmeasured first frame renders — see the degenerate
+ * branch in `gridWindow`. More than any screen shows (the widest shelf runs
+ * about ten columns and three visible rows), small enough that a two-thousand
+ * book library does not mount whole for one frame.
+ */
+export const PREMEASURE = 36
+
 export function gridWindow({
   total,
   columns,
@@ -53,19 +61,24 @@ export function gridWindow({
   viewportHeight,
   overscanRows = 2,
 }: GridMetrics): GridWindow {
-  /* Degenerate inputs resolve to "render everything" rather than to nothing.
-   * A zero row height or column count means the grid has not been measured yet
-   * — the first render, before a ref attaches — and a shelf that renders
-   * NOTHING in that frame flashes empty on every mount. Rendering everything is
-   * wrong only in cost, and only for one frame. */
+  /* Degenerate inputs resolve to "render a screenful from the top" rather
+   * than to nothing OR to everything. A zero row height or column count means
+   * the grid has not been measured yet — the first render, before a ref
+   * attaches — and a shelf that renders NOTHING in that frame flashes empty
+   * on every mount. But rendering EVERYTHING, which this did, was not "wrong
+   * only in cost for one frame": that frame mounted two thousand cells and
+   * started their cover loads, and an image request does not un-send when the
+   * second, measured render unmounts the cell. `PREMEASURE` is comfortably
+   * more than any screen shows and gives the measurer its first cell. */
   if (total <= 0) return { firstRow: 0, lastRow: -1, firstIndex: 0, endIndex: 0, padTop: 0, padBottom: 0 }
   if (columns <= 0 || rowHeight <= 0 || viewportHeight <= 0) {
-    const rows = Math.ceil(total / Math.max(1, columns))
+    const end = Math.min(total, PREMEASURE)
+    const rows = Math.ceil(end / Math.max(1, columns))
     return {
       firstRow: 0,
       lastRow: rows - 1,
       firstIndex: 0,
-      endIndex: total,
+      endIndex: end,
       padTop: 0,
       padBottom: 0,
     }
