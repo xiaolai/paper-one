@@ -44,7 +44,15 @@ export function fakeFs(files: Record<string, string> = {}) {
       return bytes
     },
     writeFile: async (path, bytes) => void store.set(path, bytes),
-    exists: async (path) => store.has(path),
+    /* A DIRECTORY EXISTS when anything lives under it — same reasoning as
+     * `rename`. Answering only for exact keys made `trashBook`'s "is the folder
+     * there" guard false for every folder, so removal silently moved nothing in
+     * tests while working fine in the app. */
+    exists: async (path) => {
+      if (store.has(path)) return true
+      for (const key of store.keys()) if (key.startsWith(`${path}/`)) return true
+      return false
+    },
     mkdir: async () => {},
     remove: async (path) => void store.delete(path),
     removeDir: async (path: string) => {
@@ -53,9 +61,19 @@ export function fakeFs(files: Record<string, string> = {}) {
       }
     },
     rename: async (from, to) => {
+      /* A DIRECTORY MOVES WITH ITS CONTENTS, as the real call does. Directories
+       * are implicit here — a folder is the keys under it — so renaming one is
+       * a prefix rewrite. Moving only the exact key made `trashBook`'s one
+       * rename silently leave every file behind, which is a fake refuting the
+       * property the code under test is built on. */
       const bytes = store.get(from)
       if (bytes) store.set(to, bytes)
       store.delete(from)
+      for (const key of [...store.keys()]) {
+        if (!key.startsWith(`${from}/`)) continue
+        store.set(`${to}${key.slice(from.length)}`, store.get(key)!)
+        store.delete(key)
+      }
     },
   }
   return fs
