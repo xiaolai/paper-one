@@ -1,12 +1,22 @@
-import { useRef } from 'react'
-import { MoreHorizontal } from 'lucide-react'
+import { useMemo, useRef, type DragEvent, type MouseEvent } from 'react'
+import { Check, MoreHorizontal } from 'lucide-react'
 import type { IndexedBook } from '../lib/bookIndex'
-import { CANNOT_OPEN, canOpen, displayAuthor, displayTitle, statusOf } from '../lib/library'
+import {
+  CANNOT_OPEN,
+  canOpen,
+  displayAuthor,
+  displayTitle,
+  statusOf,
+  type TagCount,
+} from '../lib/library'
 import { ICON } from '../lib/metrics'
 import { relativeTime } from '../lib/relativeTime'
 import { useRowMenu } from '../lib/useRowMenu'
 import { BookCover } from './BookCover'
 import { BookMenu } from './BookMenu'
+import { readSelectClick, type SelectMode } from './BookCell'
+import { TagEditor } from './TagEditor'
+import editorStyles from './TagEditor.module.css'
 import styles from './Library.module.css'
 
 /**
@@ -38,15 +48,19 @@ export interface BookRowProps {
   readonly book: IndexedBook
   readonly now: number
   readonly menuFor: string | null
-  readonly setMenuFor: (bookId: string | null) => void
+  readonly setMenuFor: React.Dispatch<React.SetStateAction<string | null>>
   readonly confirming: string | null
-  readonly setConfirming: (bookId: string | null) => void
-  readonly setTagging: (bookId: string | null) => void
-  /** Which book has its tag field open, and what has been typed into it. */
+  readonly setConfirming: React.Dispatch<React.SetStateAction<string | null>>
+  /** Which book has its tag editor open, by id. */
   readonly tagging: string | null
-  readonly draftTag: string
-  readonly setDraftTag: (tag: string) => void
-  readonly onTag: (bookId: string, tag: string) => void
+  readonly setTagging: React.Dispatch<React.SetStateAction<string | null>>
+  readonly shelfTags: readonly TagCount[]
+  readonly selected: boolean
+  readonly selecting: boolean
+  readonly onSelect: (book: IndexedBook, mode: SelectMode) => void
+  readonly onDragStart: (book: IndexedBook, event: DragEvent) => void
+  readonly onTagBooks: (bookIds: readonly string[], tags: readonly string[]) => void
+  readonly onUntagBooks: (bookIds: readonly string[], tag: string) => void
   readonly onOpen: (book: IndexedBook) => void
   readonly onRemove: (book: IndexedBook) => void
   readonly onSetFinished: (bookId: string, finished: boolean) => void
@@ -59,11 +73,15 @@ export function BookRow({
   setMenuFor,
   confirming,
   setConfirming,
-  setTagging,
   tagging,
-  draftTag,
-  setDraftTag,
-  onTag,
+  setTagging,
+  shelfTags,
+  selected,
+  selecting,
+  onSelect,
+  onDragStart,
+  onTagBooks,
+  onUntagBooks,
   onOpen,
   onRemove,
   onSetFinished,
@@ -73,23 +91,61 @@ export function BookRow({
   const status = statusOf(book)
   const openable = canOpen(book)
   const menuOpen = menuFor === book.bookId
+  const editing = tagging === book.bookId
   const rowRef = useRef<HTMLDivElement | null>(null)
 
   const { moreRef, menuRef, menuStyle, close: closeMenu } = useRowMenu(
     menuOpen,
     rowRef,
     () => {
-      // Only this row's own menu: another row's may have opened since.
-      if (menuFor === book.bookId) setMenuFor(null)
-      setConfirming(null)
+      /* Only this row's OWN state, functionally — another row's menu may have
+       * opened since, and its armed remove with it. A blanket
+       * `setConfirming(null)` here disarmed whichever row was confirming when
+       * this one's close fired late. */
+      setMenuFor((at) => (at === book.bookId ? null : at))
+      setConfirming((at) => (at === book.bookId ? null : at))
     },
-    { side: 'bottom', align: 'end' },
+    // A real menu: focus and arrow keys — see `useRowMenu`.
+    { side: 'bottom', align: 'end', menu: true },
   )
 
+  /* THE SAME EDITOR THE CARD OPENS, under this row rather than under a
+   * jacket. The menu's "Tags…" sets one piece of state for both views;
+   * without an editor here that action would set it and nothing would
+   * appear — the menu would offer something the view could not do. Placed
+   * from the viewport, so nothing below shifts, which in a virtualised list
+   * would move every row under the pointer. */
+  const { menuRef: editorRef, menuStyle: editorStyle } = useRowMenu(
+    editing,
+    rowRef,
+    () => setTagging((at) => (at === book.bookId ? null : at)),
+    { side: 'bottom', align: 'start' },
+  )
+
+  /* The same reading of a click the card gives it — literally: see
+   * `readSelectClick`, which both views call. */
+  const onRowClick = (event: MouseEvent) => {
+    const meant = readSelectClick(event, selecting)
+    if (meant === 'open') {
+      if (openable) onOpen(book)
+    } else onSelect(book, meant)
+  }
+
   const opened = relativeTime(book.openedAt, now)
+  /* ONE derivation for the condition, the bar and the percent — see `BookCell`. */
+  const progress = book.progress ?? 0
+  const pct = Math.round(progress * 100)
+  const editorBooks = useMemo(() => [book], [book])
 
   return (
-    <div className={styles.row} ref={rowRef} data-open={menuOpen}>
+    <div
+      className={styles.row}
+      ref={rowRef}
+      data-open={menuOpen}
+      data-selected={selected}
+      draggable
+      onDragStart={(event) => onDragStart(book, event)}
+    >
       {/* THE WHOLE ROW OPENS THE BOOK, not just the title — a row that is only
           clickable along one word is a row a reader misses. The menu button
           sits outside this button for the same reason it does on the card: two
@@ -97,18 +153,37 @@ export function BookRow({
       <button
         type="button"
         className={styles.rowOpen}
-        data-disabled={!openable}
-        disabled={!openable}
-        title={openable ? `Open ${title}` : CANNOT_OPEN}
-        onClick={() => onOpen(book)}
+        /* Dimmed, not `disabled` — a ⌘-click on a no-copy row is how
+           selection STARTS, and disabled refused it. See the card. */
+        data-nocopy={!openable}
+        aria-pressed={selecting ? selected : undefined}
+        title={
+          selecting
+            ? selected
+              ? `Deselect ${title}`
+              : `Select ${title}`
+            : openable
+              ? `Open ${title}`
+              : CANNOT_OPEN
+        }
+        onClick={onRowClick}
       >
-        <BookCover
-          book={book}
-          title={title}
-          className={styles.rowCover ?? ''}
-          tintedClassName={styles.rowCoverTinted ?? ''}
-          titleClassName={styles.rowCoverTitle ?? ''}
-        />
+        {/* The selection mark takes the thumbnail's place: in a list the
+            column is what the eye scans down, and a check there reads as
+            "this row is in" without a second column of boxes. */}
+        {selected ? (
+          <span className={styles.rowSelected} aria-hidden="true">
+            <Check size={ICON.control} strokeWidth={ICON.stroke} />
+          </span>
+        ) : (
+          <BookCover
+            book={book}
+            title={title}
+            className={styles.rowCover ?? ''}
+            tintedClassName={styles.rowCoverTinted ?? ''}
+            titleClassName={styles.rowCoverTitle ?? ''}
+          />
+        )}
         <span className={styles.rowTitle}>
           <span className={styles.rowTitleText}>{title}</span>
           {/* The series, where the book belongs to one — a fact the jacket
@@ -131,16 +206,16 @@ export function BookRow({
         <span className={styles.rowProgress}>
           {status === 'finished' ? (
             <span className={styles.rowFinished}>Finished</span>
-          ) : (book.progress ?? 0) > 0 ? (
+          ) : progress > 0 ? (
             <>
               <span className={styles.rowBar} aria-hidden="true">
                 <span
                   className={styles.rowBarFill}
-                  style={{ inlineSize: `${Math.round((book.progress ?? 0) * 100)}%` }}
+                  style={{ inlineSize: `${pct}%` }}
                 />
               </span>
               <span className={styles.rowPercent}>
-                {Math.round((book.progress ?? 0) * 100)}%
+                {pct}%
               </span>
             </>
           ) : (
@@ -156,34 +231,10 @@ export function BookRow({
         <span className={styles.rowWhen}>{opened ?? <span className={styles.rowNone}>—</span>}</span>
       </button>
 
-      {/* THE SAME FIELD THE CARD OPENS, over this row rather than under a
-          cover. The menu's "Add a tag…" sets one piece of state for both views;
-          without a field here that action would set it and nothing would
-          appear — the menu would offer something the view could not do. Laid
-          over the row so nothing below shifts, which in a virtualised list
-          would move every row under the pointer. */}
-      {tagging === book.bookId && (
-        <form
-          className={styles.rowTagForm}
-          onSubmit={(event) => {
-            event.preventDefault()
-            onTag(book.bookId, draftTag)
-            setDraftTag('')
-          }}
-        >
-          <input
-            className={styles.rowTagInput}
-            value={draftTag}
-            onChange={(event) => setDraftTag(event.target.value)}
-            placeholder="Add a tag"
-            aria-label={`Add a tag to ${title}`}
-            autoFocus
-            onKeyDown={(event) => {
-              if (event.key === 'Escape') setTagging(null)
-            }}
-            onBlur={() => setTagging(null)}
-          />
-        </form>
+      {editing && (
+        <div ref={editorRef} className={editorStyles.popover} style={editorStyle} role="dialog" aria-label={`Tags for ${title}`}>
+          <TagEditor books={editorBooks} shelfTags={shelfTags} onAdd={onTagBooks} onRemove={onUntagBooks} />
+        </div>
       )}
 
       <button
@@ -194,9 +245,13 @@ export function BookRow({
         aria-haspopup="menu"
         aria-expanded={menuOpen}
         data-open={menuOpen}
-        title="Finish, tag, or remove"
+        title="Finish, tag, select, or remove"
         onClick={() => {
-          setConfirming(null)
+          setConfirming((at) => (at === book.bookId ? null : at))
+          // ANY editor, whichever row's — see the card's `⋯`: one surface at
+          // a time is a shelf rule, and keyboard opens skip the
+          // outside-pointerdown that enforces it for the pointer.
+          setTagging(null)
           setMenuFor(menuOpen ? null : book.bookId)
         }}
       >
@@ -218,7 +273,8 @@ export function BookRow({
             confirming={confirming}
             setConfirming={setConfirming}
             setTagging={setTagging}
-            setDraftTag={setDraftTag}
+            selected={selected}
+            onToggleSelect={() => onSelect(book, 'toggle')}
             onRemove={onRemove}
             onSetFinished={onSetFinished}
             closeMenu={closeMenu}

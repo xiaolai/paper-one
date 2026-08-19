@@ -549,6 +549,117 @@
   min-width: 0;
 }
 
+/* A drag carrying books is over the row: the ring the shelf draws on a
+   selected jacket, at the row's own radius, so the two ends of the gesture
+   agree about what "this one" looks like. */
+.tagRow[data-over='true'] {
+  border-radius: var(--radius-control);
+  outline: 2px solid var(--accent);
+  outline-offset: calc(-1 * var(--space-2));
+  background: var(--accent-bg);
+}
+
+/* EXCLUDED — `-tag:X`. Struck through, because that is what it means, and
+   muted rather than accented: it is a scope in force, but a negative one, and
+   lighting it the same as ON would say the opposite of what it does. */
+.scopeRow[data-excluded='true'] {
+  color: var(--muted);
+}
+
+.scopeRow[data-excluded='true'] .scopeLabel {
+  text-decoration: line-through;
+}
+
+/* The Tags heading with its one control beside it: `.groupTitle`'s row, laid
+   out so the sort toggle sits at the trailing edge on the heading's baseline. */
+.groupTitleRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-inline-end: var(--space-4);
+}
+
+.groupTitleRow > .groupTitle {
+  flex: 1 1 auto;
+}
+
+/* The sort toggle: the row menu's `⋯` shape, since it is the same kind of
+   thing — a quiet mark until it is wanted. */
+.groupTool {
+  composes: more from '../styles/controls.module.css';
+}
+
+/* The count on a collapsible group's heading, so a closed group still says
+   how much it holds. */
+.groupCount {
+  margin-inline-start: auto;
+  font-weight: 400;
+  letter-spacing: normal;
+  text-transform: none;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Narrowing a long tag list by name. The rename field's shape, in the row's
+   inset, so it reads as part of the list rather than as a second search box. */
+.tagFilter {
+  width: calc(100% - 2 * var(--space-10));
+  height: var(--control-sm);
+  margin: 0 var(--space-10) var(--space-6);
+  padding: 0 var(--space-8);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-chip);
+  background: var(--surface);
+  font: inherit;
+  font-size: var(--text-small);
+  color: var(--ink);
+}
+
+.tagFilter:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* What the last collection-wide remove did, and the way back. A quiet line
+   in the list's own inset — `.scopeHint`'s voice — with the one control that
+   is not a scope. */
+.undoLine {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  min-height: var(--row-compact);
+  padding: 0 var(--space-10);
+  font-size: var(--text-small);
+  color: var(--muted);
+}
+
+.undoText {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.undoButton {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  height: var(--control-xs);
+  padding: 0 var(--space-8);
+  border: 0;
+  border-radius: var(--radius-chip);
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-small);
+  cursor: pointer;
+}
+
+.undoButton:hover,
+.undoButton:focus-visible {
+  background: var(--wash);
+}
+
 /* Rename, in place: the row's label becomes a field the same size, so nothing
    around it moves while the reader types. */
 .tagRename {

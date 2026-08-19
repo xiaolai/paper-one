@@ -18,6 +18,7 @@ function context(over: Partial<AppState> = {}) {
     importing: false,
     closeBook: () => {},
     openSwitcher: () => {},
+    editTags: null,
   }
   return { ctx, dispatched }
 }

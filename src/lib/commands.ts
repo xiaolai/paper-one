@@ -69,6 +69,12 @@ export interface CommandContext {
   importing: boolean
   closeBook: () => void
   openSwitcher: () => void
+  /**
+   * Open the tag editor over the book being read. Null when there is no such
+   * book on the shelf — the reader is on the library, or reading a `?book=`
+   * the shelf does not hold — so the palette does not offer it.
+   */
+  editTags: (() => void) | null
 }
 
 export function buildCommands(ctx: CommandContext): Command[] {
@@ -104,13 +110,18 @@ export function buildCommands(ctx: CommandContext): Command[] {
     run: () => dispatch({ type: 'togglePane' }),
   })
 
-  commands.push({
-    id: 'pane:side',
-    label: state.side === 'left' ? 'Move the pane to the right' : 'Move the pane to the left',
-    group: 'Panels',
-    keywords: 'position side',
-    run: () => dispatch({ type: 'setSide', side: state.side === 'left' ? 'right' : 'left' }),
-  })
+  /* Only while a pane is showing. Closed, the command moved nothing anyone
+   * could see — a label promising a visible result that did not come — and
+   * the preference is set again the moment a pane opens on the other side. */
+  if (state.pane !== null) {
+    commands.push({
+      id: 'pane:side',
+      label: state.side === 'left' ? 'Move the pane to the right' : 'Move the pane to the left',
+      group: 'Panels',
+      keywords: 'position side',
+      run: () => dispatch({ type: 'setSide', side: state.side === 'left' ? 'right' : 'left' }),
+    })
+  }
 
   /* §06: the ruler is scrolled-flow only. Offering it in paginated mode would
    * be a command that silently does nothing — the reducer clears `rulerOn` the
@@ -253,9 +264,36 @@ export function buildCommands(ctx: CommandContext): Command[] {
     })
   }
 
+  /* Half of tagging happens while reading — this is the book that turned out
+   * to be about the sea — and the shelf is a screen away. Same editor the
+   * shelf opens, as a sheet. */
+  if (ctx.editTags) {
+    const editTags = ctx.editTags
+    /* No `on:` — it could never light. The palette is a layer, layers are
+     * exclusive, so `tagsOpen` is false whenever the palette is open to show
+     * this row. */
+    commands.push({
+      id: 'book:tags',
+      label: 'Tags for this book…',
+      group: 'Book',
+      combo: '⌘T',
+      keywords: 'tag label subject shelve',
+      run: editTags,
+    })
+  }
+
   commands.push({
     id: 'screen:library',
-    label: state.screen === 'library' ? 'Back to the reader' : 'Go to the library',
+    /* "Back to the reader" only when there is a book to go back TO. With none
+     * open, the reader screen is the empty book-opening state — the titlebar
+     * already words this correctly, and the palette said "back" to a place
+     * the reader had never been. */
+    label:
+      state.screen === 'library'
+        ? ctx.hasBook
+          ? 'Back to the reader'
+          : 'Go to the reader'
+        : 'Go to the library',
     group: 'Book',
     // The key the titlebar button names and the handler binds. Three surfaces
     // for one action, and the palette is where a reader learns the shortcut.

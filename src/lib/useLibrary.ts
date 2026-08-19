@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
 import {
+  BOOKS_DIR,
   folderOf,
   mergeParsed,
   mergeStranded,
@@ -10,7 +11,6 @@ import {
   writeBook,
   type BookRecord,
 } from './bookFolder'
-import { BOOKS_DIR } from './bookFolder'
 import { hasContentFile, writeIndex, type IndexFs, type IndexedBook } from './bookIndex'
 import { keepCover } from './coverArt'
 import { rescueStrandedMarks, restoreBook, trashBook } from './bookTrash'
@@ -54,7 +54,6 @@ export type RekeyOutcome = 'moved' | 'nothing' | 'occupied' | 'failed'
 
 export interface Library {
   readonly books: readonly IndexedBook[]
-  /** Add a book, or fold a fresh parse into one already here — see `mergeParsed`. */
   /**
    * Add a book, or fold a fresh parse into one already here — see `mergeParsed`.
    *
@@ -68,9 +67,31 @@ export interface Library {
   update: (bookId: string, change: (record: BookRecord) => BookRecord) => void
   /** Take a book off the shelf. Its folder goes to the trash, not away. */
   remove: (bookId: string) => void
-  /** Add one of the reader's own tags. Folded, so case cannot duplicate. */
-  tag: (bookId: string, tag: string) => void
-  untag: (bookId: string, tag: string) => void
+  /**
+   * Add the reader's own tags to books. Folded, so case cannot duplicate — see
+   * `withTagsAdded`. Publisher subjects are never written here.
+   *
+   * PLURAL ON BOTH SIDES, and that is the whole API: one book with one tag is
+   * the editor over a card; fifty with three is the editor over a selection or
+   * a drop on a panel row. ONE WRITE PER BOOK whatever the number of tags,
+   * because each write is a read-modify-write of that book's `book.json`, and
+   * fifty books times three tags as separate single-tag calls is a hundred
+   * and fifty of them queued behind each other for no reason. The singular
+   * `tag`/`untag` pair went when nothing called it.
+   */
+  tagBooks: (bookIds: readonly string[], tags: readonly string[]) => void
+  /**
+   * Take one of the reader's tags off books. A publisher's subject cannot be
+   * removed — it is a fact about the book, and it returns on the next parse.
+   */
+  untagBooks: (bookIds: readonly string[], tag: string) => void
+  /**
+   * Make a publisher's subject the reader's own, on every book that declares
+   * it. From then on it is theirs — renameable, removable, and kept across a
+   * re-parse — which is the one-way door out of the publisher's namespace.
+   * The subject itself is untouched; `allTags` folds the two into one chip.
+   */
+  adoptTag: (tag: string) => void
   /**
    * Rename one of the reader's tags on EVERY book that carries it.
    *
@@ -85,8 +106,12 @@ export interface Library {
   renameTag: (from: string, to: string) => void
   /** Take one of the reader's tags off every book that carries it. */
   removeTag: (tag: string) => void
-  /** How many books a `removeTag` of this tag would touch — see the implementation. */
-  ownTagCount: (tag: string) => number
+  /**
+   * The books a `removeTag` of this tag would touch, by id — see the
+   * implementation. The LENGTH is the number the confirm shows; the ids are
+   * what an undo re-tags, so both come from one answer and cannot disagree.
+   */
+  ownTagBooks: (tag: string) => readonly string[]
   /**
    * Put a jacket in a book's folder, in order with that book's other writes.
    *
@@ -109,6 +134,33 @@ export interface Library {
    * duplicate.
    */
   rekeyBook: (from: string, to: string) => Promise<RekeyOutcome>
+}
+
+/**
+ * The reader's tags with some more added, folded by key.
+ *
+ * ONE FUNCTION under `tag`, `tagBooks` and `adoptTag`, so what "add a tag"
+ * means is decided once. It folds against the reader's OWN tags only. It used
+ * to fold against the publisher's subjects as well, so adding `Philosophy` to
+ * a book whose publisher says `philosophy` was a silent no-op — and the
+ * reader's copy is a different fact from the publisher's: theirs, durable
+ * across a re-parse, and the thing that makes the tag renameable and
+ * removable. `allTags` still folds the two into one chip, so nothing is drawn
+ * twice.
+ *
+ * Returns its input BY IDENTITY when nothing was added, which is how the
+ * callers tell `update` there is nothing to write.
+ */
+export function withTagsAdded(own: readonly string[], values: readonly string[]): readonly string[] {
+  const keys = new Set(own.map(tagKey))
+  let next = own
+  for (const value of values) {
+    const key = tagKey(value)
+    if (!key || keys.has(key)) continue
+    keys.add(key)
+    next = [...next, value]
+  }
+  return next
 }
 
 /** One file as text, or null when it is not there or will not read. */
@@ -147,13 +199,47 @@ export function useLibrary(
   latest.current = books
 
   /**
+   * How many writes are queued or running per book — the guard under
+   * `reconcile`.
+   *
+   * A write's disk result is a photograph of the record as of THAT write. With
+   * a second write queued behind it, the reader has already made a newer edit
+   * the shelf is showing optimistically — and putting the older photograph
+   * over it made the newer tag vanish until its own write landed, or forever
+   * if that write failed. Only the LAST write in flight may correct the row,
+   * and because the queue is serial per book, the last write's record has
+   * everything the earlier ones did.
+   */
+  const pending = useRef(new Map<string, number>())
+  /**
+   * Ids carried onto new ones by `rekeyBook`, old → new.
+   *
+   * A write enqueued against the old id can RUN after the folder has moved:
+   * the queue is serial per key, so a tag typed while the rekey waited its
+   * turn executed against a folder that was no longer there, read no record,
+   * and dropped the edit with no error anywhere. Tasks resolve their id
+   * through this map at run time, so the write follows the book.
+   */
+  const rekeyed = useRef(new Map<string, string>())
+  const beginWrite = (bookId: string) =>
+    pending.current.set(bookId, (pending.current.get(bookId) ?? 0) + 1)
+  const endWrite = (bookId: string) => {
+    const left = (pending.current.get(bookId) ?? 1) - 1
+    if (left <= 0) pending.current.delete(bookId)
+    else pending.current.set(bookId, left)
+  }
+
+  /**
    * Put what the disk actually holds back into the row.
    *
    * The optimistic update is a prediction; this is the correction. It runs after
    * a write that merged with the on-disk record, so it is the only path by which
-   * a field the index never knew about reaches the shelf.
+   * a field the index never knew about reaches the shelf. Called from INSIDE the
+   * write's own task, while that task is still counted — hence the guard reads
+   * "more than one": someone queued after me, so my photograph is stale.
    */
   const reconcile = useCallback((bookId: string, record: BookRecord) => {
+    if ((pending.current.get(bookId) ?? 0) > 1) return
     const at = latest.current.findIndex((one) => one.bookId === bookId)
     if (at === -1) return
     const next = [...latest.current]
@@ -168,13 +254,18 @@ export function useLibrary(
       latest.current = next
       setBooks(next)
       if (!fs) return
+      beginWrite(key)
       void queue.current
         /* APPEND, not replace. Each task here applies a CHANGE to what is on
          * disk — a tag, then a position — and coalescing two of them drops the
          * first. Marks can coalesce because each of those writes the whole list;
          * these cannot, and the distinction is why the queue has two methods. */
         .append(key, async () => {
-          await write(fs)
+          try {
+            await write(fs)
+          } finally {
+            endWrite(key)
+          }
         })
         .then(() =>
           /* The index LAST, and on its own key so a book's write is never held
@@ -204,15 +295,25 @@ export function useLibrary(
       if (next === record) return
       const list = [...latest.current]
       list[at] = { ...next, bookId }
-      commit(bookId, list, (target) =>
+      commit(bookId, list, async (target) => {
+        /* RESOLVED AT RUN TIME — the book may have been carried onto a new id
+         * while this write waited its turn. See `rekeyed`. */
+        const id = rekeyed.current.get(bookId) ?? bookId
         /* THE CHANGE, not the result. Passing `() => next` wrote the in-memory
          * record back — and that copy can be stale, because it came from an
          * index that may be one write behind after a crash. Handing the function
          * over means it is applied to whatever is actually on disk. */
-        updateBook(target, bookId, change),
-      )
+        const written = await updateBook(target, id, change)
+        /* AND THE DISK'S ANSWER, back into the row — the same correction `add`
+         * makes, for the same reason. The optimistic row was computed from the
+         * cache; when the cache was a write behind, the disk record this call
+         * just changed had fields the row did not, and the row kept showing
+         * the stale copy while the index was rewritten from it. `reconcile`
+         * declines when a newer write is already queued — see the guard. */
+        if (written) reconcile(id, written)
+      })
     },
-    [commit],
+    [commit, reconcile],
   )
 
   const add = useCallback(
@@ -235,9 +336,20 @@ export function useLibrary(
          * launch would then sail past the stranded files until the sweep deleted
          * them. */
         if (fs) {
+          /* Counted under the ROW's id, which is what `reconcile` below is
+           * called with — the two spellings can differ when the record predates
+           * the id being stored, and a guard keyed one way and read the other
+           * guards nothing. */
+          beginWrite(previous.bookId)
           void queue.current
             .append(bookId, async () => {
-              await restoreBook(fs, bookId)
+              try {
+              /* Whether the restore MOVED anything — the discriminator for the
+               * reconcile below. A restore that brought `book.json` back whole
+               * leaves nothing stranded, and gating the reconcile on the
+               * stranded copy alone meant exactly the successful restores were
+               * the ones whose recovered tags stayed invisible. */
+              const restored = await restoreBook(fs, bookId)
               await rescueStrandedMarks(fs, bookId)
               /* AND THE SAME RESCUE the full path does. Returning after the
                * restore alone left a `book.json` the restore could not move
@@ -281,10 +393,31 @@ export function useLibrary(
                 }
               }
               const stranded = parseRecord(await readText(fs, `${trashOf(bookId)}/${'book.json'}`))
-              if (!stranded) return
+              if (!stranded && !restored) return
               const live = await readBook(fs, bookId)
-              await writeBook(fs, bookId, live ? mergeStranded(stranded, live) : stranded)
-              await fs.remove(`${trashOf(bookId)}/book.json`).catch(() => {})
+              /* Stranded copy present: merge and write, as before. No stranded
+               * copy but the restore moved files: the live record IS the
+               * recovery, already whole on disk — nothing to write, only to
+               * tell. */
+              const kept = stranded ? (live ? mergeStranded(stranded, live) : stranded) : live
+              if (!kept) return
+              if (stranded) {
+                await writeBook(fs, bookId, kept)
+                await fs.remove(`${trashOf(bookId)}/book.json`).catch(() => {})
+              }
+              /* THE ROW AND THE CACHE LEARN WHAT WAS RESCUED. This path wrote
+               * a restored record — the reader's tags and place, back from the
+               * trash — and then told nobody: the shelf kept its sparse row
+               * and the index kept the sparse record, so the recovery stayed
+               * invisible until the next full scan. The same correction every
+               * other write makes, made here. */
+              reconcile(previous.bookId, kept)
+              await queue.current.push('index', async () => {
+                await writeIndex(fs, latest.current)
+              })
+              } finally {
+                endWrite(previous.bookId)
+              }
             })
             .catch((cause: unknown) => {
               console.error('Paper: could not finish restoring that book', cause)
@@ -323,7 +456,7 @@ export function useLibrary(
          * leftovers were never retried, and the trash sweep deleted them a
          * fortnight later. It is a cheap no-op when the trash is empty, which is
          * the ordinary case. */
-        await restoreBook(target as never, bookId)
+        await restoreBook(target, bookId)
         /* WHAT THE RESTORE COULD NOT BRING BACK, folded in here.
          *
          * `restoreBook` moves file by file and leaves behind a name already
@@ -341,7 +474,7 @@ export function useLibrary(
          * live `marks.json` that blocked the complete one from coming back — so
          * one annotation made in that window cost every annotation made before
          * the book was removed. */
-        await rescueStrandedMarks(target as never, bookId)
+        await rescueStrandedMarks(target, bookId)
         /* MERGED INTO WHAT IS ON DISK, ALWAYS — not only when the row was
          * missing. The in-memory copy comes from an index that `loadShelf` will
          * knowingly trust while it is one write behind, so folding the parse
@@ -425,8 +558,6 @@ export function useLibrary(
           // Already gone — nothing here to carry anywhere.
           if (!(await fs.exists(folderOf(from)))) return
           await fs.rename(folderOf(from), folderOf(to))
-          // Stamped with the id it now lives under; the record still names the
-          // folder it came from until this runs.
           /* THE RENAME IS THE MIGRATION. Everything after it is bookkeeping on
            * a book that has already arrived, so nothing below may turn the
            * answer back into a failure — the caller would then decline to add a
@@ -434,14 +565,37 @@ export function useLibrary(
            * stored id only when it names the folder it is in, which is what
            * makes the stamp below safe to lose. */
           outcome = 'moved'
-          const moved = await readBook(fs, to)
-          if (moved) await writeBook(fs, to, moved)
+          /* THE ROW MOVES WITH THE FOLDER, immediately — before the fallible
+           * stamp below, not after it. Re-keyed only once the stamp succeeded,
+           * a stamp that failed returned `moved` (correctly — the book HAS
+           * moved) while the row still carried the old id, and the caller then
+           * added a second row under the new one: the exact duplicate the
+           * whole migration exists to prevent, manufactured by its own
+           * bookkeeping order. */
           const at = latest.current.findIndex((one) => one.bookId === from)
-          if (at === -1) return
-          const next = [...latest.current]
-          next[at] = { ...latest.current[at]!, bookId: to }
-          latest.current = next
-          setBooks(next)
+          if (at !== -1) {
+            const next = [...latest.current]
+            next[at] = { ...latest.current[at]!, bookId: to }
+            latest.current = next
+            setBooks(next)
+          }
+          /* AND LATER WRITES FOLLOW IT — see `rekeyed`. An update enqueued
+           * against the old id while this task waited its turn runs after the
+           * folder has moved; unmapped, it read no record and quietly dropped
+           * the reader's edit. */
+          rekeyed.current.set(from, to)
+          /* Stamped with the id it now lives under; the record still names the
+           * folder it came from until this runs. ON THE NEW ID'S QUEUE KEY:
+           * this task runs under the OLD key, and an update the reader makes
+           * against the new id queues under the new one — two keys run
+           * independently, so a stamp done inline here could read the record,
+           * lose the race to that update's write, and put the pre-update copy
+           * back. Serialised under `to`, the stamp and any new-id write take
+           * turns, and each read-modify-write sees the other's result. */
+          await queue.current.append(to, async () => {
+            const moved = await readBook(fs, to)
+            if (moved) await writeBook(fs, to, moved)
+          })
           await queue.current.push('index', async () => {
             await writeIndex(fs, latest.current)
           })
@@ -470,6 +624,8 @@ export function useLibrary(
        * the cover — any of which could fail alone, and two of which did. */
       const removed = latest.current.find((one) => one.bookId === bookId)
       commit(bookId, list, async (target) => {
+        // The removal follows a rekeyed book too — see `rekeyed`.
+        const id = rekeyed.current.get(bookId) ?? bookId
         /* A REMOVAL THAT DID NOT HAPPEN IS NOT A REMOVAL. `trashBook` reports
          * false when there was nothing there — fine, the row was already gone —
          * but it also reported false when the move genuinely failed, and this
@@ -478,9 +634,9 @@ export function useLibrary(
          * launch. Thrown, so the queue's own reporting says the library could
          * not be saved rather than the shelf lying quietly. */
         try {
-          if (!(await trashBook(target as never, bookId))) {
-            if (await target.exists(folderOf(bookId))) {
-              throw new Error(`could not remove ${bookId}: its folder is still there`)
+          if (!(await trashBook(target, id))) {
+            if (await target.exists(folderOf(id))) {
+              throw new Error(`could not remove ${id}: its folder is still there`)
             }
           }
         } catch (cause) {
@@ -509,33 +665,53 @@ export function useLibrary(
     [commit],
   )
 
-  const tag = useCallback(
-    (bookId: string, raw: string) => {
-      const value = normalizeTag(raw)
-      if (!value) return
-      const key = tagKey(value)
-      update(bookId, (record) => {
-        const own = record.tags ?? []
-        const declared = record.subjects ?? []
-        // Folded against BOTH lists: a publisher's `philosophy` and a reader's
-        // `Philosophy` are one tag on this book.
-        if ([...own, ...declared].some((one) => tagKey(one) === key)) return record
-        return { ...record, tags: [...own, value] }
-      })
+  const tagBooks = useCallback(
+    (bookIds: readonly string[], raws: readonly string[]) => {
+      const values = raws.map(normalizeTag).filter(Boolean)
+      if (values.length === 0) return
+      for (const bookId of bookIds) {
+        update(bookId, (record) => {
+          const own = record.tags ?? []
+          const next = withTagsAdded(own, values)
+          return next === own ? record : { ...record, tags: next }
+        })
+      }
     },
     [update],
   )
 
-  const untag = useCallback(
-    (bookId: string, raw: string) => {
+  const untagBooks = useCallback(
+    (bookIds: readonly string[], raw: string) => {
       const key = tagKey(raw)
-      update(bookId, (record) => {
-        const own = record.tags ?? []
-        // A publisher's subject cannot be removed — it is a fact about the book,
-        // and it returns on the next parse anyway.
-        if (!own.some((one) => tagKey(one) === key)) return record
-        return { ...record, tags: own.filter((one) => tagKey(one) !== key) }
-      })
+      for (const bookId of bookIds) {
+        update(bookId, (record) => {
+          const own = record.tags ?? []
+          if (!own.some((one) => tagKey(one) === key)) return record
+          return { ...record, tags: own.filter((one) => tagKey(one) !== key) }
+        })
+      }
+    },
+    [update],
+  )
+
+  const adoptTag = useCallback(
+    (raw: string) => {
+      const value = normalizeTag(raw)
+      if (!value) return
+      const key = tagKey(value)
+      /* Judged per record, like `renameTag` — and only books whose PUBLISHER
+       * declares it, so adopting `Fiction` does not spray it across the shelf.
+       * The spelling written is the one the reader adopted from the panel, on
+       * every book, so the tag reads as one thing rather than as each
+       * publisher's variant of it. */
+      for (const book of latest.current) {
+        update(book.bookId, (record) => {
+          if (!(record.subjects ?? []).some((one) => tagKey(one) === key)) return record
+          const own = record.tags ?? []
+          const next = withTagsAdded(own, [value])
+          return next === own ? record : { ...record, tags: next }
+        })
+      }
     },
     [update],
   )
@@ -565,7 +741,11 @@ export function useLibrary(
           const own = record.tags ?? []
           if (!own.some((one) => tagKey(one) === fromKey)) return record
           const kept = own.filter((one) => tagKey(one) !== fromKey)
-          const alreadyThere = [...kept, ...(record.subjects ?? [])].some((one) => tagKey(one) === toKey)
+          /* Against the reader's OWN tags only — see `withTagsAdded`. Judged
+           * against the subjects too, renaming `Sea` to `Fiction` on a book
+           * whose publisher said `fiction` dropped the reader's tag and wrote
+           * nothing, so it stopped being theirs. */
+          const alreadyThere = kept.some((one) => tagKey(one) === toKey)
           return { ...record, tags: alreadyThere ? kept : [...kept, value] }
         })
       }
@@ -573,51 +753,57 @@ export function useLibrary(
     [update],
   )
 
+  /* THE SAME TRANSFORMATION `untagBooks` MAKES, over the whole shelf — one
+   * implementation, or the two drift on what "take a tag off" means. Judged
+   * per record, not from the cached row, exactly as before: `update` re-reads
+   * the record it changes. */
   const removeTag = useCallback(
     (raw: string) => {
-      const key = tagKey(raw)
-      // Judged per record, not from the cached row — see `renameTag`.
-      for (const book of latest.current) {
-        update(book.bookId, (record) => {
-          const own = record.tags ?? []
-          if (!own.some((one) => tagKey(one) === key)) return record
-          return { ...record, tags: own.filter((one) => tagKey(one) !== key) }
-        })
-      }
+      untagBooks(
+        latest.current.map((book) => book.bookId),
+        raw,
+      )
     },
-    [update],
+    [untagBooks],
   )
 
-  /**
-   * How many books carry this as the READER's own tag — the number a
-   * collection-wide remove will touch.
-   *
-   * Distinct from what the Library panel shows beside the row, which is scoped
-   * to the current status and counts publisher subjects too. Showing that
-   * number as "Remove from N books" was a lie in both directions: under
-   * `is:reading` a tag on five books read "Remove from 2" and removed from
-   * five; a tag that was three subjects and one reader tag read "4" and removed
-   * from one. The consent number has to be the action's number.
-   */
   const keepJacket = useCallback(
     (bookId: string, cover: Blob) => {
       if (!fs) return
       // The book's OWN key, which is what puts it in line behind that book's
       // record write and its removal rather than beside them.
-      void queue.current.append(bookId, async () => {
-        await keepCover(fs, bookId, cover)
-      })
+      queue.current
+        .append(bookId, async () => {
+          await keepCover(fs, bookId, cover)
+        })
+        /* CAUGHT, like every other queued write. `void` discarded the
+         * rejection, and a cover that failed to persist surfaced as an
+         * unhandled-rejection banner claiming the app had crashed — for a
+         * jacket, which the next open re-extracts anyway. */
+        .catch((cause: unknown) => {
+          console.error('Paper: could not keep the cover', cause)
+        })
     },
     [fs],
   )
 
-  const ownTagCount = useCallback(
-    (raw: string) => {
-      const key = tagKey(raw)
-      return latest.current.filter((book) => (book.tags ?? []).some((one) => tagKey(one) === key)).length
-    },
-    [],
-  )
+  /**
+   * The books carrying this as the READER's own tag — the ones a
+   * collection-wide remove will touch, and the ones an undo puts it back on.
+   *
+   * Distinct from what the Library panel shows beside the row, which is scoped
+   * to the current view and counts publisher subjects too. Showing that number
+   * as "Remove from N books" was a lie in both directions: under `is:reading`
+   * a tag on five books read "Remove from 2" and removed from five; a tag that
+   * was three subjects and one reader tag read "4" and removed from one. The
+   * consent number has to be the action's number.
+   */
+  const ownTagBooks = useCallback((raw: string): readonly string[] => {
+    const key = tagKey(raw)
+    return latest.current
+      .filter((book) => (book.tags ?? []).some((one) => tagKey(one) === key))
+      .map((book) => book.bookId)
+  }, [])
 
   const positionOf = useCallback(
     (bookId: string | null) =>
@@ -631,15 +817,30 @@ export function useLibrary(
       add,
       update,
       remove,
-      tag,
-      untag,
+      tagBooks,
+      untagBooks,
+      adoptTag,
       renameTag,
       removeTag,
-      ownTagCount,
+      ownTagBooks,
       keepJacket,
       positionOf,
       rekeyBook,
     }),
-    [books, add, update, remove, tag, untag, renameTag, removeTag, ownTagCount, keepJacket, positionOf, rekeyBook],
+    [
+      books,
+      add,
+      update,
+      remove,
+      tagBooks,
+      untagBooks,
+      adoptTag,
+      renameTag,
+      removeTag,
+      ownTagBooks,
+      keepJacket,
+      positionOf,
+      rekeyBook,
+    ],
   )
 }

@@ -12,7 +12,7 @@ import type { IndexedBook } from '../lib/bookIndex'
 import type { CompanionProvider } from '../lib/companion'
 import { ICON } from '../lib/metrics'
 import { PANE_TITLES } from '../lib/panes'
-import { paneFits, type AppDispatch, type AppState, type PaneId } from '../lib/state'
+import { defaultPaneFor, paneFits, type AppDispatch, type AppState, type PaneId } from '../lib/state'
 import type { Book } from '../lib/useBook'
 import type { Mark } from '../lib/marks'
 import type { MarkFocus } from '../lib/useMarking'
@@ -52,46 +52,35 @@ import styles from './SidePane.module.css'
  * adding a panel without an icon fails to compile rather than rendering a rail
  * button with nothing in it.
  */
-const PANE_ICONS: Record<PaneId, typeof Search> = {
-  toc: List,
-  companion: Sparkles,
-  notes: Highlighter,
-  cards: Layers,
-  search: Search,
-  stats: ChartNoAxesColumn,
-  library: LibraryBig,
-  settings: SettingsIcon,
-}
-
-/* The rail's own order, which is not the palette's: Companion sits second here,
- * beside Contents, because §03 groups the two surfaces that read the book.
- *
- * The ORDER is this file's; the membership is not. A hand-written list of ids
- * can silently omit one — the panel then exists, has a command and a shortcut,
- * and has no way into it from the pane — so the array is checked against the
- * registry below rather than trusted. */
-const RAIL_ORDER = [
-  'toc',
-  'companion',
-  'notes',
-  'cards',
-  'search',
-  'stats',
-  'library',
-  'settings',
-] as const satisfies readonly PaneId[]
+/* ONE LIST: the rail's order and each panel's icon, together. They were two —
+ * a total Record for the icons and an ordered array of ids — which meant two
+ * edits per panel and two structures to keep agreeing; the compile-time check
+ * below covers the merged list exactly as it covered the array. The ORDER is
+ * this file's; the membership is not: Companion sits second here, beside
+ * Contents, because §03 groups the two surfaces that read the book. Labels
+ * still come from `lib/panes`, which the palette and the titlebar read too. */
+const RAIL_ENTRIES = [
+  { id: 'toc', Icon: List },
+  { id: 'companion', Icon: Sparkles },
+  { id: 'notes', Icon: Highlighter },
+  { id: 'cards', Icon: Layers },
+  { id: 'search', Icon: Search },
+  { id: 'stats', Icon: ChartNoAxesColumn },
+  { id: 'library', Icon: LibraryBig },
+  { id: 'settings', Icon: SettingsIcon },
+] as const satisfies readonly { id: PaneId; Icon: typeof Search }[]
 
 /** Fails to compile if the rail and the registry stop agreeing on membership. */
-type RailCoversEveryPane = Exclude<PaneId, (typeof RAIL_ORDER)[number]> extends never
+type RailCoversEveryPane = Exclude<PaneId, (typeof RAIL_ENTRIES)[number]['id']> extends never
   ? true
-  : ['a panel is missing from RAIL_ORDER', Exclude<PaneId, (typeof RAIL_ORDER)[number]>]
+  : ['a panel is missing from RAIL_ENTRIES', Exclude<PaneId, (typeof RAIL_ENTRIES)[number]['id']>]
 const _railIsExhaustive: RailCoversEveryPane = true
 void _railIsExhaustive
 
-const RAIL = RAIL_ORDER.map((id) => ({
+const RAIL = RAIL_ENTRIES.map(({ id, Icon }) => ({
   id,
   label: PANE_TITLES[id],
-  Icon: PANE_ICONS[id],
+  Icon,
 }))
 
 /**
@@ -128,10 +117,12 @@ export interface SidePaneProps {
   companion: CompanionProvider
   /** The shelf, for the Library panel's counts and scopes. */
   books: readonly IndexedBook[]
-  /** Collection-wide tag edits, for the Library panel — see `Library`. */
+  /** Collection-wide tag edits, for the Library panel — see `LibraryPanel`. */
   onRenameTag: (from: string, to: string) => void
   onRemoveTag: (tag: string) => void
-  ownTagCount: (tag: string) => number
+  onAdoptTag: (tag: string) => void
+  onTagBooks: (bookIds: readonly string[], tags: readonly string[]) => void
+  ownTagBooks: (tag: string) => readonly string[]
   /** The faces this machine can offer — passed straight to Settings. */
   offered: readonly Face[]
 }
@@ -149,14 +140,25 @@ export function SidePane({
   books,
   onRenameTag,
   onRemoveTag,
-  ownTagCount,
+  onAdoptTag,
+  onTagBooks,
+  ownTagBooks,
   offered,
 }: SidePaneProps) {
   /* Falls back to the last pane rather than unmounting. The slot stays mounted
    * at zero width and inert while closed, so keeping the panel rendered is what
    * preserves its scroll position, note filter and search query across a
-   * close/open — returning null threw all of that away. */
-  const pane = state.pane ?? state.lastPane
+   * close/open — returning null threw all of that away.
+   *
+   * FITTED TO THE SCREEN, though. `lastPane` can name a panel this screen does
+   * not have — close the pane in the reader on Contents, walk to the library —
+   * and rendering it raw swapped the hidden slot from LibraryPanel to
+   * Contents, unmounting the panel that would reopen here and its filter,
+   * sort and undo state with it. The screen's default is what `openPane`
+   * would land on, so it is what stays warm. */
+  const pane =
+    state.pane ??
+    (paneFits(state.screen, state.lastPane) ? state.lastPane : defaultPaneFor(state.screen))
 
   return (
     <>
@@ -249,7 +251,9 @@ export function SidePane({
             dispatch={dispatch}
             onRenameTag={onRenameTag}
             onRemoveTag={onRemoveTag}
-            ownTagCount={ownTagCount}
+            onAdoptTag={onAdoptTag}
+            onTagBooks={onTagBooks}
+            ownTagBooks={ownTagBooks}
           />
         )}
       </div>
@@ -266,6 +270,9 @@ export function SidePane({
             title={label}
             aria-label={label}
             data-on={pane === id}
+            /* The lit tab, said out loud — `data-on` is only paint, and a
+               screen reader walking the rail heard eight identical buttons. */
+            aria-pressed={pane === id}
             onClick={() => dispatch({ type: 'openPane', pane: id })}
           >
             <Icon size={ICON.tab} strokeWidth={ICON.stroke} />
