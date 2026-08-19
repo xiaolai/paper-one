@@ -141,6 +141,20 @@ export type IdleReason =
   | 'no-filesystem'
   /** The reader is in a book, and the main thread is theirs. */
   | 'reading'
+  /**
+   * Books are still arriving, and the main thread belongs to getting them in.
+   *
+   * The import copies on the main thread and now shelves as it copies, so the
+   * rows this pass feeds on appear WHILE the import is running. Without this
+   * the pass would start parsing at book twenty-four and spend a second per
+   * book competing with the copy loop for the same thread — an import that
+   * took half a minute would take an hour, with the counter the reader is
+   * watching crawling for the whole of it.
+   *
+   * Nothing is lost by waiting: `parsedAt` on disk is the work list, so the
+   * pass picks up every book the import brought in the moment it finishes.
+   */
+  | 'importing'
   /** Every book on the shelf has been parsed. */
   | 'complete'
 
@@ -158,17 +172,22 @@ export type PassStep =
  * stands down while the reader is in a book is a test rather than a promise.
  *
  * The order of the checks is the order of the reasons: no library at all beats
- * standing aside for the reader, which beats having nothing to do. Reading is
- * checked BEFORE the work list is built, so a reader in a book never pays even
- * for the filter.
+ * standing aside for the reader, which beats standing aside for the import,
+ * which beats having nothing to do. Every stand-down is checked BEFORE the
+ * work list is built, so neither a reader in a book nor a running import pays
+ * even for the filter — and the filter is over the whole shelf, which during
+ * an import is a list growing by twenty-four books at a time.
  */
 export function nextStep(state: {
   readonly books: readonly IndexedBook[]
   readonly hasFilesystem: boolean
   readonly reading: boolean
+  /** True while books are still being copied in — see `IdleReason`. */
+  readonly importing?: boolean
 }): PassStep {
   if (!state.hasFilesystem) return { kind: 'idle', why: 'no-filesystem' }
   if (state.reading) return { kind: 'idle', why: 'reading' }
+  if (state.importing === true) return { kind: 'idle', why: 'importing' }
   const next = pendingFor(state.books)[0]
   return next ? { kind: 'parse', book: next } : { kind: 'idle', why: 'complete' }
 }

@@ -1,7 +1,14 @@
 import { describe, expect, it, vi } from 'vitest'
 import { contentPathIn } from './bookFolder'
 import type { VaultFs } from './bookVault'
-import { collectBooks, importFolder, keepOwnCopy, summarise, type DirFs } from './importFolder'
+import {
+  SHELVE_BATCH,
+  collectBooks,
+  importFolder,
+  keepOwnCopy,
+  summarise,
+  type DirFs,
+} from './importFolder'
 
 /**
  * Folder import, without a filesystem.
@@ -141,6 +148,92 @@ describe('importFolder', () => {
     expect(outcomes).toEqual([])
   })
 
+  /**
+   * THE SHELF FILLS WHILE THE WALK IS STILL RUNNING.
+   *
+   * Every outcome used to be returned at the end and shelved in one go, so a
+   * two-thousand-book import spent its whole copying phase with an empty
+   * shelf: the reader watched "Importing 861 of 1,959" climb underneath the
+   * words "Your library is empty". It also meant a crash mid-import left
+   * every book copied so far with bytes and no record — the same orphan this
+   * pipeline has been taught to avoid, just produced a different way.
+   */
+  describe('handing books over as it goes', () => {
+    const many = (count: number) => {
+      const names = Array.from({ length: count }, (_unused, at) => `book${String(at)}.epub`)
+      const files: Record<string, string> = {}
+      for (const name of names) files[`/books/${name}`] = name
+      return { tree: { '/books': names }, files }
+    }
+
+    it('hands over a batch before the walk has finished', async () => {
+      const { tree: many60, files: files60 } = many(60)
+      const handovers: number[] = []
+      let finished = false
+      const outcomes = await importFolder(fakeDir(many60, files60), '/books', {
+        onCopied: (batch) => {
+          /* The assertion that matters: this ran while the walk was still
+           * going, not after it. */
+          expect(finished).toBe(false)
+          handovers.push(batch.length)
+        },
+      })
+      finished = true
+      expect(outcomes).toHaveLength(60)
+      expect(handovers).toEqual([SHELVE_BATCH, SHELVE_BATCH, 60 - SHELVE_BATCH * 2])
+    })
+
+    /* Nothing dropped and nothing sent twice — the shelf must end up holding
+     * exactly what the walk copied. */
+    it('hands over every book exactly once', async () => {
+      const { tree, files } = many(60)
+      const seen: string[] = []
+      const outcomes = await importFolder(fakeDir(tree, files), '/books', {
+        onCopied: (batch) => seen.push(...batch.map((one) => one.path)),
+      })
+      expect(seen).toEqual(outcomes.map((one) => one.path))
+      expect(new Set(seen).size).toBe(60)
+    })
+
+    /* A partial batch is still a batch. Left in the buffer it would be books
+     * on disk that nothing ever shelved. */
+    it('hands over a final batch that never filled', async () => {
+      const { tree, files } = many(5)
+      const handovers: number[] = []
+      await importFolder(fakeDir(tree, files), '/books', {
+        onCopied: (batch) => handovers.push(batch.length),
+      })
+      expect(handovers).toEqual([5])
+    })
+
+    /**
+     * AND ON A STOP, which is the case worth being explicit about.
+     *
+     * The books copied before the reader stopped are on disk either way. A
+     * stop that skipped the handover would leave exactly the recordless
+     * folders the import is otherwise careful not to produce.
+     */
+    it('hands over what it copied before it was stopped', async () => {
+      const { tree, files } = many(60)
+      const controller = new AbortController()
+      const seen: string[] = []
+      await importFolder(fakeDir(tree, files), '/books', {
+        onCopied: (batch) => seen.push(...batch.map((one) => one.path)),
+        onProgress: (progress) => {
+          if (progress.done >= 30) controller.abort()
+        },
+        signal: controller.signal,
+      })
+      expect(seen.length).toBeGreaterThan(0)
+      expect(seen.length).toBeLessThan(60)
+    })
+
+    it('says nothing to a caller that did not ask', async () => {
+      const { tree, files } = many(30)
+      await expect(importFolder(fakeDir(tree, files), '/books')).resolves.toHaveLength(30)
+    })
+  })
+
   /* The yield between books is what keeps a 300-book import from freezing the
    * window. Asserted structurally: without it the loop never returns to the
    * task queue at all. */
@@ -169,6 +262,18 @@ describe('summarise', () => {
 
   it('says so when a folder held no books', () => {
     expect(summarise([])).toBe('No books found in that folder.')
+  })
+
+  /* A BOOK THAT COULD NOT BE SAVED IS NOT A BOOK THAT COULD NOT BE READ.
+   * Its bytes arrived and its record did not, which leaves a copy in the
+   * library with nothing on the shelf pointing at it — and the reader was
+   * told "1,959 added" while 82 of them had gone exactly that way. */
+  it('says how many books arrived without their record', () => {
+    expect(summarise([{ path: 'a', status: 'added' }], 1)).toBe('1 added, 1 could not be saved')
+  })
+
+  it('stays quiet about saving when everything saved', () => {
+    expect(summarise([{ path: 'a', status: 'added' }], 0)).toBe('1 added')
   })
 })
 

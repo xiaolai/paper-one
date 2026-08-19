@@ -1,6 +1,7 @@
 import { createElement } from 'react'
 import {
   defineSetting,
+  restThenBreathe,
   type Capability,
   type CapabilityContext,
   type Disposable,
@@ -142,6 +143,24 @@ let servicesFs: KernelApi['services']['fs'] = null
  * opens, or an overlapping restart's older close could delete the dirty
  * flag out from under the newer, live journal. */
 let journalHandoff: Promise<void> = Promise.resolve()
+
+/**
+ * The contentHash backfill's rate limit, in milliseconds between batches.
+ *
+ * Protects the DISK and nothing else — `hashFile` hashes in Rust, so the pass
+ * never touches the main thread and needs no protection from it. Staying off
+ * the reader's back is `restThenBreathe`'s idle half, above this.
+ *
+ * It was three seconds, which at four books a batch is twenty-five minutes to
+ * cross a two-thousand-book library. Four books per 250ms crosses the same
+ * library in about two minutes and reads it at a rate no SSD notices. Tuned,
+ * not derived: this is the number to raise if a slower disk ever makes the
+ * pass audible.
+ */
+const BACKFILL_REST_MS = 250
+
+/** The longest the backfill waits for an idle moment before going anyway. */
+const BACKFILL_IDLE_CEILING_MS = 3_000
 
 /* -------------------------------------------------------------- capability */
 
@@ -464,16 +483,39 @@ export const sync: Capability = {
       }
 
       /* The contentHash backfill, queued lazily: a small batch, then again
-       * while there is work, riding idle seconds rather than launch. */
+       * while there is work, riding idle seconds rather than launch.
+       *
+       * THREE SECONDS BETWEEN BATCHES OF FOUR was the whole rate, and on a
+       * two-thousand-book library that is five hundred batches — twenty-five
+       * minutes of a progress-less pass running behind a reader who has just
+       * imported their shelf and is watching it fill in. The rest was
+       * defending against hammering the disk at launch, which is real; it was
+       * not defending the main thread, because `hashFile` hashes in Rust.
+       *
+       * So the two concerns are separated. `BACKFILL_REST_MS` is the rate
+       * limit, and it is short because the disk is the only thing it protects.
+       * The idle wait on top of it is what keeps the pass off a reader's back,
+       * and it is the part that was never expressed: a fixed timer cannot
+       * tell a scrolling shelf from an untouched window. See `restThenBreathe`.
+       *
+       * The floor is TUNED, not derived. Four books per 250ms reads this
+       * library's three gigabytes over roughly two minutes, which is a rate
+       * no SSD notices; if a slower disk ever makes that visible, this is the
+       * number to raise. */
       const backfill = createBackfill({ services, hashFile: (folder, name) => port.hashFile(folder, name) })
+      /* Wait, then a batch, then wait again while there is work. `stopped` is
+       * checked on the far side of every wait rather than the wait being made
+       * cancellable: an idle callback cannot be cancelled, and a tick that
+       * wakes after teardown and does nothing is the same outcome. Only the
+       * first arm is held on `backfillTimer`, so a capability stopped before
+       * the pass ever ran leaves no timer behind. */
       const backfillTick = async (): Promise<void> => {
+        await restThenBreathe(BACKFILL_REST_MS, BACKFILL_IDLE_CEILING_MS)
         if (stopped) return
         const stamped = await backfill.runOnce().catch(() => 0)
-        /* Do not re-arm after teardown: an await that resolved past `stop`
-         * would otherwise schedule a timer nobody clears. */
-        if (!stopped && stamped > 0) backfillTimer = setTimeout(() => void backfillTick(), 3_000)
+        if (!stopped && stamped > 0) void backfillTick()
       }
-      backfillTimer = setTimeout(() => void backfillTick(), 3_000)
+      backfillTimer = setTimeout(() => void backfillTick(), 0)
     } else {
       /* No filesystem (a browser tab) or no peer plugin: the ledger still
        * journals nothing and the UI says so instead of pretending. */

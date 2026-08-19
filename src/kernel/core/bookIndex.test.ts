@@ -42,11 +42,33 @@ describe('scanBooks', () => {
     expect(books).toHaveLength(2)
   })
 
-  /* A half-written import — content but no record yet — is simply not on the
-   * shelf until it is finished. That is correct rather than a special case. */
-  it('skips a folder with no record at all', async () => {
+  /* BYTES WITH NO RECORD IS A BOOK — see `scanFolder`. This used to be
+   * skipped, on the reasoning that a half-written import is not a book yet.
+   * That reasoning made a record write which FAILED cost the book for good:
+   * the folder was never shelved, the index recorded it as a directory
+   * anyway, so the listing agreed with the cache on every later launch and
+   * nothing ever looked again. */
+  it('adopts a folder holding bytes but no record', async () => {
     const books = await scanBooks(
       fakeFs({ ...twoBooks, [`${BOOKS_DIR}/book_c/content.epub`]: 'bytes' }),
+    )
+    expect(books).toHaveLength(3)
+    expect(books.find((one) => one.bookId === 'book_c')).toMatchObject({
+      // Empty, not guessed: the original filename is not recoverable, and the
+      // enrichment pass fills the real one in from the bytes.
+      title: '',
+      author: '',
+      // Read off the content file, so an adopted PDF is not opened as an epub.
+      ext: 'epub',
+      hasContent: true,
+    })
+  })
+
+  /* A folder with NEITHER is still not a book: nothing to adopt, and nothing
+   * the enrichment pass could fill in from. */
+  it('skips a folder with no record and no bytes', async () => {
+    const books = await scanBooks(
+      fakeFs({ ...twoBooks, [`${BOOKS_DIR}/book_c/notes.txt`]: 'x' }),
     )
     expect(books).toHaveLength(2)
   })
@@ -58,7 +80,7 @@ describe('scanBooks', () => {
 
 describe('parseIndex', () => {
   it('reads a cache back', () => {
-    const raw = JSON.stringify({ version: 1, books: [{ bookId: 'a', title: 'T', author: 'A' }] })
+    const raw = JSON.stringify({ version: 2, books: [{ bookId: 'a', title: 'T', author: 'A' }] })
     expect(parseIndex(raw)).toEqual([{ bookId: 'a', title: 'T', author: 'A' }])
   })
 
@@ -67,8 +89,10 @@ describe('parseIndex', () => {
   it('refuses anything it cannot trust', () => {
     expect(parseIndex(null)).toBeNull()
     expect(parseIndex('not json')).toBeNull()
-    expect(parseIndex(JSON.stringify({ version: 2, books: [] }))).toBeNull()
-    expect(parseIndex(JSON.stringify({ version: 1, books: 'nope' }))).toBeNull()
+    // Both directions: the version this replaced, and one from the future.
+    expect(parseIndex(JSON.stringify({ version: 1, books: [] }))).toBeNull()
+    expect(parseIndex(JSON.stringify({ version: 3, books: [] }))).toBeNull()
+    expect(parseIndex(JSON.stringify({ version: 2, books: 'nope' }))).toBeNull()
   })
 
   /* ONE BAD ROW COSTS THE WHOLE CACHE. It used to cost only that row — and a
@@ -78,7 +102,7 @@ describe('parseIndex', () => {
    * turns the same corruption into one rescan, which rewrites the cache clean. */
   it('refuses the whole cache over one entry it cannot validate', () => {
     const raw = JSON.stringify({
-      version: 1,
+      version: 2,
       books: [{ title: 'no id' }, { bookId: 'a', title: 'T', author: 'A' }],
     })
     expect(parseIndex(raw)).toBeNull()
@@ -88,7 +112,7 @@ describe('parseIndex', () => {
    * uses, so the cache cannot hold a shape the record could not. */
   it('sanitises a malformed field without losing the row', () => {
     const raw = JSON.stringify({
-      version: 1,
+      version: 2,
       books: [{ bookId: 'a', title: 'T', author: 'A', subjects: 42 }],
     })
     const books = parseIndex(raw)
@@ -180,7 +204,7 @@ describe('writeIndex', () => {
 describe('the cache remembers which books have bytes', () => {
   it('carries hasContent back out of the index', () => {
     const raw = JSON.stringify({
-      version: 1,
+      version: 2,
       books: [
         { bookId: 'a', title: 'Has', author: '', hasContent: true },
         { bookId: 'b', title: 'Has not', author: '', hasContent: false },
@@ -192,7 +216,7 @@ describe('the cache remembers which books have bytes', () => {
   })
 
   it('leaves it unset for an index written before it was recorded', () => {
-    const raw = JSON.stringify({ version: 1, books: [{ bookId: 'a', title: 'Old', author: '' }] })
+    const raw = JSON.stringify({ version: 2, books: [{ bookId: 'a', title: 'Old', author: '' }] })
     expect(parseIndex(raw)![0]).not.toHaveProperty('hasContent')
   })
 
@@ -218,7 +242,7 @@ describe('a cache from before the flag existed', () => {
     const fs = fakeFs({
       [`${BOOKS_DIR}/book_a/book.json`]: '{"title":"Moby-Dick","author":"M"}',
       [INDEX_FILE]: JSON.stringify({
-        version: 1,
+        version: 2,
         books: [{ bookId: 'book_a', title: 'Moby-Dick', author: 'M' }],
       }),
     })
@@ -231,7 +255,7 @@ describe('a cache from before the flag existed', () => {
     const fs = fakeFs({
       [`${BOOKS_DIR}/book_a/book.json`]: '{"title":"Moby-Dick","author":"M"}',
       [INDEX_FILE]: JSON.stringify({
-        version: 1,
+        version: 2,
         books: [{ bookId: 'book_a', title: 'Moby-Dick', author: 'M', hasContent: false }],
       }),
     })
@@ -295,9 +319,12 @@ describe('a library whose records will not read', () => {
 
   /* A folder with no record at all is a half-written import, not a failure —
    * it is simply not on the shelf yet. */
-  it('is quiet about a folder that has no record yet', async () => {
+  /* A folder with no record is not a DAMAGED record, so it must not count
+   * towards the all-records-failed throw. It is adopted now rather than
+   * skipped, which changes what comes back and not that point. */
+  it('does not count a folder with no record as a damaged one', async () => {
     const fs = fakeFs({ [`${BOOKS_DIR}/book_a/content.epub`]: 'WHALE' })
-    expect(await scanBooks(fs)).toEqual([])
+    expect(await scanBooks(fs)).toHaveLength(1)
   })
 })
 
@@ -311,7 +338,7 @@ describe('a library whose records will not read', () => {
  */
 describe('a cached index with no books directory', () => {
   it('is an empty shelf, not an unreadable one', async () => {
-    const fs = fakeFs({ [INDEX_FILE]: JSON.stringify({ version: 1, books: [] }) })
+    const fs = fakeFs({ [INDEX_FILE]: JSON.stringify({ version: 2, books: [] }) })
     const { books } = await loadShelf(fs)
     expect(books).toEqual([])
   })
@@ -327,6 +354,67 @@ describe('a cached index with no books directory', () => {
  * index that still did not mention it, and disagreed again. One abandoned folder
  * turned the cache off permanently, and quietly.
  */
+/**
+ * The exact state a failed record write leaves, and how a launch gets out of it.
+ *
+ * A real import copied 1,959 books and shelved 1,877. The other 82 had their
+ * bytes and no `book.json`, because their record write failed and `commit`
+ * drops the row. What made that PERMANENT rather than merely wrong was the
+ * cache: the scan declined to shelve a folder with no record, `writeIndex`
+ * carried the folder forward as a stray anyway, so `folders` matched the
+ * directory exactly and `loadShelf` believed the index on every launch after.
+ * Nothing ever looked at those folders again.
+ *
+ * Both halves of the way out are pinned here: the version bump refuses the
+ * index that hid them, and the rescan adopts what it finds.
+ */
+describe('books whose record was lost', () => {
+  /** The cache as the defect wrote it: the book absent, its folder claimed. */
+  const hiddenBy = (version: number) =>
+    fakeFs({
+      [`${BOOKS_DIR}/book_a/book.json`]: record('Alpha'),
+      [`${BOOKS_DIR}/book_a/content.epub`]: 'ALPHA',
+      // Bytes arrived, the record write failed.
+      [`${BOOKS_DIR}/book_lost/content.epub`]: 'LOST',
+      [INDEX_FILE]: JSON.stringify({
+        version,
+        books: [{ bookId: 'book_a', title: 'Alpha', author: 'A', hasContent: true }],
+        folders: ['book_a', 'book_lost'],
+      }),
+    })
+
+  /* THE TRAP, stated as a test. Under the old version this cache agreed with
+   * the directory and was complete, so it was believed — which is why the
+   * count stayed one short across every relaunch instead of self-correcting. */
+  it('is a cache that would otherwise agree with the directory forever', async () => {
+    const fs = hiddenBy(2)
+    const { rescanned, books } = await loadShelf(fs)
+    expect(rescanned).toBe(false)
+    expect(books).toHaveLength(1)
+  })
+
+  it('refuses the index that hid them and rescans', async () => {
+    expect((await loadShelf(hiddenBy(1))).rescanned).toBe(true)
+  })
+
+  it('puts the book back on the shelf', async () => {
+    const { books } = await loadShelf(hiddenBy(1))
+    expect(books.map((one) => one.bookId).sort()).toEqual(['book_a', 'book_lost'])
+    // Openable, which is the point — the bytes were never the problem.
+    expect(books.find((one) => one.bookId === 'book_lost')?.hasContent).toBe(true)
+  })
+
+  /* And the index it leaves behind is trusted, so the recovery is paid once
+   * rather than on every launch. */
+  it('leaves a cache the next launch believes', async () => {
+    const fs = hiddenBy(1)
+    await loadShelf(fs)
+    const { rescanned, books } = await loadShelf(fs)
+    expect(rescanned).toBe(false)
+    expect(books).toHaveLength(2)
+  })
+})
+
 describe('a stray folder beside the books', () => {
   const withStray = () =>
     fakeFs({
@@ -436,11 +524,12 @@ describe('what a scan costs', () => {
     const { counted, calls } = countedFs({
       ...twoBooks,
       [`${BOOKS_DIR}/book_a/content.epub`]: 'WHALE',
-      // A stray folder costs its listing and nothing more.
+      // An adopted folder costs its listing and nothing more: there is no
+      // record to read, which is the whole reason it is adopted.
       [`${BOOKS_DIR}/half_done/content.epub`]: 'PARTIAL',
     })
     const books = await scanBooks(counted)
-    expect(books).toHaveLength(2)
+    expect(books).toHaveLength(3)
     expect(calls.readDir).toBe(1 + 3)
     expect(calls.readFile).toBe(2)
     expect(calls.exists).toBe(0)

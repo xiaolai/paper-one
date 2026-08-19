@@ -56,6 +56,34 @@ function listsContent(names: ReadonlySet<string>): boolean {
 }
 
 /**
+ * A book folder holding bytes and no record, read back as a shelf row — or
+ * null when there are no bytes either, which is a folder and not a book.
+ *
+ * See `scanFolder`, which explains why this is adopted rather than skipped.
+ *
+ * The ID IS THE FOLDER NAME, which is what the rest of the scan falls back to
+ * for a record written before ids were stored. It is `safeId(bookId)` and not
+ * reversible, so it is the same imperfect answer given in the same place
+ * rather than a new one — and every write from here on stamps the canonical
+ * id back into the record.
+ *
+ * `ext` is READ OFF THE CONTENT FILE and not assumed: `openStored` defaults a
+ * record with no `ext` to `.epub`, so an adopted PDF without this would be a
+ * row for a file that is not there.
+ */
+function adoptOrphan(name: string, names: ReadonlySet<string>): IndexedBook | null {
+  const content = CONTENT_NAMES.find((one) => names.has(one))
+  if (!content) return null
+  return {
+    bookId: name,
+    title: '',
+    author: '',
+    ext: content.slice('content.'.length),
+    hasContent: true,
+  }
+}
+
+/**
  * Does this book's folder hold a content file? ONE listing, not one probe per
  * format.
  *
@@ -83,8 +111,21 @@ export interface IndexFs extends VaultFs {
   readDir: (path: string) => Promise<{ name: string; isDirectory: boolean }[]>
 }
 
+/** The one place the stored index's version is written down. */
+const INDEX_VERSION = 2
+
 interface StoredIndex {
-  readonly version: 1
+  /**
+   * BUMPED TO 2 when a folder holding bytes and no record stopped being
+   * skipped and started being a book — see `scanFolder`. The rows a version-1
+   * index holds are all still valid; what changed is what the SET of them
+   * means, because an index written by the old rule can be complete, agree
+   * with the directory listing, and still be missing every orphaned book on
+   * disk. That cache is trusted forever by `loadShelf`'s membership check, so
+   * the only way those books are ever looked at again is to refuse the
+   * version outright and rescan once.
+   */
+  readonly version: 2
   readonly books: readonly IndexedBook[]
   /**
    * Every directory under `books/` when this index was built — not just the
@@ -131,7 +172,7 @@ export function parseIndex(raw: string | null): readonly IndexedBook[] | null {
     return null
   }
   const shape = parsed as Partial<StoredIndex>
-  if (!shape || shape.version !== 1 || !Array.isArray(shape.books)) return null
+  if (!shape || shape.version !== INDEX_VERSION || !Array.isArray(shape.books)) return null
   const books: IndexedBook[] = []
   for (const one of shape.books) {
     const id = (one as { bookId?: unknown })?.bookId
@@ -256,7 +297,31 @@ async function scanFolder(fs: IndexFs, name: string): Promise<FolderScan> {
   try {
     const listing = await fs.readDir(`${BOOKS_DIR}/${name}`)
     const names = new Set(listing.map((one) => one.name))
-    if (!names.has('book.json')) return { kind: 'stray' }
+    /* BYTES WITH NO RECORD IS A BOOK, NOT A NON-BOOK. This returned `stray`
+     * for anything without a `book.json`, on the reasoning that a folder mid
+     * import is not a book yet and should not appear until it is finished.
+     * True of a folder with nothing in it. False, and expensively so, of one
+     * holding a complete copy of a book: `atomicWrite` renames content into
+     * place, so a `content.*` that is there is whole, and the folder's own
+     * name is the content hash, which is the id. Nothing about that book is
+     * missing except a file this app can write.
+     *
+     * Skipping it made a lost record PERMANENT and SILENT. A record write
+     * that fails drops the row (`libraryStore`'s `commit`), the next scan
+     * declined to shelve the folder, and the index then recorded the folder
+     * anyway — so the listing agreed with the cache on every later launch and
+     * nothing ever looked again. 82 books sat on disk, invisible, across
+     * every relaunch, with no way for the reader to find out.
+     *
+     * Adopted with an EMPTY title rather than a guessed one: the original
+     * filename is not recoverable — the copy is stored as `content.<ext>` —
+     * and the enrichment pass parses exactly the books with no `parsedAt` and
+     * fills in the real title, author and jacket from the bytes. That is a
+     * better answer than the filename an import would have written. */
+    if (!names.has('book.json')) {
+      const adopted = adoptOrphan(name, names)
+      return adopted ? { kind: 'book', book: adopted } : { kind: 'stray' }
+    }
     const bytes = await fs.readFile(`${BOOKS_DIR}/${name}/book.json`)
     const record = parseRecord(new TextDecoder().decode(bytes))
     /* A record that is THERE and parses to nothing is unreadable too — which
@@ -489,7 +554,7 @@ export async function writeIndex(
       kept = [...new Set([...strays, ...books.map((one) => folderNameOf(one.bookId))])]
     }
   }
-  const payload: StoredIndex = { version: 1, books, ...(kept ? { folders: kept } : {}) }
+  const payload: StoredIndex = { version: INDEX_VERSION, books, ...(kept ? { folders: kept } : {}) }
   await atomicWrite(fs, INDEX_FILE, new TextEncoder().encode(JSON.stringify(payload)))
 }
 

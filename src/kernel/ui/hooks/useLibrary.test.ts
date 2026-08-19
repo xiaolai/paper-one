@@ -437,3 +437,116 @@ describe('useLibrary, mounted', () => {
     expect(books[0]?.hasContent).toBe(true)
   })
 })
+
+/**
+ * A folder import, at the size that broke.
+ *
+ * A real import copied 1,959 books correctly and shelved 1,877 of them. The 82
+ * missing ones were a CONTIGUOUS BLOCK AT THE TAIL — bytes on disk, no
+ * `book.json`, no row, no journal entry — because `shelveImported` called `add`
+ * once per book in one synchronous pass. Every call opens its own key on the
+ * write queue and each key starts draining immediately, so the whole library
+ * went into flight in a single tick and the end of the burst failed. `commit`
+ * then dropped each failed row and rewrote the index without it, and the only
+ * trace was a console line nobody had open.
+ *
+ * Both halves are pinned here: the fan-out is bounded, and a failure is
+ * COUNTED rather than swallowed. Either one alone leaves the defect — an
+ * unbounded burst that reports its failures is still lossy, and a bounded one
+ * that hides them is how this went unnoticed for a session.
+ */
+describe('addMany, the shape a folder import writes in', () => {
+  afterEach(cleanup)
+
+  const many = (count: number) =>
+    Array.from({ length: count }, (_unused, at) => ({
+      bookId: `book_${String(at).padStart(4, '0')}`,
+      record: { title: `Book ${String(at)}`, author: '', ext: 'epub' },
+      sparse: true,
+    }))
+
+  /**
+   * Counts writes IN FLIGHT, which is the quantity that broke — not total.
+   *
+   * THE DELAY IS THE MEASUREMENT, not padding. `fakeFs` resolves within the
+   * same microtask, so without it every write finishes before the next one
+   * starts and the peak reads 1 whatever the pool is set to — a test that
+   * passed with the bound removed entirely, which is to say a test of
+   * nothing. Every real write here is an IPC round-trip into the Tauri
+   * process, so a macrotask is the faithful model and not a trick.
+   */
+  function peaked(files: Record<string, string>) {
+    const fs = fakeFs(files)
+    let inFlight = 0
+    let peak = 0
+    const watched = {
+      ...fs,
+      writeFile: async (path: string, bytes: Uint8Array) => {
+        inFlight += 1
+        peak = Math.max(peak, inFlight)
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 0))
+          return await fs.writeFile(path, bytes)
+        } finally {
+          inFlight -= 1
+        }
+      },
+    }
+    return { fs, watched, peak: () => peak }
+  }
+
+  it('never puts the whole import in flight at once', async () => {
+    const { fs, watched, peak } = peaked({})
+    const library = createLibrary({ fs: watched, queue: writeQueue(), initial: [] })
+    expect(await library.addMany(many(200))).toBe(0)
+    /* `add` resolves behind its own index write — see `commit` — so the cache
+     * being there is the proof every book's chain actually finished, rather
+     * than the pool having quietly dropped the tail. */
+    expect(fs.store.has(INDEX_FILE)).toBe(true)
+    /* The bound itself. 200 books used to mean 200 chains in one tick; the
+     * pool is 8 wide, and the slack is for the index write riding along
+     * beside them. Anything near 200 is the defect back. */
+    expect(peak()).toBeLessThanOrEqual(12)
+  })
+
+  /* Every book still lands. A bound on concurrency that quietly dropped the
+   * overflow would be the same bug wearing the fix's clothes. */
+  it('shelves every book it was given', async () => {
+    const fs = fakeFs({})
+    const library = createLibrary({ fs, queue: writeQueue(), initial: [] })
+    await library.addMany(many(200))
+    expect(library.getSnapshot()).toHaveLength(200)
+  })
+
+  /* THE COUNT IS THE POINT. This returned nothing and every caller let the
+   * promise go, so an import that lost 82 books reported "1,959 added". */
+  it('counts the books whose record could not be written', async () => {
+    const fs = fakeFs({})
+    const refuses = new Set(['book_0003', 'book_0007'])
+    const failing = {
+      ...fs,
+      writeFile: async (path: string, bytes: Uint8Array) => {
+        if ([...refuses].some((id) => path.includes(id))) throw new Error('disk full')
+        return fs.writeFile(path, bytes)
+      },
+    }
+    const library = createLibrary({ fs: failing, queue: writeQueue(), initial: [] })
+    expect(await library.addMany(many(10))).toBe(2)
+  })
+
+  /* One book that cannot be saved must not cost the other 1,958. */
+  it('keeps going past a book it could not save', async () => {
+    const fs = fakeFs({})
+    const failing = {
+      ...fs,
+      writeFile: async (path: string, bytes: Uint8Array) => {
+        if (path.includes('book_0000')) throw new Error('disk full')
+        return fs.writeFile(path, bytes)
+      },
+    }
+    const library = createLibrary({ fs: failing, queue: writeQueue(), initial: [] })
+    expect(await library.addMany(many(10))).toBe(1)
+    expect(library.getSnapshot().map((one) => one.bookId)).not.toContain('book_0000')
+    expect(library.getSnapshot()).toHaveLength(9)
+  })
+})

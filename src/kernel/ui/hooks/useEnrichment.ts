@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react'
 import type { IndexedBook } from '../../core/bookIndex'
 import type { BookRecord } from '../../core/bookFolder'
 import type { VaultFs } from '../../core/bookVault'
+import { breathe } from '../../core/breath'
 import { enrichOne, needsEnrichment, nextStep, pendingCount, type EnrichDeps } from '../../core/enrich'
 
 /**
@@ -17,14 +18,20 @@ import { enrichOne, needsEnrichment, nextStep, pendingCount, type EnrichDeps } f
  * until the reader next looks at the shelf, and then it has the launch after
  * that.
  *
- * NOT WHILE READING. A reader in a book is spending the main thread on page
- * turns, and a background parse lands as a stutter in the one place this app
- * has to feel smooth. The pass stops when the reader opens a book and picks up
- * where it left off when they come back — no state needed, because `parsedAt`
- * on disk IS the progress.
+ * NOT WHILE READING, AND NOT WHILE IMPORTING. A reader in a book is spending
+ * the main thread on page turns, and a background parse lands as a stutter in
+ * the one place this app has to feel smooth. An import is spending the same
+ * thread copying, and it shelves as it goes — so its rows land here while it
+ * is still running, and a pass that took them would be parsing a book a
+ * second against a copy loop that wants the thread seventy times a second.
+ * Both stand-downs cost nothing: `parsedAt` on disk IS the progress, so the
+ * pass resumes exactly where it left off.
  *
- * A BREATH BETWEEN BOOKS. Yielding to the event loop between parses is what
- * keeps a shelf scrollable while two thousand books are being read.
+ * A BREATH BETWEEN BOOKS, TAKEN WHEN IT IS NEEDED. Yielding between parses is
+ * what keeps a shelf scrollable while two thousand books are being read — but
+ * the yield waits for the main thread to be free rather than for a fixed
+ * 120ms, so the pass stands aside from a reader and not from an empty room.
+ * See `breathe`.
  *
  * It resumes across quits for the same reason: the work list is derived from
  * the shelf every time, so a pass interrupted at book four hundred starts the
@@ -33,12 +40,18 @@ import { enrichOne, needsEnrichment, nextStep, pendingCount, type EnrichDeps } f
  */
 
 /**
- * How long to stand aside between books, in milliseconds.
+ * The LONGEST this stands aside between books, in milliseconds.
  *
- * Long enough that a scroll gesture lands between two parses rather than behind
- * one, short enough that two thousand books do not take all evening: at 120ms
- * of standing aside the pass spends four minutes waiting across a shelf that
- * size, which is nothing next to the parsing itself.
+ * A ceiling now, not a duration — see `breathe`. It was a flat sleep, and a
+ * flat sleep charges the same whether the reader is scrolling or the app has
+ * been untouched for an hour: at 120ms a book, a shelf of two thousand spent
+ * very nearly four minutes waiting for nobody. The wait is `requestIdleCallback`
+ * with this as its timeout, so it ends as soon as the main thread is free and
+ * still cannot be starved past the figure that was tuned here.
+ *
+ * The value is unchanged deliberately. It was chosen as the longest pause a
+ * reader would not notice, which is exactly the right ceiling; what was wrong
+ * with it was being the floor as well.
  */
 const BREATH_MS = 120
 
@@ -60,6 +73,14 @@ export interface EnrichmentDeps {
    * where they want jackets appearing.
    */
   readonly reading: boolean
+  /**
+   * True while an import is still copying books in — the pass stands down.
+   *
+   * The import shelves as it copies, so its rows arrive while it is running
+   * and this pass would otherwise start parsing on top of it, on the same
+   * thread, for the whole of the import. See `IdleReason`'s `importing`.
+   */
+  readonly importing: boolean
   /** Fold a parse into the shelf — the same `add` the reader's own open uses. */
   readonly add: (bookId: string, record: BookRecord) => void
   /** File the jacket, in order with this book's other writes — see `keepJacket`. */
@@ -72,7 +93,7 @@ export interface EnrichmentDeps {
 
 export function useEnrichment(deps: EnrichmentDeps): EnrichmentProgress {
   // Only what this function itself reads; the loop reaches the rest through `live`.
-  const { books, fs, reading } = deps
+  const { books, fs, reading, importing } = deps
 
   /* The whole of `deps` behind a ref. The loop is a single long-lived async
    * function, and everything it needs changes underneath it — the shelf grows
@@ -115,7 +136,7 @@ export function useEnrichment(deps: EnrichmentDeps): EnrichmentProgress {
   const inFlight = useRef<Promise<void>>(Promise.resolve())
 
   useEffect(() => {
-    if (!fs || reading || pending === 0) return
+    if (!fs || reading || importing || pending === 0) return
     const mine = (generation.current += 1)
     const current = () => generation.current === mine
 
@@ -136,6 +157,10 @@ export function useEnrichment(deps: EnrichmentDeps): EnrichmentProgress {
           books: live.current.books,
           hasFilesystem: live.current.fs !== null,
           reading: live.current.reading,
+          /* Asked every turn, like `reading`: an import can START while this
+           * loop is running — a drop onto the window during the parse pass —
+           * and the guard that let the loop in ran books ago. */
+          importing: live.current.importing,
         })
         if (step.kind === 'idle') return
 
@@ -179,8 +204,9 @@ export function useEnrichment(deps: EnrichmentDeps): EnrichmentProgress {
 
         /* The breath. Also the loop's only yield point when every book fails
          * fast — without it a shelf of unreadable files would spin the main
-         * thread flat rather than failing politely. */
-        await new Promise((resolve) => setTimeout(resolve, BREATH_MS))
+         * thread flat rather than failing politely. `breathe` always yields,
+         * idle callback or timer, so that guarantee is unchanged. */
+        await breathe(BREATH_MS)
       }
     })()
     inFlight.current = done
@@ -197,7 +223,7 @@ export function useEnrichment(deps: EnrichmentDeps): EnrichmentProgress {
     // only part of it this effect reacts to, and the loop reads the rest
     // through `live`. Listed, every write the pass makes would restart it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fs, reading, pending === 0])
+  }, [fs, reading, importing, pending === 0])
 
   return { pending }
 }

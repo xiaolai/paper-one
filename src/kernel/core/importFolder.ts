@@ -69,8 +69,17 @@ export interface ImportOutcome {
 export interface ImportProgress {
   readonly done: number
   readonly total: number
-  readonly current: string
 }
+
+/**
+ * How many books are handed to the shelf at a time — see `onCopied`.
+ *
+ * Small enough that the shelf stops saying "empty" almost at once, large
+ * enough that a two-thousand-book import is eighty handovers rather than two
+ * thousand. At the rate the copy actually runs — about seventy books a
+ * second on the library that set this — a batch is a third of a second.
+ */
+export const SHELVE_BATCH = 24
 
 /**
  * Every importable file under a folder, depth-first.
@@ -123,34 +132,83 @@ export async function importFolder(
   root: string,
   {
     onProgress,
+    onCopied,
     signal,
-  }: { onProgress?: (progress: ImportProgress) => void; signal?: AbortSignal } = {},
+  }: {
+    onProgress?: (progress: ImportProgress) => void
+    /**
+     * Books copied since the last call, IN BATCHES AND WHILE THE WALK IS
+     * STILL RUNNING — see `SHELVE_BATCH`.
+     *
+     * The reason this exists: every outcome used to be returned at the end
+     * and shelved in one go afterwards, so a two-thousand-book import spent
+     * its entire copying phase with nothing on the shelf. The reader watched
+     * a counter climb past eight hundred underneath the words "Your library
+     * is empty", which is the app telling them two contradictory things
+     * about the same moment.
+     *
+     * It also bounds what a crash costs. Shelving at the end means every
+     * book copied so far has bytes and no record if the app goes down before
+     * the loop finishes; shelving as it goes means at most one batch is in
+     * that state.
+     *
+     * The handler must not be slow — it is called from inside the copy loop.
+     * Callers hand the batch to a queue and return.
+     */
+    onCopied?: (batch: readonly ImportOutcome[]) => void
+    signal?: AbortSignal
+  } = {},
 ): Promise<ImportOutcome[]> {
   // The walk itself can be long on a deep tree, and was uncancellable.
   if (signal?.aborted) return []
   const paths = await collectBooks(fs, root)
   if (signal?.aborted) return []
   const outcomes: ImportOutcome[] = []
+  /* Copied but not yet handed over. Drained on the way out of the loop too,
+   * so a batch that never filled still reaches the shelf. */
+  let batch: ImportOutcome[] = []
+  const handOver = () => {
+    if (batch.length === 0) return
+    const ready = batch
+    batch = []
+    onCopied?.(ready)
+  }
 
   for (const [index, path] of paths.entries()) {
     if (signal?.aborted) break
     const name = path.slice(path.lastIndexOf('/') + 1)
-    onProgress?.({ done: index, total: paths.length, current: name })
+    onProgress?.({ done: index, total: paths.length })
     const outcome = await importOne(fs, path, name, signal)
     // `null` is a stop, not a failure — see `importOne`.
     if (!outcome) break
     outcomes.push(outcome)
+    batch.push(outcome)
+    if (batch.length >= SHELVE_BATCH) handOver()
     // Between books, not inside one: this is the whole of what keeps a
     // three-hundred-book import from freezing the window.
     await yieldToPaint()
   }
 
-  onProgress?.({ done: paths.length, total: paths.length, current: '' })
+  /* EVEN ON A STOP. The books already copied are on disk either way, and a
+   * stopped import that left them recordless would leave exactly the
+   * orphaned folders this pipeline has been taught to avoid. */
+  handOver()
+  onProgress?.({ done: outcomes.length, total: paths.length })
   return outcomes
 }
 
-/** A one-line summary, for a reader who does not want the whole list. */
-export function summarise(outcomes: readonly ImportOutcome[]): string {
+/**
+ * A one-line summary, for a reader who does not want the whole list.
+ *
+ * `unsaved` is books whose BYTES arrived and whose record did not — a
+ * different failure from `failed`, which is a file that could not be read at
+ * all, and the reason this parameter exists. A record write that fails leaves
+ * a copy of the book in the library with nothing on the shelf pointing at it,
+ * and until this was said out loud the only trace was a line in a console
+ * nobody had open: 82 books of 1,959 went missing that way, and the import
+ * reported "1,959 added".
+ */
+export function summarise(outcomes: readonly ImportOutcome[], unsaved = 0): string {
   const added = outcomes.filter((one) => one.status === 'added').length
   const duplicate = outcomes.filter((one) => one.status === 'duplicate').length
   const failed = outcomes.filter((one) => one.status === 'failed').length
@@ -158,6 +216,7 @@ export function summarise(outcomes: readonly ImportOutcome[]): string {
   const parts = [`${added} added`]
   if (duplicate) parts.push(`${duplicate} already here`)
   if (failed) parts.push(`${failed} could not be read`)
+  if (unsaved) parts.push(`${unsaved} could not be saved`)
   return parts.join(', ')
 }
 

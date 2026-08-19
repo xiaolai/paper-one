@@ -101,6 +101,10 @@ export {
 export { CONTENT_EXTENSIONS } from './core/bookVault'
 export type { BookRecord, TagClock, TagClockEntry } from './core/bookFolder'
 export type { IndexFs, IndexedBook } from './core/bookIndex'
+/* Standing aside between books, for a long background pass — see `breath`.
+ * Public because sync's contentHash backfill is one of the two passes that
+ * need it, and the other is the kernel's own enrichment. */
+export { breathe, restThenBreathe } from './core/breath'
 export { writeQueue } from './core/writeQueue'
 export type { WriteQueue } from './core/writeQueue'
 export { tagKey } from './core/tags'

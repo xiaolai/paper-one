@@ -110,6 +110,9 @@
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+  /* Counts that tick upward, in a line the eye returns to: proportional
+     digits make "1,412 of 1,959" shuffle sideways on every book. */
+  font-variant-numeric: tabular-nums;
 }
 
 .library[data-platform='macos'] {
@@ -1045,13 +1048,13 @@
 
 /* The import report. Per book rather than a spinner — an import of three hundred
    books that says only "working…" is indistinguishable from one that has hung. */
-.importing {
-  padding: 0 var(--stage-pad-x, 24px) var(--space-10);
-  font-size: var(--text-small);
-  opacity: 0.7;
-  font-variant-numeric: tabular-nums;
-}
-
+/* `.importing` IS GONE, and with it a whole class of layout movement. It was
+   a block above the search field carrying the import's current filename, so
+   it appeared, rewrapped on nearly every book, and disappeared — moving the
+   shelf each time. Its text lives in `.statusWork` now, in a foot of fixed
+   height. It also padded with `--stage-pad-x`, which is the READER's gutter
+   and is not defined on this screen (see the note at `.chips`), so it sat
+   24px in while everything above and below it sat at `--shelf-pad-x`. */
 
 /* Present to a screen reader, absent to the eye — the screen's heading, which
    the rail and the pane give a sighted reader for free and give a screen

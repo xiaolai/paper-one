@@ -95,6 +95,27 @@ export interface Library {
    * degraded every existing record to its filename on startup.
    */
   add(bookId: string, record: BookRecord, sparse?: boolean): Promise<void>
+  /**
+   * Add a whole import's worth of books, A FEW AT A TIME — see `WRITE_WIDTH`.
+   *
+   * The reason this exists rather than a loop over `add` in the caller: a
+   * folder import called `add` once per book in one synchronous pass, and
+   * every call opens its own key on the write queue, which starts draining
+   * immediately. Two thousand books therefore put two thousand write chains
+   * in flight in a single tick — each one several filesystem round-trips and
+   * a journal append — and the writes at the end of that burst failed. A
+   * failed record write is not visible to the reader: `commit` drops the row
+   * and rewrites the index without it, so the books were copied, silently
+   * lost their records, and never appeared. 82 of 1,959 in the case that
+   * found this.
+   *
+   * Resolves with HOW MANY COULD NOT BE SAVED, because the caller is the
+   * import and the import is what tells the reader. A count that is thrown
+   * away is how the same failure stayed invisible for a whole session.
+   */
+  addMany(
+    entries: readonly { bookId: string; record: BookRecord; sparse?: boolean }[],
+  ): Promise<number>
   /** Change one book. The only mutator, because a book is one file. */
   update(bookId: string, change: (record: BookRecord) => BookRecord): Promise<void>
   /** Take a book off the shelf. Its folder goes to the trash, not away. */
@@ -251,6 +272,68 @@ const canonical = (value: unknown): string => {
  *  order than `parseRecord` does, and a reconcile that treated key order as
  *  a change published a notification for a row that had not changed. */
 const sameRow = (a: IndexedBook, b: IndexedBook): boolean => canonical(a) === canonical(b)
+
+/**
+ * How many books this store writes at once.
+ *
+ * Every verb here that touches MANY books — an import, a tag rename across the
+ * shelf, a batch of remote rows — used to hand the whole list to the write
+ * queue in one pass. The queue serialises per key and a book's key is its own
+ * folder, so "one pass" meant every book's chain started in the same tick:
+ * two thousand books, each several filesystem round-trips and a journal
+ * append, all in flight together. The tail of that burst failed.
+ *
+ * BOUNDED AT THE PRODUCER, NOT IN THE QUEUE, and the distinction is
+ * load-bearing. Capping how many KEYS the queue drains at once looks like the
+ * tidier fix and deadlocks: a task running on a book's key awaits other keys
+ * from inside itself — the journal's `begin`/`commit` bracket on
+ * `JOURNAL_KEY`, and `noteContent`'s index write — so a full pool of book
+ * tasks would all be waiting for a key that can never be given a slot. The
+ * queue must stay unbounded; the callers must stop flooding it.
+ *
+ * Matched to `SCAN_WIDTH`'s reasoning and half its value: the cost is IPC
+ * round-trips, a handful in flight overlaps the latency, and a write is
+ * several round-trips plus an fsync where a scan is two small reads.
+ */
+const WRITE_WIDTH = 8
+
+/**
+ * Run `work` over every item, at most `width` in flight, gathering failures
+ * rather than stopping at the first.
+ *
+ * `Promise.allSettled(list.map(...))` — which this replaces in four places —
+ * gathers failures too, and starts every item at once, which is the defect.
+ * One item failing must not cost the rest, so the failure is caught per item
+ * and the reasons are returned for the caller to raise as it sees fit.
+ */
+async function pooled<T>(
+  items: readonly T[],
+  width: number,
+  work: (item: T) => Promise<void>,
+): Promise<unknown[]> {
+  const failures: unknown[] = []
+  let cursor = 0
+  const worker = async () => {
+    for (;;) {
+      const at = cursor
+      cursor += 1
+      if (at >= items.length) return
+      try {
+        await work(items[at]!)
+      } catch (cause) {
+        failures.push(cause)
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(width, items.length) }, worker))
+  return failures
+}
+
+/** The gathered failures, raised the way every batch verb here raises them. */
+function raiseGathered(failures: readonly unknown[], what: string): void {
+  if (failures.length === 1) throw failures[0]
+  if (failures.length) throw new AggregateError(failures, `${failures.length} ${what}`)
+}
 
 /**
  * A shelf row rebuilt from a record — the one place that shape is decided.
@@ -728,6 +811,26 @@ export function createLibrary({
   }
 
   /**
+   * A whole import's books, `WRITE_WIDTH` at a time — see the interface.
+   *
+   * SEQUENTIAL WITHIN A SLOT, so the shelf grows in the order the books were
+   * read rather than in completion order, and the optimistic rows each `add`
+   * publishes stay a faithful picture of what has been asked for.
+   *
+   * Failures are COUNTED AND RETURNED, not raised. One book that cannot be
+   * saved must not cost the other 1,958, and the caller — the import, which
+   * is already reporting "N added, N already here" — is the right place for
+   * "and N could not be saved" to be said out loud.
+   */
+  const addMany: Library['addMany'] = async (entries) => {
+    const failures = await pooled(entries, WRITE_WIDTH, (one) =>
+      add(one.bookId, one.record, one.sparse),
+    )
+    for (const cause of failures) console.error('Paper: could not save an imported book', cause)
+    return failures.length
+  }
+
+  /**
    * Move a book onto a new id: ONE rename, and deliberately nothing else.
    *
    * `bookIdFor` hashes content now rather than a file's ends, so every book
@@ -942,12 +1045,13 @@ export function createLibrary({
     })
   }
 
-  /** Every book, one `update` each; settled together, failures gathered. */
+  /** Every book, one `update` each; a few at a time, failures gathered. */
   const eachBook = async (change: (record: BookRecord) => BookRecord): Promise<void> => {
-    const outcomes = await Promise.allSettled(books.map((book) => update(book.bookId, change)))
-    const failed = outcomes.filter((one): one is PromiseRejectedResult => one.status === 'rejected')
-    if (failed.length === 1) throw failed[0]!.reason
-    if (failed.length) throw new AggregateError(failed.map((one) => one.reason), `${failed.length} books could not be saved`)
+    const snapshot = books
+    raiseGathered(
+      await pooled(snapshot, WRITE_WIDTH, (book) => update(book.bookId, change)),
+      'books could not be saved',
+    )
   }
 
   const renameTag: Library['renameTag'] = (from, to) => {
@@ -1060,15 +1164,15 @@ export function createLibrary({
    * one answer, or the confirm can promise more than the undo delivers. */
   const ownTagCount: Library['ownTagCount'] = (raw) => ownTagBooks(raw).length
 
-  /** The books named, one `update` each; settled together, failures gathered. */
+  /** The books named, one `update` each; a few at a time, failures gathered. */
   const eachOf = async (
     bookIds: readonly string[],
     change: (record: BookRecord) => BookRecord,
   ): Promise<void> => {
-    const outcomes = await Promise.allSettled(bookIds.map((bookId) => update(bookId, change)))
-    const failed = outcomes.filter((one): one is PromiseRejectedResult => one.status === 'rejected')
-    if (failed.length === 1) throw failed[0]!.reason
-    if (failed.length) throw new AggregateError(failed.map((one) => one.reason), `${failed.length} books could not be saved`)
+    raiseGathered(
+      await pooled(bookIds, WRITE_WIDTH, (bookId) => update(bookId, change)),
+      'books could not be saved',
+    )
   }
 
   /* HELD HERE rather than in React state, because the store is the thing that
@@ -1167,18 +1271,14 @@ export function createLibrary({
     publish(list)
     if (!fs) return
     const target = fs
-    const outcomes = await Promise.allSettled(
-      applied.map((row) =>
-        queue.append(laneFor(row.bookId), async () => {
-          await recorded(recorder, row.bookId, 'record', () => updateBook(target, row.bookId, row.change))
-        }),
-      ),
+    const failures = await pooled(applied, WRITE_WIDTH, (row) =>
+      queue.append(laneFor(row.bookId), async () => {
+        await recorded(recorder, row.bookId, 'record', () => updateBook(target, row.bookId, row.change))
+      }),
     )
     // ONE index write for the batch, whatever happened to the rows.
     await writeIndexNow(target)
-    const failed = outcomes.filter((one): one is PromiseRejectedResult => one.status === 'rejected')
-    if (failed.length === 1) throw failed[0]!.reason
-    if (failed.length) throw new AggregateError(failed.map((one) => one.reason), `${failed.length} rows could not be applied`)
+    raiseGathered(failures, 'rows could not be applied')
   }
 
   return {
@@ -1190,6 +1290,7 @@ export function createLibrary({
       }
     },
     add,
+    addMany,
     update,
     remove,
     restore,

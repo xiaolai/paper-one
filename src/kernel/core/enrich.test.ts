@@ -263,6 +263,42 @@ describe('nextStep', () => {
     })
   })
 
+  /**
+   * THE SAME RULE AS READING, FOR THE SAME THREAD.
+   *
+   * The import copies on the main thread and shelves as it copies, so the
+   * rows this pass feeds on arrive WHILE it is running. Taking them means a
+   * parse of about a second per book against a copy loop that wants the
+   * thread seventy times a second — the import that took half a minute takes
+   * an hour, and the counter the reader is watching crawls for all of it.
+   *
+   * Nothing is lost by standing down: `parsedAt` on disk is the work list, so
+   * every book the import brought in is picked up the moment it stops.
+   */
+  it('stands down while books are still arriving', () => {
+    expect(nextStep({ books: shelf, hasFilesystem: true, reading: false, importing: true })).toEqual({
+      kind: 'idle',
+      why: 'importing',
+    })
+  })
+
+  it('picks the work back up as soon as the import stops', () => {
+    expect(nextStep({ books: shelf, hasFilesystem: true, reading: false, importing: false })).toEqual({
+      kind: 'parse',
+      book: shelf[1],
+    })
+  })
+
+  /* Reading outranks importing, so the reason names the thing a reader would
+   * act on first — a pass that says "importing" to somebody sitting in a book
+   * sends them to look at the wrong thing. */
+  it('names the reader before the import when both are true', () => {
+    expect(nextStep({ books: shelf, hasFilesystem: true, reading: true, importing: true })).toEqual({
+      kind: 'idle',
+      why: 'reading',
+    })
+  })
+
   /* Complete is a DIFFERENT idle from standing aside, and the distinction is
    * the whole answer when somebody asks why their covers stopped appearing. */
   it('reports completion when every book has been parsed', () => {

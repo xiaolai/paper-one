@@ -97,8 +97,15 @@ export interface LibraryProps {
   onSetFinished: (bookId: string, finished: boolean) => void
   /** Add a whole folder — see `importFolder`. */
   onAddFolder: () => void
-  /** Live import progress, or null when none is running. */
-  importing: { done: number; total: number; current: string } | null
+  /**
+   * Live import progress, or null when none is running.
+   *
+   * The SHAPE IS THE CORE TYPE'S, restated rather than imported only because
+   * this screen takes plain props. It carried the current book's filename
+   * too, and dropping that field is what stopped the status bar sliding
+   * sideways on every book — see `work`.
+   */
+  importing: { done: number; total: number } | null
   /** The shelf could not be read — see `Reader`'s prop of the same name. */
   shelfUnread?: boolean
   /**
@@ -535,6 +542,40 @@ export function Library({
     onFirstPaint('the shelf drew its first frame')
   }, [books.length, shelf.length, visible.length, virtualising])
 
+  /**
+   * What the reader asked for, and what came of it — the status bar's work
+   * slot, or null when the app is not busy on the reader's behalf.
+   *
+   * PER BOOK, not a spinner: an import of two thousand books that says only
+   * "working…" is indistinguishable from one that has hung. A count that
+   * climbs is what proves the difference.
+   *
+   * THE FILENAME IS NOT HERE, and taking it out is the point. The line read
+   * `Importing 861 of 1,959 — <the current book>`, and at seventy books a
+   * second that title is unreadable by construction: nobody can read a
+   * hundred-character string that is replaced fourteen milliseconds later.
+   * What it did instead was change the line's width on every book — and the
+   * line sits at the far end of a `space-between` bar, so the whole of it
+   * slid left and right, continuously, for the length of the import. The
+   * text that could not be read was the text making the bar move.
+   *
+   * The counts are localised, because "Importing 1412 of 1959" is a number
+   * nobody reads at a glance and this line is read at a glance or not at
+   * all. With `tabular-nums` on the class, the width now changes only when
+   * the count gains a digit.
+   *
+   * The notice outranks live progress only because progress has already
+   * stopped by the time there is one — `App` clears the notice on a timer,
+   * so this slot returns to the enrichment pass rather than being squatted
+   * on by "1,959 added" for the rest of the session.
+   */
+  const work =
+    importing !== null
+      ? importing.total > 0
+        ? `Importing ${importing.done.toLocaleString()} of ${importing.total.toLocaleString()}`
+        : 'Reading the folder…'
+      : importNotice
+
   return (
     <div className={styles.library} data-platform={platform}>
       {/* THE WORD "LIBRARY" IS GONE. It sat in a 38px serif over the library
@@ -545,20 +586,15 @@ export function Library({
           and no pane to read the context off. */}
       <h1 className={styles.srOnly}>Library</h1>
 
-      {/* Per BOOK, not a spinner. An import of three hundred books that says
-          only "working…" is indistinguishable from one that has hung. */}
-      {importing && (
-        <div className={styles.importing} role="status">
-          {importing.total > 0
-            ? `Importing ${importing.done} of ${importing.total} — ${importing.current}`
-            : 'Reading the folder…'}
-        </div>
-      )}
-      {!importing && importNotice && (
-        <div className={styles.importing} role="status">
-          {importNotice}
-        </div>
-      )}
+      {/* THE IMPORT LINE IS IN THE STATUS BAR, at the foot — see the block at
+          the bottom of this file. It was here, above the search field, as an
+          ordinary block in this column, and it moved the entire shelf twice:
+          once when it appeared and once when it went. Worse continuously —
+          its text carries the current filename, real filenames run past a
+          hundred characters, and the block rewrapped between one and three
+          lines on almost every book of a two-thousand-book import. The shelf
+          jittered for the whole of it. The foot is fixed-height and cannot
+          do that to anything. */}
 
       {books.length > 0 && (
         <div className={styles.filters}>
@@ -826,7 +862,17 @@ export function Library({
             {books.length === 0
               ? shelfUnread
                 ? 'Your library could not be read'
-                : 'Your library is empty'
+                : /* NOT "EMPTY" WHILE BOOKS ARE ARRIVING. An import copies
+                     before it shelves, so there is a window — the folder
+                     walk, then the first batch — where the shelf genuinely
+                     holds nothing and an import is plainly running. Saying
+                     "Your library is empty" over a status bar reading
+                     "Importing 861 of 1,959" is the app contradicting itself
+                     about the same moment, and it is the state a reader is
+                     most likely to be looking at. */
+                  importing !== null
+                  ? 'Adding your books'
+                  : 'Your library is empty'
               : view.tags.length > 0
                 ? `Nothing tagged ${view.tags.join(' and ')} matches`
                 : 'Nothing matches'}
@@ -835,12 +881,14 @@ export function Library({
             {books.length === 0
               ? shelfUnread
                 ? 'Nothing has been changed. Your books are still on disk — try reopening Paper.'
-                : /* POINTS AT THE BUTTONS ABOVE, which are right there. "Books
-                     you open appear here" was written when Paper opened onto the
-                     reader and this screen was somewhere you arrived later — it
-                     described a consequence rather than telling a first-time
-                     reader what to do, and it is now the first thing they see. */
-                  'Add a book, or a folder of them — everything you highlight and tag stays with it.'
+                : importing !== null
+                  ? 'They appear here as they arrive — the count at the foot is the progress.'
+                  : /* POINTS AT THE BUTTONS ABOVE, which are right there. "Books
+                       you open appear here" was written when Paper opened onto the
+                       reader and this screen was somewhere you arrived later — it
+                       described a consequence rather than telling a first-time
+                       reader what to do, and it is now the first thing they see. */
+                    'Add a book, or a folder of them — everything you highlight and tag stays with it.'
               : 'Try a different search, or clear the filter.'}
           </div>
           {/* THE FOLDER ROUTE, at the moment it is actually wanted — and only
@@ -848,7 +896,7 @@ export function Library({
               covers "nothing matches your search", where an import offer is a
               non sequitur, and `shelfUnread`, where the shelf could not be READ
               and adding to it is the last thing to suggest. */}
-          {books.length === 0 && !shelfUnread && (
+          {books.length === 0 && !shelfUnread && importing === null && (
             <div className={styles.emptyActions}>
               {/* BOTH ROUTES IN. The copy above says "Add a book, or a folder
                   of them" — and with an empty library the toolbar that holds
@@ -959,16 +1007,37 @@ export function Library({
               ? `${books.length.toLocaleString()} ${books.length === 1 ? 'book' : 'books'}`
               : `${shelf.length.toLocaleString()} of ${books.length.toLocaleString()} books`}
         </span>
-        {/* Background work, while there is any — moved here from the Library
-            panel, where it was only visible if that panel happened to be open.
-            A pass that quietly spends CPU for minutes belongs where a reader
-            looks to find out what the app is doing. */}
-        {enriching > 0 && (
+        {/* ONE SLOT FOR EVERYTHING THE APP IS DOING, in priority order: what
+            the reader just asked for, then what it did, then what the app is
+            doing on its own. They cannot be shown at once and they must not
+            be given a second line — a status bar that grows is a status bar
+            that moves the shelf, which is the defect that brought the import
+            line down here in the first place.
+
+            The import line WINS over the enrichment line deliberately. An
+            import is the reader's own action and lasts seconds to minutes;
+            the parse pass is the app's and lasts as long as it lasts. It
+            resumes reporting the moment the import stops.
+
+            `statusWork` clips rather than wraps — see the class — so the
+            hundred-character filenames that made the old banner rewrap on
+            every book simply run out of room here. */}
+        {work !== null ? (
+          <span className={styles.statusWork} role="status">
+            {work}
+          </span>
+        ) : enriching > 0 ? (
+          /* NO LIVE REGION on this one, as before. `role="status"` is
+             `aria-live="polite"`, and this line changes once per book for as
+             long as the pass runs — announcing a countdown from two thousand
+             is not progress reporting, it is noise a reader cannot turn off.
+             The import line keeps it because it reports something the reader
+             just asked for and it stops. */
           <span className={styles.statusWork}>
             <Sparkles size={ICON.control} strokeWidth={ICON.stroke} />
             Reading books for their titles and covers — {enriching.toLocaleString()} to go
           </span>
-        )}
+        ) : null}
       </div>
     </div>
   )

@@ -30,6 +30,7 @@ import type { IndexFs } from '../core/bookIndex'
 import { contentPathIn, readBook } from '../core/bookFolder'
 import {
   MAX_FILES,
+  SHELVE_BATCH,
   importFolder,
   keepOwnCopy,
   summarise,
@@ -83,6 +84,14 @@ export interface AppProps {
    */
   composition: Composition
 }
+
+/**
+ * How long a one-line notice about the library stays on screen, in ms.
+ *
+ * It shares the status bar's single work slot with the background parse
+ * pass, so this is also how long that pass can be prevented from reporting.
+ */
+const NOTICE_MS = 12_000
 
 export function App({ services, fs, shelfUnread = false, composition }: AppProps) {
   const platform = usePlatform()
@@ -163,7 +172,7 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
   )
 
 
-  const { add, remove, positionOf, rekeyBook, keepContent, rememberPosition, setFinished } = library
+  const { add, addMany, remove, positionOf, rekeyBook, keepContent, rememberPosition, setFinished } = library
 
   /**
    * Put what an import produced onto the shelf.
@@ -172,37 +181,47 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
    * is one function rather than a step inside it because the same shelving has
    * been needed by every import route this app has had.
    */
+  /* THROUGH `addMany`, NOT A LOOP OVER `add`, and that is the whole of what
+   * stops a large import losing its tail — see `Library.addMany`. This loop
+   * used to call `add` once per book in one synchronous pass, which put a
+   * write chain per book on the queue in a single tick; the writes at the end
+   * of the burst failed, and a failed record write silently drops the row. It
+   * also let every failure go: `add` through the hook is fire-and-forget, so
+   * the count below had nowhere to come from. */
   const shelveImported = useCallback(
-    (outcomes: readonly ImportOutcome[]) => {
-      for (const one of outcomes) {
-        if (one.status === 'failed' || !one.bookId || !one.name) continue
-        /* Every non-failed outcome, including duplicates. `add` folds into an
-         * existing record rather than replacing it, so a book already on the
-         * shelf keeps its tags and its place — and a book whose bytes are in the
-         * library with no record gets one, which is the case that was invisible
-         * forever before. */
-        add(one.bookId, {
-          /* The FILENAME, until the book is opened. Parsing three hundred books
-           * to learn three hundred titles would make importing a folder as slow
-           * as reading one, and the record corrects itself on first open. */
-          title: one.name.replace(/\.[^.]+$/, ''),
-          author: '',
-          addedAt: Date.now(),
-          /* WITHOUT THIS EVERY IMPORTED PDF IS UNOPENABLE. The bytes go to
-           * `content.pdf`, and `openStored` defaults a record with no `ext` to
-           * `.epub` — so it looks for a file that is not there. */
-          ext: extensionFor(one.name),
-          ...(one.path ? { origin: one.path } : {}),
-        },
-        /* SPARSE — a placeholder, not a parse. Everything above except the
-         * extension is a guess from a filename, and `add` folds what it is given
-         * in as the book's own account of itself. Without this flag, re-scanning
-         * re-importing a folder overwrote the real title and author of every
-         * book in it with `moby-dick-1851` and nothing. */
-        true)
-      }
+    async (outcomes: readonly ImportOutcome[]): Promise<number> => {
+      /* Every non-failed outcome, including duplicates. `add` folds into an
+       * existing record rather than replacing it, so a book already on the
+       * shelf keeps its tags and its place — and a book whose bytes are in the
+       * library with no record gets one, which is the case that was invisible
+       * forever before. */
+      const entries = outcomes
+        .filter((one) => one.status !== 'failed' && one.bookId && one.name)
+        .map((one) => ({
+          bookId: one.bookId!,
+          record: {
+            /* The FILENAME, until the book is opened. Parsing three hundred books
+             * to learn three hundred titles would make importing a folder as slow
+             * as reading one, and the record corrects itself on first open. */
+            title: one.name!.replace(/\.[^.]+$/, ''),
+            author: '',
+            addedAt: Date.now(),
+            /* WITHOUT THIS EVERY IMPORTED PDF IS UNOPENABLE. The bytes go to
+             * `content.pdf`, and `openStored` defaults a record with no `ext` to
+             * `.epub` — so it looks for a file that is not there. */
+            ext: extensionFor(one.name!),
+            ...(one.path ? { origin: one.path } : {}),
+          },
+          /* SPARSE — a placeholder, not a parse. Everything above except the
+           * extension is a guess from a filename, and `add` folds what it is given
+           * in as the book's own account of itself. Without this flag, re-scanning
+           * re-importing a folder overwrote the real title and author of every
+           * book in it with `moby-dick-1851` and nothing. */
+          sparse: true,
+        }))
+      return addMany(entries)
     },
-    [add],
+    [addMany],
   )
 
   /**
@@ -305,6 +324,12 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
    * only this component knows — where the bytes are, what parses them, and
    * whether the reader is currently in a book.
    */
+  /* DECLARED HERE, above the enrichment pass, because the pass reads it —
+   * it stands down while books are arriving. It used to sit beside the import
+   * handlers three hundred lines below, which is where it is written but not
+   * where it is first needed. */
+  const [importing, setImporting] = useState<ImportProgress | null>(null)
+
   const enrichment = useEnrichment({
     books: library.books,
     fs,
@@ -313,6 +338,11 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
      * jackets appearing; gated on the open book, the pass would stop the first
      * time anything was read and never start again that session. */
     reading: state.screen === 'reader',
+    /* AND NOT WHILE BOOKS ARE STILL ARRIVING. The import shelves as it
+     * copies, so rows reach this pass mid-import; taking them would put a
+     * parse a second against a copy loop that wants the same thread seventy
+     * times a second. */
+    importing: importing !== null,
     add,
     keepJacket: library.keepJacket,
     readBook: (entry) => {
@@ -465,28 +495,53 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
          * large folder is indistinguishable from the app having hung. Same
          * lifecycle, same channel, cleared in `finally` so an exception cannot
          * strand the bar on screen. */
-        setImporting({ done: 0, total: picked.length, current: '' })
+        setImporting({ done: 0, total: picked.length })
         const outcomes: ImportOutcome[] = []
+        /* THE SAME BATCHING THE FOLDER WALK DOES, and for the same reason —
+         * see `onCopied`. A drop of a thousand books left the shelf saying
+         * "Your library is empty" for the whole copy exactly as the picker
+         * did; the two routes had one defect between them. */
+        let batchOut: ImportOutcome[] = []
+        let shelving = Promise.resolve(0)
+        const handOver = () => {
+          if (batchOut.length === 0 || !current()) return
+          const ready = batchOut
+          batchOut = []
+          shelving = shelving.then(async (sofar) => sofar + (await shelveImported(ready)))
+        }
         try {
           for (const [index, { file, path }] of picked.entries()) {
             if (!current()) return
-            setImporting({ done: index, total: picked.length, current: file.name })
+            setImporting({ done: index, total: picked.length })
             try {
               /* Never null without a signal — the only `null` is a stop, and
                * neither the picker nor a drop has anything to stop. */
               const kept = await keepOwnCopy(fs, file, path)
-              if (kept) outcomes.push(kept)
+              if (kept) {
+                outcomes.push(kept)
+                batchOut.push(kept)
+              }
             } catch (cause) {
               console.error('Paper: could not add', path ?? file.name, cause)
               outcomes.push({ path: path ?? file.name, status: 'failed', name: file.name })
             }
+            if (batchOut.length >= SHELVE_BATCH) handOver()
           }
         } finally {
+          /* Even on the early return above: the bytes are on disk either way,
+           * and leaving them recordless is the orphan this pipeline exists to
+           * avoid. */
+          handOver()
           if (current()) setImporting(null)
         }
         if (!current()) return
-        shelveImported(outcomes)
-        setImportNotice(note ? `${summarise(outcomes)} ${note}` : summarise(outcomes))
+        /* AWAITED, where it used to be fired and forgotten — the count of
+         * books whose record could not be written is the notice's, and there
+         * is nowhere else for it to come from. */
+        const unsaved = await shelving
+        if (!current()) return
+        const summary = summarise(outcomes, unsaved)
+        setImportNotice(note ? `${summary} ${note}` : summary)
       }
       openBook(opening.file, opening.path)
     },
@@ -571,13 +626,34 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
    * named individually: "4 of 300 failed" tells a reader nothing they can act
    * on.
    */
-  const [importing, setImporting] = useState<ImportProgress | null>(null)
   /* NOT SEEDED WITH THE SHELF FAILURE any more. It shared this channel with
    * import notices, so the first folder import or failed open replaced it — and
    * it was not dismissable, so until then it sat there permanently. The screens
    * say it themselves now, in the place that would otherwise have claimed the
    * library was empty. */
   const [importNotice, setImportNotice] = useState<string | null>(null)
+
+  /**
+   * A notice is TRANSIENT, and it was not.
+   *
+   * Nothing ever cleared this, so "1,959 added" — or a tag-import error from
+   * twenty minutes ago — stayed on screen for the rest of the session. That
+   * was survivable while the line had a row of its own above the shelf. It is
+   * not survivable now the line shares the status bar's one work slot with
+   * the enrichment pass: a notice that never goes away is a parse pass that
+   * can never report, and the reader is left with no way to tell whether the
+   * app is still doing something.
+   *
+   * Long enough to read a sentence twice; the notices are one line and say
+   * one thing. Nothing acts on the notice, so nothing is lost by it going —
+   * every failure it reports is also on the console, and every count it
+   * reports is visible in the shelf itself.
+   */
+  useEffect(() => {
+    if (importNotice === null) return
+    const timer = setTimeout(() => setImportNotice(null), NOTICE_MS)
+    return () => clearTimeout(timer)
+  }, [importNotice])
 
   /**
    * The reader's filing, out to a file and back.
@@ -665,19 +741,35 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
       importAbort.current?.abort()
       const controller = new AbortController()
       importAbort.current = controller
-      setImporting({ done: 0, total: 0, current: '' })
+      setImporting({ done: 0, total: 0 })
+      /* SHELVED AS THE WALK RUNS, one batch behind — see `onCopied`. Chained
+       * rather than fired in parallel: each `shelveImported` already writes
+       * `WRITE_WIDTH` books at once, and starting a batch per handover would
+       * put the whole library back in flight together, which is the defect
+       * `addMany` exists to prevent.
+       *
+       * The chain is what the notice waits on, so "N added" is still a
+       * statement about writes that finished rather than writes that were
+       * started. */
+      let shelving = Promise.resolve(0)
       try {
         const outcomes = await importFolder(
           importFs,
           folder,
           {
             onProgress: (progress) => { if (current()) setImporting(progress) },
+            onCopied: (copied) => {
+              if (!current()) return
+              shelving = shelving.then(async (sofar) => sofar + (await shelveImported(copied)))
+            },
             signal: controller.signal,
           },
         )
         if (!current()) return
-        shelveImported(outcomes)
-        setImportNotice(summarise(outcomes))
+        // Awaited for the unsaved count — see the drop path above.
+        const unsaved = await shelving
+        if (!current()) return
+        setImportNotice(summarise(outcomes, unsaved))
       } catch (cause) {
         console.error('Paper: the folder import failed', cause)
         if (current()) setImportNotice('That folder could not be imported.')

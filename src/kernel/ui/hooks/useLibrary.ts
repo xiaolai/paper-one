@@ -17,6 +17,13 @@ import type { Library, RekeyOutcome, TagRemoval } from '../../core/libraryStore'
 export interface LibraryView {
   readonly books: readonly IndexedBook[]
   add: (bookId: string, record: BookRecord, sparse?: boolean) => void
+  /**
+   * Awaitable, and NOT let go — the import needs the count of what could not
+   * be saved so it can say so. See `Library.addMany`.
+   */
+  addMany: (
+    entries: readonly { bookId: string; record: BookRecord; sparse?: boolean }[],
+  ) => Promise<number>
   update: (bookId: string, change: (record: BookRecord) => BookRecord) => void
   remove: (bookId: string) => void
   rememberPosition: (bookId: string, position: string, progress: number) => void
@@ -63,6 +70,7 @@ export function useLibrary(library: Library): LibraryView {
     () => ({
       add: (bookId: string, record: BookRecord, sparse?: boolean) =>
         letGo(library.add(bookId, record, sparse)),
+      addMany: library.addMany,
       update: (bookId: string, change: (record: BookRecord) => BookRecord) =>
         letGo(library.update(bookId, change)),
       remove: (bookId: string) => letGo(library.remove(bookId)),
