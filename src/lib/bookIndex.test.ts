@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { BOOKS_DIR } from './bookFolder'
+import { BOOKS_DIR, folderOf } from './bookFolder'
 import {
   INDEX_FILE,
   hasContentFile,
@@ -691,5 +691,56 @@ describe('hasContentFile', () => {
   it('resolves the folder from the id', async () => {
     const fs = fakeFs({ [`${BOOKS_DIR}/book_abc/content.epub`]: 'bytes' })
     expect(await hasContentFile(fs, 'book:abc')).toBe(true)
+  })
+})
+
+/**
+ * WHY the cache was not used.
+ *
+ * The launch cost is almost entirely this decision, and each answer wants a
+ * different repair — so the answer being RIGHT matters as much as the shelf
+ * being right. Asserted here rather than read off a log, because a diagnostic
+ * that is wrong is worse than none: it sends the next investigation at the
+ * wrong file with confidence.
+ */
+describe('why the shelf was rescanned', () => {
+  it('says the cache was used when it was', async () => {
+    const fs = fakeFs(twoBooks)
+    await loadShelf(fs)
+    const again = await loadShelf(fs)
+    expect(again.rescanned).toBe(false)
+    expect(again.why).toBe('cache')
+  })
+
+  it('says there was no cache on a first run', async () => {
+    const fs = fakeFs(twoBooks)
+    const first = await loadShelf(fs)
+    expect(first.rescanned).toBe(true)
+    expect(first.why).toBe('no cache')
+  })
+
+  it('says the folders disagree when one appears behind the app', async () => {
+    const fs = fakeFs(twoBooks)
+    await loadShelf(fs)
+    fs.store.set(`${BOOKS_DIR}/book_c/content.epub`, new TextEncoder().encode('x'))
+    const after = await loadShelf(fs)
+    expect(after.why).toBe('folders disagree')
+  })
+
+  it('says the rows are incomplete for an index written without hasContent', async () => {
+    /* What an index from an older version looks like: the folder set is exactly
+       right, and every row is missing the flag `canOpen` reads. Distrusting it
+       costs one rescan, once — and the reason should not be reported as a
+       folder change, which would send someone looking at the directory. */
+    const fs = fakeFs(twoBooks)
+    const books = await scanBooks(fs)
+    await writeIndex(
+      fs,
+      books.map(({ hasContent: _drop, ...rest }) => rest),
+      books.map((one) => folderOf(one.bookId).slice(BOOKS_DIR.length + 1)),
+    )
+    const after = await loadShelf(fs)
+    expect(after.rescanned).toBe(true)
+    expect(after.why).toBe('rows incomplete')
   })
 })

@@ -114,6 +114,7 @@ async function boot(root: HTMLElement): Promise<void> {
       const shelf = await timed('load the shelf', () => loadShelf(fs), (one) => ({
         books: one.books.length,
         rescanned: one.rescanned,
+        why: one.why,
       }))
       initialBooks = shelf.books
     } catch (cause) {

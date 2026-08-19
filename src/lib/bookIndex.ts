@@ -363,7 +363,23 @@ export async function scanBooks(fs: IndexFs): Promise<IndexedBook[]> {
  * exactly the cost this cache exists to remove. A reader who edits a book
  * folder by hand can delete the index.
  */
-export async function loadShelf(fs: IndexFs): Promise<{ books: IndexedBook[]; rescanned: boolean }> {
+/**
+ * WHY the cache was not used, when it was not.
+ *
+ * The launch cost is almost entirely this decision — a trusted index is six
+ * filesystem calls and a rescan is two per book — and until now the decision
+ * left no trace, so a slow launch could say THAT it rescanned and never which
+ * of three quite different things had gone wrong. Each one wants a different
+ * repair: no cache is a first run, a folder disagreement is something changing
+ * the directory behind the app, and an incomplete row is an index written by a
+ * version that did not record whether a book has bytes.
+ */
+export type ShelfSource = 'cache' | 'no cache' | 'folders disagree' | 'rows incomplete'
+
+export async function loadShelf(
+  fs: IndexFs,
+): Promise<{ books: IndexedBook[]; rescanned: boolean; why: ShelfSource }> {
+  let why: ShelfSource = 'no cache'
   const cached = await readIndex(fs)
   if (cached) {
     const folders = (await listBooksDir(fs))
@@ -383,7 +399,12 @@ export async function loadShelf(fs: IndexFs): Promise<{ books: IndexedBook[]; re
      * open back on the shelf looking fine. Distrusting such a cache costs one
      * rescan, once, and the index it writes has the flag. */
     const complete = cached.books.every((one) => typeof one.hasContent === 'boolean')
-    if (agrees && complete) return { books: [...cached.books], rescanned: false }
+    if (agrees && complete) return { books: [...cached.books], rescanned: false, why: 'cache' }
+    /* Named in the order they are checked, so the answer is the FIRST thing
+     * wrong rather than the last — an index that both disagrees and predates
+     * `hasContent` is a version mismatch, and saying so is more use than
+     * reporting the symptom it also has. */
+    why = agrees ? 'rows incomplete' : 'folders disagree'
   }
   /* ONE SNAPSHOT for both halves of the write: the scan returns the listing it
    * actually walked. A second listing taken here used to race the scan — a
@@ -392,7 +413,7 @@ export async function loadShelf(fs: IndexFs): Promise<{ books: IndexedBook[]; re
    * the disagreement. */
   const { books, folders } = await scanShelf(fs)
   await writeIndex(fs, books, folders).catch(() => {})
-  return { books, rescanned: true }
+  return { books, rescanned: true, why }
 }
 
 async function readIndex(
