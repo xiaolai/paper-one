@@ -125,10 +125,25 @@ export function BookCell({
    * on the first column lands with its left edge on the button's left — 100px
    * in from the cover, hanging in the middle of nothing, and the reader asked
    * why it did not line up with the leftmost book. The card is the thing the
-   * menu is ABOUT, and its edges are the lines the shelf is drawn on. The
-   * button shares the card's right edge and bottom, so when `end` fits nothing
-   * moves; when it flips, the menu's left sits on the cover's left, which is
-   * exactly the border the eye expects.
+   * menu is ABOUT, and its edges are the lines the shelf is drawn on — and the
+   * card was the anchor for exactly that reason, on the premise that "the button
+   * shares the card's right edge and bottom, so when `end` fits nothing moves".
+   *
+   * HALF OF THAT PREMISE IS FALSE, and it is the half that shows. Measured in
+   * the running app: the button's box is 142–166 × 311–335 and the card's is
+   * 40–166 × 110–355. The right edges do coincide. The bottoms do not — there
+   * is 20px of card below the button — so the menu hung 24px under it instead
+   * of the 4px gap every other menu gets, and read as belonging to nothing.
+   *
+   * The horizontal made it worse rather than better. The menu is 190px wide and
+   * the card 126, so `end` never fits at the shelf's leading edge; it mirrors to
+   * `start`, which against the CARD put the menu's left edge 102px away from the
+   * button that opened it. Against the button, the same mirror puts its left
+   * edge on the button's own left, which is what "attached" is supposed to mean.
+   *
+   * So it hangs from the button now. `overlayOnFlip` below is unaffected and
+   * still wanted: from the button's edge a flipped menu drapes up over its own
+   * jacket, which is what that note asks for.
    *
    * FIXED positioning is the constraint it always was: the cell clips its
    * overflow for virtualisation's sake, and a menu that is a child of the cell
@@ -136,9 +151,13 @@ export function BookCell({
    * close-on-unmount and close-on-detached — for the same reasons `TagRow`
    * needs the same things. */
   const cellRef = useRef<HTMLDivElement | null>(null)
+  /* The `⋯` button's own box, which is what the menu hangs from. See the note
+     above: the card was the anchor and the card is 20px taller than the button
+     is. */
+  const menuAnchorRef = useRef<HTMLDivElement | null>(null)
   const { moreRef, menuRef, menuStyle, close: closeMenu } = useRowMenu(
     menuOpen,
-    cellRef,
+    menuAnchorRef,
     /* THE ONE WAY THE MENU CLOSES. There were four — outside click, Escape,
      * choosing an item, and the remove's second click — and two of them cleared
      * `menuFor` without clearing `confirming`, so choosing "Mark as finished"
@@ -302,7 +321,7 @@ export function BookCell({
           <span className={styles.progressSpacer} aria-hidden="true" />
         )}
 
-        <div className={styles.menuAnchor}>
+        <div className={styles.menuAnchor} ref={menuAnchorRef}>
           <button
             ref={moreRef}
             type="button"
