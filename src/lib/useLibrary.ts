@@ -1,11 +1,11 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
 import {
-  BOOKS_DIR,
   folderOf,
   mergeParsed,
   mergeStranded,
   parseRecord,
   readBook,
+  recordPath,
   trashOf,
   updateBook,
   writeBook,
@@ -191,6 +191,45 @@ export function withTagsAdded(own: readonly string[], values: readonly string[])
   return next
 }
 
+/**
+ * A record as a shelf row, with the flag no record can supply.
+ *
+ * `hasContent` is DERIVED — the scan measures it, and it is deliberately not a
+ * field of `BookRecord`, because a stored flag is one more thing that can
+ * disagree with the folder. The corollary is easy to get wrong and was: any
+ * row rebuilt FROM a record has lost the flag unless it is handed back here.
+ *
+ * Losing it was not cosmetic. `loadShelf` refuses to trust an index in which
+ * any row lacks the flag, so one flagless row — which every `add` produced, on
+ * every import, every open and every background parse — turned the cache off
+ * for the next launch, quietly. A freshly imported library then paid a full
+ * scan of every book folder on every single launch, serial IPC before the
+ * window could draw, and called it opening the app.
+ *
+ * ONE FUNCTION under `add` and `reconcile`, so what "a record becomes a row"
+ * means is decided once. The flag is whatever the caller actually knows: the
+ * row it is replacing, or a fresh measurement. Undefined stays undefined —
+ * this carries knowledge, it does not invent any.
+ */
+export function asRow(
+  record: BookRecord,
+  bookId: string,
+  hasContent: boolean | undefined,
+): IndexedBook {
+  /* STRIPPED before the spread, not trusted to be absent. `BookRecord` has no
+   * such field, but a caller can hand a row here without noticing — and a
+   * smuggled flag surviving an `undefined` argument would make "carries
+   * knowledge, invents none" true in the tests and false at runtime. */
+  const { hasContent: _stray, ...clean } = record as BookRecord & { hasContent?: boolean }
+  return { ...clean, bookId, ...(hasContent === undefined ? {} : { hasContent }) }
+}
+
+/** A shelf row as the record it holds — the row-only fields taken back off. */
+function recordOfRow(row: IndexedBook): BookRecord {
+  const { bookId: _id, hasContent: _flag, ...record } = row
+  return record
+}
+
 /** One file as text, or null when it is not there or will not read. */
 async function readText(fs: IndexFs, path: string): Promise<string | null> {
   try {
@@ -249,12 +288,76 @@ export function useLibrary(
    * through this map at run time, so the write follows the book.
    */
   const rekeyed = useRef(new Map<string, string>())
-  const beginWrite = (bookId: string) =>
-    pending.current.set(bookId, (pending.current.get(bookId) ?? 0) + 1)
-  const endWrite = (bookId: string) => {
-    const left = (pending.current.get(bookId) ?? 1) - 1
-    if (left <= 0) pending.current.delete(bookId)
-    else pending.current.set(bookId, left)
+
+  /**
+   * ONE LANE PER FOLDER, whatever the id is spelled like.
+   *
+   * `safeId` is not injective, so `book:abc` and `book_abc` are two spellings
+   * of one directory — and `add` deliberately matches rows across spellings
+   * for exactly that reason. Keyed by the id as spelled, the queue then gave
+   * the one folder TWO lanes: a write under each spelling ran concurrently
+   * against the same `book.json` and the same `.writing` neighbour, which is
+   * the collision the queue exists to make impossible. The key is the folder,
+   * because the folder is what the writes contend for.
+   *
+   * `useMarks` derives its keys the same way — the record write and the marks
+   * write for one book must stay in one lane, or a marks write can race the
+   * removal that is trashing the folder under it. (Marks writes do not follow
+   * `lanes` below: they carry their own exists-and-trash guards against a
+   * racing removal, and a rekeyed book's marks are migrated by `rekeyMarks`
+   * before new-id writes happen.)
+   */
+  const keyOf = folderOf
+  /**
+   * Lanes REROUTED by a rekey, destination folder → the lane it now shares.
+   *
+   * Carrying a book onto a new id moves its folder, and writes for it then
+   * arrive under both spellings: tasks enqueued against the old id before the
+   * move, and everything the reader does under the new id after it. Two lanes
+   * for one book is a race; and re-enqueueing old-lane tasks onto the new lane
+   * as they surfaced REORDERED them — a task enqueued before the rekey could
+   * land after a write enqueued later, and the older edit overwrote the newer.
+   * Routing the NEW folder's lane onto the OLD one instead keeps every write
+   * for the book in a single lane in the order it was enqueued: nothing hops,
+   * so nothing can pass anything.
+   *
+   * The alias is set BEFORE the rekey's task is enqueued, so no new-id write
+   * can slip into an unaliased lane while the rename is still queued. A rekey
+   * that then finds the destination occupied leaves the alias behind — two
+   * folders over-serialised on one lane, which costs a moment of latency and
+   * no correctness, against un-aliasing a lane that other tasks may already
+   * be queued on.
+   */
+  const lanes = useRef(new Map<string, string>())
+  /** The lane an id's writes queue on — `lanes` followed to the end, cycle-safe. */
+  const laneFor = (bookId: string): string => {
+    let lane = keyOf(bookId)
+    const seen = new Set([lane])
+    for (;;) {
+      const next = lanes.current.get(lane)
+      if (!next || seen.has(next)) return lane
+      seen.add(next)
+      lane = next
+    }
+  }
+  const beginWrite = (lane: string) =>
+    pending.current.set(lane, (pending.current.get(lane) ?? 0) + 1)
+  const endWrite = (lane: string) => {
+    const left = (pending.current.get(lane) ?? 1) - 1
+    if (left <= 0) pending.current.delete(lane)
+    else pending.current.set(lane, left)
+  }
+
+  /** Where a book's writes live NOW — `rekeyed` followed to the end, cycle-safe. */
+  const resolveId = (bookId: string): string => {
+    let live = bookId
+    const seen = new Set([live])
+    for (;;) {
+      const next = rekeyed.current.get(live)
+      if (!next || seen.has(next)) return live
+      seen.add(next)
+      live = next
+    }
   }
 
   /**
@@ -266,55 +369,130 @@ export function useLibrary(
    * write's own task, while that task is still counted — hence the guard reads
    * "more than one": someone queued after me, so my photograph is stale.
    */
-  const reconcile = useCallback((bookId: string, record: BookRecord) => {
-    if ((pending.current.get(bookId) ?? 0) > 1) return
+  const reconcile = useCallback((bookId: string, record: BookRecord, hasContent?: boolean) => {
+    /* By LANE, which is where the counts actually live — after a rekey the
+     * destination folder's writes are counted under the source's lane, and a
+     * guard reading the destination key saw zero over a lane with writes in
+     * flight, letting an older disk photograph over a newer optimistic row. */
+    if ((pending.current.get(laneFor(bookId)) ?? 0) > 1) return
     const at = latest.current.findIndex((one) => one.bookId === bookId)
     if (at === -1) return
     const next = [...latest.current]
-    next[at] = { ...record, bookId, ...(latest.current[at]!.hasContent === undefined ? {} : { hasContent: latest.current[at]!.hasContent }) }
+    /* A fresh measurement wins; otherwise the row's own flag is CARRIED — see
+     * `asRow`. A write that measured nothing has learned nothing about the
+     * bytes, and must not un-know what the scan established. */
+    next[at] = asRow(record, bookId, hasContent ?? latest.current[at]!.hasContent)
     latest.current = next
     setBooks(next)
   }, [])
 
   /** State first, then the folder, then the index. */
   const commit = useCallback(
-    (key: string, next: readonly IndexedBook[], write: (target: IndexFs) => Promise<unknown>) => {
+    (
+      bookId: string,
+      next: readonly IndexedBook[],
+      write: (target: IndexFs, live: string) => Promise<unknown>,
+    ) => {
       latest.current = next
       setBooks(next)
       if (!fs) return
-      beginWrite(key)
+      const lane = laneFor(bookId)
+      beginWrite(lane)
       void queue.current
         /* APPEND, not replace. Each task here applies a CHANGE to what is on
          * disk — a tag, then a position — and coalescing two of them drops the
          * first. Marks can coalesce because each of those writes the whole list;
          * these cannot, and the distinction is why the queue has two methods. */
-        .append(key, async () => {
+        .append(lane, async () => {
           try {
-            await write(fs)
+            /* RESOLVED AT RUN TIME — the book may have been carried onto a new
+             * id while this write waited its turn. The PATH follows the book
+             * (see `rekeyed`); the LANE never has to, because a rekey routes
+             * the destination's lane back onto this one — see `lanes`. */
+            await write(fs, resolveId(bookId))
           } finally {
-            endWrite(key)
+            endWrite(lane)
           }
         })
         .then(() =>
           /* The index LAST, and on its own key so a book's write is never held
            * up by it. Rewritten whole from `latest.current`, which is the newest
            * state by the time this runs — a cache should describe where things
-           * ended up, not where one write thought they were going. */
+           * ended up, not where one write thought they were going. That means
+           * it can also serialise ANOTHER book's optimistic row whose own write
+           * has not settled — tolerable only because a write that fails repairs
+           * its row from the disk in the catch below, so the next index write
+           * describes the folder again. Without that repair the cache kept the
+           * phantom edit, and kept being TRUSTED: an idle book's `book.json` is
+           * never read while the cache agrees, so the lie survived launches. */
           queue.current.push('index', async () => {
             await writeIndex(fs, latest.current)
           }),
         )
         .catch((cause: unknown) => {
           console.error('Paper: could not save the library', cause)
-          /* AND THE CACHE GOES WITH IT. The record may well have reached disk
-           * before the index rewrite failed, and `loadShelf` trusts the index
-           * whenever the folder listing agrees — so leaving it there means the
-           * next launch reads a shelf that is confidently missing whatever this
-           * write was carrying. A rescan is the cost of not knowing which. */
-          void invalidateIndex(fs)
+          /* THE FOLDER WINS, NOW — not at some later read that may never come.
+           * The optimistic row predicted a write that did not land, and worse,
+           * another book's commit may already have serialised that phantom
+           * into the index — which is then TRUSTED, and an idle book's record
+           * is never re-read while the cache is trusted, so repairing memory
+           * alone left the lie durable across launches.
+           *
+           * The repair is a task IN THE BOOK'S LANE: serial behind every write
+           * already queued for it (whose outcomes are what it must read),
+           * counted like a write (so with newer writes queued, `reconcile`'s
+           * guard makes it defer to them — they settle the row, or fail and
+           * queue their own repair), and inside the queue the close-time flush
+           * waits on. */
+          beginWrite(lane)
+          void queue.current
+            .append(lane, async () => {
+              try {
+                const live = resolveId(bookId)
+                const truth = await readBook(fs, live)
+                if (truth) {
+                  reconcile(live, truth, (await hasContentFile(fs, live)) ?? undefined)
+                  return
+                }
+                /* NOTHING READABLE BACKS THE ROW — the write failed AND the
+                 * folder holds no record this can read, so there is no state
+                 * the row can honestly show; a scan would not shelve it
+                 * either. The row goes, and the index written below omits both
+                 * the book and its folder claim — so a folder actually sitting
+                 * there makes the next launch's listing DISAGREE and rescan,
+                 * instead of trusting a cache this session could not confirm. */
+                if (latest.current.some((one) => one.bookId === live)) {
+                  const next = latest.current.filter((one) => one.bookId !== live)
+                  latest.current = next
+                  setBooks(next)
+                }
+              } finally {
+                endWrite(lane)
+              }
+            })
+            .then(() =>
+              /* AND THE CORRECTED PICTURE REACHES THE DISK — the whole point.
+               * Without this the phantom serialised by the other book's commit
+               * stayed in `index.json` with folder membership unchanged, and
+               * the next launch believed it. */
+              queue.current.push('index', async () => {
+                await writeIndex(fs, latest.current)
+              }),
+            )
+            .catch((repair: unknown) => {
+              console.error('Paper: could not repair the shelf after a failed save', repair)
+              /* THE LAST RESORT, and only here. The repair above is the right
+               * answer because it writes a CORRECTED picture; this one is the
+               * blunt instrument, and it is reached when even that could not be
+               * written. At that point the index on disk may hold a phantom
+               * this session cannot correct, and `loadShelf` trusts the index
+               * whenever the folder listing agrees — so the honest move is to
+               * leave no cache to trust. A rescan is the cost of not knowing. */
+              void invalidateIndex(fs)
+            })
         })
     },
-    [fs],
+    [fs, reconcile],
   )
 
   const update = useCallback(
@@ -345,29 +523,33 @@ export function useLibrary(
       const at = latest.current.findIndex((one) => one.bookId === bookId)
       const current = at === -1 ? null : latest.current[at]
       if (!current) return
-      const { bookId: _id, ...record } = current
+      /* THE FLAG IS HELD ASIDE, not passed through the change. The callback's
+       * contract is `BookRecord` to `BookRecord`, and a record has no
+       * `hasContent` — a callback that built its result from scratch instead of
+       * spreading its input was silently deleting the flag from the row, which
+       * is the launch-rescan defect wearing a new door. Held here and put back
+       * by `asRow`, the contract and the row stop depending on the callback's
+       * style. */
+      const { bookId: _id, hasContent: flag, ...record } = current
       const next = change(record)
       // By identity, so a change that decides nothing moved writes nothing —
       // this runs on every page turn. `fromDisk` is the opt-out: see above.
       if (next === record && !fromDisk) return
       const list = [...latest.current]
-      list[at] = { ...next, bookId }
-      commit(bookId, list, async (target) => {
-        /* RESOLVED AT RUN TIME — the book may have been carried onto a new id
-         * while this write waited its turn. See `rekeyed`. */
-        const id = rekeyed.current.get(bookId) ?? bookId
+      list[at] = asRow(next, bookId, flag)
+      commit(bookId, list, async (target, live) => {
         /* THE CHANGE, not the result. Passing `() => next` wrote the in-memory
          * record back — and that copy can be stale, because it came from an
          * index that may be one write behind after a crash. Handing the function
          * over means it is applied to whatever is actually on disk. */
-        const written = await updateBook(target, id, change)
+        const written = await updateBook(target, live, change)
         /* AND THE DISK'S ANSWER, back into the row — the same correction `add`
          * makes, for the same reason. The optimistic row was computed from the
          * cache; when the cache was a write behind, the disk record this call
          * just changed had fields the row did not, and the row kept showing
          * the stale copy while the index was rewritten from it. `reconcile`
          * declines when a newer write is already queued — see the guard. */
-        if (written) reconcile(id, written)
+        if (written) reconcile(live, written)
       })
     },
     [commit, reconcile],
@@ -393,87 +575,78 @@ export function useLibrary(
          * launch would then sail past the stranded files until the sweep deleted
          * them. */
         if (fs) {
-          /* Counted under the ROW's id, which is what `reconcile` below is
-           * called with — the two spellings can differ when the record predates
-           * the id being stored, and a guard keyed one way and read the other
-           * guards nothing. */
-          beginWrite(previous.bookId)
+          /* ONE LANE for the row's spelling and the incoming one. These used to
+           * be counted under `previous.bookId` and queued under `bookId`
+           * because the two spellings can differ — `laneFor` resolves both to
+           * the folder they share, so the count and the task cannot disagree
+           * again. */
+          const lane = laneFor(bookId)
+          beginWrite(lane)
           void queue.current
-            .append(bookId, async () => {
+            .append(lane, async () => {
               try {
-              /* Whether the restore MOVED anything — the discriminator for the
-               * reconcile below. A restore that brought `book.json` back whole
-               * leaves nothing stranded, and gating the reconcile on the
-               * stranded copy alone meant exactly the successful restores were
-               * the ones whose recovered tags stayed invisible. */
-              const restored = await restoreBook(fs, bookId)
-              await rescueStrandedMarks(fs, bookId)
-              /* AND THE SAME RESCUE the full path does. Returning after the
-               * restore alone left a `book.json` the restore could not move
-               * sitting in the trash — so a folder import, which is all sparse
-               * adds, was the one route that could see the stranded record and
-               * walk past it. */
-              /* AND THE ROW LEARNS THE BOOK HAS BYTES AGAIN.
-               *
-               * This is the path an import takes for a book already on the
-               * shelf, and it is the exact remedy `CANNOT_OPEN` tells the reader
-               * to perform — "add the file again". The import writes the missing
-               * content and then reaches here, which returned without touching
-               * the row: so the book stayed disabled, the cache kept
-               * `hasContent: false`, folder membership had not changed, and the
-               * stale flag was trusted on every launch after. The advertised
-               * repair repaired nothing. */
-              if (previous.hasContent === false) {
-                const now = await hasContentFile(fs, folderOf(bookId).slice(BOOKS_DIR.length + 1))
-                if (now) {
-                  const where = latest.current.findIndex((one) => one.bookId === previous.bookId)
-                  if (where !== -1) {
-                    const list = [...latest.current]
-                    list[where] = { ...latest.current[where]!, hasContent: true }
-                    latest.current = list
-                    setBooks(list)
-                    /* ON THE INDEX KEY, like every other index write. Called
-                     * directly from a per-book task it shared the fixed
-                     * `index.json.writing` path with them — and re-adding a
-                     * folder of disabled books starts one of these per book, so
-                     * they raced each other and an older list could land last.
-                     * Being unchanged in folder membership, that stale cache is
-                     * then trusted, and the repaired book goes back to disabled. */
-                    /* AWAITED. Dropping the promise put an index write outside
-                     * the surrounding catch — and an unhandled rejection is
-                     * rendered as a FATAL banner here, so an ordinary failure to
-                     * save a cache became the app reporting it had crashed. */
-                    await queue.current.push('index', async () => {
-                      await writeIndex(fs, latest.current)
-                    })
-                  }
+                /* Whether the restore MOVED anything — part of the
+                 * discriminator below. A restore that brought `book.json` back
+                 * whole leaves nothing stranded, and gating the reconcile on
+                 * the stranded copy alone meant exactly the successful restores
+                 * were the ones whose recovered tags stayed invisible. */
+                const restored = await restoreBook(fs, bookId)
+                /* AND THE SAME RESCUE the full path does. Returning after the
+                 * restore alone left a `book.json` the restore could not move
+                 * sitting in the trash — so a folder import, which is all
+                 * sparse adds, was the one route that could see the stranded
+                 * record and walk past it. */
+                await rescueStrandedMarks(fs, bookId)
+                const stranded = parseRecord(await readText(fs, `${trashOf(bookId)}/book.json`))
+                /* THE FLAG IS MEASURED EVERY TIME, not only when the row said
+                 * `false`. This path is every re-import of a folder — it is the
+                 * exact remedy `CANNOT_OPEN` prescribes, "add the file again" —
+                 * and it is also where a row whose first measurement was
+                 * suppressed (`reconcile` declines under a queued neighbour)
+                 * comes to be healed. Measuring only the `false` rows repaired
+                 * the advertised case and no other: an `undefined` row stayed
+                 * flagless forever, which is the launch-rescan defect through
+                 * the one door that never measured, and a stale `true` kept
+                 * claiming bytes that are gone. AFTER the restore, so bytes the
+                 * trash just gave back are counted. */
+                const bytesThere = await hasContentFile(fs, bookId)
+                const live = await readBook(fs, bookId)
+                /* Stranded copy present: merge and write, as before. No
+                 * stranded copy but the restore moved files: the live record IS
+                 * the recovery, already whole on disk — nothing to write, only
+                 * to tell. */
+                const kept = stranded ? (live ? mergeStranded(stranded, live) : stranded) : live
+                if (stranded && kept) {
+                  await writeBook(fs, bookId, kept)
+                  await fs.remove(`${trashOf(bookId)}/book.json`).catch(() => {})
                 }
-              }
-              const stranded = parseRecord(await readText(fs, `${trashOf(bookId)}/${'book.json'}`))
-              if (!stranded && !restored) return
-              const live = await readBook(fs, bookId)
-              /* Stranded copy present: merge and write, as before. No stranded
-               * copy but the restore moved files: the live record IS the
-               * recovery, already whole on disk — nothing to write, only to
-               * tell. */
-              const kept = stranded ? (live ? mergeStranded(stranded, live) : stranded) : live
-              if (!kept) return
-              if (stranded) {
-                await writeBook(fs, bookId, kept)
-                await fs.remove(`${trashOf(bookId)}/book.json`).catch(() => {})
-              }
-              /* THE ROW AND THE CACHE LEARN WHAT WAS RESCUED. This path wrote
-               * a restored record — the reader's tags and place, back from the
-               * trash — and then told nobody: the shelf kept its sparse row
-               * and the index kept the sparse record, so the recovery stayed
-               * invisible until the next full scan. The same correction every
-               * other write makes, made here. */
-              reconcile(previous.bookId, kept)
-              await queue.current.push('index', async () => {
-                await writeIndex(fs, latest.current)
-              })
+                /* THE ROW AND THE CACHE LEARN WHAT CHANGED — what was rescued,
+                 * and what the folder holds. A recovery told nobody stayed
+                 * invisible until the next full scan; a measurement told nobody
+                 * left the index incomplete and the next launch on the
+                 * full-scan path. Nothing moved and nothing learned is the one
+                 * case with nothing to say. */
+                const row = latest.current.find((one) => one.bookId === previous.bookId)
+                const rescued = (stranded || restored) && kept ? kept : null
+                const flag = bytesThere ?? undefined
+                const learned = flag !== undefined && row !== undefined && row.hasContent !== flag
+                if (!rescued && !learned) return
+                const settled = rescued ?? (row ? recordOfRow(row) : kept)
+                if (!settled) return
+                reconcile(previous.bookId, settled, flag)
+                /* ON THE INDEX KEY, like every other index write — written
+                 * directly from a per-book task, re-adding a folder of books
+                 * starts one of these per book and they raced each other for
+                 * the fixed `index.json.writing` path. AWAITED, because a
+                 * dropped promise put the write outside the surrounding catch,
+                 * and an unhandled rejection is rendered as a FATAL banner —
+                 * an ordinary failure to save a cache became the app reporting
+                 * it had crashed. */
+                await queue.current.push('index', async () => {
+                  await writeIndex(fs, latest.current)
+                })
               } finally {
-                endWrite(previous.bookId)
+                endWrite(lane)
               }
             })
             .catch((cause: unknown) => {
@@ -494,7 +667,11 @@ export function useLibrary(
        * `writeBook` stamps it into the record — means `update`, `remove` and
        * `positionOf` see one id from this point on, instead of an alias that
        * resolves to the same folder and matches none of them. */
-      const entry: IndexedBook = { ...merged, bookId }
+      /* THE FLAG IS CARRIED, not dropped — see `asRow`. `mergeParsed` folds
+       * records, and a record does not know whether the bytes are there, so the
+       * row this replaces is the only thing here that does. The write below
+       * measures for real and corrects it. */
+      const entry: IndexedBook = asRow(merged, bookId, previous?.hasContent)
       const list =
         at === -1
           ? [entry, ...latest.current]
@@ -559,7 +736,7 @@ export function useLibrary(
           }
           await writeBook(target, bookId, kept)
           if (stranded) await target.remove(`${trashOf(bookId)}/book.json`).catch(() => {})
-          reconcile(bookId, kept)
+          reconcile(bookId, kept, (await hasContentFile(target, bookId)) ?? undefined)
           return
         }
         const written = existing ? mergeParsed(existing, record) : merged
@@ -567,12 +744,25 @@ export function useLibrary(
         // Only now: the reader's record is in two places until this line, which
         // is the order that cannot lose it.
         if (stranded) await target.remove(`${trashOf(bookId)}/book.json`).catch(() => {})
+        /* WHAT THE FOLDER ACTUALLY HOLDS, measured AFTER the record write and
+         * inside this task, which is the one place that knows the folder has
+         * settled: every route into `add` puts the bytes down before the
+         * record — an import copies them first, an open keeps its own copy
+         * first, the background pass has just read them — and the write above
+         * has just created the folder for a book that has no copy at all, so
+         * "no bytes" is a measured answer rather than a folder that was not
+         * there to ask. One listing, and the row and the index learn the flag
+         * without waiting for a rescan — which is what keeps the index trusted
+         * at the next launch, for a row the scan has never seen. NULL is a
+         * probe that could not look (see `hasContentFile`), handed on as
+         * undefined so `reconcile` carries what the row already knew. */
+        const bytesThere = await hasContentFile(target, bookId)
         /* WHAT WAS ACTUALLY WRITTEN, back into the row. The optimistic row was
          * built from the index, which `loadShelf` will knowingly trust while it
          * is one write behind — so a tag or a position on disk but not in the
          * cache stayed invisible, and the next thing to save the row wrote the
          * cache's version over it. */
-        reconcile(bookId, written)
+        reconcile(bookId, written, bytesThere ?? undefined)
       })
     },
     [commit, reconcile],
@@ -606,8 +796,16 @@ export function useLibrary(
       if (!latest.current.some((one) => one.bookId === from)) return 'nothing'
       if (latest.current.some((one) => one.bookId === to)) return 'occupied'
       let outcome = 'nothing' as RekeyOutcome
+      /* THE DESTINATION'S LANE IS ROUTED HERE FIRST, synchronously — before the
+       * rename is even queued. A write the reader makes under the new id while
+       * the rename waits its turn must land BEHIND it in this one lane; routed
+       * any later, that write starts a second lane and races everything still
+       * queued in this one. If the move below ends `occupied` or `failed`, the
+       * alias stays: two folders over-serialised on one lane costs a moment of
+       * latency and no correctness — see `lanes`. */
+      lanes.current.set(keyOf(to), laneFor(from))
       try {
-        await queue.current.append(from, async () => {
+        await queue.current.append(laneFor(from), async () => {
           if (await fs.exists(folderOf(to))) {
             outcome = 'occupied'
             return
@@ -642,17 +840,16 @@ export function useLibrary(
            * the reader's edit. */
           rekeyed.current.set(from, to)
           /* Stamped with the id it now lives under; the record still names the
-           * folder it came from until this runs. ON THE NEW ID'S QUEUE KEY:
-           * this task runs under the OLD key, and an update the reader makes
-           * against the new id queues under the new one — two keys run
-           * independently, so a stamp done inline here could read the record,
-           * lose the race to that update's write, and put the pre-update copy
-           * back. Serialised under `to`, the stamp and any new-id write take
-           * turns, and each read-modify-write sees the other's result. */
-          await queue.current.append(to, async () => {
-            const moved = await readBook(fs, to)
-            if (moved) await writeBook(fs, to, moved)
-          })
+           * folder it came from until this runs. INLINE, which an earlier
+           * version could not do: the stamp then lived on the new id's own
+           * key, because an update made against the new id queued there and
+           * two keys ran independently. The alias set above is what closed
+           * that — every new-id write now queues in THIS lane, behind this
+           * task — so the stamp's read-modify-write cannot lose a race it can
+           * no longer be in. (Appending it to this same lane and awaiting
+           * would deadlock; inline IS its slot.) */
+          const moved = await readBook(fs, to)
+          if (moved) await writeBook(fs, to, moved)
           await queue.current.push('index', async () => {
             await writeIndex(fs, latest.current)
           })
@@ -680,9 +877,9 @@ export function useLibrary(
       /* ONE RENAME. Phase 3's removal touched three places — a row, the bytes,
        * the cover — any of which could fail alone, and two of which did. */
       const removed = latest.current.find((one) => one.bookId === bookId)
-      commit(bookId, list, async (target) => {
-        // The removal follows a rekeyed book too — see `rekeyed`.
-        const id = rekeyed.current.get(bookId) ?? bookId
+      commit(bookId, list, async (target, id) => {
+        // The removal follows a rekeyed book too — `commit` resolves and
+        // re-homes it; see `runSettled`.
         /* A REMOVAL THAT DID NOT HAPPEN IS NOT A REMOVAL. `trashBook` reports
          * false when there was nothing there — fine, the row was already gone —
          * but it also reported false when the move genuinely failed, and this
@@ -876,16 +1073,28 @@ export function useLibrary(
   const keepJacket = useCallback(
     (bookId: string, cover: Blob) => {
       if (!fs) return
-      // The book's OWN key, which is what puts it in line behind that book's
-      // record write and its removal rather than beside them.
+      // The book's OWN lane, which is what puts it in line behind that book's
+      // record write and its removal rather than beside them — and the path
+      // resolved at run time if the book was carried onto a new id meanwhile,
+      // like every other write.
       queue.current
-        .append(bookId, async () => {
-          await keepCover(fs, bookId, cover)
+        .append(laneFor(bookId), async () => {
+          const live = resolveId(bookId)
+          /* ONLY FOR A BOOK THAT IS STILL HERE. Being in line behind the
+           * removal is necessary and was never sufficient: `keepCover` makes
+           * the folder it writes into, so a jacket task running AFTER a
+           * removal politely recreated the folder the removal had just
+           * carried to the trash, as a directory holding nothing but a
+           * picture of a book that is gone. The record is the book as far as
+           * the shelf is concerned, so its absence is what "removed" looks
+           * like from inside the queue. */
+          if (!(await fs.exists(recordPath(live)))) return
+          await keepCover(fs, live, cover)
         })
-        /* CAUGHT, like every other queued write. `void` discarded the
-         * rejection, and a cover that failed to persist surfaced as an
-         * unhandled-rejection banner claiming the app had crashed — for a
-         * jacket, which the next open re-extracts anyway. */
+        /* CAUGHT, like every other queued write. `keepCover` itself never
+         * throws — it answers false and reports — so what lands here is the
+         * guard above failing or the queue itself: still worth one line, not a
+         * FATAL banner, for a jacket the next open re-extracts anyway. */
         .catch((cause: unknown) => {
           console.error('Paper: could not keep the cover', cause)
         })

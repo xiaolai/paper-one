@@ -135,7 +135,12 @@ export function useMarks(
      * wrote a snapshot without the first one in it. Ordering the read against
      * the writes is what makes the answer it gets the current answer. */
     void queue.current
-      .append(bookId, async () => {
+      /* THE FOLDER IS THE KEY, exactly as `useLibrary` keys its writes — the
+       * queue serialises what contends for one directory, and two spellings of
+       * one id (`book:abc` and its folder name `book_abc`) name one directory.
+       * Keyed by the id as spelled, a marks write and the removal trashing the
+       * same folder could run beside each other. */
+      .append(folderOf(bookId), async () => {
         const raw = await readMarks(fs, bookId)
         // Parsed through the same validator the shared store used: this is a
         // file on disk, and a mark with no CFI cannot be drawn.
@@ -249,13 +254,24 @@ export function useMarks(
          * and so make their predecessors redundant, this one READS the file and
          * changes part of it. Coalescing two — delete a mark, then recolour
          * another — drops the first, and the row it belonged to reappears. */
-        .append(targetId, async () => {
+        /* On the FOLDER's key, like every other write to it — see the note on
+         * the read above. */
+        .append(folderOf(targetId), async () => {
           /* `writeMarks` creates the folder it writes into, so a change landing
            * after a removal puts a marks-only directory back where the book had
            * been. Checked before — and, because a removal can land between the
            * check and the write, checked AFTER as well: the trash entry the
            * removal leaves is the evidence, exactly as `updateBook` uses it. */
-          if (!(await fs.exists(folderOf(targetId)))) return
+          if (!(await fs.exists(folderOf(targetId)))) {
+            /* SAID, not swallowed. A cross-book edit reaches this queue under
+             * the mark's STORED id — and a book migrated onto a content-derived
+             * id no longer has a folder under its old one, so the edit has
+             * nowhere to land. The mark itself moved with the folder and is
+             * safe; the EDIT is what is lost, and losing it silently made the
+             * Notes row look updated until the next reload disagreed. */
+            console.warn(`Paper: could not change a mark for ${targetId} — no folder under that id`)
+            return
+          }
           const trashedBefore = await fs.exists(trashOf(targetId))
           const before = validMarks(await readMarks(fs, targetId))
           const next = mutate(before)
@@ -265,7 +281,21 @@ export function useMarks(
             /* The removal won. What was just written is a fragment of this
              * book's marks in a folder that is no longer the book — and leaving
              * it there is worse than losing the edit, because a later re-add
-             * lets that fragment beat the complete list waiting in the trash. */
+             * lets that fragment beat the complete list waiting in the trash.
+             *
+             * THE TELL IS THE TRASH ENTRY APPEARING, and nothing stronger is
+             * available, so do not "improve" this with a record-absence check:
+             * a trash entry beside a folder with no `book.json` is ALSO what a
+             * re-add in progress looks like — the previous removal's entry
+             * still in the trash, the content copied back, the record not yet
+             * restored — and a reader can be marking that book at that exact
+             * moment, since it is open. A predicate that read record-absence
+             * as "removed" deleted that reader's fresh mark as tidy-up. The
+             * cost of the weaker tell: a removal racing this write while a
+             * STALE trash entry exists leaves a marks-only folder fragment
+             * behind — a stray the scan does not shelve, whose real book is in
+             * the trash, recoverable either way. A fragment is visible;
+             * a deleted mark is gone. */
             await fs.remove(marksPathIn(targetId)).catch(() => {})
             return
           }
