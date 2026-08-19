@@ -4,6 +4,13 @@
  * translated out of the book's iframe, and `translateX(-50%)` is what centres
  * it on the selection — the caller supplies the selection's centre, not its
  * left edge, so the popup stays centred as the selection grows.
+ *
+ * A ROW OF `--control-sm` CONTROLS in 6px of padding, which is where
+ * `--popup-h`'s 40 comes from. Every target is the same size — the tint discs
+ * and the style specimens included — so the eye reads one rhythm rather than a
+ * palette bolted onto a toolbar. The size is the design system's own small
+ * control rather than a number this bar invented: a toolbar of icons is exactly
+ * what `--control-sm` is for.
  */
 
 .popup {
@@ -12,13 +19,12 @@
   transform: translateX(-50%);
   display: flex;
   align-items: center;
-  gap: var(--space-2);
   /* Set from POPUP_H in SelectionTools.tsx, which positions against it: two
    * copies of this number drift, and the popup then sits its own height away
    * from the line it belongs to. */
   height: var(--popup-h);
-  padding: 0 var(--space-4);
-  border-radius: var(--radius-control);
+  padding: 0 var(--space-6);
+  border-radius: var(--radius-card);
   background: var(--surface);
   border: 1px solid var(--line-2);
   box-shadow: var(--shadow-pop);
@@ -38,35 +44,171 @@
   }
 }
 
+/* One face of the popup: the bar, the mark styles, or the ways to copy.
+ *
+ * It SLIDES rather than fades, and only 6px, because the two chevrons point
+ * sideways: a face that arrived by fading would leave the gesture unanswered.
+ * The element is keyed on the face in the component, so this replays on every
+ * switch rather than running once at mount. */
+.face {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  animation: slide var(--motion-popover) both;
+}
+
+@keyframes slide {
+  from {
+    opacity: 0;
+    transform: translateX(var(--space-6));
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .popup {
+  .popup,
+  .face {
     animation: none;
   }
 }
 
+/* One control. Square, because every one of them is a glyph or a specimen
+ * rather than a word — a bar of icons with one wider button in it reads as a
+ * mistake. */
 .tool {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-6);
-  height: calc(var(--popup-h) - 2 * var(--space-4));
-  padding: 0 var(--space-10);
+  flex: 0 0 auto;
+  width: var(--control-sm);
+  height: var(--control-sm);
+  display: grid;
+  place-items: center;
+  padding: 0;
   border: none;
   border-radius: var(--radius-control);
   background: none;
-  color: var(--ink-2);
-  font-family: inherit;
-  font-size: var(--text-small);
-  font-weight: 500;
-  white-space: nowrap;
+  color: var(--muted);
   cursor: pointer;
+  transition: background var(--motion-popover), color var(--motion-popover);
 }
 
-.tool:hover {
+.tool:hover,
+.tool:focus-visible {
   background: var(--wash);
   color: var(--ink);
+}
+
+/* The style this passage is in. A TINTED BACKGROUND behind the specimen, not a
+ * border: the specimen is already a drawing, and a ring around a drawing of a
+ * mark reads as part of the mark.
+ *
+ * `--accent-bg` rather than `--wash`, which is what hover uses — the two states
+ * were the same grey, so a hovered style was indistinguishable from the chosen
+ * one and the row appeared to have two of them lit. It is also the lighter of
+ * the pair: a pale tint rather than a step down toward the page's own grey,
+ * which is the app's own way of saying "this is the one" (see `.railButton`
+ * and `.faceItem` in the side pane). */
+.tool[data-lit='true'] {
+  background: var(--accent-bg);
+  color: var(--accent);
 }
 
 .tool:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: calc(-1 * var(--space-2));
+}
+
+/* A tint, as a disc of its own rule colour.
+ *
+ * NO BORDER, on any of them. A ring in the ink was the loudest thing in the
+ * popup and read as a fourth colour rather than as a selection; a hairline in
+ * `--line-2` reads as a disabled control. The disc carries the SATURATED value
+ * so it needs neither — the pale fill is 1.24:1 against Paper and would have
+ * needed an outline to be seen at all.
+ *
+ * Lighter than the glyphs beside it — see `MARK_SWATCH`. A solid disc matched
+ * to an outlined icon's diameter outweighs it several times over, so equal
+ * WEIGHT means a visibly smaller circle. */
+.disc {
+  width: var(--mark-swatch);
+  height: var(--mark-swatch);
+  border-radius: var(--radius-pill);
+  background: var(--disc);
+  transition: box-shadow var(--motion-popover);
+}
+
+/* The chosen tint, IN ITS OWN COLOUR — so the chosen one is simply the larger
+ * dot, and the row gains no colour that is not one of the three answers.
+ *
+ * Every other way of marking it introduces a hue. A ring in the ink is black on
+ * four themes and white on Night; mixing the disc toward the ink to make it
+ * "denser" is the same thing wearing the colour's name — half of #17191B is
+ * still mostly #17191B, which is what made it read as an ugly black edge. A
+ * tinted background, which is how the STYLE row marks its choice, would sit
+ * behind a pure colour and change how that colour reads; the specimens can take
+ * it because they are drawings with their own colour already, and a ring around
+ * a drawing of a mark reads as part of the mark. Different content, same rule:
+ * indicate with something that is already in the answer.
+ *
+ * A HAIRLINE IS ENOUGH, checked on screen rather than reasoned about: 14px
+ * against 16px looks marginal written down and is obvious in place, because the
+ * three discs sit side by side and the eye is comparing them directly rather
+ * than judging one in isolation. Anything heavier stops reading as the same
+ * colour, more of it, and starts reading as a ringed colour. */
+.disc[data-lit='true'] {
+  box-shadow: 0 0 0 1px var(--disc);
+}
+
+/* A drawing of the mark itself — see `MarkSpecimen`. */
+.specimen {
+  display: block;
+  overflow: visible;
+}
+
+/* Marks on one side, actions on the other. The popup does two different kinds
+ * of thing and the rule is what says so in 1px. */
+.divider {
+  flex: 0 0 auto;
+  width: 1px;
+  height: var(--space-20);
+  margin: 0 var(--space-2);
+  background: var(--line-2);
+}
+
+/* The control that turns the popup over. Narrower than a tool, and
+ * deliberately: it is not another action, it is the second half of the one
+ * beside it. */
+.chevron {
+  flex: 0 0 auto;
+  width: var(--space-16);
+  height: var(--control-sm);
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-control);
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background var(--motion-popover), color var(--motion-popover);
+}
+
+.chevron:hover,
+.chevron:focus-visible {
+  background: var(--wash);
+  color: var(--ink);
+}
+
+.chevron:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: calc(-1 * var(--space-2));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tool,
+  .chevron,
+  .disc {
+    transition: none;
+  }
 }

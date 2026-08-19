@@ -18,6 +18,8 @@ function mark(over: Partial<Mark> = {}): Mark {
     suffix: '',
     note: '',
     kind: 'highlight',
+    tint: 'yellow',
+    style: 'fill',
     chapter: 'Ch. 1',
     createdAt: 1000,
     ...over,

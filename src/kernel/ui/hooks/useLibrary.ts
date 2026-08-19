@@ -1,7 +1,7 @@
 import { useMemo, useSyncExternalStore } from 'react'
 import type { BookRecord } from '../../core/bookFolder'
 import type { IndexedBook } from '../../core/bookIndex'
-import type { Library, RekeyOutcome } from '../../core/libraryStore'
+import type { Library, RekeyOutcome, TagRemoval } from '../../core/libraryStore'
 
 /**
  * The library, bound to React — an ADAPTER over `core/libraryStore`.
@@ -23,9 +23,16 @@ export interface LibraryView {
   setFinished: (bookId: string, finished: boolean) => void
   tag: (bookId: string, tag: string) => void
   untag: (bookId: string, tag: string) => void
+  tagBooks: (bookIds: readonly string[], tags: readonly string[]) => void
+  untagBooks: (bookIds: readonly string[], tag: string) => void
+  adoptTag: (tag: string) => void
   renameTag: (from: string, to: string) => void
   removeTag: (tag: string) => void
   ownTagCount: (tag: string) => number
+  ownTagBooks: (tag: string) => readonly string[]
+  /** What the last removal took, for the undo the panel offers. */
+  readonly lastRemoval: TagRemoval | null
+  undoRemoveTag: () => void
   keepJacket: (bookId: string, cover: Blob) => void
   /** Awaitable, because intake orders the record after the bytes. */
   keepContent: (bookId: string, name: string, bytes: Blob) => Promise<boolean>
@@ -45,6 +52,13 @@ function letGo(written: Promise<unknown>): void {
 
 export function useLibrary(library: Library): LibraryView {
   const books = useSyncExternalStore(library.subscribe, library.getSnapshot, library.getSnapshot)
+  /* A SECOND SUBSCRIPTION over the same listeners, not a field of the snapshot.
+   * The undo offer is not part of the shelf, and folding it into the row list
+   * would make every subscriber to the books re-render when it moves — and
+   * would make the snapshot a new object each time, which is what
+   * `useSyncExternalStore` refuses. The store notifies once; each hook reads
+   * the part it cares about. */
+  const lastRemoval = useSyncExternalStore(library.subscribe, library.lastRemoval, library.lastRemoval)
   const verbs = useMemo(
     () => ({
       add: (bookId: string, record: BookRecord, sparse?: boolean) =>
@@ -57,15 +71,22 @@ export function useLibrary(library: Library): LibraryView {
       setFinished: (bookId: string, finished: boolean) => letGo(library.setFinished(bookId, finished)),
       tag: (bookId: string, tag: string) => letGo(library.tag(bookId, tag)),
       untag: (bookId: string, tag: string) => letGo(library.untag(bookId, tag)),
+      tagBooks: (bookIds: readonly string[], tags: readonly string[]) =>
+        letGo(library.tagBooks(bookIds, tags)),
+      untagBooks: (bookIds: readonly string[], tag: string) =>
+        letGo(library.untagBooks(bookIds, tag)),
+      adoptTag: (tag: string) => letGo(library.adoptTag(tag)),
+      undoRemoveTag: () => letGo(library.undoRemoveTag()),
       renameTag: (from: string, to: string) => letGo(library.renameTag(from, to)),
       removeTag: (tag: string) => letGo(library.removeTag(tag)),
       keepJacket: (bookId: string, cover: Blob) => letGo(library.keepJacket(bookId, cover)),
       keepContent: library.keepContent,
       ownTagCount: library.ownTagCount,
+      ownTagBooks: library.ownTagBooks,
       positionOf: library.positionOf,
       rekeyBook: library.rekeyBook,
     }),
     [library],
   )
-  return useMemo<LibraryView>(() => ({ books, ...verbs }), [books, verbs])
+  return useMemo<LibraryView>(() => ({ books, lastRemoval, ...verbs }), [books, lastRemoval, verbs])
 }

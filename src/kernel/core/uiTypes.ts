@@ -96,3 +96,26 @@ export type Side = (typeof SIDES)[number]
  */
 export const PAGE_LAYOUTS = ['scrolled', 'paginated'] as const
 export type PageLayout = (typeof PAGE_LAYOUTS)[number]
+
+/** Which step each spacing is on — see `SPACING` in `metrics.ts`. */
+export interface SpacingIndices {
+  readonly letter: number
+  readonly word: number
+  readonly line: number
+  readonly paragraph: number
+}
+
+/** The four, named, so a caller cannot pass a key the scale does not have. */
+export type SpacingKey = keyof SpacingIndices
+
+/**
+ * How a line of prose fills its measure.
+ *
+ * NOT "left" AND "right", which is the obvious pair and the wrong one: a line
+ * set flush to the reading edge is on the LEFT in English, on the RIGHT in
+ * Arabic, and at the TOP in vertical Japanese. There is one behaviour and three
+ * appearances, and naming it by one of them would be wrong in the other two.
+ * `ragged` names what the far edge does, which is the same in all three.
+ */
+export const ALIGNS = ['justified', 'ragged'] as const
+export type Align = (typeof ALIGNS)[number]

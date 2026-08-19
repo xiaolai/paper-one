@@ -74,7 +74,7 @@ export type {
 } from './core/ports'
 export { createDiagnostics, defaultDiagnostics, redact } from './core/diagnostics'
 export type { DiagnosticsOptions, Sink } from './core/diagnostics'
-export { KERNEL_SETTINGS, SETTINGS_STORAGE_KEY, SETTINGS_VERSION, createSettingsStore, keepValues } from './core/settings'
+export { KERNEL_SETTINGS, SETTINGS_STORAGE_KEY, SETTINGS_VERSION, carryLegacySettings, createSettingsStore, keepValues } from './core/settings'
 export type { KernelPreferences, SettingsEnvelope, SettingsMigration, SettingsStoreOptions } from './core/settings'
 
 /* Storage primitives a capability writes through, and the record they write.

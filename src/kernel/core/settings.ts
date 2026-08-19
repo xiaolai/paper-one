@@ -1,7 +1,18 @@
-import type { MarkStorage } from './marks'
-import { DEFAULT_STEP_IDX, READING_STEPS } from './metrics'
+import { MARK_TINTS, READER_STYLES, type MarkStorage, type MarkStyle, type MarkTint } from './marks'
+import { BRIGHTNESS, CONTRAST, DEFAULT_STEP_IDX, READING_STEPS, SPACING } from './metrics'
 import { defineSetting, type Setting, type SettingsStore } from './ports'
-import { PAGE_LAYOUTS, SIDES, THEME_IDS, type PageLayout, type Side, type Theme, type Typeface } from './uiTypes'
+import {
+  ALIGNS,
+  PAGE_LAYOUTS,
+  SIDES,
+  THEME_IDS,
+  type Align,
+  type PageLayout,
+  type Side,
+  type SpacingIndices,
+  type Theme,
+  type Typeface,
+} from './uiTypes'
 
 /**
  * `SettingsStore`, the working one — see the port in `ports.ts`.
@@ -43,6 +54,30 @@ export type SettingsMigration = (found: SettingsEnvelope | null) => Readonly<Rec
 
 export const keepValues: SettingsMigration = (found) => found?.values ?? {}
 
+/**
+ * Carry Paper's pre-kernel settings file onto the namespaced keys.
+ *
+ * That file was a flat map of `AppState` field names — `theme`, `stepIdx`,
+ * `spacing` — written under this same storage key before the kernel gave every
+ * setting an owner. The names are otherwise identical, so the migration is a
+ * prefix: `theme` becomes `kernel.theme`, and a value that is already
+ * namespaced (anything with a dot) is passed through untouched, which is what
+ * makes this safe to run over an envelope that has already been migrated.
+ *
+ * VALUES ARE NOT VALIDATED HERE. Each setting's own `parse` runs on `get`, so a
+ * field the old file spelled differently, or a step index from a build with a
+ * longer ramp, falls back or clamps exactly as it would from a current file —
+ * one migration, not a second copy of fifteen validators.
+ */
+export const carryLegacySettings: SettingsMigration = (found) => {
+  const values = found?.values ?? {}
+  const out: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(values)) {
+    out[key.includes('.') ? key : `kernel.${key}`] = value
+  }
+  return out
+}
+
 export interface SettingsStoreOptions {
   /** The flat store. `null` — no storage at all — makes a store that lives for the session. */
   readonly storage: MarkStorage | null
@@ -66,11 +101,19 @@ function parseEnvelope(raw: string | null): SettingsEnvelope | null {
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null
   const shape = parsed as { version?: unknown; values?: unknown }
-  const version = typeof shape.version === 'number' && Number.isFinite(shape.version) ? shape.version : 0
-  const values =
+  const versioned = typeof shape.version === 'number' && Number.isFinite(shape.version)
+  const version = versioned ? (shape.version as number) : 0
+  const wrapped =
     typeof shape.values === 'object' && shape.values !== null && !Array.isArray(shape.values)
       ? (shape.values as Record<string, unknown>)
-      : {}
+      : null
+  /* AN ENVELOPE FROM BEFORE THERE WERE ENVELOPES is the object itself.
+   * Paper's first settings file was a flat map of `AppState` field names under
+   * this same key, with no `version` and no `values` — so reading it as "an
+   * envelope carrying nothing" would hand every reader who had ever chosen a
+   * theme the defaults back, once, silently. Only when BOTH markers are absent:
+   * a versioned envelope with no values really is carrying nothing. */
+  const values = wrapped ?? (versioned ? {} : (parsed as Record<string, unknown>))
   return { version, values }
 }
 
@@ -111,13 +154,19 @@ export function createSettingsStore({ storage, migrate = keepValues }: SettingsS
     },
     set: (setting, value) => {
       /* BY VALUE, so a re-render that sets what is already set writes nothing:
-       * the UI writes on every change of nine fields, and most of those
+       * the UI writes on every change of fifteen fields, and most of those
        * changes are one field. Primitives compare directly; anything richer
-       * compares serialised, which is what will be stored anyway. */
-      const current = values[setting.key]
-      const same =
-        setting.key in values &&
-        (Object.is(current, value) || JSON.stringify(current) === JSON.stringify(value))
+       * compares serialised, which is what will be stored anyway.
+       *
+       * AND AGAINST THE FALLBACK WHEN NOTHING IS STORED, because absent MEANS
+       * the fallback — `get` returns it — so writing it back changes nothing a
+       * reader could observe. Without this every cold start wrote all fifteen
+       * defaults to disk: the app reads its preferences before the first
+       * render and writes them back in an effect, so a launch that changed
+       * nothing still paid a write, on the one path that is already the
+       * slowest. */
+      const current = setting.key in values ? values[setting.key] : setting.fallback
+      const same = Object.is(current, value) || JSON.stringify(current) === JSON.stringify(value)
       if (same) return
       values = { ...values, [setting.key]: value }
       // Listeners first: what is held in memory is the truth the UI shows,
@@ -148,6 +197,31 @@ const oneOf =
 const boolean = (raw: unknown): boolean | undefined => (typeof raw === 'boolean' ? raw : undefined)
 
 /**
+ * An index into one of §09's scales, CLAMPED to it rather than rejected.
+ *
+ * These are positions on a ramp, and a file written by a build with a longer
+ * ramp is not corrupt — it is describing the end of a scale this build has
+ * less of. Falling back to the default there would throw away a reader's
+ * deliberate "as large as it goes"; clamping keeps the intent and lands on the
+ * nearest thing this build can show. A non-integer IS rejected: it indexes
+ * nothing, and `stepAt` on a NaN yields undefined rather than a step.
+ */
+const index =
+  (length: number) =>
+  (raw: unknown): number | undefined =>
+    typeof raw === 'number' && Number.isInteger(raw) ? Math.max(0, Math.min(length - 1, raw)) : undefined
+
+/** The four spacing indices, each independently clamped; a broken one costs
+ *  itself and not the other three. */
+const spacingIndices = (raw: unknown): SpacingIndices | undefined => {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
+  const row = raw as Record<string, unknown>
+  const at = (key: keyof SpacingIndices) =>
+    index(SPACING[key].steps.length)(row[key]) ?? SPACING[key].def
+  return { letter: at('letter'), word: at('word'), line: at('line'), paragraph: at('paragraph') }
+}
+
+/**
  * The reading preferences that survive a launch. Names match the `AppState`
  * fields they mirror; keys carry the `kernel.` namespace.
  */
@@ -160,18 +234,31 @@ export const KERNEL_SETTINGS = {
   typeface: defineSetting<Typeface>('kernel.typeface', 'literata', (raw) =>
     typeof raw === 'string' && raw !== '' ? raw : undefined,
   ),
-  /* An INDEX into `READING_STEPS`, so it is checked against that list's length
-   * — a file from a build with more steps must not index past the end. */
-  stepIdx: defineSetting<number>('kernel.stepIdx', DEFAULT_STEP_IDX, (raw) =>
-    typeof raw === 'number' && Number.isInteger(raw) && raw >= 0 && raw < READING_STEPS.length
-      ? raw
-      : undefined,
-  ),
+  /* An INDEX into `READING_STEPS`, CLAMPED to it — see `index`. This used to
+   * reject anything past the end, which throws away a reader's deliberate "as
+   * large as it goes" the moment they open the same library on a build with a
+   * shorter ramp. Clamping keeps the intent and lands on the nearest thing
+   * this build can show. */
+  stepIdx: defineSetting<number>('kernel.stepIdx', DEFAULT_STEP_IDX, index(READING_STEPS.length)),
   pageLayout: defineSetting<PageLayout>('kernel.pageLayout', 'scrolled', oneOf(PAGE_LAYOUTS)),
   side: defineSetting<Side>('kernel.side', 'right', oneOf(SIDES)),
   rulerOn: defineSetting<boolean>('kernel.rulerOn', false, boolean),
   scrollbarOn: defineSetting<boolean>('kernel.scrollbarOn', false, boolean),
   progressLineOn: defineSetting<boolean>('kernel.progressLineOn', false, boolean),
+  spacing: defineSetting<SpacingIndices>(
+    'kernel.spacing',
+    { letter: SPACING.letter.def, word: SPACING.word.def, line: SPACING.line.def, paragraph: SPACING.paragraph.def },
+    spacingIndices,
+  ),
+  align: defineSetting<Align>('kernel.align', 'justified', oneOf(ALIGNS)),
+  brightness: defineSetting<number>('kernel.brightness', BRIGHTNESS.def, index(BRIGHTNESS.steps.length)),
+  contrast: defineSetting<number>('kernel.contrast', CONTRAST.def, index(CONTRAST.steps.length)),
+  markTint: defineSetting<MarkTint>('kernel.markTint', 'yellow', oneOf(MARK_TINTS)),
+  /* READER_STYLES, not every style there is. The wave belongs to the
+     companion — a settings file naming it, whether hand-edited or written by
+     a build that offered it, must not hand the reader a style they cannot
+     choose and cannot see the provenance rule behind. */
+  markStyle: defineSetting<MarkStyle>('kernel.markStyle', 'fill', oneOf(READER_STYLES)),
 } as const satisfies Record<string, Setting<unknown>>
 
 export type KernelSettingName = keyof typeof KERNEL_SETTINGS
@@ -192,6 +279,12 @@ export function readKernelPreferences(store: SettingsStore): KernelPreferences {
     rulerOn: store.get(KERNEL_SETTINGS.rulerOn),
     scrollbarOn: store.get(KERNEL_SETTINGS.scrollbarOn),
     progressLineOn: store.get(KERNEL_SETTINGS.progressLineOn),
+    spacing: store.get(KERNEL_SETTINGS.spacing),
+    align: store.get(KERNEL_SETTINGS.align),
+    brightness: store.get(KERNEL_SETTINGS.brightness),
+    contrast: store.get(KERNEL_SETTINGS.contrast),
+    markTint: store.get(KERNEL_SETTINGS.markTint),
+    markStyle: store.get(KERNEL_SETTINGS.markStyle),
   }
 }
 
@@ -206,4 +299,10 @@ export function writeKernelPreferences(store: SettingsStore, prefs: KernelPrefer
   store.set(KERNEL_SETTINGS.rulerOn, prefs.rulerOn)
   store.set(KERNEL_SETTINGS.scrollbarOn, prefs.scrollbarOn)
   store.set(KERNEL_SETTINGS.progressLineOn, prefs.progressLineOn)
+  store.set(KERNEL_SETTINGS.spacing, prefs.spacing)
+  store.set(KERNEL_SETTINGS.align, prefs.align)
+  store.set(KERNEL_SETTINGS.brightness, prefs.brightness)
+  store.set(KERNEL_SETTINGS.contrast, prefs.contrast)
+  store.set(KERNEL_SETTINGS.markTint, prefs.markTint)
+  store.set(KERNEL_SETTINGS.markStyle, prefs.markStyle)
 }

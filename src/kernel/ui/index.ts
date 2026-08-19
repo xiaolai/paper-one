@@ -30,3 +30,8 @@ export type { IndexedBook } from '../core/bookIndex'
 export { emptyExpired } from '../core/bookTrash'
 export { migrateToFolders, summariseMigration } from '../core/migrateToFolders'
 export { installFatalHandlers } from '../core/reportFatal'
+/* The launch measurements. Dev-only in effect — `moment` and its neighbours
+ * send over the HMR socket, which does not exist in a build — but exported
+ * here because `src/main.tsx` is where the launch is, and a composition root
+ * may import the kernel only through this entry. */
+export { countingFs, moment, onFirstPaint, reportFs, reportStartup, timed, watchFs } from './devTiming'

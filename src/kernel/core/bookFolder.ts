@@ -510,11 +510,19 @@ export async function atomicWrite(fs: VaultFs, path: string, bytes: Uint8Array):
  * Returns false when the book is not there, which is not an error: a write
  * racing a removal should do nothing rather than recreate the folder.
  */
+/**
+ * @returns The record now on disk, or null when there was no book to change —
+ * gone, or undone because a removal raced the write. THE RECORD, not a
+ * boolean, because the caller's in-memory row may be behind the disk (the
+ * index it came from can be one write stale), and only what was actually
+ * written can put the row right. A boolean said "it worked" while the shelf
+ * kept showing the stale copy.
+ */
 export async function updateBook(
   fs: VaultFs,
   bookId: string,
   change: (record: BookRecord) => BookRecord,
-): Promise<boolean> {
+): Promise<BookRecord | null> {
   /* THE CHANGE IS APPLIED TO WHAT IS ON DISK, which is the point of taking a
    * function rather than a value. A caller holding an in-memory copy may be
    * behind — the index it came from can be one write stale after a crash — and
@@ -533,10 +541,10 @@ export async function updateBook(
     if (await fs.exists(recordPath(bookId))) {
       throw new Error(`book.json for ${bookId} is there but could not be read`)
     }
-    return false
+    return null
   }
   const next = change(current)
-  if (next === current) return true
+  if (next === current) return current
   await writeBook(fs, bookId, next)
   /* CHECKED AFTER THE WRITE, because a removal can rename the folder between
    * the read above and the write — and `writeBook` calls `mkdir`, so it happily
@@ -551,9 +559,9 @@ export async function updateBook(
     // Undone rather than left: the shell this call created is removed, and the
     // removal keeps the book it moved.
     await fs.removeDir(folderOf(bookId)).catch(() => {})
-    return false
+    return null
   }
-  return true
+  return next
 }
 
 /**

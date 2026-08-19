@@ -30,6 +30,19 @@ export interface ReaderPosition {
 }
 
 export interface BookMeta {
+  /**
+   * How many pages the book has, or 0 when it has none.
+   *
+   * A PDF has pages; reflowable text does not, because there the page is a
+   * property of the window rather than of the work — two readers at different
+   * font sizes are on different pages of the same book, so a page number
+   * derived from one of them is a citation the other cannot follow.
+   *
+   * So this is both a count and a QUESTION ANSWERED: non-zero means "this book
+   * can be cited by page", which is what `citation` asks it. Set by `makePdf`;
+   * every other backend leaves it 0 without knowing the field exists.
+   */
+  readonly pageCount: number
   readonly title: string
   readonly author: string
   /**

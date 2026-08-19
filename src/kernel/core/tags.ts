@@ -12,25 +12,46 @@
  */
 
 /**
+ * Fold a string to the form two spellings of one word share.
+ *
+ *   NFC             — `Café` typed on macOS is decomposed (e + combining acute)
+ *                     and the same word pasted from elsewhere is composed. They
+ *                     render identically and compare unequal, which is the worst
+ *                     kind of duplicate because nothing on screen can explain it.
+ *   lower, UPPER, lower — case-folding, not lowercasing. `toLowerCase` alone
+ *                     left `Straße` and `STRASSE` distinct, because ß only
+ *                     reaches `ss` through its uppercase form. The first lower
+ *                     is what brings capital ẞ along: upper-first left ẞ→ß
+ *                     while SS→ss, two keys for one word — lowered first, all
+ *                     three spellings meet at `ss`. The round trip is the
+ *                     closest JavaScript comes to Unicode case folding without
+ *                     a library; its one known deviation is Turkish dotless ı,
+ *                     which merges with i — accepted, since a locale-correct
+ *                     fold needs a locale nothing here has.
+ *   NFC again       — case mapping can denormalise (`İ` lowers to `i` + a
+ *                     combining dot), so the fold renormalises what it made.
+ *
+ * NFC BEFORE the case fold: case mapping can change which decompositions apply,
+ * so normalising only afterwards leaves the two forms of `Café` folding apart.
+ *
+ * Shared by `tagKey` and `matchesQuery`, so a search matches by the same rule
+ * tags deduplicate by — it lowercased without normalising, and a decomposed
+ * `café` typed into the field missed the composed one in every title.
+ */
+export const fold = (text: string): string =>
+  text.normalize('NFC').toLowerCase().toUpperCase().toLowerCase().normalize('NFC')
+
+/**
  * The identity of a tag, as opposed to its spelling.
  *
- * `Philosophy` and `philosophy` are ONE tag. Three steps, each earning its place:
- *
- *   trim         — a trailing space is not a different subject.
- *   NFC          — `Café` typed on macOS is decomposed (e + combining acute) and
- *                  the same word pasted from elsewhere is composed. They render
- *                  identically and compare unequal, which is the worst kind of
- *                  duplicate because nothing on screen can explain it.
- *   toLowerCase  — case-fold.
- *
- * NFC BEFORE lowercasing: lowercasing can change which decompositions apply, so
- * normalising second leaves the two forms of `Café` folding to different keys.
+ * `Philosophy` and `philosophy` are ONE tag: trim — a trailing space is not a
+ * different subject — then `fold`.
  *
  * The DISPLAY spelling is never this — it is whatever the reader first typed,
  * kept on the book. This is only ever the key.
  */
 export function tagKey(tag: string): string {
-  return tag.trim().normalize('NFC').toLowerCase()
+  return fold(tag.trim())
 }
 
 /** The longest a reader's tag may be. Kept here so the field and the store
@@ -49,5 +70,11 @@ export const TAG_MAX = 60
  * agree, and they agree by calling this.
  */
 export function normalizeTag(raw: string): string {
-  return raw.trim().slice(0, TAG_MAX)
+  /* Normalised BEFORE the cut and cut BY CODE POINT, not by UTF-16 unit.
+   * `slice` counts units, so a tag whose sixtieth character was an emoji or
+   * any astral-plane letter was cut through the middle of its surrogate pair,
+   * storing a lone surrogate no font can draw — and cutting a decomposed
+   * string could drop a combining mark off the last letter, so two spellings
+   * that fold to one key stored as two different truncations. */
+  return [...raw.trim().normalize('NFC')].slice(0, TAG_MAX).join('')
 }

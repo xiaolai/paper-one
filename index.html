@@ -3,6 +3,19 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- The window's first frame, before a single module is fetched: the last
+         colour the reader's theme resolved to, so the window opens in the app
+         instead of in white. A hint, not a source of truth — see
+         src/lib/paintHint.ts. Must stay in <head>: a build injects the bundle's
+         module script at the END of head, so this in <body> ran after it. -->
+    <script>
+      try {
+        var paint = localStorage.getItem('paper.paint.v1')
+        if (paint) document.documentElement.style.background = paint
+      } catch (ignored) {
+        // Storage disabled. One white frame, and nothing else changes.
+      }
+    </script>
     <title>Paper</title>
   </head>
   <body>

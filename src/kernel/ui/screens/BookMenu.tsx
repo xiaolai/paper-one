@@ -1,14 +1,15 @@
-import { BookCheck, Tag, Trash2 } from 'lucide-react'
+import { BookCheck, CheckSquare, Square, Tag, Trash2 } from 'lucide-react'
 import type { ReadingStatus } from '../../core/library'
 import type { IndexedBook } from '../../core/bookIndex'
 import type { BookAction } from '../../core/capability'
+import { TRASH_KEPT_FOR } from '../../core/bookTrash'
 import { ICON } from '../../core/metrics'
 
 /**
- * The three things that can be done to a book, wherever it is shown.
+ * The things that can be done to a book, wherever it is shown.
  *
  * EXTRACTED AT THE SECOND SURFACE. The shelf's card had these items written
- * into it; the list's row needs exactly the same three, with the same words,
+ * into it; the list's row needs exactly the same ones, with the same words,
  * the same two-click remove and the same state names. Written twice they drift,
  * and they drift silently — the two would simply disagree about what "Mark as
  * finished" does to a book already finished, or one would lose the confirm.
@@ -26,8 +27,11 @@ export interface BookMenuProps {
   /** Which book has its remove ARMED, so only one is armed at a time. */
   readonly confirming: string | null
   readonly setConfirming: (bookId: string | null) => void
+  /** Open the tag editor over this book. */
   readonly setTagging: (bookId: string | null) => void
-  readonly setDraftTag: (tag: string) => void
+  /** Whether this book is in the shelf's selection, and the way to change that. */
+  readonly selected: boolean
+  readonly onToggleSelect: (bookId: string) => void
   readonly onRemove: (book: IndexedBook) => void
   readonly onSetFinished: (bookId: string, finished: boolean) => void
   /** The caller's one way to close — see `useRowMenu`. */
@@ -51,7 +55,8 @@ export function BookMenu({
   confirming,
   setConfirming,
   setTagging,
-  setDraftTag,
+  selected,
+  onToggleSelect,
   onRemove,
   onSetFinished,
   closeMenu,
@@ -74,21 +79,49 @@ export function BookMenu({
         <BookCheck size={ICON.control} strokeWidth={ICON.stroke} />
         {/* Names the STATE it will produce, because the tick alone could not —
             a bare ✓ on a card that can be selected, confirmed or dismissed read
-            as any of those. */}
-        {status === 'finished' ? 'Mark as unread' : 'Mark as finished'}
+            as any of those. And the state it names is the TRUE one: clearing
+            `finished` on a book with a saved position makes it Reading, not
+            Unread — the position survives, deliberately — and a menu that said
+            "unread" produced a book the panel then counted as reading. */}
+        {status === 'finished'
+          ? book.position
+            ? 'Mark as unfinished'
+            : 'Mark as unread'
+          : 'Mark as finished'}
       </button>
       <button
         type="button"
         role="menuitem"
         className={itemClass}
         onClick={() => {
-          setDraftTag('')
           setTagging(book.bookId)
           closeMenu()
         }}
       >
         <Tag size={ICON.control} strokeWidth={ICON.stroke} />
-        Add a tag…
+        {/* "Tags…", not "Add a tag…": what opens is the book's tags, all of
+            them, to add to or take from. The old label described one of the
+            two things the editor does and hid the other. */}
+        Tags…
+      </button>
+      {/* SELECT, in words. ⌘-click selects a card, and a reader who has never
+          ⌘-clicked a shelf has no way to find that out; this row is how they
+          do. Once one is selected the bar above the shelf says the rest. */}
+      <button
+        type="button"
+        role="menuitem"
+        className={itemClass}
+        onClick={() => {
+          onToggleSelect(book.bookId)
+          closeMenu()
+        }}
+      >
+        {selected ? (
+          <CheckSquare size={ICON.control} strokeWidth={ICON.stroke} />
+        ) : (
+          <Square size={ICON.control} strokeWidth={ICON.stroke} />
+        )}
+        {selected ? 'Deselect' : 'Select'}
       </button>
       {/* A capability's actions on this book. No icon: a contribution
           carries a label, not artwork, and a wrong icon says more than none. */}
@@ -118,12 +151,12 @@ export function BookMenu({
         data-confirming={armed}
         aria-label={
           armed
-            ? `Remove ${title} — the file you imported is kept, and this is recoverable for two weeks`
+            ? `Remove ${title} — the file you imported is kept, and this is recoverable for ${TRASH_KEPT_FOR}`
             : `Remove ${title}`
         }
         title={
           armed
-            ? 'The file you imported is untouched. Your tags, place and notes are recoverable for two weeks.'
+            ? `The file you imported is untouched. Your tags, place and notes are recoverable for ${TRASH_KEPT_FOR}.`
             : 'Remove from the library'
         }
         onClick={() => {

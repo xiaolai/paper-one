@@ -45,8 +45,19 @@ const COMPOSITION_ROOTS = ['^src/app/composition\\.(desktop|ios|android)\\.ts$',
 const KERNEL_PUBLIC_ENTRY = '^src/kernel/index\\.ts$'
 const KERNEL_UI_ENTRY = '^src/kernel/ui/index\\.ts$'
 
-/** The kernel's storage adapters: the only modules that touch the fs plugin. */
-const FS_ADAPTERS = ['^src/kernel/core/bookFiles\\.ts$', '^src/kernel/core/bookVault\\.ts$', '^src/kernel/ui/appStorage\\.ts$']
+/** The kernel's storage adapters: the only modules that touch the fs plugin.
+ *
+ *  `tagFiles` is one of them, and is on this list for the same reason the
+ *  others are: it is the half of the tag archive that TOUCHES A FILE, split
+ *  from `core/tagArchive.ts` — which decides what an archive contains and
+ *  needs no filesystem to be tested. Both paths go through a dialog, so the
+ *  file is one the reader pointed at; no path is constructed there. */
+const FS_ADAPTERS = [
+  '^src/kernel/core/bookFiles\\.ts$',
+  '^src/kernel/core/bookVault\\.ts$',
+  '^src/kernel/ui/appStorage\\.ts$',
+  '^src/kernel/ui/tagFiles\\.ts$',
+]
 
 /** The peer capability's wire — the ONE capability file allowed to import
  *  @tauri-apps/api (WI-C.1). Everything else a capability does to the app

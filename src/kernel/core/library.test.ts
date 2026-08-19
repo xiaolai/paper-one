@@ -7,13 +7,21 @@ import {
   canOpen,
   inOrder,
   inScope,
+  inTagOrder,
   matchesQuery,
+  selectionTags,
   shelfFor,
   shelfView,
   sortTitle,
+  splitTags,
   statusOf,
   tagCounts,
   tagKey,
+  tagSuggestions,
+  untaggedCount,
+  tagLeaf,
+  tagPrefix,
+  tagTree,
 } from './library'
 
 /**
@@ -127,6 +135,15 @@ describe('tagKey', () => {
   /* NFC before lowercasing, not after: lowercasing can change which
    * decompositions apply, so normalising second leaves the two forms folding to
    * different keys. */
+  /* `toLowerCase` is not case folding: ß reaches ss only through its
+   * uppercase form, so `Straße` and `STRASSE` were two tags. And capital ẞ
+   * has to be lowered FIRST or it never takes that road at all. */
+  it('folds case the Unicode way, not the ASCII way', () => {
+    expect(tagKey('Straße')).toBe(tagKey('STRASSE'))
+    expect(tagKey('STRAẞE')).toBe(tagKey('STRASSE'))
+    expect(tagKey('ẞ')).toBe(tagKey('ss'))
+  })
+
   it('folds composition and case together', () => {
     expect(tagKey('CAFÉ')).toBe(tagKey('café'))
   })
@@ -164,6 +181,13 @@ describe('matchesQuery', () => {
     expect(matchesQuery(entry({ subjects: ['Philosophy'] }), 'philos')).toBe(true)
   })
 
+  /* The query goes through the same fold tag identity uses: a decomposed
+   * `café` typed on macOS must find the composed one in a title. */
+  it('matches across Unicode composition', () => {
+    const composed = entry({ title: 'Café Society' })
+    expect(matchesQuery(composed, 'café')).toBe(true)
+  })
+
   it('matches everything on an empty query', () => {
     expect(matchesQuery(entry(), '   ')).toBe(true)
   })
@@ -198,6 +222,68 @@ describe('inScope', () => {
 
   it('matches a publisher subject as readily as a reader tag', () => {
     expect(inScope(entry({ subjects: ['Sea'] }), { tags: ['sea'] })).toBe(true)
+  })
+
+  /* `-tag:` — none of these, whoever said it. */
+  describe('excluded', () => {
+    it('keeps a book carrying an excluded tag out', () => {
+      expect(inScope(entry({ tags: ['Abandoned'] }), { tags: [], excluded: ['abandoned'] })).toBe(false)
+    })
+    it('lets a book without it through', () => {
+      expect(inScope(entry({ tags: ['Sea'] }), { tags: [], excluded: ['Abandoned'] })).toBe(true)
+    })
+    it('excludes on a publisher subject as readily as a reader tag', () => {
+      expect(inScope(entry({ subjects: ['Poetry'] }), { tags: [], excluded: ['poetry'] })).toBe(false)
+    })
+    it('composes with a required tag', () => {
+      const scope = { tags: ['Sea'], excluded: ['Abandoned'] }
+      expect(inScope(entry({ tags: ['Sea'] }), scope)).toBe(true)
+      expect(inScope(entry({ tags: ['Sea', 'Abandoned'] }), scope)).toBe(false)
+      expect(inScope(entry({ tags: ['Classics'] }), scope)).toBe(false)
+    })
+  })
+
+  /* `is:untagged` — none of the READER's tags. A publisher's subjects do not
+   * make a book filed. */
+  describe('untagged', () => {
+    it('lets through a book the reader has not tagged', () => {
+      expect(inScope(entry(), { tags: [], untagged: true })).toBe(true)
+      expect(inScope(entry({ tags: [] }), { tags: [], untagged: true })).toBe(true)
+    })
+    it('keeps out a book with any tag of the reader\'s', () => {
+      expect(inScope(entry({ tags: ['Sea'] }), { tags: [], untagged: true })).toBe(false)
+    })
+    it('does not count a publisher subject as filing', () => {
+      expect(inScope(entry({ subjects: ['Fiction', 'Sea'] }), { tags: [], untagged: true })).toBe(true)
+    })
+    it('composes with a status', () => {
+      const scope = { tags: [], untagged: true, status: 'reading' as const }
+      expect(inScope(entry({ position: 'x' }), scope)).toBe(true)
+      expect(inScope(entry(), scope)).toBe(false)
+    })
+  })
+})
+
+describe('untaggedCount', () => {
+  const shelf = [
+    entry({ bookId: 'a', tags: ['Sea'] }),
+    entry({ bookId: 'b', subjects: ['Fiction'] }),
+    entry({ bookId: 'c' }),
+    entry({ bookId: 'd', tags: ['Sea'], position: 'x' }),
+    entry({ bookId: 'e', position: 'x' }),
+  ]
+  it('counts books with none of the reader\'s tags', () => {
+    expect(untaggedCount(shelf)).toBe(3)
+  })
+  it('counts within the scope it is given', () => {
+    expect(untaggedCount(shelf, { tags: [], status: 'reading' })).toBe(1)
+  })
+
+  /* A whitespace tag has no identity: it draws no chip anywhere, so the book
+   * carrying only it must still read as untagged — or it can never be found. */
+  it('ignores a tag that folds to nothing', () => {
+    expect(untaggedCount([entry({ tags: ['  '] })])).toBe(1)
+    expect(inScope(entry({ tags: ['  '] }), { tags: [], untagged: true })).toBe(true)
   })
 })
 
@@ -384,5 +470,192 @@ describe('allTags folds the publisher subjects against each other', () => {
   it('folds across both lists at once', () => {
     const row = entry({ tags: ['Sea'], subjects: ['sea', 'Classics', 'CLASSICS'] })
     expect(allTags(row)).toEqual(['Sea', 'Classics'])
+  })
+})
+
+/* The editor's field: what one Enter means. */
+describe('splitTags', () => {
+  it('is one tag for one word', () => {
+    expect(splitTags('Sea')).toEqual(['Sea'])
+  })
+  it('splits on commas and trims each piece', () => {
+    expect(splitTags(' Sea , Classics ,To reread')).toEqual(['Sea', 'Classics', 'To reread'])
+  })
+  it('drops empties, so a trailing comma asks for nothing extra', () => {
+    expect(splitTags('Sea,')).toEqual(['Sea'])
+    expect(splitTags(', ,')).toEqual([])
+  })
+  it('folds pieces that are one tag', () => {
+    expect(splitTags('Sea, sea, SEA')).toEqual(['Sea'])
+  })
+  it('cuts each piece the way the store will', () => {
+    const long = 'x'.repeat(80)
+    expect(splitTags(long)[0]).toHaveLength(60)
+  })
+
+  /* The cut counts CODE POINTS: sixty emoji are sixty characters, and the
+   * sixtieth must not be half a surrogate pair. */
+  it('does not cut through a surrogate pair', () => {
+    const emoji = '📚'.repeat(70)
+    const cut = splitTags(emoji)[0]!
+    expect([...cut]).toHaveLength(60)
+    expect(cut.at(-1)).not.toMatch(/[\uD800-\uDBFF]$/)
+  })
+})
+
+describe('tagSuggestions', () => {
+  const all = [
+    { tag: 'Sea', count: 12, mine: true },
+    { tag: 'Seafaring', count: 2, mine: false },
+    { tag: 'Philosophy', count: 9, mine: true },
+    { tag: 'Deep sea', count: 3, mine: true },
+    { tag: 'Fiction', count: 40, mine: false },
+  ]
+  const none = new Set<string>()
+
+  it('offers the most used tags when nothing is typed', () => {
+    const { rows } = tagSuggestions(all, '', none)
+    expect(rows.map((r) => r.tag)).toEqual(['Sea', 'Philosophy', 'Deep sea', 'Fiction', 'Seafaring'])
+  })
+
+  /* Starts-with before contains; the reader's own before a subject; then count. */
+  it('ranks a tag starting with the text above one containing it', () => {
+    const { rows } = tagSuggestions(all, 'sea', none)
+    expect(rows.map((r) => r.tag)).toEqual(['Sea', 'Seafaring', 'Deep sea'])
+  })
+
+  /* A finished name is a pick, not a prefix: Enter goes to row 0, so the
+   * exact match must sit there even when a longer tag is better used. */
+  it('puts the exact match first whatever the counts say', () => {
+    const rows = tagSuggestions(
+      [
+        { tag: 'Seafaring', count: 40, mine: true },
+        { tag: 'Sea', count: 1, mine: false },
+      ],
+      'sea',
+      none,
+    ).rows
+    expect(rows[0]?.tag).toBe('Sea')
+  })
+
+  it('matches by key, so case and accents do not hide a tag', () => {
+    const rows = tagSuggestions([{ tag: 'Café', count: 1, mine: true }], 'café', none).rows
+    expect(rows.map((r) => r.tag)).toEqual(['Café'])
+  })
+
+  it('leaves out what the book already carries', () => {
+    const { rows } = tagSuggestions(all, 'sea', new Set(['sea']))
+    expect(rows.map((r) => r.tag)).toEqual(['Seafaring', 'Deep sea'])
+  })
+
+  it('says whether what was typed already exists', () => {
+    expect(tagSuggestions(all, 'sea', none).exact).toBe(true)
+    expect(tagSuggestions(all, 'Sea ', none).exact).toBe(true)
+    expect(tagSuggestions(all, 'Seas', none).exact).toBe(false)
+  })
+
+  /* Already on the book is not "exists to be picked" — the field should offer
+   * neither to add it nor to create it. */
+  it('does not count a tag already on the book as exact', () => {
+    expect(tagSuggestions(all, 'sea', new Set(['sea'])).exact).toBe(false)
+  })
+
+  it('caps the list', () => {
+    expect(tagSuggestions(all, '', none, 2).rows).toHaveLength(2)
+  })
+})
+
+describe('selectionTags', () => {
+  it('unions the reader\'s tags with how many books carry each', () => {
+    const rows = selectionTags([
+      entry({ bookId: 'a', tags: ['Sea', 'Classics'] }),
+      entry({ bookId: 'b', tags: ['sea'] }),
+      entry({ bookId: 'c', subjects: ['Sea'] }),
+    ])
+    expect(rows).toEqual([
+      { tag: 'Sea', count: 2 },
+      { tag: 'Classics', count: 1 },
+    ])
+  })
+  it('leaves publisher subjects out — they are not the reader\'s to edit', () => {
+    expect(selectionTags([entry({ subjects: ['Fiction'] })])).toEqual([])
+  })
+})
+
+describe('inTagOrder', () => {
+  const rows = [
+    { tag: 'Sea', count: 12, mine: true },
+    { tag: 'émile', count: 3, mine: true },
+    { tag: 'Classics', count: 3, mine: true },
+  ]
+  it('leaves the count order as it came', () => {
+    expect(inTagOrder(rows, 'count').map((r) => r.tag)).toEqual(['Sea', 'émile', 'Classics'])
+  })
+  it('sorts by name the way a reader files, accents included', () => {
+    expect(inTagOrder(rows, 'name').map((r) => r.tag)).toEqual(['Classics', 'émile', 'Sea'])
+  })
+})
+
+describe('tagTree', () => {
+  const row = (tag: string, count = 1) => ({ tag, count, mine: true })
+
+  it('leaves a plain tag as its own group', () => {
+    const [group] = tagTree([row('Sea')])
+    expect(group).toEqual({ prefix: 'Sea', self: row('Sea'), children: [] })
+  })
+
+  it('gathers tags that share a first part', () => {
+    /* `Fiction/Sea` has stored and scoped since tags existed — the slash is
+       just a character. What was missing is the rendering. */
+    const groups = tagTree([row('Fiction/Sea'), row('Fiction/Ships'), row('Essays')])
+    expect(groups).toHaveLength(2)
+    expect(groups[0]?.prefix).toBe('Fiction')
+    expect(groups[0]?.children.map((c) => c.tag)).toEqual(['Fiction/Sea', 'Fiction/Ships'])
+    expect(groups[1]?.prefix).toBe('Essays')
+  })
+
+  it('gives the group a clickable head only when the bare tag exists', () => {
+    /* A head with no tag behind it would be a dead end wearing the same clothes
+       as a live row. `self` is what tells them apart. */
+    expect(tagTree([row('Fiction/Sea')])[0]?.self).toBeNull()
+    const withBare = tagTree([row('Fiction'), row('Fiction/Sea')])
+    expect(withBare).toHaveLength(1)
+    expect(withBare[0]?.self?.tag).toBe('Fiction')
+    expect(withBare[0]?.children.map((c) => c.tag)).toEqual(['Fiction/Sea'])
+  })
+
+  it('merges the bare tag whichever order it arrives in', () => {
+    const after = tagTree([row('Fiction/Sea'), row('Fiction')])
+    expect(after).toHaveLength(1)
+    expect(after[0]?.self?.tag).toBe('Fiction')
+    expect(after[0]?.prefix).toBe('Fiction')
+  })
+
+  it('takes the group’s position from its first member', () => {
+    /* The rows arrive in the reader's chosen order — by count or by name — and
+       sorting groups by anything else would override the control they used. */
+    const groups = tagTree([row('Essays', 9), row('Fiction/Sea', 5), row('Fiction/Ships', 4)])
+    expect(groups.map((g) => g.prefix)).toEqual(['Essays', 'Fiction'])
+  })
+
+  it('groups by the first slash only, keeping the rest on the row', () => {
+    // One level answers the case people type; deeper names are not broken by it.
+    const groups = tagTree([row('Fiction/Sea/Whales')])
+    expect(groups[0]?.prefix).toBe('Fiction')
+    expect(tagLeaf('Fiction/Sea/Whales')).toBe('Sea/Whales')
+  })
+
+  it('folds the prefix like every other tag key', () => {
+    const groups = tagTree([row('Fiction/Sea'), row('fiction/Ships')])
+    expect(groups).toHaveLength(1)
+  })
+
+  it('is not fooled by a leading or lone slash', () => {
+    /* `/Sea` has no prefix — everything before the slash is nothing — and must
+       stay a plain row rather than becoming a group with an empty head. */
+    expect(tagPrefix('/Sea')).toBe('')
+    expect(tagPrefix('Sea')).toBe('')
+    expect(tagLeaf('/Sea')).toBe('/Sea')
+    expect(tagTree([row('/Sea')])[0]?.self?.tag).toBe('/Sea')
   })
 })

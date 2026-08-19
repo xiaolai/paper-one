@@ -17,54 +17,83 @@ export interface OverlaySheetProps {
   children: ReactNode
 }
 
+/**
+ * The one definition of "focusable" the sheet uses — for the first focus AND
+ * the Tab trap. There were two, and they had already drifted: the trap knew
+ * about anchors, selects and the `disabled` attribute; the first-focus query
+ * did not, so it could land on a disabled input and silently focus nothing.
+ */
+const FOCUSABLE =
+  'a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), button:not([disabled]), [tabindex]:not([tabindex="-1"])'
+
+/** Focusable AND VISIBLE — `.focus()` on a `display: none` node is a no-op,
+ *  so a hidden candidate must not stop the search. */
+function visibleFocusable(root: HTMLElement, selector: string): HTMLElement | null {
+  for (const node of Array.from(root.querySelectorAll<HTMLElement>(selector))) {
+    if (node.offsetParent !== null) return node
+  }
+  return null
+}
+
 export function OverlaySheet({ label, onDismiss, children }: OverlaySheetProps) {
   const sheetRef = useRef<HTMLDivElement>(null)
 
-  /* Focus moves in on open and back on close. Without the restore, dismissing
-   * the palette leaves focus on a detached node and the next Tab starts from
-   * the top of the document — which for a reader means tabbing back through the
-   * whole titlebar to get anywhere. */
-  useEffect(() => {
-    const previous = document.activeElement as HTMLElement | null
-    const focusable = sheetRef.current?.querySelector<HTMLElement>(
-      'input, button, [tabindex]:not([tabindex="-1"])',
-    )
-    focusable?.focus()
-    return () => previous?.focus?.()
-  }, [])
-
   /**
-   * Make everything behind the sheet inert while it is up.
+   * ONE effect for focus and inertness, because their cleanups are ORDERED.
    *
-   * `aria-modal` is a promise, and the focus trap below keeps the Tab key
-   * honest — but neither stops a screen reader from browsing the reader behind
-   * the scrim, or a click reaching it. `inert` is the mechanism for all three
-   * at once, and it has to be applied to the SIBLINGS of the sheet rather than
-   * to the sheet's own ancestors: marking an ancestor would take the sheet
-   * with it. Restored exactly as found, so a sheet opened over an already-inert
-   * reader — which is how the library layers over it — does not un-inert it on
-   * the way out.
+   * As two effects, focus restored first and the siblings un-inerted second —
+   * so `previous.focus()` addressed an element whose ancestor was still
+   * inert, the call silently did nothing, and the reader's focus fell to the
+   * document after all: the exact loss the restore exists to prevent. React
+   * runs cleanups in declaration order; one effect makes the order explicit
+   * instead of load-bearing-by-accident.
+   *
+   * Focus moves in on open — THE FIELD FIRST, then whatever comes first. A
+   * sheet with a field in it is a sheet the reader is about to type into,
+   * wherever the field sits: the tag editor draws its chips — each with a ✕
+   * button — above its field, and taking the first focusable in document
+   * order landed focus on "remove the first tag", one keypress from doing it.
+   * A sheet with NOTHING focusable takes focus itself (`tabIndex={-1}` below):
+   * the trap keeps Tab inside either way, and a modal that never receives
+   * focus strands the keyboard outside its own scrim.
+   *
+   * Inertness: `aria-modal` is a promise, and the focus trap keeps the Tab
+   * key honest — but neither stops a screen reader from browsing the reader
+   * behind the scrim, or a click reaching it. `inert` is the mechanism for
+   * all three at once, applied to the SIBLINGS of the sheet rather than its
+   * ancestors: marking an ancestor would take the sheet with it. Restored
+   * exactly as found, so a sheet opened over an already-inert reader — which
+   * is how the library layers over it — does not un-inert it on the way out.
    */
   useEffect(() => {
     const sheet = sheetRef.current
     const parent = sheet?.parentElement
     if (!sheet || !parent) return
 
+    const previousFocus = document.activeElement as HTMLElement | null
+
     /* The SCRIM is excluded, and it is a sibling: it is rendered beside the
      * sheet, not around it. Marking it inert takes its `pointerdown` with it,
      * and click-outside-to-dismiss stops working — a modal that can only be
-     * left with the keyboard. */
+     * left with the keyboard. `child.contains(sheet)` cannot be true for a
+     * sibling; the guard that tested it was unreachable and went. */
     const siblings = Array.from(parent.children).filter(
-      (child) =>
-        child !== sheet && !child.contains(sheet) && !child.hasAttribute('data-overlay-scrim'),
+      (child) => child !== sheet && !child.hasAttribute('data-overlay-scrim'),
     )
-    const previous = siblings.map((child) => (child as HTMLElement).inert)
+    const previousInert = siblings.map((child) => (child as HTMLElement).inert)
     for (const child of siblings) (child as HTMLElement).inert = true
 
+    const field =
+      visibleFocusable(sheet, 'input:not([disabled]), textarea:not([disabled])') ??
+      visibleFocusable(sheet, FOCUSABLE)
+    ;(field ?? sheet).focus()
+
     return () => {
+      // Un-inert FIRST, or the focus restore below addresses an inert tree.
       siblings.forEach((child, i) => {
-        ;(child as HTMLElement).inert = previous[i] ?? false
+        ;(child as HTMLElement).inert = previousInert[i] ?? false
       })
+      previousFocus?.focus?.()
     }
   }, [])
 
@@ -84,11 +113,9 @@ export function OverlaySheet({ label, onDismiss, children }: OverlaySheetProps) 
       const sheet = sheetRef.current
       if (!sheet) return
 
-      const focusable = Array.from(
-        sheet.querySelectorAll<HTMLElement>(
-          'a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), button:not([disabled]), [tabindex]:not([tabindex="-1"])',
-        ),
-      ).filter((node) => node.offsetParent !== null || node === document.activeElement)
+      const focusable = Array.from(sheet.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
+        (node) => node.offsetParent !== null || node === document.activeElement,
+      )
 
       const first = focusable[0]
       const last = focusable[focusable.length - 1]
@@ -123,7 +150,13 @@ export function OverlaySheet({ label, onDismiss, children }: OverlaySheetProps) 
       <div
         className={styles.scrim}
         data-overlay-scrim
-        onPointerDown={onDismiss}
+        /* THE PRIMARY BUTTON ONLY. `pointerdown` fires for every button, and a
+         * right-click on the scrim — the gesture for "context menu", or for
+         * nothing — tore the sheet down mid-thought. `isPrimary` also keeps a
+         * second finger on a trackpad from dismissing. */
+        onPointerDown={(event) => {
+          if (event.isPrimary && event.button === 0) onDismiss()
+        }}
         /* Decorative: the dismissable thing is the sheet, and the scrim is
          * already reachable by Esc. Announcing it as a button would put a
          * nameless control in the reader's way. */
@@ -135,6 +168,10 @@ export function OverlaySheet({ label, onDismiss, children }: OverlaySheetProps) 
         role="dialog"
         aria-modal="true"
         aria-label={label}
+        /* Focusable ITSELF, for the sheet with no focusable content — focus
+         * has to land inside the modal or the Tab trap is trapping a key the
+         * reader cannot even get to. See the focus effect. */
+        tabIndex={-1}
       >
         {children}
       </div>

@@ -1,6 +1,17 @@
-import { describe, expect, it } from 'vitest'
-import { BOOKS_DIR } from './bookFolder'
-import { INDEX_FILE, loadShelf, parseIndex, scanBooks, writeIndex, type IndexFs } from './bookIndex'
+import { describe, expect, it, vi } from 'vitest'
+import { BOOKS_DIR, folderOf } from './bookFolder'
+import {
+  INDEX_FILE,
+  hasContentFile,
+  invalidateIndex,
+  loadShelf,
+  parseIndex,
+  scanAllMarks,
+  scanBooks,
+  writeIndex,
+  type IndexFs,
+} from './bookIndex'
+import { fakeFs } from './indexFsFake.testkit'
 
 /**
  * The index is a CACHE and the folders are the truth.
@@ -8,52 +19,6 @@ import { INDEX_FILE, loadShelf, parseIndex, scanBooks, writeIndex, type IndexFs 
  * Every case here is one of those two sentences: losing the cache costs a
  * rescan, and a disagreement is settled by the folder.
  */
-
-function fakeFs(files: Record<string, string> = {}) {
-  const store = new Map<string, Uint8Array>()
-  for (const [k, v] of Object.entries(files)) store.set(k, new TextEncoder().encode(v))
-  let reads = 0
-  const fs: IndexFs & { store: Map<string, Uint8Array>; reads: () => number } = {
-    store,
-    reads: () => reads,
-    readDir: async (path) => {
-      const names = new Set<string>()
-      for (const key of store.keys()) {
-        if (!key.startsWith(`${path}/`)) continue
-        const rest = key.slice(path.length + 1)
-        const head = rest.split('/')[0]
-        if (head) names.add(head)
-      }
-      /* A MISSING DIRECTORY THROWS, whatever else is in the store. It used to
-       * throw only when the store was entirely empty — so a test that seeded
-       * `index.json` and no `books/` got an empty listing instead of the failure
-       * the real `readDir` gives, and the case it was written for never ran. */
-      if (names.size === 0 && path === BOOKS_DIR) throw new Error('no dir')
-      return [...names].map((name) => ({ name, isDirectory: !name.includes('.') }))
-    },
-    readFile: async (path) => {
-      reads += 1
-      const bytes = store.get(path)
-      if (!bytes) throw new Error(`no such file: ${path}`)
-      return bytes
-    },
-    writeFile: async (path, bytes) => void store.set(path, bytes),
-    exists: async (path) => store.has(path),
-    mkdir: async () => {},
-    remove: async (path) => void store.delete(path),
-    removeDir: async (path: string) => {
-      for (const key of [...store.keys()]) {
-        if (key === path || key.startsWith(`${path}/`)) store.delete(key)
-      }
-    },
-    rename: async (from, to) => {
-      const bytes = store.get(from)
-      if (bytes) store.set(to, bytes)
-      store.delete(from)
-    },
-  }
-  return fs
-}
 
 const record = (title: string) => JSON.stringify({ title, author: 'A' })
 
@@ -106,12 +71,25 @@ describe('parseIndex', () => {
     expect(parseIndex(JSON.stringify({ version: 1, books: 'nope' }))).toBeNull()
   })
 
-  /* Validated through the same parser the folder uses, so the cache cannot hold
-   * a shape the record could not. */
-  it('drops an entry with no id, and sanitises the rest', () => {
+  /* ONE BAD ROW COSTS THE WHOLE CACHE. It used to cost only that row — and a
+   * cache missing one book still AGREED with the directory (the book's folder
+   * is on disk and in `folders` alike), so it was trusted, and the book was
+   * hidden on every launch with nothing left to notice. Refusing outright
+   * turns the same corruption into one rescan, which rewrites the cache clean. */
+  it('refuses the whole cache over one entry it cannot validate', () => {
     const raw = JSON.stringify({
       version: 1,
-      books: [{ title: 'no id' }, { bookId: 'a', title: 'T', author: 'A', subjects: 42 }],
+      books: [{ title: 'no id' }, { bookId: 'a', title: 'T', author: 'A' }],
+    })
+    expect(parseIndex(raw)).toBeNull()
+  })
+
+  /* A bad FIELD is not a bad row: it is bounded by the same parser the folder
+   * uses, so the cache cannot hold a shape the record could not. */
+  it('sanitises a malformed field without losing the row', () => {
+    const raw = JSON.stringify({
+      version: 1,
+      books: [{ bookId: 'a', title: 'T', author: 'A', subjects: 42 }],
     })
     const books = parseIndex(raw)
     expect(books).toHaveLength(1)
@@ -379,5 +357,390 @@ describe('a stray folder beside the books', () => {
     await loadShelf(fs)
     fs.store.delete(`${BOOKS_DIR}/half_done/content.epub`)
     expect((await loadShelf(fs)).rescanned).toBe(true)
+  })
+})
+
+describe('invalidateIndex', () => {
+  /* The cache is only sound while it is not BEHIND the records it summarises,
+     and `book.json` is explicitly allowed to be newer. A run whose index
+     rewrite failed after the record landed leaves a cache that still agrees
+     about folders and is wrong about contents — and `loadShelf` would trust it
+     for ever, so a tag written just before the failure would come back missing
+     on the next launch and stay missing. */
+  it('removes the cached shelf so the next launch rescans', async () => {
+    const fs = fakeFs(twoBooks)
+    await writeIndex(fs, await scanBooks(fs))
+    expect(await fs.exists(INDEX_FILE)).toBe(true)
+
+    await invalidateIndex(fs)
+
+    expect(await fs.exists(INDEX_FILE)).toBe(false)
+    const after = await loadShelf(fs)
+    expect(after.rescanned).toBe(true)
+    expect(after.books).toHaveLength(2)
+  })
+
+  it('says nothing when there is no cache to throw away', async () => {
+    // Called on every write failure, including the first one of a fresh library.
+    const fs = fakeFs(twoBooks)
+    await expect(invalidateIndex(fs)).resolves.toBeUndefined()
+  })
+
+  it('survives a filesystem that refuses to delete', async () => {
+    /* It runs on the FAILURE path, where the disk is already refusing writes.
+       An invalidation that threw would replace a stale cache with an unhandled
+       rejection — a worse outcome than the thing it is cleaning up after. */
+    const fs = fakeFs(twoBooks)
+    await writeIndex(fs, await scanBooks(fs))
+    const refusing: IndexFs = {
+      ...fs,
+      remove: () => Promise.reject(new Error('read-only filesystem')),
+    }
+    await expect(invalidateIndex(refusing)).resolves.toBeUndefined()
+  })
+})
+
+/**
+ * What a scan is allowed to COST.
+ *
+ * Every filesystem call is an IPC round-trip into the Tauri process, and
+ * `main.tsx` awaits the scan before React mounts — so the call count IS the
+ * time the window stays blank. The scan used to probe each folder up to ten
+ * times, one at a time: `exists` for the record, the read, then `exists` once
+ * per known format for the bytes. One listing per folder answers everything
+ * the probes asked, and this pins the budget so the probes cannot creep back.
+ */
+describe('what a scan costs', () => {
+  function countedFs(files: Record<string, string>) {
+    const fs = fakeFs(files)
+    const calls = { readDir: 0, readFile: 0, exists: 0 }
+    const counted: IndexFs = {
+      ...fs,
+      readDir: (path) => {
+        calls.readDir += 1
+        return fs.readDir(path)
+      },
+      readFile: (path) => {
+        calls.readFile += 1
+        return fs.readFile(path)
+      },
+      exists: (path) => {
+        calls.exists += 1
+        return fs.exists(path)
+      },
+    }
+    return { counted, calls }
+  }
+
+  it('pays one listing per folder, one read per book, and no probes', async () => {
+    const { counted, calls } = countedFs({
+      ...twoBooks,
+      [`${BOOKS_DIR}/book_a/content.epub`]: 'WHALE',
+      // A stray folder costs its listing and nothing more.
+      [`${BOOKS_DIR}/half_done/content.epub`]: 'PARTIAL',
+    })
+    const books = await scanBooks(counted)
+    expect(books).toHaveLength(2)
+    expect(calls.readDir).toBe(1 + 3)
+    expect(calls.readFile).toBe(2)
+    expect(calls.exists).toBe(0)
+  })
+
+  /* Concurrency must not reorder the shelf: the rows come back in the order
+   * the directory listed them, exactly as the serial walk produced. */
+  it('keeps the rows in listing order', async () => {
+    const files: Record<string, string> = {}
+    const names = ['book_e', 'book_a', 'book_c', 'book_b', 'book_d']
+    for (const name of names) files[`${BOOKS_DIR}/${name}/book.json`] = record(name)
+    const fs = fakeFs(files)
+    const listed = (await fs.readDir(BOOKS_DIR)).map((one) => one.name)
+    const books = await scanBooks(fs)
+    expect(books.map((one) => one.title)).toEqual(listed)
+  })
+})
+
+/**
+ * The pooled walk must be invisible from outside: same rows, same order, same
+ * failure policy as the serial walk it replaced. These are the cases where a
+ * pool differs from a loop if it is going to.
+ */
+describe('the pooled walk, behaving like the serial one', () => {
+  it('keeps listing order even when folders finish out of order', async () => {
+    const files: Record<string, string> = {}
+    for (const name of ['book_e', 'book_a', 'book_c']) {
+      files[`${BOOKS_DIR}/${name}/book.json`] = record(name)
+    }
+    const fs = fakeFs(files)
+    const listed = (await fs.readDir(BOOKS_DIR)).map((one) => one.name)
+    /* Every folder's listing is HELD at a gate, then released in reverse — a
+     * completion order the immediate-resolution fake can never produce, which
+     * is why the plain ordering test above cannot catch a pool that emits in
+     * completion order. */
+    const gates = new Map<string, () => void>()
+    const gated: IndexFs = {
+      ...fs,
+      readDir: async (path) => {
+        const listing = await fs.readDir(path)
+        if (path === BOOKS_DIR) return listing
+        await new Promise<void>((resolve) => gates.set(path, resolve))
+        return listing
+      },
+    }
+    const scanning = scanBooks(gated)
+    await vi.waitFor(() => expect(gates.size).toBe(3))
+    for (const name of [...listed].reverse()) gates.get(`${BOOKS_DIR}/${name}`)!()
+    const books = await scanning
+    expect(books.map((one) => one.title)).toEqual(listed)
+  })
+
+  /* The serial walk's `exists` probe skipped a folder that vanished between
+   * the root listing and its turn; the pool must walk past it too, not count
+   * it as a record that failed. */
+  it('walks past a folder that vanished after the listing', async () => {
+    const fs = fakeFs({ [`${BOOKS_DIR}/book_a/book.json`]: record('Alpha') })
+    const vanished: IndexFs = {
+      ...fs,
+      readDir: async (path) => {
+        if (path === BOOKS_DIR)
+          return [...(await fs.readDir(path)), { name: 'ghost', isDirectory: true }]
+        if (path === `${BOOKS_DIR}/ghost`) throw new Error('gone')
+        return fs.readDir(path)
+      },
+    }
+    const books = await scanBooks(vanished)
+    expect(books.map((one) => one.title)).toEqual(['Alpha'])
+  })
+
+  /* And a library that is ALL vanished folders is an empty shelf, not an
+   * unreadable one — the all-unreadable throw is for records that failed. */
+  it('does not call a vanished library unreadable', async () => {
+    const fs = fakeFs({})
+    const vanished: IndexFs = {
+      ...fs,
+      readDir: async (path) => {
+        if (path === BOOKS_DIR) return [{ name: 'ghost', isDirectory: true }]
+        throw new Error('gone')
+      },
+    }
+    expect(await scanBooks(vanished)).toEqual([])
+  })
+
+  /* The dangerous misclassification: a folder that will not list and whose
+   * `exists` probe ALSO answers false — which is what a metadata error looks
+   * like through Tauri's fs. The scan cannot tell it from a vanished folder,
+   * so what matters is what it WRITES: a snapshot claiming to have seen the
+   * folder would make the trust check agree forever over a shelf missing that
+   * book. Left out of the snapshot, the next launch's listing disagrees and
+   * rescans until the folder reads or truly goes. */
+  it('never lets a folder it could not see into a trusted snapshot', async () => {
+    const fs = fakeFs({ [`${BOOKS_DIR}/book_a/book.json`]: record('Alpha') })
+    const blind: IndexFs = {
+      ...fs,
+      readDir: async (path) => {
+        if (path === BOOKS_DIR)
+          return [...(await fs.readDir(path)), { name: 'blind', isDirectory: true }]
+        if (path === `${BOOKS_DIR}/blind`) throw new Error('metadata error')
+        return fs.readDir(path)
+      },
+      // The fake's exists answers false for 'books/blind' already — no keys.
+    }
+    expect((await loadShelf(blind)).rescanned).toBe(true)
+    expect((await loadShelf(blind)).rescanned).toBe(true)
+  })
+
+  it('does not trust an empty shelf it produced while blind', async () => {
+    const fs = fakeFs({})
+    const blind: IndexFs = {
+      ...fs,
+      readDir: async (path) => {
+        if (path === BOOKS_DIR) return [{ name: 'blind', isDirectory: true }]
+        throw new Error('metadata error')
+      },
+    }
+    expect((await loadShelf(blind)).books).toEqual([])
+    // The launch after must NOT believe that empty cache over a listed folder.
+    expect((await loadShelf(blind)).rescanned).toBe(true)
+  })
+
+  /* Gone and broken stay different answers: a folder that is still there and
+   * will not list is a failure to read, and a library made entirely of those
+   * is reported rather than shown empty. */
+  it('still counts a folder that is there and will not list', async () => {
+    const fs = fakeFs({ [`${BOOKS_DIR}/book_a/book.json`]: record('Alpha') })
+    const broken: IndexFs = {
+      ...fs,
+      readDir: async (path) => {
+        if (path === `${BOOKS_DIR}/book_a`) throw new Error('EIO')
+        return fs.readDir(path)
+      },
+    }
+    await expect(scanBooks(broken)).rejects.toThrow('could not be read')
+  })
+})
+
+/**
+ * What the index remembers about the DIRECTORY, across ordinary rewrites.
+ *
+ * The scan records every folder it saw so a stray one cannot distrust the
+ * cache forever. But every mutation rewrites the whole index file — so a
+ * rewrite that simply omitted the field DELETED it, and one tag written in a
+ * library with one stray folder put every later launch back on the full-scan
+ * path. The strays are carried forward; the book folders are rebuilt from the
+ * books being written, so the field stays current as books come and go.
+ */
+describe('the folders an index remembers', () => {
+  it('carries a stray folder across an ordinary rewrite', async () => {
+    const fs = fakeFs({
+      [`${BOOKS_DIR}/book_a/book.json`]: record('Alpha'),
+      [`${BOOKS_DIR}/half_done/content.epub`]: 'PARTIAL',
+    })
+    await loadShelf(fs)
+    // A mutation-shaped write: the caller knows its books and no folders.
+    await writeIndex(fs, await scanBooks(fs))
+    expect((await loadShelf(fs)).rescanned).toBe(false)
+  })
+
+  it('keeps the folder set current with the books being written', async () => {
+    const fs = fakeFs({
+      [`${BOOKS_DIR}/book_a/book.json`]: record('Alpha'),
+      [`${BOOKS_DIR}/book_b/book.json`]: record('Beta'),
+      [`${BOOKS_DIR}/half_done/content.epub`]: 'PARTIAL',
+    })
+    const { books } = await loadShelf(fs)
+    // The app removes book_b: its folder goes, and the write omits its row.
+    fs.store.delete(`${BOOKS_DIR}/book_b/book.json`)
+    await writeIndex(fs, books.filter((one) => one.bookId !== 'book_b'))
+    // Blindly PRESERVING the old listing would disagree here and rescan.
+    expect((await loadShelf(fs)).rescanned).toBe(false)
+  })
+
+  it('asserts nothing for an index that never recorded folders', async () => {
+    const fs = fakeFs({})
+    await writeIndex(fs, [{ bookId: 'book_a', title: 'T', author: '', hasContent: true }])
+    const stored = JSON.parse(new TextDecoder().decode(fs.store.get(INDEX_FILE)!)) as {
+      folders?: unknown
+    }
+    expect(stored.folders).toBeUndefined()
+  })
+})
+
+describe('scanAllMarks', () => {
+  it('collects marks in listing order and skips a book whose file will not read', async () => {
+    const fs = fakeFs({
+      [`${BOOKS_DIR}/book_a/marks.json`]: JSON.stringify([1]),
+      [`${BOOKS_DIR}/book_b/marks.json`]: 'not json',
+      [`${BOOKS_DIR}/book_c/marks.json`]: JSON.stringify([2, 3]),
+    })
+    expect(await scanAllMarks(fs)).toEqual([1, 2, 3])
+  })
+
+  it('throws when the library itself will not list', async () => {
+    const fs = fakeFs({ [`${BOOKS_DIR}/book_a/marks.json`]: '[]' })
+    const broken: IndexFs = {
+      ...fs,
+      readDir: async (path) => {
+        if (path === BOOKS_DIR) throw new Error('EIO')
+        return fs.readDir(path)
+      },
+    }
+    await expect(scanAllMarks(broken)).rejects.toThrow('EIO')
+  })
+})
+
+describe('hasContentFile', () => {
+  /* NULL is "could not look", and it is load-bearing: collapsed into false it
+   * was written into a trusted cache as a measurement, disabling a book whose
+   * bytes were there all along. */
+  it('answers null, not false, when it cannot look', async () => {
+    const fs = fakeFs({})
+    const failing: IndexFs = {
+      ...fs,
+      readDir: async () => {
+        throw new Error('EIO')
+      },
+    }
+    expect(await hasContentFile(failing, 'book_a')).toBeNull()
+  })
+
+  it('finds the bytes from one listing', async () => {
+    const fs = fakeFs({
+      [`${BOOKS_DIR}/book_a/book.json`]: record('Alpha'),
+      [`${BOOKS_DIR}/book_a/content.pdf`]: 'bytes',
+    })
+    expect(await hasContentFile(fs, 'book_a')).toBe(true)
+  })
+
+  /* A half-finished write is not the book: `content.epub.writing` must not
+   * count, or a crash mid-import produces a row that claims bytes it lost. */
+  it('does not mistake a temporary neighbour for the book', async () => {
+    const fs = fakeFs({
+      [`${BOOKS_DIR}/book_a/book.json`]: record('Alpha'),
+      [`${BOOKS_DIR}/book_a/content.epub.writing`]: 'half',
+    })
+    expect(await hasContentFile(fs, 'book_a')).toBe(false)
+  })
+
+  it('is false for a record with no bytes, and for no folder at all', async () => {
+    const fs = fakeFs({ [`${BOOKS_DIR}/book_a/book.json`]: record('Alpha') })
+    expect(await hasContentFile(fs, 'book_a')).toBe(false)
+    expect(await hasContentFile(fs, 'book_gone')).toBe(false)
+  })
+
+  /* Takes the book's ID — `book:abc` lives in `book_abc`, and the caller must
+   * not have to know that. */
+  it('resolves the folder from the id', async () => {
+    const fs = fakeFs({ [`${BOOKS_DIR}/book_abc/content.epub`]: 'bytes' })
+    expect(await hasContentFile(fs, 'book:abc')).toBe(true)
+  })
+})
+
+/**
+ * WHY the cache was not used.
+ *
+ * The launch cost is almost entirely this decision, and each answer wants a
+ * different repair — so the answer being RIGHT matters as much as the shelf
+ * being right. Asserted here rather than read off a log, because a diagnostic
+ * that is wrong is worse than none: it sends the next investigation at the
+ * wrong file with confidence.
+ */
+describe('why the shelf was rescanned', () => {
+  it('says the cache was used when it was', async () => {
+    const fs = fakeFs(twoBooks)
+    await loadShelf(fs)
+    const again = await loadShelf(fs)
+    expect(again.rescanned).toBe(false)
+    expect(again.why).toBe('cache')
+  })
+
+  it('says there was no cache on a first run', async () => {
+    const fs = fakeFs(twoBooks)
+    const first = await loadShelf(fs)
+    expect(first.rescanned).toBe(true)
+    expect(first.why).toBe('no cache')
+  })
+
+  it('says the folders disagree when one appears behind the app', async () => {
+    const fs = fakeFs(twoBooks)
+    await loadShelf(fs)
+    fs.store.set(`${BOOKS_DIR}/book_c/content.epub`, new TextEncoder().encode('x'))
+    const after = await loadShelf(fs)
+    expect(after.why).toBe('folders disagree')
+  })
+
+  it('says the rows are incomplete for an index written without hasContent', async () => {
+    /* What an index from an older version looks like: the folder set is exactly
+       right, and every row is missing the flag `canOpen` reads. Distrusting it
+       costs one rescan, once — and the reason should not be reported as a
+       folder change, which would send someone looking at the directory. */
+    const fs = fakeFs(twoBooks)
+    const books = await scanBooks(fs)
+    await writeIndex(
+      fs,
+      books.map(({ hasContent: _drop, ...rest }) => rest),
+      books.map((one) => folderOf(one.bookId).slice(BOOKS_DIR.length + 1)),
+    )
+    const after = await loadShelf(fs)
+    expect(after.rescanned).toBe(true)
+    expect(after.why).toBe('rows incomplete')
   })
 })

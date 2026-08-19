@@ -150,6 +150,8 @@ const mark = (id: string, bookId: string, note = ''): Mark => ({
   suffix: '',
   note,
   kind: 'highlight',
+  tint: 'yellow',
+  style: 'fill',
   chapter: 'One',
   createdAt: nextWall(),
 })

@@ -1,7 +1,10 @@
 import { cp } from 'node:fs/promises'
 import { createReadStream } from 'node:fs'
 import { extname, join, normalize, resolve } from 'node:path'
-import { defineConfig, type Plugin } from 'vite'
+import { type Plugin } from 'vite'
+// `defineConfig` from vitest rather than from vite, so the `test` block below
+// is typed. It is the same function; vitest re-exports it with its own field.
+import { defaultExclude, defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import { paperComposition } from './scripts/vite/assert-bundle.mjs'
 
@@ -144,6 +147,49 @@ function foliatePdfStub(): Plugin {
   }
 }
 
+/**
+ * Put the app's launch timings in THIS terminal.
+ *
+ * `console.info` in the webview goes to devtools and to the automation bridge,
+ * and neither is where someone running `pnpm app` is looking. The webview has
+ * no other channel to the terminal: `tauri-plugin-log` prints what RUST logs,
+ * and forwarding the JS console into it needs `@tauri-apps/plugin-log` and a
+ * capability grant — a dependency and a permission for a dev-only diagnostic.
+ *
+ * The dev server is already connected to the page over the HMR socket, so the
+ * message rides that. Nothing here exists in a build: `import.meta.hot` is
+ * undefined outside dev, and this plugin only ever installs a server handler.
+ *
+ * See `src/kernel/ui/devTiming.ts` for what is sent.
+ */
+function timingLog(): Plugin {
+  return {
+    name: 'paper:timing-log',
+    apply: 'serve',
+    configureServer(server) {
+      server.ws.on('paper:timing', (data: unknown) => {
+        const row = (data ?? {}) as {
+          name?: string
+          took?: number | null
+          at?: number | null
+          hidden?: boolean
+          detail?: object
+        }
+        const when =
+          (typeof row.took === 'number' ? ` took=${row.took.toFixed(0)}ms` : '') +
+          (typeof row.at === 'number' ? ` at=${row.at.toFixed(0)}ms` : '')
+        const rest = Object.entries(row.detail ?? {})
+          .map(([key, value]) => `${key}=${String(value)}`)
+          .join(' ')
+        /* HIDDEN IS SHOUTED, because a timing taken behind another window
+           measures the window server rather than the app. */
+        const seen = row.hidden ? ' HIDDEN' : ''
+        console.log(`[timing] ${row.name ?? '?'}${when}${rest ? ' ' + rest : ''}${seen}`)
+      })
+    },
+  }
+}
+
 // Tauri drives the dev server, so the port is fixed and failures must be loud
 // rather than silently hopping to 14202 — a moved port shows up as a white window.
 //
@@ -160,7 +206,10 @@ export default defineConfig({
   // `TAURI_ENV_PLATFORM`, and at `generateBundle` fails the build unless the
   // bundle holds exactly that platform's manifest set — the WI-5.9 assertion,
   // inside the build. See scripts/vite/assert-bundle.mjs.
-  plugins: [paperComposition(), react(), pdfjsAssets(), foliatePdfStub()],
+  //
+  // `timingLog()` is dev-only (`apply: 'serve'`) and puts the launch timings
+  // `kernel/ui/devTiming` sends over the HMR socket into THIS terminal.
+  plugins: [paperComposition(), react(), pdfjsAssets(), foliatePdfStub(), timingLog()],
 
   // foliate-js ships as unbundled ESM source whose modules import each other by
   // relative path. Pre-bundling it rewrites those specifiers and breaks the
@@ -174,6 +223,21 @@ export default defineConfig({
     host: host || false,
     hmr: host ? { protocol: 'ws', host, port: 14202 } : undefined,
     watch: { ignored: ['**/src-tauri/**'] },
+  },
+
+  /* TEST DISCOVERY STOPS AT THIS CHECKOUT.
+   *
+   * Agent worktrees live under `.claude/worktrees/`, and each one is a separate
+   * checkout with its own `node_modules` — usually none at all. Vitest's default
+   * `include` walks the whole tree, so one leftover worktree turned `pnpm test`
+   * red on a missing dependency in a checkout nobody was working in: a failing
+   * gate that says nothing about this one, on a file this branch does not have.
+   *
+   * Extended from `defaultExclude` rather than written out, so excluding this
+   * does not quietly stop excluding `node_modules` and `dist`.
+   */
+  test: {
+    exclude: [...defaultExclude, '.claude/worktrees/**'],
   },
 
   envPrefix: ['VITE_', 'TAURI_ENV_'],

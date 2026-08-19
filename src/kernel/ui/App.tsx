@@ -9,13 +9,16 @@ import { positionRecorder, type PositionRecorder } from '../core/positionRecorde
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { isTauri, usePlatform, usePrefersDark, usePrefersReducedMotion } from './platform'
 import { NOT_CONFIGURED } from '../core/companion'
+import { planImport } from '../core/tagArchive'
+import { canArchiveTags, exportTagsToFile, importTagsFromFile } from './tagFiles'
 import { hasOpenLayer, paneFits, useAppState } from './state'
+import { useTagPrefs } from './hooks/useTagPrefs'
 import type { KernelServices } from '../core/services'
 import type { Contributions } from '../core/registry'
 import { useBook } from './hooks/useBook'
 import { useBookIntake } from './hooks/useBookIntake'
 import { useEnrichment } from './hooks/useEnrichment'
-import { flushBeforeClose } from '../core/beforeClose'
+import { flushBeforeClose, onBeforeClose } from '../core/beforeClose'
 import { useFileDrop, type DropHaul } from './hooks/useFileDrop'
 import { useLibrary } from './hooks/useLibrary'
 import { useCards } from './hooks/useCards'
@@ -35,10 +38,13 @@ import {
 } from '../core/importFolder'
 import { BookSwitcher } from './overlays/BookSwitcher'
 import { CommandPalette } from './overlays/CommandPalette'
+import { OverlaySheet } from './overlays/OverlaySheet'
 import { TitleBar } from './shell/TitleBar'
 import { WindowShell } from './shell/WindowShell'
 import { Library } from './screens/Library'
 import { Reader } from './screens/Reader'
+import { TagEditor } from './screens/TagEditor'
+import { tagCounts } from '../core/library'
 import { SidePane } from './pane/SidePane'
 import { parseBook } from './reader/parseBook'
 import { useSpeech } from './reader/useSpeech'
@@ -99,6 +105,9 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
   const marks = useMarks(services.marks, book.bookId)
   const cards = useCards(services.cards)
   const marking = useMarking(book, marks)
+  /* Pins, colours, hidden subjects and saved views — the reader's decisions
+     ABOUT their tags, as opposed to which books carry them. See `tagPrefs`. */
+  const tagPrefs = useTagPrefs(services.storage)
   /* The import walks the reader's OWN filesystem, so it needs the absolute
    * directory reader rather than the app-relative one the shelf scan uses. They
    * are different operations and were one name, which is how the shelf came up
@@ -209,13 +218,26 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
    * handing foliate `Moby-Dick` with no suffix sent every PDF to the wrong
    * reader, which rejects it as an unsupported type.
    */
+  /* Which open the reader asked for LAST. Reading a stored book takes real
+   * time — a large PDF is seconds — and two clicks in that window resolved in
+   * completion order, so the slower FIRST click could land its `openBook`
+   * after the second's and replace the book the reader most recently chose
+   * with the one they had already abandoned. Each request takes a number; a
+   * completion that is not the newest number says nothing. */
+  const openGeneration = useRef(0)
+
   const openStored = useCallback(
     (entry: IndexedBook) => {
       if (!fs) return
+      const generation = ++openGeneration.current
+      const fresh = () => openGeneration.current === generation
       const name = storedBookName(entry)
       void readOwnedBook(fs, contentPathIn(entry.bookId, name), name)
-        .then((file) => openBook(file, entry.origin ?? null))
+        .then((file) => {
+          if (fresh()) openBook(file, entry.origin ?? null)
+        })
         .catch((cause: unknown) => {
+          if (!fresh()) return
           /* FALL BACK TO THE READER'S OWN FILE, which phase 4 deleted too
            * eagerly. "Three branches became one" was true for a book Paper
            * holds — and six of the ten books in a real phase-3 library never
@@ -246,9 +268,11 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
               return
             }
             void readBookAt(original)
-              .then((file) => openBook(file, original))
+              .then((file) => {
+                if (fresh()) openBook(file, original)
+              })
               .catch(() => {
-                openBook(original)
+                if (fresh()) openBook(original)
               })
             return
           }
@@ -374,6 +398,10 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
    * state because it is read inside a running loop, where a re-render's stale
    * closure is exactly the thing that must not happen. */
   const importBatch = useRef(0)
+  /* The running folder walk's abort handle. The batch token makes a
+   * superseded import stop REPORTING; this is what makes it stop WORKING —
+   * `importFolder` takes the signal and checks it between books. */
+  const importAbort = useRef<AbortController | null>(null)
 
   /**
    * Add every book, then open one — the shared half of picking and dropping.
@@ -392,12 +420,30 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
    * admits the difference rather than inventing a path to satisfy a signature.
    */
   const addAndOpen = useCallback(
-    async (picked: readonly { file: File; path: string | null }[]) => {
+    /* `note` rides along to the FINAL notice. The drop path knows things the
+     * batch cannot — how many items were unreadable, whether the walk was
+     * truncated — and setting them as their own notice up front meant the
+     * progress bar covered them and `summarise` then overwrote them: the one
+     * warning that books were silently missing was itself silently missing. */
+    async (picked: readonly { file: File; path: string | null }[], note?: string) => {
       if (picked.length === 0) return
       // The last, because that is the one the previous version happened to
       // open — the same book opens as before, and now the rest arrive too.
       const opening = picked[picked.length - 1]!
+      /* The note reaches the reader on EVERY path. The batch path folds it
+       * into the final summary below; the single-book path and the no-`fs`
+       * path (a plain browser tab, where nothing is shelved) have no summary,
+       * so the note stands alone — dropped there, a truncated or partly
+       * unreadable drop was reported only when persistence happened to be
+       * available, which is not what the warning was about. */
+      if (note && (picked.length === 1 || !fs)) setImportNotice(note)
       if (picked.length > 1 && fs) {
+        /* AND STOPS A RUNNING FOLDER WALK — the token below makes an older
+         * batch stop REPORTING, but a walk deep in `importFolder` kept
+         * COPYING against the same content-hashed paths. The signal is how it
+         * actually stops. */
+        importAbort.current?.abort()
+        importAbort.current = null
         /* SUPERSEDES ANY BATCH ALREADY RUNNING. Two imports could overlap —
          * drop a folder, then drop a book — and the older, slower one then
          * called `openBook` last, so the reader ended up in the book they had
@@ -440,7 +486,7 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
         }
         if (!current()) return
         shelveImported(outcomes)
-        setImportNotice(summarise(outcomes))
+        setImportNotice(note ? `${summarise(outcomes)} ${note}` : summarise(outcomes))
       }
       openBook(opening.file, opening.path)
     },
@@ -449,9 +495,14 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
 
   const addBooks = useCallback(() => {
     void pickBooks()
-      .then(addAndOpen)
+      .then((picked) => addAndOpen(picked))
       .catch((cause: unknown) => {
+        /* SAID, not only logged. A cancelled picker resolves empty, so
+         * reaching here is a real failure — and a reader whose "Add books"
+         * produced nothing at all cannot tell a broken picker from a click
+         * that did not land. */
         console.error('Paper: the book picker failed', cause)
+        setImportNotice('The file picker failed — nothing was added.')
       })
   }, [addAndOpen])
 
@@ -481,13 +532,22 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
         )
         return
       }
-      /* The ceiling is `importFolder`'s, and it is announced rather than
-       * applied quietly: a reader who drops six thousand books and is shown
-       * five thousand has been told something untrue by omission. */
-      if (truncated) {
-        setImportNotice(`That drop held more than ${MAX_FILES} books — taking the first ${MAX_FILES}.`)
-      }
-      void addAndOpen(books.map((file) => ({ file, path: null }))).catch((cause: unknown) => {
+      /* The ceilings are announced rather than applied quietly — a reader who
+       * drops six thousand books and is shown five thousand, or whose drop
+       * held three unreadable files among forty good ones, has otherwise been
+       * told something untrue by omission. AS PART OF THE FINAL NOTICE, not
+       * before the batch: set up front, the progress bar covered it and the
+       * batch summary then replaced it. */
+      const notes = [
+        truncated ? `That drop held more than ${MAX_FILES} books — took the first ${MAX_FILES}.` : null,
+        unreadable > 0
+          ? `${unreadable} ${unreadable === 1 ? 'item' : 'items'} could not be read.`
+          : null,
+      ].filter((one): one is string => one !== null)
+      void addAndOpen(
+        books.map((file) => ({ file, path: null })),
+        notes.length ? notes.join(' ') : undefined,
+      ).catch((cause: unknown) => {
         console.error('Paper: could not add what was dropped', cause)
       })
     },
@@ -518,6 +578,60 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
    * say it themselves now, in the place that would otherwise have claimed the
    * library was empty. */
   const [importNotice, setImportNotice] = useState<string | null>(null)
+
+  /**
+   * The reader's filing, out to a file and back.
+   *
+   * BOTH REPORT THROUGH `importNotice`, which is the shelf's own line for
+   * "something just happened to your library" — an archive written silently is
+   * indistinguishable from a dialog the reader dismissed, and an import that
+   * merged nothing looks exactly like one that failed.
+   *
+   * A dismissed dialog says nothing at all, deliberately: the reader closed it,
+   * they know, and a message about it is the app narrating their own action.
+   */
+  const exportTagsNow = useCallback(() => {
+    void exportTagsToFile(library.books, new Date())
+      .then((path) => {
+        if (!path) return
+        const filed = library.books.filter((book) => (book.tags ?? []).length > 0).length
+        setImportNotice(
+          filed === 0
+            ? 'No tags to export yet — nothing on the shelf is filed.'
+            : `Exported the tags on ${filed} ${filed === 1 ? 'book' : 'books'}.`,
+        )
+      })
+      .catch((cause: unknown) => {
+        console.error('Paper: could not export your tags', cause)
+        setImportNotice('Those tags could not be written.')
+      })
+  }, [library.books])
+
+  const importTagsNow = useCallback(() => {
+    void importTagsFromFile()
+      .then((picked) => {
+        if (!picked) return
+        if (!picked.archive) {
+          setImportNotice('That file is not a Paper tag export.')
+          return
+        }
+        const plan = planImport(picked.archive, library.books)
+        for (const one of plan.additions) library.tagBooks([one.bookId], one.tags)
+        /* THE NUMBER THAT DID NOTHING IS WORTH SAYING TOO. An archive from
+           another library matches nothing here, and an import that reports only
+           its successes leaves the reader believing it worked. */
+        const missed = plan.unmatched > 0 ? ` ${plan.unmatched} not on this shelf.` : ''
+        setImportNotice(
+          plan.booksTouched === 0
+            ? `Nothing to add — those tags are already here.${missed}`
+            : `Added ${plan.tagsAdded} ${plan.tagsAdded === 1 ? 'tag' : 'tags'} across ${plan.booksTouched} ${plan.booksTouched === 1 ? 'book' : 'books'}.${missed}`,
+        )
+      })
+      .catch((cause: unknown) => {
+        console.error('Paper: could not import those tags', cause)
+        setImportNotice('That file could not be read.')
+      })
+  }, [library])
   const addFolder = useCallback(() => {
     void (async () => {
       /* REFUSES TO RE-ENTER. The toolbar button carried `disabled={importing
@@ -531,7 +645,15 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
        * palette also omits the command while importing, so the reader is not
        * offered something that would refuse — but this is what makes it true. */
       if (importing !== null) return
-      const folder = await pickFolder().catch(() => null)
+      /* A rejected picker is a FAILURE, not a cancellation — cancelling
+       * resolves null — and swallowing it into the same null made a broken
+       * dialog look like a change of mind: the reader clicked Import, nothing
+       * happened, nothing was said anywhere. */
+      const folder = await pickFolder().catch((cause: unknown) => {
+        console.error('Paper: the folder picker failed', cause)
+        setImportNotice('The folder picker failed — nothing was imported.')
+        return null
+      })
       if (!folder || !importFs) return
       /* Takes the same token `addAndOpen` uses, so the two routes supersede
        * each other rather than only themselves. Without it a folder import
@@ -539,12 +661,19 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
        * and overwrite its notice — one import reporting on another's behalf. */
       const batch = (importBatch.current += 1)
       const current = () => importBatch.current === batch
+      /* A new walk retires the old one's WORK, not just its reporting. */
+      importAbort.current?.abort()
+      const controller = new AbortController()
+      importAbort.current = controller
       setImporting({ done: 0, total: 0, current: '' })
       try {
         const outcomes = await importFolder(
           importFs,
           folder,
-          { onProgress: (progress) => { if (current()) setImporting(progress) } },
+          {
+            onProgress: (progress) => { if (current()) setImporting(progress) },
+            signal: controller.signal,
+          },
         )
         if (!current()) return
         shelveImported(outcomes)
@@ -553,6 +682,7 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
         console.error('Paper: the folder import failed', cause)
         if (current()) setImportNotice('That folder could not be imported.')
       } finally {
+        if (importAbort.current === controller) importAbort.current = null
         if (current()) setImporting(null)
       }
     })()
@@ -635,6 +765,13 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
    */
   useEffect(() => {
     if (!isTauri()) return
+    /* The registration is ASYNC and the cleanup is not: torn down before the
+     * promise resolved — which StrictMode's mount/unmount/mount does on every
+     * launch in dev — `stop` was still undefined, the cleanup removed
+     * nothing, and the second mount added a second handler: two intercepts,
+     * two destroys, racing. A registration that lands after its effect died
+     * is unregistered on the spot. */
+    let disposed = false
     let stop: (() => void) | undefined
     void getCurrentWindow()
       .onCloseRequested(async (event) => {
@@ -650,6 +787,10 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
         await getCurrentWindow().destroy()
       })
       .then((unlisten) => {
+        if (disposed) {
+          unlisten()
+          return
+        }
         stop = unlisten
       })
       .catch((cause: unknown) => {
@@ -662,21 +803,8 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
     return () => stop?.()
   }, [services])
 
-  /* Take the book in: its bytes first, THEN its record.
-   *
-   * ONE EFFECT, and the order inside it is the point. These were two — a record
-   * written on parse and a copy written on `isShelved`, which meant the copy
-   * waited for the record — so a crash in between left a book on the shelf that
-   * Paper had no bytes for. That is the exact state the migration produces and
-   * the exact state `canOpen` exists to describe; producing it here as well, on
-   * every ordinary open, is not something a derived flag should have to cover.
-   *
-   * The bytes go in first because a folder holding a book with no record is
-   * simply not on the shelf yet — `scanBooks` skips it — and the next open of
-   * the same file finishes the job. The reverse is a row that cannot open.
-   */
-
-
+  /* The book intake — bytes first, then record, one effect — lives in
+   * `useBookIntake`, where its ordering rationale is documented. */
 
   /* File the book's own jacket, once.
    *
@@ -740,9 +868,18 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
     const onHidden = () => {
       if (document.visibilityState === 'hidden') flush()
     }
+    /* AND THE CLOSE PATH. The close handler runs `flushBeforeClose()` before
+     * draining the queue — that is the whole design: hand over what memory
+     * holds, then drain — but the throttled position was never REGISTERED
+     * with it. So the last two seconds of reading rode on `pagehide`, which
+     * Tauri fires after the close request has already drained the queue: the
+     * flush wrote into a queue nothing would run, and quitting mid-page lost
+     * the place the reader quit at. */
+    const offBeforeClose = onBeforeClose(flush)
     window.addEventListener('pagehide', flush)
     document.addEventListener('visibilitychange', onHidden)
     return () => {
+      offBeforeClose()
       window.removeEventListener('pagehide', flush)
       document.removeEventListener('visibilitychange', onHidden)
       // In that order: whatever is outstanding is written, and only then is the
@@ -761,9 +898,32 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
     saver.current?.record(bookId, cfi, fraction)
   }, [bookId, cfi, fraction])
 
+  /* The book being read, AS THE SHELF KNOWS IT — the row the tag editor edits.
+   * Null on the library, and null for a `?book=` the shelf does not hold, so
+   * neither ⌘T nor the palette offers to tag a book that has no record to
+   * write the tag into. FROM `openRow`, which is the same lookup made once
+   * above — this ran its own scan of the shelf beside it. */
+  const readingBook = state.screen === 'reader' ? (openRow ?? null) : null
+  /* Memoized as the one-element list `TagEditor` takes, or a fresh `[book]`
+   * inline at the render defeated every books-keyed memo inside it. */
+  const readingBooks = useMemo(() => (readingBook ? [readingBook] : []), [readingBook])
+  const openTags = useCallback(
+    () => dispatch({ type: 'toggleLayer', layer: 'tagsOpen' }),
+    [dispatch],
+  )
+  /* Every tag on the shelf, for the sheet's suggestions. Only walked while the
+   * sheet is up: the shelf computes its own for its own editors. */
+  const shelfTags = useMemo(
+    () => (state.tagsOpen ? tagCounts(library.books) : []),
+    [state.tagsOpen, library.books],
+  )
+
   const commands = useMemo(
     () =>
       buildCommands({
+        editTags: readingBook ? openTags : null,
+        exportTags: canArchiveTags() ? exportTagsNow : null,
+        importTags: canArchiveTags() ? importTagsNow : null,
         /* The same faces the settings panel offers — see `offeredFaces`. */
         faces: offeredHere,
         state,
@@ -771,7 +931,12 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
         hasBook: book.source !== null,
         // Null when nothing is selected, so the palette simply does not offer
         // a command that could not do anything.
-        markSelection: marking.selection ? () => marking.mark('') : null,
+        /* The same two settings the selection bar writes, so a mark made by
+           ⌘D and a mark made by clicking a swatch cannot come out looking
+           different — which is what a second default here would guarantee. */
+        markSelection: marking.selection
+          ? () => marking.mark('', { tint: state.markTint, style: state.markStyle })
+          : null,
         openBookPicker: addBooks,
         /* The palette is where the folder import lives now that the toolbar
          * carries one action — see `KernelCommandContext`. */
@@ -781,7 +946,7 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
         openSwitcher: () => dispatch({ type: 'toggleLayer', layer: 'switcherOpen' }),
         contributed: composition.commands,
       }),
-    [state, dispatch, book, marking, addBooks, addFolder, importing, composition],
+    [state, dispatch, book, marking, addBooks, addFolder, importing, readingBook, openTags, composition],
   )
 
   /* §11's keyboard map. Every combo the design publishes is bound here, and
@@ -827,7 +992,16 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
        * because a scrolled EPUB scrolls — but a fixed-layout book, which is
        * every PDF, does not scroll at all. These were its only way through and
        * it had none, so it opened on one page and stayed there. */
-      if (!accel && !typing && reading) {
+      /* NOT FROM A CONTROL, AND NOT AFTER SOMETHING ELSE HANDLED IT. The
+       * `typing` guard covered text entry only, so Space on a FOCUSED BUTTON —
+       * a toolbar control reached by Tab — turned the page instead of pressing
+       * the button, and an arrow key a custom control had already consumed
+       * (`defaultPrevented`) turned it again. Both are the platform's meaning
+       * of those keys being taken from under the reader's focus. */
+      const onControl =
+        target instanceof HTMLElement &&
+        target.closest('button, a[href], select, [role="menu"], [role="listbox"], [role="dialog"]') !== null
+      if (!accel && !typing && !onControl && !event.defaultPrevented && reading) {
         /* Shift+arrow is a SELECTION, not a page turn — the platform meaning of
          * the combo in every text surface there is. Without this guard the page
          * turned instead, which also made the paginator's keyboard-selection
@@ -907,7 +1081,17 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
         // browser's own, rather than being swallowed to do nothing.
         if (!marking.selection) return
         event.preventDefault()
-        marking.mark('')
+        // The tint and style the selection bar is showing — see `markSelection`.
+        marking.mark('', { tint: state.markTint, style: state.markStyle })
+        return
+      }
+      /* ⌘T: the tags of the book being read — the palette's "Tags for this
+       * book…". Only when there is such a book, on the same reasoning as ⌘D:
+       * a combo swallowed to do nothing is worse than one left unbound. */
+      if (event.key === 't') {
+        if (!readingBook) return
+        event.preventDefault()
+        openTags()
         return
       }
       /* §09's reading sizes, on the combo every reader already knows.
@@ -943,7 +1127,13 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
        * does nothing there instead, which is what an unbound key does. */
       if (shortcut && paneFits(state.screen, shortcut.pane)) {
         event.preventDefault()
-        dispatch({ type: 'openPane', pane: shortcut.pane })
+        /* A TOGGLE, exactly as the palette row behaves — the row for an open
+         * panel says "Close" and carries this combo, so the combo has to
+         * close it too. Dispatching `openPane` unconditionally made the
+         * shortcut re-open a panel its own advertised label promised to
+         * close: the same command, two behaviours by entry point. */
+        if (state.pane === shortcut.pane) dispatch({ type: 'closePane' })
+        else dispatch({ type: 'openPane', pane: shortcut.pane })
       }
     }
     window.addEventListener('keydown', onKey)
@@ -954,9 +1144,13 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
     book,
     platform,
     state.screen,
+    state.pane,
     state.paletteOpen,
     state.switcherOpen,
+    state.tagsOpen,
     state.stepIdx,
+    readingBook,
+    openTags,
   ])
 
   /* Titlebar metadata comes from the OPEN book, and from nothing else.
@@ -1011,6 +1205,23 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
                 onAddBooks={addBooks}
               />
             )}
+            {/* The tag editor over the book being read — ⌘T. The same box the
+                shelf opens over a card, in a sheet, because in the reader
+                there is no card to hang it from. */}
+            {state.tagsOpen && readingBook && (
+              <OverlaySheet
+                label="Tags for this book"
+                onDismiss={() => dispatch({ type: 'closeLayer', layer: 'tagsOpen' })}
+              >
+                <TagEditor
+                  books={readingBooks}
+                  shelfTags={shelfTags}
+                  onAdd={library.tagBooks}
+                  onRemove={library.untagBooks}
+                  fill
+                />
+              </OverlaySheet>
+            )}
           </>
         }
         pane={
@@ -1030,7 +1241,11 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
             books={library.books}
             onRenameTag={library.renameTag}
             onRemoveTag={library.removeTag}
-            ownTagCount={library.ownTagCount}
+            tagPrefs={tagPrefs}
+            lastRemoval={library.lastRemoval}
+            onUndoRemoveTag={library.undoRemoveTag}
+            onAdoptTag={library.adoptTag}
+            onTagBooks={library.tagBooks}
             offered={offeredHere}
             contributed={composition.panes}
             contributedSettings={composition.settings}
@@ -1073,8 +1288,10 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
             // reader does not want from a click on a cover.
             onOpen={openStored}
             onRemove={removeBook}
-            onTag={library.tag}
-            onUntag={library.untag}
+            onTagBooks={library.tagBooks}
+            onUntagBooks={library.untagBooks}
+            lastRemoval={library.lastRemoval}
+            onUndoRemoveTag={library.undoRemoveTag}
             onSetFinished={setFinished}
             onAddFolder={addFolder}
             importing={importing}

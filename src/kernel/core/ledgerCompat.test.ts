@@ -53,6 +53,18 @@ const MARK = {
   createdAt: 1_695_000_000_002,
 }
 
+/**
+ * The same mark as the parser now hands it back.
+ *
+ * A phase-4 file predates the mark having an appearance, so the parser names
+ * one — and the pair it names is the appearance that mark ALREADY HAD: every
+ * highlight was a solid yellow fill before there was anything else to choose.
+ * Nothing is invented here in the sense this suite cares about; no stamp, no
+ * register and no tombstone appears, which is what the assertions below check
+ * field by field.
+ */
+const MARK_READ = { ...MARK, tint: 'yellow' as const, style: 'fill' as const }
+
 const CARD = {
   id: 'c-legacy-1',
   bookId: 'book:aaaa',
@@ -112,7 +124,11 @@ describe('a phase-4 library opens identical under the new parser', () => {
       expect(book).not.toHaveProperty('tagClock')
       expect(book).not.toHaveProperty('format')
     }
-    expect(validMarks([MARK])).toEqual([MARK])
+    expect(validMarks([MARK])).toEqual([MARK_READ])
+    for (const one of validMarks([MARK])) {
+      expect(one).not.toHaveProperty('updatedAt')
+      expect(one).not.toHaveProperty('deletedAt')
+    }
     expect(parseCards(JSON.stringify([CARD]))).toEqual([CARD])
   })
 
@@ -123,7 +139,7 @@ describe('a phase-4 library opens identical under the new parser', () => {
     const kernel = createKernelServices({ fs, storage, initialBooks: books })
     await kernel.marks.open('book:aaaa')
     await kernel.writes.idle()
-    expect(kernel.marks.getSnapshot().current).toEqual([MARK])
+    expect(kernel.marks.getSnapshot().current).toEqual([MARK_READ])
     expect(kernel.cards.getSnapshot().all).toEqual([CARD])
     expect(kernel.library.positionOf('book:aaaa')).toBe(REC_A.position)
   })

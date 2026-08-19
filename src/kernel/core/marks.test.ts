@@ -29,6 +29,8 @@ function mark(over: Partial<Mark> = {}): Mark {
     suffix: '',
     note: '',
     kind: 'highlight',
+    tint: 'yellow',
+    style: 'fill',
     chapter: 'Ch. 1',
     createdAt: 1000,
     ...over,
@@ -456,5 +458,56 @@ describe('storage', () => {
       setItem: () => {},
     }
     expect(loadMarks(hostile)).toEqual([])
+  })
+})
+
+describe('the wave belongs to the companion', () => {
+  /* Reserving a shape only means something if the store keeps it reserved. The
+     reader can no longer CHOOSE a wave, but marks made before that was true are
+     on disk — and a reader's mark drawn as a wave says "a machine wrote this"
+     about a passage the reader marked themselves. */
+  it('reads a reader’s stored wave back as a plain underline', () => {
+    const stored = JSON.stringify([{ ...mark(), kind: 'highlight', style: 'wave' }])
+    expect(parseMarks(stored)[0]?.style).toBe('underline')
+  })
+
+  it('leaves the companion’s own style alone', () => {
+    // The painter ignores it and draws amber regardless; nothing needs rewriting.
+    const stored = JSON.stringify([{ ...mark(), kind: 'companion', style: 'wave' }])
+    expect(parseMarks(stored)[0]?.style).toBe('wave')
+  })
+
+  it('does not disturb the styles the reader may still choose', () => {
+    for (const style of ['fill', 'underline'] as const) {
+      const stored = JSON.stringify([{ ...mark(), kind: 'highlight', style }])
+      expect(parseMarks(stored)[0]?.style, style).toBe(style)
+    }
+  })
+})
+
+describe('re-marking a passage keeps what was written about it', () => {
+  /* `mark(note, …)` is how every appearance change is applied, and ⌘D and the
+     palette both pass an empty note because they are not writing one. Taken
+     verbatim that emptied the note on any passage marked a second time — silent
+     data loss with no undo. The rule lives in `useMarking`; this pins the store
+     behaviour it depends on, which is that a replacement is matched by anchor. */
+  it('replaces a mark on the same anchor rather than stacking one', () => {
+    const first = mark({ id: 'm1', note: 'worth remembering' })
+    const second = mark({ id: 'm2', note: 'worth remembering', tint: 'green' })
+    /* ONE LIVE MARK, not one row: the replaced row stays as a tombstone so the
+       replacement can travel to another device, and every read model hides it.
+       What this pins is the note surviving a recolour, which is the same fact
+       either way. */
+    const live = liveMarks(upsertMark([first], second))
+    expect(live).toHaveLength(1)
+    expect(live[0]?.id).toBe('m2')
+    expect(live[0]?.tint).toBe('green')
+    expect(live[0]?.note).toBe('worth remembering')
+  })
+
+  it('leaves a mark on a different anchor alone', () => {
+    const here = mark({ id: 'm1', cfi: 'epubcfi(/6/4!/4/2)' })
+    const elsewhere = mark({ id: 'm2', cfi: 'epubcfi(/6/8!/4/2)' })
+    expect(liveMarks(upsertMark([here], elsewhere))).toHaveLength(2)
   })
 })

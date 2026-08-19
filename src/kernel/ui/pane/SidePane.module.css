@@ -250,6 +250,7 @@
  * the whole row a single ambiguous target. */
 .note {
   display: block;
+  position: relative;
   width: 100%;
   text-align: start;
   padding: var(--space-12) var(--space-14);
@@ -264,8 +265,36 @@
   background: var(--wash);
 }
 
+/* THE MARK'S OWN TINT, down the leading edge. A reader who marks agreements in
+ * green and questions in purple has categorised the passages; a list of notes
+ * that shows none of it makes them re-open each one to find out which is which.
+ * A bar rather than a tinted row, because the row already uses its background
+ * to say "the companion wrote this" and two meanings on one surface is one
+ * meaning nobody can read. */
+.note::before {
+  content: '';
+  position: absolute;
+  inset-block: var(--space-12);
+  inset-inline-start: var(--space-4);
+  width: var(--track-w);
+  border-radius: var(--radius-pill);
+  background: var(--mark-yellow-rule);
+}
+
+.note[data-tint='green']::before {
+  background: var(--mark-green-rule);
+}
+
+.note[data-tint='purple']::before {
+  background: var(--mark-purple-rule);
+}
+
 /* Everything the companion produced carries the amber, forever. §15: the word
  * is companion — never ai, assistant or bot — in code as well as in the UI. */
+.note[data-kind='companion']::before {
+  background: var(--amber);
+}
+
 .note[data-kind='companion'] {
   background: var(--amber-bg);
   border-color: var(--amber-line);
@@ -518,6 +547,94 @@
 .tagRow > .scopeRow {
   flex: 1 1 auto;
   min-width: 0;
+}
+
+/* A drag carrying books is over the row: the ring the shelf draws on a
+   selected jacket, at the row's own radius, so the two ends of the gesture
+   agree about what "this one" looks like. */
+.tagRow[data-over='true'] {
+  border-radius: var(--radius-control);
+  outline: 2px solid var(--accent);
+  outline-offset: calc(-1 * var(--space-2));
+  background: var(--accent-bg);
+}
+
+/* EXCLUDED — `-tag:X`. Struck through, because that is what it means, and
+   muted rather than accented: it is a scope in force, but a negative one, and
+   lighting it the same as ON would say the opposite of what it does. */
+.scopeRow[data-excluded='true'] {
+  color: var(--muted);
+}
+
+.scopeRow[data-excluded='true'] .scopeLabel {
+  text-decoration: line-through;
+}
+
+/* The Tags heading with its one control beside it: `.groupTitle`'s row, laid
+   out so the sort toggle sits at the trailing edge on the heading's baseline. */
+.groupTitleRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-inline-end: var(--space-4);
+}
+
+.groupTitleRow > .groupTitle {
+  flex: 1 1 auto;
+}
+
+/* The sort toggle: the row menu's `⋯` shape, since it is the same kind of
+   thing — a quiet mark until it is wanted. */
+.groupTool {
+  composes: more from '../styles/controls.module.css';
+}
+
+/* The count on a collapsible group's heading, so a closed group still says
+   how much it holds. */
+.groupCount {
+  margin-inline-start: auto;
+  font-weight: 400;
+  letter-spacing: normal;
+  text-transform: none;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Narrowing a long tag list by name. The rename field's shape, in the row's
+   inset, so it reads as part of the list rather than as a second search box. */
+.tagFilter {
+  width: calc(100% - 2 * var(--space-10));
+  height: var(--control-sm);
+  margin: 0 var(--space-10) var(--space-6);
+  padding: 0 var(--space-8);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-chip);
+  background: var(--surface);
+  font: inherit;
+  font-size: var(--text-small);
+  color: var(--ink);
+}
+
+.tagFilter:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* What the last collection-wide remove did, and the way back. A quiet line
+   in the list's own inset — `.scopeHint`'s voice — with the one control that
+   is not a scope. */
+/* Shared with the tag editor — see `controls.module.css`. Composed rather than
+   restated so the two surfaces that offer an undo cannot come to word or weigh
+   it differently. */
+.undoLine {
+  composes: undoLine from '../styles/controls.module.css';
+}
+
+.undoText {
+  composes: undoText from '../styles/controls.module.css';
+}
+
+.undoButton {
+  composes: undoButton from '../styles/controls.module.css';
 }
 
 /* Rename, in place: the row's label becomes a field the same size, so nothing
@@ -899,4 +1016,210 @@
 
 .faceItem[data-on='true'] {
   color: var(--accent);
+}
+
+/* The position in a spacing scale, as pips: how much room is left in each
+   direction, which is the only thing a reader needs from this control. A
+   number would be true and useless — nobody adjusts word spacing by its em
+   value — and it would cost more width in a pane already holding four of
+   these side by side with two buttons. */
+.pips {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: 0 var(--space-4);
+}
+
+.pip {
+  inline-size: var(--track-w);
+  block-size: var(--track-w);
+  border-radius: var(--radius-pill);
+  background: var(--line-3);
+}
+
+.pip[data-on='true'] {
+  background: var(--accent);
+}
+
+/* A group heading that is also its own disclosure. Built from `.groupTitle` so
+   a group that can be put away and one that cannot read as the same rank —
+   the only difference is the mark, and that it can be pressed. */
+.groupToggle {
+  composes: groupTitle;
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+  width: 100%;
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: start;
+}
+
+.groupToggle:hover {
+  color: var(--ink-2);
+}
+
+.groupChevron {
+  flex: 0 0 auto;
+  transition: transform var(--motion-popover);
+}
+
+.groupChevron[data-open='true'] {
+  transform: rotate(90deg);
+}
+
+/* The colours a tag can be given, in the row's own menu. A row rather than a
+   submenu: there are three of them, they are the same three a mark can be, and
+   a nested menu to choose one of three is a second gesture for a decision that
+   fits on one line. */
+.colourRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+  padding: var(--space-6) var(--space-10);
+}
+
+.colourDot {
+  width: var(--mark-swatch);
+  height: var(--mark-swatch);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--dot);
+  cursor: pointer;
+  transition: box-shadow var(--motion-popover);
+}
+
+.colourDot[data-colour='yellow'] {
+  --dot: var(--mark-yellow-rule);
+}
+
+.colourDot[data-colour='green'] {
+  --dot: var(--mark-green-rule);
+}
+
+.colourDot[data-colour='purple'] {
+  --dot: var(--mark-purple-rule);
+}
+
+/* The chosen one is the larger dot, in its own colour — the same rule the
+   selection bar's tints follow, so a colour never needs a second colour to say
+   it was picked. */
+.colourDot[data-on='true'] {
+  box-shadow: 0 0 0 1px var(--dot);
+}
+
+.colourDot:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: var(--space-2);
+}
+
+.colourClear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--mark-swatch);
+  height: var(--mark-swatch);
+  padding: 0;
+  margin-inline-start: var(--space-2);
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.colourClear:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.colourClear:hover:not(:disabled) {
+  color: var(--ink);
+  background: var(--wash);
+}
+
+/* Why a row sits at the top. A footnote to the row, not part of its name. */
+.pinMark {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+/* "3 subjects hidden — Show all". Shares the undo line's shape because it is
+   the same kind of statement: something was done, here is the way back. */
+.hiddenLine {
+  composes: undoLine from '../styles/controls.module.css';
+}
+
+.hiddenText {
+  composes: undoText from '../styles/controls.module.css';
+}
+
+/* A saved view: the scope on the left, the way to forget it on the right. Two
+   controls in one row rather than a menu, because there are exactly two things
+   a view can do and a `⋯` for one of them is a gesture spent on nothing. */
+.viewRow {
+  display: flex;
+  align-items: center;
+}
+
+.viewButton {
+  composes: scopeRow;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.viewRemove {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-xs);
+  height: var(--control-xs);
+  margin-inline-end: var(--space-6);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-chip);
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--motion-chrome), background var(--motion-chrome);
+}
+
+/* Shown on hover or focus, like the shelf's own `⋯`. A row of permanent close
+   buttons reads as a list asking to be dismantled. */
+.viewRow:hover .viewRemove,
+.viewRemove:focus-visible {
+  opacity: 1;
+}
+
+.viewRemove:hover {
+  background: var(--wash);
+  color: var(--ink);
+}
+
+/* A `Fiction/…` group. The heading names the shared word once; the children
+   below show only their leaves, indented to the depth of a row's own glyph so
+   the names line up with the names above them rather than with the icons. */
+.tagGroupHead {
+  display: flex;
+  align-items: center;
+  height: var(--row-compact);
+  /* The row's own padding plus one glyph plus one gap, so the prefix begins
+     where the tag NAMES above it begin rather than where their `#` does. */
+  padding-inline: calc(var(--space-10) + var(--icon-control) + var(--space-10)) var(--space-10);
+  font-size: var(--text-ui);
+  color: var(--muted);
+  /* Not a button: nothing carries this prefix on its own, so there is nothing
+     to scope to. A dead control wearing a live one's clothes is worse than a
+     label — hence no hover, no pointer, no focus ring. */
+  cursor: default;
+}
+
+.tagGroupChildren {
+  /* The glyph's width plus the row's gap, so a leaf name sits under the name
+     above it. Indent by the icon, not by an arbitrary step. */
+  padding-inline-start: calc(var(--icon-control) + var(--space-10));
 }

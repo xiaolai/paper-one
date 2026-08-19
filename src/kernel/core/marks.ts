@@ -30,6 +30,76 @@ import { hlcOf, isHlc, laterHlc, type Hlc } from './hlc'
  */
 export type MarkKind = 'highlight' | 'companion'
 
+/**
+ * Which of the three tints the reader chose for a mark.
+ *
+ * SEPARATE FROM `kind`, and the separation is the whole point: `kind` is
+ * PROVENANCE — whose mark this is — and this is APPEARANCE. The two were one
+ * field for as long as there were only two marks in the world, yours and the
+ * companion's, and "gold fill" was simply what "yours" looked like. A reader
+ * who can choose green needs the two to come apart, or choosing a colour would
+ * be claiming a passage was written by somebody else.
+ */
+export type MarkTint = 'yellow' | 'green' | 'purple'
+
+/**
+ * How a mark is drawn: a band behind the words, or one of three rules under
+ * them.
+ *
+ * Every one of the three is a painter the Overlayer already has — `highlight`,
+ * `underline` and `squiggly`. A double underline was here and is not any more:
+ * upstream has no painter for one, the composed substitute was a rule too
+ * close to `underline` to be worth choosing between, and a style in this union
+ * that nothing draws correctly is a mark the reader can pick and then not see.
+ */
+export type MarkStyle = 'fill' | 'underline' | 'wave'
+
+/** The three tints, in the order the selection bar offers them. */
+export const MARK_TINTS: readonly MarkTint[] = ['yellow', 'green', 'purple']
+
+/** Every style a stored mark may carry, whoever made it. */
+export const MARK_STYLES: readonly MarkStyle[] = ['fill', 'underline', 'wave']
+
+/**
+ * The styles the reader may choose. NOT the wave.
+ *
+ * THE WAVE IS THE COMPANION'S, and reserving it is what keeps provenance
+ * readable. §01 gave the companion an amber underline back when your own mark
+ * was always a gold fill — shape and colour both said whose it was, redundantly.
+ * That redundancy went when the reader gained styles of their own: with both
+ * able to draw rules, the only thing separating a machine's claim from your own
+ * reading was amber against yellow on a two-pixel line, and that is the one
+ * distinction in this app that must never blur.
+ *
+ * The wave rather than every rule, which was the other candidate. A squiggle is
+ * the strongest convention there is for "something automated has an opinion
+ * here" — every spell checker ever written — so it reads as provisional without
+ * being taught, which is exactly what a companion's claim is. And for the same
+ * reason it is a poor shape for a reader's OWN mark: a squiggle under prose
+ * reads as an error, which is the wrong note for "this is worth remembering".
+ * Reserving it costs the reader a style they should not want.
+ *
+ * So the companion is distinguished on three independent channels rather than
+ * one: a hue outside the reader's palette, a shape no reader's mark can be, and
+ * the word — §10 is explicit that colour never carries meaning alone, and Notes
+ * and the margin both label a companion row as well as tinting it.
+ */
+export const READER_STYLES: readonly MarkStyle[] = ['fill', 'underline']
+
+/**
+ * The two choices that decide how a mark is drawn.
+ *
+ * Passed EXPLICITLY to `mark` rather than read from app state inside it. A
+ * swatch click has to mark in the tint that was clicked, and the dispatch that
+ * records the new tint has not been applied yet at that moment — so a `mark`
+ * that consulted state would lay down the previous colour, once, on the very
+ * gesture that chose a new one.
+ */
+export interface MarkAppearance {
+  readonly tint: MarkTint
+  readonly style: MarkStyle
+}
+
 export interface Mark {
   readonly id: string
   /** Which book this belongs to. See `bookIdFor`. */
@@ -67,6 +137,21 @@ export interface Mark {
   /** The written note. Empty when the mark is a bare highlight. */
   readonly note: string
   readonly kind: MarkKind
+  /**
+   * How this mark is drawn — see `MarkTint` and `MarkStyle`.
+   *
+   * ON THE MARK, not read from the current setting at draw time, because the
+   * colour IS part of the annotation. A reader who puts agreements in green and
+   * questions in purple has said something about each passage; redrawing their
+   * history in whatever the toggle happens to hold now would erase it, and
+   * would do so retroactively, every time they changed their mind about the
+   * next passage.
+   *
+   * Both are absent from every mark written before this existed — which is all
+   * of them — so neither is required by `isMark`. See `readTint`.
+   */
+  readonly tint: MarkTint
+  readonly style: MarkStyle
   /** TOC label at the time of marking, for "Ch. 1" in the Notes list. */
   readonly chapter: string
   readonly createdAt: number
@@ -435,11 +520,13 @@ export function createMark(draft: NewMark): Mark {
  * pasted into devtools. A malformed row is dropped rather than thrown on —
  * losing one mark is recoverable, refusing to start the reader is not.
  */
-type StoredMark = Omit<Mark, 'prefix' | 'suffix' | 'updatedAt' | 'deletedAt'> & {
+type StoredMark = Omit<Mark, 'prefix' | 'suffix' | 'updatedAt' | 'deletedAt' | 'tint' | 'style'> & {
   readonly prefix?: unknown
   readonly suffix?: unknown
   readonly updatedAt?: unknown
   readonly deletedAt?: unknown
+  readonly tint?: unknown
+  readonly style?: unknown
 }
 
 function isMark(value: unknown): value is StoredMark {
@@ -484,6 +571,52 @@ function isMark(value: unknown): value is StoredMark {
 /** Context is optional on the way in, and always a string on the way out. */
 function readContext(value: unknown): string {
   return typeof value === 'string' ? value : ''
+}
+
+/**
+ * The tint a stored row carries, or yellow.
+ *
+ * DELIBERATELY NOT PART OF `isMark`, and this is the entire compatibility
+ * story: every mark written before this field existed lacks it, so requiring it
+ * would drop the reader's whole history on the first launch after the upgrade —
+ * silently, because `validMarks` filters rather than throws. The same reasoning
+ * as `prefix` and `suffix`, and the same shape, so the next optional field has
+ * a pattern to follow rather than a precedent to guess at.
+ */
+function readTint(value: unknown): MarkTint {
+  return MARK_TINTS.includes(value as MarkTint) ? (value as MarkTint) : 'yellow'
+}
+
+/**
+ * The style a stored row carries, or a fill.
+ *
+ * FILL, even though a mark made in Night was DRAWN as a rule before this
+ * existed. That was §05 substituting for a choice the reader could not make,
+ * not a choice they made — reading it back as `underline` would freeze one
+ * theme's drawing rule into a permanent property of the mark, and it would do
+ * so for marks made on every other theme too, since nothing recorded which
+ * theme was on at the time.
+ */
+function readStyle(value: unknown): MarkStyle {
+  return MARK_STYLES.includes(value as MarkStyle) ? (value as MarkStyle) : 'fill'
+}
+
+/**
+ * The style a mark of this KIND may actually wear.
+ *
+ * Enforced on the way IN as well as on the way out, because a guarantee the
+ * store does not keep is decoration. The reader can no longer choose a wave —
+ * `READER_STYLES` does not offer one — but marks made before that was true are
+ * on disk, and a reader's mark drawn as a wave says "a machine wrote this"
+ * about a passage the reader marked themselves. It is read back as the nearest
+ * thing the reader could have meant, which is the plain rule under it.
+ *
+ * The other direction is left alone: a companion mark carries whatever it
+ * carries, because the painter ignores it entirely and draws amber regardless.
+ */
+function styleForKind(style: MarkStyle, kind: MarkKind): MarkStyle {
+  if (kind === 'companion') return style
+  return READER_STYLES.includes(style) ? style : 'underline'
 }
 
 /** Parse a stored payload, keeping only the rows that survive validation. */
@@ -533,6 +666,8 @@ export function validMarks(parsed: unknown): Mark[] {
         // with — NOT a reason to drop a mark the reader made.
         prefix: readContext(row.prefix),
         suffix: readContext(row.suffix),
+        tint: readTint(row.tint),
+        style: styleForKind(readStyle(row.style), row.kind),
         ...(updated !== undefined ? { updatedAt: updated } : {}),
         ...(tombstone !== undefined ? { deletedAt: tombstone } : {}),
       }

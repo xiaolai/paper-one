@@ -749,6 +749,8 @@ const MARK = {
   suffix: '',
   note: '',
   kind: 'highlight' as const,
+  tint: 'yellow' as const,
+  style: 'fill' as const,
   chapter: 'One',
   createdAt: 42,
 }

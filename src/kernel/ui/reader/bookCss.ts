@@ -1,5 +1,8 @@
-import type { Theme, Typeface } from '../state'
-import { readingStep } from '../../core/metrics'
+import type { MarkTint } from '../../core/marks'
+import type { MarkPalette } from './session'
+import type { Align, SpacingIndices, Theme, Typeface } from '../state'
+import { readingStep, spacingAt } from '../../core/metrics'
+import { dimBackground, inkFor } from '../../core/palette'
 import { faceById } from '../../core/typefaces'
 import { opticalScale } from '../fontProbe'
 
@@ -24,20 +27,72 @@ interface BookColours {
   ink: string
   surface: string
   accent: string
+  /**
+   * §01's three mark tints, each a pale FILL and the saturated RULE that names
+   * it — the fill for a band behind the words, the rule for a line under them
+   * and for the swatch that offers it.
+   *
+   * Green and purple are not eyeballed. Each is its theme's own gold, held at
+   * the same presence against that theme's page and rotated in hue: the rules
+   * match the gold rule's contrast against the surface, and the fills match the
+   * gold fill's, so no tint reads louder than another and none of them reads
+   * louder here than it did before there was a choice. `markTints.test.ts`
+   * asserts both, along with the 4.5:1 floor for ink on every fill.
+   */
   mark: string
   markRule: string
+  markGreen: string
+  markGreenRule: string
+  markPurple: string
+  markPurpleRule: string
   /** §01's companion hue, darkened per theme to clear 4.5:1 on its own tint. */
   amber: string
   /** The reading ruler's band. `--wash` — one step off the page, never a tint. */
   band: string
 }
 
-const BOOK_COLOURS: Record<Theme, BookColours> = {
-  paper: { ink: '#17191B', surface: '#FFFFFF', accent: '#1B3A6B', mark: '#F3E6C0', markRule: '#E0BE55', amber: '#9E5A16', band: '#F2F3F1' },
-  slate: { ink: '#1C2022', surface: '#DFE1DE', accent: '#23456F', mark: '#DCCB92', markRule: '#B99B3F', amber: '#8A4C11', band: '#CBCFCA' },
-  sepia: { ink: '#2B2117', surface: '#F8F0E1', accent: '#2C5578', mark: '#EEDBA6', markRule: '#C9A44E', amber: '#985614', band: '#EBDFC9' },
-  sage: { ink: '#1B2419', surface: '#DDE6D8', accent: '#2A4F6B', mark: '#D8CE8C', markRule: '#AE9A3C', amber: '#8F5013', band: '#C7D4C1' },
-  night: { ink: '#E9EAE8', surface: '#16191C', accent: '#8FB4E8', mark: '#4A3B18', markRule: '#8A6E2C', amber: '#D9A25E', band: '#1E2226' },
+/* EXPORTED so the invariants can be checked. The tints are derived rather than
+   picked — see the note on `mark` above — and a derivation nothing asserts is
+   just a story about where some hex values came from. `markTints.test.ts` holds
+   the three properties they were derived to have, and checks that `tokens.css`
+   still agrees with this table. */
+export const BOOK_COLOURS: Record<Theme, BookColours> = {
+  paper: { ink: '#17191B', surface: '#FFFFFF', accent: '#1B3A6B', mark: '#FAE8AF', markRule: '#D5B75A', markGreen: '#CAF7CA', markGreenRule: '#88CE8A', markPurple: '#E9CCFF', markPurpleRule: '#D1A4F3', amber: '#9E5A16', band: '#F2F3F1' },
+  slate: { ink: '#1C2022', surface: '#DFE1DE', accent: '#23456F', mark: '#FCE4A8', markRule: '#B79A3B', markGreen: '#C5F5C7', markGreenRule: '#6CB06E', markPurple: '#E6C4FF', markPurpleRule: '#B388D4', amber: '#8A4C11', band: '#CBCFCA' },
+  sepia: { ink: '#2B2117', surface: '#F8F0E1', accent: '#2C5578', mark: '#F3E8B8', markRule: '#C7AA4C', markGreen: '#C1F7D5', markGreenRule: '#7BC07D', markPurple: '#D2BCFF', markPurpleRule: '#C397E4', amber: '#985614', band: '#EBDFC9' },
+  sage: { ink: '#1B2419', surface: '#DDE6D8', accent: '#2A4F6B', mark: '#FFE2AF', markRule: '#B99C3D', markGreen: '#CAF2CF', markGreenRule: '#6EB270', markPurple: '#E2BAFF', markPurpleRule: '#B68AD6', amber: '#8F5013', band: '#C7D4C1' },
+  night: { ink: '#E9EAE8', surface: '#16191C', accent: '#8FB4E8', mark: '#533E00', markRule: '#85702A', markGreen: '#1F471B', markGreenRule: '#4E8050', markPurple: '#4C2D5B', markPurpleRule: '#83629A', amber: '#D9A25E', band: '#1E2226' },
+}
+
+/**
+ * A theme's book colours at the reader's brightness and contrast.
+ *
+ * The BACKGROUNDS dim — the page, the ruler's band, and a highlight's fill,
+ * which is a background however it is drawn. The INK moves with contrast and is
+ * floored. The accent and the rule colours are left alone, as `--accent` is in
+ * the app: they are brand and annotation, not the page and not the prose.
+ *
+ * THE BOOK NEEDS ITS OWN because it is an iframe with its own document, and the
+ * custom properties the app writes for brightness and contrast do not cross
+ * that boundary — a dimmed app had a page dimmed everywhere except the one
+ * surface the reader is looking at. Same two rules, different table.
+ */
+function bookColours(theme: Theme, brightness: number, contrast: number): BookColours {
+  const base = BOOK_COLOURS[theme]
+  const surface = dimBackground(base.surface, brightness)
+  return {
+    ...base,
+    surface,
+    band: dimBackground(base.band, brightness),
+    /* All three FILLS dim: a fill is a background however it is drawn, and a
+       dimmed page with full-brightness marks leaves the marks as the only
+       thing on screen that did not move. The RULES do not, for the same reason
+       `accent` does not — they are annotation, not page. */
+    mark: dimBackground(base.mark, brightness),
+    markGreen: dimBackground(base.markGreen, brightness),
+    markPurple: dimBackground(base.markPurple, brightness),
+    ink: inkFor(base.ink, surface, contrast),
+  }
 }
 
 /**
@@ -48,21 +103,33 @@ const BOOK_COLOURS: Record<Theme, BookColours> = {
  * black. Derived from the same table as the injected stylesheet so the drawn
  * mark and the CSS one cannot drift apart.
  *
- * Night is the exception §05 calls for: a pale fill glares on a dark page, so
- * the reader's own mark becomes a rule and takes the rule's colour.
+ * NIGHT NO LONGER OVERRIDES THE STYLE. §05 used to say a mark becomes a rule
+ * there, because "a pale fill would glare" — and that was right while the
+ * reader had no say: a fill was the only drawing there was, so turning it into
+ * a rule on the one theme it hurt was a kindness rather than a contradiction.
+ * It stopped being either once fill and underline became a CHOICE. A reader who
+ * picks a fill on Night and is given a rule has been overruled without being
+ * told, and the two styles become indistinguishable on exactly the theme people
+ * read longest on. The glare it guarded against is not there anyway: Night's
+ * fills are dark — its gold is #4A3B18 — so a band on Night is a deepening of
+ * the page, not a light on it.
  */
-export function markPalette(theme: Theme): {
-  highlight: string
-  companion: string
-  highlightAsRule: boolean
-} {
-  const c = BOOK_COLOURS[theme]
-  const night = theme === 'night'
-  return {
-    highlight: night ? c.markRule : c.mark,
-    companion: c.amber,
-    highlightAsRule: night,
+export function markPalette(theme: Theme, brightness: number, contrast: number): MarkPalette {
+  /* The same adjusted table the stylesheet uses: read from `BOOK_COLOURS`
+     directly, a dimmed book would have kept full-brightness highlights — the
+     one thing on the page that had not moved. */
+  const c = bookColours(theme, brightness, contrast)
+  const fill: Record<MarkTint, string> = {
+    yellow: c.mark,
+    green: c.markGreen,
+    purple: c.markPurple,
   }
+  const rule: Record<MarkTint, string> = {
+    yellow: c.markRule,
+    green: c.markGreenRule,
+    purple: c.markPurpleRule,
+  }
+  return { fill, rule, companion: c.amber }
 }
 
 /**
@@ -139,19 +206,38 @@ export interface BookCssOptions {
   readonly stepIdx: number
   readonly theme: Theme
   readonly typeface: Typeface
-  readonly justify: boolean
-  readonly hyphenate: boolean
+  /**
+   * Justified, or flush to the reading edge.
+   *
+   * REPLACES a `justify` boolean and a `hyphenate` boolean, which were two
+   * settings for one decision and allowed a combination that is simply bad
+   * typography — see the note where it is used.
+   */
+  readonly align: Align
+  /** How open the type is set — see `SPACING`. */
+  readonly spacing: SpacingIndices
+  /**
+   * The reader's brightness and contrast, RESOLVED rather than as indices.
+   *
+   * The book is an iframe with its own document, so the custom properties the
+   * app writes for these do not reach it — it has to be told. See
+   * `bookColours`.
+   */
+  readonly brightness: number
+  readonly contrast: number
 }
 
 export function bookCss({
   stepIdx,
   theme,
   typeface,
-  justify,
-  hyphenate,
+  align,
+  spacing,
+  brightness,
+  contrast,
 }: BookCssOptions): string {
   const step = readingStep(stepIdx)
-  const c = BOOK_COLOURS[theme]
+  const c = bookColours(theme, brightness, contrast)
   const face = faceById(typeface)
   const stack = face.stack
   /* THE SIZE THE READER ASKED FOR, CORRECTED FOR THIS FACE. Two faces at 21px
@@ -160,6 +246,14 @@ export function bookCss({
    * compensate, which changed their measure as well. Rounded, because a
    * fractional font-size lands text on half pixels. */
   const size = Math.round(step.size * opticalScale(face))
+  /* THE LINE BOX IS THE GRID, and everything else is measured against it.
+   * Paragraph spacing is a multiple of it rather than a length so that opening
+   * the leading opens the space between paragraphs with it — otherwise a reader
+   * who loosened their lines got paragraphs that looked tighter than before. */
+  const line = Math.round(step.line * spacingAt('line', spacing.line))
+  const letter = spacingAt('letter', spacing.letter)
+  const word = spacingAt('word', spacing.word)
+  const para = spacingAt('paragraph', spacing.paragraph)
 
   return `
 @namespace epub "http://www.idpf.org/2007/ops";
@@ -173,7 +267,11 @@ html {
   color: ${c.ink};
   background: ${c.surface};
   /* The line box is the unit everything else is a multiple of. */
-  --paper-line: ${step.line}px;
+  /* THE READER'S LINE, not the step's. Paragraphs, lists and quotes all read
+     this rather than the body's own line-height, so leaving the step's value
+     here would have let the setting move the body and nothing else — which is
+     every block of prose in the book. */
+  --paper-line: ${line}px;
   hanging-punctuation: allow-end last;
 }
 
@@ -189,22 +287,68 @@ body {
   background: transparent;
   font-family: ${stack};
   font-size: ${size}px;
-  line-height: ${step.line}px;
-  text-align: ${justify ? 'justify' : 'start'};
-  -webkit-hyphens: ${hyphenate ? 'auto' : 'manual'};
-  hyphens: ${hyphenate ? 'auto' : 'manual'};
+  line-height: ${line}px;
+  /* Written unconditionally, including at zero: an author stylesheet may set
+   * either of these, and a rule that appears only when the reader has moved it
+   * would leave the book's own tracking in force at the default — so "0" would
+   * mean two different things depending on the book. */
+  letter-spacing: ${letter}em;
+  word-spacing: ${word}em;
+  /* START, NEVER LEFT — and no backticks in here, per the rule this file states
+   * further up: it is a template literal and one would end the string.
+   *
+   * The flush edge is on the left in English, on the right in Arabic and at the
+   * top in vertical Japanese: one behaviour, three appearances, and the
+   * document says which it is. Nothing here detects anything. A logical value
+   * follows the book's own dir and writing-mode, and a heuristic guessing
+   * direction from character ranges would be worse than the declaration it was
+   * overriding. */
+  text-align: ${align === 'justified' ? 'justify' : 'start'};
+  /* HYPHENATION FOLLOWS THE ALIGNMENT rather than being its own switch.
+   * Justifying without it stretches the word spaces to fill the line instead,
+   * which at this measure opens rivers — measured on a real book at a narrow
+   * measure, hyphenation absorbed two lines' worth of slack that would
+   * otherwise have become white space. Ragged text has nowhere for that slack
+   * to go: the line simply ends early, so hyphens buy nothing and cost an
+   * interruption.
+   *
+   * Hyphenating needs the document's language and does nothing at all without
+   * it, silently — which is why the session supplies one when the book has not.
+   * See ensureLang there. */
+  -webkit-hyphens: ${align === 'justified' ? 'auto' : 'manual'};
+  hyphens: ${align === 'justified' ? 'auto' : 'manual'};
   -webkit-font-smoothing: antialiased;
   overflow-wrap: break-word;
 }
 
 /* Prose spacing is a multiple of the line box, so consecutive paragraphs stay
  * on grid even though headings and figures will not. */
+/* THE READER'S OWN SETTINGS, AND THEREFORE NOT DEFAULTS.
+ *
+ * Everything else this stylesheet injects is a default that a book may override
+ * — that is stated at the top of the file and it is right. These four are not:
+ * they are controls a reader operated, and a control that silently does nothing
+ * is worse than no control.
+ *
+ * A BOOK BEATS AN ELEMENT SELECTOR WITHOUT TRYING. Measured on a real one, On
+ * China ships p.nonindent { margin-bottom: 0em } — one class, specificity
+ * (0,1,1), against our (0,0,1) — so paragraph spacing computed to 0px and the
+ * control did nothing at all on that book. Calibre writes rules like it by the
+ * hundred. Raising the selector only starts an arms race a book can always win
+ * with one more class, so the reader's four are marked instead.
+ *
+ * Declared on the prose elements rather than left to inherit from body: an
+ * inherited value loses to any rule that matches the element, so body-level
+ * tracking would have been defeated by the same p.class it was meant to survive.
+ */
 p, li, blockquote, dd {
-  line-height: var(--paper-line);
+  line-height: var(--paper-line) !important;
+  letter-spacing: ${letter}em !important;
+  word-spacing: ${word}em !important;
 }
 
 p {
-  margin: 0 0 var(--paper-line);
+  margin: 0 0 calc(var(--paper-line) * ${para}) !important;
 }
 
 /* An adjacent-sibling paragraph rule was here, zeroing margin-top, and it did

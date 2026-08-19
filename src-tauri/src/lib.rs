@@ -50,6 +50,11 @@ fn mcp_bridge_port() -> u16 {
 /// `tray-icon@2x.png` is drawn verbatim in full colour and will not adapt to
 /// the menu bar. `icon_as_template(true)` is the matching half of that.
 ///
+/// The size is not set here and cannot be: `tray-icon` scales whatever bitmap
+/// it is given to 18pt tall. How large the mark reads is decided in
+/// `tray-icon-source.svg`, by how much transparent margin the export carries —
+/// see the note in that file before changing either.
+///
 /// Gated on the `desktop` feature rather than the `desktop` cfg: the feature
 /// is what turns `tauri/tray-icon` on, and without it the tray types do not
 /// exist to compile against, even on a desktop host.
@@ -94,9 +99,84 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// The characters that may appear in a URL unescaped — RFC 3986's unreserved
+/// set. Everything else is percent-encoded from its UTF-8 bytes.
+///
+/// Written out rather than pulled in as a dependency: this is the only URL this
+/// application builds, and a crate for twelve lines is a supply chain for
+/// twelve lines.
+fn percent_encode(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+/// The longest passage worth handing to a dictionary.
+///
+/// Not a defensive round number: a `dict://` lookup of a paragraph finds
+/// nothing, and a reader can select a whole chapter. This is the point past
+/// which the feature cannot work, so refusing is more honest than launching
+/// Dictionary.app to show it nothing.
+const MAX_LOOKUP: usize = 120;
+
+/// Hand a passage to the system dictionary.
+///
+/// A HANDOFF, not a lookup: what comes back from `DCSCopyTextDefinition` is a
+/// doubled headword and whatever dictionaries the reader has enabled, run
+/// together with no structure, and a multi-word selection returns nothing at
+/// all — see `lookUp.ts` for why that cannot be typeset into the panel the
+/// design draws. Dictionary.app is the version of this that is true everywhere.
+///
+/// NO SHELL IS INVOLVED. The URL is one `arg`, so it reaches `open` through
+/// `execve` as a single element and nothing in it is ever parsed as syntax; the
+/// scheme is written here rather than accepted from the caller, so this cannot
+/// be turned into a general "open any URL" command by passing one.
+#[tauri::command]
+fn look_up(term: String) -> Result<(), String> {
+    let trimmed = term.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > MAX_LOOKUP {
+        return Err("nothing to look up".into());
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err("that passage cannot be looked up".into());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let url = format!("dict://{}", percent_encode(trimmed));
+        std::process::Command::new("open")
+            .arg(url)
+            .spawn()
+            .map_err(|cause| format!("could not open the dictionary: {cause}"))?;
+        Ok(())
+    }
+
+    /* Loud on every other platform rather than silently doing nothing. The
+     * reader never reaches this — `hasDictionary` is what decides whether the
+     * button is drawn — so arriving here means the two have drifted apart, and
+     * that is worth an error in the console rather than a button that appears
+     * to work. */
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("this platform has no system dictionary".into())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mut builder = tauri::Builder::default()
+        /* This application's own commands. Unlike a plugin's, they are not
+        gated by the capability file — an app command is reachable from the
+        webview the moment it is registered here, which is why `look_up`
+        validates its own argument rather than trusting the caller. */
+        .invoke_handler(tauri::generate_handler![look_up])
         // Scoped by `capabilities/default.json`, not by these registrations —
         // registering a plugin grants nothing on its own.
         .plugin(tauri_plugin_fs::init())

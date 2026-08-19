@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { Renderer, TocItem, View } from 'foliate-js/view.js'
 import type { MarkPainter } from 'foliate-js/overlayer.js'
-import type { Theme, Typeface } from '../state'
+import type { Align, SpacingIndices, Theme, Typeface } from '../state'
 import type { BookMeta, BookNavigator, ReaderPosition } from '../hooks/useBook'
 import { useFontsReady } from '../fontProbe'
 import { isPdf } from '../../core/formats'
@@ -29,6 +29,13 @@ export interface FoliateViewProps {
   theme: Theme
   /** The face the BOOK is set in — never the interface's. */
   typeface: Typeface
+  /** How open the type is set — see `SPACING`. */
+  spacing: SpacingIndices
+  /** Justified, or flush to the reading edge. */
+  align: Align
+  /** The reader's brightness and contrast, resolved — see `bookColours`. */
+  brightness: number
+  contrast: number
   /** False only when the system asks for reduced motion. Not a preference. */
   animated: boolean
   paginated: boolean
@@ -62,7 +69,6 @@ export interface FoliateViewProps {
   /** A mark was drawn, with the live Range it resolved to. */
   onMarkDrawn: (cfi: string, range: Range) => void
   /** A drawn mark was clicked, identified by its CFI. */
-  onMarkActivated: (cfi: string) => void
   /**
    * A book was dropped onto the book itself.
    *
@@ -79,6 +85,13 @@ export interface FoliateViewProps {
 
 interface Settings {
   stepIdx: number
+  /** How open the type is set — see `SPACING`. */
+  spacing: SpacingIndices
+  /** Justified, or flush to the reading edge. */
+  align: Align
+  /** Resolved brightness and contrast — see `bookColours`. */
+  brightness: number
+  contrast: number
   measure: number
   theme: Theme
   typeface: Typeface
@@ -107,8 +120,10 @@ export function applySettings(renderer: Renderer, settings: Settings): void {
       stepIdx: settings.stepIdx,
       theme: settings.theme,
       typeface: settings.typeface,
-      justify: true,
-      hyphenate: true,
+      spacing: settings.spacing,
+      brightness: settings.brightness,
+      contrast: settings.contrast,
+      align: settings.align,
     }),
   )
 }
@@ -239,6 +254,10 @@ export function FoliateView({
   measure,
   theme,
   typeface,
+  spacing,
+  align,
+  brightness,
+  contrast,
   animated,
   paginated,
   lastLocation,
@@ -252,7 +271,6 @@ export function FoliateView({
   marks,
   onSelection,
   onMarkDrawn,
-  onMarkActivated,
   onFileDropped,
   onPageIntent,
   onFixedLayout,
@@ -286,7 +304,6 @@ export function FoliateView({
     onNavigator,
     onSelection,
     onMarkDrawn,
-    onMarkActivated,
     onFileDropped,
     onPageIntent,
     onFixedLayout,
@@ -297,7 +314,7 @@ export function FoliateView({
    * whenever a section's overlay is built, which happens as the reader scrolls
    * — long after any value captured at startup went stale. */
   const marksRef = useRef(marks)
-  const settings = useRef<Settings>({ stepIdx, measure, theme, typeface, animated, paginated })
+  const settings = useRef<Settings>({ stepIdx, measure, theme, typeface, spacing, align, brightness, contrast, animated, paginated })
   /* Through a ref for the same reason, and for one that is specific to it: the
    * saved position is derived from the book's content id, which resolves a few
    * milliseconds AFTER the reader mounts. A prop read at mount is read before
@@ -311,7 +328,7 @@ export function FoliateView({
   useLayoutEffect(() => {
     handlers.current = currentHandlers
     marksRef.current = marks
-    settings.current = { stepIdx, measure, theme, typeface, animated, paginated }
+    settings.current = { stepIdx, measure, theme, typeface, spacing, align, brightness, contrast, animated, paginated }
     lastLocationRef.current = lastLocation
   })
 
@@ -342,12 +359,16 @@ export function FoliateView({
       onNavigator: (navigator) => handlers.current.onNavigator(gen, navigator),
       onSelection: (selection) => handlers.current.onSelection(selection),
       onMarkDrawn: (cfi, range) => handlers.current.onMarkDrawn(cfi, range),
-      onMarkActivated: (cfi) => handlers.current.onMarkActivated(cfi),
       onFileDropped: (file) => handlers.current.onFileDropped(file),
       onPageIntent: (intent) => handlers.current.onPageIntent(intent),
       onFixedLayout: (fixed) => handlers.current.onFixedLayout(gen, fixed),
       getMarks: () => marksRef.current,
-      getPalette: () => markPalette(settings.current.theme),
+      getPalette: () =>
+        markPalette(
+          settings.current.theme,
+          settings.current.brightness,
+          settings.current.contrast,
+        ),
     })
     sessionRef.current = session
 
@@ -374,12 +395,15 @@ export function FoliateView({
             // `rects` arrives as a `DOMRectList` — foliate hands over
             // `range.getClientRects()` untouched — so it is materialised
             // before the geometry sees it. See `MarkPainter`.
-            highlight: ((rects, options = {}) =>
+            fill: ((rects, options = {}) =>
               Overlayer.highlight(
                 balanceRects(Array.from(rects), options.doc ?? null, options.at ?? null),
                 options,
               )) satisfies MarkPainter,
             underline: Overlayer.underline,
+            // The Overlayer's own name for the wavy rule. Renamed at this seam
+            // because "squiggly" is foliate's word and §15's is "wave".
+            wave: Overlayer.squiggly,
           }
         },
         /* foliate has no PDF loader, so a PDF is turned into a Book — one
@@ -440,7 +464,7 @@ export function FoliateView({
      * the effect and unmounted the React tree — the reader vanished instead of
      * the theme failing to change. */
     try {
-      applySettings(renderer, { stepIdx, measure: settings.current.measure, theme, typeface, animated, paginated })
+      applySettings(renderer, { stepIdx, measure: settings.current.measure, theme, typeface, spacing, align, brightness, contrast, animated, paginated })
       /* A theme change reaches the book through `setStyles`, which restyles the
        * document WITHOUT rebuilding the section — so no `create-overlay` fires
        * and the marks keep the colour they were painted in. Changing the step or
@@ -461,7 +485,12 @@ export function FoliateView({
      * webfont arrives the stack resolves to a fallback whose x-height is
      * somebody else's — a book opened during startup would otherwise keep a
      * size measured off Georgia until the reader changed some other setting. */
-  }, [stepIdx, theme, typeface, animated, paginated, ready, generation, fontsReady])
+    /* `spacing` is here because it is part of the stylesheet: without it the
+     * settings were re-applied for a theme or a face and not for the four
+     * controls that change how the type is set, so the pips moved and the page
+     * did not. Its identity is stable — the reducer returns the SAME state when
+     * a spacing has not moved — so depending on the object cannot loop. */
+  }, [stepIdx, theme, typeface, spacing, align, brightness, contrast, animated, paginated, ready, generation, fontsReady])
 
   /* THE MEASURE ALONE, and only the layout attributes for it.
    *

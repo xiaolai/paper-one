@@ -1,11 +1,11 @@
 import {
-  BOOKS_DIR,
   atomicWrite,
   contentPathIn,
   folderOf,
   mergeParsed,
   mergeStranded,
   parseRecord,
+  recordPath,
   readBook,
   setTag,
   trashOf,
@@ -13,7 +13,7 @@ import {
   writeBook,
   type BookRecord,
 } from './bookFolder'
-import { hasContentFile, writeIndex, type IndexFs, type IndexedBook } from './bookIndex'
+import { hasContentFile, invalidateIndex, writeIndex, type IndexFs, type IndexedBook } from './bookIndex'
 import { keepCover } from './coverArt'
 import { rescueStrandedMarks, restoreBook, trashBook } from './bookTrash'
 import { hlcOf, type Hlc } from './hlc'
@@ -74,6 +74,13 @@ export interface RemoteRow {
   readonly change: (record: BookRecord) => BookRecord
 }
 
+/** A removal the reader can undo: the tag as spelled, and the books that
+ *  actually carried it. */
+export interface TagRemoval {
+  readonly tag: string
+  readonly bookIds: readonly string[]
+}
+
 export interface Library {
   /** The shelf as it is right now. Same array until something changes. */
   getSnapshot(): readonly IndexedBook[]
@@ -123,6 +130,35 @@ export interface Library {
   removeTag(tag: string): Promise<void>
   /** How many books a `removeTag` of this tag would touch — see the implementation. */
   ownTagCount(tag: string): number
+  /**
+   * Add every tag to every book named — one `book.json` write per book.
+   *
+   * The plural of `tag`, and the only form the shelf's selection and the tag
+   * editor use. Spellings are normalised and empties dropped before anything
+   * is written, so a caller cannot store a tag the panel could not then name.
+   */
+  tagBooks(bookIds: readonly string[], tags: readonly string[]): Promise<void>
+  /**
+   * Take one tag off every book named, and RECORD what was actually taken.
+   *
+   * The one place a removal is recorded, so the shelf-wide `removeTag` and the
+   * editor's remove over a selection offer the same way back — two recorders
+   * are two answers to "what did that just take off".
+   */
+  untagBooks(bookIds: readonly string[], tag: string): Promise<void>
+  /**
+   * Adopt a publisher's subject as the reader's OWN tag, on the books whose
+   * subjects declare it — and only those, so adopting `Fiction` does not spray
+   * it across the shelf. One spelling is written everywhere, so the tag reads
+   * as one thing rather than as each publisher's variant of it.
+   */
+  adoptTag(tag: string): Promise<void>
+  /** The books carrying a tag, by id. `ownTagCount` is its length. */
+  ownTagBooks(tag: string): readonly string[]
+  /** What the last removal took, or null when there is nothing to offer back. */
+  lastRemoval(): TagRemoval | null
+  /** Put the last removal back, and stop offering it. */
+  undoRemoveTag(): Promise<void>
   /**
    * Put a jacket in a book's folder, in order with that book's other writes.
    *
@@ -216,6 +252,39 @@ const canonical = (value: unknown): string => {
  *  a change published a notification for a row that had not changed. */
 const sameRow = (a: IndexedBook, b: IndexedBook): boolean => canonical(a) === canonical(b)
 
+/**
+ * A shelf row rebuilt from a record — the one place that shape is decided.
+ *
+ * `hasContent` is the field the record does NOT carry: it is knowledge the
+ * index holds about whether the book's bytes are here, so it has to be handed
+ * in and carried across, or every reconcile after a write silently forgets it
+ * and the shelf offers to open a book it cannot.
+ */
+export function asRow(record: BookRecord, bookId: string, hasContent: boolean | undefined): IndexedBook {
+  /* STRIPPED before the spread, not trusted to be absent. `BookRecord` has no
+   * such field, but a caller can hand a row here without noticing — and a
+   * smuggled flag surviving an `undefined` argument would make "carries
+   * knowledge, invents none" true in the tests and false at runtime. */
+  const { hasContent: _stray, ...clean } = record as BookRecord & { hasContent?: boolean }
+  return { ...clean, bookId, ...(hasContent === undefined ? {} : { hasContent }) }
+}
+
+/**
+ * A row as the RECORD it is a view of — `asRow`'s twin.
+ *
+ * `bookId` and `hasContent` are the index's, not the book's: one is the key
+ * the row is filed under, the other is derived by the scan. A change function
+ * is record-to-record and must not be shown either, and the identity check
+ * that decides whether anything moved must not be comparing against them —
+ * handed a row with the flag still on it, a merge that changed nothing
+ * returned a fresh object, and a sync session that should have been a no-op
+ * wrote a line into the journal for every book it re-served.
+ */
+export function recordOfRow(row: IndexedBook): BookRecord {
+  const { bookId: _id, hasContent: _flag, ...record } = row
+  return record
+}
+
 export function createLibrary({
   fs,
   queue,
@@ -254,11 +323,58 @@ export function createLibrary({
     })
   /** The list as it is right now — the authority between notifications. */
   let books: readonly IndexedBook[] = initial
+
+  /**
+   * Where a book's writes QUEUE, and where they LAND, across a rekey.
+   *
+   * A rekey renames the folder under a book, so two things move and they move
+   * differently. The PATH follows the book — a write enqueued under the old id
+   * before the rename must land in the new folder when its turn comes, which
+   * is what `rekeyed` resolves. The LANE must NOT follow it: a write that
+   * hopped lanes mid-flight could be overtaken by one enqueued after it, so
+   * `lanes` routes the NEW folder's lane back onto the old one and every write
+   * for the book — issued under either id, before or after the move — stays in
+   * a single lane in the order it was asked for.
+   *
+   * The alias is set BEFORE the rekey's task is enqueued, so no new-id write
+   * can slip into an unaliased lane while the rename is still queued. A rekey
+   * that then finds the destination occupied leaves the alias behind — two
+   * folders over-serialised on one lane, which costs a moment of latency and
+   * no correctness, against un-aliasing a lane other tasks may already be
+   * queued on.
+   */
+  const lanes = new Map<string, string>()
+  const rekeyed = new Map<string, string>()
+
+  /** A map followed to its end, cycle-safe. */
+  const follow = (start: string, map: ReadonlyMap<string, string>): string => {
+    let at = start
+    const seen = new Set([at])
+    for (;;) {
+      const next = map.get(at)
+      if (next === undefined || seen.has(next)) return at
+      seen.add(next)
+      at = next
+    }
+  }
+
+  /* THE FOLDER IS THE LANE, not the id as spelled: two spellings of one id
+   * (`book:abc` and its folder name `book_abc`) name one directory, and a
+   * queue exists to serialise what contends for one directory. */
+  const laneFor = (bookId: string): string => follow(folderOf(bookId), lanes)
+  /** Where a book's writes land NOW — `rekeyed` followed to the end. */
+  const resolveId = (bookId: string): string => follow(bookId, rekeyed)
   const listeners = new Set<() => void>()
+
+  /** Tell every subscriber to re-read. Its own function because not every
+   *  change is a change to the LIST — the undo offer moves on its own. */
+  const notify = () => {
+    for (const listener of [...listeners]) listener()
+  }
 
   const publish = (next: readonly IndexedBook[]) => {
     books = next
-    for (const listener of [...listeners]) listener()
+    notify()
   }
 
   /**
@@ -274,7 +390,7 @@ export function createLibrary({
     const at = books.findIndex((one) => one.bookId === bookId)
     if (at === -1) return
     const was = books[at]!
-    const row: IndexedBook = { ...record, bookId, ...(was.hasContent === undefined ? {} : { hasContent: was.hasContent }) }
+    const row = asRow(record, bookId, was.hasContent)
     if (sameRow(was, row)) return
     const next = [...books]
     next[at] = row
@@ -296,11 +412,12 @@ export function createLibrary({
     key: string,
     next: readonly IndexedBook[],
     what: 'record' | 'removed',
-    write: (target: IndexFs) => Promise<unknown>,
+    write: (target: IndexFs, live: string) => Promise<unknown>,
   ): Promise<void> => {
     publish(next)
     if (!fs) return Promise.resolve()
     const target = fs
+    const lane = laneFor(key)
     return (
       queue
         /* APPEND, not replace. Each task here applies a CHANGE to what is on
@@ -310,10 +427,70 @@ export function createLibrary({
         /* BRACKETED — `begin` before the folder write and `commit` after it,
          * inside the queued task, so a recorder sees the change with nothing
          * else touching the book in between. */
-        .append(key, async () => {
-          await recorded(recorder, key, what, () => write(target))
+        .append(lane, async () => {
+          /* RESOLVED AT RUN TIME — the book may have been carried onto a new
+           * id while this write waited its turn. The PATH follows the book;
+           * the LANE never has to, because a rekey routes the destination's
+           * lane back onto this one — see `lanes`. */
+          const live = resolveId(key)
+          await recorded(recorder, live, what, () => write(target, live))
         })
         .then(() => writeIndexNow(target))
+        .catch(async (cause: unknown) => {
+          /* THE FOLDER WINS, NOW — not at some later read that may never come.
+           *
+           * The optimistic row predicted a write that did not land, and worse,
+           * another book's commit may already have serialised that phantom
+           * into the index — which is then TRUSTED, because folder membership
+           * has not changed, and an idle book's `book.json` is never re-read
+           * while the cache is trusted. Repairing memory alone left the lie
+           * durable across launches.
+           *
+           * The repair is a task IN THE BOOK'S LANE: serial behind every write
+           * already queued for it, whose outcomes are what it must read, and
+           * inside the queue the close-time flush waits on. */
+          try {
+            await queue.append(lane, async () => {
+              const live = resolveId(key)
+              const truth = await readBook(target, live)
+              if (truth) {
+                reconcile(live, truth)
+                await measureContent(target, live)
+                return
+              }
+              /* NOTHING READABLE BACKS THE ROW — the write failed AND the
+               * folder holds no record this can read, so there is no state the
+               * row can honestly show; a scan would not shelve it either. The
+               * row goes, and the index written below omits both the book and
+               * its folder claim — so a folder actually sitting there makes
+               * the next launch's listing DISAGREE and rescan, instead of
+               * trusting a cache this session could not confirm. */
+              if (books.some((one) => one.bookId === live)) {
+                publish(books.filter((one) => one.bookId !== live))
+              }
+            })
+            /* AND THE CORRECTED PICTURE REACHES THE DISK — the whole point.
+             * Without this the phantom serialised by the other book's commit
+             * stayed in `index.json` with folder membership unchanged, and the
+             * next launch believed it. */
+            await writeIndexNow(target)
+          } catch (repair: unknown) {
+            console.error('Paper: could not repair the shelf after a failed save', repair)
+            /* THE LAST RESORT, and only here. The repair above is the right
+             * answer because it writes a CORRECTED picture; this is the blunt
+             * instrument, reached when even that could not be written. At that
+             * point the index on disk may hold a phantom this session cannot
+             * correct, and `loadShelf` trusts the index whenever the folder
+             * listing agrees — so the honest move is to leave no cache to
+             * trust. A rescan is the cost of not knowing. */
+            await invalidateIndex(target).catch(() => {})
+          }
+          /* RE-THROWN. The verbs return their promise to the caller — the hook
+           * reports a failed save, `eachBook` gathers failures across a shelf —
+           * so swallowing it here would make a write that did not happen look
+           * like one that did. */
+          throw cause
+        })
     )
   }
 
@@ -321,19 +498,27 @@ export function createLibrary({
     const at = books.findIndex((one) => one.bookId === bookId)
     const current = at === -1 ? null : books[at]
     if (!current) return Promise.resolve()
-    const { bookId: _id, ...record } = current
+    const record = recordOfRow(current)
     const next = change(record)
     // By identity, so a change that decides nothing moved writes nothing —
     // this runs on every page turn.
     if (next === record) return Promise.resolve()
     const list = [...books]
-    list[at] = { ...next, bookId }
-    return commit(bookId, list, 'record', (target) =>
+    /* THE FLAG SURVIVES A CALLBACK THAT BUILDS ITS RESULT. `change` is
+     * record-to-record and is under no obligation to spread its input, so a
+     * callback returning a fresh object used to strip the derived flag from
+     * the row on the way through — the same defect `add` had, wearing the
+     * other mutator. */
+    list[at] = asRow(next, bookId, current.hasContent)
+    return commit(bookId, list, 'record', (target, live) =>
       /* THE CHANGE, not the result. Passing `() => next` wrote the in-memory
        * record back — and that copy can be stale, because it came from an
        * index that may be one write behind after a crash. Handing the function
-       * over means it is applied to whatever is actually on disk. */
-      updateBook(target, bookId, change),
+       * over means it is applied to whatever is actually on disk.
+       *
+       * `live` rather than `bookId`: the book may have been carried onto a new
+       * id while this write waited its turn — see `rekeyed`. */
+      updateBook(target, live, change),
     )
   }
 
@@ -342,8 +527,13 @@ export function createLibrary({
    * queued task for the book (so it must not queue on the book's key itself)
    * and writes the index on the index key when the answer changed.
    */
-  const noteContent = async (target: IndexFs, bookId: string): Promise<void> => {
-    const now = await hasContentFile(target, folderOf(bookId).slice(BOOKS_DIR.length + 1))
+  const measureContent = async (target: IndexFs, bookId: string): Promise<void> => {
+    const now = await hasContentFile(target, bookId)
+    /* NULL IS NOT FALSE. The folder could not be listed, which says nothing
+     * about whether the bytes are there — writing it in as `false` is how a
+     * transient failure to look disabled a book whose content was sitting
+     * right beside it. Carry what the index already had. */
+    if (now === null) return
     const where = books.findIndex((one) => one.bookId === bookId)
     if (where === -1) return
     const row = books[where]!
@@ -351,12 +541,22 @@ export function createLibrary({
     const list = [...books]
     list[where] = { ...row, hasContent: now }
     publish(list)
-    /* ON THE INDEX KEY, like every other index write. Called directly from a
-     * per-book task it shared the fixed `index.json.writing` path with them —
-     * and re-adding a folder of disabled books starts one of these per book, so
-     * they raced each other and an older list could land last. Being unchanged
-     * in folder membership, that stale cache is then trusted, and the repaired
-     * book goes back to disabled. AWAITED, so a failure is the caller's. */
+  }
+
+  /**
+   * The measurement, and the index write that records it.
+   *
+   * For callers that are NOT inside a `commit` — which writes the index itself
+   * once its task resolves, so measuring inside one must not write it a second
+   * time. On the index key, like every other index write: called directly from
+   * a per-book task it shared the fixed `index.json.writing` path with them,
+   * and re-adding a folder of disabled books starts one of these per book, so
+   * they raced each other and an older list could land last. Being unchanged
+   * in folder membership, that stale cache is then trusted, and the repaired
+   * book goes back to disabled. AWAITED, so a failure is the caller's.
+   */
+  const noteContent = async (target: IndexFs, bookId: string): Promise<void> => {
+    await measureContent(target, bookId)
     await writeIndexNow(target)
   }
 
@@ -380,7 +580,7 @@ export function createLibrary({
        * them. */
       if (!fs) return Promise.resolve()
       const target = fs
-      return queue.append(bookId, () =>
+      return queue.append(laneFor(bookId), () =>
         recorded(recorder, bookId, 'record', async () => {
           await restoreBook(target, bookId)
           await noteReAdd(target, bookId)
@@ -400,7 +600,17 @@ export function createLibrary({
            * `hasContent: false`, folder membership had not changed, and the
            * stale flag was trusted on every launch after. The advertised
            * repair repaired nothing. */
-          if (previous.hasContent === false) await noteContent(target, previous.bookId)
+          /* THE FLAG IS MEASURED EVERY TIME, not only when the row said
+           * `false`. This path is every re-import of a folder — it is the
+           * exact remedy `CANNOT_OPEN` prescribes, "add the file again" — and
+           * it is also where a row whose first measurement was suppressed
+           * comes to be healed. Measuring only the `false` rows repaired the
+           * advertised case and no other: an `undefined` row stayed flagless
+           * for ever, which is the launch-rescan defect through the one door
+           * that never measured, and a stale `true` kept claiming bytes that
+           * are gone. AFTER the restore, so bytes the trash just gave back are
+           * counted. */
+          await noteContent(target, previous.bookId)
           const stranded = parseRecord(await readText(target, `${trashOf(bookId)}/book.json`))
           if (!stranded) return
           const live = await readBook(target, bookId)
@@ -421,9 +631,15 @@ export function createLibrary({
      * `writeBook` stamps it into the record — means `update`, `remove` and
      * `positionOf` see one id from this point on, instead of an alias that
      * resolves to the same folder and matches none of them. */
-    const entry: IndexedBook = { ...merged, bookId }
+    /* THE FLAG IS CARRIED, not rebuilt. `hasContent` is derived by the scan and
+     * is not a field of `BookRecord`, so the optimistic row — drawn before any
+     * disk answer comes back — loses it unless `asRow` is handed it back. The
+     * enrichment pass and the reader's own open both fold a parse into an
+     * existing row, and this is the exact line where every parse used to knock
+     * the flag off the shelf. */
+    const entry = asRow(merged, bookId, previous?.hasContent)
     const list = at === -1 ? [entry, ...books] : books.map((one, i) => (i === at ? entry : one))
-    return commit(bookId, list, 'record', async (target) => {
+    return commit(bookId, list, 'record', async (target, live) => {
       /* RESTORED, not overwritten, when a removed copy is waiting. The id is
        * the bytes, so re-adding a book Paper had removed lands on the same
        * folder name — and its tags, position and marks are still in there.
@@ -437,8 +653,8 @@ export function createLibrary({
        * leftovers were never retried, and the trash sweep deleted them a
        * fortnight later. It is a cheap no-op when the trash is empty, which is
        * the ordinary case. */
-      await restoreBook(target, bookId)
-      await noteReAdd(target, bookId)
+      await restoreBook(target, live)
+      await noteReAdd(target, live)
       /* WHAT THE RESTORE COULD NOT BRING BACK, folded in here.
        *
        * `restoreBook` moves file by file and leaves behind a name already
@@ -450,25 +666,25 @@ export function createLibrary({
        * This layer DOES know: the stranded record is the one the reader wrote,
        * so it is `previous` in the merge and the live one is the parse. Once
        * it is safely written, the copy in the trash goes. */
-      const stranded = parseRecord(await readText(target, `${trashOf(bookId)}/book.json`))
+      const stranded = parseRecord(await readText(target, `${trashOf(live)}/book.json`))
       /* AND THE MARKS, for the same reason and by the same route. A highlight
        * made while a re-added book's bytes were still being written created a
        * live `marks.json` that blocked the complete one from coming back — so
        * one annotation made in that window cost every annotation made before
        * the book was removed. */
-      await rescueStrandedMarks(target, bookId)
+      await rescueStrandedMarks(target, live)
       /* MERGED INTO WHAT IS ON DISK, ALWAYS — not only when the row was
        * missing. The in-memory copy comes from an index that `loadShelf` will
        * knowingly trust while it is one write behind, so folding the parse
        * into it and writing that back put a stale record over a newer one:
        * opening a book could undo the tag applied just before the last quit.
        * The record is the truth; the row is a view of it. */
-      const live = await readBook(target, bookId)
+      const onDisk = await readBook(target, live)
       /* BOTH ARE THE READER'S, so neither wins outright — see `mergeStranded`.
        * Treating the stranded copy as authoritative threw away a tag applied
        * after the partial restore, which is a fresh way to lose the same thing
        * this rescue exists to save. */
-      const existing = stranded ? (live ? mergeStranded(stranded, live) : stranded) : live
+      const existing = stranded ? (onDisk ? mergeStranded(stranded, onDisk) : stranded) : onDisk
       /* SPARSE IS CHECKED AGAINST THE DISK TOO. The early return above guards
        * the in-memory row, and a record can be on disk without being in that
        * list — a removal shown optimistically before its trash landed, or an
@@ -482,22 +698,32 @@ export function createLibrary({
           ...(record.ext && !existing.ext ? { ext: record.ext } : {}),
           ...(record.origin && !existing.origin ? { origin: record.origin } : {}),
         }
-        await writeBook(target, bookId, kept)
-        if (stranded) await target.remove(`${trashOf(bookId)}/book.json`).catch(() => {})
-        reconcile(bookId, kept)
+        await writeBook(target, live, kept)
+        if (stranded) await target.remove(`${trashOf(live)}/book.json`).catch(() => {})
+        reconcile(live, kept)
         return
       }
       const written = existing ? mergeParsed(existing, record) : merged
-      await writeBook(target, bookId, written)
+      await writeBook(target, live, written)
       // Only now: the reader's record is in two places until this line, which
       // is the order that cannot lose it.
-      if (stranded) await target.remove(`${trashOf(bookId)}/book.json`).catch(() => {})
+      if (stranded) await target.remove(`${trashOf(live)}/book.json`).catch(() => {})
       /* WHAT WAS ACTUALLY WRITTEN, back into the row. The optimistic row was
        * built from the index, which `loadShelf` will knowingly trust while it
        * is one write behind — so a tag or a position on disk but not in the
        * cache stayed invisible, and the next thing to save the row wrote the
        * cache's version over it. */
-      reconcile(bookId, written)
+      reconcile(live, written)
+      /* AND THE FLAG, MEASURED OFF THE FOLDER BY THE WRITE ITSELF.
+       *
+       * `loadShelf` refuses to trust an index in which any row lacks
+       * `hasContent`, so one flagless row turns the cache off for the NEXT
+       * launch and makes opening a freshly imported library pay a full
+       * folder-by-folder scan, every single time. A row this path adds has
+       * never been scanned, so nothing else will measure it. Inside the
+       * committed task, so the index write `commit` chains afterwards carries
+       * the answer; `measureContent` deliberately does not write it itself. */
+      await measureContent(target, live)
     })
   }
 
@@ -529,8 +755,12 @@ export function createLibrary({
     if (books.some((one) => one.bookId === to)) return 'occupied'
     const target = fs
     let outcome = 'nothing' as RekeyOutcome
+    /* THE ALIAS FIRST, before the task is enqueued: a write issued under the
+     * NEW id while the rename is still queued must already find its way into
+     * this lane, or it would run beside the rename rather than behind it. */
+    lanes.set(folderOf(to), laneFor(from))
     try {
-      await queue.append(from, async () => {
+      await queue.append(laneFor(from), async () => {
         if (await target.exists(folderOf(to))) {
           outcome = 'occupied'
           return
@@ -549,6 +779,10 @@ export function createLibrary({
          * stored id only when it names the folder it is in, which is what
          * makes the stamp below safe to lose. */
         outcome = 'moved'
+        /* AND THE PATH FOLLOWS THE BOOK from here on: a write enqueued under
+         * the old id before the rename lands in the new folder when its turn
+         * comes — see `rekeyed`. */
+        rekeyed.set(from, to)
         const moved = await readBook(target, to)
         if (moved) await recorded(recorder, to, 'record', () => writeBook(target, to, moved))
         const at = books.findIndex((one) => one.bookId === from)
@@ -578,13 +812,13 @@ export function createLibrary({
     /* ONE RENAME. Phase 3's removal touched three places — a row, the bytes,
      * the cover — any of which could fail alone, and two of which did. */
     const removed = books.find((one) => one.bookId === bookId)
-    return commit(bookId, list, 'removed', async (target) => {
+    return commit(bookId, list, 'removed', async (target, live) => {
       /* THE PRESENCE REGISTER FIRST, THE RENAME SECOND — the order is the
        * point (`presence.ts`). A crash between the two leaves a live folder
        * and a register that says removed, which launch recovery finishes; the
        * other order would leave a book gone with nothing anywhere recording
        * that anyone removed it, and a stale satchel would put it back. */
-      await settlePresence(target, bookId, 'removed', clock())
+      await settlePresence(target, live, 'removed', clock())
       /* A REMOVAL THAT DID NOT HAPPEN IS NOT A REMOVAL. `trashBook` reports
        * false when there was nothing there — fine, the row was already gone —
        * but it also reported false when the move genuinely failed, and this
@@ -593,9 +827,9 @@ export function createLibrary({
        * launch. Thrown, so the queue's own reporting says the library could
        * not be saved rather than the shelf lying quietly. */
       try {
-        if (!(await trashBook(target, bookId))) {
-          if (await target.exists(folderOf(bookId))) {
-            throw new Error(`could not remove ${bookId}: its folder is still there`)
+        if (!(await trashBook(target, live))) {
+          if (await target.exists(folderOf(live))) {
+            throw new Error(`could not remove ${live}: its folder is still there`)
           }
         }
       } catch (cause) {
@@ -609,7 +843,7 @@ export function createLibrary({
          * followed hid a correctly-written `book.json` across launches. Only
          * the one book that failed to go comes back, into whatever the shelf
          * is NOW. */
-        if (removed && !books.some((one) => one.bookId === bookId)) {
+        if (removed && !books.some((one) => one.bookId === live)) {
           publish([removed, ...books])
           await writeIndexNow(target)
         }
@@ -619,7 +853,7 @@ export function createLibrary({
          * removal the reader just watched not happen. Best effort: a register
          * that cannot be written back leans towards removal, which recovery
          * treats as intent — the recoverable side of wrong. */
-        await settlePresence(target, bookId, 'live', clock()).catch(() => {})
+        await settlePresence(target, live, 'live', clock()).catch(() => {})
         throw cause
       }
     })
@@ -629,7 +863,7 @@ export function createLibrary({
     if (!fs) return false
     const target = fs
     let came = false
-    await queue.append(bookId, () =>
+    await queue.append(laneFor(bookId), () =>
       recorded(recorder, bookId, 'removed', async () => {
         if (!(await restoreBook(target, bookId))) return
         came = true
@@ -639,8 +873,10 @@ export function createLibrary({
         await rescueStrandedMarks(target, bookId)
         const record = await readBook(target, bookId)
         if (!record) return
-        const hasContent = await hasContentFile(target, folderOf(bookId).slice(BOOKS_DIR.length + 1))
-        const row: IndexedBook = { ...record, bookId, hasContent }
+        const hasContent = await hasContentFile(target, bookId)
+        // Absent rather than false when the folder could not be listed — see
+        // `hasContentFile`. An absent flag is "not known", which is honest.
+        const row = asRow(record, bookId, hasContent ?? undefined)
         const at = books.findIndex((one) => one.bookId === bookId)
         publish(at === -1 ? [row, ...books] : books.map((one, i) => (i === at ? row : one)))
       }),
@@ -764,20 +1000,29 @@ export function createLibrary({
   const keepJacket: Library['keepJacket'] = (bookId, cover) => {
     if (!fs) return Promise.resolve()
     const target = fs
-    // The book's OWN key, which is what puts it in line behind that book's
+    // The book's OWN lane, which is what puts it in line behind that book's
     // record write and its removal rather than beside them.
-    return queue.append(bookId, () =>
-      recorded(recorder, bookId, 'cover', async () => {
-        await keepCover(target, bookId, cover)
-      }),
-    )
+    return queue.append(laneFor(bookId), async () => {
+      const live = resolveId(bookId)
+      /* ONLY FOR A BOOK THAT IS STILL HERE. Being in line behind the removal
+       * is necessary and was never sufficient: `keepCover` MAKES the folder it
+       * writes into, so a jacket task running after a removal politely
+       * recreated the folder the removal had just carried to the trash, as a
+       * directory holding nothing but a picture of a book that is gone. The
+       * record is the book as far as the shelf is concerned, so its absence is
+       * what "removed" looks like from inside the queue. */
+      if (!(await target.exists(recordPath(live)))) return
+      await recorded(recorder, live, 'cover', async () => {
+        await keepCover(target, live, cover)
+      })
+    })
   }
 
   const keepContent: Library['keepContent'] = async (bookId, name, bytes) => {
     if (!fs) return false
     const target = fs
     let wrote = false
-    await queue.append(bookId, () =>
+    await queue.append(laneFor(bookId), () =>
       recorded(recorder, bookId, 'content', async () => {
         const at = contentPathIn(bookId, name)
         /* Checked before the bytes are touched: `arrayBuffer()` copies the
@@ -805,9 +1050,93 @@ export function createLibrary({
    * five; a tag that was three subjects and one reader tag read "4" and removed
    * from one. The consent number has to be the action's number.
    */
-  const ownTagCount: Library['ownTagCount'] = (raw) => {
+  const ownTagBooks: Library['ownTagBooks'] = (raw) => {
     const key = tagKey(raw)
-    return books.filter((book) => (book.tags ?? []).some((one) => tagKey(one) === key)).length
+    return books.filter((book) => (book.tags ?? []).some((one) => tagKey(one) === key)).map((book) => book.bookId)
+  }
+
+  /* Its LENGTH, not a second walk with a second rule: the number the reader is
+   * shown before a removal and the books an undo puts it back on must come from
+   * one answer, or the confirm can promise more than the undo delivers. */
+  const ownTagCount: Library['ownTagCount'] = (raw) => ownTagBooks(raw).length
+
+  /** The books named, one `update` each; settled together, failures gathered. */
+  const eachOf = async (
+    bookIds: readonly string[],
+    change: (record: BookRecord) => BookRecord,
+  ): Promise<void> => {
+    const outcomes = await Promise.allSettled(bookIds.map((bookId) => update(bookId, change)))
+    const failed = outcomes.filter((one): one is PromiseRejectedResult => one.status === 'rejected')
+    if (failed.length === 1) throw failed[0]!.reason
+    if (failed.length) throw new AggregateError(failed.map((one) => one.reason), `${failed.length} books could not be saved`)
+  }
+
+  /* HELD HERE rather than in React state, because the store is the thing that
+   * knows what a removal took — and `removeTag` and the editor's remove both
+   * route through `untagBooks`, so there is one recorder and one answer. */
+  let removal: TagRemoval | null = null
+  const setLastRemoval = (next: TagRemoval | null) => {
+    removal = next
+    notify()
+  }
+  const lastRemoval: Library['lastRemoval'] = () => removal
+
+  const tagBooks: Library['tagBooks'] = (bookIds, raws) => {
+    const values = raws.map(normalizeTag).filter(Boolean)
+    if (values.length === 0) return Promise.resolve()
+    const at = clock()
+    return eachOf(bookIds, (record) => {
+      let next = record
+      for (const value of values) {
+        const key = tagKey(value)
+        // Folded against BOTH lists, exactly as `tag` does: a publisher's
+        // `philosophy` and a reader's `Philosophy` are one tag on this book.
+        const held = [...(next.tags ?? []), ...(next.subjects ?? [])]
+        if (held.some((one) => tagKey(one) === key)) continue
+        next = setTag(next, value, true, at)
+      }
+      return next
+    })
+  }
+
+  const untagBooks: Library['untagBooks'] = (bookIds, raw) => {
+    const key = tagKey(raw)
+    const at = clock()
+    /* WHICH BOOKS ACTUALLY LOSE IT, taken before anything is written — read
+     * afterwards the answer is always none, and an undo would have nothing to
+     * put the tag back on. Filtered rather than assumed: `bookIds` is a
+     * selection, and most of a selection may not carry the tag at all, so
+     * putting it back on all of them would tag books that never had it. */
+    const wanted = new Set(bookIds)
+    const touched = ownTagBooks(raw).filter((bookId) => wanted.has(bookId))
+    return eachOf(bookIds, (record) => {
+      const held = (record.tags ?? []).find((one) => tagKey(one) === key)
+      // A publisher's subject cannot be removed — it is a fact about the book,
+      // and it returns on the next parse anyway.
+      if (held === undefined) return record
+      return setTag(record, held, false, at)
+    }).then(() => {
+      if (touched.length > 0) setLastRemoval({ tag: normalizeTag(raw), bookIds: touched })
+    })
+  }
+
+  const adoptTag: Library['adoptTag'] = (raw) => {
+    const value = normalizeTag(raw)
+    if (!value) return Promise.resolve()
+    const key = tagKey(value)
+    const at = clock()
+    return eachBook((record) => {
+      if (!(record.subjects ?? []).some((one) => tagKey(one) === key)) return record
+      if ((record.tags ?? []).some((one) => tagKey(one) === key)) return record
+      return setTag(record, value, true, at)
+    })
+  }
+
+  const undoRemoveTag: Library['undoRemoveTag'] = () => {
+    const offered = removal
+    if (!offered) return Promise.resolve()
+    setLastRemoval(null)
+    return tagBooks(offered.bookIds, [offered.tag])
   }
 
   const positionOf: Library['positionOf'] = (bookId) =>
@@ -816,7 +1145,7 @@ export function createLibrary({
   const refreshContent: Library['refreshContent'] = (bookId) => {
     if (!fs) return Promise.resolve()
     const target = fs
-    return queue.append(bookId, () =>
+    return queue.append(laneFor(bookId), () =>
       recorded(recorder, bookId, 'content', () => noteContent(target, bookId)),
     )
   }
@@ -827,10 +1156,11 @@ export function createLibrary({
     for (const row of rows) {
       const at = list.findIndex((one) => one.bookId === row.bookId)
       if (at === -1) continue
-      const { bookId: _id, ...record } = list[at]!
+      const was = list[at]!
+      const record = recordOfRow(was)
       const next = row.change(record)
       if (next === record) continue
-      list[at] = { ...next, bookId: row.bookId }
+      list[at] = asRow(next, row.bookId, was.hasContent)
       applied.push(row)
     }
     if (applied.length === 0) return
@@ -839,7 +1169,7 @@ export function createLibrary({
     const target = fs
     const outcomes = await Promise.allSettled(
       applied.map((row) =>
-        queue.append(row.bookId, async () => {
+        queue.append(laneFor(row.bookId), async () => {
           await recorded(recorder, row.bookId, 'record', () => updateBook(target, row.bookId, row.change))
         }),
       ),
@@ -870,6 +1200,12 @@ export function createLibrary({
     renameTag,
     removeTag,
     ownTagCount,
+    ownTagBooks,
+    tagBooks,
+    untagBooks,
+    adoptTag,
+    lastRemoval,
+    undoRemoveTag,
     keepJacket,
     keepContent,
     positionOf,

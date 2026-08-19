@@ -259,7 +259,7 @@ describe('updateBook', () => {
    * otherwise removing a book while its position is being saved brings it back. */
   it('does nothing for a book that is not there', async () => {
     const fs = fakeFs()
-    expect(await updateBook(fs, 'gone', (r) => r)).toBe(false)
+    expect(await updateBook(fs, "gone", (r) => r)).toBeNull()
     expect(fs.files.size).toBe(0)
   })
 
@@ -509,7 +509,7 @@ describe('a write racing a removal', () => {
       }
       return { ...record, position: 'epubcfi(/6/14)' }
     })
-    expect(wrote).toBe(false)
+    expect(wrote).toBeNull()
     expect([...fs.files.keys()].some((k) => k.startsWith(`${folderOf('book_a')}/`))).toBe(false)
     expect(fs.files.has(`${trashOf('book_a')}/content.epub`)).toBe(true)
   })
@@ -522,7 +522,10 @@ describe('a write racing a removal', () => {
       [`${folderOf('book_a')}/book.json`]: '{"title":"Moby-Dick","author":"M"}',
       [`${trashOf('book_a')}/book.json`]: '{"title":"An older removal","author":""}',
     })
-    expect(await updateBook(fs, 'book_a', (r) => ({ ...r, finished: true }))).toBe(true)
+    // The record now on disk comes back, so the caller can put its row right.
+    expect(await updateBook(fs, 'book_a', (r) => ({ ...r, finished: true }))).toMatchObject({
+      finished: true,
+    })
     expect((await readBook(fs, 'book_a'))?.finished).toBe(true)
   })
 })
@@ -666,7 +669,7 @@ describe('updateBook on a record that will not read', () => {
   })
 
   it('still reports a book that is genuinely gone, without throwing', async () => {
-    expect(await updateBook(fakeFs(), 'book_a', (r) => r)).toBe(false)
+    expect(await updateBook(fakeFs(), "book_a", (r) => r)).toBeNull()
   })
 })
 

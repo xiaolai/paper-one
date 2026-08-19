@@ -26,7 +26,14 @@
   --line:#EDEEEB; --line-2:#E3E4E1; --line-3:#D6D8D3;
   --accent:#1B3A6B; --accent-bg:#EEF1F6; --accent-line:#DDE2EA;
   --amber:#9E5A16; --amber-bg:#FBF6EE; --amber-line:#E7D6BE;
-  --mark:#F3E6C0; --mark-rule:#E0BE55; --mark-ink:#9A8455; --ok:#7C9A6B;
+  --mark:#FAE8AF; --mark-rule:#D5B75A; --mark-ink:#9A8455; --ok:#7C9A6B;
+  /* §01's three mark tints: a pale FILL for a band behind the words and a
+     saturated RULE for the line under them — and for the swatch that offers
+     either. Mirrored in `bookCss.ts` for the book's own document, which
+     cannot see these; that table is the one the Overlayer paints from. */
+  --mark-yellow:#FAE8AF; --mark-yellow-rule:#D5B75A;
+  --mark-green:#CAF7CA; --mark-green-rule:#88CE8A;
+  --mark-purple:#E9CCFF; --mark-purple-rule:#D1A4F3;
   /* Destructive ink. Checked against every theme's --surface AND --wash, since a
      danger row is read on its hover fill: 6.5 / 5.9 here; sepia 5.8 / 5.0; slate
      and sage fell to 4.15 / 4.24 on wash — under 4.5:1 — and carry their own. */
@@ -57,7 +64,14 @@
   --accent:#23456F; --accent-bg:#CFD7DF; --accent-line:#B4BFCB;
   --swatch-edge:#A6ABA6;
   --amber:#8A4C11; --amber-bg:#DDD8CB; --amber-line:#C6B79C;
-  --mark:#DCCB92; --mark-rule:#B99B3F; --mark-ink:#6F6034; --ok:#6A8858;
+  --mark:#DCC992; --mark-rule:#B79A3B; --mark-ink:#6F6034; --ok:#6A8858;
+  /* §01's three mark tints: a pale FILL for a band behind the words and a
+     saturated RULE for the line under them — and for the swatch that offers
+     either. Mirrored in `bookCss.ts` for the book's own document, which
+     cannot see these; that table is the one the Overlayer paints from. */
+  --mark-yellow:#DCC992; --mark-yellow-rule:#B79A3B;
+  --mark-green:#ACD8AD; --mark-green-rule:#6CB06E;
+  --mark-purple:#C9ADDE; --mark-purple-rule:#B388D4;
   /* Darker than the root's: on this theme's --wash the root red measures under
      4.5:1 (see the contrast note on --danger in :root). */
   --danger:#9C1D16;
@@ -71,7 +85,14 @@
   --accent:#2A4F6B; --accent-bg:#CDDCDE; --accent-line:#B3C6C9;
   --swatch-edge:#A2B29A;
   --amber:#8F5013; --amber-bg:#DDDCC3; --amber-line:#C3BE97;
-  --mark:#D8CE8C; --mark-rule:#AE9A3C; --mark-ink:#6A6231; --ok:#5F8050;
+  --mark:#DDCC94; --mark-rule:#B99C3D; --mark-ink:#6A6231; --ok:#5F8050;
+  /* §01's three mark tints: a pale FILL for a band behind the words and a
+     saturated RULE for the line under them — and for the swatch that offers
+     either. Mirrored in `bookCss.ts` for the book's own document, which
+     cannot see these; that table is the one the Overlayer paints from. */
+  --mark-yellow:#DDCC94; --mark-yellow-rule:#B99C3D;
+  --mark-green:#AFDAAF; --mark-green-rule:#6EB270;
+  --mark-purple:#C4A8D8; --mark-purple-rule:#B68AD6;
   /* Darker than the root's: on this theme's --wash the root red measures under
      4.5:1 (see the contrast note on --danger in :root). */
   --danger:#9C1D16;
@@ -85,7 +106,14 @@
   --accent:#2C5578; --accent-bg:#E7E9E4; --accent-line:#CFD6D2;
   --swatch-edge:#C9B694;
   --amber:#985614; --amber-bg:#F3E7D2; --amber-line:#DCC49E;
-  --mark:#EEDBA6; --mark-rule:#C9A44E; --mark-ink:#8A7443; --ok:#6E8C5C;
+  --mark:#ECDAA2; --mark-rule:#C7AA4C; --mark-ink:#8A7443; --ok:#6E8C5C;
+  /* §01's three mark tints: a pale FILL for a band behind the words and a
+     saturated RULE for the line under them — and for the swatch that offers
+     either. Mirrored in `bookCss.ts` for the book's own document, which
+     cannot see these; that table is the one the Overlayer paints from. */
+  --mark-yellow:#ECDAA2; --mark-yellow-rule:#C7AA4C;
+  --mark-green:#BCE8BC; --mark-green-rule:#7BC07D;
+  --mark-purple:#CCB1E1; --mark-purple-rule:#C397E4;
   --tint-a:#EEE3CE; --tint-b:#E3E5DE; --tint-c:#E9E1D5; --tint-d:#E4E6D9; --tint-e:#EDDCBB;
 }
 
@@ -101,7 +129,14 @@
      paper that means going the other way. */
   --swatch-edge:#FFFFFF;
   --amber:#D9A25E; --amber-bg:#241C12; --amber-line:#3B2E1D;
-  --mark:#4A3B18; --mark-rule:#8A6E2C; --mark-ink:#C9B380; --ok:#86A874; --danger:#E5735F;
+  --mark:#62511C; --mark-rule:#85702A; --mark-ink:#C9B380; --ok:#86A874; --danger:#E5735F;
+  /* §01's three mark tints: a pale FILL for a band behind the words and a
+     saturated RULE for the line under them — and for the swatch that offers
+     either. Mirrored in `bookCss.ts` for the book's own document, which
+     cannot see these; that table is the one the Overlayer paints from. */
+  --mark-yellow:#62511C; --mark-yellow-rule:#85702A;
+  --mark-green:#325934; --mark-green-rule:#4E8050;
+  --mark-purple:#5B426D; --mark-purple-rule:#83629A;
   --tint-a:#2A2620; --tint-b:#1F262E; --tint-c:#262330; --tint-d:#202A26; --tint-e:#2E2716;
   /* Night is the only theme that re-values elevation: a light-theme shadow
    * disappears on a dark page. */

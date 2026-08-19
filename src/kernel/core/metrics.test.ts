@@ -16,6 +16,7 @@ import {
   measureForStep,
   paneTakesTrack,
   proseBleed,
+  proseColumn,
   proseGrid,
   readingStep,
 } from './metrics'
@@ -43,6 +44,21 @@ describe('proseGrid', () => {
     const grid = proseGrid(2000, false)
     expect(grid.marginCol).toBe(GUTTER)
     expect(containerCentre(grid)).toBe(measureCentre(grid))
+  })
+
+  /* The mirror FLOORS like the gutter it mirrors. It used to drain to zero —
+   * the text flush against the stage's right edge, the same broken window
+   * GUTTER_MIN exists to prevent on the left. It does not shrink in lockstep
+   * with the gutter, deliberately: `paneTakesTrack` counts one gutter and
+   * declares the margin spendable, and the pane threshold is built on that —
+   * so the measure sits slightly off centre while the two sides walk down to
+   * the shared floor, and never loses its right margin entirely. */
+  it('never lets the mirror fall below the floor, at any width', () => {
+    for (let width = 0; width <= 2000; width += 7) {
+      const grid = proseGrid(width, false)
+      expect(grid.marginCol).toBeGreaterThanOrEqual(GUTTER_MIN)
+      expect(grid.marginCol).toBeLessThanOrEqual(GUTTER)
+    }
   })
 
   it('reserves the margin column once the book has marks', () => {
@@ -226,5 +242,47 @@ describe('readingStep', () => {
     for (const idx of [-1, 0, 1, 2, 3, 4, 5, 6, 7, 99, Number.NaN]) {
       expect(measureForStep(idx)).toBe(readingStep(idx).measure)
     }
+  })
+})
+
+describe('proseColumn', () => {
+  /* Measured in the running app on 2026-08-19: a 1009px stage (961 inner, 24px
+     padding either side) laid its gutter at 87 and its measure at 175. The
+     arithmetic here has to land on the same numbers, because the whole point of
+     it is to tell a floating surface where the words are without asking the
+     DOM a second time. */
+  const GRID = { gutter: 56, measure: 660, marginCol: 56, gap: 32 }
+
+  it('lands where the browser laid the measure track', () => {
+    expect(proseColumn(961, GRID)).toEqual({ left: 174.5, width: 660 })
+  })
+
+  it('starts after the padding, the slack and the tracks before it', () => {
+    // 24 padding + half of (961 - 836) slack + 56 gutter + 32 gap.
+    const { left } = proseColumn(961, GRID)
+    expect(left).toBe(24 + (961 - (56 + 660 + 56 + 64)) / 2 + 56 + 32)
+  })
+
+  it('follows a widened margin, which puts the measure left of the stage’s centre', () => {
+    /* The margin opens once a book has notes in it, and the GRID stays centred
+       — so the measure inside it does not. This is exactly why the offset
+       cannot be "half the stage minus half the measure", which is the shortcut
+       that looks right on every window with no notes in the margin.
+       Built by `proseGrid` rather than by hand: a grid whose tracks do not fit
+       the stage is not a grid this function is ever handed. */
+    const withNotes = proseGrid(961, true)
+    const { left, width } = proseColumn(961, withNotes)
+    expect(withNotes.marginCol).toBeGreaterThan(withNotes.gutter)
+    expect(left + width / 2).toBeLessThan(961 / 2 + 24)
+  })
+
+  it('gives no negative offset when the tracks cannot fit', () => {
+    /* `proseGrid` sizes the tracks to the stage, so this is a defensive case
+       rather than a reachable one — but a negative offset would put the bar
+       off the reading area entirely, which is worse than a bar pressed against
+       its leading edge. Grid itself does the same: it stops centring and
+       overflows the end. */
+    const { left } = proseColumn(200, GRID)
+    expect(left).toBe(24 + 56 + 32)
   })
 })

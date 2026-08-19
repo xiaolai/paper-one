@@ -6,7 +6,7 @@ import { createLibrary, type Library } from './libraryStore'
 import { createMarkStore, type MarkStore } from './markStore'
 import { folderOf } from './bookFolder'
 import { NOOP_DIAGNOSTICS, NOOP_RECORDER, REMOVABLE_BLOB_NAMES, type Diagnostics, type MutationRecorder, type MutationToken, type RemovableBlobName, type SettingsStore } from './ports'
-import { createSettingsStore, type SettingsMigration } from './settings'
+import { carryLegacySettings, createSettingsStore, type SettingsMigration } from './settings'
 import { writeQueue, type WriteQueue } from './writeQueue'
 
 /**
@@ -201,7 +201,10 @@ export function createKernelServices({
   const marks = createMarkStore({ fs, queue: writes, recorder: recorderPort, clock: clockPort })
   const cards = createCards({ storage, recorder: recorderPort, clock: clockPort, queue: writes })
   const settings = createSettingsStore(
-    settingsMigration ? { storage, migrate: settingsMigration } : { storage },
+    /* `carryLegacySettings` by default, not `keepValues`: the app has a
+     * settings file older than the namespaced keys, and the kernel is where
+     * that history is known. A composition may still supply its own. */
+    { storage, migrate: settingsMigration ?? carryLegacySettings },
   )
   return {
     library,

@@ -61,6 +61,13 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  /* THE SCROLLBAR'S SPACE IS ALWAYS RESERVED, so the books sit in the same
+     column as the toolbar above them whether the shelf scrolls or not. Without
+     it the scroll area is 15px narrower than the chrome exactly when there is
+     something to scroll — so the shelf and the search field were measured
+     against two different widths and could not be made to line up in both
+     states at once. */
+  scrollbar-gutter: stable;
   /* A column, so the empty state can still take the full height and centre
      itself in it — it did that as a flex child of `.library` and would
      otherwise collapse to its own text now that it lives in here. */
@@ -85,7 +92,7 @@
   justify-content: space-between;
   gap: var(--space-16);
   height: var(--status-bar-h);
-  padding: 0 var(--shelf-pad-x);
+  padding: 0 calc(var(--shelf-pad-x) + var(--scrollbar-w)) 0 var(--shelf-pad-x);
   background: var(--surface);
   font-size: var(--text-caption);
   color: var(--muted);
@@ -229,13 +236,13 @@
   background: var(--wash);
 }
 
-.rowOpen[data-disabled='true'] {
-  cursor: default;
+/* A book Paper holds no copy of: dimmed, NOT disabled. A plain click cannot
+   open it — the handler refuses that one verb — but a ⌘-click selects it,
+   which is how selection starts, so the events must keep flowing. The
+   app-wide `data-disabled` attribute would take them (`pointer-events: none`
+   in global.css), which is exactly why this is its own name. */
+.rowOpen[data-nocopy='true'] {
   opacity: 0.45;
-}
-
-.rowOpen[data-disabled='true']:hover {
-  background: none;
 }
 
 /* The jacket, small enough to be an anchor for the eye rather than the subject
@@ -351,28 +358,22 @@
   color: var(--line-3);
 }
 
-/* OVER the row, not in it: a field that pushed the row taller would move every
-   row below it, and in a virtualised list that is the whole page jumping under
-   the pointer. Inset from the jacket so the book being tagged stays visible. */
-.rowTagForm {
-  position: absolute;
-  inset-block: var(--space-4);
-  inset-inline: calc(var(--row-thumb) + var(--space-14)) var(--space-40);
-  z-index: 3;
-  display: flex;
-  align-items: center;
+/* A selected row keeps the wash whether or not the pointer is on it — the
+   same reading a scope row in the pane gives ON: persistent state, not hover. */
+.row[data-selected='true'] .rowOpen {
+  background: var(--accent-bg);
 }
 
-.rowTagInput {
-  inline-size: 100%;
-  block-size: 100%;
-  padding: 0 var(--space-10);
-  border: 1px solid var(--accent);
-  border-radius: var(--radius-control);
-  background: var(--surface);
-  font-family: inherit;
-  font-size: var(--text-small);
-  color: var(--ink);
+/* The selection mark, in the thumbnail's column and at the thumbnail's size,
+   so the column the eye scans down is where "this one is in" is said. */
+.rowSelected {
+  display: grid;
+  place-items: center;
+  inline-size: var(--row-thumb);
+  aspect-ratio: var(--cover-aspect);
+  border-radius: var(--radius-mark);
+  background: var(--accent);
+  color: var(--surface);
 }
 
 /* Always drawn, like the card's — a control that appears on hover is a control
@@ -422,7 +423,26 @@
   flex: 0 0 auto;
   display: grid;
   grid-template-columns: repeat(auto-fill, var(--card-w));
-  gap: var(--space-28) var(--space-20);
+  /* THE ROW GAP IS SMALL BECAUSE THE CARD IS NOT. Between two covers there is
+     already the whole of the lower card furniture — a progress rule, the `⋯`
+     and the reserved tag line, about 52px of mostly white — so the gap is not
+     the separation, it is what is added to it. At 28 the rows read as further
+     apart than the columns despite the columns having more actual air between
+     them. */
+  gap: var(--space-12) var(--space-20);
+  /* THE ROW ENDS WHERE THE TOOLBAR DOES. Fixed-width tracks almost never divide
+     a window evenly — at 1440 with the pane open, six 126px cards and five 20px
+     gaps leave 73px over — and packed to the start, all of it piled up on the
+     right, so the last cover stopped 88px short of the `+` above it.
+     `space-between` puts that leftover into the gaps instead of the margin.
+
+     THE COLUMNS STAY 126 WIDE, which is the trade being made. Letting them
+     stretch instead — `minmax(var(--card-w), 1fr)` — would hold the gaps at 20
+     and end flush too, but a card that changes width changes the height of its
+     cover well, and the cell height is a CONSTANT derived from `CARD_W`. That
+     constant is what let the runtime cell measurement go; making the card fluid
+     brings it back. So the gaps give, and the covers do not. */
+  justify-content: space-between;
   padding: var(--space-4) var(--shelf-pad-x) var(--space-40);
 }
 
@@ -438,8 +458,9 @@
   cursor: pointer;
 }
 
-.book:disabled {
-  cursor: default;
+/* No-copy: dimmed, not disabled — see `.rowOpen[data-nocopy]`. */
+.book[data-nocopy='true'] {
+  opacity: 0.45;
 }
 
 .book:focus-visible {
@@ -501,7 +522,7 @@
   box-shadow: var(--shadow-jacket);
 }
 
-.book:hover:not(:disabled) .cover {
+.book:hover .cover {
   transform: translateY(calc(-1 * var(--space-2)));
 }
 
@@ -568,9 +589,15 @@
  * peer of "Add books…" it would restate the equal-weight pairing that was just
  * taken out of the toolbar. The margin gives it its own beat rather than
  * letting it crowd the sentence above it. */
+/* The two ways in, side by side — see the empty state's own comment. */
+.emptyActions {
+  display: flex;
+  gap: var(--space-8);
+  margin-top: var(--space-6);
+}
+
 .emptyImport {
   composes: secondary from '../styles/controls.module.css';
-  margin-top: var(--space-6);
 }
 
 /* The cell wraps the open button so the remove control can sit on top of it.
@@ -595,8 +622,20 @@
   overflow: hidden;
 }
 
+/* THE BOOK TAKES ITS COVER'S HEIGHT AND NO MORE.
+ *
+ * It grew — `flex: 1 1 auto` — so every cell's spare height was absorbed here,
+ * between the jacket and the row under it. The cell reserves 20px for a tag row
+ * that an untagged book never draws, and all of it was landing in that gap:
+ * measured, a 193px cover inside a 217px box, putting the progress rule and the
+ * `⋯` 28px below the jacket they belong to.
+ *
+ * Not growing, the spare height falls to the BOTTOM of the cell, which is where
+ * the tag row appears when there is one — so the space is reserved where it is
+ * actually used, and the meta row sits under the cover at the 12px the two
+ * margins ask for. */
 .cell > .book {
-  flex: 1 1 auto;
+  flex: 0 0 auto;
   min-width: 0;
   min-height: 0;
 }
@@ -622,7 +661,17 @@
   align-items: center;
   gap: var(--space-8);
   min-height: var(--pane-title-row);
-  padding: var(--space-4) var(--shelf-pad-x) var(--space-12);
+  /* The extra on the trailing edge is the scrollbar's, which the shelf below
+     always reserves — see `.body`. Without it this row is wider than the books
+     it sits over by exactly that much, and the `+` can never line up with the
+     last cover. */
+  /* The trailing padding carries the scrollbar's width, which the shelf below
+     always reserves — see `.body`. The BOTTOM one is the air under the toolbar,
+     and it has to live here rather than on the shelf: virtualisation writes
+     `padding-block` onto the shelf inline, so a `padding-top` in the stylesheet
+     is overwritten the moment the shelf is long enough to virtualise. */
+  padding: var(--space-4) calc(var(--shelf-pad-x) + var(--scrollbar-w)) var(--space-20)
+    var(--shelf-pad-x);
 }
 
 .search {
@@ -667,7 +716,8 @@
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-6);
-  padding: 0 var(--shelf-pad-x) var(--space-12);
+  padding: 0 calc(var(--shelf-pad-x) + var(--scrollbar-w)) var(--space-20)
+    var(--shelf-pad-x);
 }
 
 .chip {
@@ -703,29 +753,175 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* The tag field, laid over the cover's lower edge so the shelf does not reflow
-   while a tag is typed — a cell that grew would push every row below it. */
-.tagForm {
-  position: absolute;
-  inset-inline: var(--space-6);
-  inset-block-start: var(--space-6);
-  z-index: 1;
+/* An exclusion — "not Sea". Same chip, drawn hollow so a reader glancing at
+   the row can tell what is being kept out from what is being kept. */
+.chip[data-excluded='true'] {
+  background: transparent;
+  border-color: var(--accent);
+  border-style: dashed;
 }
 
-.tagInput {
-  width: 100%;
+/* ══ SELECTION ══════════════════════════════════════════════════════════ */
+
+/* The bar: a fact about the shelf and a way to act on it, in the chips' row
+   and at the chips' weight. It sits INSIDE the same gutter as everything else,
+   because a bar that spans the window reads as a mode and this is not one —
+   the shelf is still the shelf, with some books picked out on it. */
+.selectionBar {
+  position: relative;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  min-height: var(--control-pill);
+  margin: 0 calc(var(--shelf-pad-x) + var(--scrollbar-w)) var(--space-20) var(--shelf-pad-x);
+  padding: 0 var(--space-6) 0 var(--space-12);
+  border-radius: var(--radius-control);
+  background: var(--accent-bg);
+  font-size: var(--text-small);
+  color: var(--ink);
+}
+
+.selectionCount {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* How to add more, said once, for the reader who arrived through the menu's
+   Select. Takes the slack so the actions sit at the trailing end. */
+.selectionHint {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+.selectionAction {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-6);
   height: var(--control-sm);
   padding: 0 var(--space-10);
-  /* `--line-2`, for the reason `.search` gives — and this one asked for the
-   * same absent token with a DIFFERENT fallback (0.2 against 0.12), so the two
-   * fields sat at two border weights that were never chosen relative to each
-   * other. */
-  border: 1px solid var(--line-2);
-  border-radius: var(--radius-pill);
-  background: var(--surface, #fff);
-  color: inherit;
+  border: 0;
+  border-radius: var(--radius-chip);
+  background: transparent;
+  color: var(--ink);
   font: inherit;
   font-size: var(--text-small);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.selectionAction:hover,
+.selectionAction[data-open='true'] {
+  background: var(--surface);
+}
+
+/* The door to the removal ceremony. It takes `--danger` for its ink and not
+   for its fill: a filled red button on a bar the reader passes constantly is a
+   thing to flinch at, and this one does not remove anything — it asks. The fill
+   belongs on the button inside the sheet, which does. */
+.selectionRemove {
+  composes: selectionAction;
+  color: var(--danger);
+}
+
+.selectionRemove:hover,
+.selectionRemove[aria-expanded='true'] {
+  background: var(--surface);
+}
+
+.selectionDone {
+  composes: more from '../styles/controls.module.css';
+}
+
+/* --- the removal ceremony ---------------------------------------------- */
+
+.removeSheet {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+  padding: var(--space-20);
+}
+
+.removeHeading {
+  font-size: var(--text-body);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+/* The titles themselves, so the number can be checked against something. No
+   bullets: these are the reader's own books being read back to them, not a
+   list of options. */
+.removeList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  font-size: var(--text-ui);
+  color: var(--ink);
+}
+
+.removeList > li {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.removeMore {
+  color: var(--muted);
+}
+
+.removeNote {
+  margin: 0;
+  font-size: var(--text-small);
+  color: var(--muted);
+}
+
+/* The way out is on the left, where it is reached first by Tab and by focus on
+   open; the act is on the right, where the eye ends. */
+.removeActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-10);
+  margin-block-start: var(--space-4);
+}
+
+.removeCancel {
+  composes: secondary from '../styles/controls.module.css';
+}
+
+.removeConfirm {
+  composes: primary from '../styles/controls.module.css';
+  background: var(--danger);
+}
+
+/* A selected card: a ring at the jacket's edge — the accent, at the width the
+   focus ring uses, so the two read as the same family of "this one" — and a
+   check in its corner. The ring is on the well rather than the artwork, so a
+   short jacket's ring is not a short ring. */
+.cell[data-selected='true'] .cover {
+  outline: 2px solid var(--accent);
+  outline-offset: var(--space-2);
+}
+
+.selectedMark {
+  position: absolute;
+  inset-inline-start: var(--space-6);
+  inset-block-start: var(--space-6);
+  display: grid;
+  place-items: center;
+  width: var(--control-xs);
+  height: var(--control-xs);
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: var(--surface);
+  box-shadow: var(--shadow-pill);
 }
 
 /* ONE LINE, and a line the cell has budgeted for. It wrapped, and a book with
@@ -752,14 +948,35 @@
   font-size: var(--text-micro);
   opacity: 0.75;
   cursor: pointer;
+  /* TRUNCATE, do not push. A long tag used to shove its neighbours — and the
+     `+N` control after them — past the row's clipped edge, so the one chip
+     that discloses the hidden tags was itself hidden, undisclosably. Chips
+     shrink and ellipsise; the count never does. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bookTag[data-more='true'] {
+  flex: 0 0 auto;
 }
 
 /* The reader's own tags read as theirs. A publisher's subject is a fact about
-   the book and cannot be removed, so it must not look like it can. */
+   the book, drawn quieter — the difference is whose it is, not what a click
+   does: every chip scopes. */
 .bookTag[data-mine='true'] {
   border-color: transparent;
   background: var(--accent-bg);
   opacity: 1;
+}
+
+/* The count of what did not fit — a control that opens the editor, where
+   every tag is seen in full. Muted like a subject: it is a fact about the
+   row, not a tag. */
+.bookTag[data-more='true'] {
+  border-style: dashed;
+  color: var(--muted);
 }
 
 /* THE META ROW: the progress rule and the row's one control, side by side.

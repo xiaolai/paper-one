@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { gridWindow } from './virtualGrid'
+import { PREMEASURE, gridWindow } from './virtualGrid'
 
 /**
  * Virtualisation is where off-by-one errors live, and in a browser they are
@@ -69,13 +69,19 @@ describe('gridWindow', () => {
   /**
    * Before the grid has been measured — the first render, before a ref attaches
    * — every metric is zero. Rendering NOTHING then makes the shelf flash empty
-   * on every mount; rendering everything is wrong only in cost, and only for one
-   * frame.
+   * on every mount; rendering EVERYTHING mounted two thousand cells and
+   * started their cover loads for one frame, and the image requests did not
+   * un-send when the measured render unmounted them. A bounded screenful is
+   * the middle path: never blank, never the whole shelf.
    */
-  it('renders everything when the grid has not been measured yet', () => {
-    expect(gridWindow({ ...base, rowHeight: 0 }).endIndex).toBe(100)
-    expect(gridWindow({ ...base, viewportHeight: 0 }).endIndex).toBe(100)
-    expect(gridWindow({ ...base, columns: 0 }).endIndex).toBe(100)
+  it('renders a bounded screenful when the grid has not been measured yet', () => {
+    expect(gridWindow({ ...base, rowHeight: 0 }).endIndex).toBe(PREMEASURE)
+    expect(gridWindow({ ...base, viewportHeight: 0 }).endIndex).toBe(PREMEASURE)
+    expect(gridWindow({ ...base, columns: 0 }).endIndex).toBe(PREMEASURE)
+    // Starting at the top, so the measurer has a first cell to measure.
+    expect(gridWindow({ ...base, rowHeight: 0 }).firstIndex).toBe(0)
+    // A small shelf is unaffected — the bound only bites past a screenful.
+    expect(gridWindow({ ...base, total: 10, rowHeight: 0 }).endIndex).toBe(10)
   })
 
   /**

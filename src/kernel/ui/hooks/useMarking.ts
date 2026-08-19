@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { findMark } from '../../core/markMatch'
-import type { Mark } from '../../core/marks'
+import type { Mark, MarkAppearance } from '../../core/marks'
 import type { SelectionSnapshot } from '../reader/session'
 import type { Book } from './useBook'
 import type { MarksView } from './useMarks'
@@ -42,8 +42,17 @@ export interface Marking {
   onMarkDrawn: (cfi: string, range: Range) => void
   /** The existing mark on the current selection, if that passage is marked. */
   readonly selected: Mark | null
-  /** Mark the selection. Returns the mark, or null if nothing was selected. */
-  mark: (note: string) => Mark | null
+  /**
+   * Mark the selection in the given tint and style. Returns the mark, or null
+   * if nothing was selected.
+   *
+   * `keep` leaves the selection standing instead of consuming it. §07's rule —
+   * acting on a selection consumes it — is right for a decision and wrong for a
+   * TRIAL: the mark palette redraws the passage as each choice lands, and a
+   * reader comparing a rule against a wave cannot compare anything if the first
+   * press takes the popup away.
+   */
+  mark: (note: string, appearance: MarkAppearance, keep?: boolean) => Mark | null
   unmark: (target: Mark) => void
   /** The mark the Notes panel should reveal, if any. */
   readonly focus: MarkFocus | null
@@ -135,7 +144,7 @@ export function useMarking(book: Book, marks: MarksView): Marking {
    * back.
    */
   const mark = useCallback(
-    (note: string): Mark | null => {
+    (note: string, appearance: MarkAppearance, keep = false): Mark | null => {
       if (!selection || !bookId) return null
       const created = marks.add({
         bookId,
@@ -145,8 +154,17 @@ export function useMarking(book: Book, marks: MarksView): Marking {
         // Captured here because here is the only place it exists. See `Mark`.
         prefix: selection.prefix,
         suffix: selection.suffix,
-        note,
+        /* THE EXISTING NOTE SURVIVES A RE-MARK. `note` is what a NEW mark gets,
+         * and every caller that only means to change a passage's appearance
+         * passes '' — ⌘D and the palette's "Mark this passage" both do. Written
+         * verbatim, marking an already-annotated passage a second time deleted
+         * what the reader had written about it, silently and with no undo.
+         * Emptying a note deliberately goes through `marks.setNote`, which is
+         * the editor's own path and is not affected by this. */
+        note: note === '' && selected ? selected.note : note,
         kind: 'highlight',
+        tint: appearance.tint,
+        style: appearance.style,
         chapter,
       })
       /* The overlay of the mark this one replaced goes with it. The store drops
@@ -160,10 +178,13 @@ export function useMarking(book: Book, marks: MarksView): Marking {
         forgetRange(selected.cfi)
       }
       drawMark(created)
-      // §07: acting on a selection consumes it. Leaving it up would leave the
-      // popup floating over a passage that has already been dealt with.
-      deselect()
-      setSelection(null)
+      /* §07: acting on a selection consumes it. Leaving it up would leave the
+       * popup floating over a passage that has already been dealt with — unless
+       * the caller is still deciding, which is what `keep` says. */
+      if (!keep) {
+        deselect()
+        setSelection(null)
+      }
       return created
     },
     [selection, bookId, marks, chapter, drawMark, eraseMark, selected, deselect, forgetRange],

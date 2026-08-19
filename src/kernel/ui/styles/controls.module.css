@@ -156,3 +156,46 @@
     transition: none;
   }
 }
+
+/* THE WAY BACK FROM A REMOVAL, shared by the Library panel and the tag editor
+ * over a selection — the two surfaces that can take a tag off many books at
+ * once. Here rather than in either of them because two copies of a line that
+ * says the same thing drift, and this one carries a number the reader is being
+ * asked to trust. */
+.undoLine {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  min-height: var(--row-compact);
+  padding: 0 var(--space-10);
+  font-size: var(--text-small);
+  color: var(--muted);
+}
+
+.undoText {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.undoButton {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  height: var(--control-xs);
+  padding: 0 var(--space-8);
+  border: 0;
+  border-radius: var(--radius-chip);
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-small);
+  cursor: pointer;
+}
+
+.undoButton:hover,
+.undoButton:focus-visible {
+  background: var(--wash);
+}

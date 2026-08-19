@@ -184,11 +184,116 @@ export const READING_STEPS: readonly ReadingStep[] = [
   { size: 30, line: 48, measure: 820, note: 'Maximum. Beyond this the page turns into a large-print edition.' },
 ] as const
 
+/**
+ * The four spacings a reader can open up, each as a closed set of steps.
+ *
+ * STEPS, NOT SLIDERS, for the same reason `READING_STEPS` is: a value between
+ * two of these is not a decision anybody made, and a slider invites hunting for
+ * one. Each of these also has a floor and a ceiling that are typographic facts
+ * rather than preferences, and a stepper is where those live.
+ *
+ * The defaults are all the current behaviour, so a reader who never opens this
+ * gets exactly the book they have now.
+ *
+ * WHY THESE FOUR. Letter and word spacing are the two that help a reader who
+ * finds dense type hard to track — the evidence for both is about legibility,
+ * not taste. Line and paragraph spacing are how much air the page has, which is
+ * the oldest reading preference there is. Nothing here changes the MEASURE:
+ * that is set by the size step, and letting two controls move it would make the
+ * line length depend on which one the reader touched last.
+ */
+export interface SpacingScale {
+  readonly steps: readonly number[]
+  readonly def: number
+  /** How the value is written into the book's CSS. */
+  readonly unit: 'em' | 'x'
+}
+
+export const SPACING: Record<'letter' | 'word' | 'line' | 'paragraph', SpacingScale> = {
+  /* Tracking, in em so it follows the size. Negative is offered because a face
+   * set loose by its designer can be tightened, but only one step of it: past
+   * that the letters touch. */
+  letter: { steps: [-0.01, 0, 0.01, 0.02, 0.04], def: 1, unit: 'em' },
+  /* Word spacing opens the gaps between words without touching the letters,
+   * which is the pair a reader who loses their place usually wants. */
+  /* Five steps with one that TIGHTENS, so this scale is shaped like `letter`
+     above: a step below the default, then the default, then three that open up.
+     It had four and started at its own floor, which made it the one row whose
+     minus was dead before the reader touched anything. */
+  word: { steps: [-0.02, 0, 0.04, 0.08, 0.16], def: 1, unit: 'em' },
+  /* A MULTIPLE of the step's own line box, not a length: every reading step
+   * carries a line height chosen for its size, and a fixed leading would be
+   * loose at 17px and tight at 30. */
+  line: { steps: [0.85, 1, 1.15, 1.3, 1.5], def: 1, unit: 'x' },
+  /* Also a multiple of the line box, which is what keeps consecutive paragraphs
+   * on the grid — see `bookCss`. */
+  /* Re-based so one line — what the book has always had between paragraphs —
+     is the second step rather than the third, without that value changing. A
+     zero step was offered once, on the reasoning that an indenting book wants
+     no space as well; it went, because nothing here indents a paragraph, so no
+     space between them runs the prose together rather than setting it tightly. */
+  paragraph: { steps: [0.5, 1, 1.5, 2, 2.5], def: 1, unit: 'x' },
+}
+
+/**
+ * How much of the theme's own light to keep, and how hard the text sits on it.
+ *
+ * BOUNDED AT 0.75, and the bound is measured rather than chosen. Dimming a
+ * light theme darkens the page, and past about half the page reaches mid grey —
+ * where the most any text can manage is 5.3:1 against it, leaving the contrast
+ * control no room and the page reading as grey rather than as dimmed paper. At
+ * 0.75 the page is #bfbfbf with about 11:1 available, which is headroom.
+ *
+ * Contrast is ONE-SIDED — softest up to the theme, never past it (see
+ * `CONTRAST` below) — and deliberately narrow. It moves the text only — see
+ * `adjustPalette` — and everything it produces is clamped to 4.5:1, so the
+ * soft end is a preference rather than a way to make the page unreadable.
+ */
+export const BRIGHTNESS: SpacingScale = {
+  steps: [0.75, 0.8125, 0.875, 0.9375, 1],
+  def: 4,
+  unit: 'x',
+}
+
+/**
+ * THE THEME IS THE CEILING. Contrast runs from softest up to the theme exactly
+ * as designed, and stops there — it used to run past it, pushing the ink toward
+ * pure black on a light theme and pure white on a dark one, which is a reader
+ * overriding a decision that was measured. Softening is a preference; hardening
+ * past the design is a second opinion about a contrast ratio that was already
+ * checked.
+ *
+ * That also puts its default at the top of its scale, where `BRIGHTNESS`
+ * already was: both controls now start at "the theme untouched" and only take
+ * away, which is one idea rather than two.
+ */
+export const CONTRAST: SpacingScale = {
+  steps: [-0.35, -0.2625, -0.175, -0.0875, 0],
+  def: 4,
+  unit: 'x',
+}
+
+/** A value from either scale, clamped for the reason `spacingAt` gives. */
+export function stepAt(scale: SpacingScale, idx: number): number {
+  const at = Math.min(scale.steps.length - 1, Math.max(0, Math.round(idx)))
+  return scale.steps[at] ?? scale.steps[scale.def] ?? 0
+}
+
+/** A spacing value from an index, clamped — an index from anywhere may be stale. */
+export function spacingAt(key: keyof typeof SPACING, idx: number): number {
+  return stepAt(SPACING[key], idx)
+}
+
 /** Index into READING_STEPS for the 21/34/660 default. */
 export const DEFAULT_STEP_IDX = 2
 
-/** §03 reading measure and margin gutter. */
-export const MEASURE = 660
+/** §03 reading measure — DERIVED from the default reading step, not restated.
+ *  Written out as `660` it was a second copy of `READING_STEPS[2].measure`,
+ *  and `readingStep`'s own comment records what two copies of that number
+ *  nearly cost: the book laid out to one size inside a column sized for
+ *  another, silently. */
+export const MEASURE = READING_STEPS[DEFAULT_STEP_IDX]!.measure
+/** §03 margin gutter. */
 export const GUTTER = 56
 
 /**
@@ -289,7 +394,17 @@ export function proseGrid(
   let over = gutter + measure + marginCol + gap * 2 - stageInner
 
   if (over > 0) {
-    const take = Math.min(over, marginCol)
+    /* The mark lane may be spent WHOLE — `paneTakesTrack` counts one gutter
+     * and declares the margin spendable, and the pane threshold is built on
+     * that. But the MIRROR is not a mark lane: it floors at `GUTTER_MIN`,
+     * exactly as the gutter it mirrors does, because it drained to zero here
+     * and the text sat flush against the stage's right edge — the same broken
+     * window `GUTTER_MIN` was introduced to prevent on the left. The measure
+     * still sits a little off centre while the two sides walk down to their
+     * shared floor; what it can no longer do is lose its right margin
+     * entirely. */
+    const floor = showMargin ? 0 : GUTTER_MIN
+    const take = Math.min(over, Math.max(0, marginCol - floor))
     marginCol -= take
     over -= take
   }
@@ -330,9 +445,48 @@ export function proseGrid(
  * constant this replaces was 1024 for every reading step, which is below every
  * width this returns.
  */
+/**
+ * Where the MEASURE track sits, relative to the stage's own box.
+ *
+ * For anything that has to stay over the words rather than merely inside the
+ * reading area — the selection tools, which were bounded by the stage and so
+ * were free to hang across the whole margin column, over the very notes that
+ * live there.
+ *
+ * The stage centres the grid (`justify-content: center`), so the measure's
+ * offset is the stage's padding, plus half the slack, plus the tracks before
+ * it. `stageInner` is the CONTENT width — what `useElementWidth` reports and
+ * what `proseGrid` is given — while the offset is returned against the stage's
+ * BORDER box, because that is the origin `rangeRectsInHost` translates into and
+ * the origin an absolutely positioned child resolves against. The stage has no
+ * border, so the two coincide; the padding is what has to be added back.
+ *
+ * Pure, and checked against the running app: at a 1009px stage with tracks
+ * 56/660/56 and a 32px gap it returns 174.5, and the measure was measured in
+ * the window at 175.
+ */
+export function proseColumn(stageInner: number, grid: ProseGrid): { left: number; width: number } {
+  const tracks = grid.gutter + grid.measure + grid.marginCol + 2 * grid.gap
+  /* Never negative: below the width where the tracks fit, grid stops centring
+     and overflows the end, so the column starts at the padding. */
+  const slack = Math.max(0, stageInner - tracks) / 2
+  return { left: STAGE_PADDING_X + slack + grid.gutter + grid.gap, width: grid.measure }
+}
+
 export function paneTakesTrack(windowWidth: number, stepIdx: number): boolean {
+  /* `+ GUTTER_MIN`: the mirror's floor. The margin column is spendable down
+   * to that floor and no further — drained whole, the text sat flush against
+   * the stage's right edge, which is the broken window `GUTTER_MIN` exists to
+   * prevent. A threshold that did not budget the floor granted the pane its
+   * track 24px early, and the grid paid for it out of the one gutter this
+   * predicate promises to keep whole. */
   const needed =
-    measureForStep(stepIdx) + PANE_TRACK + STAGE_PADDING_X * 2 + GUTTER + PROSE_GAP * 2
+    measureForStep(stepIdx) +
+    PANE_TRACK +
+    STAGE_PADDING_X * 2 +
+    GUTTER +
+    GUTTER_MIN +
+    PROSE_GAP * 2
   return windowWidth >= needed
 }
 
@@ -466,15 +620,21 @@ export const SHEET = { max: 640, inset: 48, top: 96, maxHeight: 560 } as const
  */
 export const MENU_MIN_W = 190
 
+/* A `PANE_MENU_W = 220` lived here — a menu sized for the face picker inside
+ * the pane — published as `--pane-menu-w` and consumed by nothing: the picker
+ * sizes itself. A constant with no consumer is a claim the code does not
+ * make; whoever builds the pane menu next should reintroduce the number WITH
+ * its first consumer. */
+
 /**
- * A menu opened from inside the side pane, which is narrower than the window.
- *
- * Wide enough to hold the longest face name this app can offer set in that
- * face — "Instrument Sans" in Instrument Sans — and no wider, because a menu
- * that overhangs the pane it belongs to reads as a window rather than as a
- * choice within one.
+ * The tag editor: the popover a card, a row or a selection opens to edit its
+ * tags. Wider than a menu (`MENU_MIN_W`) because it holds chips that wrap and
+ * a field with a suggestion list under it, each suggestion carrying a name
+ * and a count; narrower than the pane (`PANE_W`), so over a card it still
+ * reads as a popover about that card rather than as a panel that happened to
+ * land near it.
  */
-export const PANE_MENU_W = 220
+export const TAG_EDITOR_W = 300
 
 /**
  * How far a nested chapter steps in per level of the table of contents.
@@ -494,6 +654,24 @@ export const TOC_INDENT = 16
  * either side. Enough that the two lines sit IN the tile rather than fill it,
  * and no more: five of these are a row of choices, not five panels.
  */
+/**
+ * The colour disc inside a tint button in §10's selection bar.
+ *
+ * ITS BUTTON IS `CONTROL.sm`, off the ordinary scale — the bar is a row of
+ * small icon controls and there is no reason for it to invent a size. Only the
+ * disc needs a number of its own, exactly as the theme swatch below does: it is
+ * a mark of a size, not a control.
+ *
+ * ONE UNDER THE ICON RAMP'S 15. A solid disc carries more ink than an outlined
+ * glyph of the same diameter, so it wants to be the smaller of the two — but
+ * only just. Taken down to ten to match the glyphs by WEIGHT, it stopped
+ * reading as a colour worth choosing and started reading as a status dot: the
+ * three tints are the reason this face exists, and a face's subject should not
+ * be its faintest element. Fourteen is a colour first and a control second,
+ * which is the right order here.
+ */
+export const MARK_SWATCH = 14
+
 export const THEME_SWATCH_H = 52
 
 /**
@@ -685,9 +863,13 @@ export const RULER_PIN = 216
  */
 export function applyMetrics(root: HTMLElement, platform: Platform): void {
   const px = (n: number) => `${n}px`
+  /* ONLY TOKENS SOMETHING READS. A published property with no `var()` behind
+   * it is a promise nobody collects — nine of them had accumulated here, and a
+   * dead token is worse than none because renaming or removing its constant
+   * looks safe in every automated check while a real consumer would have said
+   * otherwise. Anything added here should arrive together with its first
+   * consumer. */
   const vars: Record<string, string> = {
-    '--line-box': px(LINE),
-    '--pane-w': px(PANE_W),
     '--pane-track': px(PANE_TRACK),
     '--leading-card-radius': px(LEADING_CARD_RADIUS),
     '--concentric-inset': px(CONCENTRIC_INSET),
@@ -699,7 +881,11 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
     '--row-h': px(ROW_H),
     '--control-xs': px(CONTROL.xs),
     '--control-sm': px(CONTROL.sm),
-    '--control-pill': px(CONTROL.md),
+    /* Through the ALIAS, which exists exactly for this token — the pill's
+     * circle reads the token as width and height both, and publishing from
+     * `CONTROL.md` directly left the alias with no consumer at all: a name
+     * that claimed to guard a coupling it was not part of. */
+    '--control-pill': px(CONTROL_PILL),
     '--control-lg': px(CONTROL.lg),
     '--row-compact': px(ROW.compact),
     '--control-titlebar': px(CONTROL_TITLEBAR),
@@ -716,8 +902,9 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
     '--sheet-top': px(SHEET.top),
     '--sheet-max-h': px(SHEET.maxHeight),
     '--menu-min-w': px(MENU_MIN_W),
-    '--pane-menu-w': px(PANE_MENU_W),
+    '--tag-editor-w': px(TAG_EDITOR_W),
     '--toc-indent': px(TOC_INDENT),
+    '--mark-swatch': px(MARK_SWATCH),
     '--theme-swatch-h': px(THEME_SWATCH_H),
     '--track-w': px(TRACK_W),
     '--traffic-light': px(TRAFFIC_LIGHT),
@@ -748,8 +935,6 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
     '--cover-aspect': `${COVER_ASPECT}`,
     '--cell-height': px(cellHeightFor(CARD_W)),
     // §12 layer order, published so stylesheets stop restating the numbers.
-    '--z-ruler-band': String(Z.rulerBand),
-    '--z-prose': String(Z.prose),
     '--z-chrome': String(Z.chrome),
     '--z-sticky': String(Z.stickyBar),
     '--z-ruler-hint': String(Z.rulerHint),
@@ -758,11 +943,7 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
     '--z-pane-sheet': String(Z.paneSheet),
     '--z-menu': String(Z.menu),
     '--z-scrim': String(Z.scrim),
-    '--z-figure': String(Z.figure),
-    '--measure': px(MEASURE),
-    '--gutter': px(GUTTER),
     '--motion-chrome': MOTION.chromeFade,
-    '--motion-ruler': MOTION.rulerTrack,
     '--motion-pane': MOTION.paneOpen,
     '--motion-popover': MOTION.popover,
     '--motion-readout': MOTION.readout,

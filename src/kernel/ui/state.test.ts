@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_STEP_IDX, READING_STEPS, readingStep } from '../core/metrics'
 import { BUNDLED_FACES, faceById } from '../core/typefaces'
+import { createSettingsStore, readKernelPreferences } from '../core/settings'
 import { bootState, initialState, paneFits, preferencesOf, reducer, screenFor, type AppState } from './state'
 
 /**
@@ -411,7 +412,11 @@ describe('bootState', () => {
   it('keeps the book panel when the launch named a book', () => {
     const boot = bootState('?book=/sample.epub')
     expect(boot.screen).toBe('reader')
-    expect(boot.pane).toBe(initialState.pane)
+    /* The READER's default panel, by name. This compared against
+     * `initialState.pane`, which pinned nothing once the seed became coherent
+     * with its own library screen — the reader boot takes its panel from
+     * `paneFor`, and Companion is the panel §03 puts beside a book. */
+    expect(boot.pane).toBe('companion')
   })
 
   /* `lastPane` is what the toggle reopens, so it has to agree with the panel
@@ -458,8 +463,8 @@ describe('the hook starts from bootState', () => {
  *
  * `bootState` takes what the settings store remembered and starts from it —
  * that is what makes a chosen theme survive a relaunch, and a mobile build
- * survive being unloaded by its OS. Only the nine preferences travel; the
- * transient state (screen, layers, query) is decided fresh, as it always was.
+ * survive being unloaded by its OS. Only the preferences travel; the transient
+ * state (screen, layers, query) is decided fresh, as it always was.
  */
 describe('bootState with remembered preferences', () => {
   it('starts from what was remembered, and from the defaults for the rest', () => {
@@ -487,13 +492,78 @@ describe('bootState with remembered preferences', () => {
       themeFollowsOs: false,
       typeface: 'literata',
       stepIdx: 1,
+      spacing: { letter: 2, word: 1, line: 3, paragraph: 0 },
+      align: 'ragged' as const,
+      brightness: 0,
+      contrast: 1,
       pageLayout: 'scrolled' as const,
       side: 'left' as const,
       rulerOn: true,
       scrollbarOn: true,
       progressLineOn: true,
+      markTint: 'purple' as const,
+      markStyle: 'underline' as const,
     }
     expect(preferencesOf(bootState('', remembered))).toEqual(remembered)
+  })
+
+  /* THE TWO DEFAULT TABLES MUST AGREE, and nothing else checks it. A store
+     with no values answers every `get` with the setting's own fallback, and
+     that answer is spread over `initialState` by `bootState` — so a fallback
+     that disagrees with `initialState` silently changes what a first launch
+     looks like, in a table nobody reads beside the reducer's. Caught exactly
+     this way during the kernel merge: `kernel.align` said ragged while
+     `initialState.align` said justified. */
+  it('has a settings fallback for every preference, equal to the initial state', () => {
+    const empty = readKernelPreferences(createSettingsStore({ storage: null }))
+    expect(empty).toEqual(preferencesOf(initialState))
+  })
+})
+
+describe('a launch restores what the reader chose', () => {
+  /* Paper persisted none of this: a reader who set Night at 19px got Paper at
+     21px the next morning, every morning. `bootState` is where the stored
+     preferences become the first render — read before React mounts, not in an
+     effect, so there is no frame of the default theme to see. */
+  const stored = {
+    ...preferencesOf(initialState),
+    theme: 'night' as const,
+    stepIdx: 1,
+    brightness: 0,
+    markTint: 'purple' as const,
+    markStyle: 'underline' as const,
+    spacing: { letter: 2, word: 1, line: 3, paragraph: 0 },
+  }
+
+  it('boots into the stored theme, size and mark appearance', () => {
+    const state = bootState('', stored)
+    expect(state.theme).toBe('night')
+    expect(state.stepIdx).toBe(1)
+    expect(state.brightness).toBe(0)
+    expect(state.markTint).toBe('purple')
+    expect(state.markStyle).toBe('underline')
+    expect(state.spacing).toEqual(stored.spacing)
+  })
+
+  it('boots into the defaults when there is nothing stored', () => {
+    // No store at all — a plain browser tab, or a disk that would not open.
+    expect(bootState('').theme).toBe(initialState.theme)
+  })
+
+  it('still decides the screen and the pane itself', () => {
+    /* Session facts are not persisted, and the ORDER in `bootState` is what
+       guarantees it: a hand-edited file naming a screen or a panel must not put
+       the reader somewhere they never left. */
+    const withSession = { ...stored, screen: 'reader', pane: 'notes' } as never
+    const state = bootState('', withSession)
+    expect(state.screen).toBe('library')
+    expect(state.pane).toBe(initialState.pane)
+  })
+
+  it('lets ?book= win over the stored preferences for the screen', () => {
+    const state = bootState('?book=x', stored)
+    expect(state.screen).toBe('reader')
+    expect(state.theme).toBe('night')
   })
 })
 

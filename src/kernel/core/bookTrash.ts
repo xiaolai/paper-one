@@ -28,6 +28,13 @@ import { folderOf, readMarks, trashOf, writeMarks } from './bookFolder'
  * holds deletions for the same reason and roughly as long.
  */
 export const TRASH_DAYS = 14
+/**
+ * The retention window as UI copy, derived from the number the sweep actually
+ * enforces. "Two weeks" was written out twice in the remove confirm,
+ * independently of `TRASH_DAYS` — so shortening the sweep would have left the
+ * interface promising recovery the trash no longer offered.
+ */
+export const TRASH_KEPT_FOR = TRASH_DAYS === 14 ? 'two weeks' : `${TRASH_DAYS} days`
 const DAY_MS = 24 * 60 * 60 * 1000
 
 export interface TrashFs extends VaultFs {

@@ -9,6 +9,7 @@ import type { Mark } from './marks'
 import type { MarkStorage } from './marks'
 import { NOOP_RECORDER, contentBlobPort, type MutationRecorder, type MutationToken } from './ports'
 import { createKernelServices, type KernelServices } from './services'
+import { BRIGHTNESS } from './metrics'
 import { KERNEL_SETTINGS, SETTINGS_STORAGE_KEY, createSettingsStore } from './settings'
 
 /**
@@ -42,6 +43,8 @@ const mark = (id: string, sectionIndex: number, note = ''): Mark => ({
   suffix: '',
   note,
   kind: 'highlight',
+  tint: 'yellow',
+  style: 'fill',
   chapter: 'One',
   createdAt: NOW + sectionIndex,
 })
@@ -768,12 +771,24 @@ describe('SettingsStore', () => {
     const storage = memoryStorage({
       [SETTINGS_STORAGE_KEY]: JSON.stringify({
         version: 1,
-        values: { 'kernel.theme': 42, 'kernel.stepIdx': 999, 'sync.interval': 30, 'kernel.side': 'left' },
+        values: {
+          'kernel.theme': 42,
+          'kernel.stepIdx': 1.5,
+          'kernel.brightness': 999,
+          'sync.interval': 30,
+          'kernel.side': 'left',
+        },
       }),
     })
     const store = createSettingsStore({ storage })
     expect(store.get(KERNEL_SETTINGS.theme)).toBe('paper')
+    // A non-integer indexes nothing, so it falls back…
     expect(store.get(KERNEL_SETTINGS.stepIdx)).toBe(KERNEL_SETTINGS.stepIdx.fallback)
+    /* …while an integer past the end of this build's ramp CLAMPS rather than
+       falling back: it is not malformed, it is describing the end of a scale
+       this build has less of, and falling back would throw away a reader's
+       deliberate "as far as it goes". */
+    expect(store.get(KERNEL_SETTINGS.brightness)).toBe(BRIGHTNESS.steps.length - 1)
     expect(store.get(KERNEL_SETTINGS.side)).toBe('left')
     store.set(KERNEL_SETTINGS.theme, 'sepia')
     expect(JSON.parse(storage.map.get(SETTINGS_STORAGE_KEY)!).values).toMatchObject({ 'sync.interval': 30, 'kernel.theme': 'sepia' })

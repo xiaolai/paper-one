@@ -24,6 +24,7 @@ import { Companion } from './Companion'
 import { Contents } from './Contents'
 import type { Face } from '../../core/typefaces'
 import { LibraryPanel } from './LibraryPanel'
+import type { TagPrefsStore } from '../hooks/useTagPrefs'
 import { Cards } from './Cards'
 import { Notes } from './Notes'
 import { SearchPanel } from './SearchPanel'
@@ -54,46 +55,35 @@ import styles from './SidePane.module.css'
  * adding a panel without an icon fails to compile rather than rendering a rail
  * button with nothing in it.
  */
-const PANE_ICONS: Record<KernelPaneId, typeof Search> = {
-  toc: List,
-  companion: Sparkles,
-  notes: Highlighter,
-  cards: Layers,
-  search: Search,
-  stats: ChartNoAxesColumn,
-  library: LibraryBig,
-  settings: SettingsIcon,
-}
-
-/* The rail's own order, which is not the palette's: Companion sits second here,
- * beside Contents, because §03 groups the two surfaces that read the book.
- *
- * The ORDER is this file's; the membership is not. A hand-written list of ids
- * can silently omit one — the panel then exists, has a command and a shortcut,
- * and has no way into it from the pane — so the array is checked against the
- * registry below rather than trusted. */
-const RAIL_ORDER = [
-  'toc',
-  'companion',
-  'notes',
-  'cards',
-  'search',
-  'stats',
-  'library',
-  'settings',
-] as const satisfies readonly KernelPaneId[]
+/* ONE LIST: the rail's order and each panel's icon, together. They were two —
+ * a total Record for the icons and an ordered array of ids — which meant two
+ * edits per panel and two structures to keep agreeing; the compile-time check
+ * below covers the merged list exactly as it covered the array. The ORDER is
+ * this file's; the membership is not: Companion sits second here, beside
+ * Contents, because §03 groups the two surfaces that read the book. Labels
+ * still come from `ui/panes`, which the palette and the titlebar read too. */
+const RAIL_ENTRIES = [
+  { id: 'toc', Icon: List },
+  { id: 'companion', Icon: Sparkles },
+  { id: 'notes', Icon: Highlighter },
+  { id: 'cards', Icon: Layers },
+  { id: 'search', Icon: Search },
+  { id: 'stats', Icon: ChartNoAxesColumn },
+  { id: 'library', Icon: LibraryBig },
+  { id: 'settings', Icon: SettingsIcon },
+] as const satisfies readonly { id: KernelPaneId; Icon: typeof Search }[]
 
 /** Fails to compile if the rail and the registry stop agreeing on membership. */
-type RailCoversEveryPane = Exclude<KernelPaneId, (typeof RAIL_ORDER)[number]> extends never
+type RailCoversEveryPane = Exclude<KernelPaneId, (typeof RAIL_ENTRIES)[number]['id']> extends never
   ? true
-  : ['a panel is missing from RAIL_ORDER', Exclude<KernelPaneId, (typeof RAIL_ORDER)[number]>]
+  : ['a panel is missing from RAIL_ENTRIES', Exclude<KernelPaneId, (typeof RAIL_ENTRIES)[number]['id']>]
 const _railIsExhaustive: RailCoversEveryPane = true
 void _railIsExhaustive
 
-const RAIL = RAIL_ORDER.map((id) => ({
+const RAIL = RAIL_ENTRIES.map(({ id, Icon }) => ({
   id,
   label: PANE_TITLES[id],
-  Icon: PANE_ICONS[id],
+  Icon,
 }))
 
 /**
@@ -130,10 +120,16 @@ export interface SidePaneProps {
   companion: CompanionProvider
   /** The shelf, for the Library panel's counts and scopes. */
   books: readonly IndexedBook[]
-  /** Collection-wide tag edits, for the Library panel — see `Library`. */
+  /** Collection-wide tag edits, for the Library panel — see `LibraryPanel`. */
   onRenameTag: (from: string, to: string) => void
   onRemoveTag: (tag: string) => void
-  ownTagCount: (tag: string) => number
+  /** The reader's decisions about their tags — see `tagPrefs`. */
+  tagPrefs: TagPrefsStore
+  /** The last shelf-wide tag removal and its undo — see `LibraryPanel`. */
+  lastRemoval: { readonly tag: string; readonly bookIds: readonly string[] } | null
+  onUndoRemoveTag: () => void
+  onAdoptTag: (tag: string) => void
+  onTagBooks: (bookIds: readonly string[], tags: readonly string[]) => void
   /** The faces this machine can offer — passed straight to Settings. */
   offered: readonly Face[]
   /**
@@ -160,7 +156,11 @@ export function SidePane({
   books,
   onRenameTag,
   onRemoveTag,
-  ownTagCount,
+  tagPrefs,
+  lastRemoval,
+  onUndoRemoveTag,
+  onAdoptTag,
+  onTagBooks,
   offered,
   contributed,
   contributedSettings,
@@ -170,10 +170,20 @@ export function SidePane({
    * preserves its scroll position, note filter and search query across a
    * close/open — returning null threw all of that away.
    *
-   * RESOLVED against the composition, not trusted: a remembered pane id that
-   * belongs to no composed capability shows the screen's default rather than
-   * a title over nothing — see `shownPane`. */
-  const shown = shownPane(state.pane ?? state.lastPane, contributed, defaultPaneFor(state.screen))
+   * FITTED TO THE SCREEN, though. `lastPane` can name a panel this screen does
+   * not have — close the pane in the reader on Contents, walk to the library —
+   * and rendering it raw swapped the hidden slot from LibraryPanel to
+   * Contents, unmounting the panel that would reopen here and its filter,
+   * sort and undo state with it. The screen's default is what `openPane`
+   * would land on, so it is what stays warm.
+   *
+   * RESOLVED against the composition after that, not trusted: a remembered
+   * pane id that belongs to no composed capability shows the screen's default
+   * rather than a title over nothing — see `shownPane`. */
+  const fallback = defaultPaneFor(state.screen)
+  const wanted =
+    state.pane ?? (paneFits(state.screen, state.lastPane, contributed) ? state.lastPane : fallback)
+  const shown = shownPane(wanted, contributed, fallback)
   const pane = shown.id
 
   return (
@@ -235,6 +245,14 @@ export function SidePane({
             onToggleProgressLine={() => dispatch({ type: 'toggleProgressLine' })}
             onSide={(side) => dispatch({ type: 'setSide', side })}
             onStepIdx={(idx) => dispatch({ type: 'setStepIdx', idx })}
+            spacing={state.spacing}
+            onSpacing={(key, idx) => dispatch({ type: 'setSpacing', key, idx })}
+            align={state.align}
+            onAlign={(align) => dispatch({ type: 'setAlign', align })}
+            brightness={state.brightness}
+            onBrightness={(idx) => dispatch({ type: 'setBrightness', idx })}
+            contrast={state.contrast}
+            onContrast={(idx) => dispatch({ type: 'setContrast', idx })}
             onTypeface={(typeface) => dispatch({ type: 'setTypeface', typeface })}
           />
         )}
@@ -260,7 +278,11 @@ export function SidePane({
             dispatch={dispatch}
             onRenameTag={onRenameTag}
             onRemoveTag={onRemoveTag}
-            ownTagCount={ownTagCount}
+            tagPrefs={tagPrefs}
+            lastRemoval={lastRemoval}
+            onUndoRemoveTag={onUndoRemoveTag}
+            onAdoptTag={onAdoptTag}
+            onTagBooks={onTagBooks}
           />
         )}
 
@@ -281,6 +303,9 @@ export function SidePane({
             title={label}
             aria-label={label}
             data-on={pane === id}
+            /* The lit tab, said out loud — `data-on` is only paint, and a
+               screen reader walking the rail heard eight identical buttons. */
+            aria-pressed={pane === id}
             onClick={() => dispatch({ type: 'openPane', pane: id })}
           >
             <Icon size={ICON.tab} strokeWidth={ICON.stroke} />

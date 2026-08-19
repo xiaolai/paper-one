@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useReducer, type Dispatch } from 'react'
-import { DEFAULT_STEP_IDX, READING_STEPS } from '../core/metrics'
+import type { MarkStyle, MarkTint } from '../core/marks'
+import { BRIGHTNESS, CONTRAST, DEFAULT_STEP_IDX, READING_STEPS, SPACING } from '../core/metrics'
 import type { SettingsStore } from '../core/ports'
 import { readKernelPreferences, writeKernelPreferences, type KernelPreferences } from '../core/settings'
 import type { PaneContribution } from '../core/capability'
-import { isContributedPaneId, type PageLayout, type PaneId, type Screen, type Side, type Theme, type Typeface } from '../core/uiTypes'
+import { isContributedPaneId, type Align, type PageLayout, type PaneId, type Screen, type Side, type SpacingIndices, type SpacingKey, type Theme, type Typeface } from '../core/uiTypes'
 
 /**
  * Application state.
@@ -23,31 +24,29 @@ import { isContributedPaneId, type PageLayout, type PaneId, type Screen, type Si
  * layers that could not exist, and every guard elsewhere in the app had to name
  * them. A layer earns a place here when something raises it.
  */
-const LAYER_ORDER = ['paletteOpen', 'switcherOpen'] as const
+/* `tagsOpen` is the tag editor as a sheet over the reader — the shelf opens
+ * the same editor as a popover, which is not a layer because it is dismissed
+ * by its own click-outside and never takes the window. */
+const LAYER_ORDER = ['paletteOpen', 'switcherOpen', 'tagsOpen'] as const
 
 /** Derived from LAYER_ORDER so the action types and the dismiss order cannot
  *  drift apart — adding a layer in one place now fails to compile in the other. */
 export type Layer = (typeof LAYER_ORDER)[number]
 
-/**
- * The layers that take the whole window, of which at most one can be open.
- *
- * They were free to stack, and the result disagreed with itself: opening the
- * palette over the switcher left the switcher painted on top — it renders
- * later — while Esc closed the palette, because `dismissTop` walks
- * LAYER_ORDER and the palette is higher in it. So the layer the reader could
- * see was not the layer their keystrokes reached, and dismissing the one on
- * screen took two presses of Esc with nothing visibly happening on the first.
- *
- */
-const MODAL_LAYERS: readonly Layer[] = ['paletteOpen', 'switcherOpen']
+/* AT MOST ONE LAYER IS OPEN — enforced in `toggleLayer`, over the whole of
+ * LAYER_ORDER. There used to be a second list of "modal" layers beside this
+ * one, byte-identical to it, because they were once free to stack and the
+ * result disagreed with itself: opening the palette over the switcher left
+ * the switcher painted on top while Esc closed the palette. Two identical
+ * lists are one list — the day a genuinely non-modal layer arrives, it gets
+ * its own list and its own reasoning. */
 
 /* `Screen`, `Theme`, `Typeface`, `PaneId`, `Side` and `PageLayout` are
  * declared in `core/uiTypes` — with their reasoning — so that code with no
  * React in it can name them: a durable setting under `kernel.theme`, a pane a
  * capability contributes. Re-exported here, so nothing that named them through
  * this module has moved. */
-export type { ContributedPaneId, KernelPaneId, PageLayout, PaneId, Screen, Side, Theme, Typeface } from '../core/uiTypes'
+export type { Align, ContributedPaneId, KernelPaneId, PageLayout, PaneId, Screen, Side, SpacingIndices, SpacingKey, Theme, Typeface } from '../core/uiTypes'
 
 /**
  * What the reducer needs to know about a contributed pane: its id and the
@@ -68,11 +67,37 @@ export interface AppState {
   readonly side: Side
   readonly paletteOpen: boolean
   readonly switcherOpen: boolean
+  /** The tag editor over the reader's current book, as a sheet — ⌘T. */
+  readonly tagsOpen: boolean
   /** Chrome fades to 0 and returns on pointer-near (§06). */
   readonly chromeOn: boolean
   readonly rulerOn: boolean
   readonly rulerPinned: boolean
   readonly stepIdx: number
+  /**
+   * How open the reader wants the type: letter, word, line and paragraph, each
+   * an index into its own scale in `SPACING`.
+   *
+   * Indices rather than values, exactly like `stepIdx`: the steps are the
+   * decision and a stored value would let a build with a different scale
+   * resolve to something between two of them. Grouped rather than four fields
+   * because they are one thing a reader adjusts together, and because the
+   * reducer can then take one action for all four.
+   */
+  readonly spacing: SpacingIndices
+  /** Justified, or flush to the reading edge — see `Align`. */
+  readonly align: Align
+  /**
+   * How much of the theme's light the app emits, and how hard the text sits on
+   * it — indices into `BRIGHTNESS` and `CONTRAST`.
+   *
+   * Independent of the system, which is the point: a reader dimming their whole
+   * display to read at night dims everything else with it, and turning the
+   * display back up to answer a message undoes the reading setting. This is the
+   * app's own.
+   */
+  readonly brightness: number
+  readonly contrast: number
   readonly typeface: Typeface
   /**
    * Whether the book's scrollbar is drawn. Off by default.
@@ -104,8 +129,35 @@ export interface AppState {
    * does not show.
    */
   readonly libraryQuery: string
+  /**
+   * The appearance the next mark gets — the tint chosen in the selection bar,
+   * and whether it lays down a band or a rule.
+   *
+   * IN APP STATE rather than local to the bar, because the bar is unmounted
+   * between selections. Kept there it would reset to yellow on every gesture,
+   * which is the opposite of what a colour scheme is for: a reader who marks
+   * questions in purple wants the NEXT question in purple too, without
+   * re-choosing. ⌘D and the palette's "Mark this passage" read the same two
+   * values, so a mark made by keyboard and a mark made by pointer cannot come
+   * out looking different.
+   *
+   * Not persisted across launches — like `theme`, `stepIdx` and every other
+   * reading setting here, which is a gap this state has had all along rather
+   * than one these two fields introduce.
+   */
+  readonly markTint: MarkTint
+  readonly markStyle: MarkStyle
 }
 
+/**
+ * The seed `bootState` starts from — and COHERENT ON ITS OWN TERMS: its pane
+ * fits its screen. It carried `pane: 'companion'` beside `screen: 'library'`
+ * for a while, a pairing `paneFits` rejects, on the reasoning that only
+ * `bootState` ever read it — which was true right up until anything else did,
+ * and tests already do. `bootState` still owns fitting the pane to whatever
+ * screen the launch actually lands on; `?book=` boots land on the reader and
+ * take its default panel through `paneFor`.
+ */
 export const initialState: AppState = {
   /**
    * THE LIBRARY, not the reader.
@@ -122,21 +174,39 @@ export const initialState: AppState = {
   screen: 'library',
   theme: 'paper',
   themeFollowsOs: true,
-  pane: 'companion',
-  lastPane: 'companion',
+  /* The screen's own panel — `paneFits('library', 'library')` holds, so the
+   * seed is a legal state. A reader boot swaps both through `paneFor`. */
+  pane: 'library',
+  lastPane: 'library',
   side: 'right',
   paletteOpen: false,
   libraryQuery: '',
   switcherOpen: false,
+  tagsOpen: false,
   chromeOn: false,
   rulerOn: false,
   rulerPinned: false,
   stepIdx: DEFAULT_STEP_IDX,
   // §14's face, and the one the whole reading typography is specified around.
   typeface: 'literata',
+  /* Every spacing at its own default, which is the book exactly as it reads
+     today — a reader who never opens these gets no change. */
+  spacing: {
+    letter: SPACING.letter.def,
+    word: SPACING.word.def,
+    line: SPACING.line.def,
+    paragraph: SPACING.paragraph.def,
+  },
+  /* Justified, which is what the book has always been set as. */
+  align: 'justified',
+  /* The theme exactly as designed, until a reader says otherwise. */
+  brightness: BRIGHTNESS.def,
+  contrast: CONTRAST.def,
   scrollbarOn: false,
   progressLineOn: false,
   pageLayout: 'scrolled',
+  markTint: 'yellow',
+  markStyle: 'fill',
 }
 
 export type Action =
@@ -156,10 +226,29 @@ export type Action =
   | { type: 'toggleRuler' }
   | { type: 'pinRuler' }
   | { type: 'setStepIdx'; idx: number }
+  | { type: 'setSpacing'; key: SpacingKey; idx: number }
+  | { type: 'setAlign'; align: Align }
+  | { type: 'setBrightness'; idx: number }
+  | { type: 'setContrast'; idx: number }
   | { type: 'setTypeface'; typeface: Typeface }
   | { type: 'toggleScrollbar' }
   | { type: 'toggleProgressLine' }
   | { type: 'setPageLayout'; layout: PageLayout }
+  | { type: 'setMarkTint'; tint: MarkTint }
+  | { type: 'setMarkStyle'; style: MarkStyle }
+
+/**
+ * An index into a scale of `length` steps, or null for input that must not
+ * reach an array lookup.
+ *
+ * ONE FUNCTION, because four reducer branches each restated it and each had
+ * to remember the same trap: NaN survives `Math.min`/`Math.max` unchanged, so
+ * a clamp without the finite check let NaN straight through to the lookup.
+ */
+function scaleIndex(idx: number, length: number): number | null {
+  if (!Number.isFinite(idx)) return null
+  return Math.min(Math.max(Math.round(idx), 0), length - 1)
+}
 
 /**
  * `contributed` is the panes the composition added — the reducer's fitting
@@ -185,7 +274,14 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
        * every screen change, which is the same conflation as a pane that shuts
        * itself, arriving from the other side. */
       const pane = state.pane === null ? null : paneFor(action.screen, state.lastPane, contributed)
-      return { ...state, screen: action.screen, pane, switcherOpen: false, paletteOpen: false }
+      return {
+        ...state,
+        screen: action.screen,
+        pane,
+        switcherOpen: false,
+        paletteOpen: false,
+        tagsOpen: false,
+      }
     }
 
     case 'setLibraryQuery': {
@@ -234,10 +330,13 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
       return { ...state, side: action.side }
 
     case 'toggleLayer': {
-      // Closing needs no ceremony; opening a modal layer retires the others.
+      /* Closing needs no ceremony; opening retires the others. Every layer is
+       * modal today, so there is no non-modal branch — one existed, guarded on
+       * a membership test that could not fail, which is the kind of branch that
+       * looks exercised and never runs. If a non-modal layer ever arrives, it
+       * gets its own list and this comment stops being true loudly. */
       if (state[action.layer]) return { ...state, [action.layer]: false }
-      if (!MODAL_LAYERS.includes(action.layer)) return { ...state, [action.layer]: true }
-      const closed = Object.fromEntries(MODAL_LAYERS.map((layer) => [layer, false]))
+      const closed = Object.fromEntries(LAYER_ORDER.map((layer) => [layer, false]))
       return { ...state, ...closed, [action.layer]: true }
     }
 
@@ -253,25 +352,45 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
       return { ...state, chromeOn: action.on }
 
     case 'toggleRuler':
+      /* §06: THE RULER IS SCROLLED-FLOW ONLY. The palette already omits the
+       * command in paginated mode, but the reducer is the boundary every
+       * dispatcher crosses, and a guard that lives only in one caller is a
+       * guard the next caller has to remember — `setPageLayout` clears the
+       * ruler on the way out for exactly this invariant. */
+      if (state.pageLayout !== 'scrolled') return state
       // Turning the ruler off also unpins it, so re-enabling starts from rest.
       return state.rulerOn
         ? { ...state, rulerOn: false, rulerPinned: false }
         : { ...state, rulerOn: true }
 
     case 'pinRuler':
-      return { ...state, rulerPinned: true }
+      // Pinning a ruler that is not there would leave a pin waiting to apply
+      // to the next ruler — a state nothing chose and nothing draws.
+      return state.rulerOn ? { ...state, rulerPinned: true } : state
 
-    case 'setStepIdx':
+    case 'setStepIdx': {
       // Clamped rather than validated at the call site: the stepper, the
       // settings slider and the keyboard shortcut all feed this.
-      // Non-finite input is dropped rather than stored: `stepIdx` indexes
-      // READING_STEPS, and NaN survives Math.min/Math.max unchanged, so the
-      // old clamp let NaN straight through to the array lookup.
-      if (!Number.isFinite(action.idx)) return state
-      return {
-        ...state,
-        stepIdx: Math.min(Math.max(Math.round(action.idx), 0), READING_STEPS.length - 1),
-      }
+      const stepIdx = scaleIndex(action.idx, READING_STEPS.length)
+      return stepIdx === null ? state : { ...state, stepIdx }
+    }
+
+    case 'setSpacing': {
+      const idx = scaleIndex(action.idx, SPACING[action.key].steps.length)
+      if (idx === null || state.spacing[action.key] === idx) return state
+      return { ...state, spacing: { ...state.spacing, [action.key]: idx } }
+    }
+
+    case 'setBrightness':
+    case 'setContrast': {
+      const key = action.type === 'setBrightness' ? 'brightness' : 'contrast'
+      const scale = action.type === 'setBrightness' ? BRIGHTNESS : CONTRAST
+      const idx = scaleIndex(action.idx, scale.steps.length)
+      return idx === null || state[key] === idx ? state : { ...state, [key]: idx }
+    }
+
+    case 'setAlign':
+      return state.align === action.align ? state : { ...state, align: action.align }
 
     case 'setTypeface':
       return { ...state, typeface: action.typeface }
@@ -288,6 +407,15 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
       return action.layout === 'paginated'
         ? { ...state, pageLayout: 'paginated', rulerOn: false, rulerPinned: false }
         : { ...state, pageLayout: 'scrolled' }
+
+    /* Two settings rather than one `appearance`, because the reader changes
+       them independently and a combined action would make every tint click
+       restate the style — which is how a toggle silently resets. */
+    case 'setMarkTint':
+      return { ...state, markTint: action.tint }
+
+    case 'setMarkStyle':
+      return { ...state, markStyle: action.style }
 
   }
 }
@@ -383,13 +511,20 @@ export function screenFor(search: string): Screen {
 /**
  * The application state, with the durable half remembered.
  *
- * READ BEFORE THE FIRST RENDER, written on change. The nine preferences that
- * survive a launch — theme, face, size, layout, side, the three edge marks —
- * live in `AppState` while the app runs, because that is what every control
- * reads and every reducer case writes; the `SettingsStore` is where they go
- * between launches. `bootState` folds the stored values in, and the effect
- * below writes each change back. `set` on the store is by value, so a
+ * READ BEFORE THE FIRST RENDER, written on change. The fifteen preferences
+ * that survive a launch — theme, face, size, spacing, alignment, brightness,
+ * contrast, layout, side, the three edge marks and the mark's own tint and
+ * style — live in `AppState` while the app runs, because that is what every
+ * control reads and every reducer case writes; the `SettingsStore` is where
+ * they go between launches. `bootState` folds the stored values in, and the
+ * effect below writes each change back. `set` on the store is by value, so a
  * re-render that changes nothing durable writes nothing.
+ *
+ * THE SETTINGS ARRIVE BEFORE THE FIRST RENDER, not through an effect:
+ * `main.tsx` awaits the store before React mounts, so the first frame is the
+ * reader's own theme and type size. Applied afterwards they would be a visible
+ * flash of Paper at 21px on every launch, on the one surface nobody can look
+ * away from.
  */
 export function useAppState(settings: SettingsStore, contributed: ContributedPanes = NO_CONTRIBUTED): [AppState, AppDispatch] {
   /* The reducer closes over the contributed panes; the composition is static
@@ -398,7 +533,11 @@ export function useAppState(settings: SettingsStore, contributed: ContributedPan
   const reduce = useCallback((state: AppState, action: Action) => reducer(state, action, contributed), [contributed])
   const [state, dispatch] = useReducer(
     reduce,
-    bootState(typeof window === 'undefined' ? '' : window.location.search, readKernelPreferences(settings)),
+    bootState(
+      typeof window === 'undefined' ? '' : window.location.search,
+      readKernelPreferences(settings),
+      contributed,
+    ),
   )
   const prefs = preferencesOf(state)
   useEffect(() => {
@@ -410,17 +549,30 @@ export function useAppState(settings: SettingsStore, contributed: ContributedPan
       // itself says why (`fileStore` reports a failed disk write).
       console.error('Paper: could not save a preference', cause)
     }
+    /* SPREAD FIELD BY FIELD, not `[settings, prefs]`: `preferencesOf` builds a
+     * fresh object every render, so depending on it would run this effect on
+     * every page turn and keystroke. `spacing` is the one nested value, so its
+     * four indices are listed rather than the object that holds them. */
   }, [
     settings,
     prefs.theme,
     prefs.themeFollowsOs,
     prefs.typeface,
     prefs.stepIdx,
+    prefs.spacing.letter,
+    prefs.spacing.word,
+    prefs.spacing.line,
+    prefs.spacing.paragraph,
+    prefs.align,
+    prefs.brightness,
+    prefs.contrast,
     prefs.pageLayout,
     prefs.side,
     prefs.rulerOn,
     prefs.scrollbarOn,
     prefs.progressLineOn,
+    prefs.markTint,
+    prefs.markStyle,
   ])
   return [state, dispatch]
 }
@@ -432,11 +584,17 @@ export function preferencesOf(state: AppState): KernelPreferences {
     themeFollowsOs: state.themeFollowsOs,
     typeface: state.typeface,
     stepIdx: state.stepIdx,
+    spacing: state.spacing,
+    align: state.align,
+    brightness: state.brightness,
+    contrast: state.contrast,
     pageLayout: state.pageLayout,
     side: state.side,
     rulerOn: state.rulerOn,
     scrollbarOn: state.scrollbarOn,
     progressLineOn: state.progressLineOn,
+    markTint: state.markTint,
+    markStyle: state.markStyle,
   }
 }
 
@@ -453,11 +611,23 @@ export function preferencesOf(state: AppState): KernelPreferences {
  * Exported because it is the honest thing to test — a reducer case cannot show
  * that the state a launch begins in is coherent.
  */
-export function bootState(search: string, remembered: Partial<KernelPreferences> = {}): AppState {
+export function bootState(
+  search: string,
+  remembered: Partial<KernelPreferences> = {},
+  contributed: ContributedPanes = NO_CONTRIBUTED,
+): AppState {
   const screen = screenFor(search)
-  const pane = paneFits(screen, initialState.pane ?? defaultPaneFor(screen))
-    ? initialState.pane
-    : defaultPaneFor(screen)
+  /* CLOSED STAYS CLOSED, FITTED STAYS FITTED — and the two must not tangle.
+   * The old conditional fed the FALLBACK into `paneFits` and then returned the
+   * original: with a null initial pane, "the default fits" answered yes and
+   * null came back — which happened to be wanted, by an accident of routing
+   * rather than a statement of it. Said directly: a null seed boots closed;
+   * anything else boots to that panel where it fits, or the screen's default. */
+  const pane = initialState.pane === null ? null : paneFor(screen, initialState.pane, contributed)
+  /* THE PREFERENCES GO ON FIRST, then the things a launch decides. Screen and
+     pane are session facts and are not persisted — see `KERNEL_SETTINGS` — so a
+     stored file cannot put the reader back into a panel they closed, and the
+     order here is what guarantees it rather than trusting the file's shape. */
   const prefs = { ...preferencesOf(initialState), ...remembered }
   /* THE SAME RULE THE REDUCER KEEPS: paginated flow has no ruler (§06). Two
    * stored values can disagree — the layout written after the ruler — and a

@@ -19,8 +19,11 @@ import viteConfig from './vite.config'
  * `test:projects` is what stops the flag from hiding a project whose glob
  * has drifted away from its files.
  *
- * Environment is Node everywhere, deliberately: several kernel tests assert
- * that no DOM exists, and nothing here needs jsdom.
+ * Environment is Node everywhere by default, deliberately: several kernel tests
+ * assert that no DOM exists, and the other fifty-odd suites should not pay
+ * jsdom's start-up for a DOM they never touch. A suite that genuinely mounts a
+ * hook opts in per FILE with `// @vitest-environment jsdom` on its first line —
+ * `kernel/ui/hooks/useLibrary.test.ts` is the exemplar; see `docs/hook-tests.md`.
  *
  * `vite.config.ts` is merged in rather than duplicated so the tests see the
  * same plugins and resolution the app is built with — before this file existed
