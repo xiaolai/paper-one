@@ -46,6 +46,21 @@ describe('proseGrid', () => {
     expect(containerCentre(grid)).toBe(measureCentre(grid))
   })
 
+  /* The mirror FLOORS like the gutter it mirrors. It used to drain to zero —
+   * the text flush against the stage's right edge, the same broken window
+   * GUTTER_MIN exists to prevent on the left. It does not shrink in lockstep
+   * with the gutter, deliberately: `paneTakesTrack` counts one gutter and
+   * declares the margin spendable, and the pane threshold is built on that —
+   * so the measure sits slightly off centre while the two sides walk down to
+   * the shared floor, and never loses its right margin entirely. */
+  it('never lets the mirror fall below the floor, at any width', () => {
+    for (let width = 0; width <= 2000; width += 7) {
+      const grid = proseGrid(width, false)
+      expect(grid.marginCol).toBeGreaterThanOrEqual(GUTTER_MIN)
+      expect(grid.marginCol).toBeLessThanOrEqual(GUTTER)
+    }
+  })
+
   it('reserves the margin column once the book has marks', () => {
     expect(proseGrid(2000, true).marginCol).toBe(MARGIN_COL)
   })
