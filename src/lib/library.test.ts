@@ -19,6 +19,9 @@ import {
   tagKey,
   tagSuggestions,
   untaggedCount,
+  tagLeaf,
+  tagPrefix,
+  tagTree,
 } from './library'
 
 /**
@@ -590,5 +593,69 @@ describe('inTagOrder', () => {
   })
   it('sorts by name the way a reader files, accents included', () => {
     expect(inTagOrder(rows, 'name').map((r) => r.tag)).toEqual(['Classics', 'émile', 'Sea'])
+  })
+})
+
+describe('tagTree', () => {
+  const row = (tag: string, count = 1) => ({ tag, count, mine: true })
+
+  it('leaves a plain tag as its own group', () => {
+    const [group] = tagTree([row('Sea')])
+    expect(group).toEqual({ prefix: 'Sea', self: row('Sea'), children: [] })
+  })
+
+  it('gathers tags that share a first part', () => {
+    /* `Fiction/Sea` has stored and scoped since tags existed — the slash is
+       just a character. What was missing is the rendering. */
+    const groups = tagTree([row('Fiction/Sea'), row('Fiction/Ships'), row('Essays')])
+    expect(groups).toHaveLength(2)
+    expect(groups[0]?.prefix).toBe('Fiction')
+    expect(groups[0]?.children.map((c) => c.tag)).toEqual(['Fiction/Sea', 'Fiction/Ships'])
+    expect(groups[1]?.prefix).toBe('Essays')
+  })
+
+  it('gives the group a clickable head only when the bare tag exists', () => {
+    /* A head with no tag behind it would be a dead end wearing the same clothes
+       as a live row. `self` is what tells them apart. */
+    expect(tagTree([row('Fiction/Sea')])[0]?.self).toBeNull()
+    const withBare = tagTree([row('Fiction'), row('Fiction/Sea')])
+    expect(withBare).toHaveLength(1)
+    expect(withBare[0]?.self?.tag).toBe('Fiction')
+    expect(withBare[0]?.children.map((c) => c.tag)).toEqual(['Fiction/Sea'])
+  })
+
+  it('merges the bare tag whichever order it arrives in', () => {
+    const after = tagTree([row('Fiction/Sea'), row('Fiction')])
+    expect(after).toHaveLength(1)
+    expect(after[0]?.self?.tag).toBe('Fiction')
+    expect(after[0]?.prefix).toBe('Fiction')
+  })
+
+  it('takes the group’s position from its first member', () => {
+    /* The rows arrive in the reader's chosen order — by count or by name — and
+       sorting groups by anything else would override the control they used. */
+    const groups = tagTree([row('Essays', 9), row('Fiction/Sea', 5), row('Fiction/Ships', 4)])
+    expect(groups.map((g) => g.prefix)).toEqual(['Essays', 'Fiction'])
+  })
+
+  it('groups by the first slash only, keeping the rest on the row', () => {
+    // One level answers the case people type; deeper names are not broken by it.
+    const groups = tagTree([row('Fiction/Sea/Whales')])
+    expect(groups[0]?.prefix).toBe('Fiction')
+    expect(tagLeaf('Fiction/Sea/Whales')).toBe('Sea/Whales')
+  })
+
+  it('folds the prefix like every other tag key', () => {
+    const groups = tagTree([row('Fiction/Sea'), row('fiction/Ships')])
+    expect(groups).toHaveLength(1)
+  })
+
+  it('is not fooled by a leading or lone slash', () => {
+    /* `/Sea` has no prefix — everything before the slash is nothing — and must
+       stay a plain row rather than becoming a group with an empty head. */
+    expect(tagPrefix('/Sea')).toBe('')
+    expect(tagPrefix('Sea')).toBe('')
+    expect(tagLeaf('/Sea')).toBe('/Sea')
+    expect(tagTree([row('/Sea')])[0]?.self?.tag).toBe('/Sea')
   })
 })

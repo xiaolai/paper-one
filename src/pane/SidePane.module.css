@@ -1068,3 +1068,158 @@
 .groupChevron[data-open='true'] {
   transform: rotate(90deg);
 }
+
+/* The colours a tag can be given, in the row's own menu. A row rather than a
+   submenu: there are three of them, they are the same three a mark can be, and
+   a nested menu to choose one of three is a second gesture for a decision that
+   fits on one line. */
+.colourRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+  padding: var(--space-6) var(--space-10);
+}
+
+.colourDot {
+  width: var(--mark-swatch);
+  height: var(--mark-swatch);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--dot);
+  cursor: pointer;
+  transition: box-shadow var(--motion-popover);
+}
+
+.colourDot[data-colour='yellow'] {
+  --dot: var(--mark-yellow-rule);
+}
+
+.colourDot[data-colour='green'] {
+  --dot: var(--mark-green-rule);
+}
+
+.colourDot[data-colour='purple'] {
+  --dot: var(--mark-purple-rule);
+}
+
+/* The chosen one is the larger dot, in its own colour — the same rule the
+   selection bar's tints follow, so a colour never needs a second colour to say
+   it was picked. */
+.colourDot[data-on='true'] {
+  box-shadow: 0 0 0 1px var(--dot);
+}
+
+.colourDot:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: var(--space-2);
+}
+
+.colourClear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--mark-swatch);
+  height: var(--mark-swatch);
+  padding: 0;
+  margin-inline-start: var(--space-2);
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.colourClear:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.colourClear:hover:not(:disabled) {
+  color: var(--ink);
+  background: var(--wash);
+}
+
+/* Why a row sits at the top. A footnote to the row, not part of its name. */
+.pinMark {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+/* "3 subjects hidden — Show all". Shares the undo line's shape because it is
+   the same kind of statement: something was done, here is the way back. */
+.hiddenLine {
+  composes: undoLine from '../styles/controls.module.css';
+}
+
+.hiddenText {
+  composes: undoText from '../styles/controls.module.css';
+}
+
+/* A saved view: the scope on the left, the way to forget it on the right. Two
+   controls in one row rather than a menu, because there are exactly two things
+   a view can do and a `⋯` for one of them is a gesture spent on nothing. */
+.viewRow {
+  display: flex;
+  align-items: center;
+}
+
+.viewButton {
+  composes: scopeRow;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.viewRemove {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-xs);
+  height: var(--control-xs);
+  margin-inline-end: var(--space-6);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-chip);
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--motion-chrome), background var(--motion-chrome);
+}
+
+/* Shown on hover or focus, like the shelf's own `⋯`. A row of permanent close
+   buttons reads as a list asking to be dismantled. */
+.viewRow:hover .viewRemove,
+.viewRemove:focus-visible {
+  opacity: 1;
+}
+
+.viewRemove:hover {
+  background: var(--wash);
+  color: var(--ink);
+}
+
+/* A `Fiction/…` group. The heading names the shared word once; the children
+   below show only their leaves, indented to the depth of a row's own glyph so
+   the names line up with the names above them rather than with the icons. */
+.tagGroupHead {
+  display: flex;
+  align-items: center;
+  height: var(--row-compact);
+  /* The row's own padding plus one glyph plus one gap, so the prefix begins
+     where the tag NAMES above it begin rather than where their `#` does. */
+  padding-inline: calc(var(--space-10) + var(--icon-control) + var(--space-10)) var(--space-10);
+  font-size: var(--text-ui);
+  color: var(--muted);
+  /* Not a button: nothing carries this prefix on its own, so there is nothing
+     to scope to. A dead control wearing a live one's clothes is worse than a
+     label — hence no hover, no pointer, no focus ring. */
+  cursor: default;
+}
+
+.tagGroupChildren {
+  /* The glyph's width plus the row's gap, so a leaf name sits under the name
+     above it. Indent by the icon, not by an arbitrary step. */
+  padding-inline-start: calc(var(--icon-control) + var(--space-10));
+}

@@ -393,6 +393,92 @@ export type TagOrder = 'count' | 'name'
  * so `Émile` files under E and `sea` beside `Sea` — the same rule `inOrder`
  * uses for titles, for the same reason.
  */
+/**
+ * A tag row, grouped into the tree its name already describes.
+ *
+ * `Fiction/Sea` and `Fiction/Ships` have stored and scoped since tags existed —
+ * the slash is just a character in the string, and `tag:Fiction/Sea` has always
+ * worked. What was missing is the RENDERING: a flat list showed them as two
+ * unrelated rows whose shared prefix the reader had to read for themselves, and
+ * a library with twenty `Fiction/…` tags read as twenty tags rather than one
+ * subject with twenty parts.
+ *
+ * ONE LEVEL, deliberately. `Fiction/Sea/Whales` groups under `Fiction` and
+ * keeps the rest of its name on the row. Full recursion is a tree component, a
+ * collapse state per node and a scoping question at every level; one level
+ * answers the case people actually type and can be read at a glance. Deeper
+ * names are not broken by it — they are simply grouped by their first part.
+ *
+ * A PARENT ROW IS ONLY DRAWN WHEN THE TAG ITSELF EXISTS. `Fiction/Sea` alone
+ * makes a group headed by the word Fiction, which is a heading and not
+ * something to click: there is no `Fiction` tag to scope to, and a row that
+ * scoped to nothing would be a dead end wearing the same clothes as a live row.
+ * `self` is what tells them apart.
+ */
+export interface TagGroup<T extends { tag: string }> {
+  /** The part before the first slash, or the whole tag when there is none. */
+  readonly prefix: string
+  /** The row for the prefix itself, when a tag by exactly that name exists. */
+  readonly self: T | null
+  /** Rows under it, in the order they arrived. Empty for a plain tag. */
+  readonly children: readonly T[]
+}
+
+/** Everything before the first slash, trimmed. Empty when there is no slash. */
+export function tagPrefix(tag: string): string {
+  const at = tag.indexOf('/')
+  if (at <= 0) return ''
+  return tag.slice(0, at).trim()
+}
+
+/** What a child row shows: the part after the prefix, so the shared word is not
+ *  repeated down the column. Falls back to the whole tag if it would be empty. */
+export function tagLeaf(tag: string): string {
+  const at = tag.indexOf('/')
+  if (at <= 0) return tag
+  return tag.slice(at + 1).trim() || tag
+}
+
+/**
+ * Group rows on their first slash, keeping the order they came in.
+ *
+ * The incoming order is the reader's chosen one — by count or by name — and a
+ * group takes the position of its FIRST member, so a heavily used `Fiction/Sea`
+ * pulls the whole Fiction group up exactly as it would have pulled its own row.
+ * Sorting the groups by anything else would quietly override the control the
+ * reader used to order them.
+ */
+export function tagTree<T extends { tag: string }>(rows: readonly T[]): TagGroup<T>[] {
+  /* ONE MAP FOR BOTH KINDS OF ROW, keyed the way tags are keyed everywhere
+     else. `Fiction` and `Fiction/Sea` land in the same entry whichever order
+     they arrive in, which is what makes the head of a group clickable when the
+     bare tag exists and a plain heading when it does not. */
+  const groups = new Map<string, { prefix: string; self: T | null; children: T[] }>()
+  const order: string[] = []
+
+  for (const row of rows) {
+    const prefix = tagPrefix(row.tag)
+    const key = tagKey(prefix || row.tag)
+    let group = groups.get(key)
+    if (!group) {
+      group = { prefix: prefix || row.tag, self: null, children: [] }
+      groups.set(key, group)
+      order.push(key)
+    }
+    if (prefix) group.children.push(row)
+    else {
+      group.self = row
+      // The real tag's own spelling wins over a prefix inferred from a child.
+      group.prefix = row.tag
+    }
+  }
+
+  return order.map((key) => {
+    const group = groups.get(key)!
+    return { prefix: group.prefix, self: group.self, children: group.children }
+  })
+}
+
 export function inTagOrder(rows: readonly TagCount[], order: TagOrder): TagCount[] {
   if (order === 'count') return [...rows]
   return [...rows].sort(

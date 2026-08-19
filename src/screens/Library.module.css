@@ -820,8 +820,85 @@
   background: var(--surface);
 }
 
+/* The door to the removal ceremony. It takes `--danger` for its ink and not
+   for its fill: a filled red button on a bar the reader passes constantly is a
+   thing to flinch at, and this one does not remove anything — it asks. The fill
+   belongs on the button inside the sheet, which does. */
+.selectionRemove {
+  composes: selectionAction;
+  color: var(--danger);
+}
+
+.selectionRemove:hover,
+.selectionRemove[aria-expanded='true'] {
+  background: var(--surface);
+}
+
 .selectionDone {
   composes: more from '../styles/controls.module.css';
+}
+
+/* --- the removal ceremony ---------------------------------------------- */
+
+.removeSheet {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+  padding: var(--space-20);
+}
+
+.removeHeading {
+  font-size: var(--text-body);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+/* The titles themselves, so the number can be checked against something. No
+   bullets: these are the reader's own books being read back to them, not a
+   list of options. */
+.removeList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  font-size: var(--text-ui);
+  color: var(--ink);
+}
+
+.removeList > li {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.removeMore {
+  color: var(--muted);
+}
+
+.removeNote {
+  margin: 0;
+  font-size: var(--text-small);
+  color: var(--muted);
+}
+
+/* The way out is on the left, where it is reached first by Tab and by focus on
+   open; the act is on the right, where the eye ends. */
+.removeActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-10);
+  margin-block-start: var(--space-4);
+}
+
+.removeCancel {
+  composes: secondary from '../styles/controls.module.css';
+}
+
+.removeConfirm {
+  composes: primary from '../styles/controls.module.css';
+  background: var(--danger);
 }
 
 /* A selected card: a ring at the jacket's edge — the accent, at the width the

@@ -18,24 +18,37 @@ import {
   Plus,
   Sparkles,
   Tag,
+  Trash2,
   User,
   X,
 } from 'lucide-react'
-import { shelfFor, tagCounts, tagKey } from '../lib/library'
+import { displayTitle, shelfFor, tagCounts, tagKey } from '../lib/library'
 import type { LibraryOrder } from '../lib/library'
 import { writeBookDrag } from '../lib/bookDrag'
 import type { IndexedBook } from '../lib/bookIndex'
+import { TRASH_KEPT_FOR } from '../lib/bookTrash'
 import { withStatus, withUntagged, withoutTag } from '../lib/searchQuery'
 import { ICON } from '../lib/metrics'
 import type { Platform } from '../lib/metrics'
 import { useRowMenu } from '../lib/useRowMenu'
 import { VIRTUALISE_ABOVE, gridWindow } from '../lib/virtualGrid'
+import { OverlaySheet } from '../overlays/OverlaySheet'
 import { BookCell, type SelectMode } from './BookCell'
 import { BookRow } from './BookRow'
 import { TagEditor } from './TagEditor'
 import editorStyles from './TagEditor.module.css'
 import { ToolbarMenu, type ToolbarOption } from './ToolbarMenu'
 import styles from './Library.module.css'
+
+/**
+ * How many books the removal sheet NAMES before it starts counting.
+ *
+ * Enough that a small mistake is visible — a reader who meant three and
+ * gathered four sees the fourth — and few enough that the list cannot push the
+ * buttons off the sheet. Past this the count is the honest summary; a scrolling
+ * list of two hundred titles answers no question the number does not.
+ */
+const REMOVE_NAMED = 5
 
 /**
  * The library — the books this reader has opened.
@@ -294,6 +307,7 @@ export function Library({
     if (kept.size === 0) {
       setAnchorId(null)
       setTaggingSelection(false)
+      setRemovingSelection(false)
     }
   }, [shelf, selected])
 
@@ -324,10 +338,22 @@ export function Library({
     [shelf, anchorId],
   )
 
+  /**
+   * Whether the removal ceremony is open.
+   *
+   * NOT a layer in `state.ts`. The selection is a fact about this shelf and
+   * lives here; a confirmation ABOUT that selection cannot outlive it, and a
+   * boolean in the reducer would have to be swept whenever the selection was
+   * pruned — a second place to forget. It is closed by `clearSelection` for
+   * exactly that reason, and by the effect that prunes to what is shown.
+   */
+  const [removingSelection, setRemovingSelection] = useState(false)
+
   const clearSelection = useCallback(() => {
     setSelected(new Set())
     setAnchorId(null)
     setTaggingSelection(false)
+    setRemovingSelection(false)
   }, [])
 
   /* ⌘A takes the shelf as shown; Escape lets it go. Both only on this screen
@@ -348,13 +374,24 @@ export function Library({
         setSelected(new Set(shelf.map((book) => book.bookId)))
         return
       }
-      if (event.key === 'Escape' && selecting && !menuFor && !tagging && !taggingSelection) {
+      if (event.key !== 'Escape') return
+      /* ONE LAYER PER PRESS, topmost first — the same rule §11 states for the
+       * reader's own overlays. The removal sheet is modal and is on top, so it
+       * goes first and the selection it was asking about survives; a single
+       * Escape that dismissed the question AND the selection would make
+       * backing out of the ceremony cost the reader the gathering. */
+      if (removingSelection) {
+        event.preventDefault()
+        setRemovingSelection(false)
+        return
+      }
+      if (selecting && !menuFor && !tagging && !taggingSelection) {
         clearSelection()
       }
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
-  }, [platform, shelf, selecting, menuFor, tagging, taggingSelection, clearSelection])
+  }, [platform, shelf, selecting, menuFor, tagging, taggingSelection, removingSelection, clearSelection])
 
   /* What leaves the shelf when a card is dragged: the selection if the card is
    * in it, the card alone if not — Finder's rule. See `bookDrag`. */
@@ -643,6 +680,20 @@ export function Library({
                 mixed selection this is the only label that is true of all. */}
             {finishedAll ? 'Mark as unfinished' : 'Mark as finished'}
           </button>
+          {/* THE DOOR TO THE CEREMONY, NOT THE ACT — which is what the
+              trailing ellipsis has always meant, and why this can sit on a bar
+              the plan said was too small to hold a removal. Nothing goes
+              anywhere until the sheet is answered. */}
+          <button
+            type="button"
+            className={styles.selectionRemove}
+            aria-haspopup="dialog"
+            aria-expanded={removingSelection}
+            onClick={() => setRemovingSelection(true)}
+          >
+            <Trash2 size={ICON.control} strokeWidth={ICON.stroke} />
+            Remove…
+          </button>
           <button
             type="button"
             className={styles.selectionDone}
@@ -673,6 +724,68 @@ export function Library({
             </div>
           )}
         </div>
+      )}
+
+      {/* THE SENTENCE THE NUMBER DESERVES.
+          Everything a reader needs to answer without leaving: how many, which
+          ones (up to a handful, then a count), that their imported file is
+          untouched, and how long this is recoverable for. CANCEL IS FIRST IN
+          DOCUMENT ORDER, deliberately — `OverlaySheet` moves focus to the
+          first focusable it finds, and a confirmation whose destructive
+          button is focused on open turns Return into the act itself. */}
+      {removingSelection && selectedBooks.length > 0 && (
+        <OverlaySheet
+          label={`Remove ${selectedBooks.length} books from the library`}
+          onDismiss={() => setRemovingSelection(false)}
+        >
+          <div className={styles.removeSheet}>
+            <div className={styles.removeHeading}>
+              Remove {selectedBooks.length.toLocaleString()}{' '}
+              {selectedBooks.length === 1 ? 'book' : 'books'} from the library?
+            </div>
+            <ul className={styles.removeList}>
+              {selectedBooks.slice(0, REMOVE_NAMED).map((book) => (
+                <li key={book.bookId}>{displayTitle(book)}</li>
+              ))}
+              {selectedBooks.length > REMOVE_NAMED && (
+                <li className={styles.removeMore}>
+                  and {(selectedBooks.length - REMOVE_NAMED).toLocaleString()} more
+                </li>
+              )}
+            </ul>
+            <p className={styles.removeNote}>
+              The files you imported are kept where they are. This is recoverable for{' '}
+              {TRASH_KEPT_FOR}.
+            </p>
+            <div className={styles.removeActions}>
+              <button
+                type="button"
+                className={styles.removeCancel}
+                onClick={() => setRemovingSelection(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className={styles.removeConfirm}
+                onClick={() => {
+                  /* Captured before anything is removed. `selectedBooks` is
+                     derived from the shelf, and the shelf changes under the
+                     first removal — iterating it directly would drop every
+                     book after the first. */
+                  const going = [...selectedBooks]
+                  setRemovingSelection(false)
+                  clearSelection()
+                  for (const book of going) onRemove(book)
+                }}
+              >
+                <Trash2 size={ICON.control} strokeWidth={ICON.stroke} />
+                Remove {selectedBooks.length.toLocaleString()}{' '}
+                {selectedBooks.length === 1 ? 'book' : 'books'}
+              </button>
+            </div>
+          </div>
+        </OverlaySheet>
       )}
 
       <div className={styles.body} data-scroll>

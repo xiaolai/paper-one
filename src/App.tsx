@@ -13,6 +13,7 @@ import { planImport } from './lib/tagArchive'
 import { canArchiveTags, exportTagsToFile, importTagsFromFile } from './lib/tagFiles'
 import { hasOpenLayer, paneFits, useAppState } from './lib/state'
 import { loadSettings, useSettings } from './lib/useSettings'
+import { useTagPrefs } from './lib/useTagPrefs'
 import type { MarkStorage } from './lib/marks'
 import { useBook } from './lib/useBook'
 import { useBookIntake } from './lib/useBookIntake'
@@ -119,6 +120,9 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
   const marks = useMarks(book.bookId, fs, writes.current)
   const cards = useCards(storage)
   const marking = useMarking(book, marks)
+  /* Pins, colours, hidden subjects and saved views — the reader's decisions
+     ABOUT their tags, as opposed to which books carry them. See `tagPrefs`. */
+  const tagPrefs = useTagPrefs(storage)
   /* The import walks the reader's OWN filesystem, so it needs the absolute
    * directory reader rather than the app-relative one the shelf scan uses. They
    * are different operations and were one name, which is how the shelf came up
@@ -1256,6 +1260,7 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
             books={library.books}
             onRenameTag={library.renameTag}
             onRemoveTag={library.removeTag}
+            tagPrefs={tagPrefs}
             lastRemoval={library.lastRemoval}
             onUndoRemoveTag={library.undoRemoveTag}
             onAdoptTag={library.adoptTag}

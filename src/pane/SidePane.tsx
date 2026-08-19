@@ -22,6 +22,7 @@ import { Companion } from './Companion'
 import { Contents } from './Contents'
 import type { Face } from '../lib/typefaces'
 import { LibraryPanel } from './LibraryPanel'
+import type { TagPrefsStore } from '../lib/useTagPrefs'
 import { Cards } from './Cards'
 import { Notes } from './Notes'
 import { SearchPanel } from './SearchPanel'
@@ -120,6 +121,8 @@ export interface SidePaneProps {
   /** Collection-wide tag edits, for the Library panel — see `LibraryPanel`. */
   onRenameTag: (from: string, to: string) => void
   onRemoveTag: (tag: string) => void
+  /** The reader's decisions about their tags — see `tagPrefs`. */
+  tagPrefs: TagPrefsStore
   /** The last shelf-wide tag removal and its undo — see `LibraryPanel`. */
   lastRemoval: { readonly tag: string; readonly bookIds: readonly string[] } | null
   onUndoRemoveTag: () => void
@@ -142,6 +145,7 @@ export function SidePane({
   books,
   onRenameTag,
   onRemoveTag,
+  tagPrefs,
   lastRemoval,
   onUndoRemoveTag,
   onAdoptTag,
@@ -254,6 +258,7 @@ export function SidePane({
             dispatch={dispatch}
             onRenameTag={onRenameTag}
             onRemoveTag={onRemoveTag}
+            tagPrefs={tagPrefs}
             lastRemoval={lastRemoval}
             onUndoRemoveTag={onUndoRemoveTag}
             onAdoptTag={onAdoptTag}

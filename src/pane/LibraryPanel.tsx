@@ -1,5 +1,9 @@
 import { useMemo, useState } from 'react'
 import {
+  X,
+  BookmarkPlus,
+  Bookmark,
+  Eye,
   ArrowDownAZ,
   ArrowDownWideNarrow,
   BookOpen,
@@ -13,12 +17,15 @@ import {
 } from 'lucide-react'
 import type { IndexedBook } from '../lib/bookIndex'
 import {
+  TAG_MAX,
   inTagOrder,
   normalizeTag,
   shelfView,
   statusCounts,
   tagCounts,
   tagKey,
+  tagLeaf,
+  tagTree,
   untaggedCount,
   type ReadingStatus,
   type TagCount,
@@ -33,6 +40,14 @@ import {
   withUntagged,
   withoutTag,
 } from '../lib/searchQuery'
+import {
+  colourOf,
+  isHidden,
+  isPinned,
+  pinnedFirst,
+  shownSubjects,
+} from '../lib/tagPrefs'
+import type { TagPrefsStore } from '../lib/useTagPrefs'
 import type { AppDispatch } from '../lib/state'
 import styles from './SidePane.module.css'
 import { TagRow, type TagRowState } from './TagRow'
@@ -116,6 +131,9 @@ export interface LibraryPanelProps {
    * author had already stopped the line disappearing when its SECTION collapsed
    * — see the note where it renders — which is the same defect one level in.
    */
+  /** The reader's decisions about their tags — pins, colours, hidden subjects
+   *  and saved views. See `tagPrefs`. */
+  readonly tagPrefs: TagPrefsStore
   readonly lastRemoval: { readonly tag: string; readonly bookIds: readonly string[] } | null
   readonly onUndoRemoveTag: () => void
   /** Make a publisher's subject the reader's own, on every book declaring it. */
@@ -131,6 +149,7 @@ export function LibraryPanel({
   dispatch,
   onRenameTag,
   onRemoveTag,
+  tagPrefs,
   lastRemoval,
   onUndoRemoveTag,
   onAdoptTag,
@@ -142,6 +161,9 @@ export function LibraryPanel({
   const [order, setOrder] = useState<TagOrder>('count')
   const [filter, setFilter] = useState('')
   const [subjectsOpen, setSubjectsOpen] = useState(true)
+  /** Naming a view, in place — the same shape the tag rename uses. */
+  const [naming, setNaming] = useState(false)
+  const [viewName, setViewName] = useState('')
 
   /* PARSED ONCE. This ran twice — once bare for the scope sets, once inside
    * the shelf memo — two derivations of one string, diverging the day one
@@ -211,14 +233,33 @@ export function LibraryPanel({
           excludedTags.has(tagKey(row.tag)),
       )
     : rows
-  const mine = inTagOrder(
-    narrowed.filter((row) => row.mine),
-    order,
+  /* PINNED FIRST, and after the reader's chosen order rather than instead of
+     it: `pinnedFirst` is a stable partition, so what is not pinned keeps the
+     order the control above put it in. */
+  const mine = pinnedFirst(
+    inTagOrder(
+      narrowed.filter((row) => row.mine),
+      order,
+    ),
+    tagPrefs.prefs,
   )
-  const subjects = inTagOrder(
-    narrowed.filter((row) => !row.mine),
-    order,
+  /* A hidden subject is gone from here and nowhere else: it stays on the book,
+     it still scopes if typed, and the editor still offers to adopt it. What the
+     reader asked for is not to be shown BISAC codes in this list. */
+  const subjects = shownSubjects(
+    inTagOrder(
+      narrowed.filter((row) => !row.mine),
+      order,
+    ),
+    tagPrefs.prefs,
   )
+  const hiddenCount = tagPrefs.prefs.hiddenSubjects.length
+  const views = tagPrefs.prefs.views
+  /* Offered only when there IS a scope, and only when it is not already kept.
+     A "Save this view" row over an unscoped shelf saves the word "everything",
+     and one offered over a view the reader just chose invites them to make a
+     second copy of it. */
+  const savable = query.trim() !== '' && !views.some((one) => one.query === query.trim())
   const nothingScoped =
     parsed.status === null &&
     parsed.tags.length === 0 &&
@@ -240,13 +281,22 @@ export function LibraryPanel({
   const stateOf = (tag: string): TagRowState =>
     excludedTags.has(tagKey(tag)) ? 'excluded' : activeTags.has(tagKey(tag)) ? 'on' : 'off'
 
-  const row = (entry: TagCount) => {
+  /**
+   * One tag row.
+   *
+   * `label` overrides what the row SAYS without changing what it is: a child of
+   * a group shows `Sea` rather than `Fiction/Sea`, so the shared word is not
+   * repeated down the column — but every action on it still names the whole
+   * tag, because the whole tag is what scopes, renames and removes.
+   */
+  const row = (entry: TagCount, label?: string) => {
     const { tag, count } = entry
     const state = stateOf(tag)
     return (
       <TagRow
         key={tagKey(tag)}
         tag={tag}
+        label={label}
         count={count}
         /* The number a remove would actually touch — NOT `count`, which is
            scoped to the view and includes publisher subjects. From the
@@ -257,6 +307,12 @@ export function LibraryPanel({
         removes={removesByKey.get(tagKey(tag)) ?? 0}
         mine={entry.mine}
         state={state}
+        pinned={isPinned(tagPrefs.prefs, tag)}
+        onTogglePin={() => tagPrefs.togglePinned(tag)}
+        colour={colourOf(tagPrefs.prefs, tag)}
+        onSetColour={(next) => tagPrefs.setColour(tag, next)}
+        hidden={isHidden(tagPrefs.prefs, tag)}
+        onToggleHidden={() => tagPrefs.toggleHidden(tag)}
         /* Tags ACCUMULATE — every tag, not any — because adding a second one
            is narrowing, and that is what `tag:` has always meant. Clicking a
            row that is ON clears it; clicking one that is EXCLUDED lifts the
@@ -339,6 +395,93 @@ export function LibraryPanel({
         )
       })}
 
+      {/* SAVED VIEWS, with the status rows rather than with the tags.
+          Phase 4 deleted collections because a tag already scoped, and that was
+          right — but a saved QUERY is a different thing from a tag: `is:reading
+          -tag:Abandoned` names no single tag and cannot be a row in the tag
+          list. It belongs where the other whole-shelf scopes are.
+          A row, not a screen: choosing one sets the query, which is the only
+          state a view has. Nothing is hidden behind it. */}
+      {(views.length > 0 || savable) && (
+        <>
+          <div className={styles.groupTitleRow}>
+            <span className={styles.groupTitle}>Views</span>
+          </div>
+          {views.map((view) => {
+            const on = query.trim() === view.query
+            return (
+              <div key={view.id} className={styles.viewRow} data-on={on}>
+                <button
+                  type="button"
+                  className={styles.viewButton}
+                  data-on={on}
+                  aria-pressed={on}
+                  title={view.query}
+                  onClick={() => setQuery(on ? '' : view.query)}
+                >
+                  <Bookmark size={ICON.control} strokeWidth={ICON.stroke} />
+                  <span className={styles.scopeLabel}>{view.name}</span>
+                </button>
+                <button
+                  type="button"
+                  className={styles.viewRemove}
+                  aria-label={`Forget the view ${view.name}`}
+                  title="Forget this view"
+                  onClick={() => tagPrefs.removeView(view.id)}
+                >
+                  <X size={ICON.inline} strokeWidth={ICON.stroke} />
+                </button>
+              </div>
+            )
+          })}
+          {savable &&
+            (naming ? (
+              <form
+                className={styles.tagRename}
+                onSubmit={(event) => {
+                  event.preventDefault()
+                  const name = viewName.trim()
+                  if (name) tagPrefs.saveView(name, query)
+                  setNaming(false)
+                  setViewName('')
+                }}
+              >
+                <Bookmark size={ICON.control} strokeWidth={ICON.stroke} />
+                <input
+                  className={styles.tagRenameInput}
+                  value={viewName}
+                  autoFocus
+                  maxLength={TAG_MAX}
+                  placeholder="Name this view"
+                  aria-label="Name for this view"
+                  onChange={(event) => setViewName(event.target.value)}
+                  onBlur={() => {
+                    setNaming(false)
+                    setViewName('')
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Escape') {
+                      event.stopPropagation()
+                      setNaming(false)
+                      setViewName('')
+                    }
+                  }}
+                />
+              </form>
+            ) : (
+              <button
+                type="button"
+                className={styles.scopeRow}
+                title={query}
+                onClick={() => setNaming(true)}
+              >
+                <BookmarkPlus size={ICON.control} strokeWidth={ICON.stroke} />
+                <span className={styles.scopeLabel}>Save this view</span>
+              </button>
+            ))}
+        </>
+      )}
+
       {anyTags && (
         <>
           <div className={styles.groupTitleRow}>
@@ -378,7 +521,29 @@ export function LibraryPanel({
             />
           )}
 
-          {mine.map(row)}
+          {/* GROUPED ON THE SLASH, which `Fiction/Sea` has stored and scoped
+              since tags existed — this is the rendering that was missing, not a
+              new capability. A group whose prefix is not itself a tag draws a
+              heading rather than a row: there is nothing to scope to, and a
+              dead control wearing a live one's clothes is worse than a label.
+              Shipped as the default view, not behind a preference — a reader
+              who never types a slash sees exactly the flat list they had. */}
+          {tagTree(mine).map((group) =>
+            group.children.length === 0 ? (
+              group.self && row(group.self)
+            ) : (
+              <div key={`g:${tagKey(group.prefix)}`} className={styles.tagGroup}>
+                {group.self ? (
+                  row(group.self)
+                ) : (
+                  <div className={styles.tagGroupHead}>{group.prefix}</div>
+                )}
+                <div className={styles.tagGroupChildren}>
+                  {group.children.map((child) => row(child, tagLeaf(child.tag)))}
+                </div>
+              </div>
+            ),
+          )}
 
           {/* UNTAGGED — books with none of the reader's own tags, within the
               view. Where every cleanup starts. Listed under the reader's tags
@@ -400,6 +565,29 @@ export function LibraryPanel({
             </button>
           )}
 
+          {/* THE WAY BACK FROM HIDING. A hidden subject's row is gone from this
+              list, and its menu with it — so without this the reader can hide a
+              subject and has no way at all to unhide it. Shown whenever
+              anything is hidden, including when every subject is, which is the
+              case where the section itself disappears. */}
+          {hiddenCount > 0 && (
+            <div className={styles.hiddenLine} role="status">
+              <span className={styles.hiddenText}>
+                {hiddenCount} {hiddenCount === 1 ? 'subject' : 'subjects'} hidden
+              </span>
+              <button
+                type="button"
+                className={styles.undoButton}
+                onClick={() => {
+                  for (const key of [...tagPrefs.prefs.hiddenSubjects]) tagPrefs.toggleHidden(key)
+                }}
+              >
+                <Eye size={ICON.control} strokeWidth={ICON.stroke} />
+                Show all
+              </button>
+            </div>
+          )}
+
           {subjects.length > 0 && (
             <>
               <button
@@ -418,7 +606,7 @@ export function LibraryPanel({
                 Subjects
                 <span className={styles.groupCount}>{subjects.length}</span>
               </button>
-              {subjectsOpen && subjects.map(row)}
+              {subjectsOpen && subjects.map((one) => row(one))}
             </>
           )}
         </>

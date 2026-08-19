@@ -1,7 +1,8 @@
 import { useRef, useState, type DragEvent, type MouseEvent } from 'react'
-import { Ban, CopyPlus, Hash, MoreHorizontal, Pencil, Trash2 } from 'lucide-react'
+import { Ban, CopyPlus, Eye, EyeOff, Hash, MoreHorizontal, Pencil, Pin, PinOff, Trash2 } from 'lucide-react'
 import { hasBookDrag, readBookDrag } from '../lib/bookDrag'
 import { TAG_MAX } from '../lib/library'
+import { TAG_COLOURS, type TagColour } from '../lib/tagPrefs'
 import { ICON } from '../lib/metrics'
 import { useRowMenu } from '../lib/useRowMenu'
 import controls from '../styles/controls.module.css'
@@ -47,6 +48,15 @@ export type TagRowState = 'off' | 'on' | 'excluded'
 
 export interface TagRowProps {
   readonly tag: string
+  /**
+   * What the row says, when that differs from what the tag IS.
+   *
+   * A child of a `Fiction/…` group shows `Sea`. Only the wording changes:
+   * scoping, renaming, removing and the drop target all still use `tag`, and
+   * the accessible names below are built from it, so a screen reader hears the
+   * whole tag rather than a leaf with no context.
+   */
+  readonly label?: string | undefined
   /** Shown beside the row: books carrying the tag within the current view. */
   readonly count: number
   /** How many books a remove will actually touch — the confirm's number. */
@@ -59,6 +69,20 @@ export interface TagRowProps {
   readonly onRename: (to: string) => void
   readonly onRemove: () => void
   readonly onAdopt: () => void
+  /**
+   * The reader's decisions ABOUT this tag, as opposed to which books carry it —
+   * see `tagPrefs`. All optional: `TagRow` also draws rows in surfaces that
+   * have no preferences to offer, and a menu item that cannot act is worse than
+   * one that is not there.
+   */
+  readonly pinned?: boolean
+  readonly onTogglePin?: () => void
+  readonly colour?: TagColour | null
+  readonly onSetColour?: (colour: TagColour | null) => void
+  /** Hide a publisher's SUBJECT. Never offered for the reader's own tag — one
+   *  they do not want, they remove; hidden, it would file books out of sight. */
+  readonly hidden?: boolean
+  readonly onToggleHidden?: () => void
   /** Books dropped on the row, by id — the shelf's selection or one card. */
   readonly onDropBooks: (bookIds: readonly string[]) => void
   /** Which tag has its menu open, so only one is open across the panel. */
@@ -68,6 +92,7 @@ export interface TagRowProps {
 
 export function TagRow({
   tag,
+  label,
   count,
   removes,
   mine,
@@ -77,6 +102,12 @@ export function TagRow({
   onRename,
   onRemove,
   onAdopt,
+  pinned = false,
+  onTogglePin,
+  colour = null,
+  onSetColour,
+  hidden = false,
+  onToggleHidden,
   onDropBooks,
   menuFor,
   setMenuFor,
@@ -215,9 +246,27 @@ export function TagRow({
           {excluded ? (
             <Ban size={ICON.control} strokeWidth={ICON.stroke} />
           ) : (
-            <Hash size={ICON.control} strokeWidth={ICON.stroke} />
+            /* THE HASH CARRIES THE COLOUR, rather than a dot beside it. The row
+               already has a glyph, a label and a count; a fourth mark for the
+               colour makes a list of forty rows harder to scan than the colour
+               makes it easier. Uncoloured, it inherits as before. */
+            <Hash
+              size={ICON.control}
+              strokeWidth={ICON.stroke}
+              style={colour ? { color: `var(--mark-${colour}-rule)` } : undefined}
+            />
           )}
-          <span className={styles.scopeLabel}>{tag}</span>
+          <span className={styles.scopeLabel}>{label ?? tag}</span>
+          {pinned && (
+            /* Small, and after the name: it says why this row is where it is,
+               which is a footnote to the row rather than part of its identity. */
+            <Pin
+              className={styles.pinMark}
+              size={ICON.inline}
+              strokeWidth={ICON.stroke}
+              aria-label="Pinned"
+            />
+          )}
           <span className={styles.scopeCount}>{count}</span>
         </button>
       )}
@@ -278,6 +327,80 @@ export function TagRow({
                 >
                   <CopyPlus size={ICON.control} strokeWidth={ICON.stroke} />
                   Keep as my tag
+                </button>
+              )}
+              {onTogglePin && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  className={controls.menuItem}
+                  onClick={() => {
+                    closeMenu()
+                    onTogglePin()
+                  }}
+                >
+                  {pinned ? (
+                    <PinOff size={ICON.control} strokeWidth={ICON.stroke} />
+                  ) : (
+                    <Pin size={ICON.control} strokeWidth={ICON.stroke} />
+                  )}
+                  {pinned ? 'Unpin' : 'Pin to the top'}
+                </button>
+              )}
+              {onSetColour && (
+                /* THE COLOURS IN A ROW, not behind a submenu. There are three,
+                   they are the same three a mark can be, and a nested menu to
+                   choose one of three is a second gesture for a decision that
+                   fits on one line. The last swatch clears it. */
+                <div className={styles.colourRow} role="group" aria-label={`Colour for ${tag}`}>
+                  {TAG_COLOURS.map((one) => (
+                    <button
+                      key={one}
+                      type="button"
+                      className={styles.colourDot}
+                      data-colour={one}
+                      data-on={colour === one}
+                      aria-pressed={colour === one}
+                      title={one[0]!.toUpperCase() + one.slice(1)}
+                      aria-label={`Colour ${tag} ${one}`}
+                      onClick={() => {
+                        closeMenu()
+                        onSetColour(colour === one ? null : one)
+                      }}
+                    />
+                  ))}
+                  <button
+                    type="button"
+                    className={styles.colourClear}
+                    title="No colour"
+                    aria-label={`No colour for ${tag}`}
+                    disabled={colour === null}
+                    onClick={() => {
+                      closeMenu()
+                      onSetColour(null)
+                    }}
+                  >
+                    <Ban size={ICON.inline} strokeWidth={ICON.stroke} />
+                  </button>
+                </div>
+              )}
+              {!mine && onToggleHidden && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  className={controls.menuItem}
+                  title="Keep this subject out of the panel. It stays on the book, and adopting it is still offered from the editor."
+                  onClick={() => {
+                    closeMenu()
+                    onToggleHidden()
+                  }}
+                >
+                  {hidden ? (
+                    <Eye size={ICON.control} strokeWidth={ICON.stroke} />
+                  ) : (
+                    <EyeOff size={ICON.control} strokeWidth={ICON.stroke} />
+                  )}
+                  {hidden ? 'Show this subject' : 'Never show this subject'}
                 </button>
               )}
               <button
