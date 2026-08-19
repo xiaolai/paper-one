@@ -11,6 +11,8 @@
 		3036F7131E55779ABF15BD58 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 02B7F8347F94B067E6B27396 /* LaunchScreen.storyboard */; };
 		31585529C029A01BE249A285 /* CoreGraphics.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1E81BD6B453D87B7F7B1597B /* CoreGraphics.framework */; };
 		324A1E9A4258E7911D4DAC39 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9FACFFCB6E3743955F72464C /* Security.framework */; };
+		33F0CE3D8FDF1E6837D93EBE /* SystemConfiguration.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4DDC17AC7FD6E2D6EAF940E6 /* SystemConfiguration.framework */; };
+		36C1893A7382FCD5A6A74845 /* libapp.a in Resources */ = {isa = PBXBuildFile; fileRef = CF674524E34966183631754E /* libapp.a */; };
 		53CDD0ACFBE8BDF1550B2E53 /* main.mm in Sources */ = {isa = PBXBuildFile; fileRef = 682535EEFE1DA20BE07B123C /* main.mm */; };
 		5C516481BCA83A182C2BCC94 /* assets in Resources */ = {isa = PBXBuildFile; fileRef = 3842AE2A64FB9933D0400EA4 /* assets */; };
 		618672DC8A5E0605441C9935 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 0E2B15F176E4B041AE33EEEA /* UIKit.framework */; };
@@ -32,11 +34,13 @@
 		306B9C1792E7B1C53FA262A6 /* bindings.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = bindings.h; sourceTree = "<group>"; };
 		3842AE2A64FB9933D0400EA4 /* assets */ = {isa = PBXFileReference; lastKnownFileType = folder; path = assets; sourceTree = SOURCE_ROOT; };
 		39EEC6A55698228E08917A52 /* libapp.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libapp.a; sourceTree = "<group>"; };
+		4DDC17AC7FD6E2D6EAF940E6 /* SystemConfiguration.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SystemConfiguration.framework; path = System/Library/Frameworks/SystemConfiguration.framework; sourceTree = SDKROOT; };
 		682535EEFE1DA20BE07B123C /* main.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = main.mm; sourceTree = "<group>"; };
 		81E326B61ED92E1D1EECF952 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		9FACFFCB6E3743955F72464C /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
 		AF1DE57E7D9CF13BB2E0E038 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		CE1209BFDECB28E00189B168 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
+		CF674524E34966183631754E /* libapp.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libapp.a; sourceTree = "<group>"; };
 		D8F57162F5CC7AEDD55F173D /* WebKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WebKit.framework; path = System/Library/Frameworks/WebKit.framework; sourceTree = SDKROOT; };
 		F3673D372C5ABDD1AD6E7067 /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
 		FBC720DFA1D01F55B0A32344 /* app_iOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = app_iOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -53,6 +57,7 @@
 				9D59FB167BB4E699DA17D1E9 /* MetalKit.framework in Frameworks */,
 				299814393FFBF154FAD94CA8 /* QuartzCore.framework in Frameworks */,
 				324A1E9A4258E7911D4DAC39 /* Security.framework in Frameworks */,
+				33F0CE3D8FDF1E6837D93EBE /* SystemConfiguration.framework in Frameworks */,
 				618672DC8A5E0605441C9935 /* UIKit.framework in Frameworks */,
 				836D84C5F07860664DAF79C8 /* WebKit.framework in Frameworks */,
 			);
@@ -70,6 +75,7 @@
 				04B56F58E2E44DDE1D67E7B7 /* MetalKit.framework */,
 				F3673D372C5ABDD1AD6E7067 /* QuartzCore.framework */,
 				9FACFFCB6E3743955F72464C /* Security.framework */,
+				4DDC17AC7FD6E2D6EAF940E6 /* SystemConfiguration.framework */,
 				0E2B15F176E4B041AE33EEEA /* UIKit.framework */,
 				D8F57162F5CC7AEDD55F173D /* WebKit.framework */,
 			);
@@ -91,6 +97,22 @@
 				306B9C1792E7B1C53FA262A6 /* bindings.h */,
 			);
 			path = bindings;
+			sourceTree = "<group>";
+		};
+		5F72359403FB561BE1489F63 /* debug */ = {
+			isa = PBXGroup;
+			children = (
+				CF674524E34966183631754E /* libapp.a */,
+			);
+			path = debug;
+			sourceTree = "<group>";
+		};
+		70DD658F1D4B0FED51A79854 /* arm64 */ = {
+			isa = PBXGroup;
+			children = (
+				5F72359403FB561BE1489F63 /* debug */,
+			);
+			path = arm64;
 			sourceTree = "<group>";
 		};
 		78CBE3E5873199C0066F12DF /* Sources */ = {
@@ -129,6 +151,7 @@
 		BAFB695BB8415511FEC74542 /* Externals */ = {
 			isa = PBXGroup;
 			children = (
+				70DD658F1D4B0FED51A79854 /* arm64 */,
 			);
 			path = Externals;
 			sourceTree = "<group>";
@@ -148,6 +171,13 @@
 				329C38BE5E8B40354375D0D0 /* bindings */,
 			);
 			path = app;
+			sourceTree = "<group>";
+		};
+		"TEMP_052317F3-99AF-47EA-A3C5-50D57C343745" /* x86_64 */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = x86_64;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -211,6 +241,7 @@
 				C6BD59C055C986EA4A77FDA2 /* Assets.xcassets in Resources */,
 				3036F7131E55779ABF15BD58 /* LaunchScreen.storyboard in Resources */,
 				5C516481BCA83A182C2BCC94 /* assets in Resources */,
+				36C1893A7382FCD5A6A74845 /* libapp.a in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -276,7 +307,7 @@
 				"LIBRARY_SEARCH_PATHS[arch=arm64]" = "$(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
 				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
 				PRODUCT_BUNDLE_IDENTIFIER = one.paper.reader;
-				PRODUCT_NAME = Paper;
+				PRODUCT_NAME = "Paper";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				VALID_ARCHS = arm64;
@@ -363,7 +394,7 @@
 				"LIBRARY_SEARCH_PATHS[arch=arm64]" = "$(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
 				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
 				PRODUCT_BUNDLE_IDENTIFIER = one.paper.reader;
-				PRODUCT_NAME = Paper;
+				PRODUCT_NAME = "Paper";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				VALID_ARCHS = arm64;
