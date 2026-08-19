@@ -28,7 +28,14 @@ function testClock() {
   return () => makeHlc(++t, 0, DEV)
 }
 
-function journalOver(fs: CrashableFs, extra: { cards?: readonly CardRow[]; fsyncEvery?: number } = {}) {
+function journalOver(
+  fs: CrashableFs,
+  extra: {
+    cards?: readonly CardRow[]
+    fsyncEvery?: number
+    onQuarantine?: (info: { moved: string; reason: string }) => void
+  } = {},
+) {
   return createJournal({
     fs,
     queue: writeQueue(),
@@ -36,7 +43,23 @@ function journalOver(fs: CrashableFs, extra: { cards?: readonly CardRow[]; fsync
     fsync: (path) => fs.fsync(path),
     ...(extra.fsyncEvery === undefined ? {} : { fsyncEvery: extra.fsyncEvery }),
     ...(extra.cards === undefined ? {} : { cards: () => extra.cards ?? [] }),
+    ...(extra.onQuarantine === undefined ? {} : { onQuarantine: extra.onQuarantine }),
   })
+}
+
+/**
+ * A damaged journal opens, says why, and does not absorb what it found.
+ *
+ * The remedy changed with ADR 0001 Decision 9 and the rebuild it made
+ * possible; the invariant did not. These cases have always been about a
+ * contradictory file not being merged in — that is still what is asserted.
+ */
+async function expectQuarantined(fs: CrashableFs, reason: RegExp): Promise<void> {
+  let told = ''
+  const journal = journalOver(fs, { onQuarantine: (info) => (told = info.reason) })
+  await journal.open()
+  expect(told).toMatch(reason)
+  await journal.close()
 }
 
 describe('open and close', () => {
@@ -135,7 +158,12 @@ describe('load tolerance', () => {
     lines[0] = lines[0]!.slice(0, 10)
     fs.store.set(JOURNAL_PATH, new TextEncoder().encode(lines.join('\n')))
 
-    await expect(journalOver(fs).open()).rejects.toThrow(/not the tail/)
+    const seen: { reason: string }[] = []
+    const reopened = journalOver(fs, { onQuarantine: (info) => seen.push(info) })
+    await reopened.open()
+    expect(seen[0]?.reason).toMatch(/not the tail/)
+    // NOT ABSORBED — the surviving lines of the damaged file are not adopted.
+    expect(reopened.entries().some((e) => e.book === 'book:a' && e.kind === 'commit')).toBe(false)
   })
 
   it('a COMPLETE last line that is not an entry is corruption, not a torn tail', async () => {
@@ -152,7 +180,7 @@ describe('load tolerance', () => {
     const withBadTail = new Uint8Array([...held, ...new TextEncoder().encode('{"seq":99}\n')])
     fs.store.set(JOURNAL_PATH, withBadTail)
 
-    await expect(journalOver(fs).open()).rejects.toThrow(/not a journal entry/)
+    await expectQuarantined(fs, /not a journal entry/)
   })
 
   it('commits a dangling begin with a fresh seq at load', async () => {
@@ -188,19 +216,33 @@ describe('load validation — a corrupt journal is refused, not absorbed', () =>
     fs.store.set(JOURNAL_PATH, new TextEncoder().encode(text))
     return journalOver(fs)
   }
+  /** Open a damaged file and hand back why it was quarantined. */
+  const reasonFor = async (text: string): Promise<string> => {
+    const fs = crashableFs()
+    fs.store.set(JOURNAL_PATH, new TextEncoder().encode(text))
+    let reason = ''
+    const journal = journalOver(fs, { onQuarantine: (info) => (reason = info.reason) })
+    await journal.open()
+    /* NOT ABSORBED, which is the invariant these cases have always been
+       about: the contradictory lines are gone from the read model, and the
+       file that held them is moved aside rather than merged in. */
+    expect(journal.entries().some((e) => e.epoch === 'e1')).toBe(false)
+    await journal.close()
+    return reason
+  }
 
-  it('throws on a seq that does not strictly increase', async () => {
-    await expect(overFile(beginLine(5) + beginLine(3)).open()).rejects.toThrow(/does not increase/)
-    await expect(overFile(beginLine(4) + beginLine(4)).open()).rejects.toThrow(/does not increase/)
+  it('quarantines a seq that does not strictly increase', async () => {
+    expect(await reasonFor(beginLine(5) + beginLine(3))).toMatch(/does not increase/)
+    expect(await reasonFor(beginLine(4) + beginLine(4))).toMatch(/does not increase/)
   })
 
-  it('throws on a second epoch', async () => {
-    await expect(overFile(beginLine(1, 'e1') + beginLine(2, 'e2')).open()).rejects.toThrow(/second epoch/)
+  it('quarantines a second epoch', async () => {
+    expect(await reasonFor(beginLine(1, 'e1') + beginLine(2, 'e2'))).toMatch(/second epoch/)
   })
 
-  it('throws on a commit rev that regresses its key', async () => {
-    await expect(overFile(commitLine(1, 2) + commitLine(2, 1)).open()).rejects.toThrow(/regresses/)
-    await expect(overFile(commitLine(1, 3) + commitLine(2, 3)).open()).rejects.toThrow(/regresses/)
+  it('quarantines a commit rev that regresses its key', async () => {
+    expect(await reasonFor(commitLine(1, 2) + commitLine(2, 1))).toMatch(/regresses/)
+    expect(await reasonFor(commitLine(1, 3) + commitLine(2, 3))).toMatch(/regresses/)
   })
 
   it('still opens a valid file written the same way', async () => {
@@ -322,7 +364,7 @@ describe('carried findings — crash durability and load hardening', () => {
         JSON.stringify({ seq: 1, kind: 'begin', epoch: 'e1', book: 'book:a', what: 'record', at, origin: 'local' }) + '\n',
       [JOURNAL_META_PATH]: JSON.stringify({ epoch: 'e2', nextSeq: 2, journalFormat: 1, state: 'ready' }),
     })
-    await expect(journalOver(fs).open()).rejects.toThrow(/meta says/)
+    await expectQuarantined(fs, /meta says/)
   })
 
   it('#9 rejects a complete line carrying an invalid optional field (a rev on a begin)', async () => {
@@ -331,7 +373,7 @@ describe('carried findings — crash durability and load hardening', () => {
         JSON.stringify({ seq: 1, kind: 'begin', epoch: 'e1', book: 'book:a', what: 'record', at, origin: 'local', rev: 3 }) +
         '\n',
     })
-    await expect(journalOver(fs).open()).rejects.toThrow(/not a journal entry/)
+    await expectQuarantined(fs, /not a journal entry/)
   })
 
   it('#9 refuses a torn last line that is not even a valid JSON prefix of an entry', async () => {
@@ -345,7 +387,7 @@ describe('carried findings — crash durability and load hardening', () => {
     // is corruption where a torn tail would sit, not a tolerable truncation.
     const held = fs.store.get(JOURNAL_PATH)!
     fs.store.set(JOURNAL_PATH, new Uint8Array([...held, ...new TextEncoder().encode('@@@ not an entry')]))
-    await expect(journalOver(fs).open()).rejects.toThrow(/not a valid entry prefix/)
+    await expectQuarantined(fs, /not a valid entry prefix/)
   })
 
   it('#7/#8 fsyncs the presence register and the sync directory during bootstrap', async () => {
@@ -863,5 +905,106 @@ describe('the journal and a spy see the same writers', () => {
       .filter((e) => e.kind === 'begin')
       .map((e) => `${e.what} ${e.book}`)
     expect(journaled).toEqual(await spyKinds())
+  })
+})
+
+
+/**
+ * A JOURNAL THAT CONTRADICTS ITSELF IS REBUILT, NOT REFUSED.
+ *
+ * This is the failure that was actually hit. Two writers — a page reload while
+ * appends were in flight — left the sequence going backwards mid-file. `open`
+ * threw, `sync.start` failed, the composition rolled back, and a reader whose
+ * library has nothing to do with sync got a fatal banner instead of their
+ * books. Refusing the file was right; taking the app down with it was not, and
+ * so was leaving sync dead until someone deleted a file by hand.
+ *
+ * Rebuilding is sound because the journal is DERIVED — the books and marks are
+ * the truth, in their folders. What is genuinely lost is what a peer had
+ * acknowledged, which is why the rebuild mints a new epoch.
+ */
+describe('recovering from a corrupt journal', () => {
+  /** A journal whose seq goes backwards mid-file — the shape that happened. */
+  const withBackwardsSeq = async (fs: CrashableFs) => {
+    const first = journalOver(fs)
+    await first.open()
+    const token = await first.begin('book:a', 'record')
+    await first.commit(token)
+    await first.close()
+    const rows = journalLines(fs, JOURNAL_PATH) as Record<string, unknown>[]
+    expect(rows.length).toBeGreaterThan(1)
+    /* THE SHAPE THAT ACTUALLY HAPPENED: a valid entry whose seq has already
+       been used, appended after later ones — two writers, each with its own
+       counter, on one append-only file. Re-appending the FIRST line verbatim
+       makes a well-formed entry that violates only the ordering. */
+    const replayed = [...rows, rows[0]!]
+    fs.store.set(JOURNAL_PATH, new TextEncoder().encode(replayed.map((r) => JSON.stringify(r)).join('\n') + '\n'))
+  }
+
+  it('opens, rather than throwing', async () => {
+    const fs = crashableFs()
+    await withBackwardsSeq(fs)
+    const journal = journalOver(fs)
+    await expect(journal.open()).resolves.toBeUndefined()
+    expect(journal.state()).toBe('ready')
+    await journal.close()
+  })
+
+  it('moves the corrupt file aside rather than deleting it', async () => {
+    const fs = crashableFs()
+    await withBackwardsSeq(fs)
+    const seen: { moved: string; reason: string }[] = []
+    const journal = journalOver(fs, { onQuarantine: (info) => seen.push(info) })
+    await journal.open()
+    expect(seen).toHaveLength(1)
+    expect(seen[0]!.reason).toMatch(/does not increase past/)
+    // The evidence is still on disk, under the name the report named.
+    expect(fs.store.has(seen[0]!.moved)).toBe(true)
+    expect(seen[0]!.moved).toMatch(/^sync\/journal\.corrupt-/)
+    await journal.close()
+  })
+
+  it('mints a NEW epoch, because a peer must resync rather than be reconciled', async () => {
+    const fs = crashableFs()
+    await withBackwardsSeq(fs)
+    const before = JSON.parse(new TextDecoder().decode(fs.store.get(JOURNAL_META_PATH)!)) as { epoch: string }
+    const journal = journalOver(fs)
+    await journal.open()
+    expect(journal.epoch()).not.toBe(before.epoch)
+    await journal.close()
+  })
+
+  it('rebuilds a baseline from the folders, so nothing the reader owns is lost', async () => {
+    const fs = crashableFs()
+    await withBackwardsSeq(fs)
+    // A book on disk that the discarded journal never mentioned.
+    fs.store.set(
+      'books/book_rebuilt/book.json',
+      new TextEncoder().encode(JSON.stringify({ bookId: 'book:rebuilt', title: 'Moby-Dick', author: 'Melville', addedAt: 1 })),
+    )
+    const journal = journalOver(fs)
+    await journal.open()
+    const books = (journalLines(fs, JOURNAL_PATH) as { book?: string }[]).map((row) => row.book)
+    expect(books).toContain('book:rebuilt')
+    await journal.close()
+  })
+
+  it('leaves a torn last line to the crash path, which is not corruption', async () => {
+    /* A crash mid-append leaves a PREFIX, and a prefix satisfies every
+       invariant — it must be trimmed silently, not quarantined. Quarantining
+       it would throw away a good journal on every unclean shutdown. */
+    const fs = crashableFs()
+    const first = journalOver(fs)
+    await first.open()
+    const token = await first.begin('book:a', 'record')
+    await first.commit(token)
+    await first.close()
+    const text = new TextDecoder().decode(fs.store.get(JOURNAL_PATH)!)
+    fs.store.set(JOURNAL_PATH, new TextEncoder().encode(text + '{"seq":99,"kind":"beg'))
+    const seen: unknown[] = []
+    const journal = journalOver(fs, { onQuarantine: (info) => seen.push(info) })
+    await journal.open()
+    expect(seen).toEqual([])
+    await journal.close()
   })
 })

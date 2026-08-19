@@ -65,6 +65,15 @@ export interface SettingsProps {
    * ids and uniqueness; `renderContribution` narrows each opaque renderer.
    */
   sections: readonly SettingsSection[]
+  /**
+   * Capabilities that did not compose — `Composition.failures`.
+   *
+   * Stated here because this is where their sections would have been. A
+   * failure is survivable now (ADR 0001 Decision 9), which is only honest if
+   * the reader can see that something is missing rather than wondering where
+   * Devices went.
+   */
+  missing?: readonly { readonly id: string }[] | undefined
   onTheme: (theme: Theme) => void
   onFollowOs: (follows: boolean) => void
   onPageLayout: (layout: PageLayout) => void
@@ -96,6 +105,7 @@ export function Settings({
   typeface,
   offered,
   sections,
+  missing,
   onTheme,
   onFollowOs,
   onPageLayout,
@@ -342,6 +352,12 @@ export function Settings({
         <div key={section.id}>
           <div className={styles.groupTitle}>{section.title}</div>
           {renderContribution(section.id, section.render)}
+        </div>
+      ))}
+
+      {(missing ?? []).map((one) => (
+        <div key={one.id} className={styles.capabilityMissing}>
+          <span>{one.id} is not running — its settings are unavailable until the app is restarted.</span>
         </div>
       ))}
     </div>

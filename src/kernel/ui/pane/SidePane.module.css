@@ -1223,3 +1223,18 @@
      above it. Indent by the icon, not by an arbitrary step. */
   padding-inline-start: calc(var(--icon-control) + var(--space-10));
 }
+
+/* A CAPABILITY THAT DID NOT COMPOSE, stated where its section would have been.
+ *
+ * ADR 0001 Decision 9 lets the app run without it — a corrupt sync journal
+ * must not cost a reader their library. The cost of that is a surface that can
+ * be quietly absent, so absence is given a sentence instead. Amber, not red:
+ * nothing is broken for the reader, something is simply not here. */
+.capabilityMissing {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-6);
+  padding: var(--space-6) var(--space-10) var(--space-10);
+  font-size: var(--text-small);
+  color: var(--amber);
+}

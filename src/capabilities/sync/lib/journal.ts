@@ -87,6 +87,23 @@ import { cardsDigest, marksDigest, recordDigest } from './merge'
 /** The directory the journal, its meta, its dirty flag and the presence
  *  register all live in — fsynced whenever an ENTRY in it is created,
  *  renamed or removed, so the directory slot survives power loss too. */
+/**
+ * The journal on disk contradicts itself — not a crash artefact.
+ *
+ * A crash leaves a PREFIX of a valid journal, and a prefix satisfies every
+ * load-time invariant; `loadLines` handles that case separately and silently.
+ * This is the other thing: an epoch that changes mid-file, a rev that
+ * regresses, a seq that goes backwards. Its own type because `open` recovers
+ * from exactly this and must not swallow an unreadable disk or a newer format
+ * along with it.
+ */
+export class JournalCorruption extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'JournalCorruption'
+  }
+}
+
 export const SYNC_DIR = 'sync'
 export const JOURNAL_PATH = 'sync/journal.jsonl'
 export const JOURNAL_META_PATH = 'sync/journal.meta.json'
@@ -151,6 +168,15 @@ export interface JournalOptions {
    * so the journal holds no raw flat-store handle. Absent: no cards.
    */
   readonly cards?: () => readonly Card[]
+  /**
+   * Told when a corrupt journal was quarantined and rebuilt — see `open`.
+   *
+   * A hook rather than a `console.error`: the capability holds a scoped
+   * `Diagnostics` and this is its news to report. Silence here would make a
+   * rebuilt journal indistinguishable from a first run, and the two mean very
+   * different things to a peer.
+   */
+  readonly onQuarantine?: (info: { readonly moved: string; readonly reason: string }) => void
 }
 
 export interface JournalKeyRef {
@@ -427,6 +453,7 @@ export function createJournal({
   fsync = async () => {},
   fsyncEvery = 100,
   cards = () => [],
+  onQuarantine,
 }: JournalOptions): Journal {
   let meta: JournalMeta | null = null
   let nextSeq = 1
@@ -612,9 +639,9 @@ export function createJournal({
          * corruption — tolerating either would serve a feed with a hole in
          * it, or erase a line the disk actually holds. */
         const isTail = lines.slice(i + 1).every((rest) => rest === '')
-        if (!isTail) throw new Error(`journal: malformed line ${i + 1} is not the tail`)
+        if (!isTail) throw new JournalCorruption(`journal: malformed line ${i + 1} is not the tail`)
         if (!isValidJsonPrefix(line)) {
-          throw new Error(`journal: malformed last line ${i + 1} is not a valid entry prefix`)
+          throw new JournalCorruption(`journal: malformed last line ${i + 1} is not a valid entry prefix`)
         }
         torn = true
         break
@@ -624,15 +651,15 @@ export function createJournal({
         /* COMPLETE JSON that is not an entry. A torn append cannot leave
          * this — a byte prefix of `{...}` either fails to parse or IS the
          * whole line — so it is corruption wherever it sits, tail included. */
-        throw new Error(`journal: line ${i + 1} is complete but not a journal entry`)
+        throw new JournalCorruption(`journal: line ${i + 1} is complete but not a journal entry`)
       }
       if (entry.seq <= lastSeq) {
-        throw new Error(`journal: seq ${entry.seq} at line ${i + 1} does not increase past ${lastSeq}`)
+        throw new JournalCorruption(`journal: seq ${entry.seq} at line ${i + 1} does not increase past ${lastSeq}`)
       }
       lastSeq = entry.seq
       if (epoch === null) epoch = entry.epoch
       else if (entry.epoch !== epoch) {
-        throw new Error(`journal: line ${i + 1} names a second epoch`)
+        throw new JournalCorruption(`journal: line ${i + 1} names a second epoch`)
       }
       const key = keyOf(entry.book, entry.what)
       if (entry.kind === 'commit') {
@@ -645,7 +672,7 @@ export function createJournal({
            * refuse to open, and rewrite so the migration is paid once. Every
            * other key colliding is genuine corruption. */
           if (entry.what !== 'cards') {
-            throw new Error(`journal: commit rev ${entry.rev} at line ${i + 1} regresses its key`)
+            throw new JournalCorruption(`journal: commit rev ${entry.rev} at line ${i + 1} regresses its key`)
           }
           entry = { ...entry, rev: prev + 1 }
           repaired = true
@@ -655,7 +682,7 @@ export function createJournal({
         const prev = ackedRev.get(key) ?? 0
         if (entry.rev! <= prev) {
           if (entry.what !== 'cards') {
-            throw new Error(`journal: ack rev ${entry.rev} at line ${i + 1} regresses its key`)
+            throw new JournalCorruption(`journal: ack rev ${entry.rev} at line ${i + 1} regresses its key`)
           }
           entry = { ...entry, rev: prev + 1 }
           repaired = true
@@ -670,7 +697,7 @@ export function createJournal({
      * — a journal of epoch A opened under a meta of epoch B would append B
      * onto A and fail its own second-epoch check on the very next load. */
     if (epoch !== null && meta !== null && meta.epoch !== epoch) {
-      throw new Error(`journal: entries name epoch ${JSON.stringify(epoch)} but meta says ${JSON.stringify(meta.epoch)}`)
+      throw new JournalCorruption(`journal: entries name epoch ${JSON.stringify(epoch)} but meta says ${JSON.stringify(meta.epoch)}`)
     }
     if (torn || repaired) {
       /* THE CLEANED BYTES GO DOWN NOW, not merely into memory — a torn tail
@@ -948,7 +975,38 @@ export function createJournal({
     queue.append(JOURNAL_KEY, async () => {
       verifyIncomplete = false
       meta = await readMeta()
-      await loadLines()
+      try {
+        await loadLines()
+      } catch (cause) {
+        /* A JOURNAL THAT CONTRADICTS ITSELF IS REBUILT, not refused.
+         *
+         * Refusing was right about the file and wrong about the consequence:
+         * `open` threw, `sync.start` failed, and before ADR 0001 Decision 9
+         * that took the whole app down — a reader lost their library because a
+         * replication cache had a sequence gap. Even after Decision 9 it left
+         * sync permanently dead until someone deleted a file by hand.
+         *
+         * Rebuilding is sound because THE JOURNAL IS DERIVED. The books, the
+         * marks and the cards are the truth, on disk, in their folders;
+         * `bootstrap` walks them and emits a complete baseline. What is
+         * genuinely lost is which entries a peer had already acknowledged —
+         * so the rebuild mints a NEW EPOCH, which is precisely the signal a
+         * peer already understands as "my history restarted, resync from
+         * scratch". Nothing is silently reconciled behind its back.
+         *
+         * The file is MOVED, never deleted: it is evidence about a bug that
+         * has happened at least once, and a reader's disk is not the place to
+         * destroy evidence. */
+        if (!(cause instanceof JournalCorruption)) throw cause
+        const moved = `${SYNC_DIR}/journal.corrupt-${clock()}.jsonl`
+        await fs.rename(JOURNAL_PATH, moved)
+        await fs.remove(JOURNAL_META_PATH).catch(() => {})
+        all = []
+        byKey.clear()
+        journalFileExists = false
+        meta = null
+        onQuarantine?.({ moved, reason: cause.message })
+      }
       nextSeq = Math.max(meta?.nextSeq ?? 1, all.length === 0 ? 1 : all[all.length - 1]!.seq + 1)
       const wasDirty = await fs.exists(JOURNAL_DIRTY_PATH)
       if (meta === null || meta.state === 'building') {

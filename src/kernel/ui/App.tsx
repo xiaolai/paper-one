@@ -14,7 +14,7 @@ import { canArchiveTags, exportTagsToFile, importTagsFromFile } from './tagFiles
 import { hasOpenLayer, paneFits, useAppState } from './state'
 import { useTagPrefs } from './hooks/useTagPrefs'
 import type { KernelServices } from '../core/services'
-import type { Contributions } from '../core/registry'
+import type { Composition } from '../core/registry'
 import { useBook } from './hooks/useBook'
 import { useBookIntake } from './hooks/useBookIntake'
 import { useEnrichment } from './hooks/useEnrichment'
@@ -81,7 +81,7 @@ export interface AppProps {
    * by the composition root, like `services`, and read here; the kernel
    * itself puts nothing in it.
    */
-  composition: Contributions
+  composition: Composition
 }
 
 export function App({ services, fs, shelfUnread = false, composition }: AppProps) {
@@ -1249,6 +1249,7 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
             offered={offeredHere}
             contributed={composition.panes}
             contributedSettings={composition.settings}
+            missingCapabilities={composition.failures}
           />
         }
         onDismissPane={() => dispatch({ type: 'closePane' })}

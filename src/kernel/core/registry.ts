@@ -74,9 +74,30 @@ export interface Contributions {
   readonly clients: readonly ClientContribution[]
 }
 
+/** A capability that did not compose — see `Composition.failures`. */
+export interface CapabilityFailure {
+  readonly id: string
+  /** `start-failed`, or `requires-failed` when a dependency did not compose. */
+  readonly kind: 'start-failed' | 'requires-failed'
+  readonly error: unknown
+  /** The dependency at fault, for `requires-failed`. */
+  readonly because?: string
+}
+
 export interface Composition extends Contributions, Disposable {
-  /** Capability ids in registration order. */
+  /** Capability ids in registration order — those that STARTED. */
   readonly order: readonly string[]
+  /**
+   * What did not compose, and why. Empty is the ordinary case.
+   *
+   * A capability's `start` does I/O — the sync journal opens a file — so it
+   * can fail for reasons that are not build defects: a damaged file, a full
+   * disk, a permission that changed. Those no longer take the app down (ADR
+   * 0001, Decision 9); the capability is left out, everything else composes,
+   * and this is the record the UI reads to say so. `reason` is the id it
+   * depended on when a capability was skipped because a dependency failed.
+   */
+  readonly failures: readonly CapabilityFailure[]
   /**
    * Take everything down: every capability's `Disposable`, in reverse
    * registration order, and every registry emptied. Idempotent. Throws an
@@ -445,8 +466,7 @@ const EMPTY_CLIENTS: readonly ClientContribution[] = Object.freeze([])
 const EMPTY_SERVICES: ReadonlyMap<string, ServiceContribution> = new Map()
 
 /** Panes across the composition: by `order` (unset last), then registration. */
-function sortPanes(ordered: readonly Capability[]): readonly PaneContribution[] {
-  const all = ordered.flatMap((cap) => cap.panes ?? [])
+function sortPanes(all: readonly PaneContribution[]): readonly PaneContribution[] {
   return Object.freeze(
     all
       .map((pane, i) => ({ pane, i }))
@@ -494,16 +514,24 @@ export async function composeCapabilities(
    * arrays `checkNamespaces` just validated. A `start` that mutates its own
    * `panes`/`services`/… array — pushing an unnamespaced or another
    * capability's name — therefore cannot reach the composition's registries:
-   * they are frozen copies of the validated state, not live references. */
-  const panes = sortPanes(ordered)
-  const settings = Object.freeze(ordered.flatMap((cap) => [...(cap.settings ?? [])]))
-  const bookActions = Object.freeze(ordered.flatMap((cap) => [...(cap.bookActions ?? [])]))
-  const clients = Object.freeze(ordered.flatMap((cap) => [...(cap.clients ?? [])]))
-  const services: ReadonlyMap<string, ServiceContribution> = new Map(
-    ordered.flatMap((cap) => (cap.services ?? []).map((service) => [service.name, service] as const)),
+   * they are frozen copies of the validated state, not live references.
+   *
+   * KEPT PER CAPABILITY, because a capability that fails to start contributes
+   * nothing (Decision 9) and the registries are filtered to what started —
+   * filtered from THESE copies, so taking the snapshot early still holds. */
+  const snapshot = ordered.map((cap) =>
+    Object.freeze({
+      id: cap.id,
+      panes: Object.freeze([...(cap.panes ?? [])]),
+      settings: Object.freeze([...(cap.settings ?? [])]),
+      bookActions: Object.freeze([...(cap.bookActions ?? [])]),
+      clients: Object.freeze([...(cap.clients ?? [])]),
+      services: Object.freeze([...(cap.services ?? [])]),
+    }),
   )
-  const frozenOrder = Object.freeze([...order])
   let disposed = false
+  const failures: CapabilityFailure[] = []
+  const failed = new Set<string>()
 
   const started: { id: string; disposable: Disposable }[] = []
   const rollback = (cause: unknown, id: string, why: string, extra: readonly unknown[] = []): never => {
@@ -516,8 +544,38 @@ export async function composeCapabilities(
     })
   }
 
+  /**
+   * Leave one capability out, keeping the rest — ADR 0001 Decision 9.
+   *
+   * A `start` that throws has already been unwound by `unwind()`, so nothing
+   * it acquired is still held. The composition continues without it: the
+   * kernel's ports keep their no-op defaults, which is the same shape a build
+   * that never composed the capability has — and that shape is exercised by
+   * `pnpm verify:without`. Dying instead put the app in a state nothing tests.
+   */
+  const skip = (id: string, kind: CapabilityFailure['kind'], error: unknown, because?: string): void => {
+    failed.add(id)
+    failures.push(Object.freeze({ id, kind, error, ...(because === undefined ? {} : { because }) }))
+    api.diagnostics.error('composition.capability-failed', {
+      capability: id,
+      kind,
+      ...(because === undefined ? {} : { because }),
+      message: error instanceof Error ? error.message : String(error),
+    })
+  }
+
   for (const cap of ordered) {
     if (signal.aborted) rollback(undefined, cap.id, 'was not started: the composition was aborted')
+    /* A DEPENDENCY THAT DID NOT COMPOSE TAKES ITS DEPENDANTS WITH IT. `requires`
+     * is a declared need, not a preference: `sync` reaches the peer transport
+     * through `peer`, so starting it without one would fail later, further from
+     * the cause. Registration order is topological, so a dependency has always
+     * been decided by the time this runs. */
+    const missing = (cap.requires ?? []).find((id) => failed.has(id))
+    if (missing !== undefined) {
+      skip(cap.id, 'requires-failed', new Error(`capability "${cap.id}" requires "${missing}", which did not compose`), missing)
+      continue
+    }
     /* This capability's disposer stack: each resource it acquires registers
      * its own teardown through `onCleanup`. Run in reverse, it undoes a
      * half-finished `start` (so a throw leaves nothing) and, harmlessly
@@ -559,19 +617,35 @@ export async function composeCapabilities(
     try {
       disposable = cap.start ? await cap.start(ctx, signal) : NOTHING
     } catch (cause) {
-      rollback(cause, cap.id, 'failed to start', unwind())
+      /* The teardown errors are folded into the recorded failure rather than
+       * dropped: a `start` that failed AND could not clean up after itself is
+       * two facts, and the second one is how a leak gets noticed. */
+      const errors = unwind()
+      skip(cap.id, 'start-failed', errors.length === 0 ? cause : new AggregateError([cause, ...errors], `capability "${cap.id}" failed to start`))
+      continue
     }
     /* The property READ is inside the guard too: `dispose` could be a
-     * getter, and a getter that throws here must roll back like any other
-     * misbehaving start, not escape past the started list. */
+     * getter, and a getter that throws here must be treated like any other
+     * misbehaving start, not escape past the started list.
+     *
+     * A MISSING OR UNREADABLE `Disposable` IS STILL A BUILD DEFECT — it is
+     * the capability's shape being wrong, not its environment — but it is
+     * reported the same way rather than killing the app, because the reader
+     * cannot act on either and a dead window says less than a working app
+     * with one capability missing. `pnpm verify` is where this stays fatal. */
     let disposeFn: unknown
     try {
       disposeFn = disposable?.dispose
     } catch (cause) {
-      rollback(cause, cap.id, 'has a Disposable whose dispose cannot be read', unwind())
+      const errors = unwind()
+      skip(cap.id, 'start-failed', errors.length === 0 ? cause : new AggregateError([cause, ...errors], `capability "${cap.id}" has a Disposable whose dispose cannot be read`))
+      continue
     }
     if (typeof disposeFn !== 'function') {
-      rollback(undefined, cap.id, 'returned no Disposable from start', unwind())
+      const errors = unwind()
+      const cause = new Error(`capability "${cap.id}" returned no Disposable from start`)
+      skip(cap.id, 'start-failed', errors.length === 0 ? cause : new AggregateError([cause, ...errors], cause.message))
+      continue
     }
     /* Fold the disposer stack into teardown: the returned `Disposable`, then
      * the registered cleanups in reverse. Both run on normal dispose. */
@@ -604,8 +678,26 @@ export async function composeCapabilities(
     if (signal.aborted) rollback(undefined, cap.id, 'was aborted while starting')
   }
 
-  /* Every capability has started, so every delegating service handler's target
-   * is ready: serve the composed services through the bound host (the peer
+  /* THE REGISTRIES ARE WHAT STARTED, from the pre-start snapshot. A capability
+   * that did not compose contributes nothing — no pane, no settings section,
+   * no service, no book action — so the reader is never offered a surface
+   * backed by something that is not running. `order` is the started set too,
+   * because it is what "registration order" now means. */
+  const live = new Set(started.map((one) => one.id))
+  const startedOrdered = ordered.filter((cap) => live.has(cap.id))
+  const kept = snapshot.filter((one) => live.has(one.id))
+  const panes = sortPanes(Object.freeze(kept.flatMap((one) => [...one.panes])))
+  const settings = Object.freeze(kept.flatMap((one) => [...one.settings]))
+  const bookActions = Object.freeze(kept.flatMap((one) => [...one.bookActions]))
+  const clients = Object.freeze(kept.flatMap((one) => [...one.clients]))
+  const services: ReadonlyMap<string, ServiceContribution> = new Map(
+    kept.flatMap((one) => one.services.map((service) => [service.name, service] as const)),
+  )
+  const frozenOrder = Object.freeze(startedOrdered.map((cap) => cap.id))
+  const frozenFailures = Object.freeze([...failures])
+
+  /* Every capability that composed has started, so every delegating service
+   * handler's target is ready: serve the composed services through the bound host (the peer
    * transport on a shelf; a no-op with no host bound — a satchel, a browser
    * tab, a test). Best-effort — replication is the spine, services enhance it,
    * so a serve that fails degrades visibly rather than failing the boot. */
@@ -618,6 +710,7 @@ export async function composeCapabilities(
 
   const composition: Composition = {
     order: frozenOrder,
+    failures: frozenFailures,
     get panes() {
       return disposed ? EMPTY_PANES : panes
     },
@@ -625,7 +718,7 @@ export async function composeCapabilities(
       if (disposed) return []
       const out: Command[] = []
       const seen = new Set<string>()
-      for (const cap of ordered) {
+      for (const cap of startedOrdered) {
         for (const command of cap.commands?.(ctx) ?? []) {
           if (!command.id.startsWith(`${cap.id}:`) || command.id.length === cap.id.length + 1) {
             throw invalid('namespace', cap.id, `command id ${JSON.stringify(command.id)} of capability "${cap.id}" must be "${cap.id}:<name>"`)

@@ -322,6 +322,12 @@ export const sync: Capability = {
         /* The canonical rows, tombstones included, off the kernel's card
          * store — sync holds no raw flat-store handle (WI-10.4). */
         cards: () => services.cards.stored(),
+        /* A rebuilt journal and a first run look identical from the outside
+         * and mean very different things to a peer — so it is said out loud,
+         * with where the evidence went. */
+        onQuarantine: ({ moved, reason }) => {
+          api.diagnostics.error('sync.journal-quarantined', { moved, reason })
+        },
       })
       await journal.open()
       const openedJournal = journal

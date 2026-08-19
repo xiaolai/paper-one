@@ -141,6 +141,8 @@ export interface SidePaneProps {
   contributed: readonly PaneContribution[]
   /** The contributed settings sections, for the Settings panel (WI-C.5). */
   contributedSettings: readonly SettingsSection[]
+  /** Capabilities that did not compose — see `Settings.missing`. */
+  missingCapabilities?: readonly { readonly id: string }[] | undefined
 }
 
 export function SidePane({
@@ -164,6 +166,7 @@ export function SidePane({
   offered,
   contributed,
   contributedSettings,
+  missingCapabilities,
 }: SidePaneProps) {
   /* Falls back to the last pane rather than unmounting. The slot stays mounted
    * at zero width and inert while closed, so keeping the panel rendered is what
@@ -228,6 +231,7 @@ export function SidePane({
           <Settings
             offered={offered}
             sections={contributedSettings}
+            missing={missingCapabilities}
             theme={state.theme}
             themeFollowsOs={state.themeFollowsOs}
             pageLayout={state.pageLayout}

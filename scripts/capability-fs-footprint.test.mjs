@@ -151,6 +151,14 @@ const REVIEWED_FOOTPRINT = [
   'sync/lib/journal.ts fs.appendFile(JOURNAL_PATH)',
   'sync/lib/journal.ts fs.mkdir(SYNC_DIR)',
   'sync/lib/journal.ts fs.remove(JOURNAL_DIRTY_PATH)',
+  /* The corruption recovery (ADR 0001 Decision 9). A journal that contradicts
+   * itself is MOVED ASIDE and rebuilt from the folders rather than refused —
+   * refusing left sync dead until someone deleted a file by hand. Both paths
+   * are the journal's own, under `sync/`: the rename's destination is built
+   * from `SYNC_DIR`, and the meta file goes so `bootstrap` mints a fresh
+   * epoch. Nothing is deleted; the evidence keeps its bytes under a new name. */
+  'sync/lib/journal.ts fs.remove(JOURNAL_META_PATH)',
+  'sync/lib/journal.ts fs.rename(JOURNAL_PATH)',
   'sync/lib/journal.ts fs.writeFile(JOURNAL_DIRTY_PATH)',
   'sync/lib/journal.ts fs.writeFile(JOURNAL_PATH)',
   // Bootstrap notes a trashed book in the presence register —

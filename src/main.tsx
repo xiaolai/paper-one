@@ -180,13 +180,29 @@ async function boot(root: HTMLElement): Promise<void> {
 
   /* THE CAPABILITIES, composed onto those services — validated, ordered and
    * started before the first render, so the pane and the palette are complete
-   * on the first frame rather than filling in. A capability that fails to
-   * start is a build defect, not a runtime condition to soften: nothing stays
-   * registered (the registry rolls back), the rejection reaches the fatal
-   * handlers, and the reader sees why. The lifetime signal is the window's;
-   * nothing aborts it today, and `dispose()` is what a close would call. */
+   * on the first frame rather than filling in. A capability whose START fails
+   * is left out and the app runs without it (ADR 0001 Decision 9); a
+   * composition that will not VALIDATE is a build defect and still reaches the
+   * fatal handlers. `composition.failures` is what did not compose, and the
+   * settings pane says so. */
   const lifetime = new AbortController()
   const composition = await composeCapabilities(capabilities, kernelApi(services), lifetime.signal)
+
+  /* THE LIFETIME ENDS WITH THE PAGE, which nothing used to do.
+   *
+   * A reload builds a SECOND set of capabilities while the first is still
+   * live, and the two overlap for as long as the old context takes to go
+   * away. The sync journal is append-only with an in-memory sequence counter,
+   * so two of them on one file is exactly how its sequence came to run
+   * backwards — 203 violations, and a journal the next launch refused. Aborting
+   * here runs each capability's teardown: sync unbinds the recorder at once, so
+   * no further bracket reaches the old journal, and closes it behind the queue.
+   *
+   * `pagehide`, not `beforeunload`: it fires on a reload and on a navigation,
+   * it does not ask to block the unload, and it is the event the platform
+   * actually guarantees here. Idempotent — `dispose()` and the abort listener
+   * both no-op after the first. */
+  window.addEventListener('pagehide', () => lifetime.abort(), { once: true })
 
   createRoot(root).render(
     <StrictMode>

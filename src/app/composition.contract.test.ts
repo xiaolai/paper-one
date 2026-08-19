@@ -322,62 +322,161 @@ describe('namespacing (ADR decision 5)', () => {
 
 /* ------------------------------------------------------------ atomicity */
 
-describe('atomic registration', () => {
-  it('a start that throws disposes the started ones in reverse and registers nothing', async () => {
+/**
+ * DECISION 9'S OTHER HALF, and the reason the first half is safe.
+ *
+ * A `start` that fails no longer kills the app — so a genuine start bug could
+ * ship as a capability that quietly is not there. This is where it stays
+ * fatal: every capability each platform composes must actually start, over the
+ * real modules, with no filesystem and no storage. Fail here and `pnpm verify`
+ * is red; fail at runtime on a reader's machine and they keep their library.
+ *
+ * That asymmetry is the whole design: loud where someone can fix it, survivable
+ * where nobody can.
+ */
+describe('every composed capability actually starts', () => {
+  for (const [platform, caps] of [
+    ['desktop', desktop],
+    ['ios', ios],
+    ['android', android],
+  ] as const) {
+    it(`${platform} composes with no failures`, async () => {
+      const composition = await composeCapabilities(caps, api(), new AbortController().signal)
+      try {
+        expect(
+          composition.failures.map((one) => `${one.id}: ${String((one.error as Error)?.message)}`),
+          `${platform} has a capability that did not start`,
+        ).toEqual([])
+        expect(composition.order).toEqual(caps.map((cap) => cap.id).sort((a, b) => composition.order.indexOf(a) - composition.order.indexOf(b)))
+      } finally {
+        composition.dispose()
+      }
+    })
+  }
+})
+
+describe('a capability that fails to start', () => {
+  /* ADR 0001 DECISION 9. This used to take the whole app down: `sync` opens the
+   * journal in its `start`, a corrupt file threw, the composition rolled back,
+   * and a reader whose library has nothing to do with sync got a fatal banner
+   * instead of their books. Validation failures are still fatal — those are
+   * build defects, deterministic, and caught by `pnpm verify`. A `start` does
+   * I/O, and I/O fails for reasons a build cannot see. */
+  it('leaves the others composed, and contributes nothing itself', async () => {
     const events: string[] = []
     const boom = new Error('no network')
-    const promise = composeCapabilities(
+    const composition = await composeCapabilities(
       [
         cap('a', { panes: [{ id: 'a:pane', label: 'A', screens: ['reader'], render: () => null }] }, events),
         cap('b', { services: [{ name: 'b.ping', grant: 'b:ping', handler: async () => null }] }, events),
-        cap('c', {}, events, { throwOnStart: boom }),
+        cap('c', { panes: [{ id: 'c:pane', label: 'C', screens: ['reader'], render: () => null }] }, events, { throwOnStart: boom }),
         cap('d', {}, events),
       ],
       api(),
       new AbortController().signal,
     )
-    const error = await rejection(promise)
-    expect(error.code).toBe('start-failed')
-    expect(error.capability).toBe('c')
-    expect(error.cause).toBe(boom)
-    // b then a — reverse. d never started.
-    expect(events).toEqual(['start a', 'start b', 'start c', 'dispose b', 'dispose a'])
-    // No timer of any of them is left: nothing stays registered.
+    // Everything else started, INCLUDING the one after the failure.
+    expect(events).toEqual(['start a', 'start b', 'start c', 'start d'])
+    expect(composition.order).toEqual(['a', 'b', 'd'])
+    expect(composition.failures).toHaveLength(1)
+    expect(composition.failures[0]).toMatchObject({ id: 'c', kind: 'start-failed', error: boom })
+    /* AND IT IS ABSENT FROM EVERY REGISTRY. A pane backed by a capability that
+     * is not running would be a title over nothing. */
+    expect(composition.panes.map((pane) => pane.id)).toEqual(['a:pane'])
+    expect([...composition.services.keys()]).toEqual(['b.ping'])
+    composition.dispose()
     expect(vi.getTimerCount()).toBe(0)
   })
 
-  it('a start that returns no Disposable is a failed start', async () => {
+  it('takes its dependants with it', async () => {
+    /* `requires` is a declared need. Starting `sync` without the `peer` it
+     * reaches the transport through would fail later, further from the cause. */
     const events: string[] = []
-    const error = await rejection(
-      composeCapabilities([cap('a', {}, events), cap('b', {}, events, { noDisposable: true })], api(), new AbortController().signal),
+    const composition = await composeCapabilities(
+      [cap('peer', {}, events, { throwOnStart: new Error('no plugin') }), cap('sync', { requires: ['peer'] }, events)],
+      api(),
+      new AbortController().signal,
     )
-    expect(error.code).toBe('start-failed')
-    expect(error.capability).toBe('b')
-    expect(events).toEqual(['start a', 'start b', 'dispose a'])
-    // a's timer was cleared by its dispose; b's own timer is what a start with
-    // no Disposable leaks — which is exactly why such a start is refused.
+    expect(events).toEqual(['start peer'])
+    expect(composition.order).toEqual([])
+    expect(composition.failures.map((one) => [one.id, one.kind, one.because])).toEqual([
+      ['peer', 'start-failed', undefined],
+      ['sync', 'requires-failed', 'peer'],
+    ])
+    composition.dispose()
+  })
+
+  it('unwinds what it acquired before it threw', async () => {
+    // C1: a start that registers cleanups (a listener, a timer, a bound port)
+    // and then throws must leave NONE of them — the kernel runs the disposer
+    // stack for the failing capability itself. That is unchanged by Decision 9;
+    // what changed is that the OTHERS keep running.
+    const events: string[] = []
+    const partial: Capability = {
+      id: 'partial',
+      start: (ctx) => {
+        events.push('start partial')
+        ctx.onCleanup(() => events.push('undo first'))
+        ctx.onCleanup(() => events.push('undo second'))
+        throw new Error('half started')
+      },
+    }
+    const composition = await composeCapabilities([cap('a', {}, events), partial], api(), new AbortController().signal)
+    expect(events).toEqual(['start a', 'start partial', 'undo second', 'undo first'])
+    expect(composition.order).toEqual(['a'])
+    expect(composition.failures[0]?.id).toBe('partial')
+    composition.dispose()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('folds a cleanup that also threw into the recorded failure', async () => {
+    /* Two facts, not one: the start failed AND it could not clean up after
+       itself. The second is how a leak gets noticed, so it must not be eaten
+       by the first. */
+    const messy: Capability = {
+      id: 'messy',
+      start: (ctx) => {
+        ctx.onCleanup(() => {
+          throw new Error('cleanup also failed')
+        })
+        throw new Error('start failed')
+      },
+    }
+    const composition = await composeCapabilities([messy], api(), new AbortController().signal)
+    const error = composition.failures[0]?.error
+    expect(error).toBeInstanceOf(AggregateError)
+    expect((error as AggregateError).errors.map((e) => (e as Error).message)).toEqual(['start failed', 'cleanup also failed'])
+    composition.dispose()
+  })
+
+  it('is a failed start when no Disposable comes back', async () => {
+    const events: string[] = []
+    const composition = await composeCapabilities(
+      [cap('a', {}, events), cap('b', {}, events, { noDisposable: true })],
+      api(),
+      new AbortController().signal,
+    )
+    expect(composition.order).toEqual(['a'])
+    expect(composition.failures[0]).toMatchObject({ id: 'b', kind: 'start-failed' })
+    composition.dispose()
+    // b's own timer is what a start with no Disposable leaks — which is why
+    // such a start is refused rather than registered.
     vi.clearAllTimers()
   })
 
-  it('a dispose that throws during rollback does not stop the rest, and is reported with the cause', async () => {
-    const events: string[] = []
-    const error = await rejection(
-      composeCapabilities(
-        [
-          cap('a', {}, events),
-          cap('b', {}, events, { throwOnDispose: new Error('b will not go') }),
-          cap('c', {}, events, { throwOnStart: new Error('c fails') }),
-        ],
-        api(),
-        new AbortController().signal,
-      ),
+  it('says so through diagnostics, so a silent absence is impossible', async () => {
+    const diagnostics = recordingDiagnostics()
+    const composition = await composeCapabilities(
+      [cap('c', {}, [], { throwOnStart: new Error('nope') })],
+      api(diagnostics),
+      new AbortController().signal,
     )
-    expect(events).toEqual(['start a', 'start b', 'start c', 'dispose b', 'dispose a'])
-    expect(error.cause).toBeInstanceOf(AggregateError)
-    expect((error.cause as AggregateError).errors.map((e) => (e as Error).message)).toEqual(['c fails', 'b will not go'])
-    expect(vi.getTimerCount()).toBe(0)
+    expect(diagnostics.log.join('\n')).toContain('composition.capability-failed')
+    composition.dispose()
   })
+})
 
+describe('atomic registration', () => {
   it('a signal already aborted starts nothing', async () => {
     const events: string[] = []
     const controller = new AbortController()
@@ -458,27 +557,6 @@ describe('atomic registration', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
-  it('unwinds a capability that acquired resources through onCleanup, then threw', async () => {
-    // C1: a start that registers cleanups (a listener, a timer, a bound port)
-    // and then throws must leave NONE of them — the kernel runs the disposer
-    // stack for the failing capability itself, not only the earlier ones.
-    const events: string[] = []
-    const partial: Capability = {
-      id: 'partial',
-      start: (ctx) => {
-        events.push('start partial')
-        ctx.onCleanup(() => events.push('undo first'))
-        ctx.onCleanup(() => events.push('undo second'))
-        throw new Error('half started')
-      },
-    }
-    const error = await rejection(composeCapabilities([cap('a', {}, events), partial], api(), new AbortController().signal))
-    expect(error.code).toBe('start-failed')
-    expect(error.capability).toBe('partial')
-    // The failing capability's own cleanups run in reverse, then earlier caps.
-    expect(events).toEqual(['start a', 'start partial', 'undo second', 'undo first', 'dispose a'])
-    expect(vi.getTimerCount()).toBe(0)
-  })
 
   it('scopes each capability to its own settings namespace', async () => {
     let leaked: unknown = 'unset'
