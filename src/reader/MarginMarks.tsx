@@ -187,6 +187,7 @@ export function MarginMarks({ marks, ranges, stage, doc, position, onSelect }: M
           type="button"
           className={styles.mark}
           data-kind={mark.kind}
+          data-tint={mark.tint}
           style={{ top }}
           onClick={() => onSelect(mark)}
         >

@@ -429,6 +429,34 @@ export function proseGrid(
  * constant this replaces was 1024 for every reading step, which is below every
  * width this returns.
  */
+/**
+ * Where the MEASURE track sits, relative to the stage's own box.
+ *
+ * For anything that has to stay over the words rather than merely inside the
+ * reading area — the selection tools, which were bounded by the stage and so
+ * were free to hang across the whole margin column, over the very notes that
+ * live there.
+ *
+ * The stage centres the grid (`justify-content: center`), so the measure's
+ * offset is the stage's padding, plus half the slack, plus the tracks before
+ * it. `stageInner` is the CONTENT width — what `useElementWidth` reports and
+ * what `proseGrid` is given — while the offset is returned against the stage's
+ * BORDER box, because that is the origin `rangeRectsInHost` translates into and
+ * the origin an absolutely positioned child resolves against. The stage has no
+ * border, so the two coincide; the padding is what has to be added back.
+ *
+ * Pure, and checked against the running app: at a 1009px stage with tracks
+ * 56/660/56 and a 32px gap it returns 174.5, and the measure was measured in
+ * the window at 175.
+ */
+export function proseColumn(stageInner: number, grid: ProseGrid): { left: number; width: number } {
+  const tracks = grid.gutter + grid.measure + grid.marginCol + 2 * grid.gap
+  /* Never negative: below the width where the tracks fit, grid stops centring
+     and overflows the end, so the column starts at the padding. */
+  const slack = Math.max(0, stageInner - tracks) / 2
+  return { left: STAGE_PADDING_X + slack + grid.gutter + grid.gap, width: grid.measure }
+}
+
 export function paneTakesTrack(windowWidth: number, stepIdx: number): boolean {
   const needed =
     measureForStep(stepIdx) + PANE_TRACK + STAGE_PADDING_X * 2 + GUTTER + PROSE_GAP * 2
@@ -593,6 +621,24 @@ export const TOC_INDENT = 16
  * either side. Enough that the two lines sit IN the tile rather than fill it,
  * and no more: five of these are a row of choices, not five panels.
  */
+/**
+ * The colour disc inside a tint button in §10's selection bar.
+ *
+ * ITS BUTTON IS `CONTROL.sm`, off the ordinary scale — the bar is a row of
+ * small icon controls and there is no reason for it to invent a size. Only the
+ * disc needs a number of its own, exactly as the theme swatch below does: it is
+ * a mark of a size, not a control.
+ *
+ * ONE UNDER THE ICON RAMP'S 15. A solid disc carries more ink than an outlined
+ * glyph of the same diameter, so it wants to be the smaller of the two — but
+ * only just. Taken down to ten to match the glyphs by WEIGHT, it stopped
+ * reading as a colour worth choosing and started reading as a status dot: the
+ * three tints are the reason this face exists, and a face's subject should not
+ * be its faintest element. Fourteen is a colour first and a control second,
+ * which is the right order here.
+ */
+export const MARK_SWATCH = 14
+
 export const THEME_SWATCH_H = 52
 
 /**
@@ -817,6 +863,7 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
     '--menu-min-w': px(MENU_MIN_W),
     '--pane-menu-w': px(PANE_MENU_W),
     '--toc-indent': px(TOC_INDENT),
+    '--mark-swatch': px(MARK_SWATCH),
     '--theme-swatch-h': px(THEME_SWATCH_H),
     '--track-w': px(TRACK_W),
     '--traffic-light': px(TRAFFIC_LIGHT),

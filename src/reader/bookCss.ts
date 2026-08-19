@@ -1,3 +1,5 @@
+import type { MarkTint } from '../lib/marks'
+import type { MarkPalette } from './session'
 import type { Align, SpacingIndices, Theme, Typeface } from '../lib/state'
 import { readingStep, spacingAt } from '../lib/metrics'
 import { dimBackground, inkFor } from '../lib/palette'
@@ -25,20 +27,41 @@ interface BookColours {
   ink: string
   surface: string
   accent: string
+  /**
+   * §01's three mark tints, each a pale FILL and the saturated RULE that names
+   * it — the fill for a band behind the words, the rule for a line under them
+   * and for the swatch that offers it.
+   *
+   * Green and purple are not eyeballed. Each is its theme's own gold, held at
+   * the same presence against that theme's page and rotated in hue: the rules
+   * match the gold rule's contrast against the surface, and the fills match the
+   * gold fill's, so no tint reads louder than another and none of them reads
+   * louder here than it did before there was a choice. `markTints.test.ts`
+   * asserts both, along with the 4.5:1 floor for ink on every fill.
+   */
   mark: string
   markRule: string
+  markGreen: string
+  markGreenRule: string
+  markPurple: string
+  markPurpleRule: string
   /** §01's companion hue, darkened per theme to clear 4.5:1 on its own tint. */
   amber: string
   /** The reading ruler's band. `--wash` — one step off the page, never a tint. */
   band: string
 }
 
-const BOOK_COLOURS: Record<Theme, BookColours> = {
-  paper: { ink: '#17191B', surface: '#FFFFFF', accent: '#1B3A6B', mark: '#F3E6C0', markRule: '#E0BE55', amber: '#9E5A16', band: '#F2F3F1' },
-  slate: { ink: '#1C2022', surface: '#DFE1DE', accent: '#23456F', mark: '#DCCB92', markRule: '#B99B3F', amber: '#8A4C11', band: '#CBCFCA' },
-  sepia: { ink: '#2B2117', surface: '#F8F0E1', accent: '#2C5578', mark: '#EEDBA6', markRule: '#C9A44E', amber: '#985614', band: '#EBDFC9' },
-  sage: { ink: '#1B2419', surface: '#DDE6D8', accent: '#2A4F6B', mark: '#D8CE8C', markRule: '#AE9A3C', amber: '#8F5013', band: '#C7D4C1' },
-  night: { ink: '#E9EAE8', surface: '#16191C', accent: '#8FB4E8', mark: '#4A3B18', markRule: '#8A6E2C', amber: '#D9A25E', band: '#1E2226' },
+/* EXPORTED so the invariants can be checked. The tints are derived rather than
+   picked — see the note on `mark` above — and a derivation nothing asserts is
+   just a story about where some hex values came from. `markTints.test.ts` holds
+   the three properties they were derived to have, and checks that `tokens.css`
+   still agrees with this table. */
+export const BOOK_COLOURS: Record<Theme, BookColours> = {
+  paper: { ink: '#17191B', surface: '#FFFFFF', accent: '#1B3A6B', mark: '#FAE8AF', markRule: '#D5B75A', markGreen: '#CAF7CA', markGreenRule: '#88CE8A', markPurple: '#E9CCFF', markPurpleRule: '#D1A4F3', amber: '#9E5A16', band: '#F2F3F1' },
+  slate: { ink: '#1C2022', surface: '#DFE1DE', accent: '#23456F', mark: '#FCE4A8', markRule: '#B79A3B', markGreen: '#C5F5C7', markGreenRule: '#6CB06E', markPurple: '#E6C4FF', markPurpleRule: '#B388D4', amber: '#8A4C11', band: '#CBCFCA' },
+  sepia: { ink: '#2B2117', surface: '#F8F0E1', accent: '#2C5578', mark: '#F3E8B8', markRule: '#C7AA4C', markGreen: '#C1F7D5', markGreenRule: '#7BC07D', markPurple: '#D2BCFF', markPurpleRule: '#C397E4', amber: '#985614', band: '#EBDFC9' },
+  sage: { ink: '#1B2419', surface: '#DDE6D8', accent: '#2A4F6B', mark: '#FFE2AF', markRule: '#B99C3D', markGreen: '#CAF2CF', markGreenRule: '#6EB270', markPurple: '#E2BAFF', markPurpleRule: '#B68AD6', amber: '#8F5013', band: '#C7D4C1' },
+  night: { ink: '#E9EAE8', surface: '#16191C', accent: '#8FB4E8', mark: '#533E00', markRule: '#85702A', markGreen: '#1F471B', markGreenRule: '#4E8050', markPurple: '#4C2D5B', markPurpleRule: '#83629A', amber: '#D9A25E', band: '#1E2226' },
 }
 
 /**
@@ -61,7 +84,13 @@ function bookColours(theme: Theme, brightness: number, contrast: number): BookCo
     ...base,
     surface,
     band: dimBackground(base.band, brightness),
+    /* All three FILLS dim: a fill is a background however it is drawn, and a
+       dimmed page with full-brightness marks leaves the marks as the only
+       thing on screen that did not move. The RULES do not, for the same reason
+       `accent` does not — they are annotation, not page. */
     mark: dimBackground(base.mark, brightness),
+    markGreen: dimBackground(base.markGreen, brightness),
+    markPurple: dimBackground(base.markPurple, brightness),
     ink: inkFor(base.ink, surface, contrast),
   }
 }
@@ -74,28 +103,33 @@ function bookColours(theme: Theme, brightness: number, contrast: number): BookCo
  * black. Derived from the same table as the injected stylesheet so the drawn
  * mark and the CSS one cannot drift apart.
  *
- * Night is the exception §05 calls for: a pale fill glares on a dark page, so
- * the reader's own mark becomes a rule and takes the rule's colour.
+ * NIGHT NO LONGER OVERRIDES THE STYLE. §05 used to say a mark becomes a rule
+ * there, because "a pale fill would glare" — and that was right while the
+ * reader had no say: a fill was the only drawing there was, so turning it into
+ * a rule on the one theme it hurt was a kindness rather than a contradiction.
+ * It stopped being either once fill and underline became a CHOICE. A reader who
+ * picks a fill on Night and is given a rule has been overruled without being
+ * told, and the two styles become indistinguishable on exactly the theme people
+ * read longest on. The glare it guarded against is not there anyway: Night's
+ * fills are dark — its gold is #4A3B18 — so a band on Night is a deepening of
+ * the page, not a light on it.
  */
-export function markPalette(
-  theme: Theme,
-  brightness: number,
-  contrast: number,
-): {
-  highlight: string
-  companion: string
-  highlightAsRule: boolean
-} {
+export function markPalette(theme: Theme, brightness: number, contrast: number): MarkPalette {
   /* The same adjusted table the stylesheet uses: read from `BOOK_COLOURS`
      directly, a dimmed book would have kept full-brightness highlights — the
      one thing on the page that had not moved. */
   const c = bookColours(theme, brightness, contrast)
-  const night = theme === 'night'
-  return {
-    highlight: night ? c.markRule : c.mark,
-    companion: c.amber,
-    highlightAsRule: night,
+  const fill: Record<MarkTint, string> = {
+    yellow: c.mark,
+    green: c.markGreen,
+    purple: c.markPurple,
   }
+  const rule: Record<MarkTint, string> = {
+    yellow: c.markRule,
+    green: c.markGreenRule,
+    purple: c.markPurpleRule,
+  }
+  return { fill, rule, companion: c.amber }
 }
 
 /**

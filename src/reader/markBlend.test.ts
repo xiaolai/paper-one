@@ -44,6 +44,21 @@ describe('the highlight overlay', () => {
     expect(declared('--overlayer-highlight-blend-mode')).toBe('multiply')
   })
 
+  it('screens on the dark theme, because multiply can only darken', () => {
+    /* THE SAME DEFECT FROM THE OTHER SIDE. Multiply keeps the glyphs legible on
+       paper by only ever darkening — and on a near-black page that makes the
+       band darker than the page it is marking. Measured on the running app: a
+       #5D4D15 band over Night's #17191C page rendered as #060603, a black smear
+       that swallowed the words. Screen is multiply's dual and keeps the glyphs
+       for the same reason on a dark ground.
+       Asserted BY NAME, like the mode above and for the same reason: the
+       tempting wrong fix for "Night's marks look bad" is to reach for the
+       colours, and the colours were never the problem. */
+    const night = /\[data-theme='night'\]\s*\{([^}]*)\}/.exec(css)?.[1] ?? ''
+    expect(night).toContain('--overlayer-highlight-blend-mode')
+    expect(/--overlayer-highlight-blend-mode\s*:\s*screen\s*;/.test(night)).toBe(true)
+  })
+
   it('is fully opaque, which multiply makes safe', () => {
     // Under multiply, opacity is the mark's strength and costs the text
     // nothing. Under `normal` it would be the strength of the film.

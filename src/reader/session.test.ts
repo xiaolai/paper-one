@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { View } from 'foliate-js/view.js'
 import { ReaderSession, readMeta } from './session'
-import type { MarkAnchor, SelectionSnapshot, SessionCallbacks } from './session'
+import type { MarkAnchor, MarkPalette, SelectionSnapshot, SessionCallbacks } from './session'
 import { buildFixture, elem, txt } from './wordSnap/domFake.testkit'
 import { fakeDocument, type FakeDocument } from './wordSnap/documentFake.testkit'
 import { selectionOver, type FakeSelection } from './wordSnap/selectionFake.testkit'
@@ -175,7 +175,14 @@ function fakeView(overrides: Partial<Record<'open' | 'init', () => Promise<void>
   return view as unknown as FakeView
 }
 
-const PALETTE = { highlight: '#F3E6C0', companion: '#9E5A16', highlightAsRule: false }
+/* Paper's own three tints. Written out rather than imported from `bookCss` so
+   a change to the table shows up here as a decision rather than as a test that
+   silently follows it. */
+const PALETTE: MarkPalette = {
+  fill: { yellow: '#F3E6C0', green: '#D1EED3', purple: '#F2E0FF' },
+  rule: { yellow: '#E0BE55', green: '#85D288', purple: '#DDAFFF' },
+  companion: '#9E5A16',
+}
 
 function callbacks(
   marks: readonly MarkAnchor[] = [],
@@ -197,7 +204,6 @@ function callbacks(
     onNavigator: rec('onNavigator'),
     onSelection: rec('onSelection'),
     onMarkDrawn: rec('onMarkDrawn'),
-    onMarkActivated: rec('onMarkActivated'),
     onFileDropped: rec('onFileDropped'),
     onPageIntent: rec('onPageIntent'),
     onFixedLayout: rec('onFixedLayout'),
@@ -207,7 +213,7 @@ function callbacks(
   return Object.assign(cb, { calls })
 }
 
-const painters = { highlight: 'HIGHLIGHT', underline: 'UNDERLINE' }
+const painters = { fill: 'FILL', underline: 'UNDERLINE', wave: 'WAVE' }
 
 /** Every value `onSelection` has been handed, in order. Snapshots and nulls
  *  alike, because the nulls are half of what the selection contract says. */
@@ -586,6 +592,8 @@ describe('ReaderSession marks', () => {
     cfi: 'epubcfi(/6/4)',
     sectionIndex: 0,
     kind: 'highlight',
+    tint: 'yellow',
+    style: 'fill',
     ...over,
   })
 
@@ -602,7 +610,9 @@ describe('ReaderSession marks', () => {
 
     view.emit('create-overlay', { index: 2 })
 
-    expect(view.annotations).toEqual([{ value: 'here', kind: 'highlight', remove: false }])
+    expect(view.annotations).toEqual([
+      { value: 'here', kind: 'highlight', tint: 'yellow', style: 'fill', remove: false },
+    ])
   })
 
   it('reads the store afresh for every overlay, so a new mark is drawn', async () => {
@@ -621,34 +631,107 @@ describe('ReaderSession marks', () => {
     expect(view.annotations.map((a) => a.value)).toEqual(['made-later'])
   })
 
-  it('paints your mark as a fill and the companion\'s as a rule', async () => {
+  /** Draw one annotation and report the painter and colour it chose. */
+  const paintOne = async (annotation: Record<string, unknown>) => {
     const view = fakeView()
     const session = new ReaderSession(fakeHost(), callbacks())
     await session.start('book.epub', deps(view))
+    const painted: { fn: unknown; color: unknown }[] = []
+    view.emit('draw-annotation', {
+      draw: (fn: unknown, options: { color: string }) => painted.push({ fn, color: options.color }),
+      annotation,
+      range: null,
+    })
+    void session
+    return painted
+  }
 
-    const painted: unknown[] = []
-    const draw = (fn: unknown) => painted.push(fn)
-    view.emit('draw-annotation', { draw, annotation: { kind: 'highlight' }, range: null })
-    view.emit('draw-annotation', { draw, annotation: { kind: 'companion' }, range: null })
-
-    expect(painted).toEqual(['HIGHLIGHT', 'UNDERLINE'])
+  it('draws a fill mark as a band in its tint', async () => {
+    expect(await paintOne({ kind: 'highlight', tint: 'green', style: 'fill' })).toEqual([
+      { fn: 'FILL', color: '#D1EED3' },
+    ])
   })
 
-  it('paints your mark as a rule in Night, where a fill would glare', async () => {
+  it.each([['underline', 'UNDERLINE']])(
+    'draws a %s mark with its own painter, in the tint’s rule colour',
+    async (style, painter) => {
+    /* The RULE colour, not the fill: a pale band is invisible as a 2px line,
+       which is the whole reason each tint is a pair. And one painter per style,
+       because a style the union offers and nothing can draw is a mark the
+       reader chooses and then cannot see. */
+      expect(await paintOne({ kind: 'highlight', tint: 'purple', style })).toEqual([
+        { fn: painter, color: '#DDAFFF' },
+      ])
+    },
+  )
+
+  it('falls back to a fill for a style this build does not know', async () => {
+    // A mark written by a later build, read back by this one.
+    expect(await paintOne({ kind: 'highlight', tint: 'green', style: 'dotted' })).toEqual([
+      { fn: 'FILL', color: '#D1EED3' },
+    ])
+  })
+
+  it('draws the companion’s mark as an amber WAVE whatever the reader chose', async () => {
+    /* Here the colour is not a preference, it is whose mark this is — and so is
+       the shape. The wave is reserved to the companion (`READER_STYLES`), which
+       is what keeps a machine's claim from looking like the reader's own once
+       the reader can draw rules too. A departure from §01, which specified an
+       underline back when every reader's mark was a fill. */
+    expect(await paintOne({ kind: 'companion', tint: 'green', style: 'fill' })).toEqual([
+      { fn: 'WAVE', color: '#9E5A16' },
+    ])
+  })
+
+  it('draws a reader’s underline as an underline, not the companion’s wave', async () => {
+    // The pair above only means something if the reader's rule is a different one.
+    expect(await paintOne({ kind: 'highlight', tint: 'green', style: 'underline' })).toEqual([
+      { fn: 'UNDERLINE', color: '#85D288' },
+    ])
+  })
+
+  it('falls back to a yellow fill for an annotation carrying neither', async () => {
+    /* Every mark made before tints existed, and anything foliate has
+       round-tripped. The same default `validMarks` applies, so a mark does not
+       change appearance depending on which of the two resolved it. */
+    expect(await paintOne({ kind: 'highlight' })).toEqual([
+      { fn: 'FILL', color: '#F3E6C0' },
+    ])
+  })
+
+  it('does not substitute a rule for a fill on any theme', async () => {
+    /* §05 used to turn every Night mark into a rule, which was right while a
+       fill was the only drawing there was. With the style a CHOICE, overriding
+       it would overrule the reader silently and collapse the two styles into
+       one on the theme people read longest on. */
     const view = fakeView()
     const cb = callbacks()
-    cb.getPalette = () => ({ highlight: '#8A6E2C', companion: '#D9A25E', highlightAsRule: true })
+    cb.getPalette = () => ({
+      fill: { yellow: '#4A3B18', green: '#2C4230', purple: '#433851' },
+      rule: { yellow: '#8A6E2C', green: '#4B7D4D', purple: '#85659D' },
+      companion: '#D9A25E',
+    })
     const session = new ReaderSession(fakeHost(), cb)
     await session.start('book.epub', deps(view))
 
     const painted: { fn: unknown; color: unknown }[] = []
+    const draw = (fn: unknown, options: { color: string }) =>
+      painted.push({ fn, color: options.color })
     view.emit('draw-annotation', {
-      draw: (fn: unknown, options: { color: string }) => painted.push({ fn, color: options.color }),
-      annotation: { kind: 'highlight' },
+      draw,
+      annotation: { kind: 'highlight', tint: 'yellow', style: 'fill' },
+      range: null,
+    })
+    view.emit('draw-annotation', {
+      draw,
+      annotation: { kind: 'highlight', tint: 'yellow', style: 'underline' },
       range: null,
     })
 
-    expect(painted).toEqual([{ fn: 'UNDERLINE', color: '#8A6E2C' }])
+    expect(painted).toEqual([
+      { fn: 'FILL', color: '#4A3B18' },
+      { fn: 'UNDERLINE', color: '#8A6E2C' },
+    ])
   })
 
   it('reports the live range a mark resolved to', async () => {
@@ -682,9 +765,13 @@ describe('ReaderSession marks', () => {
     nav.drawMark(anchor({ cfi: 'x' }))
     nav.eraseMark(anchor({ cfi: 'x' }))
 
+    /* The APPEARANCE rides along on the erase too. foliate matches an
+       annotation by value, so it makes no difference to the removal — but a
+       shape that differed between the two paths is exactly how the drawing
+       and the erasing come to disagree about what a mark is. */
     expect(view.annotations).toEqual([
-      { value: 'x', kind: 'highlight', remove: false },
-      { value: 'x', kind: 'highlight', remove: true },
+      { value: 'x', kind: 'highlight', tint: 'yellow', style: 'fill', remove: false },
+      { value: 'x', kind: 'highlight', tint: 'yellow', style: 'fill', remove: true },
     ])
   })
 
@@ -1250,6 +1337,69 @@ describe('ReaderSession gesture provenance', () => {
 
     expect(doc.listenerCounts()).toEqual({})
     expect(view.listenerCounts()).toEqual({})
+  })
+
+  describe('clicking a mark', () => {
+    /**
+     * `show-annotation` is what foliate emits when a click hits a drawn mark,
+     * and it carries the live range and the section index with the anchor.
+     * Selecting that range is what puts the selection tools over the highlight,
+     * so a reader recolours, restyles, notes, copies or removes a mark with the
+     * same bar they made it with.
+     */
+    const clickMark = (view: ReturnType<typeof fakeView>, range: unknown) =>
+      view.emit('show-annotation', { value: 'cfi/9', index: 0, range })
+
+    it('selects the passage the mark covers, and publishes it', async () => {
+      const { selection, view, cb } = await loadedSection()
+      const range = selection.getRangeAt(0)
+
+      clickMark(view, range)
+
+      expect(selection.mutations).toBe(1)
+      expect(published(cb)).toEqual([
+        {
+          cfi: 'cfi(0:ick bro)',
+          sectionIndex: 0,
+          text: 'ick bro',
+          prefix: 'the qu',
+          suffix: 'wn fox',
+          range: selection.getRangeAt(0),
+        },
+      ])
+    })
+
+    it('publishes in the same turn rather than leaving it to the pointer snap', async () => {
+      /* The click that hit the mark has already scheduled a snap, and that snap
+         would publish the range too — a macrotask later and widened to whole
+         words. Waiting for it would bring the bar up late, against an anchor
+         that is not the mark's own. */
+      const { selection, view, cb } = await loadedSection()
+      clickMark(view, selection.getRangeAt(0))
+      expect(published(cb)).toHaveLength(1)
+    })
+
+    it('does nothing when the event carries no range', async () => {
+      /* `showAnnotation` resolves a CFI before emitting, and a CFI that will not
+         resolve produces no range. Selecting nothing would be a bar hanging off
+         a passage that could not be found. */
+      const { selection, view, cb } = await loadedSection()
+      clickMark(view, undefined)
+      expect(selection.mutations).toBe(0)
+      expect(published(cb)).toEqual([])
+    })
+
+    it('does nothing after the session is disposed', async () => {
+      const { selection, view, cb, session } = await loadedSection()
+      const range = selection.getRangeAt(0)
+      session.dispose()
+      clickMark(view, range)
+      /* Disposal itself publishes a null — the popup coming down with the
+         book. What must not appear is a SNAPSHOT, which would be a bar over a
+         document that has been torn down. */
+      expect(published(cb).filter(Boolean)).toEqual([])
+      expect(selection.mutations).toBe(0)
+    })
   })
 
   it('publishes on keyup without touching the selection — shift+arrow stays character-granular', async () => {
@@ -2259,9 +2409,25 @@ const NO_META = {
   languages: [],
   description: '',
   subtitle: '',
+  pageCount: 0,
 }
 
 describe('readMeta', () => {
+  it('reads a page count, which only a PDF has', () => {
+    /* `makePdf` is the only backend that sets it. Non-zero is what tells a
+       citation the book can be cited by page at all — reflowable text has no
+       page, because there the page is a property of the window. */
+    expect(readMeta({ metadata: { pageCount: 412 } }).pageCount).toBe(412)
+    expect(readMeta({ metadata: {} }).pageCount).toBe(0)
+  })
+
+  it('refuses a page count that is not a whole positive number', () => {
+    // Storage and a book's own metadata are both untrusted; 0 means "no pages".
+    for (const bad of [0, -3, 1.5, Number.NaN, Infinity, '12', null]) {
+      expect(readMeta({ metadata: { pageCount: bad } }).pageCount).toBe(0)
+    }
+  })
+
   it('reads plain strings', () => {
     expect(readMeta({ metadata: { title: 'Moby-Dick', author: 'Melville' } })).toEqual({
       ...NO_META,

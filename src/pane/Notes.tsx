@@ -270,6 +270,7 @@ export function Notes({ marks, cards, bookId, onDelete, focus, onGoTo }: NotesPr
           }}
           className={styles.note}
           data-kind={mark.kind}
+          data-tint={mark.tint}
           data-focused={mark.id === focus?.id}
         >
           {mark.kind === 'companion' && (

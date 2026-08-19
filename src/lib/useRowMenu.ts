@@ -18,6 +18,35 @@ import type { Placement } from './placement'
  * hook can clear whatever the caller keeps (the armed remove, a rename draft).
  * A shared accessible menu with focus management would build on this; that is
  * a component, and this is the part both would need first.
+ *
+ * WHERE THE MENU MAY BE RENDERED IS NOT FREE. `menuStyle` is in VIEWPORT
+ * coordinates and `.menu` is `position: fixed` — and a fixed element inside an
+ * ancestor carrying a `transform`, a `filter` or a `perspective` resolves its
+ * insets against THAT ANCESTOR instead of the viewport. Measured in the running
+ * app: a fixed child asking for (0, 0) landed at (0, 0) normally and at
+ * (300, 300) — its transformed parent's own origin — inside one.
+ *
+ * So a caller whose menu would sit inside such an ancestor must portal it out —
+ * and then, having escaped the transform, it has also escaped the THEME:
+ * `data-theme` lives on the window shell and `useAppPalette` writes brightness
+ * and contrast as inline custom properties on that same element, so a menu
+ * portalled to the body inherits neither and draws a Paper-white card in the
+ * middle of Night. The shell is the target that satisfies both, since it
+ * carries no transform of its own.
+ *
+ * A third thing, unrelated to either: ANCHOR-CLEARANCE IS NOT CONTAINER-
+ * CLEARANCE. A menu hung from a button that sits inside a padded container
+ * clears the BUTTON and laps over the container. Pass the container as `avoid`
+ * — `place` widens the obstacle to cover both and keeps the alignment to the
+ * button.
+ *
+ * `palette.ts` names the first trap for `filter`, which is where this app met
+ * it originally. All three were found in one afternoon on the selection bar's
+ * copy menu, and none of them applies to it any more: that menu is not a
+ * surface now, it is a face the popup turns over to. Which is the shortest
+ * statement of what this whole paragraph is for — a second floating surface
+ * inside a first one costs four problems, and replacing the contents costs
+ * none. Reach for a menu when the surface it opens over is not one you own.
  */
 export interface RowMenu {
   /** Put on the `⋯` button. */

@@ -75,6 +75,28 @@ button {
   --overlayer-highlight-blend-mode: multiply;
 }
 
+/*
+ * MULTIPLY IS THE WRONG OPERATOR ON A DARK PAGE, and screen is its dual.
+ *
+ * Multiply can only darken. On paper that is exactly right — it is what a real
+ * highlighter does, and it is why the glyphs survive being painted over. On a
+ * near-black page it is a disaster: the band comes out DARKER than the page it
+ * is marking. Measured on the running app before this rule existed, a #5D4D15
+ * band over Night's #17191C page rendered as #060603 — a black smear that
+ * swallowed the words instead of marking them, which is precisely the failure
+ * the blend mode is here to prevent, arriving from the other side.
+ *
+ * Screen can only lighten, so on a dark page the glyphs survive for exactly the
+ * same reason they survive multiply on a light one.
+ *
+ * The colours are generated against this: `scripts/mark-tints.mjs` hands the
+ * painter whatever, blended this way against this theme's page, produces the
+ * band the model asked for. Change the mode here and the table is wrong.
+ */
+[data-theme='night'] {
+  --overlayer-highlight-blend-mode: screen;
+}
+
 #root {
   height: 100%;
 }

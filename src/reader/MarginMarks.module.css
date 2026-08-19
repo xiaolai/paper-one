@@ -15,7 +15,13 @@
   width: 100%;
   padding: var(--space-4) var(--space-8);
   border: none;
-  border-inline-start: 2px solid var(--line-3);
+  /* THE MARK'S OWN TINT, so a passage marked purple is purple where the note
+     about it sits. A neutral rule was right while every mark looked the same;
+     with three tints it makes the margin the one place a reader's colour
+     scheme is invisible — which is the place they are reading it from. The
+     rule colour rather than the fill: 2px of a pale band is not a colour, it
+     is a smudge. Falls back to the gold for a mark made before tints. */
+  border-inline-start: 2px solid var(--mark-yellow-rule);
   border-radius: 0 var(--radius-chip) var(--radius-chip) 0;
   background: none;
   color: var(--muted);
@@ -38,7 +44,18 @@
   outline-offset: 1px;
 }
 
-/* §01: the companion's provenance is amber in every theme, Night included. */
+.mark[data-tint='green'] {
+  border-inline-start-color: var(--mark-green-rule);
+}
+
+.mark[data-tint='purple'] {
+  border-inline-start-color: var(--mark-purple-rule);
+}
+
+/* §01: the companion's provenance is amber in every theme, Night included.
+ * AFTER the tints, and it must stay after them: the companion's mark carries a
+ * tint like any other row — nothing stops one being stored — and amber is what
+ * says whose mark it is, so it wins. */
 .mark[data-kind='companion'] {
   border-inline-start-color: var(--amber-line);
   color: var(--amber);

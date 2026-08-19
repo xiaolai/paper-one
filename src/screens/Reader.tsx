@@ -8,13 +8,16 @@ import {
   measureForStep,
   paneTakesTrack,
   proseBleed,
+  proseColumn,
   proseGrid,
   BRIGHTNESS,
   CONTRAST,
   stepAt,
 } from '../lib/metrics'
 import { bookAccent } from '../lib/bookAccent'
-import { marginMarks } from '../lib/marks'
+import { citation, type Source } from '../lib/citation'
+import { hasDictionary, lookUp } from '../lib/lookUp'
+import { marginMarks, type MarkAppearance } from '../lib/marks'
 import type { MarkStore } from '../lib/useMarks'
 import type { Marking } from '../lib/useMarking'
 import { hasOpenLayer } from '../lib/state'
@@ -128,6 +131,12 @@ export function Reader({
 
   const { selection, setSelection, ranges, onMarkDrawn, selected, mark, unmark } = marking
 
+  /** What the next mark takes, as one value, so nothing has to pair them up. */
+  const appearance = useMemo<MarkAppearance>(
+    () => ({ tint: state.markTint, style: state.markStyle }),
+    [state.markTint, state.markStyle],
+  )
+
   const windowWidth = useAvailableWidth()
   /* Must use the SAME predicate as WindowShell. Reserving PANE_TRACK whenever
    * `state.pane` is set meant that below the §06 collapse threshold — where
@@ -204,6 +213,51 @@ export function Reader({
     book.deselect()
     setSelection(null)
   }, [book])
+
+  /**
+   * Put something on the clipboard and take the selection down.
+   *
+   * ONE PATH FOR BOTH WAYS OF COPYING, because the failure handling is the
+   * whole of it and it is easy to get wrong twice: clipboard access can be
+   * absent or refused, and the popup dismisses itself either way — so a copy
+   * that did not happen looks exactly like one that did, until the reader
+   * pastes nothing.
+   */
+  const copyToClipboard = useCallback(
+    (text: string) => {
+      const clipboard = navigator.clipboard
+      if (text && clipboard) {
+        void clipboard.writeText(text).catch((cause: unknown) => {
+          console.error('Paper: could not copy the selection', cause)
+          setNotice('That could not be copied to the clipboard.')
+        })
+      } else if (text) {
+        setNotice('This device has no clipboard available.')
+      }
+      clearSelection()
+    },
+    [clearSelection],
+  )
+
+  /**
+   * Where the passage came from, for a citation.
+   *
+   * THE PAGE IS THE SECTION INDEX PLUS ONE, and only for a book that has pages:
+   * `makePdf` builds one section per PDF page, so for a PDF the two are the
+   * same number counted from different places. Reflowable text has no page at
+   * all — `pageCount` is 0 there and `citation` falls back to the chapter,
+   * which is the locator that survives being read at somebody else's font size.
+   */
+  const sourceFor = useCallback(
+    (sectionIndex: number): Source => ({
+      title: book.meta?.title ?? '',
+      author: book.meta?.author ?? '',
+      chapter: book.position.chapterLabel,
+      page: (book.meta?.pageCount ?? 0) > 0 ? sectionIndex + 1 : 0,
+      fraction: book.position.fraction,
+    }),
+    [book.meta, book.position],
+  )
 
   /* Leaving the reader takes the selection with it.
    *
@@ -413,16 +467,15 @@ export function Reader({
                       onFileDropped={book.open}
                       onPageIntent={onPageIntent}
                       onFixedLayout={book.setFixedLayout}
-                      onMarkActivated={(cfi) => {
-                        /* The mark is already in hand, so Notes is told WHICH
-                           one. Opening the panel is not showing the mark: the
-                           list holds every mark in every book, and landing at
-                           the top of it leaves the reader to find the one they
-                           just clicked. */
-                        const hit = marks.current.find((m) => m.cfi === cfi)
-                        if (!hit) return
-                        showInNotes(hit.id)
-                      }}
+                      /* NO `onMarkActivated`. Clicking a mark used to open
+                         Notes on it; it SELECTS the passage now — see
+                         `show-annotation` in `session` — so the selection tools
+                         come up over the highlight and every one of them
+                         applies to it: its colour, its style, a note, a copy,
+                         or taking it off. The panel is still one press away on
+                         the bar and one click away from the margin, which is
+                         where a reader goes to READ a note rather than to act
+                         on the passage it belongs to. */
                     />
                   </div>
 
@@ -444,36 +497,66 @@ export function Reader({
                   <SelectionTools
                     selection={selection}
                     stage={stage}
-                    marked={selected !== null}
+                    /* The words' own column, so the bar cannot hang across the
+                       margin and cover the notes drawn there. A fixed-layout
+                       page fills the grid and has no measure, so it keeps the
+                       stage — see `column`. */
+                    column={book.fixedLayout ? null : proseColumn(available, grid)}
+                    marked={selected}
                     position={book.position}
-                    onHighlight={() => mark(selected?.note ?? '')}
+                    appearance={appearance}
+                    /* ONE WAY TO APPLY AN APPEARANCE, whichever control asked
+                       for it. The popup decides WHAT — the last one made, or the
+                       mark already on the passage, with one axis changed — and
+                       this only carries it out and remembers it.
+                       Acted on with the value the popup passed, never with the
+                       one in state: these dispatches have not been applied yet,
+                       so reading state here would lay down the PREVIOUS
+                       appearance on the very press that chose a new one. */
+                    onApply={(next, keep) => {
+                      dispatch({ type: 'setMarkTint', tint: next.tint })
+                      dispatch({ type: 'setMarkStyle', style: next.style })
+                      mark(selected?.note ?? '', next, keep)
+                    }}
                     onNote={() => {
                       /* The note itself is written in the Notes panel, where
                          there is room for it. Marking first is what gives it an
                          anchor — and the editor for THAT mark opens with the
                          panel, rather than leaving the reader to find the row
-                         and click "Add a note" a second time. */
-                      const created = mark(selected?.note ?? '')
-                      const target = created ?? selected
-                      showInNotes(target?.id ?? null, true)
-                    }}
-                    onCopy={() => {
-                      /* Reported when it fails. Clipboard access can be absent
-                         or refused, and the popup dismissed itself either way —
-                         so a copy that did not happen looked exactly like one
-                         that did, until the reader pasted nothing. */
-                      const text = selection?.text
-                      const clipboard = navigator.clipboard
-                      if (text && clipboard) {
-                        void clipboard.writeText(text).catch((cause: unknown) => {
-                          console.error('Paper: could not copy the selection', cause)
-                          setNotice('That could not be copied to the clipboard.')
-                        })
-                      } else if (text) {
-                        setNotice('This device has no clipboard available.')
+                         and click "Add a note" a second time.
+                         ONLY when there is nothing to write on yet. A passage
+                         that is already marked has its anchor, and re-marking it
+                         here would lay the LAST-USED appearance over the one it
+                         is already wearing — recolouring a mark on the way to
+                         writing a note about it. */
+                      if (selected) {
+                        showInNotes(selected.id, true)
+                        clearSelection()
+                        return
                       }
-                      clearSelection()
+                      const created = mark('', appearance)
+                      showInNotes(created?.id ?? null, true)
                     }}
+                    onCopy={() => copyToClipboard(selection?.text ?? '')}
+                    onCite={() => {
+                      if (!selection) return
+                      copyToClipboard(citation(selection.text, sourceFor(selection.sectionIndex)))
+                    }}
+                    onLookUp={
+                      hasDictionary(platform)
+                        ? () => {
+                            const term = selection?.text ?? ''
+                            /* The selection is NOT consumed. A lookup is a
+                               question about the passage, not something done to
+                               it — and the reader's next act is usually to mark
+                               the word they have just understood. */
+                            void lookUp(term).catch((cause: unknown) => {
+                              console.error('Paper: could not look that up', cause)
+                              setNotice('That could not be looked up.')
+                            })
+                          }
+                        : null
+                    }
                     onRemove={() => {
                       if (selected) unmark(selected)
                       clearSelection()

@@ -364,6 +364,19 @@ export async function makePdf(file: File | string, hooks: PdfHooks = {}): Promis
     metadata: {
       title: info?.Title?.trim() || titleFromSource(file),
       author: info?.Author?.trim() || '',
+      /* THE ONE THING THAT MAKES A PDF DIFFERENT FROM A BOOK, as far as the
+       * rest of the app is concerned: it has pages. Reflowable text does not —
+       * its "page" is a property of the window it happens to be shown in — so
+       * this is what lets a citation say "p. 12" for a PDF and a chapter for an
+       * EPUB without either of them having to ask what format they are.
+       *
+       * One section per page (see `sections` below), so the page a passage is
+       * on is its section index plus one. Printed page LABELS — the roman
+       * numerals a book gives its front matter — are not honoured: pdf.js
+       * exposes them through `getPageLabels()`, but metadata is stored in
+       * `library.json` and rewritten on every position save, and an array of
+       * two thousand strings does not belong in a file written that often. */
+      pageCount: pdf.numPages,
     },
     toc: outline?.map(tocItem) ?? [],
     sections: Array.from({ length: pdf.numPages }, (_, i) => ({

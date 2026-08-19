@@ -250,6 +250,7 @@
  * the whole row a single ambiguous target. */
 .note {
   display: block;
+  position: relative;
   width: 100%;
   text-align: start;
   padding: var(--space-12) var(--space-14);
@@ -264,8 +265,36 @@
   background: var(--wash);
 }
 
+/* THE MARK'S OWN TINT, down the leading edge. A reader who marks agreements in
+ * green and questions in purple has categorised the passages; a list of notes
+ * that shows none of it makes them re-open each one to find out which is which.
+ * A bar rather than a tinted row, because the row already uses its background
+ * to say "the companion wrote this" and two meanings on one surface is one
+ * meaning nobody can read. */
+.note::before {
+  content: '';
+  position: absolute;
+  inset-block: var(--space-12);
+  inset-inline-start: var(--space-4);
+  width: var(--track-w);
+  border-radius: var(--radius-pill);
+  background: var(--mark-yellow-rule);
+}
+
+.note[data-tint='green']::before {
+  background: var(--mark-green-rule);
+}
+
+.note[data-tint='purple']::before {
+  background: var(--mark-purple-rule);
+}
+
 /* Everything the companion produced carries the amber, forever. §15: the word
  * is companion — never ai, assistant or bot — in code as well as in the UI. */
+.note[data-kind='companion']::before {
+  background: var(--amber);
+}
+
 .note[data-kind='companion'] {
   background: var(--amber-bg);
   border-color: var(--amber-line);

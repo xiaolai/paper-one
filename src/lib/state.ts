@@ -1,4 +1,5 @@
 import { useReducer, type Dispatch } from 'react'
+import type { MarkStyle, MarkTint } from './marks'
 import { BRIGHTNESS, CONTRAST, DEFAULT_STEP_IDX, READING_STEPS, SPACING } from './metrics'
 
 /**
@@ -194,6 +195,24 @@ export interface AppState {
    * does not show.
    */
   readonly libraryQuery: string
+  /**
+   * The appearance the next mark gets — the tint chosen in the selection bar,
+   * and whether it lays down a band or a rule.
+   *
+   * IN APP STATE rather than local to the bar, because the bar is unmounted
+   * between selections. Kept there it would reset to yellow on every gesture,
+   * which is the opposite of what a colour scheme is for: a reader who marks
+   * questions in purple wants the NEXT question in purple too, without
+   * re-choosing. ⌘D and the palette's "Mark this passage" read the same two
+   * values, so a mark made by keyboard and a mark made by pointer cannot come
+   * out looking different.
+   *
+   * Not persisted across launches — like `theme`, `stepIdx` and every other
+   * reading setting here, which is a gap this state has had all along rather
+   * than one these two fields introduce.
+   */
+  readonly markTint: MarkTint
+  readonly markStyle: MarkStyle
 }
 
 export const initialState: AppState = {
@@ -240,6 +259,8 @@ export const initialState: AppState = {
   scrollbarOn: false,
   progressLineOn: false,
   pageLayout: 'scrolled',
+  markTint: 'yellow',
+  markStyle: 'fill',
 }
 
 export type Action =
@@ -267,6 +288,8 @@ export type Action =
   | { type: 'toggleScrollbar' }
   | { type: 'toggleProgressLine' }
   | { type: 'setPageLayout'; layout: PageLayout }
+  | { type: 'setMarkTint'; tint: MarkTint }
+  | { type: 'setMarkStyle'; style: MarkStyle }
 
 export function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -414,6 +437,15 @@ export function reducer(state: AppState, action: Action): AppState {
       return action.layout === 'paginated'
         ? { ...state, pageLayout: 'paginated', rulerOn: false, rulerPinned: false }
         : { ...state, pageLayout: 'scrolled' }
+
+    /* Two settings rather than one `appearance`, because the reader changes
+       them independently and a combined action would make every tint click
+       restate the style — which is how a toggle silently resets. */
+    case 'setMarkTint':
+      return { ...state, markTint: action.tint }
+
+    case 'setMarkStyle':
+      return { ...state, markStyle: action.style }
 
   }
 }

@@ -69,7 +69,6 @@ export interface FoliateViewProps {
   /** A mark was drawn, with the live Range it resolved to. */
   onMarkDrawn: (cfi: string, range: Range) => void
   /** A drawn mark was clicked, identified by its CFI. */
-  onMarkActivated: (cfi: string) => void
   /**
    * A book was dropped onto the book itself.
    *
@@ -272,7 +271,6 @@ export function FoliateView({
   marks,
   onSelection,
   onMarkDrawn,
-  onMarkActivated,
   onFileDropped,
   onPageIntent,
   onFixedLayout,
@@ -306,7 +304,6 @@ export function FoliateView({
     onNavigator,
     onSelection,
     onMarkDrawn,
-    onMarkActivated,
     onFileDropped,
     onPageIntent,
     onFixedLayout,
@@ -362,7 +359,6 @@ export function FoliateView({
       onNavigator: (navigator) => handlers.current.onNavigator(gen, navigator),
       onSelection: (selection) => handlers.current.onSelection(selection),
       onMarkDrawn: (cfi, range) => handlers.current.onMarkDrawn(cfi, range),
-      onMarkActivated: (cfi) => handlers.current.onMarkActivated(cfi),
       onFileDropped: (file) => handlers.current.onFileDropped(file),
       onPageIntent: (intent) => handlers.current.onPageIntent(intent),
       onFixedLayout: (fixed) => handlers.current.onFixedLayout(gen, fixed),
@@ -399,12 +395,15 @@ export function FoliateView({
             // `rects` arrives as a `DOMRectList` — foliate hands over
             // `range.getClientRects()` untouched — so it is materialised
             // before the geometry sees it. See `MarkPainter`.
-            highlight: ((rects, options = {}) =>
+            fill: ((rects, options = {}) =>
               Overlayer.highlight(
                 balanceRects(Array.from(rects), options.doc ?? null, options.at ?? null),
                 options,
               )) satisfies MarkPainter,
             underline: Overlayer.underline,
+            // The Overlayer's own name for the wavy rule. Renamed at this seam
+            // because "squiggly" is foliate's word and §15's is "wave".
+            wave: Overlayer.squiggly,
           }
         },
         /* foliate has no PDF loader, so a PDF is turned into a Book — one

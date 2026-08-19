@@ -6,7 +6,7 @@ import type {
   TocItem,
   View,
 } from 'foliate-js/view.js'
-import type { MarkKind } from '../lib/marks'
+import { MARK_STYLES, MARK_TINTS, type MarkKind, type MarkStyle, type MarkTint } from '../lib/marks'
 import type { BookMeta, ReaderPosition } from '../lib/useBook'
 import { coverFrom } from '../lib/coverArt'
 import { deferSnap } from './wordSnap/deferredSnap'
@@ -104,6 +104,12 @@ export interface MarkAnchor {
   readonly cfi: string
   readonly sectionIndex: number
   readonly kind: MarkKind
+  /* Carried on the anchor rather than looked up when the overlay draws: the
+     painter runs inside a `draw-annotation` handler that has the annotation and
+     nothing else, and giving it the store to search would be a second source of
+     truth for what a mark looks like, resolved at a different moment. */
+  readonly tint: MarkTint
+  readonly style: MarkStyle
 }
 
 /** A live selection in the book, with its anchor already resolved. */
@@ -132,21 +138,31 @@ export interface SelectionSnapshot {
  * not valid in one. Marks would silently draw black.
  */
 export interface MarkPalette {
-  readonly highlight: string
-  readonly companion: string
+  /** The band drawn behind the words, per tint. */
+  readonly fill: Record<MarkTint, string>
+  /** The rule drawn under them, per tint — and the colour of the swatch that
+   *  offers it, which is why the saturated value lives here and not only in a
+   *  stylesheet. */
+  readonly rule: Record<MarkTint, string>
   /**
-   * Night draws your own mark as a rule rather than a fill — §05: "Highlights
-   * stay legible by fill in light themes and by rule in Night, where a pale
-   * fill would glare." A boolean rather than a painter reference so the palette
-   * stays plain data and the session keeps sole ownership of the painters.
+   * §01's companion hue. A companion mark is an amber underline whatever the
+   * reader has chosen for their own, because here the colour is not a
+   * preference — it is what says whose mark this is.
    */
-  readonly highlightAsRule: boolean
+  readonly companion: string
 }
 
-/** The Overlayer's draw functions, passed in so foliate stays lazily loaded. */
+/**
+ * The Overlayer's draw functions, passed in so foliate stays lazily loaded.
+ *
+ * One per `MarkStyle`, plus the companion's, which reuses `underline`. Named
+ * for the STYLE rather than for the Overlayer function behind it — `wave` is
+ * foliate's `squiggly`, and §15's word is the one the interface uses.
+ */
 export interface MarkPainters {
-  readonly highlight: unknown
+  readonly fill: unknown
   readonly underline: unknown
+  readonly wave: unknown
 }
 
 export interface SessionCallbacks {
@@ -193,7 +209,6 @@ export interface SessionCallbacks {
   /** The selection in the book changed. Null when it collapsed. */
   onSelection: (selection: SelectionSnapshot | null) => void
   /** A drawn mark was clicked, identified by its CFI. */
-  onMarkActivated: (cfi: string) => void
   /**
    * A book was dropped ON the book — see `#watchDrops`.
    *
@@ -387,6 +402,21 @@ export class ReaderSession {
    * it, and only the holder may clear.
    */
   #selectionOwner: Document | null = null
+  /**
+   * How to select a range and publish it, per section.
+   *
+   * The publishers are built per section inside `#watchSelection`, where they
+   * close over the section's document, its index and the view — and clicking a
+   * MARK arrives on a view-level event that has none of them. Rather than
+   * rebuild a second publisher out of the same parts, which is how two answers
+   * to "what is selected" come to disagree, the one that already exists is
+   * registered here.
+   *
+   * KEYED BY INDEX, because that is what `show-annotation` carries. Keying by
+   * document would mean recovering one from the range's `ownerDocument`, which
+   * is an inference where the event already holds the answer.
+   */
+  readonly #selectors = new Map<number, (range: Range) => void>()
   /** A book this session synthesised, which `View.close()` will not release. */
   #prepared: Destroyable | null = null
   readonly #host: HTMLElement
@@ -562,22 +592,81 @@ export class ReaderSession {
         container && container.nodeType === ELEMENT_NODE
           ? (container as Element)
           : (container?.parentElement ?? null)
-      // §01: your own mark is a gold fill, the companion's is an amber
-      // underline. The kind rides along on the annotation so the painter does
-      // not have to look the mark up again.
+      /* §01 SAID AMBER UNDERLINE, and this is an amber WAVE — the one place
+       * this file departs from the section it implements, deliberately.
+       * The underline was provenance back when the reader's own mark was
+       * always a gold fill: shape and colour both said whose it was. Once the
+       * reader could draw rules too, an amber rule and a yellow rule were two
+       * pixels and a hue apart. The wave is reserved to the companion now
+       * (`READER_STYLES` is what enforces it), so the shape carries the
+       * provenance again — and a squiggle is what every spell checker on earth
+       * uses to say "something automated has an opinion here", which is what a
+       * companion's claim is.
+       * Not a style the reader picks, either way. Everything else is the
+       * reader's own tint and their own choice of band or rule.
+       *
+       * The three values ride along on the annotation so the painter does not
+       * have to look the mark up again: `annotation` carries whatever
+       * `annotationFor` put on it, and reading the store from in here would be
+       * a second answer to "what does this mark look like", resolved at a
+       * different moment from the first. */
       if (detail.annotation?.kind === 'companion') {
-        detail.draw(painters.underline, { color: palette.companion })
-      } else if (palette.highlightAsRule) {
-        detail.draw(painters.underline, { color: palette.highlight })
+        detail.draw(painters.wave, { color: palette.companion })
+        return
+      }
+
+      /* Read defensively. `Annotation` carries arbitrary values through
+       * foliate untyped, and an annotation from an older build — or one
+       * foliate has round-tripped — has neither field. Falling back to the
+       * same default `validMarks` uses keeps one answer for "an old mark". */
+      const tint = tintOf(detail.annotation?.['tint'])
+      const style = styleOf(detail.annotation?.['style'])
+      /* THE FILL COLOUR FOR A BAND, THE RULE COLOUR FOR A LINE, which is the
+       * whole reason each tint is a pair: a fill saturated enough to read as a
+       * 2px line makes its own words unreadable, and a rule pale enough to sit
+       * behind text is not a line, it is a smudge. */
+      if (style === 'fill') {
+        detail.draw(painters.fill, { color: palette.fill[tint], doc, at })
       } else {
-        detail.draw(painters.highlight, { color: palette.highlight, doc, at })
+        detail.draw(painters[style], { color: palette.rule[tint] })
       }
     })
 
+    /**
+     * Clicking a mark SELECTS the passage it covers.
+     *
+     * Which is what puts the selection tools over it — the reader's way to
+     * recolour a highlight, restyle it, note it, copy it or take it off is the
+     * same bar they made it with, rather than a second set of controls
+     * somewhere else that would have to be kept in step with the first.
+     *
+     * A REAL SELECTION, not a snapshot assembled from the mark's stored fields.
+     * Both would put the bar in the right place; only this one comes down
+     * again. A synthesised selection is not the document's, so nothing in the
+     * document contradicts it: the next click lands somewhere else, the
+     * `selectionchange` listener sees no live selection and publishes null —
+     * which would be right if the bar were showing a real selection and is
+     * merely a race against the fake one. Selecting for real puts the popup on
+     * the same footing as every other selection there is, including the way it
+     * goes away.
+     *
+     * `show-annotation` carries the live `range` and the section `index`
+     * alongside the anchor, so nothing has to be resolved to do this.
+     */
     view.addEventListener('show-annotation', (event) => {
       if (this.#disposed) return
-      const { value } = (event as CustomEvent<{ value: string }>).detail
-      this.#cb.onMarkActivated(value)
+      const { index, range } = (
+        event as CustomEvent<{ value: string; index: number; range?: Range }>
+      ).detail
+      /* No range means the anchor did not resolve — `showAnnotation` emits that
+       * way for a CFI it could not find. Selecting nothing would leave the bar
+       * hanging off a passage that is not there. */
+      if (!range) return
+      /* SELECTED AND PUBLISHED NOW rather than left to the `pointerup` snap
+       * that this same click already scheduled. That snap would publish the
+       * range too, a macrotask later and widened to whole words — so the bar
+       * would arrive late, against an anchor that is not the mark's own. */
+      this.#selectors.get(index)?.(range)
     })
 
     view.addEventListener('relocate', (event) => {
@@ -897,6 +986,28 @@ export class ReaderSession {
     doc.addEventListener('keyup', publishLive)
     doc.addEventListener('selectionchange', clearIfCollapsed)
 
+    /* Selecting a range in THIS section, for the one caller that has a range
+     * but no document — see `show-annotation`. It goes through `publishLive`
+     * rather than through `publish(range)` directly, so what is published is
+     * whatever the selection actually became: `setBaseAndExtent` detaches the
+     * range it is handed, and publishing the detached one is the exact defect
+     * `publish`'s argument exists to prevent. */
+    this.#selectors.set(index, (range: Range) => {
+      /* Through `defaultView`, exactly as `selectionOf` above reaches it — a
+         document's selection belongs to its window, and the two must ask the
+         same object or one of them is reading a selection the other cannot
+         see. */
+      const selection = doc.defaultView?.getSelection()
+      if (!selection) return
+      selection.setBaseAndExtent(
+        range.startContainer,
+        range.startOffset,
+        range.endContainer,
+        range.endOffset,
+      )
+      publishLive()
+    })
+
     this.#onTeardown(doc, () => {
       provenance.unbind()
       /* Not a DOM listener, so the listener-count assertions cannot see it: a
@@ -912,6 +1023,10 @@ export class ReaderSession {
       doc.removeEventListener('pointerup', snap.schedule)
       doc.removeEventListener('keyup', publishLive)
       doc.removeEventListener('selectionchange', clearIfCollapsed)
+      /* A Map, so it only ever grows unless something takes the row out — the
+       * same reasoning as `#sections`, and the same failure if it is forgotten:
+       * a selector retaining a document nobody is reading. */
+      this.#selectors.delete(index)
     })
   }
 
@@ -1380,8 +1495,20 @@ function quietly(what: string, step: () => void): void {
  * The object handed to foliate. `value` is the anchor it resolves; `kind` is
  * ours, carried through untouched and read back in `draw-annotation`.
  */
-function annotationFor(anchor: MarkAnchor): { value: string; kind: MarkKind } {
-  return { value: anchor.cfi, kind: anchor.kind }
+function annotationFor(
+  anchor: MarkAnchor,
+): { value: string; kind: MarkKind; tint: MarkTint; style: MarkStyle } {
+  return { value: anchor.cfi, kind: anchor.kind, tint: anchor.tint, style: anchor.style }
+}
+
+/** One of the three tints, or yellow — the same default `validMarks` applies. */
+function tintOf(value: unknown): MarkTint {
+  return MARK_TINTS.includes(value as MarkTint) ? (value as MarkTint) : 'yellow'
+}
+
+/** One of the four styles, or a fill — again the default `validMarks` applies. */
+function styleOf(value: unknown): MarkStyle {
+  return MARK_STYLES.includes(value as MarkStyle) ? (value as MarkStyle) : 'fill'
 }
 
 /**
@@ -1604,7 +1731,15 @@ export function readMeta(book: { metadata?: unknown }): BookMeta {
     languages: list(md['language'], text),
     description: cap(text(md['description']), MAX_LONG),
     subtitle: cap(text(md['subtitle'])),
+    /* Set by `makePdf` and by nothing else, which is exactly the intent: a
+       book either has pages or it does not, and only one format here does. */
+    pageCount: pageCount(md['pageCount']),
   }
+}
+
+/** A whole number of pages, or 0 for a book that has none. */
+function pageCount(value: unknown): number {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : 0
 }
 
 /**

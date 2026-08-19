@@ -775,7 +775,12 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
         hasBook: book.source !== null,
         // Null when nothing is selected, so the palette simply does not offer
         // a command that could not do anything.
-        markSelection: marking.selection ? () => marking.mark('') : null,
+        /* The same two settings the selection bar writes, so a mark made by
+           ⌘D and a mark made by clicking a swatch cannot come out looking
+           different — which is what a second default here would guarantee. */
+        markSelection: marking.selection
+          ? () => marking.mark('', { tint: state.markTint, style: state.markStyle })
+          : null,
         openBookPicker: addBooks,
         /* The palette is where the folder import lives now that the toolbar
          * carries one action — see `CommandContext`. */
@@ -910,7 +915,8 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
         // browser's own, rather than being swallowed to do nothing.
         if (!marking.selection) return
         event.preventDefault()
-        marking.mark('')
+        // The tint and style the selection bar is showing — see `markSelection`.
+        marking.mark('', { tint: state.markTint, style: state.markStyle })
         return
       }
       /* §09's reading sizes, on the combo every reader already knows.
