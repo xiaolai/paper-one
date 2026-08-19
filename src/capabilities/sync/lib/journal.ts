@@ -222,7 +222,7 @@ export interface Journal extends MutationRecorder {
  * the same day, not after someone remembers this copy. */
 const KNOWN_KINDS: ReadonlySet<string> = new Set(MUTATION_KINDS)
 
-const keyOf = (book: string, what: MutationKind): string => `${what} ${book}`
+const keyOf = (book: string, what: MutationKind): string => `${what}\u0000${book}`
 
 /**
  * The book a `(book, what)` is journaled under. Cards are ONE cross-book

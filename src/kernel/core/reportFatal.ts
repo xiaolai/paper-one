@@ -36,11 +36,38 @@ function host(): HTMLElement {
   return el
 }
 
+/**
+ * An error, its stack, and EVERYTHING UNDERNEATH IT.
+ *
+ * `cause` is where the diagnosis lives and it was being thrown away. A
+ * `CapabilityError` says "capability X failed to start; nothing stays
+ * registered" — which names the victim, not the problem — and attaches what
+ * actually went wrong as its cause. Twice now that surface has been the only
+ * thing on screen while the sentence that identified the fault sat one link
+ * below it, unprinted: the first time it cost a debugging session, the second
+ * time it was reported as a bug with nothing in it to act on.
+ *
+ * `AggregateError` is spelled out too, because the registry wraps a rollback's
+ * teardown failures in one and the interesting error can be any of them.
+ * Depth-capped and cycle-guarded: this runs on the path where things are
+ * already going wrong, and a reporter that hangs or recurses is worse than a
+ * terse one.
+ */
+export function explainFatal(detail: unknown, depth = 0, seen = new Set<unknown>()): string {
+  if (depth > 6 || seen.has(detail)) return '…'
+  seen.add(detail)
+  if (!(detail instanceof Error)) return String(detail)
+  const head = `${detail.name}: ${detail.message}\n${detail.stack ?? ''}`
+  const inner: string[] = []
+  if (detail instanceof AggregateError && Array.isArray(detail.errors)) {
+    detail.errors.forEach((one, i) => inner.push(`  [${i}] ${explainFatal(one, depth + 1, seen)}`))
+  }
+  if (detail.cause !== undefined) inner.push(`caused by: ${explainFatal(detail.cause, depth + 1, seen)}`)
+  return inner.length === 0 ? head : `${head}\n${inner.join('\n')}`
+}
+
 export function reportFatal(label: string, detail: unknown): void {
-  const text =
-    detail instanceof Error
-      ? `${detail.name}: ${detail.message}\n${detail.stack ?? ''}`
-      : String(detail)
+  const text = explainFatal(detail)
   // eslint-disable-next-line no-console -- the console is still the better
   // channel when devtools happen to be open; the DOM surface is the fallback.
   console.error(label, detail)
