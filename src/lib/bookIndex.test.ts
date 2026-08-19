@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import { BOOKS_DIR } from './bookFolder'
-import { INDEX_FILE, loadShelf, parseIndex, scanBooks, writeIndex, type IndexFs } from './bookIndex'
+import {
+  INDEX_FILE,
+  invalidateIndex,
+  loadShelf,
+  parseIndex,
+  scanBooks,
+  writeIndex,
+  type IndexFs,
+} from './bookIndex'
 
 /**
  * The index is a CACHE and the folders are the truth.
@@ -379,5 +387,45 @@ describe('a stray folder beside the books', () => {
     await loadShelf(fs)
     fs.store.delete(`${BOOKS_DIR}/half_done/content.epub`)
     expect((await loadShelf(fs)).rescanned).toBe(true)
+  })
+})
+
+describe('invalidateIndex', () => {
+  /* The cache is only sound while it is not BEHIND the records it summarises,
+     and `book.json` is explicitly allowed to be newer. A run whose index
+     rewrite failed after the record landed leaves a cache that still agrees
+     about folders and is wrong about contents — and `loadShelf` would trust it
+     for ever, so a tag written just before the failure would come back missing
+     on the next launch and stay missing. */
+  it('removes the cached shelf so the next launch rescans', async () => {
+    const fs = fakeFs(twoBooks)
+    await writeIndex(fs, await scanBooks(fs))
+    expect(await fs.exists(INDEX_FILE)).toBe(true)
+
+    await invalidateIndex(fs)
+
+    expect(await fs.exists(INDEX_FILE)).toBe(false)
+    const after = await loadShelf(fs)
+    expect(after.rescanned).toBe(true)
+    expect(after.books).toHaveLength(2)
+  })
+
+  it('says nothing when there is no cache to throw away', async () => {
+    // Called on every write failure, including the first one of a fresh library.
+    const fs = fakeFs(twoBooks)
+    await expect(invalidateIndex(fs)).resolves.toBeUndefined()
+  })
+
+  it('survives a filesystem that refuses to delete', async () => {
+    /* It runs on the FAILURE path, where the disk is already refusing writes.
+       An invalidation that threw would replace a stale cache with an unhandled
+       rejection — a worse outcome than the thing it is cleaning up after. */
+    const fs = fakeFs(twoBooks)
+    await writeIndex(fs, await scanBooks(fs))
+    const refusing: IndexFs = {
+      ...fs,
+      remove: () => Promise.reject(new Error('read-only filesystem')),
+    }
+    await expect(invalidateIndex(refusing)).resolves.toBeUndefined()
   })
 })

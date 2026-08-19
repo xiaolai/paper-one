@@ -11,7 +11,7 @@ import {
   writeBook,
   type BookRecord,
 } from './bookFolder'
-import { hasContentFile, writeIndex, type IndexFs, type IndexedBook } from './bookIndex'
+import { hasContentFile, writeIndex, type IndexFs, type IndexedBook, invalidateIndex } from './bookIndex'
 import { keepCover } from './coverArt'
 import { rescueStrandedMarks, restoreBook, trashBook } from './bookTrash'
 import { normalizeTag, tagKey } from './library'
@@ -63,8 +63,14 @@ export interface Library {
    * degraded every existing record to its filename on startup.
    */
   add: (bookId: string, record: BookRecord, sparse?: boolean) => void
-  /** Change one book. The only mutator, because a book is one file. */
-  update: (bookId: string, change: (record: BookRecord) => BookRecord) => void
+  /**
+   * Change one book. The only mutator, because a book is one file.
+   *
+   * `fromDisk` decides what the change is judged against — the cached row, or
+   * the record on disk. See the implementation; the short version is that the
+   * cheap answer is right for the position and wrong for a tag.
+   */
+  update: (bookId: string, change: (record: BookRecord) => BookRecord, fromDisk?: boolean) => void
   /** Take a book off the shelf. Its folder goes to the trash, not away. */
   remove: (bookId: string) => void
   /**
@@ -106,6 +112,22 @@ export interface Library {
   renameTag: (from: string, to: string) => void
   /** Take one of the reader's tags off every book that carries it. */
   removeTag: (tag: string) => void
+  /**
+   * The last shelf-wide tag removal, kept so it can be put back.
+   *
+   * HERE RATHER THAN IN THE PANEL, which is where it lived and is not where it
+   * belongs. `LibraryPanel` is mounted only while its own panel is showing, so
+   * switching to Notes — or closing the pane at all — unmounted the one control
+   * that could reverse a tag just taken off four hundred books. The action is
+   * the store's; so is the means to undo it.
+   *
+   * Cleared by the undo, and replaced by the next removal. Not timed: a
+   * countdown racing the reader is the wrong pressure to apply to something
+   * this large, and there is nothing to reclaim by forgetting it sooner.
+   */
+  readonly lastRemoval: TagRemoval | null
+  /** Put the last removal's tag back on the books it came off. */
+  undoRemoveTag: () => void
   /**
    * The books a `removeTag` of this tag would touch, by id — see the
    * implementation. The LENGTH is the number the confirm shows; the ids are
@@ -151,6 +173,12 @@ export interface Library {
  * Returns its input BY IDENTITY when nothing was added, which is how the
  * callers tell `update` there is nothing to write.
  */
+/** A shelf-wide tag removal, and what it would take to put it back. */
+export interface TagRemoval {
+  readonly tag: string
+  readonly bookIds: readonly string[]
+}
+
 export function withTagsAdded(own: readonly string[], values: readonly string[]): readonly string[] {
   const keys = new Set(own.map(tagKey))
   let next = own
@@ -278,21 +306,50 @@ export function useLibrary(
         )
         .catch((cause: unknown) => {
           console.error('Paper: could not save the library', cause)
+          /* AND THE CACHE GOES WITH IT. The record may well have reached disk
+           * before the index rewrite failed, and `loadShelf` trusts the index
+           * whenever the folder listing agrees — so leaving it there means the
+           * next launch reads a shelf that is confidently missing whatever this
+           * write was carrying. A rescan is the cost of not knowing which. */
+          void invalidateIndex(fs)
         })
     },
     [fs],
   )
 
   const update = useCallback(
-    (bookId: string, change: (record: BookRecord) => BookRecord) => {
+    (
+      bookId: string,
+      change: (record: BookRecord) => BookRecord,
+      /**
+       * Judge the change against the DISK, not against the cached row.
+       *
+       * `update` normally decides whether anything moved by applying `change`
+       * to the row it has in memory, and returns without writing when the
+       * answer is "nothing" — which is right for the position, saved on every
+       * page turn, and wrong for anything that has to be true of the record
+       * itself. `book.json` is explicitly allowed to be NEWER than the index
+       * (see `readBook`), so a book whose cached row is one write behind was
+       * skipped entirely: `removeTag` could not take a tag off a book that had
+       * one on disk and not in the cache, and `renameTag`'s own note claimed
+       * the opposite was true.
+       *
+       * With this set the task is queued regardless and `change` is applied to
+       * whatever `updateBook` reads. The optimistic row is still only replaced
+       * when the cached view of it moved — a write nobody can see does not need
+       * to redraw the shelf, and `reconcile` corrects the row afterwards from
+       * what the disk actually returned.
+       */
+      fromDisk = false,
+    ) => {
       const at = latest.current.findIndex((one) => one.bookId === bookId)
       const current = at === -1 ? null : latest.current[at]
       if (!current) return
       const { bookId: _id, ...record } = current
       const next = change(record)
       // By identity, so a change that decides nothing moved writes nothing —
-      // this runs on every page turn.
-      if (next === record) return
+      // this runs on every page turn. `fromDisk` is the opt-out: see above.
+      if (next === record && !fromDisk) return
       const list = [...latest.current]
       list[at] = { ...next, bookId }
       commit(bookId, list, async (target) => {
@@ -688,7 +745,7 @@ export function useLibrary(
           const own = record.tags ?? []
           if (!own.some((one) => tagKey(one) === key)) return record
           return { ...record, tags: own.filter((one) => tagKey(one) !== key) }
-        })
+        }, true)
       }
     },
     [update],
@@ -710,7 +767,7 @@ export function useLibrary(
           const own = record.tags ?? []
           const next = withTagsAdded(own, [value])
           return next === own ? record : { ...record, tags: next }
-        })
+        }, true)
       }
     },
     [update],
@@ -730,10 +787,13 @@ export function useLibrary(
        * that adds and removes in the same record is what makes the promise
        * true: `book.json` is written once, atomically, holding the result.
        *
-       * The same `update` also reads the record it changes, so a book whose
-       * cached row is one write stale is judged by what is on disk — which is
-       * why this no longer pre-filters from `latest.current` and instead lets
-       * `update` return the record unchanged when the tag is not there.
+       * Judged FROM DISK — the `true` on `update` below, and it is load-bearing
+       * rather than tidy. `update` normally decides whether anything moved by
+       * applying the change to its CACHED row and returns without writing when
+       * the answer is nothing; `book.json` is explicitly allowed to be newer
+       * than the index, so a book whose row was one write behind was skipped
+       * before this call ever reached the disk. This note used to claim the
+       * opposite was already true, which was worse than not knowing.
        * Merging onto an existing tag falls out: if `toKey` is already present
        * the map just drops the old spelling and the fold keeps one. */
       for (const book of latest.current) {
@@ -747,7 +807,7 @@ export function useLibrary(
            * nothing, so it stopped being theirs. */
           const alreadyThere = kept.some((one) => tagKey(one) === toKey)
           return { ...record, tags: alreadyThere ? kept : [...kept, value] }
-        })
+        }, true)
       }
     },
     [update],
@@ -755,17 +815,41 @@ export function useLibrary(
 
   /* THE SAME TRANSFORMATION `untagBooks` MAKES, over the whole shelf — one
    * implementation, or the two drift on what "take a tag off" means. Judged
-   * per record, not from the cached row, exactly as before: `update` re-reads
-   * the record it changes. */
+   * from disk rather than from the cached row, which is what `untagBooks`
+   * passes: a tag that reached `book.json` while the index fell behind is still
+   * on the book, and a remove that could not see it left it there for ever. */
+  /* DECLARED BEFORE `removeTag`, which closes over it: the removal has to read
+   * the affected ids before it takes the tag off, or the undo has nothing to
+   * put it back on. */
+  const ownTagBooks = useCallback((raw: string): readonly string[] => {
+    const key = tagKey(raw)
+    return latest.current
+      .filter((book) => (book.tags ?? []).some((one) => tagKey(one) === key))
+      .map((book) => book.bookId)
+  }, [])
+
+  const [lastRemoval, setLastRemoval] = useState<TagRemoval | null>(null)
+
   const removeTag = useCallback(
     (raw: string) => {
+      /* THE IDS ARE TAKEN BEFORE THE REMOVAL, from the same answer the confirm
+       * counted — `ownTagBooks`. Read afterwards they would all be gone, and an
+       * undo would have nothing to put the tag back on. */
+      const bookIds = ownTagBooks(raw)
       untagBooks(
         latest.current.map((book) => book.bookId),
         raw,
       )
+      if (bookIds.length > 0) setLastRemoval({ tag: normalizeTag(raw), bookIds })
     },
-    [untagBooks],
+    [untagBooks, ownTagBooks],
   )
+
+  const undoRemoveTag = useCallback(() => {
+    if (!lastRemoval) return
+    tagBooks(lastRemoval.bookIds, [lastRemoval.tag])
+    setLastRemoval(null)
+  }, [lastRemoval, tagBooks])
 
   const keepJacket = useCallback(
     (bookId: string, cover: Blob) => {
@@ -798,13 +882,6 @@ export function useLibrary(
    * was three subjects and one reader tag read "4" and removed from one. The
    * consent number has to be the action's number.
    */
-  const ownTagBooks = useCallback((raw: string): readonly string[] => {
-    const key = tagKey(raw)
-    return latest.current
-      .filter((book) => (book.tags ?? []).some((one) => tagKey(one) === key))
-      .map((book) => book.bookId)
-  }, [])
-
   const positionOf = useCallback(
     (bookId: string | null) =>
       bookId ? latest.current.find((one) => one.bookId === bookId)?.position ?? null : null,
@@ -822,6 +899,8 @@ export function useLibrary(
       adoptTag,
       renameTag,
       removeTag,
+      lastRemoval,
+      undoRemoveTag,
       ownTagBooks,
       keepJacket,
       positionOf,
@@ -837,6 +916,8 @@ export function useLibrary(
       adoptTag,
       renameTag,
       removeTag,
+      lastRemoval,
+      undoRemoveTag,
       ownTagBooks,
       keepJacket,
       positionOf,

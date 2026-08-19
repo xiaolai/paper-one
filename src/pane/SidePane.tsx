@@ -120,9 +120,11 @@ export interface SidePaneProps {
   /** Collection-wide tag edits, for the Library panel — see `LibraryPanel`. */
   onRenameTag: (from: string, to: string) => void
   onRemoveTag: (tag: string) => void
+  /** The last shelf-wide tag removal and its undo — see `LibraryPanel`. */
+  lastRemoval: { readonly tag: string; readonly bookIds: readonly string[] } | null
+  onUndoRemoveTag: () => void
   onAdoptTag: (tag: string) => void
   onTagBooks: (bookIds: readonly string[], tags: readonly string[]) => void
-  ownTagBooks: (tag: string) => readonly string[]
   /** The faces this machine can offer — passed straight to Settings. */
   offered: readonly Face[]
 }
@@ -140,9 +142,10 @@ export function SidePane({
   books,
   onRenameTag,
   onRemoveTag,
+  lastRemoval,
+  onUndoRemoveTag,
   onAdoptTag,
   onTagBooks,
-  ownTagBooks,
   offered,
 }: SidePaneProps) {
   /* Falls back to the last pane rather than unmounting. The slot stays mounted
@@ -251,9 +254,10 @@ export function SidePane({
             dispatch={dispatch}
             onRenameTag={onRenameTag}
             onRemoveTag={onRemoveTag}
+            lastRemoval={lastRemoval}
+            onUndoRemoveTag={onUndoRemoveTag}
             onAdoptTag={onAdoptTag}
             onTagBooks={onTagBooks}
-            ownTagBooks={ownTagBooks}
           />
         )}
       </div>

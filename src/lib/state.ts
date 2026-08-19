@@ -1,5 +1,6 @@
 import { useReducer, type Dispatch } from 'react'
 import type { MarkStyle, MarkTint } from './marks'
+import type { StoredSettings } from './settings'
 import { BRIGHTNESS, CONTRAST, DEFAULT_STEP_IDX, READING_STEPS, SPACING } from './metrics'
 
 /**
@@ -559,10 +560,28 @@ export function screenFor(search: string): Screen {
   return new URLSearchParams(search).get('book') ? 'reader' : 'library'
 }
 
-export function useAppState(): [AppState, AppDispatch] {
+/** What a launch is told: the address it was opened at, and what the reader
+ *  had set the last time they closed the app. */
+export interface Boot {
+  readonly search: string
+  /** The stored settings, or null when there is no store to read — see
+   *  `parseSettings`, which is what turns a file into this. */
+  readonly settings: StoredSettings | null
+}
+
+export function useAppState(settings: StoredSettings | null): [AppState, AppDispatch] {
   /* The LAZY overload: `bootState` parses the URL, and passed by value it ran
-   * on every render for a result `useReducer` reads exactly once. */
-  return useReducer(reducer, typeof window === 'undefined' ? '' : window.location.search, bootState)
+   * on every render for a result `useReducer` reads exactly once.
+   *
+   * The settings arrive HERE rather than through an effect, and that is the
+   * point of threading them this far: `main.tsx` already awaits the store
+   * before React mounts, so the first render can be the reader's own theme and
+   * type size. Applied afterwards they would be a visible flash of Paper at
+   * 21px on every launch, on the one surface nobody can look away from. */
+  return useReducer(reducer, {
+    search: typeof window === 'undefined' ? '' : window.location.search,
+    settings,
+  }, bootState)
 }
 
 /**
@@ -578,7 +597,7 @@ export function useAppState(): [AppState, AppDispatch] {
  * Exported because it is the honest thing to test — a reducer case cannot show
  * that the state a launch begins in is coherent.
  */
-export function bootState(search: string): AppState {
+export function bootState({ search, settings }: Boot): AppState {
   const screen = screenFor(search)
   /* CLOSED STAYS CLOSED, FITTED STAYS FITTED — and the two must not tangle.
    * The old conditional fed the FALLBACK into `paneFits` and then returned the
@@ -587,7 +606,17 @@ export function bootState(search: string): AppState {
    * rather than a statement of it. Said directly: a null seed boots closed;
    * anything else boots to that panel where it fits, or the screen's default. */
   const pane = initialState.pane === null ? null : paneFor(screen, initialState.pane)
-  return { ...initialState, screen, pane, lastPane: pane ?? initialState.lastPane }
+  /* THE SETTINGS GO ON FIRST, then the things a launch decides. Screen and pane
+     are session facts and are not persisted — see `SETTINGS_KEYS` — so a stored
+     file cannot put the reader back into a panel they closed, and the order
+     here is what guarantees it rather than trusting the file's shape. */
+  return {
+    ...initialState,
+    ...(settings ?? {}),
+    screen,
+    pane,
+    lastPane: pane ?? initialState.lastPane,
+  }
 }
 
 /**

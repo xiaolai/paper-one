@@ -10,6 +10,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { isTauri, usePlatform, usePrefersDark, usePrefersReducedMotion } from './lib/platform'
 import { NOT_CONFIGURED } from './lib/companion'
 import { hasOpenLayer, paneFits, useAppState } from './lib/state'
+import { loadSettings, useSettings } from './lib/useSettings'
 import type { MarkStorage } from './lib/marks'
 import { useBook } from './lib/useBook'
 import { useBookIntake } from './lib/useBookIntake'
@@ -86,9 +87,16 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
   /* The one thing that can stop a page turn sliding. Not a setting — see the
    * hook, which explains why there is deliberately no control for it. */
   const reducedMotion = usePrefersReducedMotion()
-  const [state, dispatch] = useAppState()
+  /* THE READER'S OWN SETTINGS, read before the first render. `storage` is
+     already awaited in `main.tsx`, so the theme and type size a reader chose
+     are what the first paint uses rather than something an effect corrects a
+     frame later. */
+  const [state, dispatch] = useAppState(loadSettings(storage))
   /* The open book lives here, not in the reader: Contents and Companion read
    * from it and they are panels of the side pane now. */
+  /* And written back whenever they move. See `useSettings` for why this is a
+     comparison rather than a write on every state change. */
+  useSettings(storage, state)
   const book = useBook()
   /* Marks outlive the open book — the Notes panel browses every book's — so the
    * store is keyed by book rather than owned by one. */
@@ -1190,9 +1198,10 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
             books={library.books}
             onRenameTag={library.renameTag}
             onRemoveTag={library.removeTag}
+            lastRemoval={library.lastRemoval}
+            onUndoRemoveTag={library.undoRemoveTag}
             onAdoptTag={library.adoptTag}
             onTagBooks={library.tagBooks}
-            ownTagBooks={library.ownTagBooks}
             offered={offeredHere}
           />
         }

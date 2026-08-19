@@ -106,29 +106,35 @@ export interface LibraryPanelProps {
   readonly onRenameTag: (from: string, to: string) => void
   /** Take one of the reader's tags off every book carrying it. */
   readonly onRemoveTag: (tag: string) => void
+  /**
+   * The last shelf-wide removal, and the way back from it — both owned by the
+   * library store rather than by this panel.
+   *
+   * It was `useState` here, and this panel is mounted only while its own panel
+   * is showing: switching to Notes, or closing the pane, unmounted the one
+   * control that could reverse a tag just taken off four hundred books. The
+   * author had already stopped the line disappearing when its SECTION collapsed
+   * — see the note where it renders — which is the same defect one level in.
+   */
+  readonly lastRemoval: { readonly tag: string; readonly bookIds: readonly string[] } | null
+  readonly onUndoRemoveTag: () => void
   /** Make a publisher's subject the reader's own, on every book declaring it. */
   readonly onAdoptTag: (tag: string) => void
   /** Put tags on books — a drop on a row, and the undo after a remove. */
   readonly onTagBooks: (bookIds: readonly string[], tags: readonly string[]) => void
-  /** The books `onRemoveTag` would touch — the confirm's number, the undo's ids. */
-  readonly ownTagBooks: (tag: string) => readonly string[]
 }
 
 /** What the last collection-wide remove took off, so it can be put back. */
-interface Removal {
-  readonly tag: string
-  readonly bookIds: readonly string[]
-}
-
 export function LibraryPanel({
   books,
   query,
   dispatch,
   onRenameTag,
   onRemoveTag,
+  lastRemoval,
+  onUndoRemoveTag,
   onAdoptTag,
   onTagBooks,
-  ownTagBooks,
 }: LibraryPanelProps) {
   /* Which tag's menu is open — one across the panel, held here for the same
    * reason the shelf holds `menuFor` for its cards. */
@@ -136,9 +142,6 @@ export function LibraryPanel({
   const [order, setOrder] = useState<TagOrder>('count')
   const [filter, setFilter] = useState('')
   const [subjectsOpen, setSubjectsOpen] = useState(true)
-  /* The one action here that touches many books at once, kept so it can be
-   * undone in place. Cleared by the next removal, or by the undo. */
-  const [removal, setRemoval] = useState<Removal | null>(null)
 
   /* PARSED ONCE. This ran twice — once bare for the scope sets, once inside
    * the shelf memo — two derivations of one string, diverging the day one
@@ -247,10 +250,10 @@ export function LibraryPanel({
         count={count}
         /* The number a remove would actually touch — NOT `count`, which is
            scoped to the view and includes publisher subjects. From the
-           one-pass map, not `ownTagBooks` per row: that walked the whole
-           shelf once per tag on every keystroke. The ids for the remove
-           itself still come from `ownTagBooks`, at click time — see
-           `onRemove`, where the number and the ids must agree. */
+           one-pass map rather than a per-row shelf walk on every keystroke.
+           The ids the remove and its undo use come from the same rule inside
+           the store (`ownTagBooks`, read before the tag is taken off), so the
+           number here and the books touched there cannot disagree. */
         removes={removesByKey.get(tagKey(tag)) ?? 0}
         mine={entry.mine}
         state={state}
@@ -284,9 +287,9 @@ export function LibraryPanel({
            book carries would empty the shelf with nothing to say why. What it
            came off is kept, so the line below can put it back. */
         onRemove={() => {
-          const bookIds = ownTagBooks(tag)
+          /* The store takes the ids it will need for the undo, before the tag
+             is gone — see `removeTag`. Read here they would already be stale. */
           onRemoveTag(tag)
-          setRemoval({ tag, bookIds })
           if (state !== 'off') setQuery(withoutTag(query, tag, tagKey))
         }}
         onAdopt={() => onAdoptTag(tag)}
@@ -424,19 +427,16 @@ export function LibraryPanel({
       {/* OUTSIDE the tags section's gate, deliberately: removing the last tag
           on the shelf collapses that section, and an undo that unmounted with
           it vanished at the exact moment it was the only way back. */}
-      {removal && (
+      {lastRemoval && (
         <div className={styles.undoLine} role="status">
           <span className={styles.undoText}>
-            Removed {removal.tag} from {removal.bookIds.length}{' '}
-            {removal.bookIds.length === 1 ? 'book' : 'books'}
+            Removed {lastRemoval.tag} from {lastRemoval.bookIds.length}{' '}
+            {lastRemoval.bookIds.length === 1 ? 'book' : 'books'}
           </span>
           <button
             type="button"
             className={styles.undoButton}
-            onClick={() => {
-              onTagBooks(removal.bookIds, [removal.tag])
-              setRemoval(null)
-            }}
+            onClick={onUndoRemoveTag}
           >
             <Undo2 size={ICON.control} strokeWidth={ICON.stroke} />
             Undo

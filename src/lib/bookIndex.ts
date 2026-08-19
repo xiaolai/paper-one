@@ -284,6 +284,29 @@ async function folderNames(fs: IndexFs): Promise<string[]> {
 }
 
 /** Write the cache. Atomic, like every other write here. */
+/**
+ * Throw the cached shelf away, so the next launch rebuilds it from the folders.
+ *
+ * `loadShelf` trusts `index.json` whenever the directory listing still agrees
+ * with it — which is the whole point of the cache, and is only sound while the
+ * index is not behind the records it summarises. `book.json` is explicitly
+ * allowed to be newer (see `readBook`), so a run where a write failed after the
+ * record landed but before the index was rewritten leaves a cache that AGREES
+ * about folders and is wrong about contents, and nothing later would notice: a
+ * tag added just before the failure would come back missing on the next launch
+ * and stay missing.
+ *
+ * Deleting it costs one rescan and cannot be wrong. Failing to delete it costs
+ * a reader their work, silently, with the shelf looking perfectly healthy.
+ *
+ * Best effort by design. This runs on the failure path, where the disk is
+ * already refusing writes — an invalidation that threw would replace a bad
+ * cache with an unhandled rejection.
+ */
+export async function invalidateIndex(fs: IndexFs): Promise<void> {
+  await fs.remove(INDEX_FILE).catch(() => {})
+}
+
 export async function writeIndex(
   fs: IndexFs,
   books: readonly IndexedBook[],

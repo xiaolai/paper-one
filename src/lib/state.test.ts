@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_STEP_IDX, READING_STEPS, readingStep } from './metrics'
 import { BUNDLED_FACES, faceById } from './typefaces'
+import { settingsOf } from './settings'
 import { bootState, initialState, paneFits, reducer, screenFor, type AppState } from './state'
 
 /**
@@ -401,7 +402,7 @@ describe('setLibraryQuery', () => {
 
 describe('bootState', () => {
   it('does not open the library on a panel the library does not have', () => {
-    const boot = bootState('')
+    const boot = bootState({ search: '', settings: null })
     expect(boot.screen).toBe('library')
     expect(paneFits(boot.screen, boot.pane!)).toBe(true)
     // The panel about the shelf, on the shelf — see `defaultPaneFor`.
@@ -409,7 +410,7 @@ describe('bootState', () => {
   })
 
   it('keeps the book panel when the launch named a book', () => {
-    const boot = bootState('?book=/sample.epub')
+    const boot = bootState({ search: '?book=/sample.epub', settings: null })
     expect(boot.screen).toBe('reader')
     /* The READER's default panel, by name. This compared against
      * `initialState.pane`, which pinned nothing once the seed became coherent
@@ -422,7 +423,7 @@ describe('bootState', () => {
    * that is actually showing — or the first ⌘\ closes and reopens onto
    * something else. */
   it('starts with lastPane agreeing with the panel on screen', () => {
-    const boot = bootState('')
+    const boot = bootState({ search: '', settings: null })
     expect(boot.lastPane).toBe(boot.pane)
   })
 })
@@ -444,5 +445,52 @@ describe('the hook starts from bootState', () => {
      * as the lazy initializer — which is the current shape, so the URL parse
      * runs once instead of on every render. */
     expect(hook).toMatch(/useReducer\(\s*reducer,[^)]*bootState[(),]/)
+  })
+})
+
+describe('a launch restores what the reader chose', () => {
+  /* Paper persisted none of this: a reader who set Night at 19px got Paper at
+     21px the next morning, every morning. `bootState` is where the stored file
+     becomes the first render — through the reducer's lazy initialiser, not an
+     effect, so there is no frame of the default theme to see. */
+  const stored = {
+    ...settingsOf(initialState),
+    theme: 'night' as const,
+    stepIdx: 1,
+    brightness: 0,
+    markTint: 'purple' as const,
+    markStyle: 'underline' as const,
+    spacing: { letter: 2, word: 1, line: 3, paragraph: 0 },
+  }
+
+  it('boots into the stored theme, size and mark appearance', () => {
+    const state = bootState({ search: '', settings: stored })
+    expect(state.theme).toBe('night')
+    expect(state.stepIdx).toBe(1)
+    expect(state.brightness).toBe(0)
+    expect(state.markTint).toBe('purple')
+    expect(state.markStyle).toBe('underline')
+    expect(state.spacing).toEqual(stored.spacing)
+  })
+
+  it('boots into the defaults when there is nothing stored', () => {
+    // No store at all — a plain browser tab, or a disk that would not open.
+    expect(bootState({ search: '', settings: null }).theme).toBe(initialState.theme)
+  })
+
+  it('still decides the screen and the pane itself', () => {
+    /* Session facts are not persisted, and the ORDER in `bootState` is what
+       guarantees it: a hand-edited file naming a screen or a panel must not put
+       the reader somewhere they never left. */
+    const withSession = { ...stored, screen: 'reader', pane: 'notes' } as never
+    const state = bootState({ search: '', settings: withSession })
+    expect(state.screen).toBe('library')
+    expect(state.pane).toBe(initialState.pane)
+  })
+
+  it('lets ?book= win over the stored settings for the screen', () => {
+    const state = bootState({ search: '?book=x', settings: stored })
+    expect(state.screen).toBe('reader')
+    expect(state.theme).toBe('night')
   })
 })
