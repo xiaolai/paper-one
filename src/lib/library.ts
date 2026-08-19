@@ -132,7 +132,7 @@ export function inOrder(books: readonly IndexedBook[], order: LibraryOrder): Ind
  * tags deduplicate by — it lowercased without normalising, and a decomposed
  * `café` typed into the field missed the composed one in every title.
  */
-const fold = (text: string): string =>
+export const fold = (text: string): string =>
   text.normalize('NFC').toLowerCase().toUpperCase().toLowerCase().normalize('NFC')
 
 /**

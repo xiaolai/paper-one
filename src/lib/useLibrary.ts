@@ -740,6 +740,23 @@ export function useLibrary(
   const untagBooks = useCallback(
     (bookIds: readonly string[], raw: string) => {
       const key = tagKey(raw)
+      /* WHICH BOOKS ACTUALLY LOSE IT, taken before anything is written — read
+       * afterwards the answer is always none, and an undo would have nothing to
+       * put the tag back on. Filtered rather than assumed: `bookIds` is a
+       * selection, and most of a selection may not carry the tag at all, so
+       * putting it back on all of them would tag books that never had it.
+       *
+       * From the cached rows, which is the one place this is weaker than the
+       * removal itself — that reads each record from disk (`true` below), so a
+       * tag present only on disk is removed and not offered back. The
+       * alternative is reading every record twice for an undo nobody may use. */
+      const touched = latest.current
+        .filter(
+          (book) =>
+            bookIds.includes(book.bookId) &&
+            (book.tags ?? []).some((one) => tagKey(one) === key),
+        )
+        .map((book) => book.bookId)
       for (const bookId of bookIds) {
         update(bookId, (record) => {
           const own = record.tags ?? []
@@ -747,6 +764,11 @@ export function useLibrary(
           return { ...record, tags: own.filter((one) => tagKey(one) !== key) }
         }, true)
       }
+      /* THE ONE PLACE A REMOVAL IS RECORDED, so the shelf-wide remove and the
+       * editor's remove over a selection offer the same way back. `removeTag`
+       * routes through here; it used to record separately, which is two answers
+       * to "what did that just take off". */
+      if (touched.length > 0) setLastRemoval({ tag: normalizeTag(raw), bookIds: touched })
     },
     [update],
   )
@@ -832,17 +854,17 @@ export function useLibrary(
 
   const removeTag = useCallback(
     (raw: string) => {
-      /* THE IDS ARE TAKEN BEFORE THE REMOVAL, from the same answer the confirm
-       * counted — `ownTagBooks`. Read afterwards they would all be gone, and an
-       * undo would have nothing to put the tag back on. */
-      const bookIds = ownTagBooks(raw)
+      /* No recording here: `untagBooks` does it, for every caller. The ids it
+       * keeps are the books that actually carried the tag, which over the whole
+       * shelf is the same answer `ownTagBooks` gives the confirm — so the
+       * number the reader was shown and the books an undo restores come from
+       * one rule rather than two that could drift. */
       untagBooks(
         latest.current.map((book) => book.bookId),
         raw,
       )
-      if (bookIds.length > 0) setLastRemoval({ tag: normalizeTag(raw), bookIds })
     },
-    [untagBooks, ownTagBooks],
+    [untagBooks],
   )
 
   const undoRemoveTag = useCallback(() => {

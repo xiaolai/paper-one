@@ -74,6 +74,10 @@ export interface LibraryProps {
    */
   onTagBooks: (bookIds: readonly string[], tags: readonly string[]) => void
   onUntagBooks: (bookIds: readonly string[], tag: string) => void
+  /** The last tag removal and the way back — for the SELECTION editor, which is
+   *  the one on this screen that can take a tag off many books at once. */
+  lastRemoval: { readonly tag: string; readonly bookIds: readonly string[] } | null
+  onUndoRemoveTag: () => void
   /** The reader's judgement that a book is done. */
   onSetFinished: (bookId: string, finished: boolean) => void
   /** Add a whole folder — see `importFolder`. */
@@ -172,6 +176,8 @@ export function Library({
   onRemove,
   onTagBooks,
   onUntagBooks,
+  lastRemoval,
+  onUndoRemoveTag,
   onSetFinished,
   onAddFolder,
   importing,
@@ -661,6 +667,8 @@ export function Library({
                 shelfTags={shelfTags}
                 onAdd={onTagBooks}
                 onRemove={onUntagBooks}
+                lastRemoval={lastRemoval}
+                onUndoRemove={onUndoRemoveTag}
               />
             </div>
           )}

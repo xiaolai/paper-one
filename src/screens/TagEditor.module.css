@@ -196,3 +196,16 @@
   font-variant-numeric: tabular-nums;
   color: var(--muted);
 }
+
+/* Shared with the Library panel — see `controls.module.css`. */
+.undoLine {
+  composes: undoLine from '../styles/controls.module.css';
+}
+
+.undoText {
+  composes: undoText from '../styles/controls.module.css';
+}
+
+.undoButton {
+  composes: undoButton from '../styles/controls.module.css';
+}

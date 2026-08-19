@@ -19,6 +19,8 @@ function context(over: Partial<AppState> = {}) {
     closeBook: () => {},
     openSwitcher: () => {},
     editTags: null,
+    exportTags: null,
+    importTags: null,
   }
   return { ctx, dispatched }
 }
@@ -342,5 +344,35 @@ describe('filterCommands', () => {
   it('drops misses entirely', () => {
     const commands = buildCommands(context().ctx)
     expect(filterCommands(commands, 'qqqq')).toEqual([])
+  })
+})
+
+describe('the tag archive commands', () => {
+  /** The shared context with the archive hooks swapped in. */
+  const withArchive = (over: { exportTags?: (() => void) | null; importTags?: (() => void) | null }) => ({
+    ...context().ctx,
+    ...over,
+  })
+
+  /* Offered only where there is a filesystem to write to — `canArchiveTags` is
+     false in a plain browser tab, and a row that opens a dialog which cannot
+     exist is the app describing a feature it does not have. */
+  it('offers export and import when the archive is available', () => {
+    const ids = buildCommands(withArchive({ exportTags: () => {}, importTags: () => {} })).map((c) => c.id)
+    expect(ids).toContain('tags:export')
+    expect(ids).toContain('tags:import')
+  })
+
+  it('offers neither when it is not', () => {
+    const ids = buildCommands(withArchive({ exportTags: null, importTags: null })).map((c) => c.id)
+    expect(ids).not.toContain('tags:export')
+    expect(ids).not.toContain('tags:import')
+  })
+
+  it('says merge in the import label, because that is what it does', () => {
+    /* The word is the reassurance: an import never removes a tag, so restoring
+       an old file cannot silently undo a month of filing. */
+    const row = buildCommands(withArchive({ importTags: () => {} })).find((c) => c.id === 'tags:import')
+    expect(row?.keywords).toContain('merge')
   })
 })

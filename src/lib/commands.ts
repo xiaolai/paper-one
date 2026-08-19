@@ -75,6 +75,19 @@ export interface CommandContext {
    * the shelf does not hold — so the palette does not offer it.
    */
   editTags: (() => void) | null
+  /**
+   * Write the reader's tags to a file, and read one back — null where there is
+   * no filesystem to write to.
+   *
+   * IN THE PALETTE rather than in the toolbar or the Library panel, and the
+   * panel is the tempting place. Backing up is not tag MANAGEMENT: a reader
+   * looking at the panel is filing books, and a pair of file-dialog rows beside
+   * the tags they are sorting is a second subject in the same surface. It is
+   * also the rarest action here — done once, or after something went wrong —
+   * which is exactly what the palette is for.
+   */
+  exportTags: (() => void) | null
+  importTags: (() => void) | null
 }
 
 export function buildCommands(ctx: CommandContext): Command[] {
@@ -279,6 +292,31 @@ export function buildCommands(ctx: CommandContext): Command[] {
       combo: '⌘T',
       keywords: 'tag label subject shelve',
       run: editTags,
+    })
+  }
+
+  if (ctx.exportTags) {
+    const run = ctx.exportTags
+    commands.push({
+      id: 'tags:export',
+      label: 'Export your tags…',
+      group: 'Library',
+      keywords: 'tag backup save export file json archive',
+      run,
+    })
+  }
+
+  if (ctx.importTags) {
+    const run = ctx.importTags
+    commands.push({
+      id: 'tags:import',
+      /* "Merge" in the label, because that is what it does and the word is the
+         reassurance: an import never removes a tag, so restoring an old file
+         cannot silently undo a month of filing. */
+      label: 'Import tags from a file…',
+      group: 'Library',
+      keywords: 'tag restore load import merge file json archive backup',
+      run,
     })
   }
 

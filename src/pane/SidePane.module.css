@@ -622,42 +622,19 @@
 /* What the last collection-wide remove did, and the way back. A quiet line
    in the list's own inset — `.scopeHint`'s voice — with the one control that
    is not a scope. */
+/* Shared with the tag editor — see `controls.module.css`. Composed rather than
+   restated so the two surfaces that offer an undo cannot come to word or weigh
+   it differently. */
 .undoLine {
-  display: flex;
-  align-items: center;
-  gap: var(--space-8);
-  min-height: var(--row-compact);
-  padding: 0 var(--space-10);
-  font-size: var(--text-small);
-  color: var(--muted);
+  composes: undoLine from '../styles/controls.module.css';
 }
 
 .undoText {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  composes: undoText from '../styles/controls.module.css';
 }
 
 .undoButton {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-4);
-  height: var(--control-xs);
-  padding: 0 var(--space-8);
-  border: 0;
-  border-radius: var(--radius-chip);
-  background: transparent;
-  color: var(--accent);
-  font: inherit;
-  font-size: var(--text-small);
-  cursor: pointer;
-}
-
-.undoButton:hover,
-.undoButton:focus-visible {
-  background: var(--wash);
+  composes: undoButton from '../styles/controls.module.css';
 }
 
 /* Rename, in place: the row's label becomes a field the same size, so nothing

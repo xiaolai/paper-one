@@ -9,6 +9,8 @@ import { positionRecorder, type PositionRecorder } from './lib/positionRecorder'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { isTauri, usePlatform, usePrefersDark, usePrefersReducedMotion } from './lib/platform'
 import { NOT_CONFIGURED } from './lib/companion'
+import { planImport } from './lib/tagArchive'
+import { canArchiveTags, exportTagsToFile, importTagsFromFile } from './lib/tagFiles'
 import { hasOpenLayer, paneFits, useAppState } from './lib/state'
 import { loadSettings, useSettings } from './lib/useSettings'
 import type { MarkStorage } from './lib/marks'
@@ -586,6 +588,60 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
    * say it themselves now, in the place that would otherwise have claimed the
    * library was empty. */
   const [importNotice, setImportNotice] = useState<string | null>(null)
+
+  /**
+   * The reader's filing, out to a file and back.
+   *
+   * BOTH REPORT THROUGH `importNotice`, which is the shelf's own line for
+   * "something just happened to your library" — an archive written silently is
+   * indistinguishable from a dialog the reader dismissed, and an import that
+   * merged nothing looks exactly like one that failed.
+   *
+   * A dismissed dialog says nothing at all, deliberately: the reader closed it,
+   * they know, and a message about it is the app narrating their own action.
+   */
+  const exportTagsNow = useCallback(() => {
+    void exportTagsToFile(library.books, new Date())
+      .then((path) => {
+        if (!path) return
+        const filed = library.books.filter((book) => (book.tags ?? []).length > 0).length
+        setImportNotice(
+          filed === 0
+            ? 'No tags to export yet — nothing on the shelf is filed.'
+            : `Exported the tags on ${filed} ${filed === 1 ? 'book' : 'books'}.`,
+        )
+      })
+      .catch((cause: unknown) => {
+        console.error('Paper: could not export your tags', cause)
+        setImportNotice('Those tags could not be written.')
+      })
+  }, [library.books])
+
+  const importTagsNow = useCallback(() => {
+    void importTagsFromFile()
+      .then((picked) => {
+        if (!picked) return
+        if (!picked.archive) {
+          setImportNotice('That file is not a Paper tag export.')
+          return
+        }
+        const plan = planImport(picked.archive, library.books)
+        for (const one of plan.additions) library.tagBooks([one.bookId], one.tags)
+        /* THE NUMBER THAT DID NOTHING IS WORTH SAYING TOO. An archive from
+           another library matches nothing here, and an import that reports only
+           its successes leaves the reader believing it worked. */
+        const missed = plan.unmatched > 0 ? ` ${plan.unmatched} not on this shelf.` : ''
+        setImportNotice(
+          plan.booksTouched === 0
+            ? `Nothing to add — those tags are already here.${missed}`
+            : `Added ${plan.tagsAdded} ${plan.tagsAdded === 1 ? 'tag' : 'tags'} across ${plan.booksTouched} ${plan.booksTouched === 1 ? 'book' : 'books'}.${missed}`,
+        )
+      })
+      .catch((cause: unknown) => {
+        console.error('Paper: could not import those tags', cause)
+        setImportNotice('That file could not be read.')
+      })
+  }, [library])
   const addFolder = useCallback(() => {
     void (async () => {
       /* REFUSES TO RE-ENTER. The toolbar button carried `disabled={importing
@@ -882,6 +938,8 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
     () =>
       buildCommands({
         editTags: readingBook ? openTags : null,
+        exportTags: canArchiveTags() ? exportTagsNow : null,
+        importTags: canArchiveTags() ? importTagsNow : null,
         /* The same faces the settings panel offers — see `offeredFaces`. */
         faces: offeredHere,
         state,
@@ -1244,6 +1302,8 @@ export function App({ storage, fs, initialBooks, shelfUnread = false }: AppProps
             onRemove={removeBook}
             onTagBooks={library.tagBooks}
             onUntagBooks={library.untagBooks}
+            lastRemoval={library.lastRemoval}
+            onUndoRemoveTag={library.undoRemoveTag}
             onSetFinished={(bookId, finished) =>
               update(bookId, (record) => ({ ...record, finished }))
             }

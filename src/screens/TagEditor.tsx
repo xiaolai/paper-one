@@ -1,5 +1,5 @@
 import { useId, useMemo, useState } from 'react'
-import { Plus, X } from 'lucide-react'
+import { Plus, Undo2, X } from 'lucide-react'
 import type { IndexedBook } from '../lib/bookIndex'
 import {
   displayTitle,
@@ -50,6 +50,19 @@ export interface TagEditorProps {
   readonly onRemove: (bookIds: readonly string[], tag: string) => void
   /** Fill whatever holds it — the reader's sheet — rather than take a popover's width. */
   readonly fill?: boolean
+  /**
+   * The last tag removal and the way back from it — both optional, and given
+   * only to the editor over a SELECTION.
+   *
+   * Undo earns its place where the act is bulk. Taking one tag off one book
+   * from a card's own editor is small, visible and already reversible — the
+   * chip is gone from a list you are looking at and typing it back is two
+   * keystrokes. Taking it off four hundred is none of those things, and that is
+   * the editor this is wired to. The store records every removal either way
+   * (see `untagBooks`), so the panel's own line still covers the rest.
+   */
+  readonly lastRemoval?: { readonly tag: string; readonly bookIds: readonly string[] } | null
+  readonly onUndoRemove?: () => void
 }
 
 /** How many suggestions to show under the field. Enough to pick from, few
@@ -99,7 +112,15 @@ function OptionRow({
   )
 }
 
-export function TagEditor({ books, shelfTags, onAdd, onRemove, fill = false }: TagEditorProps) {
+export function TagEditor({
+  books,
+  shelfTags,
+  onAdd,
+  onRemove,
+  fill = false,
+  lastRemoval = null,
+  onUndoRemove,
+}: TagEditorProps) {
   /* PER INSTANCE, via useId — the combobox contract's ids were fixed strings,
    * on the reasoning that only one editor is ever open, and the reasoning had
    * a keyboard-shaped hole: the bulk editor and a card's editor can coexist
@@ -395,6 +416,23 @@ export function TagEditor({ books, shelfTags, onAdd, onRemove, fill = false }: T
               </span>
             </OptionRow>
           )}
+        </div>
+      )}
+
+      {/* AT THE FOOT, under the suggestions rather than beside the chips: the
+          line is about something that has already happened, and put next to the
+          chip it referred to it read as a control ON that chip. Outside the
+          suggestions' gate, so it does not vanish when the field empties. */}
+      {lastRemoval && onUndoRemove && (
+        <div className={styles.undoLine} role="status">
+          <span className={styles.undoText}>
+            Removed {lastRemoval.tag} from {lastRemoval.bookIds.length}{' '}
+            {lastRemoval.bookIds.length === 1 ? 'book' : 'books'}
+          </span>
+          <button type="button" className={styles.undoButton} onClick={onUndoRemove}>
+            <Undo2 size={ICON.control} strokeWidth={ICON.stroke} />
+            Undo
+          </button>
         </div>
       )}
     </div>
