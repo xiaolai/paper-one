@@ -219,6 +219,48 @@ export function watchFs(everyMs = 2_000): void {
 }
 
 /**
+ * EVERYTHING BEFORE `boot()` EVER RUNS, which is most of the wait.
+ *
+ * The instrument started at the first line of `boot`, so every phase it
+ * measured was fast and the launch still felt slow — the shelf finishing at
+ * `at=756ms` after `took=29ms` of work says the other 727ms happened before
+ * anything here was watching. That time is the window opening, the document
+ * parsing, and the module graph evaluating, and none of it is the app's own
+ * code.
+ *
+ * IN DEV THIS IS MOSTLY VITE. An unbundled module graph is served a file at a
+ * time and transformed on first request, so a cold dev server pays hundreds of
+ * round-trips a production bundle does not. Read a dev number as an upper
+ * bound, and compare a built app before optimising anything here.
+ */
+export function reportStartup(): void {
+  if (!ON) return
+  const [nav] = performance.getEntriesByType('navigation') as PerformanceNavigationTiming[]
+  if (nav) {
+    say('the document', null, performance.now(), {
+      /* When the HTML had arrived — the window's own cost, up to that point. */
+      arrived: `${Math.round(nav.responseEnd)}ms`,
+      /* Everything since: parsing, and the module graph evaluating. In dev
+       * that is Vite serving it one file at a time and transforming each on
+       * first request, which a production bundle does not do. */
+      modules: `${Math.round(performance.now() - nav.responseEnd)}ms`,
+    })
+  }
+  /* WHEN THE READER SAW ANYTHING AT ALL. Every other number here is the app
+   * talking about itself; this is the one that answers "how long was the window
+   * white", which is the question actually being asked. */
+  try {
+    new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        moment(`the window painted: ${entry.name}`, { at: Math.round(entry.startTime) })
+      }
+    }).observe({ type: 'paint', buffered: true })
+  } catch {
+    // No paint timing in this webview: one fewer line, not a failure.
+  }
+}
+
+/**
  * When the window actually showed something.
  *
  * TWO FRAMES, not one. A single `requestAnimationFrame` fires BEFORE the frame

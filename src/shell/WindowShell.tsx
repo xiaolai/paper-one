@@ -1,5 +1,6 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
+import { PAINT_HINT_KEY } from '../lib/paintHint'
 import { PANE_W, paneTakesTrack, type Platform } from '../lib/metrics'
 import { useAvailableWidth } from '../lib/useAvailableWidth'
 import type { AppState } from '../lib/state'
@@ -45,6 +46,27 @@ export function WindowShell({
      lands without disturbing the cascade anywhere else. */
   const [root, setRoot] = useState<HTMLDivElement | null>(null)
   useAppPalette(root, state.theme, state.brightness, state.contrast)
+
+  /* KEEP THE FIRST FRAME'S COLOUR CURRENT — see the script in `index.html`,
+   * which reads this before any module is fetched so the window opens in the
+   * reader's own theme instead of white.
+   *
+   * READ OFF THE ELEMENT rather than mapped from `state.theme` in code. The
+   * themes are defined in `tokens.css` and nowhere else on purpose, and a
+   * lookup table here would be a second copy of five colours that goes stale
+   * the first time one is adjusted — silently, because being one shade out is
+   * invisible in every check. Asking the browser what `--bg` resolved to is
+   * the same question the next frame will ask. */
+  useEffect(() => {
+    if (!root) return
+    const bg = getComputedStyle(root).getPropertyValue('--bg').trim()
+    if (!bg) return
+    try {
+      localStorage.setItem(PAINT_HINT_KEY, bg)
+    } catch {
+      // Storage disabled. The window opens white, and nothing else changes.
+    }
+  }, [root, state.theme])
 
   /* §06: below 1024px the pane stops taking a track and becomes a sheet over
    * the reader — the design's own word for it.

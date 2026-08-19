@@ -21,7 +21,15 @@ import { loadShelf } from './lib/bookIndex'
 import { emptyExpired } from './lib/bookTrash'
 import { migrateToFolders, summariseMigration } from './lib/migrateToFolders'
 import { libraryFs } from './lib/bookFiles'
-import { countingFs, moment, onFirstPaint, reportFs, timed, watchFs } from './lib/devTiming'
+import {
+  countingFs,
+  moment,
+  onFirstPaint,
+  reportFs,
+  reportStartup,
+  timed,
+  watchFs,
+} from './lib/devTiming'
 import { installFatalHandlers } from './lib/reportFatal'
 
 installFatalHandlers()
@@ -48,6 +56,9 @@ async function boot(root: HTMLElement): Promise<void> {
    * measured rather than reasoned about. Dev only, and gone from a build —
    * see `devTiming`. */
   const bootFrom = performance.now()
+  /* FIRST, so the window's own cost is on the record before the app adds any of
+   * its own. Everything above this line ran before `boot` was called at all. */
+  reportStartup()
   const storage = await timed('open the store', () => openAppStorage())
   /* THE SHELF IS AWAITED TOO, for the same reason the store is: rendering first
    * and filling in afterwards gives every reader one frame of an empty library,
