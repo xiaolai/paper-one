@@ -411,7 +411,11 @@ describe('bootState', () => {
   it('keeps the book panel when the launch named a book', () => {
     const boot = bootState('?book=/sample.epub')
     expect(boot.screen).toBe('reader')
-    expect(boot.pane).toBe(initialState.pane)
+    /* The READER's default panel, by name. This compared against
+     * `initialState.pane`, which pinned nothing once the seed became coherent
+     * with its own library screen — the reader boot takes its panel from
+     * `paneFor`, and Companion is the panel §03 puts beside a book. */
+    expect(boot.pane).toBe('companion')
   })
 
   /* `lastPane` is what the toggle reopens, so it has to agree with the panel
@@ -436,6 +440,9 @@ describe('the hook starts from bootState', () => {
   it('does not assemble its own initial state', () => {
     const source = readFileSync(fileURLToPath(new URL('./state.ts', import.meta.url)), 'utf8')
     const hook = source.slice(source.indexOf('export function useAppState'))
-    expect(hook).toMatch(/useReducer\(\s*reducer,\s*bootState\(/)
+    /* Either form reaches bootState: called eagerly, or handed to useReducer
+     * as the lazy initializer — which is the current shape, so the URL parse
+     * runs once instead of on every render. */
+    expect(hook).toMatch(/useReducer\(\s*reducer,[^)]*bootState[(),]/)
   })
 })

@@ -20,24 +20,22 @@ import { BRIGHTNESS, CONTRAST, DEFAULT_STEP_IDX, READING_STEPS, SPACING } from '
  * layers that could not exist, and every guard elsewhere in the app had to name
  * them. A layer earns a place here when something raises it.
  */
-const LAYER_ORDER = ['paletteOpen', 'switcherOpen'] as const
+/* `tagsOpen` is the tag editor as a sheet over the reader — the shelf opens
+ * the same editor as a popover, which is not a layer because it is dismissed
+ * by its own click-outside and never takes the window. */
+const LAYER_ORDER = ['paletteOpen', 'switcherOpen', 'tagsOpen'] as const
 
 /** Derived from LAYER_ORDER so the action types and the dismiss order cannot
  *  drift apart — adding a layer in one place now fails to compile in the other. */
 export type Layer = (typeof LAYER_ORDER)[number]
 
-/**
- * The layers that take the whole window, of which at most one can be open.
- *
- * They were free to stack, and the result disagreed with itself: opening the
- * palette over the switcher left the switcher painted on top — it renders
- * later — while Esc closed the palette, because `dismissTop` walks
- * LAYER_ORDER and the palette is higher in it. So the layer the reader could
- * see was not the layer their keystrokes reached, and dismissing the one on
- * screen took two presses of Esc with nothing visibly happening on the first.
- *
- */
-const MODAL_LAYERS: readonly Layer[] = ['paletteOpen', 'switcherOpen']
+/* AT MOST ONE LAYER IS OPEN — enforced in `toggleLayer`, over the whole of
+ * LAYER_ORDER. There used to be a second list of "modal" layers beside this
+ * one, byte-identical to it, because they were once free to stack and the
+ * result disagreed with itself: opening the palette over the switcher left
+ * the switcher painted on top while Esc closed the palette. Two identical
+ * lists are one list — the day a genuinely non-modal layer arrives, it gets
+ * its own list and its own reasoning. */
 
 /**
  * The two screens there are.
@@ -135,6 +133,8 @@ export interface AppState {
   readonly side: Side
   readonly paletteOpen: boolean
   readonly switcherOpen: boolean
+  /** The tag editor over the reader's current book, as a sheet — ⌘T. */
+  readonly tagsOpen: boolean
   /** Chrome fades to 0 and returns on pointer-near (§06). */
   readonly chromeOn: boolean
   readonly rulerOn: boolean
@@ -215,6 +215,15 @@ export interface AppState {
   readonly markStyle: MarkStyle
 }
 
+/**
+ * The seed `bootState` starts from — and COHERENT ON ITS OWN TERMS: its pane
+ * fits its screen. It carried `pane: 'companion'` beside `screen: 'library'`
+ * for a while, a pairing `paneFits` rejects, on the reasoning that only
+ * `bootState` ever read it — which was true right up until anything else did,
+ * and tests already do. `bootState` still owns fitting the pane to whatever
+ * screen the launch actually lands on; `?book=` boots land on the reader and
+ * take its default panel through `paneFor`.
+ */
 export const initialState: AppState = {
   /**
    * THE LIBRARY, not the reader.
@@ -231,12 +240,15 @@ export const initialState: AppState = {
   screen: 'library',
   theme: 'paper',
   themeFollowsOs: true,
-  pane: 'companion',
-  lastPane: 'companion',
+  /* The screen's own panel — `paneFits('library', 'library')` holds, so the
+   * seed is a legal state. A reader boot swaps both through `paneFor`. */
+  pane: 'library',
+  lastPane: 'library',
   side: 'right',
   paletteOpen: false,
   libraryQuery: '',
   switcherOpen: false,
+  tagsOpen: false,
   chromeOn: false,
   rulerOn: false,
   rulerPinned: false,
@@ -291,6 +303,19 @@ export type Action =
   | { type: 'setMarkTint'; tint: MarkTint }
   | { type: 'setMarkStyle'; style: MarkStyle }
 
+/**
+ * An index into a scale of `length` steps, or null for input that must not
+ * reach an array lookup.
+ *
+ * ONE FUNCTION, because four reducer branches each restated it and each had
+ * to remember the same trap: NaN survives `Math.min`/`Math.max` unchanged, so
+ * a clamp without the finite check let NaN straight through to the lookup.
+ */
+function scaleIndex(idx: number, length: number): number | null {
+  if (!Number.isFinite(idx)) return null
+  return Math.min(Math.max(Math.round(idx), 0), length - 1)
+}
+
 export function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
     case 'goScreen': {
@@ -310,7 +335,14 @@ export function reducer(state: AppState, action: Action): AppState {
        * every screen change, which is the same conflation as a pane that shuts
        * itself, arriving from the other side. */
       const pane = state.pane === null ? null : paneFor(action.screen, state.lastPane)
-      return { ...state, screen: action.screen, pane, switcherOpen: false, paletteOpen: false }
+      return {
+        ...state,
+        screen: action.screen,
+        pane,
+        switcherOpen: false,
+        paletteOpen: false,
+        tagsOpen: false,
+      }
     }
 
     case 'setLibraryQuery': {
@@ -359,10 +391,13 @@ export function reducer(state: AppState, action: Action): AppState {
       return { ...state, side: action.side }
 
     case 'toggleLayer': {
-      // Closing needs no ceremony; opening a modal layer retires the others.
+      /* Closing needs no ceremony; opening retires the others. Every layer is
+       * modal today, so there is no non-modal branch — one existed, guarded on
+       * a membership test that could not fail, which is the kind of branch that
+       * looks exercised and never runs. If a non-modal layer ever arrives, it
+       * gets its own list and this comment stops being true loudly. */
       if (state[action.layer]) return { ...state, [action.layer]: false }
-      if (!MODAL_LAYERS.includes(action.layer)) return { ...state, [action.layer]: true }
-      const closed = Object.fromEntries(MODAL_LAYERS.map((layer) => [layer, false]))
+      const closed = Object.fromEntries(LAYER_ORDER.map((layer) => [layer, false]))
       return { ...state, ...closed, [action.layer]: true }
     }
 
@@ -378,45 +413,41 @@ export function reducer(state: AppState, action: Action): AppState {
       return { ...state, chromeOn: action.on }
 
     case 'toggleRuler':
+      /* §06: THE RULER IS SCROLLED-FLOW ONLY. The palette already omits the
+       * command in paginated mode, but the reducer is the boundary every
+       * dispatcher crosses, and a guard that lives only in one caller is a
+       * guard the next caller has to remember — `setPageLayout` clears the
+       * ruler on the way out for exactly this invariant. */
+      if (state.pageLayout !== 'scrolled') return state
       // Turning the ruler off also unpins it, so re-enabling starts from rest.
       return state.rulerOn
         ? { ...state, rulerOn: false, rulerPinned: false }
         : { ...state, rulerOn: true }
 
     case 'pinRuler':
-      return { ...state, rulerPinned: true }
+      // Pinning a ruler that is not there would leave a pin waiting to apply
+      // to the next ruler — a state nothing chose and nothing draws.
+      return state.rulerOn ? { ...state, rulerPinned: true } : state
 
-    case 'setStepIdx':
+    case 'setStepIdx': {
       // Clamped rather than validated at the call site: the stepper, the
       // settings slider and the keyboard shortcut all feed this.
-      // Non-finite input is dropped rather than stored: `stepIdx` indexes
-      // READING_STEPS, and NaN survives Math.min/Math.max unchanged, so the
-      // old clamp let NaN straight through to the array lookup.
-      if (!Number.isFinite(action.idx)) return state
-      return {
-        ...state,
-        stepIdx: Math.min(Math.max(Math.round(action.idx), 0), READING_STEPS.length - 1),
-      }
+      const stepIdx = scaleIndex(action.idx, READING_STEPS.length)
+      return stepIdx === null ? state : { ...state, stepIdx }
+    }
 
     case 'setSpacing': {
-      /* Clamped and finite-checked for the reason `setStepIdx` gives at length:
-         these index a scale, and NaN survives `Math.min`/`Math.max` untouched
-         and reaches the array. */
-      if (!Number.isFinite(action.idx)) return state
-      const scale = SPACING[action.key]
-      const idx = Math.min(Math.max(Math.round(action.idx), 0), scale.steps.length - 1)
-      if (state.spacing[action.key] === idx) return state
+      const idx = scaleIndex(action.idx, SPACING[action.key].steps.length)
+      if (idx === null || state.spacing[action.key] === idx) return state
       return { ...state, spacing: { ...state.spacing, [action.key]: idx } }
     }
 
     case 'setBrightness':
     case 'setContrast': {
-      /* Finite-checked and clamped, for the reason `setStepIdx` gives. */
-      if (!Number.isFinite(action.idx)) return state
       const key = action.type === 'setBrightness' ? 'brightness' : 'contrast'
       const scale = action.type === 'setBrightness' ? BRIGHTNESS : CONTRAST
-      const idx = Math.min(Math.max(Math.round(action.idx), 0), scale.steps.length - 1)
-      return state[key] === idx ? state : { ...state, [key]: idx }
+      const idx = scaleIndex(action.idx, scale.steps.length)
+      return idx === null || state[key] === idx ? state : { ...state, [key]: idx }
     }
 
     case 'setAlign':
@@ -529,7 +560,9 @@ export function screenFor(search: string): Screen {
 }
 
 export function useAppState(): [AppState, AppDispatch] {
-  return useReducer(reducer, bootState(typeof window === 'undefined' ? '' : window.location.search))
+  /* The LAZY overload: `bootState` parses the URL, and passed by value it ran
+   * on every render for a result `useReducer` reads exactly once. */
+  return useReducer(reducer, typeof window === 'undefined' ? '' : window.location.search, bootState)
 }
 
 /**
@@ -547,9 +580,13 @@ export function useAppState(): [AppState, AppDispatch] {
  */
 export function bootState(search: string): AppState {
   const screen = screenFor(search)
-  const pane = paneFits(screen, initialState.pane ?? defaultPaneFor(screen))
-    ? initialState.pane
-    : defaultPaneFor(screen)
+  /* CLOSED STAYS CLOSED, FITTED STAYS FITTED — and the two must not tangle.
+   * The old conditional fed the FALLBACK into `paneFits` and then returned the
+   * original: with a null initial pane, "the default fits" answered yes and
+   * null came back — which happened to be wanted, by an accident of routing
+   * rather than a statement of it. Said directly: a null seed boots closed;
+   * anything else boots to that panel where it fits, or the screen's default. */
+  const pane = initialState.pane === null ? null : paneFor(screen, initialState.pane)
   return { ...initialState, screen, pane, lastPane: pane ?? initialState.lastPane }
 }
 
