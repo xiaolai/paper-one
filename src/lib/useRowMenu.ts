@@ -135,9 +135,35 @@ export function useRowMenu(
     }
     /* Focus moves INTO the menu on open — after this task, so the placement
      * pass has run and the box is where it will stay. `preventScroll` because
-     * the first frame can still be parked off screen. */
+     * the first frame can still be parked off screen.
+     *
+     * ONLY FOR A KEYBOARD OPEN, and the reason is §07: focus is drawn on
+     * `:focus-visible` alone so that a pointer user never sees a ring. Moving
+     * focus programmatically defeats that on the FIRST menu of a session —
+     * before the engine has classified any interaction, WebKit's heuristic
+     * treats a programmatic focus as focus-visible, so `global.css`'s
+     * `outline: 3px solid var(--accent)` painted a box around the first item.
+     * It went away for every later menu, once a real click had put the engine
+     * on record as pointer-driven, which is exactly the shape of the bug: a box
+     * on first load and never again.
+     *
+     * The trigger's own ring is the test. If the `⋯` is wearing one, the reader
+     * arrived by keyboard and wants focus carried in; if it is not, they
+     * clicked, and moving focus buys them nothing but the box. Nothing is lost
+     * when the guess goes the wrong way: with focus left on the trigger,
+     * `at` resolves to -1 and ↓ still opens onto the first item. */
     let focusTimer: number | undefined
-    if (menu) {
+    const byKeyboard = (() => {
+      try {
+        return moreRef.current?.matches(':focus-visible') ?? false
+      } catch {
+        /* `:focus-visible` is unsupported in some engines this could run in;
+         * carrying focus in is the safer failure, since a keyboard user
+         * stranded outside an open menu is worse than a stray ring. */
+        return true
+      }
+    })()
+    if (menu && byKeyboard) {
       focusTimer = window.setTimeout(() => {
         items()[0]?.focus({ preventScroll: true })
       }, 0)
