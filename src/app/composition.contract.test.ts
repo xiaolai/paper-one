@@ -9,9 +9,11 @@ import {
   registrationOrder,
   resolvePaneId,
   type Capability,
+  type CapabilityContext,
   type CommandContext,
   type Composition,
   type Diagnostics,
+  type IndexFs,
   type KernelApi,
 } from '../kernel'
 import { capabilities as android } from './composition.android'
@@ -206,6 +208,26 @@ describe('namespacing (ADR decision 5)', () => {
   const pane = (id: string) => ({ id: id as `${string}:${string}`, label: 'x', screens: ['reader'] as const, render: () => null })
   const service = (name: string, grant = 'sync:x') => ({ name: name as `${string}.${string}`, grant, handler: async () => null })
 
+  it('serves the composed services through the bound host after every start, and unserves on dispose', async () => {
+    const services = createKernelServices({ fs: null, storage: null })
+    const servedNames: string[] = []
+    let unserved = false
+    const unbind = services.bindServiceHost((list) => {
+      servedNames.push(...list.map((s) => s.name))
+      return { dispose: () => (unserved = true) }
+    })
+    const composition = await composeCapabilities(
+      [cap('a', { services: [service('a.ping', 'a:ping')] }), cap('sync', { services: [service('sync.push')] })],
+      kernelApi(services),
+      new AbortController().signal,
+    )
+    // Every declared service, whichever capability owns it — not just one's own subset.
+    expect(servedNames).toEqual(['a.ping', 'sync.push'])
+    composition.dispose()
+    expect(unserved).toBe(true)
+    unbind.dispose()
+  })
+
   it('refuses a pane id outside the owner\'s prefix', async () => {
     for (const bad of ['pane', 'other:pane', 'sync:', 'sync']) {
       const error = await rejection(composeCapabilities([cap('sync', { panes: [pane(bad)] })], api(), new AbortController().signal))
@@ -383,16 +405,343 @@ describe('atomic registration', () => {
     release()
     const error = await rejection(promise)
     expect(error.code).toBe('start-failed')
-    expect(error.capability).toBe('c')
+    // Attributed to the capability whose awaited start overlapped the abort —
+    // the recheck fires the moment it resolves, before `c` is ever reached.
+    expect(error.capability).toBe('slow')
     expect(events).toEqual(['start a', 'start slow', 'dispose slow', 'dispose a'])
     expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('aborts while the services are being served — disposed and refused, not returned alive', async () => {
+    // The window this guards: every start returned, the loop's checks all
+    // passed, and the abort fires DURING the awaited `serveServices`. The
+    // abort listener does not exist yet, and a listener added to an
+    // already-aborted signal never fires — so without the final check a
+    // fully-live composition escaped its ended lifetime.
+    const events: string[] = []
+    const controller = new AbortController()
+    const kernel = api()
+    kernel.services.bindServiceHost(() => {
+      controller.abort()
+      return { dispose: () => events.push('unserve') }
+    })
+    const error = await rejection(composeCapabilities([cap('a', {}, events)], kernel, controller.signal))
+    expect(error.code).toBe('aborted')
+    // The capability was disposed and the served services were unserved.
+    expect(events).toEqual(['start a', 'unserve', 'dispose a'])
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('aborts while the LAST capability is awaited — no live composition is returned', async () => {
+    // The bug this guards: with no capability after `slow`, the old top-of-loop
+    // abort check never ran, so a composition from an already-aborted lifetime
+    // was returned and never disposed. The post-await recheck rolls it back.
+    const events: string[] = []
+    const controller = new AbortController()
+    let release!: () => void
+    const slow: Capability = {
+      id: 'slow',
+      start: () =>
+        new Promise((resolve) => {
+          events.push('start slow')
+          release = () => resolve({ dispose: () => events.push('dispose slow') })
+        }),
+    }
+    const promise = composeCapabilities([cap('a', {}, events), slow], api(), controller.signal)
+    await vi.advanceTimersByTimeAsync(0)
+    controller.abort()
+    release()
+    const error = await rejection(promise)
+    expect(error.code).toBe('start-failed')
+    expect(error.capability).toBe('slow')
+    expect(events).toEqual(['start a', 'start slow', 'dispose slow', 'dispose a'])
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('unwinds a capability that acquired resources through onCleanup, then threw', async () => {
+    // C1: a start that registers cleanups (a listener, a timer, a bound port)
+    // and then throws must leave NONE of them — the kernel runs the disposer
+    // stack for the failing capability itself, not only the earlier ones.
+    const events: string[] = []
+    const partial: Capability = {
+      id: 'partial',
+      start: (ctx) => {
+        events.push('start partial')
+        ctx.onCleanup(() => events.push('undo first'))
+        ctx.onCleanup(() => events.push('undo second'))
+        throw new Error('half started')
+      },
+    }
+    const error = await rejection(composeCapabilities([cap('a', {}, events), partial], api(), new AbortController().signal))
+    expect(error.code).toBe('start-failed')
+    expect(error.capability).toBe('partial')
+    // The failing capability's own cleanups run in reverse, then earlier caps.
+    expect(events).toEqual(['start a', 'start partial', 'undo second', 'undo first', 'dispose a'])
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('scopes each capability to its own settings namespace', async () => {
+    let leaked: unknown = 'unset'
+    let threw: unknown = null
+    const setting = <T>(key: string, fallback: T) => ({ key: key as `${string}.${string}`, fallback, parse: (r: unknown) => r as T })
+    const nosy: Capability = {
+      id: 'nosy',
+      start: (ctx) => {
+        // Its own namespace is fine.
+        ctx.settings.set(setting('nosy.pref', 1), 7)
+        // Another capability's is refused.
+        try {
+          ctx.settings.get(setting('other.secret', ''))
+        } catch (error) {
+          threw = error
+        }
+        // getSnapshot shows only its own namespace.
+        ctx.settings.set(setting('nosy.two', 0), 9)
+        leaked = Object.keys(ctx.settings.getSnapshot()).filter((k) => !k.startsWith('nosy.'))
+        return { dispose: () => {} }
+      },
+    }
+    const composition = await composeCapabilities([nosy], api(), new AbortController().signal)
+    expect(threw).not.toBeNull()
+    expect(leaked).toEqual([])
+    composition.dispose()
+  })
+
+  it('runs onCleanup registrations at normal dispose too, after the returned Disposable', async () => {
+    const events: string[] = []
+    const withCleanup: Capability = {
+      id: 'withcleanup',
+      start: (ctx) => {
+        events.push('start withcleanup')
+        ctx.onCleanup(() => events.push('cleanup a'))
+        ctx.onCleanup(() => events.push('cleanup b'))
+        return { dispose: () => events.push('dispose returned') }
+      },
+    }
+    const controller = new AbortController()
+    const composition = await composeCapabilities([withCleanup], api(), controller.signal)
+    composition.dispose()
+    // Returned Disposable first, then the cleanups in reverse.
+    expect(events).toEqual(['start withcleanup', 'dispose returned', 'cleanup b', 'cleanup a'])
   })
 })
 
 /* ------------------------------------------------------------- lifecycle */
 
+/* ------------------------------------------------------------ confinement */
+
+/** A map-backed filesystem over the kernel's own seam, for the confinement
+ *  cases: what lands (or refuses to) is read straight off the map. */
+function mapFs(): { store: Map<string, Uint8Array>; fs: IndexFs } {
+  const store = new Map<string, Uint8Array>()
+  const fs: IndexFs = {
+    readFile: async (path) => {
+      const bytes = store.get(path)
+      if (!bytes) throw new Error('missing')
+      return bytes
+    },
+    readDir: async () => [],
+    exists: async (path) => store.has(path),
+    writeFile: async (path, bytes) => void store.set(path, bytes),
+    mkdir: async () => {},
+    remove: async (path) => void store.delete(path),
+    removeDir: async (path) => {
+      for (const key of [...store.keys()]) if (key === path || key.startsWith(`${path}/`)) store.delete(key)
+    },
+    rename: async (from, to) => {
+      const bytes = store.get(from)
+      if (bytes === undefined) throw new Error('missing')
+      store.delete(from)
+      store.set(to, bytes)
+    },
+    appendFile: async (path, bytes) => {
+      const held = store.get(path) ?? new Uint8Array(0)
+      const joined = new Uint8Array(held.length + bytes.length)
+      joined.set(held)
+      joined.set(bytes, held.length)
+      store.set(path, joined)
+    },
+  }
+  return { store, fs }
+}
+
+/** Compose one capability over the given kernel and hand back its context. */
+async function contextOf(kernel: KernelApi, id = 'nosy'): Promise<{ ctx: CapabilityContext; composition: Composition }> {
+  let ctx: CapabilityContext | null = null
+  const composition = await composeCapabilities(
+    [{ id, start: (given) => ((ctx = given), { dispose: () => {} }) }],
+    kernel,
+    new AbortController().signal,
+  )
+  if (ctx === null) throw new Error('start never ran')
+  return { ctx, composition }
+}
+
+describe('a capability filesystem confined to its own namespace (WI-10.3)', () => {
+  const BYTES = new TextEncoder().encode('x')
+
+  it('refuses every write shape outside <cap>/ — plain, ../, and absolute — touching nothing', async () => {
+    const { store, fs } = mapFs()
+    store.set('books/x/book.json', new TextEncoder().encode('{}'))
+    const { ctx, composition } = await contextOf(kernelApi(createKernelServices({ fs, storage: null })))
+    const scoped = ctx.services.fs
+    if (scoped === null) throw new Error('no fs')
+    const append = scoped.appendFile
+    if (!append) throw new Error('no appendFile')
+    const refused: readonly (() => Promise<unknown>)[] = [
+      () => scoped.writeFile('books/x/book.json', BYTES),
+      () => scoped.writeFile('nosy/../books/x/book.json', BYTES),
+      () => scoped.writeFile('/etc/hosts', BYTES),
+      () => scoped.writeFile('..', BYTES),
+      () => scoped.writeFile('nosy\\..\\books\\x', BYTES),
+      () => scoped.remove('books/x/book.json'),
+      () => scoped.removeDir('books'),
+      () => scoped.rename('books/x/book.json', 'nosy/stolen.json'),
+      () => scoped.rename('nosy/own.json', 'books/x/book.json'),
+      () => scoped.mkdir('books/y'),
+      () => append('books/x/marks.json', BYTES),
+    ]
+    for (const attempt of refused) {
+      const error = await attempt().then(
+        () => null,
+        (thrown: unknown) => thrown,
+      )
+      expect(error, attempt.toString()).toBeInstanceOf(CapabilityError)
+      expect((error as CapabilityError).code, attempt.toString()).toBe('namespace')
+    }
+    // Nothing was written, moved or deleted by any refused call.
+    expect([...store.keys()]).toEqual(['books/x/book.json'])
+    composition.dispose()
+  })
+
+  it('allows writes under <cap>/, and leaves reads open', async () => {
+    const { store, fs } = mapFs()
+    store.set('books/x/book.json', new TextEncoder().encode('{"title":"Moby-Dick"}'))
+    const { ctx, composition } = await contextOf(kernelApi(createKernelServices({ fs, storage: null })))
+    const scoped = ctx.services.fs
+    if (scoped === null) throw new Error('no fs')
+    await scoped.mkdir('nosy')
+    await scoped.writeFile('nosy/state.json', BYTES)
+    await scoped.appendFile?.('nosy/log.jsonl', BYTES)
+    await scoped.rename('nosy/state.json', 'nosy/renamed.json')
+    await scoped.remove('nosy/renamed.json')
+    expect(store.has('nosy/log.jsonl')).toBe(true)
+    expect(store.has('nosy/renamed.json')).toBe(false)
+    // Reads stay open in v1 — the one real consumer digests books/**.
+    expect(new TextDecoder().decode(await scoped.readFile('books/x/book.json'))).toContain('Moby-Dick')
+    expect(await scoped.exists('books/x/book.json')).toBe(true)
+    composition.dispose()
+  })
+
+  it('mirrors the platform: appendFile exists on the wrapper exactly when the real fs has it', async () => {
+    const bare = mapFs()
+    delete (bare.fs as { appendFile?: unknown }).appendFile
+    const without = await contextOf(kernelApi(createKernelServices({ fs: bare.fs, storage: null })))
+    expect(without.ctx.services.fs?.appendFile).toBeUndefined()
+    without.composition.dispose()
+    const withAppend = await contextOf(kernelApi(createKernelServices({ fs: mapFs().fs, storage: null })))
+    expect(typeof withAppend.ctx.services.fs?.appendFile).toBe('function')
+    withAppend.composition.dispose()
+  })
+
+  it('a composition with no filesystem hands the capability null, not a wrapper over nothing', async () => {
+    const { ctx, composition } = await contextOf(api())
+    expect(ctx.services.fs).toBeNull()
+    expect(ctx.services.storage).toBeNull()
+    composition.dispose()
+  })
+})
+
+describe('a capability flat store confined to its own namespace (WI-10.4)', () => {
+  function mapStorage() {
+    const map = new Map<string, string>()
+    return { map, getItem: (k: string) => map.get(k) ?? null, setItem: (k: string, v: string) => void map.set(k, v) }
+  }
+
+  it('refuses a cross-namespace setItem AND getItem; its own keys work', async () => {
+    const storage = mapStorage()
+    storage.map.set('kernel.secret', 'x')
+    const { ctx, composition } = await contextOf(kernelApi(createKernelServices({ fs: null, storage })))
+    const scoped = ctx.services.storage
+    if (scoped === null) throw new Error('no storage')
+    for (const attempt of [() => scoped.setItem('kernel.theme', 'night'), () => scoped.getItem('kernel.secret'), () => scoped.setItem('other.k', 'v')]) {
+      let thrown: unknown = null
+      try {
+        attempt()
+      } catch (error) {
+        thrown = error
+      }
+      expect(thrown).toBeInstanceOf(CapabilityError)
+      expect((thrown as CapabilityError).code).toBe('namespace')
+    }
+    scoped.setItem('nosy.state', 'kept')
+    expect(scoped.getItem('nosy.state')).toBe('kept')
+    // Nothing outside the namespace changed, nothing leaked.
+    expect(storage.map.get('kernel.secret')).toBe('x')
+    expect(storage.map.has('kernel.theme')).toBe(false)
+    composition.dispose()
+  })
+
+  it('the cards read a capability legitimately needs rides the Cards API, tombstones included', async () => {
+    const storage = mapStorage()
+    const kernel = kernelApi(createKernelServices({ fs: null, storage }))
+    const minted = { id: 'c1', bookId: 'book:a', kind: 'Excerpt' as const, body: 'x', answer: '', source: '', cfi: null, createdAt: 1 }
+    await kernel.services.cards.add(minted)
+    await kernel.services.cards.remove('c1')
+    const { ctx, composition } = await contextOf(kernel)
+    // The whole collection — the tombstoned row a replicator must see — with
+    // no raw flat-store key involved.
+    const rows = ctx.services.cards.stored()
+    expect(rows.map((row) => row.id)).toEqual(['c1'])
+    expect(rows[0]?.deletedAt).toBeTruthy()
+    expect(ctx.services.cards.getSnapshot().all).toEqual([])
+    composition.dispose()
+  })
+})
+
+describe('the enforcement gate — an illegal capability is refused at every door (WI-10.6)', () => {
+  it('a rogue start attempting kernel-owned writes is refused on each, and nothing changed', async () => {
+    const { store, fs } = mapFs()
+    const record = new TextEncoder().encode('{"title":"Moby-Dick"}')
+    store.set('books/x/book.json', record)
+    store.set('books/x/content.epub', new TextEncoder().encode('bytes'))
+    const flat = new Map<string, string>([['kernel.theme', '"paper"']])
+    const storage = { getItem: (k: string) => flat.get(k) ?? null, setItem: (k: string, v: string) => void flat.set(k, v) }
+    const kernel = kernelApi(createKernelServices({ fs, storage }))
+
+    const refused: string[] = []
+    const rogue: Capability = {
+      id: 'rogue',
+      start: async (ctx) => {
+        const attempt = async (label: string, run: () => Promise<unknown> | unknown): Promise<void> => {
+          try {
+            await run()
+          } catch (thrown) {
+            if (thrown instanceof CapabilityError && thrown.code === 'namespace') refused.push(label)
+          }
+        }
+        const theme = { key: 'kernel.theme' as `${string}.${string}`, fallback: 'paper', parse: (raw: unknown) => raw as string }
+        await attempt('fs.writeFile', () => ctx.services.fs?.writeFile('books/x/book.json', new TextEncoder().encode('{}')))
+        await attempt('fs.remove', () => ctx.services.fs?.remove('books/x/content.epub'))
+        await attempt('storage.setItem', () => ctx.services.storage?.setItem('kernel.theme', '"night"'))
+        await attempt('settings.set', () => ctx.settings.set(theme, 'night'))
+        await attempt('services.settings.set', () => ctx.services.settings.set(theme, 'night'))
+        return { dispose: () => {} }
+      },
+    }
+    const composition = await composeCapabilities([rogue], kernel, new AbortController().signal)
+    // Every door said no — by refusal, not by accident of a missing handle.
+    expect(refused).toEqual(['fs.writeFile', 'fs.remove', 'storage.setItem', 'settings.set', 'services.settings.set'])
+    // And the kernel's data is exactly what it was.
+    expect(store.get('books/x/book.json')).toBe(record)
+    expect(store.has('books/x/content.epub')).toBe(true)
+    expect(flat.get('kernel.theme')).toBe('"paper"')
+    composition.dispose()
+  })
+})
+
 describe('the KernelApi a start receives', () => {
-  it('carries the services, the settings store and a Diagnostics scoped to the capability', async () => {
+  it('carries the services, a settings store scoped to the capability, and a scoped Diagnostics', async () => {
     const diagnostics = recordingDiagnostics()
     const kernel = api(diagnostics)
     const seen: KernelApi[] = []
@@ -401,8 +750,17 @@ describe('the KernelApi a start receives', () => {
       kernel,
       new AbortController().signal,
     )
-    expect(seen[0]?.services).toBe(kernel.services)
-    expect(seen[0]?.settings).toBe(kernel.settings)
+    // The services carry the kernel's own stores — the same instances —
+    // but the object is a per-capability view, because its tree-wide
+    // handles (fs, storage, settings) are namespace-confined wrappers
+    // (phase 10, WI-10.3/10.4).
+    expect(seen[0]?.services.library).toBe(kernel.services.library)
+    expect(seen[0]?.services.marks).toBe(kernel.services.marks)
+    expect(seen[0]?.services.cards).toBe(kernel.services.cards)
+    expect(seen[0]?.services.writes).toBe(kernel.services.writes)
+    expect(seen[0]?.services.settings).not.toBe(kernel.services.settings)
+    // Settings is scoped (a wrapper), not the raw kernel store — like diagnostics.
+    expect(seen[0]?.settings).not.toBe(kernel.settings)
     expect(diagnostics.log).toContain('sync info hello')
     expect(diagnostics.log).toContain('root info composition.started')
     composition.dispose()

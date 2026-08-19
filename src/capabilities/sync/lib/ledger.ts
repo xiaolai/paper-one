@@ -1,15 +1,16 @@
 import {
   BOOKS_DIR,
-  CARDS_STORAGE_KEY,
+  PRESENCE_KEY,
   defineSetting,
   folderOf,
   mergeCards,
-  parseCards,
+  notePresence,
   readBook,
   readMarks,
   readPresence,
   recordPath,
   validMarks,
+  writePresence,
   type BookRecord,
   type KernelServices,
   type Mark,
@@ -153,7 +154,19 @@ const refuse = (code: string, message: string, retryable = false): { code: strin
  *  blob layer calls the folder. */
 export const blobFolderOf = (bookId: string): string => folderOf(bookId).slice(BOOKS_DIR.length + 1)
 
-const contentNameOf = (record: BookRecord): string => `content.${record.ext ?? record.format ?? 'bin'}`
+/**
+ * The ONE rule for a book's content blob file NAME (#17), used by every local
+ * call site so the name the source hashes, the name a content answer reports,
+ * and the name a download removes can never disagree. `ext` leads because it
+ * is what the kernel names the file on disk (`content.<ext>`); a device that
+ * only ever RECEIVED the bytes has no `ext` (it is device-local, stripped off
+ * the wire) and falls through to `format` — which is what it was fetched
+ * under — so the rule matches the disk on both an importer and a receiver.
+ * The cross-device FETCH still requests `format` alone, because that is the
+ * only content-naming field that travels; on an honest import the two agree.
+ */
+const contentBlobName = (record: { readonly format?: string | undefined; readonly ext?: string | undefined }): `content.${string}` =>
+  `content.${record.ext ?? record.format ?? 'bin'}`
 
 export function createLedger({
   services,
@@ -165,9 +178,15 @@ export function createLedger({
   hashFile,
   pageLimit = DEFAULT_PAGE_LIMIT,
 }: LedgerOptions): Ledger {
-  const { library, marks, cards, settings, fs, storage } = services
+  if (!Number.isInteger(pageLimit) || pageLimit < 1) {
+    throw new Error(`createLedger: pageLimit must be a positive integer, not ${JSON.stringify(pageLimit)}`)
+  }
+  const { library, marks, cards, settings, fs } = services
 
-  const ownCards = () => parseCards(storage?.getItem(CARDS_STORAGE_KEY) ?? null)
+  /* The canonical rows, tombstones included, off the kernel's card store —
+   * the authority between writes, so never staler than the flat store's
+   * bytes (WI-10.4: sync holds no raw storage handle at all). */
+  const ownCards = () => cards.stored()
   /* ABSENT AND UNREADABLE ARE NOT THE SAME ANSWER — `updateBook`'s rule,
    * held here too. `readMarks` already draws the line (absent is `[]`,
    * unreadable throws); swallowing the throw made a momentary read failure
@@ -192,6 +211,96 @@ export function createLedger({
     return null
   }
   const rowOf = (book: string) => library.getSnapshot().find((one) => one.bookId === book)
+
+  /**
+   * The ONE reconstruction of a book's content blob facts — name, size, hash
+   * (#17). Hashing the file is preferred, because it yields the VERIFIED size
+   * and the ACTUAL hash of the bytes; the record's stored `contentHash` (with
+   * an honest unknown size of 0) is the fallback when there is no hasher or no
+   * file under the canonical name. `null` when there is nothing to offer —
+   * which is exactly what makes a `hasContent` claim un-servable, and so
+   * un-ackable (#15/#16).
+   */
+  const contentFacts = async (book: string, record: BookRecord): Promise<BlobFacts | null> => {
+    const name = contentBlobName(record)
+    if (hashFile) {
+      try {
+        const hashed = await hashFile(blobFolderOf(book), name)
+        return { name, size: hashed.size, hash: hashed.blake3 }
+      } catch {
+        /* No bytes under that name — fall through to the record's stored hash. */
+      }
+    }
+    if (record.contentHash) return { name, size: 0, hash: record.contentHash }
+    return null
+  }
+
+  /**
+   * Bring a book's cover over when the peer offers one and this device lacks
+   * it — INDEPENDENT of whether the content is being fetched (#21). A cover
+   * that will not land costs the jacket, not the content ack — and the retry
+   * is structural, not tracked: every later push of the book offers the
+   * cover again and runs this again. (A `coverRetry` set once claimed to
+   * carry the retry; nothing ever read it.)
+   *
+   * The NAME is checked against the one writable cover name before the
+   * fetch: `cover.name` crosses the wire, and a peer that labelled its
+   * "cover" `content.epub` would otherwise aim the fetch at the book's
+   * bytes. The folder never crosses — it is derived locally from the book.
+   */
+  const ensureCover = async (peer: string, folder: string, cover: PushGroup['cover']): Promise<void> => {
+    if (!cover || !fetchBlob) return
+    if (cover.name !== 'cover.jpg' && cover.name !== 'cover.webp') return
+    if (hashFile) {
+      try {
+        const have = await hashFile(folder, cover.name)
+        if (have.blake3 === cover.hash) return
+      } catch {
+        /* Not here yet — fetch it below. */
+      }
+    }
+    try {
+      await fetchBlob(peer, folder, cover)
+    } catch {
+      /* This session loses the jacket, not the content; the next push of
+       * the book offers it again. */
+    }
+  }
+
+  /**
+   * Apply a removal that arrived from a peer, carrying the STAMP it happened
+   * at (#13). The transmitted `at` — never a fresh mint — drives the presence
+   * LWW, so a stale removal LOSES to a newer re-add already in the register
+   * instead of a fresh stamp overwriting it, and an absent row still records
+   * the removal's time rather than discarding it. Only when the removal WINS
+   * the register is the book trashed; `library.remove` mints its own stamp for
+   * that write, so `at` is re-asserted afterwards — unless a concurrent re-add
+   * has since taken the book live — keeping the register's stored time the
+   * REAL removal time for onward propagation.
+   *
+   * It OWNS its provenance rather than riding `applyRemote`'s fence: the trash
+   * bracket is enqueued asynchronously (after the LWW read), so a fence armed
+   * up-front could be consumed by an unrelated begin in the gap. `markRemote`
+   * arms the expectation and calls `library.remove` synchronously inside it,
+   * closing that window — which is why the call sites hand removals HERE
+   * rather than into the fenced batch.
+   */
+  const applyRemoteRemoval = async (book: string, at: Hlc): Promise<void> => {
+    if (!fs) return
+    const target = fs
+    let won = false
+    await services.writes.append(PRESENCE_KEY, async () => {
+      won = await notePresence(target, book, 'removed', at)
+    })
+    if (!won || rowOf(book) === undefined) return
+    await journal.markRemote([{ book, what: 'removed' }], () => library.remove(book))
+    await services.writes.append(PRESENCE_KEY, async () => {
+      const presence = await readPresence(target)
+      if (presence[book]?.state === 'removed') {
+        await writePresence(target, { ...presence, [book]: { state: 'removed', at } })
+      }
+    })
+  }
 
   /**
    * Witness EVERY stamp a received message carries — records' register
@@ -274,7 +383,14 @@ export function createLedger({
           }),
         )
       }
-      pending.push(apply.run())
+      /* `run` must ENQUEUE synchronously (see the module note) — but a
+       * synchronous THROW from it would escape before the try below and
+       * leave every armed fence loaded for the next local edit. */
+      try {
+        pending.push(apply.run())
+      } catch (thrown) {
+        pending.push(Promise.reject(thrown))
+      }
     }
     try {
       const outcomes = await Promise.allSettled(pending)
@@ -356,24 +472,64 @@ export function createLedger({
   const handlePush = async (raw: unknown, peer: string): Promise<PushAck> => {
     const group = parsePushGroup(raw)
     if (group === null) throw refuse('malformed', 'not a push group')
+    /* The empty book id is RESERVED for the one cross-book cards surface; a
+     * group smuggling a record, marks, a removal or content under it would
+     * write state under the id `''`. */
+    if (
+      group.book === '' &&
+      (group.record !== undefined ||
+        group.marks !== undefined ||
+        group.removed !== undefined ||
+        group.hasContent ||
+        group.contentHash !== undefined ||
+        group.size !== undefined ||
+        group.cover !== undefined)
+    ) {
+      throw refuse('malformed', 'the reserved cards group may carry only cards')
+    }
     requireReady()
     witnessStamps(group)
 
     /* The content identity guard (§2.3): both sides hold bytes and the
      * hashes differ ⇒ conflict — never merge, never fetch. Judged BEFORE any
-     * state is written. */
+     * state is written. The held hash is NOT trusted from the record alone
+     * (#16): a shelf with bytes but no stored `contentHash` is HASHED now, so
+     * a remote hash can never be stamped onto unrelated bytes. If identity
+     * cannot be established (no hasher, no bytes under the name), the push is
+     * REFUSED retryable rather than merged blind. */
     const held = group.book === '' ? null : await ownRecord(group.book)
     const row = group.book === '' ? undefined : rowOf(group.book)
     const ownHasContent = row?.hasContent === true
-    if (group.hasContent && ownHasContent && group.contentHash && held?.contentHash && group.contentHash !== held.contentHash) {
-      throw refuse('conflict', `content for ${group.book} differs on the two devices`)
+    if (group.hasContent && ownHasContent && group.contentHash !== undefined && held !== null) {
+      let heldHash = held.contentHash
+      if (heldHash === undefined) {
+        const facts = await contentFacts(group.book, held)
+        if (facts === null) {
+          throw refuse('unverifiable', `content for ${group.book} is here but its identity cannot be verified`, true)
+        }
+        heldHash = facts.hash
+      }
+      if (heldHash !== group.contentHash) {
+        throw refuse('conflict', `content for ${group.book} differs on the two devices`)
+      }
     }
-    const needsBytes = group.hasContent && !ownHasContent && group.contentHash !== undefined && fetchBlob !== undefined
+    /* A push that CLAIMS content this device lacks must arrive with VERIFIED
+     * blob facts and a transport to fetch them (#15) — a hash to verify the
+     * bytes against, and a `fetchBlob`. Without either, the bytes can never
+     * land, so the push must NOT be acked: it is refused retryable, and the
+     * satchel keeps the row pushable for the next session. */
+    const wantsBytes = group.hasContent && !ownHasContent
+    if (wantsBytes && (group.contentHash === undefined || fetchBlob === undefined)) {
+      throw refuse('content-unavailable', `push for ${group.book} claims content but sent no verifiable way to fetch it`, true)
+    }
+    const needsBytes = wantsBytes
+
+    /* The REMOTE-REMOVAL path (#13) is applied on its own, OUTSIDE the fenced
+     * batch: it drives the presence LWW with the transmitted stamp and owns
+     * its own provenance (see `applyRemoteRemoval`). */
+    if (group.removed) await applyRemoteRemoval(group.book, group.removed.at)
 
     const applies: RemoteApply[] = []
-    if (group.removed) {
-      applies.push({ keys: [{ book: group.book, what: 'removed' }], run: () => library.remove(group.book) })
-    }
     if (group.record) {
       const incoming = group.record
       applies.push({ keys: [{ book: group.book, what: 'record' }], run: () => applyIncomingRecord(group.book, incoming) })
@@ -388,18 +544,22 @@ export function createLedger({
     }
     await applyRemote(applies)
 
+    const folder = group.book === '' ? '' : blobFolderOf(group.book)
     if (needsBytes) {
       /* The bytes, then the commit, then — only then — the ack: "import
-       * acked only after bytes". The fetch itself journals nothing; the
-       * `refreshContent` commit is the remote-origin record of the landing. */
-      const folder = blobFolderOf(group.book)
-      const name = `content.${group.format ?? 'bin'}`
-      await fetchBlob(peer, folder, { name, size: group.size ?? 0, hash: group.contentHash as string })
-      if (group.cover) {
-        /* A cover that will not land costs the jacket, not the ack. */
-        await fetchBlob(peer, folder, group.cover).catch(() => {})
-      }
+       * acked only after bytes". The name is the ONE canonical rule (#17), so
+       * it matches what the satchel serves. The fetch itself journals nothing;
+       * the `refreshContent` commit is the remote-origin record of the
+       * landing. */
+      const name = contentBlobName({ format: group.format })
+      await fetchBlob!(peer, folder, { name, size: group.size ?? 0, hash: group.contentHash as string })
       await applyRemote([{ keys: [{ book: group.book, what: 'content' }], run: () => library.refreshContent(group.book) }])
+    }
+    /* The cover moves whenever it is offered and this device lacks it —
+     * INDEPENDENT of the content fetch (#21), and tracked for retry rather
+     * than dropped on failure. */
+    if (group.cover && group.book !== '') {
+      await ensureCover(peer, folder, group.cover)
     }
 
     const ack: {
@@ -475,7 +635,12 @@ export function createLedger({
       rows,
       removals,
       ...(wireCards === undefined ? {} : { cards: wireCards }),
-      nextSince: page.length === 0 ? request.until : page[page.length - 1]!.seq,
+      /* A DONE page advances the cursor to the window's end, not to its
+       * last visible entry: `journal.head()` counts begins and acks the
+       * coalesced feed never serves, so anchoring on the last entry left
+       * the cursor forever short of the advertised head — one spurious
+       * catch-up round trip per session. */
+      nextSince: done ? request.until : page[page.length - 1]!.seq,
       done,
     }
   }
@@ -507,11 +672,12 @@ export function createLedger({
         return null
       }
     }
-    const content = await facts(contentNameOf(record))
+    const contentName = contentBlobName(record)
+    const content = await facts(contentName)
     const cover = (await facts('cover.jpg')) ?? (await facts('cover.webp'))
     return {
       folder,
-      name: content?.name ?? contentNameOf(record),
+      name: content?.name ?? contentName,
       size: content?.size ?? 0,
       contentHash: content?.hash ?? record.contentHash ?? '',
       coverName: cover?.name ?? null,
@@ -564,18 +730,14 @@ export function createLedger({
     }
     if (hasContent && record) {
       group.format = record.format ?? record.ext ?? 'bin'
-      if (record.contentHash) {
-        group.contentHash = record.contentHash
-      } else if (hashFile) {
-        /* No stored hash yet (the lazy backfill has not reached this book):
-         * hash the copy now, so the shelf can fetch verified. */
-        try {
-          const hashed = await hashFile(blobFolderOf(book), contentNameOf(record))
-          group.contentHash = hashed.blake3
-          group.size = hashed.size
-        } catch {
-          /* No bytes to hash after all; the shelf will not fetch. */
-        }
+      /* One canonical builder (#17): it hashes the copy — yielding the
+       * VERIFIED size and the ACTUAL hash — and falls back to the record's
+       * stored hash only when it cannot. Sending the size lets the shelf's
+       * verified-facts gate (#15) accept the fetch. */
+      const facts = await contentFacts(book, record)
+      if (facts) {
+        group.contentHash = facts.hash
+        if (facts.size > 0) group.size = facts.size
       }
       if (hashFile) {
         try {
@@ -660,9 +822,6 @@ export function createLedger({
             } satisfies RemoteApply,
           ]
         : []),
-      ...page.removals.map(
-        (removal): RemoteApply => ({ keys: [{ book: removal.book, what: 'removed' }], run: () => library.remove(removal.book) }),
-      ),
       ...(page.cards
         ? [
             {
@@ -677,6 +836,9 @@ export function createLedger({
         : []),
     ]
     await applyRemote(applies)
+    /* Removals apply OUTSIDE the fenced batch (#13): the transmitted stamp
+     * through the LWW register, each owning its own provenance. */
+    for (const removal of page.removals) await applyRemoteRemoval(removal.book, removal.at)
     /* Marks, for books whose digest differs — each under its own remote
      * bracket. Gated by "Keep notes on this phone": off means only books
      * whose bytes are here. */
@@ -688,8 +850,20 @@ export function createLedger({
       if (current === row.marksDigest) continue
       const answer = await channel.call(SYNC_SERVICES.marks.name, { book: row.book })
       const parsed = answer && typeof answer === 'object' ? (answer as { book?: unknown; marks?: unknown }) : null
-      const rows = Array.isArray(parsed?.marks) ? validMarks(parsed.marks) : null
-      if (rows === null) throw new Error('sync.marks answered something that is not a marks list')
+      /* CORRELATED, and strictly valid. An answer for a different book —
+       * or one whose rows validation would thin — must not be merged with
+       * the cursor then advancing past it: a dropped row would be skipped
+       * forever, because the digest comparison above is what schedules
+       * this fetch and it never re-fires for an already-advanced page. */
+      if (parsed?.book !== row.book) {
+        throw new Error(`sync.marks answered book ${JSON.stringify(parsed?.book)} for ${row.book}`)
+      }
+      const answered = parsed.marks
+      if (!Array.isArray(answered)) throw new Error('sync.marks answered something that is not a marks list')
+      const rows = validMarks(answered)
+      if (rows.length !== answered.length) {
+        throw new Error(`sync.marks answered ${answered.length} rows of which only ${rows.length} are valid marks`)
+      }
       if (rows.length === 0) continue
       witnessStamps(rows)
       await applyRemote([{ keys: [{ book: row.book, what: 'marks' }], run: () => marks.mergeRemote(row.book, rows) }])
@@ -793,6 +967,17 @@ export function createLedger({
     const answer = parseContentAnswer(await channel.call(SYNC_SERVICES.content.name, { book }))
     if (answer === null) throw new Error('sync.content answered something that is not a content answer')
     if (answer.contentHash === '' || answer.size === 0) throw new Error(`the shelf has no verified bytes for ${book}`)
+    /* The answer's folder and name cross the wire — CORRELATED to the book
+     * this device asked for before any byte lands. Folder names are
+     * deterministic (`safeId`), so the shelf's folder for the book IS the
+     * local one; an answer naming any other folder, or a non-content name,
+     * would aim the landing at somebody else's files. */
+    if (answer.folder !== blobFolderOf(book)) {
+      throw new Error(`sync.content answered folder ${JSON.stringify(answer.folder)} for ${book}`)
+    }
+    if (!answer.name.startsWith('content.')) {
+      throw new Error(`sync.content answered a non-content name ${JSON.stringify(answer.name)}`)
+    }
     await fetchBlob(channel.peerId, answer.folder, { name: answer.name, size: answer.size, hash: answer.contentHash })
     await applyRemote([{ keys: [{ book, what: 'content' }], run: () => library.refreshContent(book) }])
     return { size: answer.size }
@@ -802,8 +987,10 @@ export function createLedger({
     if (!fs) return
     const record = await ownRecord(book)
     if (record === null) return
-    const path = `${folderOf(book)}/${contentNameOf(record)}`
-    if (await fs.exists(path)) await fs.remove(path)
+    /* The ONE door into books/<id>/: the kernel's closed-name primitive
+     * (WI-10.2/10.5). This ledger's own fs handle is namespace-confined and
+     * cannot reach the book's folder at all. */
+    await services.removeBlob(book, contentBlobName(record))
     await applyRemote([{ keys: [{ book, what: 'content' }], run: () => library.refreshContent(book) }])
   }
 

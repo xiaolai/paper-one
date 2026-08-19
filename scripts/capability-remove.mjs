@@ -9,12 +9,13 @@ import { isProcessEntry } from './lib/entry.mjs'
 import {
   RemovalRefused,
   removeAclGrants,
+  removeAclIdentifiers,
   removeCargoDependency,
   removeFromComposition,
   removeManifestEntry,
   removePluginRegistration,
 } from './lib/removal.mjs'
-import { readAclFiles } from './check-compositions.mjs'
+import { readAclFiles, readOrNull } from './check-compositions.mjs'
 
 /**
  * `pnpm capability:remove <id>` — deletion as an operation (ADR decision 7,
@@ -119,8 +120,18 @@ export function planRemoval(root, id, options = {}) {
     const source = readOrNull(root, file)
     if (source === null) throw new RemovalRefused(`${file} does not exist; every platform has a static composition (pnpm compositions:check)`)
     const result = removeFromComposition(source, entry.ts)
-    if (result.changed) edits.push({ file, text: result.text, note: `remove import of ../capabilities/${entry.ts} and ${result.names.map((n) => JSON.stringify(n)).join(', ')}` })
-    else notes.push(`${file}: does not import ${entry.ts}; nothing to remove`)
+    if (result.changed) {
+      edits.push({ file, text: result.text, note: `remove import of ../capabilities/${entry.ts} and ${result.names.map((n) => JSON.stringify(n)).join(', ')}` })
+    } else if (Array.isArray(entry.platforms) && entry.platforms.includes(platform)) {
+      /* Genuine drift: the manifest composes this capability on this platform,
+       * but the composition already dropped it. Removal stays tolerant (so a
+       * partial removal can be re-run), but the note SAYS it is drift rather
+       * than laundering it — `pnpm compositions:check` is where it is caught
+       * before the removal takes the manifest entry with it. */
+      notes.push(`${file}: DRIFT — the manifest composes ${JSON.stringify(id)} on ${platform} but this file does not import it (pnpm compositions:check); nothing to remove here`)
+    } else {
+      notes.push(`${file}: does not import ${entry.ts} (not composed on ${platform}); nothing to remove`)
+    }
   }
 
   const crate = typeof entry.crate === 'string' ? entry.crate : null
@@ -147,9 +158,27 @@ export function planRemoval(root, id, options = {}) {
     const formatted = useRustfmt ? hooks.rustfmt(libEdit.text, path.join(root, LIB_RS)) : libEdit.text
     edits.push({ file: LIB_RS, text: formatted, note: `remove .plugin(${snake}::init())${useRustfmt ? ', rustfmt' : ''}` })
 
-    const namespace = typeof entry.plugin === 'string' ? entry.plugin : id
+  }
+
+  /* The ACL half runs OUTSIDE the crate branch: a capability whose plugin is
+   * a registry crate has no local `crate` yet still owns grants, and nesting
+   * this under the crate check left them dangling after removal.
+   *
+   * The ACL namespace is the plugin name with Tauri's `tauri-plugin-` prefix
+   * stripped (`tauri-plugin-peer` grants `peer:default`), NOT the crate name.
+   * Remove the manifest's EXACT declared grants when it has them — a prefix
+   * guessed from the crate misses `peer:default` and leaves it dangling. */
+  const declaredPerms = Array.isArray(entry.permissions) ? entry.permissions.filter((p) => typeof p === 'string') : []
+  if (declaredPerms.length > 0 || crate !== null || typeof entry.plugin === 'string') {
+    const aclNamespace = (typeof entry.plugin === 'string' ? entry.plugin : id).replace(/^tauri-plugin-/, '')
+    const strayed = declaredPerms.filter((p) => !p.startsWith(`${aclNamespace}:`))
+    if (strayed.length > 0) {
+      throw new RemovalRefused(
+        `${MANIFEST_NAME}: capability ${JSON.stringify(id)} declares permission(s) ${strayed.map((p) => JSON.stringify(p)).join(', ')} outside its ACL namespace "${aclNamespace}:"; the manifest is inconsistent with the plugin`,
+      )
+    }
     for (const { file, text } of readAclFiles(root)) {
-      const acl = removeAclGrants(text, namespace)
+      const acl = declaredPerms.length > 0 ? removeAclIdentifiers(text, declaredPerms) : removeAclGrants(text, aclNamespace)
       if (acl.changed) edits.push({ file, text: acl.text, note: `remove grants ${acl.removed.map((r) => JSON.stringify(r)).join(', ')}` })
     }
   }
@@ -167,18 +196,28 @@ export function planRemoval(root, id, options = {}) {
 
 /**
  * Write the plan. Every edited file goes to `<file>.capability-remove.tmp`
- * first — all of them — and only then is each renamed over its original, so
- * a write failure leaves the originals untouched. Deletions follow; then,
- * for a crate, the lockfile prune. Returns the lines it printed.
+ * first — all of them — and only then is each renamed over its original, so a
+ * write failure leaves the originals untouched. Deletions follow; then, for a
+ * crate, the lockfile prune. Returns the lines it printed.
+ *
+ * ATOMICITY of the edits: the original bytes of every edited file are kept, so
+ * if an irreversible later step — a deletion, the Cargo prune — fails AFTER the
+ * edits are on disk, the edits are ROLLED BACK to the consistent pre-removal
+ * tree rather than left half-applied. A partially-run deletion cannot be
+ * undone, so the raised error says so; the edited registration surfaces
+ * (manifest, compositions, Cargo.toml, lib.rs, ACL) are restored regardless,
+ * so a retry starts from a known state.
  */
 export function applyPlan(root, plan, options = {}) {
   const hooks = { gitRm: gitRmCached, cargoPrune: cargoPruneLock, ...options.hooks }
   const lines = []
   const staged = []
+  const backups = []
   try {
     for (const edit of plan.edits) {
       const target = path.join(root, edit.file)
       const tmp = `${target}.capability-remove.tmp`
+      backups.push({ target, original: readFileSync(target) })
       writeFileSync(tmp, edit.text)
       staged.push({ tmp, target })
     }
@@ -189,15 +228,39 @@ export function applyPlan(root, plan, options = {}) {
   for (const { tmp, target } of staged) renameSync(tmp, target)
   for (const edit of plan.edits) lines.push(`edited  ${edit.file} — ${edit.note}`)
 
-  for (const { dir, tracked } of plan.deletions) {
-    if (tracked) hooks.gitRm(root, dir)
-    rmSync(path.join(root, dir), { recursive: true, force: true })
-    lines.push(`deleted ${dir}/${tracked ? ' (git rm --cached, then removed)' : ''}`)
+  const restoreEdits = () => {
+    /* Best-effort, but HONESTLY reported: the thrown error's claim of what
+     * was restored must not include a file whose restore itself failed. */
+    const unrestored = []
+    for (const { target, original } of backups) {
+      try {
+        writeFileSync(target, original)
+      } catch {
+        unrestored.push(path.relative(root, target))
+      }
+    }
+    return unrestored
   }
+  try {
+    for (const { dir, tracked } of plan.deletions) {
+      if (tracked) hooks.gitRm(root, dir)
+      rmSync(path.join(root, dir), { recursive: true, force: true })
+      lines.push(`deleted ${dir}/${tracked ? ' (git rm --cached, then removed)' : ''}`)
+    }
 
-  if (plan.crate !== null && (options.cargo ?? true)) {
-    hooks.cargoPrune(root)
-    lines.push(`pruned  src-tauri/Cargo.lock (cargo metadata --offline)`)
+    if (plan.crate !== null && (options.cargo ?? true)) {
+      hooks.cargoPrune(root)
+      lines.push(`pruned  src-tauri/Cargo.lock (cargo metadata --offline)`)
+    }
+  } catch (cause) {
+    const unrestored = restoreEdits()
+    const restored = backups.length - unrestored.length
+    throw new Error(
+      `removal failed after the edits were written; ${restored} of ${backups.length} edited file(s) were restored to their pre-removal state${
+        unrestored.length === 0 ? '' : ` — COULD NOT RESTORE: ${unrestored.join(', ')}`
+      } (any directory deletion already run may be partial): ${cause.message}`,
+      { cause },
+    )
   }
   return lines
 }
@@ -212,19 +275,15 @@ function readOrThrow(root, rel) {
   }
 }
 
-function readOrNull(root, rel) {
-  try {
-    return readFileSync(path.join(root, rel), 'utf8')
-  } catch {
-    return null
-  }
-}
-
 /** Does git, from `root`, track anything under `rel`? False when `root` is
  *  not itself the top of a work tree (a copy under /tmp must never reach a
  *  parent repository's index). */
 export function gitTracks(root, rel) {
   const top = spawnSync('git', ['-C', root, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' })
+  /* A git that could not RUN is not an answer — treating it as "untracked"
+   * would delete without the promised index handling. A non-zero exit is
+   * the honest "not a repository" and stays false. */
+  if (top.error) throw new Error(`git could not run: ${top.error.message}`, { cause: top.error })
   if (top.status !== 0) return false
   let same = false
   try {
@@ -234,6 +293,7 @@ export function gitTracks(root, rel) {
   }
   if (!same) return false
   const ls = spawnSync('git', ['-C', root, 'ls-files', '--error-unmatch', '--', rel], { encoding: 'utf8' })
+  if (ls.error) throw new Error(`git could not run: ${ls.error.message}`, { cause: ls.error })
   return ls.status === 0
 }
 

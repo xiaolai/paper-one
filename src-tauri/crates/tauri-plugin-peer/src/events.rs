@@ -22,10 +22,14 @@ pub fn null_sink() -> EventSink {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PairingPending {
+    /// An unguessable id for this exact pairing attempt. The webview echoes it
+    /// back to `peer_pair_confirm`, so a stale confirm — or a pre-played QR
+    /// that produced a different attempt — cannot confirm this one.
+    pub attempt_id: String,
     pub id: String,
     pub name: String,
     pub platform: String,
-    /// Four decimal digits, zero-padded, identical on the satchel's screen.
+    /// Six decimal digits, zero-padded, identical on the satchel's screen.
     pub sas: String,
 }
 
@@ -135,16 +139,38 @@ mod tests {
 
     #[test]
     fn names_are_valid_tauri_event_names_and_payloads_are_camel_case() {
+        // EVERY variant — the test's claim is the whole event surface, and a
+        // variant left out is a payload whose casing nothing checks.
         let events = [
             PeerEvent::PairingPending(PairingPending {
+                attempt_id: "att-1".into(),
                 id: "a".into(),
                 name: "n".into(),
                 platform: "macos".into(),
-                sas: "0042".into(),
+                sas: "000042".into(),
+            }),
+            PeerEvent::PairingResult(PairingResult {
+                ok: false,
+                id: "a".into(),
+                name: None,
+                platform: None,
+                role: None,
+                reason: Some("bad-mac".into()),
+            }),
+            PeerEvent::SessionOpen(SessionOpen {
+                session_id: 3,
+                peer_id: "a".into(),
+                role: Role::Shelf,
+                initiator: true,
+                hello: serde_json::Value::Null,
             }),
             PeerEvent::SessionClosed(SessionClosed {
                 session_id: 3,
                 reason: "closed".into(),
+            }),
+            PeerEvent::SessionFrames(SessionFrames {
+                session_id: 3,
+                count: 2,
             }),
             PeerEvent::Transfer(TransferProgress {
                 transfer_id: 1,
@@ -161,8 +187,14 @@ mod tests {
                 .chars()
                 .all(|c| c.is_alphanumeric() || matches!(c, '-' | '/' | ':' | '_')));
         }
-        assert_eq!(events[1].payload()["sessionId"], 3);
-        assert_eq!(events[2].payload()["transferId"], 1);
-        assert_eq!(events[2].payload()["state"], "running");
+        // The renamed (snake→camel) field of each payload type that has one.
+        assert_eq!(events[0].payload()["attemptId"], "att-1");
+        assert_eq!(events[1].payload()["reason"], "bad-mac");
+        assert_eq!(events[2].payload()["peerId"], "a");
+        assert_eq!(events[3].payload()["sessionId"], 3);
+        assert_eq!(events[4].payload()["sessionId"], 3);
+        assert_eq!(events[4].payload()["count"], 2);
+        assert_eq!(events[5].payload()["transferId"], 1);
+        assert_eq!(events[5].payload()["state"], "running");
     }
 }

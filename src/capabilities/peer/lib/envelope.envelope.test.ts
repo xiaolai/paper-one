@@ -8,6 +8,8 @@ import {
   FrameTooLarge,
   HEADER_BYTES,
   MAX_FRAME_BYTES,
+  MAX_JSON_DEPTH,
+  MAX_PAYLOAD_BYTES,
   MalformedFrame,
   ServiceCallError,
   UNKNOWN_ID,
@@ -640,5 +642,278 @@ describe('the client', () => {
     await expect(client.call('example.ping', 3)).rejects.toBeInstanceOf(ServiceCallError)
     expect(sent).toHaveLength(2)
     expect(timers.pending()).toBe(0)
+  })
+})
+
+/* ------------------------------------------------ hardening (adversarial) */
+
+/**
+ * The findings a branch audit raised against a hostile peer: live grant
+ * revocation on an open session, bounded concurrency and queues, serialised
+ * awaited sends, reflected diagnostic text, cancellable/bounded client
+ * streams, restricted JSON, encode-failure hygiene, error-field leakage,
+ * service correlation, and the wire-size boundary. Each case fails against the
+ * pre-audit code and passes against the hardened code.
+ */
+describe('hardening against a hostile peer', () => {
+  const ingest = (seen: unknown[]): ServiceContribution => ({
+    name: 'example.ingest',
+    grant: 'example:ingest',
+    handler: async (_req, ctx) => {
+      for await (const item of ctx.input) seen.push(item)
+      return seen.length
+    },
+  })
+
+  it('re-checks live grants on an open session: revocation aborts in-flight and refuses new work (H1)', async () => {
+    let granted = true
+    const timers = fakeTimers()
+    const seen: unknown[] = []
+    const router = createRouter({ services: [ingest(seen)], hasGrant: (_p, g) => granted && g === 'example:ingest', timers })
+    const sent: Frame[] = []
+    const conn = router.connect('peer-a', (bytes) => sent.push(decodeFrame(bytes)))
+    conn.receive(encodeFrame(frame({ service: 'example.ingest', id: 'x', kind: 'req', body: null })))
+    conn.receive(encodeFrame(frame({ service: 'example.ingest', id: 'x', kind: 'stream', body: 'one' })))
+    await settle()
+    expect(conn.inFlight).toBe(1)
+    granted = false
+    conn.recheckGrants()
+    expect(conn.inFlight).toBe(0)
+    expect(errBody(sent.find((f) => f.id === 'x' && f.kind === 'err')).code).toBe(ENVELOPE_ERRORS.forbidden)
+    // A fresh request is now refused forbidden at dispatch — the check is live.
+    conn.receive(encodeFrame(frame({ service: 'example.ingest', id: 'y', kind: 'req', body: null })))
+    expect(errBody(sent.find((f) => f.id === 'y')).code).toBe(ENVELOPE_ERRORS.forbidden)
+  })
+
+  it('refuses a continuation frame whose grant was revoked, aborting the request (H1 per-frame)', async () => {
+    let granted = true
+    const timers = fakeTimers()
+    const router = createRouter({
+      services: [{ name: 'example.ingest', grant: 'example:ingest', handler: (_r, ctx) => new Promise(() => void ctx.input) }],
+      hasGrant: (_p, g) => granted && g === 'example:ingest',
+      timers,
+    })
+    const sent: Frame[] = []
+    const conn = router.connect('peer-a', (bytes) => sent.push(decodeFrame(bytes)))
+    conn.receive(encodeFrame(frame({ service: 'example.ingest', id: 'z', kind: 'req', body: null })))
+    conn.receive(encodeFrame(frame({ service: 'example.ingest', id: 'z', kind: 'stream', body: 'a' })))
+    await settle()
+    expect(conn.inFlight).toBe(1)
+    granted = false
+    conn.receive(encodeFrame(frame({ service: 'example.ingest', id: 'z', kind: 'stream', body: 'b' })))
+    expect(errBody(sent.find((f) => f.id === 'z' && f.kind === 'err')).code).toBe(ENVELOPE_ERRORS.forbidden)
+    expect(conn.inFlight).toBe(0)
+  })
+
+  it('refuses work past the in-flight cap with a typed overloaded err, building no handler (H2)', async () => {
+    const built: string[] = []
+    const timers = fakeTimers()
+    const slow: ServiceContribution = { name: 'example.slow', grant: 'example:ping', handler: (req) => new Promise(() => built.push(String(req))) }
+    const router = createRouter({ services: [slow], hasGrant: () => true, timers, maxInFlight: 2 })
+    const sent: Frame[] = []
+    const conn = router.connect('peer-a', (bytes) => sent.push(decodeFrame(bytes)))
+    for (const id of ['a', 'b', 'c']) conn.receive(encodeFrame(frame({ service: 'example.slow', id, body: id })))
+    await settle()
+    expect(conn.inFlight).toBe(2)
+    expect(errBody(sent.find((f) => f.id === 'c')).code).toBe(ENVELOPE_ERRORS.overloaded)
+    expect(built).toEqual(['a', 'b'])
+  })
+
+  it('bounds queued input by bytes, refusing the overflow and aborting the flooder (H3)', async () => {
+    const timers = fakeTimers()
+    const sink: ServiceContribution = { name: 'example.sink', grant: 'example:ping', handler: () => new Promise(() => {}) }
+    const router = createRouter({ services: [sink], hasGrant: () => true, timers, maxQueuedBytes: 200 })
+    const sent: Frame[] = []
+    const conn = router.connect('peer-a', (bytes) => sent.push(decodeFrame(bytes)))
+    conn.receive(encodeFrame(frame({ service: 'example.sink', id: 'q', body: null })))
+    await settle()
+    const body = 'x'.repeat(40)
+    for (let i = 0; i < 4; i++) conn.receive(encodeFrame(frame({ service: 'example.sink', id: 'q', kind: 'stream', body })))
+    expect(errBody(sent.find((f) => f.id === 'q' && f.kind === 'err')).code).toBe(ENVELOPE_ERRORS.overloaded)
+    expect(conn.inFlight).toBe(0)
+  })
+
+  it('serialises awaited sends so stream order survives a slow transport (H4)', async () => {
+    const timers = fakeTimers()
+    const gen: ServiceContribution = {
+      name: 'example.gen',
+      grant: 'example:ping',
+      handler: async function* () {
+        yield 1
+        yield 2
+        yield 3
+      },
+    }
+    const router = createRouter({ services: [gen], hasGrant: () => true, timers })
+    const order: Frame[] = []
+    const conn = router.connect(
+      'peer-a',
+      (bytes) =>
+        new Promise<void>((resolve) => {
+          const f = decodeFrame(bytes)
+          setTimeout(() => {
+            order.push(f)
+            resolve()
+          }, 2)
+        }),
+    )
+    conn.receive(encodeFrame(frame({ service: 'example.gen', id: 'g', body: null })))
+    /* Wait for ARRIVAL, then assert ORDER. A fixed sleep here raced the
+     * event loop under full-suite load — 40ms was not always enough for four
+     * 2ms-delayed sends — and a wait that names its condition cannot. */
+    await vi.waitFor(() => expect(order.length).toBe(4))
+    expect(order.map((f) => [f.kind, f.body])).toEqual([
+      ['stream', 1],
+      ['stream', 2],
+      ['stream', 3],
+      ['end', null],
+    ])
+  })
+
+  it('disconnects when a send fails instead of swallowing it, aborting other work (H4)', async () => {
+    const timers = fakeTimers()
+    let otherSignal: AbortSignal | undefined
+    const quick: ServiceContribution = { name: 'example.quick', grant: 'example:ping', handler: async () => 'done' }
+    const slow: ServiceContribution = { name: 'example.slow', grant: 'example:ping', handler: (_r, ctx) => new Promise(() => (otherSignal = ctx.signal)) }
+    const router = createRouter({ services: [quick, slow], hasGrant: () => true, timers })
+    let fail = false
+    const conn = router.connect('peer-a', (bytes) => {
+      decodeFrame(bytes)
+      return fail ? Promise.reject(new Error('link down')) : Promise.resolve()
+    })
+    conn.receive(encodeFrame(frame({ service: 'example.slow', id: 's', body: null })))
+    await settle()
+    expect(conn.inFlight).toBe(1)
+    fail = true
+    conn.receive(encodeFrame(frame({ service: 'example.quick', id: 'q', body: null })))
+    await settle()
+    expect(otherSignal?.aborted).toBe(true)
+    expect(conn.inFlight).toBe(0)
+  })
+
+  const rawFrame = (value: Record<string, unknown>): Uint8Array => {
+    const payload = new TextEncoder().encode(JSON.stringify(value))
+    const bytes = new Uint8Array(HEADER_BYTES + payload.byteLength)
+    new DataView(bytes.buffer).setUint32(0, payload.byteLength, false)
+    bytes.set(payload, HEADER_BYTES)
+    return bytes
+  }
+  const rawBody = (bodyLiteral: string): Uint8Array => {
+    const payload = new TextEncoder().encode(`{"v":1,"service":"a.b","id":"r1","kind":"req","body":${bodyLiteral}}`)
+    const bytes = new Uint8Array(HEADER_BYTES + payload.byteLength)
+    new DataView(bytes.buffer).setUint32(0, payload.byteLength, false)
+    bytes.set(payload, HEADER_BYTES)
+    return bytes
+  }
+
+  it('refuses a near-cap unknown field without reflecting it, and never throws (M5)', () => {
+    const h = harness([ping])
+    const bigKey = 'z'.repeat(MAX_PAYLOAD_BYTES - 200)
+    const bytes = rawFrame({ v: 1, service: 'example.ping', id: 'r1', kind: 'req', body: null, [bigKey]: 1 })
+    expect(() => h.connection.receive(bytes)).not.toThrow()
+    expect(h.sent).toHaveLength(1)
+    expect(errBody(h.sent[0]).code).toBe(ENVELOPE_ERRORS.malformed)
+    expect(encodeFrame(h.sent[0] as Frame).byteLength).toBeLessThan(1000)
+    expect(JSON.stringify(h.sent[0])).not.toContain(bigKey)
+  })
+
+  it('refuses a near-cap unknown version without reflecting it, and never throws (M5)', () => {
+    const h = harness([ping])
+    const bigVersion = 'v'.repeat(MAX_PAYLOAD_BYTES - 200)
+    const bytes = rawFrame({ v: bigVersion, service: 'example.ping', id: 'r1', kind: 'req', body: null })
+    expect(() => h.connection.receive(bytes)).not.toThrow()
+    expect(h.sent).toHaveLength(1)
+    expect(errBody(h.sent[0]).code).toBe(ENVELOPE_ERRORS.unsupported)
+    expect(encodeFrame(h.sent[0] as Frame).byteLength).toBeLessThan(1000)
+    expect(JSON.stringify(h.sent[0])).not.toContain('vvvv')
+  })
+
+  it('a client stream broken out of sends cancel and tears down (M6)', async () => {
+    const timers = fakeTimers()
+    const sent: Frame[] = []
+    const client = createClient({ send: (bytes) => void sent.push(decodeFrame(bytes)), timers })
+    const iterator = client.stream('example.ping', null)[Symbol.asyncIterator]()
+    client.receive(encodeFrame(frame({ id: 'c1', service: 'example.ping', kind: 'stream', body: 'a' })))
+    const first = await iterator.next()
+    expect(first.value).toBe('a')
+    await iterator.return?.()
+    expect(sent.map((f) => f.kind)).toEqual(['req', 'cancel'])
+    expect(client.inFlight).toBe(0)
+  })
+
+  it('bounds a client stream buffer and cancels on overflow (M6)', async () => {
+    const timers = fakeTimers()
+    const sent: Frame[] = []
+    const client = createClient({ send: (bytes) => void sent.push(decodeFrame(bytes)), timers, maxStreamBytes: 200 })
+    const iterator = client.stream('example.ping', null)[Symbol.asyncIterator]()
+    client.receive(encodeFrame(frame({ id: 'c1', service: 'example.ping', kind: 'stream', body: 'x'.repeat(300) })))
+    const failure = await iterator.next().catch((e: unknown) => e)
+    expect((failure as ServiceCallError).error.code).toBe(ENVELOPE_ERRORS.overloaded)
+    expect(sent.some((f) => f.kind === 'cancel')).toBe(true)
+  })
+
+  it('refuses deeply nested and non-finite JSON bodies (M8)', () => {
+    const deep = '['.repeat(MAX_JSON_DEPTH + 5) + ']'.repeat(MAX_JSON_DEPTH + 5)
+    expect(() => decodeFrame(rawBody(deep))).toThrow(/nests too deeply/)
+    expect(() => decodeFrame(rawBody('1e400'))).toThrow(/non-finite/)
+    // A shallow, finite body still round-trips.
+    expect(decodeFrame(rawBody('[1,2,3]')).body).toEqual([1, 2, 3])
+  })
+
+  it('rejects unencodable and oversized requests typed, leaking no pending state (M9)', async () => {
+    const timers = fakeTimers()
+    const sent: Frame[] = []
+    const client = createClient({ send: (bytes) => void sent.push(decodeFrame(bytes)), timers })
+    const cyclic: Record<string, unknown> = {}
+    cyclic.self = cyclic
+    expect(((await client.call('example.ping', cyclic).catch((e: unknown) => e)) as ServiceCallError).error.code).toBe(ENVELOPE_ERRORS.malformed)
+    expect(((await client.call('example.ping', 10n).catch((e: unknown) => e)) as ServiceCallError).error.code).toBe(ENVELOPE_ERRORS.malformed)
+    expect(((await client.call('example.ping', 'x'.repeat(MAX_FRAME_BYTES)).catch((e: unknown) => e)) as ServiceCallError).error.code).toBe(ENVELOPE_ERRORS.frameTooLarge)
+    expect(sent).toEqual([])
+    expect(client.inFlight).toBe(0)
+    expect(timers.pending()).toBe(0)
+  })
+
+  it('strips extra fields from a handler-thrown ServiceError before it crosses (M10)', async () => {
+    const leaky: ServiceContribution = {
+      name: 'example.leaky',
+      grant: 'example:ping',
+      handler: async () => Promise.reject({ code: 'busy', retryable: true, message: 'later', stack: 'secret-stack', bookText: 'the-secret-book' }),
+    }
+    const h = harness([leaky])
+    h.send(frame({ service: 'example.leaky', id: 'k', body: null }))
+    await settle()
+    const err = h.sent.find((f) => f.id === 'k')
+    expect(errBody(err)).toEqual({ code: 'busy', retryable: true, message: 'later' })
+    expect(Object.keys(errBody(err) as object).sort()).toEqual(['code', 'message', 'retryable'])
+    expect(JSON.stringify(err)).not.toContain('secret')
+  })
+
+  it('refuses a continuation frame whose service does not match the request (L11)', async () => {
+    const seen: unknown[] = []
+    const h = harness([ingest(seen), { name: 'example.other', grant: 'example:ingest', handler: async () => 'other' }])
+    h.send(frame({ service: 'example.ingest', id: 'm', kind: 'req', body: null }))
+    await settle()
+    h.send(frame({ service: 'example.other', id: 'm', kind: 'stream', body: 'wrong' }))
+    expect(errBody(h.sent.find((f) => f.id === 'm' && f.kind === 'err')).code).toBe(ENVELOPE_ERRORS.protocol)
+    h.send(frame({ service: 'example.ingest', id: 'm', kind: 'end', body: null }))
+    await settle()
+    expect(seen).toEqual([])
+  })
+
+  it('refuses a non-null body on end or cancel as malformed (L12)', () => {
+    expect(() => parseFrame({ v: 1, service: 'a.b', id: 'r1', kind: 'end', body: { fat: 1 } })).toThrow(MalformedFrame)
+    expect(() => parseFrame({ v: 1, service: 'a.b', id: 'r1', kind: 'cancel', body: [1, 2] })).toThrow(MalformedFrame)
+    expect(parseFrame({ v: 1, service: 'a.b', id: 'r1', kind: 'end', body: null }).kind).toBe('end')
+  })
+
+  it('caps the ENCODED frame including its header at the wire limit (L13)', () => {
+    const okBytes = encodeFrame(frame({ body: 'x'.repeat(MAX_PAYLOAD_BYTES - 100) }))
+    expect(okBytes.byteLength).toBeLessThanOrEqual(MAX_FRAME_BYTES)
+    // A declared length between MAX_PAYLOAD_BYTES and MAX_FRAME_BYTES — whose
+    // encoded frame would overrun the outer transport — is now refused.
+    const header = new Uint8Array(HEADER_BYTES + 4)
+    new DataView(header.buffer).setUint32(0, MAX_FRAME_BYTES, false)
+    expect(() => decodeFrame(header)).toThrow(FrameTooLarge)
   })
 })

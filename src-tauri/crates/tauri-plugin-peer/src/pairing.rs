@@ -7,11 +7,12 @@
 //! TLS handshake proved (`conn.remote_id()`), never a field. The shelf
 //! verifies in constant time, consumes the pending secret in one atomic step
 //! (a second connection with the same secret finds nothing), shows the
-//! human a 4-digit SAS derived from `(secret, shelfId, satchelId)` — the
+//! human a 6-digit SAS derived from `(secret, shelfId, satchelId)` — the
 //! satchel computes and shows the same — and waits for `peer_pair_confirm`.
-//! On accept both sides persist the peer with the grants their app chose;
-//! the shelf's ack carries a second MAC so the satchel knows the ack came
-//! from the party holding the secret.
+//! On accept both sides persist the peer with the grants their app chose, as a
+//! two-sided commit: the shelf's ack carries a second MAC, the satchel persists
+//! and returns a third (the commit), and only then does the shelf keep the
+//! peer — a satchel that never commits leaves no one-way trust.
 //!
 //! What a wrong version looks like: the ALPN carries it, so `pair/0` never
 //! completes a handshake, and a `v` other than `1` in the URI is refused
@@ -20,7 +21,7 @@
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use data_encoding::BASE32_NOPAD;
 use iroh::endpoint::{Connection, SendStream, VarInt};
@@ -49,6 +50,10 @@ const DIAL_TIMEOUT: Duration = Duration::from_secs(30);
 /// The satchel waits the shelf's confirm window plus this much for the ack.
 const ACK_GRACE: Duration = Duration::from_secs(30);
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
+/// After sending the ack the shelf waits this long for the satchel's commit —
+/// the second half of the two-sided commit (finding M8). A silent satchel is
+/// dropped and the shelf rolls back; a reset arrives sooner.
+const COMMIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub type Secret = [u8; 16];
 
@@ -65,14 +70,26 @@ pub struct PairingState {
 #[derive(Default)]
 struct Inner {
     pending: Option<Pending>,
-    confirm: Option<oneshot::Sender<Decision>>,
+    confirm: Option<Confirm>,
 }
 
 struct Pending {
     secret: Secret,
-    expires_at: SystemTime,
+    /// Monotonic deadline (finding L10): a wall-clock change cannot stretch or
+    /// shrink the window. The wall-clock expiry is encoded in the QR separately,
+    /// for display only.
+    expires_at: Instant,
     /// The name this shelf gives itself in the ack.
     name: String,
+}
+
+/// The confirmation the human is about to answer, bound to the exact attempt
+/// (finding M9): `peer_pair_confirm` must present the matching `attempt_id`, so
+/// a stale confirm — or one meant for a different, pre-played attempt — cannot
+/// confirm this one.
+struct Confirm {
+    attempt_id: String,
+    sender: oneshot::Sender<Decision>,
 }
 
 struct Decision {
@@ -88,8 +105,14 @@ enum Claim {
     Claimed {
         secret: Secret,
         shelf_name: String,
+        attempt_id: String,
         decision: oneshot::Receiver<Decision>,
     },
+}
+
+/// A fresh, unguessable id for one pairing attempt.
+fn new_attempt_id() -> String {
+    format!("{:032x}", rand::random::<u128>())
 }
 
 impl PairingState {
@@ -107,8 +130,23 @@ impl PairingState {
         inner.confirm = None;
     }
 
-    fn take_confirm(&self) -> Option<oneshot::Sender<Decision>> {
-        self.inner.lock().expect("pairing lock").confirm.take()
+    /// Take the confirmation sender, but only if the caller named the current
+    /// attempt. REQUIRED: an unbound confirmation approved whichever attempt
+    /// happened to be pending — exactly the stale/pre-played approval the
+    /// binding (M9) exists to refuse — so the compat path that allowed one is
+    /// gone. A mismatch leaves the pending attempt in place: a stale confirm
+    /// cannot consume the attempt that replaced the one it meant.
+    fn take_confirm(&self, attempt_id: &str) -> Result<oneshot::Sender<Decision>> {
+        let mut inner = self.inner.lock().expect("pairing lock");
+        match inner.confirm.as_ref() {
+            None => Err(Error::NoPendingPairing),
+            Some(confirm) => {
+                if confirm.attempt_id != attempt_id {
+                    return Err(Error::NoPendingPairing);
+                }
+                Ok(inner.confirm.take().expect("checked present").sender)
+            }
+        }
     }
 
     /// The single-shot step. Verify under the lock; consume only on success,
@@ -119,7 +157,7 @@ impl PairingState {
         let Some(pending) = inner.pending.as_ref() else {
             return Claim::NoPending;
         };
-        if SystemTime::now() > pending.expires_at {
+        if Instant::now() > pending.expires_at {
             inner.pending = None;
             return Claim::Expired;
         }
@@ -128,11 +166,16 @@ impl PairingState {
             return Claim::BadMac;
         }
         let pending = inner.pending.take().expect("checked above");
+        let attempt_id = new_attempt_id();
         let (tx, rx) = oneshot::channel();
-        inner.confirm = Some(tx);
+        inner.confirm = Some(Confirm {
+            attempt_id: attempt_id.clone(),
+            sender: tx,
+        });
         Claim::Claimed {
             secret: pending.secret,
             shelf_name: pending.name,
+            attempt_id,
             decision: rx,
         }
     }
@@ -159,16 +202,40 @@ pub(crate) fn ack_mac(secret: &Secret, satchel: &EndpointId, shelf: &EndpointId)
     hasher.finalize()
 }
 
-/// Four decimal digits from `keyed_hash(derive_key("paper pair sas", secret),
-/// shelfId ‖ satchelId)`: the first two bytes, big-endian, mod 10000.
+/// `keyed_hash(derive_key("paper pair commit v1", secret), "commit" ‖ satchelId
+/// ‖ shelfId)`. The satchel returns this once it has persisted the shelf, so
+/// the shelf keeps the peer only after the satchel confirms its own trust —
+/// the second side of the commit (finding M8). Authenticated, so it cannot be
+/// forged by a relay or a stranger.
+pub(crate) fn commit_mac(
+    secret: &Secret,
+    satchel: &EndpointId,
+    shelf: &EndpointId,
+) -> blake3::Hash {
+    let key = blake3::derive_key("paper pair commit v1", secret);
+    let mut hasher = blake3::Hasher::new_keyed(&key);
+    hasher.update(b"commit");
+    hasher.update(satchel.as_bytes());
+    hasher.update(shelf.as_bytes());
+    hasher.finalize()
+}
+
+/// Six decimal digits from `keyed_hash(derive_key("paper pair sas", secret),
+/// shelfId ‖ satchelId)`: the first four bytes, big-endian, mod 1_000_000.
+///
+/// Six digits (~20 bits), not four (~13): this code is the human's last check
+/// against a man-in-the-middle, and 1-in-a-million is the entropy a compared
+/// pairing code is normally held to. Four bytes into the modulo keeps the bias
+/// negligible.
 pub(crate) fn sas(secret: &Secret, shelf: &EndpointId, satchel: &EndpointId) -> String {
     let key = blake3::derive_key("paper pair sas", secret);
     let mut hasher = blake3::Hasher::new_keyed(&key);
     hasher.update(shelf.as_bytes());
     hasher.update(satchel.as_bytes());
     let bytes = hasher.finalize();
-    let n = u16::from_be_bytes([bytes.as_bytes()[0], bytes.as_bytes()[1]]) % 10_000;
-    format!("{n:04}")
+    let b = bytes.as_bytes();
+    let n = u32::from_be_bytes([b[0], b[1], b[2], b[3]]) % 1_000_000;
+    format!("{n:06}")
 }
 
 fn parse_mac(hex: &str) -> Option<blake3::Hash> {
@@ -320,6 +387,14 @@ struct PairAck {
     mac_ack: Option<String>,
 }
 
+/// The satchel's commit: sent after it persists the shelf, so the shelf can
+/// keep the peer only once both sides hold the trust (finding M8).
+#[derive(Debug, Serialize, Deserialize)]
+struct PairCommit {
+    /// Hex of [`commit_mac`].
+    mac_commit: String,
+}
+
 // ── results ───────────────────────────────────────────────────────────────
 
 /// What `peer_pair_begin` returns.
@@ -355,11 +430,14 @@ pub fn begin(node: &Node, name: Option<String>) -> Result<PairOffer> {
         });
     }
     let secret: Secret = rand::random();
-    let expires_at = SystemTime::now() + PAIR_TTL;
-    let expires_secs = expires_at
+    // The wall-clock expiry is for the QR's display/encoding only; enforcement
+    // is on a monotonic deadline (finding L10) so moving the clock cannot
+    // stretch the window.
+    let expires_secs = (SystemTime::now() + PAIR_TTL)
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    let deadline = Instant::now() + PAIR_TTL;
     let addr = node.endpoint().addr();
     let uri = PairUri {
         id: node.id(),
@@ -372,7 +450,7 @@ pub fn begin(node: &Node, name: Option<String>) -> Result<PairOffer> {
     let svg = render_qr(&url)?;
     node.pairing.replace(Pending {
         secret,
-        expires_at,
+        expires_at: deadline,
         name: name.unwrap_or_else(default_device_name),
     });
     Ok(PairOffer {
@@ -387,10 +465,21 @@ pub fn cancel(node: &Node) {
     node.pairing.cancel();
 }
 
-/// The human's answer. Returns once the peer is persisted and the ack has
-/// gone out (`Some(record)`), or once the refusal has (`None`).
-pub async fn confirm(node: &Node, accept: bool, grants: Vec<String>) -> Result<Option<PeerRecord>> {
-    let sender = node.pairing.take_confirm().ok_or(Error::NoPendingPairing)?;
+/// The human's answer, bound to the exact attempt (finding M9): `attempt_id`
+/// MUST name the pending attempt, so a stale confirm or one meant for a
+/// different (e.g. pre-played) attempt is refused. There is no unbound form —
+/// the compat path that accepted one restored the exact hole the binding
+/// closed.
+///
+/// Returns once both sides have committed the pairing (`Some(record)`), or once
+/// the refusal has gone out (`None`).
+pub async fn confirm(
+    node: &Node,
+    accept: bool,
+    grants: Vec<String>,
+    attempt_id: String,
+) -> Result<Option<PeerRecord>> {
+    let sender = node.pairing.take_confirm(&attempt_id)?;
     let (reply_tx, reply_rx) = oneshot::channel();
     sender
         .send(Decision {
@@ -460,18 +549,21 @@ async fn serve_inner(node: &Arc<Node>, conn: &Connection) -> Result<Option<PeerR
         return refuse(&mut send, "bad-mac").await;
     };
 
-    let (secret, shelf_name, decision) = match node.pairing.claim(&node.id(), &remote, &mac) {
-        Claim::NoPending => return refuse(&mut send, "no-pending").await,
-        Claim::Expired => return refuse(&mut send, "expired").await,
-        Claim::BadMac => return refuse(&mut send, "bad-mac").await,
-        Claim::Claimed {
-            secret,
-            shelf_name,
-            decision,
-        } => (secret, shelf_name, decision),
-    };
+    let (secret, shelf_name, attempt_id, decision) =
+        match node.pairing.claim(&node.id(), &remote, &mac) {
+            Claim::NoPending => return refuse(&mut send, "no-pending").await,
+            Claim::Expired => return refuse(&mut send, "expired").await,
+            Claim::BadMac => return refuse(&mut send, "bad-mac").await,
+            Claim::Claimed {
+                secret,
+                shelf_name,
+                attempt_id,
+                decision,
+            } => (secret, shelf_name, attempt_id, decision),
+        };
 
     node.emit(PeerEvent::PairingPending(PairingPending {
+        attempt_id,
         id: remote.to_string(),
         name: hello.name.clone(),
         platform: hello.platform.clone(),
@@ -506,14 +598,18 @@ async fn serve_inner(node: &Arc<Node>, conn: &Connection) -> Result<Option<PeerR
         last_seen_at: now,
         last_addrs: remote_addrs(node, remote).await,
     };
-    // The guard is dropped before the awaits below; the failure is a
-    // typed error to the confirming command and a refusal on the wire.
+    // Persist-then-commit already makes this durable before the peer is live in
+    // memory (finding H3); the guard is dropped before the awaits below.
     let persisted = node.peers().insert(record.clone());
     if let Err(err) = persisted {
         let _ = decision.reply.send(Err(err));
         return refuse(&mut send, "persist-failed").await;
     }
 
+    // The two-sided commit (finding M8): the shelf has persisted, but keeps the
+    // peer only once the satchel confirms it persisted too. A satchel that
+    // resets after the human accepts — or fails its own persist — never sends a
+    // valid commit, so the shelf rolls back and no one-way trust survives.
     let ack = PairAck {
         ok: true,
         reason: None,
@@ -522,10 +618,44 @@ async fn serve_inner(node: &Arc<Node>, conn: &Connection) -> Result<Option<PeerR
         role: Some(Role::Shelf),
         mac_ack: Some(ack_mac(&secret, &remote, &node.id()).to_hex().to_string()),
     };
-    write_json(&mut send, &ack).await?;
-    flush(&mut send).await;
-    let _ = decision.reply.send(Ok(Some(record.clone())));
-    Ok(Some(record))
+    match await_commit(node, &mut send, &mut recv, &secret, &remote, &ack).await {
+        Ok(()) => {
+            let _ = decision.reply.send(Ok(Some(record.clone())));
+            Ok(Some(record))
+        }
+        Err(err) => {
+            let _ = node.peers().remove(&record.id);
+            let _ = decision
+                .reply
+                .send(Err(Error::PairingRefused("commit-failed".into())));
+            Err(err)
+        }
+    }
+}
+
+/// Send the ack, then wait for the satchel's authenticated commit. Any failure
+/// — a reset, a silent satchel past the deadline, or a forged commit MAC — is
+/// returned so the caller rolls the shelf's trust back.
+async fn await_commit(
+    node: &Node,
+    send: &mut SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    secret: &Secret,
+    satchel: &EndpointId,
+    ack: &PairAck,
+) -> Result<()> {
+    write_json(send, ack).await?;
+    flush(send).await;
+    let commit: PairCommit = match timeout(COMMIT_TIMEOUT, read_json(recv)).await {
+        Ok(Ok(commit)) => commit,
+        Ok(Err(_)) => return Err(Error::PairingRefused("commit-aborted".into())),
+        Err(_) => return Err(Error::PairingRefused("commit-timeout".into())),
+    };
+    let expected = commit_mac(secret, satchel, &node.id());
+    if parse_mac(&commit.mac_commit) != Some(expected) {
+        return Err(Error::PairingRefused("bad-commit-mac".into()));
+    }
+    Ok(())
 }
 
 /// Send `PairAck { ok: false, reason }`, wait for it to be acknowledged, and
@@ -602,13 +732,14 @@ pub async fn from_uri(
             .to_string(),
     };
     write_json(&mut send, &hello).await?;
-    let _ = send.finish();
+    // The send stream stays open: after the ack the satchel sends its commit on
+    // it, the second half of the two-sided commit (finding M8).
     let sas = sas(&uri.secret, &shelf, &node.id());
 
     let node = node.clone();
     let secret = uri.secret;
     let task = tokio::spawn(async move {
-        let result = finish(&node, &conn, &mut recv, shelf, &secret, grants).await;
+        let result = finish(&node, &conn, &mut send, &mut recv, shelf, &secret, grants).await;
         node.emit(PeerEvent::PairingResult(match &result {
             Ok(record) => PairingResult {
                 ok: true,
@@ -633,9 +764,11 @@ pub async fn from_uri(
     Ok((PairStart { sas }, task))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn finish(
     node: &Node,
     conn: &Connection,
+    send: &mut SendStream,
     recv: &mut iroh::endpoint::RecvStream,
     shelf: EndpointId,
     secret: &Secret,
@@ -679,6 +812,14 @@ async fn finish(
         last_addrs: remote_addrs(node, shelf).await,
     };
     node.peers().insert(record.clone())?;
+    // Confirm to the shelf that we persisted, so it keeps the peer (finding M8).
+    // Best-effort: if this commit is lost the shelf rolls back to no trust —
+    // leaving at worst a benign satchel-only record, never shelf-only trust.
+    let commit = PairCommit {
+        mac_commit: commit_mac(secret, &node.id(), &shelf).to_hex().to_string(),
+    };
+    let _ = write_json(send, &commit).await;
+    flush(send).await;
     Ok(record)
 }
 
@@ -721,14 +862,14 @@ mod tests {
         assert_ne!(mac, pair_mac(&[8u8; 16], &shelf, &satchel));
         assert_ne!(mac, ack_mac(&s, &satchel, &shelf), "different derivation");
         let code = sas(&s, &shelf, &satchel);
-        assert_eq!(code.len(), 4);
+        assert_eq!(code.len(), 6);
         assert!(code.chars().all(|c| c.is_ascii_digit()));
         assert_eq!(code, sas(&s, &shelf, &satchel));
         assert_ne!(code, sas(&[8u8; 16], &shelf, &satchel));
     }
 
     #[test]
-    fn sas_is_zero_padded_first_two_bytes_mod_10000() {
+    fn sas_is_zero_padded_first_four_bytes_mod_1_000_000() {
         let (shelf, satchel) = ids();
         let s = secret();
         let key = blake3::derive_key("paper pair sas", &s);
@@ -736,8 +877,9 @@ mod tests {
         h.update(shelf.as_bytes());
         h.update(satchel.as_bytes());
         let b = h.finalize();
-        let n = u16::from_be_bytes([b.as_bytes()[0], b.as_bytes()[1]]) % 10_000;
-        assert_eq!(sas(&s, &shelf, &satchel), format!("{n:04}"));
+        let bytes = b.as_bytes();
+        let n = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) % 1_000_000;
+        assert_eq!(sas(&s, &shelf, &satchel), format!("{n:06}"));
     }
 
     #[test]
@@ -828,7 +970,13 @@ mod tests {
         };
         assert_eq!(pending.id, satchel.id());
         assert_eq!(pending.name, "Phone");
-        let confirmed = confirm(&shelf.node, accept, vec!["sync:*".into(), "blob:*".into()]).await;
+        let confirmed = confirm(
+            &shelf.node,
+            accept,
+            vec!["sync:*".into(), "blob:*".into()],
+            pending.attempt_id.clone(),
+        )
+        .await;
         let satchel_result = task.await.unwrap();
         (confirmed, satchel_result, pending.sas, start.sas)
     }
@@ -872,7 +1020,10 @@ mod tests {
 
         // The secret is spent: the same URI again is refused.
         assert_eq!(
-            confirm(&shelf.node, true, vec![]).await.unwrap_err().kind(),
+            confirm(&shelf.node, true, vec![], "no-such-attempt".into())
+                .await
+                .unwrap_err()
+                .kind(),
             "noPendingPairing"
         );
         shelf.close().await;
@@ -920,10 +1071,16 @@ mod tests {
         let (_, task) = from_uri(&satchel.node, &offer.url, None, vec![])
             .await
             .unwrap();
-        shelf
+        let ev = shelf
             .next_event_where(|e| matches!(e, PeerEvent::PairingPending(_)))
             .await;
-        confirm(&shelf.node, true, vec![]).await.unwrap().unwrap();
+        let PeerEvent::PairingPending(pending) = ev else {
+            unreachable!()
+        };
+        confirm(&shelf.node, true, vec![], pending.attempt_id)
+            .await
+            .unwrap()
+            .unwrap();
         task.await.unwrap().unwrap();
         assert_eq!(shelf.node.list_peers().len(), 1);
         shelf.close().await;
@@ -935,10 +1092,11 @@ mod tests {
         let mut shelf = TestNode::start("pair-expired-shelf", Role::Shelf).await;
         let satchel = TestNode::start("pair-expired-satchel", Role::Satchel).await;
         let offer = begin(&shelf.node, None).unwrap();
-        // Age the pending secret in place.
+        // Age the pending secret in place, on the monotonic deadline (finding
+        // L10) — the enforcement clock, not the wall clock.
         {
             let mut inner = shelf.node.pairing.inner.lock().unwrap();
-            inner.pending.as_mut().unwrap().expires_at = SystemTime::now() - Duration::from_secs(1);
+            inner.pending.as_mut().unwrap().expires_at = Instant::now() - Duration::from_secs(1);
         }
         let (_, task) = from_uri(&satchel.node, &offer.url, None, vec![])
             .await
@@ -965,10 +1123,16 @@ mod tests {
         let (_, task) = from_uri(&satchel.node, &offer.url, None, vec![])
             .await
             .unwrap();
-        shelf
+        let ev = shelf
             .next_event_where(|e| matches!(e, PeerEvent::PairingPending(_)))
             .await;
-        confirm(&shelf.node, true, vec![]).await.unwrap().unwrap();
+        let PeerEvent::PairingPending(pending) = ev else {
+            unreachable!()
+        };
+        confirm(&shelf.node, true, vec![], pending.attempt_id)
+            .await
+            .unwrap()
+            .unwrap();
         task.await.unwrap().unwrap();
 
         let other = TestNode::start("pair-reuse-other", Role::Satchel).await;
@@ -1000,7 +1164,10 @@ mod tests {
         let err = task.await.unwrap().unwrap_err();
         assert!(err.to_string().contains("cancelled"), "{err}");
         assert_eq!(
-            confirm(&shelf.node, true, vec![]).await.unwrap_err().kind(),
+            confirm(&shelf.node, true, vec![], "no-such-attempt".into())
+                .await
+                .unwrap_err()
+                .kind(),
             "noPendingPairing"
         );
         shelf.close().await;
@@ -1155,24 +1322,43 @@ mod tests {
         };
         assert_eq!(pending.id, raw.id().to_string());
         assert_eq!(pending.sas, sas(&uri.secret, &shelf.node.id(), &raw.id()));
-        let record = confirm(&shelf.node, true, vec![]).await.unwrap().unwrap();
+        // The raw satchel, concurrently: read the ack, check it, and return its
+        // commit so the shelf keeps the peer (the two-sided commit, finding M8).
+        let raw_id = raw.id();
+        let shelf_id = shelf.node.id();
+        let secret = uri.secret;
+        let ack_task = tokio::spawn(async move {
+            let ack: PairAck = read_json(&mut recv).await.unwrap();
+            assert!(ack.ok);
+            assert_eq!(
+                ack.mac_ack.as_deref(),
+                Some(ack_mac(&secret, &raw_id, &shelf_id).to_hex().as_str())
+            );
+            let commit = PairCommit {
+                mac_commit: commit_mac(&secret, &raw_id, &shelf_id).to_hex().to_string(),
+            };
+            write_json(&mut send, &commit).await.unwrap();
+            let _ = send.finish();
+        });
+        let record = confirm(&shelf.node, true, vec![], pending.attempt_id.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        ack_task.await.unwrap();
         assert_eq!(record.id, raw.id().to_string());
         assert_ne!(record.id, bogus.to_string());
-        let ack: PairAck = read_json(&mut recv).await.unwrap();
-        assert!(ack.ok);
-        assert_eq!(
-            ack.mac_ack.as_deref(),
-            Some(
-                ack_mac(&uri.secret, &raw.id(), &shelf.node.id())
-                    .to_hex()
-                    .as_str()
-            )
-        );
         raw.close().await;
         shelf.close().await;
     }
 
-    #[tokio::test]
+    /* Multi-thread ON PURPOSE: a hundred QUIC handshakes, ten endpoints and
+     * the shelf's accept loop all cooperatively scheduled on the default
+     * current-thread runtime starve each other whenever the sibling tests
+     * saturate the machine — the product-side HELLO_TIMEOUT (15s) then
+     * expires for every attempt, no claim happens, and the pending-event
+     * wait dies. The property under test is the single-shot claim, not
+     * single-thread scheduling. */
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn one_hundred_concurrent_attempts_with_one_secret_pair_exactly_once() {
         let mut shelf = TestNode::start("pair-race-shelf", Role::Shelf).await;
         let offer = begin(&shelf.node, None).unwrap();
@@ -1210,6 +1396,19 @@ mod tests {
                 .await
                 .unwrap();
                 let ack: PairAck = read_json(&mut recv).await.unwrap();
+                if ack.ok {
+                    // The one winner completes the two-sided commit so the
+                    // shelf keeps the peer (finding M8).
+                    let commit = PairCommit {
+                        mac_commit: commit_mac(&uri.secret, &raw.id(), &shelf_id)
+                            .to_hex()
+                            .to_string(),
+                    };
+                    let _ = write_json(&mut send, &commit).await;
+                    // Wait for delivery before this task returns and drops the
+                    // connection, or the commit could be lost.
+                    flush(&mut send).await;
+                }
                 (raw.id().to_string(), ack)
             }));
         }
@@ -1220,12 +1419,19 @@ mod tests {
         else {
             unreachable!()
         };
-        confirm(&shelf.node, true, vec![]).await.unwrap().unwrap();
+        confirm(&shelf.node, true, vec![], pending.attempt_id.clone())
+            .await
+            .unwrap()
+            .unwrap();
 
         let mut ok = 0;
         let mut refused = 0;
         for task in tasks {
-            let (id, ack) = timeout(Duration::from_secs(10), task)
+            // 30s, not 10s: with 100 concurrent handshakes each now carrying the
+            // two-sided commit round-trip (M8), a loaded machine can take longer
+            // than 10s to drain them all. The assertion is the count, not the
+            // speed, so the headroom costs nothing when the run is fast.
+            let (id, ack) = timeout(Duration::from_secs(30), task)
                 .await
                 .unwrap()
                 .unwrap();
@@ -1277,5 +1483,101 @@ mod tests {
         assert!(shelf.node.list_peers().is_empty());
         raw.close().await;
         shelf.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_satchel_that_vanishes_before_committing_leaves_no_shelf_trust() {
+        // Finding M8: the shelf keeps the peer only once the satchel confirms
+        // it persisted too. A satchel that reads the ack then drops without a
+        // commit must leave the shelf with no one-way trust.
+        let mut shelf = TestNode::start("pair-commit-shelf", Role::Shelf).await;
+        let offer = begin(&shelf.node, None).unwrap();
+        let uri = PairUri::parse(&offer.url).unwrap();
+        let raw = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+            .unwrap();
+        let conn = raw.connect(uri.endpoint_addr(), PAIR_ALPN).await.unwrap();
+        let (mut send, mut recv) = conn.open_bi().await.unwrap();
+        write_json(
+            &mut send,
+            &PairHello {
+                name: "ghost".into(),
+                platform: "test".into(),
+                role: Role::Satchel,
+                mac: pair_mac(&uri.secret, &shelf.node.id(), &raw.id())
+                    .to_hex()
+                    .to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let PeerEvent::PairingPending(pending) = shelf
+            .next_event_where(|e| matches!(e, PeerEvent::PairingPending(_)))
+            .await
+        else {
+            unreachable!()
+        };
+
+        // Read the ack, then vanish without ever sending the commit.
+        let vanish = tokio::spawn(async move {
+            let ack: PairAck = read_json(&mut recv).await.unwrap();
+            assert!(ack.ok);
+            conn.close(VarInt::from_u32(0), b"bye");
+            raw
+        });
+        let confirmed = confirm(&shelf.node, true, vec!["sync:*".into()], pending.attempt_id).await;
+        assert!(confirmed.is_err(), "the shelf reports the commit failed");
+        let raw = vanish.await.unwrap();
+        assert!(
+            shelf.node.list_peers().is_empty(),
+            "no one-way shelf trust survives a missing commit"
+        );
+        let ev = shelf
+            .next_event_where(|e| matches!(e, PeerEvent::PairingResult(_)))
+            .await;
+        assert!(matches!(ev, PeerEvent::PairingResult(r) if !r.ok));
+        raw.close().await;
+        shelf.close().await;
+    }
+
+    #[tokio::test]
+    async fn confirm_is_bound_to_the_attempt_id() {
+        // Finding M9: a confirm carrying the wrong attempt id is refused and
+        // does not consume the pending attempt; only the matching id confirms.
+        let mut shelf = TestNode::start("pair-attempt-shelf", Role::Shelf).await;
+        let mut satchel = TestNode::start("pair-attempt-satchel", Role::Satchel).await;
+        let offer = begin(&shelf.node, None).unwrap();
+        let (_, task) = from_uri(&satchel.node, &offer.url, None, vec![])
+            .await
+            .unwrap();
+        let PeerEvent::PairingPending(pending) = shelf
+            .next_event_where(|e| matches!(e, PeerEvent::PairingPending(_)))
+            .await
+        else {
+            unreachable!()
+        };
+
+        // A confirm for a different attempt is refused and leaves the real
+        // attempt intact (a stale or pre-played attempt cannot ride this one).
+        assert_eq!(
+            confirm(&shelf.node, true, vec![], "not-the-attempt".into())
+                .await
+                .unwrap_err()
+                .kind(),
+            "noPendingPairing"
+        );
+        // The matching id confirms it.
+        confirm(&shelf.node, true, vec![], pending.attempt_id.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        task.await.unwrap().unwrap();
+        assert_eq!(shelf.node.list_peers().len(), 1);
+        assert_eq!(shelf.node.list_peers()[0].id, satchel.id());
+        let _ = satchel.next_event().await;
+        shelf.close().await;
+        satchel.close().await;
     }
 }

@@ -1,8 +1,8 @@
 import { createElement } from 'react'
 import {
   defineSetting,
-  writeQueue,
   type Capability,
+  type CapabilityContext,
   type Disposable,
   type KernelApi,
   type ServiceContext,
@@ -16,8 +16,8 @@ import { createBackfill } from './lib/backfill'
 import { createCoverCache, type CoverCache } from './lib/coverCache'
 import { createJournal, type Journal } from './lib/journal'
 import { createLedger, type Ledger, type SyncChannel } from './lib/ledger'
-import { SYNC_SERVICES, type SyncRole } from './lib/protocol'
-import { bindRole, bindScheduler, currentRole, syncNow, syncStatus } from './lib/runtime'
+import { SYNC_SERVICES, parseContentAnswer, type SyncRole } from './lib/protocol'
+import { bindRole, bindScheduler, currentRole, syncNow, syncStatus, unbindRole, unbindScheduler } from './lib/runtime'
 import { createSyncScheduler, type SyncScheduler } from './lib/scheduler'
 import { DEGRADED_DETAIL } from './lib/status'
 import { createStorageModel, dropDownloadSize, recordDownloadSize, type StorageModel } from './ui/storageModel'
@@ -55,6 +55,9 @@ let running: {
   readonly ledger: Ledger
   readonly shelfPeer: () => Promise<string | null>
   readonly coverCache: CoverCache | null
+  /** The composition's (scoped) filesystem — carried here so an action that
+   *  outlives a teardown cannot write through a NEWER runtime's handle. */
+  readonly fs: KernelApi['services']['fs']
 } | null = null
 let storageModel: StorageModel | null = null
 
@@ -78,10 +81,14 @@ const SERVICE_LIST: readonly ServiceContribution[] = Object.values(SYNC_SERVICES
 
 /** An ephemeral channel to the paired shelf, for one task. */
 async function withShelf<T>(task: (channel: SyncChannel) => Promise<T>): Promise<T> {
-  if (!running) throw new Error('sync has not started')
-  const shelf = await running.shelfPeer()
+  /* ONE capture: `running` is a mutable module slot a teardown nulls, and a
+   * restart replaces — dereferencing it again after an await could mix two
+   * runtimes or read null mid-operation. */
+  const held = running
+  if (!held) throw new Error('sync has not started')
+  const shelf = await held.shelfPeer()
   if (shelf === null) throw new Error('not paired with a shelf')
-  const channel = await running.port.connect(shelf)
+  const channel = await held.port.connect(shelf)
   try {
     return await task(channel)
   } finally {
@@ -94,7 +101,7 @@ async function downloadAction(bookId: string): Promise<void> {
   if (!held) return
   await withShelf(async (channel) => {
     const { size } = await held.ledger.download(channel, bookId)
-    const fs = servicesFs
+    const fs = held.fs
     if (fs) await recordDownloadSize(fs, bookId, size).catch(() => {})
     /* The jacket, best-effort — a cover that will not come costs nothing. */
     await held.coverCache?.ensure(bookId).catch(() => {})
@@ -105,11 +112,15 @@ async function removeDownloadAction(bookId: string): Promise<void> {
   const held = running
   if (!held) return
   await held.ledger.removeDownload(bookId)
-  const fs = servicesFs
+  const fs = held.fs
   if (fs) await dropDownloadSize(fs, bookId).catch(() => {})
 }
 
 let servicesFs: KernelApi['services']['fs'] = null
+/* The journal HANDOFF: one journal's close must settle before the next
+ * opens, or an overlapping restart's older close could delete the dirty
+ * flag out from under the newer, live journal. */
+let journalHandoff: Promise<void> = Promise.resolve()
 
 /* -------------------------------------------------------------- capability */
 
@@ -142,7 +153,12 @@ export const sync: Capability = {
       id: 'sync:remove-download',
       label: 'Remove download',
       when: (book) => runningRole() === 'satchel' && book.hasContent === true,
-      run: (bookId) => removeDownloadAction(bookId).catch(() => {}),
+      run: (bookId) =>
+        removeDownloadAction(bookId).catch(() => {
+          /* Content that stayed put must not look removed — same signal as a
+           * failed download. */
+          syncStatus.set({ state: 'degraded', detail: DEGRADED_DETAIL })
+        }),
     },
   ],
 
@@ -151,10 +167,82 @@ export const sync: Capability = {
   /** The satchel-side stubs, declared (I.2). */
   clients: Object.values(SYNC_SERVICES).map((service) => ({ name: service.name as `${string}.${string}` })),
 
-  async start(api: KernelApi, signal: AbortSignal): Promise<Disposable> {
+  async start(api: CapabilityContext, signal: AbortSignal): Promise<Disposable> {
     const services = api.services
     const settings = api.settings
     servicesFs = services.fs
+
+    /* Every torn-down resource has a slot below; `stop` reads them, so it can
+     * run at ANY point — including a `start` that throws half-way — and undo
+     * exactly what was acquired so far. It is registered with the kernel's
+     * disposer stack (the failure path) AND returned as the Disposable (the
+     * normal path); it is idempotent, so the overlap is harmless. */
+    /* This invocation's OWN published state, for the ownership checks in
+     * `stop` — an overlapping restart's newer values are not this stop's. */
+    let myRunning: typeof running = null
+    let myHandlers: typeof handlers = null
+    let myStorageModel: StorageModel | null = null
+    let unbindClock: Disposable | null = null
+    let unbindRecorder: Disposable | null = null
+    let closeJournal: (() => void) | null = null
+    let unserve: (() => void) | null = null
+    let scheduler: SyncScheduler | null = null
+    let unregisterSyncNow: (() => void) | null = null
+    let backfillTimer: ReturnType<typeof setTimeout> | null = null
+    let boundRole: object | null = null
+    let stopped = false
+
+    const step = (label: string, fn: () => void): void => {
+      try {
+        fn()
+      } catch (error) {
+        api.diagnostics.warn('sync.teardown-step-failed', {
+          label,
+          message: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+    const stop = (): void => {
+      if (stopped) return
+      stopped = true
+      signal.removeEventListener('abort', stop)
+      step('scheduler', () => scheduler?.stop())
+      step('bindScheduler', () => {
+        if (scheduler !== null) unbindScheduler(scheduler)
+      })
+      step('syncNow', () => unregisterSyncNow?.())
+      step('serve', () => unserve?.())
+      step('backfill', () => {
+        if (backfillTimer !== null) clearTimeout(backfillTimer)
+      })
+      step('storageModel', () => {
+        if (storageModel === myStorageModel) {
+          storageModel?.dispose()
+          storageModel = null
+        } else {
+          myStorageModel?.dispose()
+        }
+      })
+      /* Cleared only under OWNERSHIP: an older, slower stop must not erase
+       * a newer start's live runtime — the same rule peer's stop follows. */
+      if (handlers === myHandlers) handlers = null
+      if (running === myRunning) running = null
+      if (servicesFs === services.fs) servicesFs = null
+      /* Restore the kernel's recorder and clock BEFORE the journal closes, so
+       * no store write is ever delegated into a journal that is shutting down
+       * — the whole point of an unbind-able bind. */
+      step('unbindRecorder', () => unbindRecorder?.dispose())
+      step('unbindClock', () => unbindClock?.dispose())
+      step('role', () => {
+        if (boundRole !== null) unbindRole(boundRole)
+      })
+      /* Best-effort: the dirty flag stays if this write loses the race with
+       * the window, and the next open's verify pass squares it — that is
+       * what the flag is FOR. */
+      step('journal', () => closeJournal?.())
+    }
+    api.onCleanup(stop)
+    signal.addEventListener('abort', stop, { once: true })
 
     const device = ensureDeviceId(settings)
     const clock = createClock({
@@ -165,43 +253,79 @@ export const sync: Capability = {
       },
       save: (last) => settings.set(CLOCK_FLOOR_SETTING, last),
     })
-    services.bindClock(() => clock.now())
+    unbindClock = services.bindClock(() => clock.now())
 
     const port = peerPort()
     const fs = services.fs
     let journal: Journal | null = null
     if (fs) {
+      /* Wait out the previous lifetime's close (a no-op when none is in
+       * flight) so two journals never overlap on the same files. */
+      await journalHandoff.catch(() => {})
       journal = createJournal({
         fs,
-        queue: writeQueue(),
+        /* THE SHELF'S QUEUE — `JournalOptions.queue`'s stated contract: the
+         * same queue the stores write on, so `drain()` at window close
+         * covers a journal append still in flight. A private queue here
+         * silently exempted exactly the writes durability exists for. */
+        queue: services.writes,
         clock: () => clock.now(),
-        ...(port ? { fsync: (path: string) => port.fsync(path).catch(() => {}) } : {}),
-        storage: services.storage,
+        /* NOT swallowed: the fsync hook is the journal's durability
+         * barrier, and a barrier that reports success on failure is no
+         * barrier — the append must fail loudly and stay retryable. */
+        ...(port ? { fsync: (path: string) => port.fsync(path) } : {}),
+        /* The canonical rows, tombstones included, off the kernel's card
+         * store — sync holds no raw flat-store handle (WI-10.4). */
+        cards: () => services.cards.stored(),
       })
       await journal.open()
-      services.bindRecorder(journal)
+      const openedJournal = journal
+      closeJournal = () => {
+        journalHandoff = openedJournal.close().catch((error: unknown) => {
+          api.diagnostics.warn('sync.teardown-step-failed', {
+            label: 'journal-close',
+            message: error instanceof Error ? error.message : String(error),
+          })
+        })
+      }
+      unbindRecorder = services.bindRecorder(journal)
     }
-
-    let unserve: (() => void) | null = null
-    let scheduler: SyncScheduler | null = null
-    let unregisterSyncNow: (() => void) | null = null
-    let backfillTimer: ReturnType<typeof setTimeout> | null = null
+    /* An abort during `journal.open()` already ran `stop` — but the slots
+     * filled SINCE it ran (the close hook, the recorder bind) were not swept,
+     * and carrying on would acquire more. Re-arm, sweep, and fail the start
+     * so the registry's rollback sees the truth. */
+    const abortedDuringStart = (): boolean => {
+      if (!stopped) return false
+      stopped = false
+      stop()
+      return true
+    }
+    if (abortedDuringStart()) throw new Error('sync: start aborted while the journal was opening')
 
     if (fs && journal && port) {
       const openJournal = journal
-      const role: SyncRole = await port.localRole().catch(() => 'shelf' as SyncRole)
-      bindRole(role)
+      const role: SyncRole = await port.localRole().catch((error: unknown) => {
+        /* The shelf fallback serves nothing extra and schedules nothing —
+         * the safe side — but a role that could not be read is a fact the
+         * log must carry, not a silent guess. */
+        api.diagnostics.warn('sync.role-unknown', { message: error instanceof Error ? error.message : String(error) })
+        return 'shelf' as SyncRole
+      })
+      if (abortedDuringStart()) throw new Error('sync: start aborted while the role was being read')
+      boundRole = bindRole(role)
+      const fetchVerifiedBlob = (peerId: string, folder: string, blob: { name: string; size: number; hash: string }) =>
+        port.fetchBlob({ peerId, folder, name: blob.name, expectedSize: blob.size, expectedHash: blob.hash })
       const ledger = createLedger({
         services,
         journal: openJournal,
         clock,
         device,
         role,
-        fetchBlob: (peerId, folder, blob) =>
-          port.fetchBlob({ peerId, folder, name: blob.name, expectedSize: blob.size, expectedHash: blob.hash }),
+        fetchBlob: fetchVerifiedBlob,
         hashFile: (folder, name) => port.hashFile(folder, name),
       })
-      handlers = new Map(ledger.services().map((service) => [service.name, service.handler]))
+      myHandlers = new Map(ledger.services().map((service) => [service.name, service.handler]))
+      handlers = myHandlers
       const shelfPeer = async (): Promise<string | null> =>
         (await port.listPeers()).find((peer) => peer.role === 'shelf')?.id ?? null
 
@@ -211,39 +335,45 @@ export const sync: Capability = {
         lookup: async (book) => {
           try {
             return await withShelf(async (channel) => {
-              const answer = (await channel.call(SYNC_SERVICES.content.name, { book })) as Record<string, unknown>
+              /* The one canonical parser — an ad-hoc cast here once accepted
+               * shapes the protocol module would refuse. */
+              const answer = parseContentAnswer(await channel.call(SYNC_SERVICES.content.name, { book }))
+              if (answer === null) return null
               const cover =
-                typeof answer['coverName'] === 'string' &&
-                typeof answer['coverSize'] === 'number' &&
-                typeof answer['coverHash'] === 'string'
-                  ? { name: answer['coverName'], size: answer['coverSize'], hash: answer['coverHash'] }
+                answer.coverName !== null && answer.coverSize !== undefined && answer.coverHash !== undefined
+                  ? { name: answer.coverName, size: answer.coverSize, hash: answer.coverHash }
                   : null
-              return { peerId: channel.peerId, folder: String(answer['folder'] ?? ''), cover }
+              return { peerId: channel.peerId, folder: answer.folder, cover }
             })
           } catch {
             return null
           }
         },
-        fetchBlob: (peerId, folder, blob) =>
-          port.fetchBlob({ peerId, folder, name: blob.name, expectedSize: blob.size, expectedHash: blob.hash }),
+        fetchBlob: fetchVerifiedBlob,
+        /* Eviction's only delete — the kernel's closed-name primitive
+         * (WI-10.2/10.5); the scoped fs cannot reach a book's folder. */
+        removeBlob: (book, name) => services.removeBlob(book, name),
       })
-      running = { port, ledger, shelfPeer, coverCache }
-      storageModel = createStorageModel({
+      myRunning = { port, ledger, shelfPeer, coverCache, fs }
+      running = myRunning
+      myStorageModel = createStorageModel({
         services,
         coverCache,
         status: syncStatus,
         removeDownload: (book) => removeDownloadAction(book),
       })
+      storageModel = myStorageModel
 
       if (role === 'shelf') {
-        unserve = await port.serve(SERVICE_LIST)
-        /* The shelf's "last sync" is the last satchel that came calling. */
-        const offOpen = port.onSessionOpen(() => syncStatus.set({ state: 'ok', lastSyncAt: Date.now() }))
-        const held = unserve
-        unserve = () => {
-          offOpen()
-          held()
-        }
+        /* The composed services are served centrally by the peer host once
+         * every capability has started (`services.serveServices`), so a
+         * declared service is reachable whichever capability owns it — sync no
+         * longer serves its own subset. The shelf here only tracks "last sync"
+         * from an incoming session. The status is RESET first: it is a
+         * module-global store, and a previous lifetime's `degraded` must not
+         * survive into this one looking current. */
+        syncStatus.set({ state: 'idle', detail: null })
+        unserve = port.onSessionOpen(() => syncStatus.set({ state: 'ok', lastSyncAt: Date.now() }))
       } else {
         const run = async (): Promise<void> => {
           syncStatus.set({ state: 'syncing', detail: null })
@@ -286,41 +416,23 @@ export const sync: Capability = {
        * while there is work, riding idle seconds rather than launch. */
       const backfill = createBackfill({ services, hashFile: (folder, name) => port.hashFile(folder, name) })
       const backfillTick = async (): Promise<void> => {
+        if (stopped) return
         const stamped = await backfill.runOnce().catch(() => 0)
-        if (stamped > 0) backfillTimer = setTimeout(() => void backfillTick(), 3_000)
+        /* Do not re-arm after teardown: an await that resolved past `stop`
+         * would otherwise schedule a timer nobody clears. */
+        if (!stopped && stamped > 0) backfillTimer = setTimeout(() => void backfillTick(), 3_000)
       }
       backfillTimer = setTimeout(() => void backfillTick(), 3_000)
     } else {
       /* No filesystem (a browser tab) or no peer plugin: the ledger still
        * journals nothing and the UI says so instead of pretending. */
-      storageModel = createStorageModel({ services, coverCache: null, status: syncStatus, removeDownload: null })
+      myStorageModel = createStorageModel({ services, coverCache: null, status: syncStatus, removeDownload: null })
+      storageModel = myStorageModel
       syncStatus.set({ state: 'idle', detail: fs ? 'Peer plugin unavailable' : 'No filesystem in a browser tab' })
     }
 
     api.diagnostics.info('sync.started', { wired: running !== null })
 
-    let stopped = false
-    const stop = () => {
-      if (stopped) return
-      stopped = true
-      scheduler?.stop()
-      bindScheduler(null)
-      bindRole(null)
-      unregisterSyncNow?.()
-      unserve?.()
-      if (backfillTimer !== null) clearTimeout(backfillTimer)
-      storageModel?.dispose()
-      storageModel = null
-      handlers = null
-      running = null
-      servicesFs = null
-      /* Best-effort: the dirty flag stays if this write loses the race with
-       * the window, and the next open's verify pass squares it — that is
-       * what the flag is FOR. */
-      void journal?.close().catch(() => {})
-      signal.removeEventListener('abort', stop)
-    }
-    signal.addEventListener('abort', stop, { once: true })
     return { dispose: stop }
   },
 }

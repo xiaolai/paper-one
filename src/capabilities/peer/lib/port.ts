@@ -1,5 +1,5 @@
 import type { ServiceContribution } from '../../../kernel'
-import { createClient, createRouter, type CallOptions, type RouterConnection } from './envelope'
+import { createClient, createRouter, type CallOptions, type Client, type RouterConnection } from './envelope'
 import { grantCovers } from './grants'
 import type {
   BlobRequest,
@@ -11,6 +11,7 @@ import type {
   PeerRole,
   PeerStatus,
   PeerWire,
+  SessionClosed,
   SessionOpen,
   TransferProgress,
   Unsubscribe,
@@ -25,14 +26,15 @@ import type {
  * envelope `Client` bound to that one session. Blobs and the peers/pairing
  * surface pass through, typed.
  *
- * GRANTS are checked before dispatch from a CACHE of `peers.json`,
- * refreshed on every incoming session and on every grant edit made through
- * this port. The plugin is the authority — it refuses a revoked peer's next
- * frame by closing the session (`revoked`), so the cache is defence in
- * depth, not the wall — but a check that awaited IPC per frame would put an
- * async hole inside the router's dispatch, and the session-scoped refresh
- * closes the gap to "changed mid-session by another writer", which the
- * plugin already covers.
+ * GRANTS are checked before dispatch from a CACHE of `peers.json`, refreshed
+ * on every incoming session AND on every grant edit made through this port —
+ * and, because the router re-asks the cache on every continuation frame, a
+ * narrowing reaches an OPEN session: `setGrants` refreshes the cache and then
+ * has the router re-check its in-flight requests, aborting any whose grant is
+ * gone. The plugin is the authority — it refuses a revoked peer's next frame
+ * by closing the session (`revoked`), so the cache is defence in depth, not
+ * the wall — but a check that awaited IPC per frame would put an async hole
+ * inside the router's dispatch, which the live cache avoids.
  */
 
 export interface Channel {
@@ -59,7 +61,7 @@ export interface PeerPort {
 
   pairBegin(name?: string): Promise<PairOffer>
   pairCancel(): Promise<void>
-  pairConfirm(accept: boolean, grants?: readonly string[]): Promise<WirePeer | null>
+  pairConfirm(accept: boolean, grants: readonly string[] | undefined, attemptId: string): Promise<WirePeer | null>
   pairFromUri(uri: string, name?: string, grants?: readonly string[]): Promise<PairStart>
 
   onPairingPending(fn: (event: PairingPending) => void): Unsubscribe
@@ -86,14 +88,22 @@ export interface PeerPort {
 export function createPeerPort(wire: PeerWire): PeerPort {
   /* One drain per session at a time, with a rerun flag: two overlapping
    * drains would interleave their delivery order across awaits, and frame
-   * order is the envelope's ground. */
-  const drains = new Map<number, { running: boolean; again: boolean }>()
-  const drainInto = async (sessionId: number, deliver: (bytes: Uint8Array) => void): Promise<void> => {
+   * order is the envelope's ground. Each drain is ABORTABLE (a session that
+   * closes stops its loop at once) and reports a `sessionRecv` REJECTION to
+   * `onError` instead of leaking an unhandled rejection; its state is deleted
+   * when the session closes, so the map does not grow without bound. */
+  const drains = new Map<number, { running: boolean; again: boolean; aborted: boolean }>()
+  const drainInto = async (
+    sessionId: number,
+    deliver: (bytes: Uint8Array) => void,
+    onError: (thrown: unknown) => void,
+  ): Promise<void> => {
     let state = drains.get(sessionId)
     if (!state) {
-      state = { running: false, again: false }
+      state = { running: false, again: false, aborted: false }
       drains.set(sessionId, state)
     }
+    if (state.aborted) return
     if (state.running) {
       state.again = true
       return
@@ -103,15 +113,38 @@ export function createPeerPort(wire: PeerWire): PeerPort {
       do {
         state.again = false
         for (;;) {
-          const frames = await wire.sessionRecv(sessionId)
+          if (state.aborted) return
+          let frames: readonly Uint8Array[]
+          try {
+            frames = await wire.sessionRecv(sessionId)
+          } catch (thrown) {
+            state.aborted = true
+            onError(thrown)
+            return
+          }
           if (frames.length === 0) break
-          for (const frame of frames) deliver(frame)
+          for (const frame of frames) {
+            if (state.aborted) return
+            deliver(frame)
+          }
         }
       } while (state.again)
     } finally {
       state.running = false
     }
   }
+  const abortDrain = (sessionId: number): void => {
+    const state = drains.get(sessionId)
+    if (state) state.aborted = true
+    drains.delete(sessionId)
+  }
+
+  /* Callbacks a live `serve()` registers so a grant edit through this port can
+   * refresh its cache and have its router re-check open sessions. */
+  const grantWatchers = new Set<(peerId: string, grants?: readonly string[]) => Promise<void> | void>()
+  /* One live server per port: two would install competing listeners and
+   * race each other draining the same session inboxes. */
+  let servingActive = false
 
   return {
     status: () => wire.status(),
@@ -121,11 +154,18 @@ export function createPeerPort(wire: PeerWire): PeerPort {
 
     listPeers: () => wire.listPeers(),
     forgetPeer: (id) => wire.forgetPeer(id),
-    setGrants: (id, grants) => wire.setGrants(id, grants),
+    async setGrants(id, grants) {
+      await wire.setGrants(id, grants)
+      // The edit is committed; each watcher applies THESE grants to its
+      // cache synchronously before its own (fallible) full refresh, so a
+      // listing that fails cannot leave an open session judged by the wider
+      // grants the store no longer holds.
+      for (const watcher of [...grantWatchers]) await watcher(id, grants)
+    },
 
     pairBegin: (name) => wire.pairBegin(name),
     pairCancel: () => wire.pairCancel(),
-    pairConfirm: (accept, grants) => wire.pairConfirm(accept, grants),
+    pairConfirm: (accept, grants, attemptId) => wire.pairConfirm(accept, grants, attemptId),
     pairFromUri: (uri, name, grants) => wire.pairFromUri(uri, name, grants),
 
     onPairingPending: (fn) => wire.onPairingPending(fn),
@@ -134,9 +174,25 @@ export function createPeerPort(wire: PeerWire): PeerPort {
     onTransfer: (fn) => wire.onTransfer(fn),
 
     async serve(services) {
+      if (servingActive) throw new Error('peer port: serve() is already active — one server per port')
+      servingActive = true
+      let serving = true
       let peers = new Map<string, WirePeer>()
+      /* Newest wins: refreshes overlap (a session opening while grants
+       * change), and an OLDER listing landing last would resurrect grants a
+       * newer one had just narrowed — re-authorising revoked requests. */
+      let peersGeneration = 0
       const refresh = async () => {
-        peers = new Map((await wire.listPeers()).map((peer) => [peer.id, peer] as const))
+        const mine = ++peersGeneration
+        const listed = new Map((await wire.listPeers()).map((peer) => [peer.id, peer] as const))
+        if (mine !== peersGeneration) return
+        peers = listed
+        /* Every PUBLISHED listing rechecks the live connections: a caller
+         * whose own refresh was superseded (a newer one is in flight) must
+         * not judge grants against the cache its discarded listing left
+         * behind — the recheck rides the listing that actually lands, so a
+         * revocation bites as soon as the newest state does. */
+        for (const conn of connections.values()) conn.recheckGrants()
       }
       const router = createRouter({
         services,
@@ -146,71 +202,187 @@ export function createPeerPort(wire: PeerWire): PeerPort {
         },
       })
       const connections = new Map<number, RouterConnection>()
+
+      /* Tear one session's connection down once: stop its drain, drop it from
+       * the map, and disconnect the router side. `closeNative` also closes the
+       * transport session — for a send failure, where the router should stop
+       * writing to a peer it can no longer reach; not for a close event, where
+       * the session is already gone. Idempotent. */
+      const dropConnection = (sessionId: number, closeNative: boolean): void => {
+        abortDrain(sessionId)
+        const conn = connections.get(sessionId)
+        if (conn) {
+          connections.delete(sessionId)
+          conn.disconnect()
+        }
+        if (closeNative) void wire.close(sessionId).catch(() => {})
+      }
+
+      const onGrantsChanged = async (peerId: string, grants?: readonly string[]): Promise<void> => {
+        /* The COMMITTED grants land first, synchronously — the refresh that
+         * follows can fail, and failing WIDE would keep an open session
+         * authorized by grants the store no longer holds. The recheck for
+         * everything else happens inside whichever refresh publishes. */
+        if (grants !== undefined) {
+          const held = peers.get(peerId)
+          if (held) {
+            peers.set(peerId, { ...held, grants: [...grants] })
+            for (const conn of connections.values()) if (conn.peer === peerId) conn.recheckGrants()
+          }
+        }
+        await refresh()
+      }
+      grantWatchers.add(onGrantsChanged)
+
       const offs: Unsubscribe[] = [
         wire.onSessionOpen((event) => {
           if (event.initiator) return
           void (async () => {
-            await refresh()
-            const conn = router.connect(event.peerId, (bytes) => void wire.send(event.sessionId, bytes).catch(() => {}))
-            connections.set(event.sessionId, conn)
-            /* Frames that landed before the connection existed are in the
-             * inbox and raised their one edge event already — drain now. */
-            await drainInto(event.sessionId, (bytes) => conn.receive(bytes))
+            try {
+              await refresh()
+              /* Torn down while the refresh was in flight: registering now
+               * would hand a connection to a server that no longer exists,
+               * and it would serve forever. */
+              if (!serving) return
+              const conn = router.connect(event.peerId, (bytes) =>
+                /* Return the send promise so the envelope serialises and awaits
+                 * it; a failure tears the connection AND the session down
+                 * rather than being swallowed, then re-throws so the envelope's
+                 * own chain also disconnects. */
+                wire.send(event.sessionId, bytes).catch((thrown) => {
+                  dropConnection(event.sessionId, true)
+                  throw thrown
+                }),
+              )
+              connections.set(event.sessionId, conn)
+              /* Frames that landed before the connection existed are in the
+               * inbox and raised their one edge event already — drain now. */
+              await drainInto(
+                event.sessionId,
+                (bytes) => conn.receive(bytes),
+                () => dropConnection(event.sessionId, false),
+              )
+            } catch {
+              dropConnection(event.sessionId, true)
+            }
           })()
         }),
         wire.onSessionFrames((event) => {
           const conn = connections.get(event.sessionId)
-          if (conn) void drainInto(event.sessionId, (bytes) => conn.receive(bytes))
+          if (conn) void drainInto(event.sessionId, (bytes) => conn.receive(bytes), () => dropConnection(event.sessionId, false))
         }),
         wire.onSessionClosed((event) => {
-          const conn = connections.get(event.sessionId)
-          if (!conn) return
-          connections.delete(event.sessionId)
-          conn.disconnect()
+          dropConnection(event.sessionId, false)
         }),
       ]
-      await refresh()
-      await wire.ready()
-      return () => {
+      const teardown = () => {
+        /* Idempotent AND ownership-scoped: a stale second call must not
+         * release the port-wide flag a NEWER server now holds. */
+        if (!serving) return
+        serving = false
+        servingActive = false
+        grantWatchers.delete(onGrantsChanged)
         for (const off of offs) off()
-        for (const conn of connections.values()) conn.disconnect()
-        connections.clear()
+        for (const sessionId of [...connections.keys()]) dropConnection(sessionId, false)
       }
+      try {
+        await refresh()
+        await wire.ready()
+      } catch (thrown) {
+        /* A serve that fails must not leave its listeners and grant watcher
+         * registered — `serve()` rejecting means NOTHING is serving. */
+        teardown()
+        throw thrown
+      }
+      return teardown
     },
 
     async connect(peerId) {
-      const sessionId = await wire.connect(peerId, null)
-      const client = createClient({ send: (bytes) => void wire.send(sessionId, bytes).catch(() => {}) })
       const closedFns = new Set<(reason: string) => void>()
+      let sessionId: number | null = null
+      let client: Client | null = null
+      let torn = false
+      /* A close that lands during the dial window (before we know our session
+       * id) is buffered and replayed once the id is known — see below. */
+      const buffered: SessionClosed[] = []
+
+      const tearDown = (reason: string): void => {
+        if (torn) return
+        torn = true
+        if (sessionId !== null) abortDrain(sessionId)
+        offFrames()
+        offClosed()
+        client?.disconnect()
+        for (const fn of [...closedFns]) {
+          /* Isolated: teardown often runs from a fire-and-forget drain, so a
+           * throwing callback would both silence LATER callbacks and become
+           * an unhandled rejection. */
+          try {
+            fn(reason)
+          } catch {
+            /* The subscriber's problem; the close is still delivered on. */
+          }
+        }
+      }
+
       const deliver = (bytes: Uint8Array) => {
         try {
-          client.receive(bytes)
+          client?.receive(bytes)
         } catch {
           /* Bytes that are not a frame mean the transport is broken under
            * us; every pending call rejects `disconnected` and the session
            * is closed rather than read further. */
-          client.disconnect()
-          void wire.close(sessionId).catch(() => {})
+          if (sessionId !== null) void wire.close(sessionId).catch(() => {})
+          tearDown('lost')
         }
       }
-      const offFrames = wire.onSessionFrames((event) => {
-        if (event.sessionId === sessionId) void drainInto(sessionId, deliver)
-      })
+
+      /* Subscribe to session-close BEFORE dialing, so a peer that closes right
+       * after the handshake cannot slip its close in before the listener
+       * exists (which would leave later sends failing silently and callers
+       * waiting out their 30 s timeout). Until the id is known, a close is
+       * buffered; matched or discarded once it is. */
       const offClosed = wire.onSessionClosed((event) => {
+        if (sessionId === null) {
+          buffered.push(event)
+          return
+        }
         if (event.sessionId !== sessionId) return
+        tearDown(event.reason)
+      })
+      const offFrames = wire.onSessionFrames((event) => {
+        if (sessionId !== null && event.sessionId === sessionId) {
+          void drainInto(sessionId, deliver, () => tearDown('lost'))
+        }
+      })
+
+      try {
+        sessionId = await wire.connect(peerId, null)
+      } catch (thrown) {
         offFrames()
         offClosed()
-        client.disconnect()
-        for (const fn of [...closedFns]) fn(event.reason)
+        throw thrown
+      }
+      client = createClient({
+        send: (bytes) =>
+          wire.send(sessionId as number, bytes).catch((thrown) => {
+            if (sessionId !== null) void wire.close(sessionId).catch(() => {})
+            tearDown('lost')
+            throw thrown
+          }),
       })
-      // Anything that raced the subscription.
-      void drainInto(sessionId, deliver)
+
+      // Replay a close that raced the dial, then drain anything that raced the
+      // subscription.
+      for (const event of buffered) if (event.sessionId === sessionId) tearDown(event.reason)
+      const id = sessionId
+      void drainInto(id, deliver, () => tearDown('lost'))
       return {
-        sessionId,
+        sessionId: id,
         peerId,
-        call: (service, body, options) => client.call(service, body, options),
-        stream: (service, body, options) => client.stream(service, body, options),
-        close: () => wire.close(sessionId),
+        call: (service, body, options) => (client as Client).call(service, body, options),
+        stream: (service, body, options) => (client as Client).stream(service, body, options),
+        close: () => wire.close(id),
         onClosed: (fn) => {
           closedFns.add(fn)
           return () => void closedFns.delete(fn)
@@ -225,7 +397,13 @@ export function createPeerPort(wire: PeerWire): PeerPort {
         let off: Unsubscribe = () => {}
         const judge = (event: TransferProgress) => {
           if (transferId === null || event.transferId !== transferId) return
-          onProgress?.(event)
+          try {
+            onProgress?.(event)
+          } catch {
+            /* Progress is advisory; a throwing observer must not skip the
+             * terminal handling below and leave this promise pending — and
+             * its listener registered — forever. */
+          }
           if (event.state === 'done') {
             off()
             resolve()

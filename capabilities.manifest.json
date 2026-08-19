@@ -13,7 +13,7 @@
       "ts": "peer",
       "platforms": ["desktop", "ios", "android"],
       "crate": "tauri-plugin-peer",
-      "plugin": "tauri-plugin-peer",
+      "plugin": "peer",
       "permissions": ["peer:default"]
     },
     {

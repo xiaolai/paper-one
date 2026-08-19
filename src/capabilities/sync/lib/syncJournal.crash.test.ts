@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { writeQueue } from '../../../kernel'
 import { makeHlc } from './clock'
 import { createJournal, type JournalEntry } from './journal'
-import { crashableFs, fsOver, memoryStorage, type CrashableFs } from './journalFs.testkit'
+import { crashableFs, fsOver, type CrashableFs } from './journalFs.testkit'
 
 /**
  * THE CRASH-POINT STATE MACHINE. A scenario runs once, cleanly, over a fake
@@ -27,11 +27,9 @@ function journalOver(fs: CrashableFs, fsyncEvery = 2) {
     clock: () => makeHlc(++t, 0, DEV),
     fsync: (path) => fs.fsync(path),
     fsyncEvery,
-    storage: memoryStorage({
-      'paper.cards.v1': JSON.stringify([
-        { id: 'c1', bookId: 'book:aaaa', kind: 'Excerpt', body: 'x', answer: '', source: '', cfi: null, createdAt: 700 },
-      ]),
-    }),
+    cards: () => [
+      { id: 'c1', bookId: 'book:aaaa', kind: 'Excerpt', body: 'x', answer: '', source: '', cfi: null, createdAt: 700 },
+    ],
   })
 }
 

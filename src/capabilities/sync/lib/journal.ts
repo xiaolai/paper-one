@@ -60,20 +60,22 @@
 
 import {
   BOOKS_DIR,
-  CARDS_STORAGE_KEY,
+  MUTATION_KINDS,
   PRESENCE_KEY,
+  readPresence,
+  PRESENCE_PATH,
   TRASH_DIR,
   atomicWrite,
   hlcOf,
   notePresence,
-  parseCards,
   parseRecord,
   readBook,
   readMarks,
+  recordPath,
   validMarks,
+  type Card,
   type Hlc,
   type IndexFs,
-  type MarkStorage,
   type MutationKind,
   type MutationRecorder,
   type MutationToken,
@@ -82,6 +84,10 @@ import {
 import { isHlc } from './clock'
 import { cardsDigest, marksDigest, recordDigest } from './merge'
 
+/** The directory the journal, its meta, its dirty flag and the presence
+ *  register all live in — fsynced whenever an ENTRY in it is created,
+ *  renamed or removed, so the directory slot survives power loss too. */
+export const SYNC_DIR = 'sync'
 export const JOURNAL_PATH = 'sync/journal.jsonl'
 export const JOURNAL_META_PATH = 'sync/journal.meta.json'
 export const JOURNAL_DIRTY_PATH = 'sync/journal.dirty'
@@ -139,8 +145,12 @@ export interface JournalOptions {
   readonly fsync?: (path: string) => Promise<void>
   /** During bootstrap, fsync every N records. Injectable for the kill test. */
   readonly fsyncEvery?: number
-  /** The flat store, for the cards baseline and the verify pass. */
-  readonly storage?: MarkStorage | null
+  /**
+   * The canonical card rows, tombstones included, for the cards baseline
+   * and the verify pass — `services.cards.stored` at composition (WI-10.4),
+   * so the journal holds no raw flat-store handle. Absent: no cards.
+   */
+  readonly cards?: () => readonly Card[]
 }
 
 export interface JournalKeyRef {
@@ -208,7 +218,9 @@ export interface Journal extends MutationRecorder {
   subscribe(listener: () => void): () => void
 }
 
-const MUTATION_KINDS: ReadonlySet<string> = new Set(['record', 'marks', 'cover', 'content', 'removed', 'cards'])
+/* Derived from the kernel's own tuple — a kind added there is valid here
+ * the same day, not after someone remembers this copy. */
+const KNOWN_KINDS: ReadonlySet<string> = new Set(MUTATION_KINDS)
 
 const keyOf = (book: string, what: MutationKind): string => `${what} ${book}`
 
@@ -245,13 +257,23 @@ function entryOf(raw: unknown): JournalEntry | null {
   if (e['kind'] !== 'begin' && e['kind'] !== 'commit' && e['kind'] !== 'acked') return null
   if (typeof e['epoch'] !== 'string' || e['epoch'] === '') return null
   if (typeof e['book'] !== 'string') return null
-  if (typeof e['what'] !== 'string' || !MUTATION_KINDS.has(e['what'])) return null
+  if (typeof e['what'] !== 'string' || !KNOWN_KINDS.has(e['what'])) return null
   if (!isHlc(e['at'])) return null
   if (e['origin'] !== 'local' && e['origin'] !== 'remote') return null
   const needsRev = e['kind'] === 'commit' || e['kind'] === 'acked'
   if (needsRev && (typeof e['rev'] !== 'number' || !Number.isInteger(e['rev']) || e['rev'] < 1)) return null
+  /* AN INVALID OPTIONAL FIELD IS CORRUPTION, NOT A FIELD TO DROP. A `rev` on a
+   * begin, or a non-string / non-commit `digest`, means the line was written
+   * by something that did not understand the schema — silently discarding it
+   * (the old behaviour) let a garbled line load as a valid entry with its
+   * telltale field quietly gone. */
+  if (!needsRev && e['rev'] !== undefined) return null
+  if (e['digest'] !== undefined && (typeof e['digest'] !== 'string' || e['kind'] !== 'commit')) return null
   const beginRef = e['begin']
-  if (beginRef !== undefined && (e['kind'] !== 'commit' || typeof beginRef !== 'number' || !Number.isInteger(beginRef) || beginRef < 1)) {
+  if (
+    beginRef !== undefined &&
+    (e['kind'] !== 'commit' || typeof beginRef !== 'number' || !Number.isInteger(beginRef) || beginRef < 1 || beginRef >= (e['seq'] as number))
+  ) {
     return null
   }
   return {
@@ -268,6 +290,130 @@ function entryOf(raw: unknown): JournalEntry | null {
   }
 }
 
+/**
+ * Whether `s` is a strict prefix of some syntactically valid JSON text — the
+ * exact shape a crash mid-append leaves of a serialised entry. Arbitrary
+ * corruption sitting where the last line should be is NOT such a prefix, and
+ * tolerating it as a torn tail would silently erase a line the disk holds.
+ *
+ * A compact hand-scanner over the JSON grammar rather than a dependency:
+ * running out of input mid-value is a valid prefix; a structurally impossible
+ * byte, or a complete value with trailing junk, is not.
+ */
+export function isValidJsonPrefix(s: string): boolean {
+  const n = s.length
+  if (n === 0) return false
+
+  const skipWs = (i: number): number => {
+    while (i < n && (s[i] === ' ' || s[i] === '\t' || s[i] === '\n' || s[i] === '\r')) i++
+    return i
+  }
+  /* Each scanner returns the index AFTER a complete token, `n` when the input
+   * ran out mid-token (a valid prefix), or -1 for a structural violation. */
+  const scanString = (i: number): number => {
+    i++
+    while (i < n) {
+      const c = s[i]!
+      if (c === '\\') {
+        if (i + 1 >= n) return n
+        const e = s[i + 1]!
+        if ('"\\/bfnrt'.includes(e)) {
+          i += 2
+          continue
+        }
+        if (e === 'u') {
+          for (let k = 0; k < 4; k++) {
+            if (i + 2 + k >= n) return n
+            if (!/[0-9a-fA-F]/.test(s[i + 2 + k]!)) return -1
+          }
+          i += 6
+          continue
+        }
+        return -1
+      }
+      if (c === '"') return i + 1
+      if (c.charCodeAt(0) < 0x20) return -1
+      i++
+    }
+    return n
+  }
+  const scanLiteral = (i: number, word: string): number => {
+    for (let k = 0; k < word.length; k++) {
+      if (i + k >= n) return n
+      if (s[i + k] !== word[k]) return -1
+    }
+    return i + word.length
+  }
+  const scanNumber = (i: number): number => {
+    const start = i
+    if (s[i] === '-') i++
+    while (i < n && s[i]! >= '0' && s[i]! <= '9') i++
+    if (i < n && s[i] === '.') {
+      i++
+      while (i < n && s[i]! >= '0' && s[i]! <= '9') i++
+    }
+    if (i < n && (s[i] === 'e' || s[i] === 'E')) {
+      i++
+      if (i < n && (s[i] === '+' || s[i] === '-')) i++
+      while (i < n && s[i]! >= '0' && s[i]! <= '9') i++
+    }
+    return i === start ? -1 : i
+  }
+  const scanValue = (i0: number): number => {
+    const i = skipWs(i0)
+    if (i >= n) return n
+    const c = s[i]!
+    if (c === '"') return scanString(i)
+    if (c === '{') return scanObject(i)
+    if (c === '[') return scanArray(i)
+    if (c === 't') return scanLiteral(i, 'true')
+    if (c === 'f') return scanLiteral(i, 'false')
+    if (c === 'n') return scanLiteral(i, 'null')
+    if (c === '-' || (c >= '0' && c <= '9')) return scanNumber(i)
+    return -1
+  }
+  function scanObject(i0: number): number {
+    let i = skipWs(i0 + 1)
+    if (i >= n) return n
+    if (s[i] === '}') return i + 1
+    for (;;) {
+      i = skipWs(i)
+      if (i >= n) return n
+      if (s[i] !== '"') return -1
+      const afterKey = scanString(i)
+      if (afterKey === -1 || afterKey >= n) return afterKey
+      i = skipWs(afterKey)
+      if (i >= n) return n
+      if (s[i] !== ':') return -1
+      const afterVal = scanValue(i + 1)
+      if (afterVal === -1 || afterVal >= n) return afterVal
+      i = skipWs(afterVal)
+      if (i >= n) return n
+      if (s[i] === '}') return i + 1
+      if (s[i] !== ',') return -1
+      i++
+    }
+  }
+  function scanArray(i0: number): number {
+    let i = skipWs(i0 + 1)
+    if (i >= n) return n
+    if (s[i] === ']') return i + 1
+    for (;;) {
+      const afterVal = scanValue(i)
+      if (afterVal === -1 || afterVal >= n) return afterVal
+      i = skipWs(afterVal)
+      if (i >= n) return n
+      if (s[i] === ']') return i + 1
+      if (s[i] !== ',') return -1
+      i++
+    }
+  }
+
+  const end = scanValue(0)
+  if (end === -1) return false
+  return skipWs(end) >= n
+}
+
 /** A token the kernel hands back to `commit` — carries the begin's identity. */
 interface JournalToken extends MutationToken {
   readonly seq: number
@@ -280,7 +426,7 @@ export function createJournal({
   clock,
   fsync = async () => {},
   fsyncEvery = 100,
-  storage = null,
+  cards = () => [],
 }: JournalOptions): Journal {
   let meta: JournalMeta | null = null
   let nextSeq = 1
@@ -291,10 +437,27 @@ export function createJournal({
   const expectedRemote = new Map<string, number[]>()
   let nextTicket = 1
   let opened = false
+  /** True once the journal file exists this session — so the FIRST append,
+   *  which creates the file, can fsync the directory that now points at it. */
+  let journalFileExists = false
+  /** True when an unclean-shutdown verify pass could not complete — a folder
+   *  it had to read errored rather than answered. The dirty flag then STAYS
+   *  through `close`, so the next open retries instead of passing by omission. */
+  let verifyIncomplete = false
   /** Runtime local-commit listeners — see `subscribe`. */
   const listeners = new Set<() => void>()
   const notifyLocalCommit = (): void => {
-    for (const listener of [...listeners]) listener()
+    for (const listener of [...listeners]) {
+      /* Isolated: this runs inside the journal's queued task AFTER the
+       * commit line is durable, so a throwing subscriber must neither
+       * reject a commit that in fact persisted — inviting a retry of a
+       * write that happened — nor rob later listeners of the signal. */
+      try {
+        listener()
+      } catch {
+        /* The scheduler's problem, not the journal's. */
+      }
+    }
   }
 
   const keyState = (book: string, what: MutationKind): KeyState => {
@@ -324,6 +487,11 @@ export function createJournal({
       state.dangling =
         entry.begin === undefined ? [] : state.dangling.filter((begin) => begin.seq !== entry.begin)
     } else {
+      /* NOT validated against the key's commit revs, deliberately: crash
+       * recovery renumbers revisions (a dropped tail, legacy cards lines),
+       * so an ack honestly ahead of the surviving commits is a state the
+       * crash suite REQUIRES loading — the outbox's CAS is what keeps a
+       * live ack honest. */
       if (entry.rev! >= state.lastAckedRev) {
         state.lastAckedRev = entry.rev!
         state.lastAcked = entry
@@ -333,10 +501,17 @@ export function createJournal({
 
   /* ------------------------------------------------------------ file io */
 
+  /* Fsync the sync DIRECTORY, so a create/rename/remove of an entry in it
+   * survives power loss — fsyncing a file's bytes makes the bytes durable,
+   * not the directory slot that names them (#8). A no-op in tests and the
+   * browser; the peer plugin's `fs_fsync` on the app. */
+  const fsyncDir = (): Promise<void> => fsync(SYNC_DIR)
+
   const encode = (entry: JournalEntry): Uint8Array => new TextEncoder().encode(`${JSON.stringify(entry)}\n`)
 
   const appendLine = async (entry: JournalEntry, sync: boolean): Promise<void> => {
     const bytes = encode(entry)
+    const creating = !journalFileExists
     if (fs.appendFile) {
       await fs.appendFile(JOURNAL_PATH, bytes)
     } else {
@@ -355,15 +530,21 @@ export function createJournal({
        * window all-or-nothing and hide the truncated-tail path from tests. */
       await fs.writeFile(JOURNAL_PATH, joined)
     }
+    journalFileExists = true
     if (sync) await fsync(JOURNAL_PATH)
+    /* The append that CREATED the file added a directory entry: fsync the
+     * directory so a crash cannot lose the slot even after the bytes fsynced. */
+    if (creating) await fsyncDir()
   }
 
   const writeMeta = async (value: JournalMeta): Promise<void> => {
     meta = value
     // Whole, small, and via the kernel's temp-and-rename: a torn meta file
-    // would cost the epoch, and the epoch is what a peer trusts.
+    // would cost the epoch, and the epoch is what a peer trusts. The rename
+    // changes a directory entry, so the directory is fsynced too (#8).
     await atomicWrite(fs, JOURNAL_META_PATH, new TextEncoder().encode(JSON.stringify(value, null, 2)))
     await fsync(JOURNAL_META_PATH)
+    await fsyncDir()
   }
 
   const readMeta = async (): Promise<JournalMeta | null> => {
@@ -401,13 +582,18 @@ export function createJournal({
     } catch {
       return
     }
+    /* The file was there to read, so its directory slot is already durable —
+     * the next append is not a create and owes the directory no fsync. */
+    journalFileExists = true
     let torn = false
+    let repaired = false
     const lines = text.split('\n')
-    /* The load-time invariants (#4): one epoch, strictly-increasing seq,
-     * strictly-increasing commit and ack revs per key. A journal violating
-     * them is not a crash artefact — a crash leaves a PREFIX, and a prefix
-     * of a valid journal holds all three — it is corruption, and deriving
-     * `nextSeq` from it would serve a feed that disagrees with itself. */
+    /* The load-time invariants (#4): one epoch — the same one `meta` names —
+     * strictly-increasing seq, strictly-increasing commit and ack revs per
+     * key. A journal violating them is not a crash artefact — a crash leaves
+     * a PREFIX, and a prefix of a valid journal holds all three — it is
+     * corruption, and deriving `nextSeq` from it would serve a feed that
+     * disagrees with itself. */
     let lastSeq = 0
     let epoch: string | null = null
     const commitRev = new Map<string, number>()
@@ -419,18 +605,21 @@ export function createJournal({
       try {
         raw = JSON.parse(line)
       } catch {
-        /* INCOMPLETE JSON, LAST LINE ONLY. A crash mid-append truncates the
-         * tail and that is ordinary; bytes that do not parse with valid
-         * lines AFTER them are corruption, and pretending otherwise would
-         * serve a feed with a hole in it. */
+        /* INCOMPLETE JSON, LAST LINE ONLY, AND ONLY A REAL PREFIX. A crash
+         * mid-append truncates the tail into a strict byte-prefix of a
+         * serialised entry; bytes that do not parse with valid lines AFTER
+         * them, or bytes that are not even a valid JSON prefix, are
+         * corruption — tolerating either would serve a feed with a hole in
+         * it, or erase a line the disk actually holds. */
         const isTail = lines.slice(i + 1).every((rest) => rest === '')
-        if (isTail) {
-          torn = true
-          break
+        if (!isTail) throw new Error(`journal: malformed line ${i + 1} is not the tail`)
+        if (!isValidJsonPrefix(line)) {
+          throw new Error(`journal: malformed last line ${i + 1} is not a valid entry prefix`)
         }
-        throw new Error(`journal: malformed line ${i + 1} is not the tail`)
+        torn = true
+        break
       }
-      const entry = entryOf(raw)
+      let entry = entryOf(raw)
       if (entry === null) {
         /* COMPLETE JSON that is not an entry. A torn append cannot leave
          * this — a byte prefix of `{...}` either fails to parse or IS the
@@ -447,30 +636,57 @@ export function createJournal({
       }
       const key = keyOf(entry.book, entry.what)
       if (entry.kind === 'commit') {
-        if (entry.rev! <= (commitRev.get(key) ?? 0)) {
-          throw new Error(`journal: commit rev ${entry.rev} at line ${i + 1} regresses its key`)
+        const prev = commitRev.get(key) ?? 0
+        if (entry.rev! <= prev) {
+          /* CARDS ARE ONE STREAM MADE OF MANY. A legacy journal recorded
+           * cards under the caller's book id; canonicalising them to `''`
+           * here collapses those streams onto one, and their once-separate
+           * revs now collide. Renumber onto a monotone tail rather than
+           * refuse to open, and rewrite so the migration is paid once. Every
+           * other key colliding is genuine corruption. */
+          if (entry.what !== 'cards') {
+            throw new Error(`journal: commit rev ${entry.rev} at line ${i + 1} regresses its key`)
+          }
+          entry = { ...entry, rev: prev + 1 }
+          repaired = true
         }
         commitRev.set(key, entry.rev!)
       } else if (entry.kind === 'acked') {
-        if (entry.rev! <= (ackedRev.get(key) ?? 0)) {
-          throw new Error(`journal: ack rev ${entry.rev} at line ${i + 1} regresses its key`)
+        const prev = ackedRev.get(key) ?? 0
+        if (entry.rev! <= prev) {
+          if (entry.what !== 'cards') {
+            throw new Error(`journal: ack rev ${entry.rev} at line ${i + 1} regresses its key`)
+          }
+          entry = { ...entry, rev: prev + 1 }
+          repaired = true
         }
         ackedRev.set(key, entry.rev!)
       }
       absorb(entry)
     }
-    if (torn) {
-      /* THE TORN BYTES GO NOW, not merely out of memory. Recovery is about
-       * to APPEND — the dangling-begin commits, the verify pass — and an
-       * append after a torn tail welds the fragment onto the next line: one
-       * malformed line that is NOT the tail, which the next load correctly
-       * refuses as corruption. Found by the crash-point machine
+    /* THE JOURNAL AND ITS META MUST NAME ONE EPOCH (#4). The loader proves
+     * the lines agree with each other; this proves they agree with the meta
+     * file, whose epoch is what `begin`/`commit` stamp and what a peer trusts
+     * — a journal of epoch A opened under a meta of epoch B would append B
+     * onto A and fail its own second-epoch check on the very next load. */
+    if (epoch !== null && meta !== null && meta.epoch !== epoch) {
+      throw new Error(`journal: entries name epoch ${JSON.stringify(epoch)} but meta says ${JSON.stringify(meta.epoch)}`)
+    }
+    if (torn || repaired) {
+      /* THE CLEANED BYTES GO DOWN NOW, not merely into memory — a torn tail
+       * dropped, or legacy cards revs renumbered. Recovery is about to APPEND
+       * — the dangling-begin commits, the verify pass — and an append after a
+       * torn tail welds the fragment onto the next line: one malformed line
+       * that is NOT the tail, which the next load correctly refuses as
+       * corruption. Renumbered revs must land too, or every future load
+       * repeats the collision. Found by the crash-point machine
        * (`syncJournal.crash.test.ts`), which is exactly what it is for.
        * Entries re-serialise byte-identically (one field order, stated at
        * `parseEntry`), so this is the valid prefix, atomically. */
       const clean = all.map((entry) => JSON.stringify(entry)).join('\n')
       await atomicWrite(fs, JOURNAL_PATH, new TextEncoder().encode(clean.length ? `${clean}\n` : ''))
       await fsync(JOURNAL_PATH)
+      await fsyncDir()
     }
   }
 
@@ -499,24 +715,48 @@ export function createJournal({
   }
 
   /* `book` here is what the kernel handed `begin` — a book ID, from which
-   * `readBook`/`readMarks` derive the folder the same way every kernel
-   * writer does. `null` for a surface with no digest to compute, which the
-   * verify pass reads as "cannot compare, do not re-commit". */
+   * `readBook`/`readMarks` derive the folder the same way every kernel writer
+   * does. `null` is a genuine ABSENCE — a surface with no digest to compute,
+   * or a record that is gone — which the verify pass reads as "cannot
+   * compare, do not re-commit". An ERROR (a file present but unreadable, a
+   * hash that threw) is NOT an absence and is THROWN (#10): verify must not
+   * pass by turning a failed read into a matching-looking null. */
   const digestOf = async (book: string, what: MutationKind): Promise<string | null> => {
+    if (what === 'record') {
+      const record = await readBook(fs, book)
+      if (record !== null) return recordDigest(record)
+      /* `readBook` answers null for GONE and for BROKEN alike. Present but
+       * unreadable is a torn/half-written folder the verify pass must keep
+       * chasing, not a book that is simply not there. */
+      if (await fs.exists(recordPath(book))) {
+        throw new Error(`journal: book.json for ${book} is present but could not be read`)
+      }
+      return null
+    }
+    if (what === 'marks') {
+      // `readMarks`: absent is `[]`, unreadable THROWS — which propagates as
+      // the error it is rather than reading as "no marks".
+      return marksDigest(validMarks(await readMarks(fs, book)))
+    }
+    if (what === 'cards') {
+      return cardsDigest(cards())
+    }
+    return null
+  }
+
+  /* Best-effort digest for a COMMIT (#6): the kernel writers pass none, so
+   * one is computed from the just-written folder — that is what lets the
+   * verify pass detect a durable commit paired with a lost data write. A
+   * read that fails here must NOT fail the write, so it commits without a
+   * digest — and a digest-less commit is honestly OUTSIDE the verify pass's
+   * reach (it compares stored digests): the cost of one unreadable
+   * post-write read is one commit the unclean-shutdown check cannot judge,
+   * not a failed write. */
+  const digestForCommit = async (book: string, what: MutationKind): Promise<string | undefined> => {
     try {
-      if (what === 'record') {
-        const record = await readBook(fs, book)
-        return record === null ? null : await recordDigest(record)
-      }
-      if (what === 'marks') {
-        return await marksDigest(validMarks(await readMarks(fs, book)))
-      }
-      if (what === 'cards') {
-        return await cardsDigest(parseCards(storage?.getItem(CARDS_STORAGE_KEY) ?? null))
-      }
-      return null
+      return (await digestOf(book, what)) ?? undefined
     } catch {
-      return null
+      return undefined
     }
   }
 
@@ -526,8 +766,41 @@ export function createJournal({
     for (const state of byKey.values()) {
       const last = state.lastCommit
       if (!last || last.digest === undefined) continue
-      const current = await digestOf(last.book, last.what)
-      if (current === null || current === last.digest) continue
+      let current: string | null
+      try {
+        current = await digestOf(last.book, last.what)
+      } catch {
+        /* NOT an absence, NOT a match — verify could not read the folder, so
+         * it cannot certify agreement. The dirty flag is RETAINED (below,
+         * through `close`) so the next open retries, instead of a clean close
+         * clearing it and the discrepancy going unchecked forever (#10). */
+        verifyIncomplete = true
+        continue
+      }
+      if (current === null) {
+        if (last.what === 'record') {
+          /* A record the journal certifies at a digest, GONE from disk: a
+           * lost `book.json` unless a REMOVAL explains it — and the arbiter
+           * is the presence register, because a RESTORE journals under the
+           * same 'removed' kind, so a newer commit alone cannot say which
+           * way the book went. Inventing a removal here would REPLICATE the
+           * loss, so verification stays incomplete instead — the dirty flag
+           * survives `close` and every later open keeps retrying until the
+           * folder is resolved. */
+          const removed = byKey.get(keyOf(last.book, 'removed'))?.lastCommit
+          let explained = false
+          if (removed && removed.seq > last.seq) {
+            try {
+              explained = (await readPresence(fs))[last.book]?.state === 'removed'
+            } catch {
+              explained = false
+            }
+          }
+          if (!explained) verifyIncomplete = true
+        }
+        continue
+      }
+      if (current === last.digest) continue
       const entry: JournalEntry = {
         seq: nextSeq++,
         kind: 'commit',
@@ -613,10 +886,10 @@ export function createJournal({
     }
 
     /* The cards collection, whole, when there is one. */
-    const cards = parseCards(storage?.getItem(CARDS_STORAGE_KEY) ?? null)
-    if (cards.length) {
-      const newest = cards.reduce((held, card) => Math.max(held, card.createdAt), 0)
-      await emitBaseline(epoch, '', 'cards', hlcOf(newest), await cardsDigest(cards), pending)
+    const held = cards()
+    if (held.length) {
+      const newest = held.reduce((most, card) => Math.max(most, card.createdAt), 0)
+      await emitBaseline(epoch, '', 'cards', hlcOf(newest), await cardsDigest(held), pending)
     }
 
     /* Trash markers become presence entries — the register outlives the
@@ -645,12 +918,25 @@ export function createJournal({
         /* the folder name stands in */
       }
       await queue.append(PRESENCE_KEY, async () => {
-        await notePresence(fs, bookId, 'removed', at)
+        const wrote = await notePresence(fs, bookId, 'removed', at)
+        /* THE PRESENCE REGISTER IS FSYNCED BEFORE READY (#7). A trash marker
+         * migrated into the register but left non-durable would, after a
+         * crash past `ready`, be a book gone from disk with nothing recording
+         * that anyone removed it — a deletion that resurrects. Its directory
+         * slot goes down too, for the same reason the journal's does (#8). */
+        if (wrote) {
+          await fsync(PRESENCE_PATH)
+          await fsyncDir()
+        }
       })
       await emitBaseline(epoch, bookId, 'removed', at, undefined, pending)
     }
 
-    await fsync(JOURNAL_PATH)
+    /* Only when the file exists: an EMPTY shelf's bootstrap appends no
+     * baseline at all, so there is no journal file yet — and a real fsync
+     * of a path that is not there fails, which (now that fsync failures
+     * propagate) would fail the very first open of a fresh install. */
+    if (await fs.exists(JOURNAL_PATH)) await fsync(JOURNAL_PATH)
     /* READY, and only now: the epoch a peer may learn is the epoch of a
      * complete baseline. */
     await writeMeta({ epoch, nextSeq, journalFormat: JOURNAL_FORMAT, state: 'ready' })
@@ -660,6 +946,7 @@ export function createJournal({
 
   const open = (): Promise<void> =>
     queue.append(JOURNAL_KEY, async () => {
+      verifyIncomplete = false
       meta = await readMeta()
       await loadLines()
       nextSeq = Math.max(meta?.nextSeq ?? 1, all.length === 0 ? 1 : all[all.length - 1]!.seq + 1)
@@ -672,10 +959,12 @@ export function createJournal({
         await verifyAfterUncleanShutdown()
       }
       /* The flag goes up AFTER recovery, so a crash DURING recovery is
-       * simply the next open's unclean shutdown again. */
-      await fs.mkdir('sync')
+       * simply the next open's unclean shutdown again. Creating it adds a
+       * directory entry, so the directory is fsynced too (#8). */
+      await fs.mkdir(SYNC_DIR)
       await fs.writeFile(JOURNAL_DIRTY_PATH, new Uint8Array(0))
       await fsync(JOURNAL_DIRTY_PATH)
+      await fsyncDir()
       opened = true
     })
 
@@ -683,7 +972,18 @@ export function createJournal({
     queue.append(JOURNAL_KEY, async () => {
       if (!opened) return
       await writeMeta({ epoch: meta!.epoch, nextSeq, journalFormat: JOURNAL_FORMAT, state: meta!.state })
-      await fs.remove(JOURNAL_DIRTY_PATH)
+      /* THE DIRTY FLAG STAYS while a bracket still dangles between begin and
+       * commit (#5), or an unclean-shutdown verify could not finish (#10).
+       * Clearing it would advertise a clean shutdown when a commit for that
+       * begin can no longer land, or a folder the verify pass could not read
+       * was never squared — so the next open must run recovery again, which
+       * only the flag's presence triggers. Removing it changes a directory
+       * entry, so the directory is fsynced (#8). */
+      const dangling = [...byKey.values()].some((state) => state.dangling.length > 0)
+      if (!dangling && !verifyIncomplete) {
+        await fs.remove(JOURNAL_DIRTY_PATH)
+        await fsyncDir()
+      }
       opened = false
     })
 
@@ -722,6 +1022,20 @@ export function createJournal({
     queue.append(JOURNAL_KEY, async () => {
       if (!opened) throw new Error('journal: commit before open')
       const mine = token as JournalToken
+      /* The token must be one THIS journal issued and has not yet settled:
+       * a foreign or malformed one (no seq), or one already committed,
+       * would append a commit line clearing a bracket it does not own. */
+      if (typeof mine.seq !== 'number' || !keyState(canonicalBook(mine.book, mine.what), mine.what).dangling.some((begin) => begin.seq === mine.seq)) {
+        throw new Error(`journal: commit for an unknown or already-settled begin (seq ${String(mine.seq)})`)
+      }
+      /* THE COMMIT CARRIES A DIGEST EVEN WHEN THE CALLER GAVE NONE (#6). The
+       * kernel writers pass no digest, so without this every kernel-written
+       * key was invisible to the unclean-shutdown verify pass — a durable
+       * commit paired with a data write the crash lost could never be
+       * detected. Computed from the just-written folder, inside the bracket,
+       * AFTER the write landed; a read that fails here yields no digest rather
+       * than failing the write (the verify pass is the backstop). */
+      const measured = digest ?? (await digestForCommit(mine.book, mine.what))
       const state = keyState(mine.book, mine.what)
       const entry: JournalEntry = {
         seq: nextSeq++,
@@ -733,7 +1047,7 @@ export function createJournal({
         rev: state.lastRev + 1,
         begin: mine.seq,
         origin: mine.origin,
-        ...(digest === undefined ? {} : { digest }),
+        ...(measured === undefined ? {} : { digest: measured }),
       }
       await appendLine(entry, true)
       absorb(entry)
@@ -764,11 +1078,27 @@ export function createJournal({
   }
 
   const markRemote = async <T,>(keys: readonly JournalKeyRef[], fn: () => Promise<T>): Promise<T> => {
-    const tickets = keys.map(({ book, what }) => ({ book, what, ticket: expectRemote(book, what) }))
+    /* Armed BY FENCE on each surface's queue key — the ledger's applyRemote
+     * pattern: armed inline, a LOCAL write already queued for the key would
+     * begin first and consume the expectation, and the remote write itself
+     * would then journal `local` — an echo. The fence runs after everything
+     * already enqueued, immediately before `fn` enqueues the remote write.
+     * (In tests that give the journal a private queue the fence degrades to
+     * inline arming — ordering only matters on the SHARED queue the
+     * composition wires.) */
+    const armed = keys.map(({ book, what }) => ({ book, what, ticket: null as number | null }))
+    const fences = armed.map((slot) =>
+      queue.append(slot.book, async () => {
+        slot.ticket = expectRemote(slot.book, slot.what)
+      }),
+    )
     try {
       return await fn()
     } finally {
-      for (const { book, what, ticket } of tickets) clearRemote(book, what, ticket)
+      await Promise.allSettled(fences)
+      for (const { book, what, ticket } of armed) {
+        if (ticket !== null) clearRemote(book, what, ticket)
+      }
     }
   }
 
@@ -842,6 +1172,7 @@ export function createJournal({
       const text = keep.map((entry) => JSON.stringify(entry)).join('\n')
       await atomicWrite(fs, JOURNAL_PATH, new TextEncoder().encode(text.length ? `${text}\n` : ''))
       await fsync(JOURNAL_PATH)
+      await fsyncDir() // the compaction rename changed a directory entry (#8)
       all = []
       byKey.clear()
       for (const entry of keep) absorb(entry)

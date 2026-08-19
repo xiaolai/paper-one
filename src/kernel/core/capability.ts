@@ -42,6 +42,22 @@ export interface KernelApi {
 }
 
 /**
+ * What a capability's `start` actually receives: the `KernelApi` plus
+ * `onCleanup`, the kernel's disposer stack for THIS capability.
+ *
+ * A resource acquired during `start` — a listener, a timer, a bound port —
+ * is registered with `onCleanup` the moment it is taken. If `start` then
+ * throws, the kernel runs the stack in reverse (most recent first) so a
+ * half-finished `start` leaves nothing behind; on a `start` that succeeds
+ * the same cleanups run at dispose, after the returned `Disposable`. This is
+ * what MAKES the atomicity guarantee below real, rather than a promise every
+ * capability has to keep by hand and the kernel cannot enforce.
+ */
+export interface CapabilityContext extends KernelApi {
+  onCleanup(dispose: () => void): void
+}
+
+/**
  * The opaque render handle for a pane or a settings section.
  *
  * `() => unknown` and not `() => ReactNode`, on purpose: this type has to be
@@ -127,6 +143,12 @@ export interface BookAction {
    * render, against the shelf row, by the kernel's book menu.
    */
   readonly when?: (book: IndexedBook) => boolean
+  /**
+   * The kernel's menu does NOT await this and attaches no rejection
+   * handler: an async action owns its own failures — catch, and speak
+   * through your capability's own surface (a status store, a pane), or the
+   * rejection is unhandled. The sync actions are the pattern.
+   */
   run(bookId: string): void | Promise<void>
 }
 
@@ -182,5 +204,5 @@ export interface Capability {
    * `Disposable` ends. Registration is ATOMIC: a `start` that throws leaves
    * no registry entry, listener or timer, of this capability or any other.
    */
-  start?(ctx: KernelApi, signal: AbortSignal): Disposable | Promise<Disposable>
+  start?(ctx: CapabilityContext, signal: AbortSignal): Disposable | Promise<Disposable>
 }

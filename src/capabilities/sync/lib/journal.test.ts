@@ -3,6 +3,7 @@ import {
   NOOP_RECORDER,
   createKernelServices,
   writeQueue,
+  type Card as CardRow,
   type MutationRecorder,
 } from '../../../kernel'
 import { hlcOf, makeHlc, type Hlc } from './clock'
@@ -10,12 +11,14 @@ import {
   JOURNAL_DIRTY_PATH,
   JOURNAL_META_PATH,
   JOURNAL_PATH,
+  SYNC_DIR,
   createJournal,
+  isValidJsonPrefix,
   type Journal,
   type JournalEntry,
 } from './journal'
 import { crashableFs, fsOver, journalLines, memoryStorage, type CrashableFs } from './journalFs.testkit'
-import { recordDigest } from './merge'
+import { marksDigest, recordDigest } from './merge'
 
 const DEV = 'a1b2c3d4e5f60718'
 
@@ -25,14 +28,14 @@ function testClock() {
   return () => makeHlc(++t, 0, DEV)
 }
 
-function journalOver(fs: CrashableFs, extra: { storage?: ReturnType<typeof memoryStorage>; fsyncEvery?: number } = {}) {
+function journalOver(fs: CrashableFs, extra: { cards?: readonly CardRow[]; fsyncEvery?: number } = {}) {
   return createJournal({
     fs,
     queue: writeQueue(),
     clock: testClock(),
     fsync: (path) => fs.fsync(path),
     ...(extra.fsyncEvery === undefined ? {} : { fsyncEvery: extra.fsyncEvery }),
-    ...(extra.storage === undefined ? {} : { storage: extra.storage }),
+    ...(extra.cards === undefined ? {} : { cards: () => extra.cards ?? [] }),
   })
 }
 
@@ -251,6 +254,188 @@ describe('the unclean-shutdown verify pass', () => {
   })
 })
 
+describe('carried findings — crash durability and load hardening', () => {
+  const at = makeHlc(1, 0, DEV)
+  const REC = { bookId: 'book:a', title: 'Moby-Dick', author: 'Melville', addedAt: 50 }
+  const overFile = (files: Record<string, string>) => {
+    const fs = crashableFs()
+    for (const [path, text] of Object.entries(files)) fs.store.set(path, new TextEncoder().encode(text))
+    return fs
+  }
+
+  it('#5 close keeps the dirty flag while a begin still dangles, and clears it once none do', async () => {
+    const fs = crashableFs()
+    const journal = journalOver(fs)
+    await journal.open()
+    await journal.begin('book:a', 'record') // no commit — the bracket dangles
+    await journal.close()
+    // A bracket between begin and commit is not a clean shutdown: the flag
+    // stays so the next open recovers and verifies rather than looking clean.
+    expect(await fs.exists(JOURNAL_DIRTY_PATH)).toBe(true)
+
+    const reopened = journalOver(fs)
+    await reopened.open() // recovers the dangling begin — nothing dangles now
+    await reopened.close()
+    expect(await fs.exists(JOURNAL_DIRTY_PATH)).toBe(false)
+  })
+
+  it('#6 a commit with no caller digest carries the folder digest, so a lost data write is caught', async () => {
+    const fs = crashableFs()
+    const journal = journalOver(fs)
+    await journal.open()
+    fs.store.set('books/book_a/book.json', new TextEncoder().encode(JSON.stringify(REC)))
+    const token = await journal.begin('book:a', 'record')
+    await journal.commit(token) // no digest, exactly as the kernel writers commit
+    const commit = journal.entries().find((e) => e.kind === 'commit')!
+    expect(commit.digest).toBe(await recordDigest(REC))
+
+    // The data write is lost: the folder holds other bytes, and the shutdown
+    // is unclean (no close). Verify must detect the torn commit/data pair.
+    const other = { ...REC, title: 'Something else entirely' }
+    fs.store.set('books/book_a/book.json', new TextEncoder().encode(JSON.stringify(other)))
+    const reopened = journalOver(fs)
+    await reopened.open()
+    const records = reopened.entries().filter((e) => e.kind === 'commit' && e.what === 'record')
+    expect(records).toHaveLength(2)
+    expect(records[1]!.digest).toBe(await recordDigest(other))
+  })
+
+  it('#10 an unreadable folder in verify retains the dirty flag rather than passing by omission', async () => {
+    const fs = crashableFs()
+    const journal = journalOver(fs)
+    await journal.open()
+    fs.store.set('books/book_a/book.json', new TextEncoder().encode(JSON.stringify(REC)))
+    const token = await journal.begin('book:a', 'record')
+    await journal.commit(token, await recordDigest(REC))
+    // Unclean shutdown; the folder is now present but will not parse — a read
+    // ERROR, not an absence, so verify cannot certify agreement.
+    fs.store.set('books/book_a/book.json', new TextEncoder().encode('{ not json at all'))
+    const reopened = journalOver(fs)
+    await reopened.open()
+    await reopened.close() // a clean close must NOT clear the flag over an errored verify
+    expect(await fs.exists(JOURNAL_DIRTY_PATH)).toBe(true)
+  })
+
+  it('#4 refuses a journal whose epoch disagrees with journal.meta.json', async () => {
+    const fs = overFile({
+      [JOURNAL_PATH]:
+        JSON.stringify({ seq: 1, kind: 'begin', epoch: 'e1', book: 'book:a', what: 'record', at, origin: 'local' }) + '\n',
+      [JOURNAL_META_PATH]: JSON.stringify({ epoch: 'e2', nextSeq: 2, journalFormat: 1, state: 'ready' }),
+    })
+    await expect(journalOver(fs).open()).rejects.toThrow(/meta says/)
+  })
+
+  it('#9 rejects a complete line carrying an invalid optional field (a rev on a begin)', async () => {
+    const fs = overFile({
+      [JOURNAL_PATH]:
+        JSON.stringify({ seq: 1, kind: 'begin', epoch: 'e1', book: 'book:a', what: 'record', at, origin: 'local', rev: 3 }) +
+        '\n',
+    })
+    await expect(journalOver(fs).open()).rejects.toThrow(/not a journal entry/)
+  })
+
+  it('#9 refuses a torn last line that is not even a valid JSON prefix of an entry', async () => {
+    const fs = crashableFs()
+    const journal = journalOver(fs)
+    await journal.open()
+    const token = await journal.begin('book:a', 'record')
+    await journal.commit(token)
+    await journal.close()
+    // Garbage appended as a final line — not a byte-prefix of any entry, so it
+    // is corruption where a torn tail would sit, not a tolerable truncation.
+    const held = fs.store.get(JOURNAL_PATH)!
+    fs.store.set(JOURNAL_PATH, new Uint8Array([...held, ...new TextEncoder().encode('@@@ not an entry')]))
+    await expect(journalOver(fs).open()).rejects.toThrow(/not a valid entry prefix/)
+  })
+
+  it('#7/#8 fsyncs the presence register and the sync directory during bootstrap', async () => {
+    // A shelf with a trash marker, so the bootstrap migrates it into the
+    // presence register.
+    const fs = crashableFs({
+      'trash/book_ccc/book.json': JSON.stringify({ bookId: 'book:ccc', title: 'Gone', author: '' }),
+      'trash/book_ccc/.removed': '5000',
+    })
+    await journalOver(fs).open()
+    const fsynced = fs.ops.filter((op) => op.kind === 'fsync').map((op) => op.path)
+    // #7: the presence register is made durable before `ready` — a marker
+    // migrated but not fsynced would resurrect a deletion after a crash.
+    expect(fsynced).toContain('sync/removed.json')
+    // #8: the sync DIRECTORY is fsynced too, so the entries it names survive.
+    expect(fsynced).toContain(SYNC_DIR)
+  })
+
+  it('#31 migrates colliding legacy cards revs at load instead of refusing to open', async () => {
+    // Two legacy per-book cards streams, each at rev 1, that canonicalise onto
+    // the one `cards ''` stream — their revs now collide.
+    const fs = overFile({
+      [JOURNAL_PATH]:
+        JSON.stringify({ seq: 1, kind: 'commit', epoch: 'e1', book: 'book:a', what: 'cards', at, rev: 1, origin: 'local' }) +
+        '\n' +
+        JSON.stringify({ seq: 2, kind: 'commit', epoch: 'e1', book: 'book:b', what: 'cards', at, rev: 1, origin: 'local' }) +
+        '\n',
+      [JOURNAL_META_PATH]: JSON.stringify({ epoch: 'e1', nextSeq: 3, journalFormat: 1, state: 'ready' }),
+    })
+    const journal = journalOver(fs)
+    await journal.open() // must NOT throw
+    const cardCommits = journal.entries().filter((e) => e.kind === 'commit' && e.what === 'cards')
+    expect(cardCommits.map((e) => [e.book, e.rev])).toEqual([
+      ['', 1],
+      ['', 2],
+    ])
+    // The renumbering is persisted, so the next load reads a clean stream.
+    await journal.close()
+    const reopened = journalOver(fs)
+    await reopened.open()
+    expect(reopened.entries().filter((e) => e.kind === 'commit' && e.what === 'cards').map((e) => e.rev)).toEqual([1, 2])
+  })
+})
+
+describe('isValidJsonPrefix — proving a torn tail is a real truncation (#9)', () => {
+  it('accepts strict prefixes of valid JSON across the grammar', () => {
+    for (const s of [
+      '{',
+      '{"seq"',
+      '{"seq":12',
+      '{"seq":12,"kind":"be',
+      '{"a":[1, 2',
+      '[tru',
+      '[fals',
+      '[nul',
+      '{"n":-12.5e',
+      '-',
+      '{"e":"\\u00',
+      '{"s":"a\\"b',
+      '{"nested":{"x":',
+    ]) {
+      expect(isValidJsonPrefix(s), s).toBe(true)
+    }
+  })
+
+  it('accepts complete values, which are prefixes of themselves', () => {
+    for (const s of ['{}', '[]', '123', 'true', 'false', 'null', '"x"', '{"a":[1,2,3]}']) {
+      expect(isValidJsonPrefix(s), s).toBe(true)
+    }
+  })
+
+  it('rejects bytes no completion can make valid', () => {
+    for (const s of [
+      '',
+      '@@@',
+      '}{',
+      '{"a":1}x', // trailing junk past a complete value
+      '{"a" 1}', // missing colon
+      '{"a":1 2}', // missing comma
+      '[1 2]',
+      '{"e":"\\x"}', // invalid escape
+      'tru3', // a wrong literal
+      '{1:2}', // a non-string key
+      `"a${String.fromCharCode(1)}b"`, // a raw control character in a string
+    ]) {
+      expect(isValidJsonPrefix(s), s).toBe(false)
+    }
+  })
+})
+
 describe('origin — the echo fix', () => {
   it('stamps remote exactly the begins markRemote named, one shot each, FIFO', async () => {
     const fs = crashableFs()
@@ -380,8 +565,12 @@ describe('compaction', () => {
       const token = await journal.begin('book:a', 'record')
       await journal.commit(token, `v${i + 1}`)
     }
+    // The marks digest is the REAL digest of this book's (empty) marks folder,
+    // so the reopen's verify pass — which #5 now runs, because a begin dangles
+    // at close — matches it and re-commits nothing.
+    const emptyMarks = await marksDigest([])
     const marksToken = await journal.begin('book:a', 'marks')
-    await journal.commit(marksToken, 'm1')
+    await journal.commit(marksToken, emptyMarks)
     await journal.ack('book:a', 'marks', 1)
     await journal.begin('book:b', 'record') // dangling at compaction time
 
@@ -395,15 +584,17 @@ describe('compaction', () => {
     ])
     expect(lines[0]!.digest).toBe('v5')
 
-    // The compacted journal reloads into the same working state. Closed
-    // first: an unclean shutdown would ALSO trigger the verify pass, which
-    // is its own test above.
+    // The compacted journal reloads into the same working state. A begin still
+    // dangles at close, so the dirty flag STAYS (#5) and the reopen runs the
+    // verify pass — a no-op here, because every kept digest matches the folder
+    // (the record digests read null with no book.json, the marks digest is the
+    // empty-folder digest).
     await journal.close()
     const reopened = journalOver(fs)
     await reopened.open()
-    // v5 and m1 as compacted; the dangling begin was recovered into a fresh
-    // commit (no digest — nothing was measured) at the end of the file.
-    expect(reopened.feed(0, reopened.head()).map((e) => e.digest)).toEqual(['v5', 'm1', undefined])
+    // v5 and the marks digest as compacted; the dangling begin was recovered
+    // into a fresh commit (no digest — nothing was measured) at the file's end.
+    expect(reopened.feed(0, reopened.head()).map((e) => e.digest)).toEqual(['v5', emptyMarks, undefined])
     expect(reopened.entries().filter((e) => e.kind === 'commit' && e.book === 'book:b')).toHaveLength(1)
   })
 
@@ -456,14 +647,13 @@ describe('bootstrap — building to ready over an existing shelf', () => {
       'trash/book_cccc/.removed': '5000',
     })
 
-  const CARD = JSON.stringify([
+  const CARD: readonly CardRow[] = [
     { id: 'c1', bookId: 'book:aaaa', kind: 'Excerpt', body: 'x', answer: '', source: '', cfi: null, createdAt: 700 },
-  ])
+  ]
 
   it('emits one local baseline commit per surface, with legacy stamps and digests, then publishes the epoch', async () => {
     const fs = shelf()
-    const storage = memoryStorage({ 'paper.cards.v1': CARD })
-    const journal = journalOver(fs, { storage })
+    const journal = journalOver(fs, { cards: CARD })
     await journal.open()
 
     expect(journal.state()).toBe('ready')
@@ -491,7 +681,6 @@ describe('bootstrap — building to ready over an existing shelf', () => {
 
   it('killed mid-way it resumes: no duplicate baselines, the same epoch, ready only at the end', async () => {
     const fs = shelf()
-    const storage = memoryStorage({ 'paper.cards.v1': CARD })
     // The kill: the underlying append starts failing after 2 lines.
     let appends = 0
     const append = fs.appendFile.bind(fs)
@@ -500,7 +689,7 @@ describe('bootstrap — building to ready over an existing shelf', () => {
       if (appends > 2) throw new Error('killed')
       return append(path, bytes)
     }
-    const journal = journalOver(fs, { storage })
+    const journal = journalOver(fs, { cards: CARD })
     await expect(journal.open()).rejects.toThrow(/killed/)
     expect(journal.epoch()).toBeNull() // building: the epoch is not published
     const metaMidway = JSON.parse(new TextDecoder().decode(fs.store.get(JOURNAL_META_PATH)!)) as { epoch: string; state: string }
@@ -508,7 +697,7 @@ describe('bootstrap — building to ready over an existing shelf', () => {
 
     // The next launch: the fs behaves again, the build resumes.
     fs.appendFile = append
-    const resumed = journalOver(fs, { storage })
+    const resumed = journalOver(fs, { cards: CARD })
     await resumed.open()
     expect(resumed.state()).toBe('ready')
     expect(resumed.epoch()).toBe(metaMidway.epoch) // the SAME epoch, kept across the kill
@@ -525,8 +714,7 @@ describe('bootstrap — building to ready over an existing shelf', () => {
 
   it('a runtime cards write joins the bootstrap baseline on the ONE (book "", cards) stream', async () => {
     const fs = shelf()
-    const storage = memoryStorage({ 'paper.cards.v1': CARD })
-    const journal = journalOver(fs, { storage })
+    const journal = journalOver(fs, { cards: CARD })
     await journal.open()
 
     // A caller names its own book id; the journal canonicalises to ''. Split

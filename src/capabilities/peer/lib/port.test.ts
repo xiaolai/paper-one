@@ -91,6 +91,41 @@ describe('the port over two linked fake wires', () => {
     ).rejects.toThrow(/blobHashMismatch/)
   })
 
+  it('narrowing a peer\'s grants mid-session refuses the next call on the OPEN session (H1)', async () => {
+    const { shelf, satchel } = linkedWires()
+    const shelfPort = createPeerPort(shelf)
+    const satchelPort = createPeerPort(satchel)
+    await shelfPort.serve([echo]) // echo needs sync:pull; the satchel starts with sync:*
+    const channel = await satchelPort.connect(shelf.id)
+    expect(await channel.call('sync.echo', { n: 1 })).toEqual({ echoed: { n: 1 } })
+    // Revoke through THIS port; the router's cache must refresh and the open
+    // session must feel it — the next call is forbidden, not answered stale.
+    await shelfPort.setGrants(satchel.id, [])
+    await expect(channel.call('sync.echo', { n: 2 })).rejects.toMatchObject({
+      name: 'ServiceCallError',
+      error: { code: 'forbidden' },
+    })
+    await channel.close()
+  })
+
+  it('a session dropped by the link rejects in-flight calls and reports closed (M7)', async () => {
+    const { shelf, satchel } = linkedWires()
+    const shelfPort = createPeerPort(shelf)
+    const satchelPort = createPeerPort(satchel)
+    let release: () => void = () => {}
+    await shelfPort.serve([{ name: 'sync.slow', grant: 'sync:pull', handler: () => new Promise((resolve) => (release = () => resolve(null))) }])
+    const channel = await satchelPort.connect(shelf.id)
+    const closed: string[] = []
+    channel.onClosed((reason) => void closed.push(reason))
+    const inflight = channel.call('sync.slow', null)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    satchel.setOnline(false) // severs the link, closing every session with `lost`
+    await expect(inflight).rejects.toBeInstanceOf(ServiceCallError)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(closed).toEqual(['lost'])
+    release()
+  })
+
   it('forgetting the peer mid-session closes the channel and rejects what was in flight', async () => {
     const { shelf, satchel } = linkedWires()
     const shelfPort = createPeerPort(shelf)
@@ -116,5 +151,20 @@ describe('the port over two linked fake wires', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(closed).toEqual(['revoked'])
     release()
+  })
+
+  it('binds a pairing confirmation to the attempt id — a mismatch is refused, the right one confirms (M9)', async () => {
+    const { shelf, satchel } = linkedWires()
+    const offer = await shelf.pairBegin('Shelf')
+    let attemptId = ''
+    shelf.onPairingPending((event) => (attemptId = event.attemptId))
+    await satchel.pairFromUri(offer.url, 'Phone')
+    expect(attemptId).not.toBe('')
+    // A confirmation bound to a DIFFERENT (e.g. pre-played) attempt is refused,
+    // and must not consume the pending one.
+    await expect(shelf.pairConfirm(true, ['sync:*'], 'att-someone-else')).rejects.toThrow()
+    // The attempt the human is actually looking at confirms.
+    const peer = await shelf.pairConfirm(true, ['sync:*'], attemptId)
+    expect(peer).not.toBeNull()
   })
 })

@@ -177,6 +177,19 @@ export const CASES = [
     expect: ['no-kernel-reaches-capabilities'],
   },
   {
+    name: 'shared intermediary re-exports a capability (the requires back door)',
+    files: {
+      // A non-kernel, non-capability, non-composition module re-exporting a
+      // capability index: the barrel through which a capability could reach an
+      // undeclared capability, invisible to the direct-edge requires check.
+      'src/shared/facade.ts': "export { betaPort } from '../capabilities/beta/index.ts'\n",
+      'src/capabilities/gamma/index.ts': "import { betaPort } from '../../shared/facade.ts'\nexport const gamma = betaPort\n",
+    },
+    from: 'src/shared/facade.ts',
+    to: 'src/capabilities/beta/index.ts',
+    expect: ['capability-index-only-from-composition'],
+  },
+  {
     name: 'dynamic import() of a kernel internal from a capability',
     files: {
       'src/capabilities/alpha/index.ts':
@@ -226,6 +239,35 @@ export const CASES = [
     from: 'src/capabilities/peer/lib/wire.ts',
     to: /(^|\/)@tauri-apps\/plugin-dialog(\/|$)/,
     expect: ['peer-wire-tauri-api-only'],
+  },
+  {
+    name: 'a capability -> a composition root (the whole-composition back door)',
+    files: {
+      'src/capabilities/alpha/index.ts':
+        LEGAL_TREE['src/capabilities/alpha/index.ts'] + "import { capabilities } from '../../app/composition.desktop.ts'\nvoid capabilities\n",
+    },
+    from: 'src/capabilities/alpha/index.ts',
+    to: 'src/app/composition.desktop.ts',
+    expect: ['no-capability-to-composition-root'],
+  },
+  {
+    name: 'a shared module -> a composition root (the laundered whole-composition path)',
+    files: {
+      'src/shared/roots.ts': "import { capabilities } from '../app/composition.desktop.ts'\nexport const laundered = capabilities\n",
+    },
+    from: 'src/shared/roots.ts',
+    to: 'src/app/composition.desktop.ts',
+    expect: ['no-capability-to-composition-root'],
+  },
+  {
+    name: 'one platform composition root -> another (braided platform graphs)',
+    files: {
+      'src/app/composition.ios.ts':
+        "import { capabilities as desktop } from './composition.desktop.ts'\nexport const capabilities = desktop\n",
+    },
+    from: 'src/app/composition.ios.ts',
+    to: 'src/app/composition.desktop.ts',
+    expect: ['no-capability-to-composition-root'],
   },
   {
     name: 'a cycle',

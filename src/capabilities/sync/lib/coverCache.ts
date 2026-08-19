@@ -1,4 +1,4 @@
-import { BOOKS_DIR, atomicWrite, defineSetting, type IndexFs, type Setting, type SettingsStore } from '../../../kernel'
+import { BOOKS_DIR, atomicWrite, defineSetting, type IndexFs, type RemovableBlobName, type Setting, type SettingsStore } from '../../../kernel'
 import { blobFolderOf, type BlobFacts } from './ledger'
 
 /**
@@ -45,6 +45,12 @@ export interface CoverCacheOptions {
   /** Where a book's cover is — the `sync.content` answer, reduced. */
   readonly lookup: (book: string) => Promise<CoverLookup | null>
   readonly fetchBlob: (peerId: string, folder: string, blob: BlobFacts) => Promise<void>
+  /**
+   * Delete one closed-name blob from a book's folder — the kernel's
+   * `removeBlob` primitive (WI-10.2/10.5). Eviction's only delete: this
+   * cache's own fs handle is namespace-confined and cannot reach books/.
+   */
+  readonly removeBlob: (book: string, name: RemovableBlobName) => Promise<void>
   readonly now?: () => number
 }
 
@@ -59,7 +65,7 @@ export interface CoverCache {
   evict(): Promise<void>
 }
 
-export function createCoverCache({ fs, settings, lookup, fetchBlob, now = Date.now }: CoverCacheOptions): CoverCache {
+export function createCoverCache({ fs, settings, lookup, fetchBlob, removeBlob, now = Date.now }: CoverCacheOptions): CoverCache {
   /* Serialised: two ensure()s racing the index write would drop one entry. */
   let chain: Promise<unknown> = Promise.resolve()
   const serial = <T,>(task: () => Promise<T>): Promise<T> => {
@@ -77,6 +83,10 @@ export function createCoverCache({ fs, settings, lookup, fetchBlob, now = Date.n
         if (typeof raw !== 'object' || raw === null) continue
         const entry = raw as Record<string, unknown>
         if (typeof entry['name'] !== 'string' || typeof entry['size'] !== 'number' || typeof entry['usedAt'] !== 'number') continue
+        /* Finite, non-negative, or the row is corrupt: a NaN or negative
+         * size poisons the byte total and a NaN stamp scrambles the LRU. */
+        if (!Number.isInteger(entry['size']) || entry['size'] < 0) continue
+        if (!Number.isFinite(entry['usedAt'])) continue
         out[book] = { name: entry['name'], size: entry['size'], usedAt: entry['usedAt'] }
       }
       return out
@@ -99,16 +109,24 @@ export function createCoverCache({ fs, settings, lookup, fetchBlob, now = Date.n
       .sort((a, b) => a[1].usedAt - b[1].usedAt)
     for (const [book, entry] of oldestFirst) {
       if (total <= cap) break
-      await fs.remove(`${BOOKS_DIR}/${blobFolderOf(book)}/${entry.name}`).catch(() => {})
+      /* An index entry naming something outside the closed set (a hand-edited
+       * covers.json) is REFUSED by the primitive; the entry still leaves the
+       * index, so a poisoned row cannot delete anything and stops being
+       * tracked. */
+      await removeBlob(book, entry.name as RemovableBlobName).catch(() => {})
       delete index[book]
       total -= entry.size
     }
     return index
   }
 
+  /* The honest name first, the legacy read-only name second — ONE list,
+   * shared by local discovery and remote-answer validation. */
+  const COVER_NAMES = ['cover.jpg', 'cover.webp'] as const
   const coverHere = async (folder: string): Promise<string | null> => {
-    if (await fs.exists(`${BOOKS_DIR}/${folder}/cover.jpg`)) return 'cover.jpg'
-    if (await fs.exists(`${BOOKS_DIR}/${folder}/cover.webp`)) return 'cover.webp'
+    for (const name of COVER_NAMES) {
+      if (await fs.exists(`${BOOKS_DIR}/${folder}/${name}`)) return name
+    }
     return null
   }
 
@@ -120,16 +138,49 @@ export function createCoverCache({ fs, settings, lookup, fetchBlob, now = Date.n
         const present = await coverHere(folder)
         if (present !== null) {
           const held = index[book]
-          index[book] = { name: present, size: held?.size ?? 0, usedAt: now() }
-          await writeIndex(index)
+          /* First seen here (a cover that predates the index, or a row the
+           * parse refused): measure it, or it enters the ledger at zero
+           * bytes and is never worth evicting. A held size is kept — the
+           * touch path must stay one read cheap. */
+          let size = held?.size
+          if (size === undefined || held?.name !== present) {
+            try {
+              size = (await fs.readFile(`${BOOKS_DIR}/${folder}/${present}`)).length
+            } catch {
+              size = held?.size ?? 0
+            }
+          }
+          index[book] = { name: present, size, usedAt: now() }
+          /* Evicted here too: DISCOVERY grows the tracked bytes exactly as
+           * a fetch does, and a discovery path that never evicted let the
+           * cache climb past its cap one found jacket at a time. */
+          await writeIndex(await evictLocked(index, book))
           return true
         }
+        const dropStale = async (): Promise<false> => {
+          if (book in index) {
+            delete index[book]
+            await writeIndex(index)
+          }
+          return false
+        }
         const found = await lookup(book)
-        if (!found || found.cover === null) return false
+        if (!found || found.cover === null) return dropStale()
+        /* CORRELATED before a byte moves: the folder and the name are the
+         * peer's words. Folder names are deterministic (`safeId`), so the
+         * answer's folder must be THIS book's; and the name must be a COVER
+         * name — a "cover" labelled `content.epub` would aim the fetch at
+         * the book's bytes. (Whether the legacy `cover.webp` may LAND is
+         * the plugin's call — see the module note.) */
+        if (found.folder !== folder) return dropStale()
+        if (!(COVER_NAMES as readonly string[]).includes(found.cover.name)) return dropStale()
         try {
           await fetchBlob(found.peerId, found.folder, found.cover)
         } catch {
-          return false
+          /* The fetch failing says nothing about the stale row — but the
+           * cover is not here, so a tracked entry for it is a lie either
+           * way. */
+          return dropStale()
         }
         index[book] = { name: found.cover.name, size: found.cover.size, usedAt: now() }
         await writeIndex(await evictLocked(index, book))

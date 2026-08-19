@@ -79,9 +79,11 @@ async function makeStack(
   const storage = flatStorage()
   const clock = createClock({ deviceId, now: nextWall })
   const journalQueue = writeQueue()
-  const journal = createJournal({ fs, queue: journalQueue, clock: () => clock.now(), storage })
-  await journal.open()
+  /* Services FIRST: the journal's cards baseline reads the kernel's card
+   * store (WI-10.4), so the store must exist before the journal opens. */
   const services = createKernelServices({ fs, storage, initialBooks: booksOn(fs) })
+  const journal = createJournal({ fs, queue: journalQueue, clock: () => clock.now(), cards: () => services.cards.stored() })
+  await journal.open()
   services.bindRecorder(journal)
   services.bindClock(() => clock.now())
   const port = createPeerPort(wire)
@@ -662,5 +664,113 @@ describe('the star protocol over two real stacks (WI-C.2)', () => {
     await channel.close()
     // Nothing was written before the refusal.
     expect(shelf.journal.entries().length).toBe(before)
+  })
+})
+
+describe('carried findings — removals, content facts, and covers', () => {
+  const pushHandler = (stack: Stack) => stack.ledger.services().find((one) => one.name === 'sync.push')!
+  const asCtx = (handler: ReturnType<typeof pushHandler>['handler']) =>
+    ({ peer: 'satchel-x' }) as unknown as Parameters<typeof handler>[1]
+
+  it('#13 a stale removal does not beat a newer re-add already in the presence register', async () => {
+    const { shelf } = await makeWorld()
+    await shelf.services.library.add('book:x', rec('Xenon'))
+    await shelf.services.library.remove('book:x') // presence {removed, tA}
+    await shelf.services.library.add('book:x', rec('Xenon')) // re-add restores: {live, tB > tA}
+    expect(shelf.services.library.getSnapshot().map((b) => b.bookId)).toContain('book:x')
+
+    // A removal stamped in the distant past — older than the re-add — arrives.
+    const stale = makeHlc(1, 0, 'ffffffffffffffff')
+    const push = pushHandler(shelf)
+    await push.handler({ book: 'book:x', revs: { removed: 1 }, hasContent: false, removed: { at: stale } }, asCtx(push.handler))
+
+    // The stale removal LOST the register: the book stays, still live — a fresh
+    // mint would have removed it.
+    expect(shelf.services.library.getSnapshot().map((b) => b.bookId)).toContain('book:x')
+    expect((await readPresence(shelf.fs))['book:x']?.state).toBe('live')
+  })
+
+  it('#15 a hasContent push with no verifiable way to fetch is refused, never acked', async () => {
+    const { shelf } = await makeWorld()
+    const push = pushHandler(shelf)
+    // Claims content the shelf lacks, but sends no contentHash — un-fetchable,
+    // un-verifiable, and so un-ackable.
+    await expect(
+      push.handler(
+        { book: 'book:y', revs: { record: 1 }, hasContent: true, record: toWire(rec('Ylang')) },
+        asCtx(push.handler),
+      ),
+    ).rejects.toMatchObject({ code: 'content-unavailable' })
+    // Nothing was applied before the refusal.
+    expect(shelf.services.library.getSnapshot().map((b) => b.bookId)).not.toContain('book:y')
+  })
+
+  it('#16 a shelf with bytes but no stored hash hashes them, and refuses a conflicting push', async () => {
+    const { shelf } = await makeWorld()
+    await shelf.services.library.add('book:z', { ...rec('Zeta'), ext: 'epub', format: 'epub' })
+    await shelf.fs.writeFile('books/book_z/content.epub', new TextEncoder().encode('the shelf bytes'))
+    await shelf.services.library.refreshContent('book:z') // hasContent, but the record stores no hash
+    expect(shelf.services.library.getSnapshot().find((b) => b.bookId === 'book:z')?.hasContent).toBe(true)
+
+    const push = pushHandler(shelf)
+    // A different hash than the shelf's actual bytes — a conflict, judged by
+    // HASHING the held bytes rather than trusting an absent stored hash.
+    await expect(
+      push.handler(
+        { book: 'book:z', revs: { record: 1 }, hasContent: true, contentHash: 'a'.repeat(64), format: 'epub', record: toWire(rec('Zeta')) },
+        asCtx(push.handler),
+      ),
+    ).rejects.toMatchObject({ code: 'conflict' })
+  })
+
+  it('#17 a content push carries a verified size even when the record already stores a hash', async () => {
+    const { shelf, satchel } = await makeWorld()
+    const bytes = new TextEncoder().encode('some epub bytes to size and hash')
+    await satchel.services.library.add('book:s', { ...rec('Sized'), ext: 'epub', format: 'epub' })
+    await satchel.fs.writeFile('books/book_s/content.epub', bytes)
+    await satchel.services.library.refreshContent('book:s')
+    // A stored hash, as the lazy backfill leaves — the old path then pushed it
+    // with no size at all.
+    await satchel.services.library.update('book:s', (record) => ({ ...record, contentHash: 'b'.repeat(64) }))
+
+    let pushed: Record<string, unknown> | null = null
+    const channel = await satchel.port.connect(shelf.wire.id)
+    const spy: SyncChannel = {
+      peerId: channel.peerId,
+      call: async (service, body) => {
+        if (service === 'sync.push' && (body as { book?: string }).book === 'book:s') pushed = body as Record<string, unknown>
+        return channel.call(service, body)
+      },
+    }
+    await satchel.ledger.runSession(spy).catch(() => {})
+    await channel.close()
+    expect(pushed).not.toBeNull()
+    expect(pushed!['hasContent']).toBe(true)
+    expect(pushed!['size']).toBeGreaterThan(0)
+  })
+
+  it('#21 a cover is fetched even when the content is already present', async () => {
+    const { shelf, satchel } = await makeWorld()
+    const bytes = new TextEncoder().encode('shared epub bytes')
+    const coverBytes = new TextEncoder().encode('a jacket')
+    // The satchel holds the book, its content, and a cover.
+    await satchel.services.library.add('book:c', { ...rec('Covered'), ext: 'epub', format: 'epub' })
+    await satchel.fs.writeFile('books/book_c/content.epub', bytes)
+    await satchel.fs.writeFile('books/book_c/cover.jpg', coverBytes)
+    await satchel.services.library.refreshContent('book:c')
+
+    // The shelf ALREADY has the identical content (so no content fetch), but
+    // no cover.
+    await shelf.services.library.add('book:c', { ...rec('Covered'), ext: 'epub', format: 'epub' })
+    await shelf.fs.writeFile('books/book_c/content.epub', bytes)
+    await shelf.services.library.refreshContent('book:c')
+    expect(shelf.fs.store.has('books/book_c/cover.jpg')).toBe(false)
+
+    // The satchel pushes: the content is already here, the cover is offered —
+    // and the cover comes over anyway.
+    const channel = await satchel.port.connect(shelf.wire.id)
+    await satchel.ledger.runSession(channel)
+    await channel.close()
+    expect(shelf.fs.store.get('books/book_c/cover.jpg')).toEqual(coverBytes)
   })
 })

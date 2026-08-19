@@ -80,6 +80,13 @@ log = "0.4"
 # state; no raster output, so no `image`.
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
+# `O_NOFOLLOW` for the blob file opens, so a planted final-component symlink
+# fails the open rather than being followed out of the data root. Unix only;
+# already in the tree via tokio/iroh, so no new compilation. Windows uses a
+# pre-open `symlink_metadata` check instead (reparse points need privilege).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 # A runtime for the one test that binds an endpoint; the app supplies its own.
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

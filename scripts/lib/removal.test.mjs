@@ -139,6 +139,23 @@ describe('removeAclGrants', () => {
 /* ------------------------------------------------------------- Cargo.toml */
 
 describe('removeCargoDependency', () => {
+  it('treats a QUOTED feature key as syntax, never as an array item', () => {
+    // `"my-feature" = ["dep:x"]` — tokenizing the key as an item deleted it
+    // and produced invalid TOML.
+    const toml = ['[dependencies]', 'x = { path = "crates/x", optional = true }', '', '[features]', '"my-feature" = ["dep:x", "serde/derive"]', ''].join('\n')
+    const out = removeCargoDependency(toml, 'x').text
+    expect(out).toContain('"my-feature" = ["serde/derive"]')
+  })
+
+  it('keeps the opening syntax when a removed item was alone on the assignment line', () => {
+    // `f = ["dep:x",` — deleting the whole line left `]` orphaned: invalid TOML.
+    const toml = ['[dependencies]', 'x = { path = "crates/x", optional = true }', '', '[features]', 'f = ["dep:x",', '    "serde/derive",', ']', ''].join('\n')
+    const out = removeCargoDependency(toml, 'x').text
+    expect(out).toContain('f = [')
+    expect(out).toContain('"serde/derive",')
+    expect(out).not.toContain('dep:x')
+  })
+
   const text = [
     '[dependencies]',
     'serde = "1"',
@@ -244,6 +261,43 @@ describe('removePluginRegistration', () => {
     expect(removePluginRegistration(src, 'x')).toEqual({ text: src, changed: false })
   })
 
+  it('never edits a .plugin(...) that lives inside a string literal', () => {
+    const src = 'fn run() {\n    log(".plugin(x::init())");\n    b().plugin(x::init());\n}\n'
+    // The REAL registration is cut; the quoted prose survives byte for byte
+    // (string contents are masked out of both the matcher and the residual
+    // check — prose is not a reference).
+    const out = removePluginRegistration(src, 'x')
+    expect(out.changed).toBe(true)
+    expect(out.text).toContain('log(".plugin(x::init())");')
+    expect(out.text).not.toContain('b().plugin(x::init())')
+    const proseOnly = 'fn run() {\n    log(".plugin(x::init())");\n    b().run();\n}\n'
+    // With no real registration at all, prose alone is a no-op, not a refusal.
+    expect(removePluginRegistration(proseOnly, 'x')).toEqual({ text: proseOnly, changed: false })
+  })
+
+  it('a string label naming the capability does not refuse a composition removal', () => {
+    const src = "import { a } from '../capabilities/a'\nconst label = 'about a'\nexport const capabilities = [a]\n"
+    expect(removeFromComposition(src, 'a').changed).toBe(true)
+  })
+
+  it('REFUSES a multi-line .plugin(...) call rather than answering changed: false', () => {
+    // The shape rustfmt sometimes writes for a long argument. Answering
+    // changed:false here let a caller prune the crate and leave its
+    // registration live in lib.rs.
+    const src = 'fn run() {\n    builder = builder.plugin(\n        x::init(),\n    );\n    go(builder);\n}\n'
+    expect(() => removePluginRegistration(src, 'x')).toThrow(/cannot edit/)
+  })
+
+  it('sees a self-assignment behind a trailing comment, and keeps a comment out of the moved semicolon', () => {
+    // The comment hid `builder = builder` from the check, leaving
+    // `builder = builder; // registration` behind.
+    const hidden = 'fn run() {\n    builder = builder\n        .plugin(x::init()); // registration\n    go(builder);\n}\n'
+    expect(removePluginRegistration(hidden, 'x').text).toBe('fn run() {\n    go(builder);\n}\n')
+    // And when the previous line carries a comment, the semicolon lands on
+    // the CODE, not inside the comment.
+    const commented = 'fn run() {\n    builder = builder\n        .plugin(a::init()) // keep me\n        .plugin(x::init());\n    go(builder);\n}\n'
+    expect(removePluginRegistration(commented, 'x').text).toBe('fn run() {\n    builder = builder\n        .plugin(a::init()); // keep me\n    go(builder);\n}\n')
+  })
 })
 
 /* -------------------------------------------------------- the real tree */

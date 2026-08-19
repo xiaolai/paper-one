@@ -93,6 +93,16 @@ export function createClock({ deviceId, now = Date.now, load, save }: ClockOptio
     counter = held.counter
   }
 
+  /* How far ahead of this device's wall a witnessed stamp may reach.
+   * GENEROUS on purpose: a device whose wall reset to 1970 must still
+   * witness honest present-day stamps (~half a century "ahead" of it), so
+   * the bound is a century — but bounded it must be, because witnessing a
+   * stamp near `HLC_MAX_MS` (year ~10889) raises the PERSISTED floor so
+   * high that `makeHlc` overflows once the counter steps past a stuck
+   * wall: a clock bricked forever, saved to disk. Refusing fails the one
+   * session, loudly, and keeps the clock. */
+  const MAX_WITNESS_AHEAD_MS = 100 * 365 * 24 * 60 * 60 * 1000
+
   const stamp = () => makeHlc(ms, counter, deviceId)
 
   const advance = (): Hlc => {
@@ -121,6 +131,9 @@ export function createClock({ deviceId, now = Date.now, load, save }: ClockOptio
     witness: (remote) => {
       if (!isHlc(remote)) throw new Error(`witness: not a stamp: ${JSON.stringify(remote)}`)
       const theirs = parseHlc(remote)
+      if (theirs.ms > Math.max(0, Math.floor(now())) + MAX_WITNESS_AHEAD_MS) {
+        throw new Error(`witness: stamp implausibly far in the future: ${JSON.stringify(remote)}`)
+      }
       if (theirs.ms < ms || (theirs.ms === ms && theirs.counter <= counter)) return
       ms = theirs.ms
       counter = theirs.counter

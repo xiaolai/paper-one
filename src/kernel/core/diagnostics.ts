@@ -23,9 +23,12 @@ export interface Sink {
  *
  * Matched as WORDS of the key, not as substrings and not only as the whole
  * key: `token`, `authToken`, `auth_token` and `peer-id` are all caught, and
- * `context` — which contains `text` — is not. Secrets, peer identities, book
- * text and envelope bodies are the four things the plan says never enter a
- * log; `key` and `endpoint` are the two more that tend to travel with them.
+ * `context` — which contains `text` — is not. A trailing-`s` plural counts as
+ * its singular, so `secrets`, `tokens` and `keys` are caught too, WITHOUT
+ * becoming a substring rule (`peerless` stems to `peerles`, not `peer`).
+ * Secrets, peer identities, book text and envelope bodies are the four the
+ * plan says never enter a log; the credential words below tend to travel with
+ * them.
  */
 export const REDACTED_WORDS: ReadonlySet<string> = new Set([
   'secret',
@@ -35,6 +38,14 @@ export const REDACTED_WORDS: ReadonlySet<string> = new Set([
   'text',
   'peer',
   'endpoint',
+  'password',
+  'credential',
+  'authorization',
+  'cookie',
+  'bearer',
+  'signature',
+  'mac',
+  'sas',
 ])
 
 export const REDACTED = '[redacted]'
@@ -42,9 +53,12 @@ export const REDACTED = '[redacted]'
 /** How deep a nested value is walked before it is summarised. */
 const MAX_DEPTH = 8
 
-/** `authToken` → `auth`, `token`; `peer_id` → `peer`, `id`; `Body` → `body`. */
+/** `authToken` → `auth`, `token`; `peer_id` → `peer`, `id`; `Body` → `body`;
+ *  and the acronym boundary too: `APIKey` → `api`, `key` — without the
+ *  acronym-to-word split, every ALL-CAPS-led compound sailed past the list. */
 function wordsOf(key: string): string[] {
   return key
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
     .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
     .split(/[^A-Za-z0-9]+/)
     .filter(Boolean)
@@ -52,7 +66,14 @@ function wordsOf(key: string): string[] {
 }
 
 function isRedactedKey(key: string): boolean {
-  return wordsOf(key).some((word) => REDACTED_WORDS.has(word))
+  return wordsOf(key).some(
+    (word) =>
+      REDACTED_WORDS.has(word) ||
+      (word.endsWith('s') && REDACTED_WORDS.has(word.slice(0, -1))) ||
+      /* `bodies` → `body`: the plain trailing-s rule left every -ies plural
+       * of a listed word unredacted. */
+      (word.endsWith('ies') && REDACTED_WORDS.has(`${word.slice(0, -3)}y`)),
+  )
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -64,10 +85,12 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 /**
  * The fields with every value under a redacted key replaced.
  *
- * Walks plain objects and arrays, however nested; anything else — an Error,
- * a Date, a class instance — passes through as it is, because it is a value
- * and not a container of keyed fields. Depth is bounded so a cyclic structure
- * cannot hang the logger: past `MAX_DEPTH` a container becomes `[deep]`.
+ * Walks plain objects and arrays, however nested. An Error is reduced to its
+ * type alone — its `message` and `stack` are exactly where book text or a
+ * secret ends up when a throw is logged, which the plan forbids. A Date or
+ * other primitive-like value passes through as it is. Depth is bounded so a
+ * cyclic structure cannot hang the logger: past `MAX_DEPTH` a container
+ * becomes `[deep]`.
  */
 export function redact(fields: Record<string, unknown>): Record<string, unknown> {
   return redactObject(fields, 0)
@@ -86,9 +109,37 @@ function redactValue(value: unknown, depth: number): unknown {
     if (depth > MAX_DEPTH) return '[deep]'
     return value.map((one) => redactValue(one, depth + 1))
   }
+  /* An Error's message and stack are unbounded, caller-shaped text — the very
+   * place a secret or a line of a book leaks into a log. Keep only its type —
+   * and only when the NAME is shaped like a type: `name` is an ordinary
+   * mutable property, so a caller-set sentence (or a secret) could ride it
+   * out otherwise. One identifier-shaped word ending in Error/Exception
+   * carries a class name and nothing else. */
+  if (value instanceof Error) {
+    return /^[A-Za-z][A-Za-z0-9]{0,40}(Error|Exception)$/.test(value.name) ? `[${value.name}]` : '[Error]'
+  }
   if (isPlainObject(value)) {
     if (depth > MAX_DEPTH) return '[deep]'
     return redactObject(value, depth)
+  }
+  /* A Date is a value — but a COPY of one: expando properties riding the
+   * original would reach the sink otherwise. Any OTHER object — a Map, a
+   * Set, a typed array, a class instance — is an opaque container this
+   * walker cannot see into, so it is reduced to its constructor's name;
+   * and that name is caller-mutable, so it passes the same shape gate an
+   * Error's does or becomes the fixed marker. A function's source is a
+   * body of text nobody meant to log. */
+  if (value instanceof Date) return new Date(value.getTime())
+  if (typeof value === 'function') return '[function]'
+  if (typeof value === 'object' && value !== null) {
+    let ctor: unknown
+    try {
+      ctor = (value as { constructor?: { name?: string } }).constructor?.name
+    } catch {
+      /* A proxy or accessor that throws on inspection earns the marker. */
+      ctor = undefined
+    }
+    return typeof ctor === 'string' && /^[A-Za-z][A-Za-z0-9]{0,40}$/.test(ctor) ? `[${ctor}]` : '[object]'
   }
   return value
 }

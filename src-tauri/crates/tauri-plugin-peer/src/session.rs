@@ -38,9 +38,25 @@ use crate::role::Role;
 pub const PEER_ALPN: &[u8] = b"one.paper.reader/peer/1";
 const HELLO_TIMEOUT: Duration = Duration::from_secs(15);
 const DIAL_TIMEOUT: Duration = Duration::from_secs(30);
-/// Frames the inbox holds before the reader stops pulling from the wire.
-/// QUIC flow control does the rest; nothing is dropped.
+/// Frames the inbox holds before the reader stops pulling from the wire — a
+/// secondary bound that keeps a flood of tiny (even empty) frames from growing
+/// the queue without bound. The byte budget below is the real memory ceiling.
 pub const INBOX_CAP: usize = 4096;
+/// Bytes the inbox holds before the reader stops pulling from the wire. This,
+/// not the frame count, is what bounds memory: at 4096 frames of up to 4 MiB
+/// the old frame-only cap allowed ~16 GiB per session. The reader admits a
+/// frame only while under this budget, so at most `INBOX_BYTE_CAP` plus one
+/// in-flight [`MAX_FRAME`](crate::frame::MAX_FRAME) is ever buffered. QUIC flow
+/// control backpressures the sender; nothing is dropped.
+pub const INBOX_BYTE_CAP: usize = 8 * 1024 * 1024;
+
+/// The most sessions this node keeps open at once, across all peers — a bound
+/// on connections, tasks and file descriptors a flood of dials can spawn.
+pub const MAX_SESSIONS: usize = 256;
+/// The most sessions any one peer may hold. The app opens a single session per
+/// peer; this leaves headroom for a reconnect overlapping a not-yet-reaped drop
+/// while still refusing a peer that tries to spawn many.
+pub const MAX_SESSIONS_PER_PEER: usize = 4;
 
 /// Close codes. The reason string is what both sides act on; the code is
 /// for wire-level bookkeeping.
@@ -57,14 +73,34 @@ pub struct Sessions {
 }
 
 impl Sessions {
-    fn register(&self, make: impl FnOnce(u64) -> Session) -> Arc<Session> {
+    /// Register under the SAME lock acquisition as the capacity check:
+    /// `at_capacity` and a separate insert let two concurrent handshakes both
+    /// pass the check and exceed the caps, so the check-and-insert is one
+    /// critical section and the earlier `at_capacity` calls are cheap
+    /// pre-refusals, not the gate. `Err` hands the constructed session back
+    /// UNREGISTERED, for the caller to close.
+    #[allow(clippy::result_large_err)]
+    fn register_within_caps(
+        &self,
+        peer: EndpointId,
+        make: impl FnOnce(u64) -> Session,
+    ) -> std::result::Result<Arc<Session>, Arc<Session>> {
         let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
         let session = Arc::new(make(id));
-        self.inner
-            .lock()
-            .expect("sessions lock")
-            .insert(id, session.clone());
-        session
+        let mut inner = self.inner.lock().expect("sessions lock");
+        if over_caps(&inner, peer) {
+            return Err(session);
+        }
+        inner.insert(id, session.clone());
+        Ok(session)
+    }
+
+    /// Whether admitting another session for `peer` would break the global or
+    /// per-peer cap. Checked before the handshake completes so a flood of
+    /// dials cannot spawn unbounded sessions.
+    pub fn at_capacity(&self, peer: EndpointId) -> bool {
+        let inner = self.inner.lock().expect("sessions lock");
+        over_caps(&inner, peer)
     }
 
     pub fn get(&self, id: u64) -> Option<Arc<Session>> {
@@ -101,14 +137,29 @@ impl Sessions {
     }
 }
 
+/// The capacity predicate, under the caller's lock — ONE copy, shared by the
+/// cheap pre-refusal and the atomic registration gate so the two cannot drift.
+fn over_caps(inner: &HashMap<u64, Arc<Session>>, peer: EndpointId) -> bool {
+    inner.len() >= MAX_SESSIONS
+        || inner.values().filter(|s| s.peer_id == peer).count() >= MAX_SESSIONS_PER_PEER
+}
+
 // ── a session ─────────────────────────────────────────────────────────────
+
+/// The session's inbox and its running byte total, under one lock so the two
+/// never disagree.
+#[derive(Default)]
+struct Inbox {
+    frames: VecDeque<Bytes>,
+    bytes: usize,
+}
 
 pub struct Session {
     pub id: u64,
     pub peer_id: EndpointId,
     conn: Connection,
     send: tokio::sync::Mutex<SendStream>,
-    inbox: Mutex<VecDeque<Bytes>>,
+    inbox: Mutex<Inbox>,
     space: Notify,
     close_reason: Mutex<Option<String>>,
     finished: AtomicBool,
@@ -153,8 +204,9 @@ impl Session {
     /// Up to `max` frames from the inbox, oldest first. Never waits.
     pub fn drain(&self, max: usize) -> Vec<Bytes> {
         let mut inbox = self.inbox.lock().expect("inbox lock");
-        let n = max.min(inbox.len());
-        let out: Vec<Bytes> = inbox.drain(..n).collect();
+        let n = max.min(inbox.frames.len());
+        let out: Vec<Bytes> = inbox.frames.drain(..n).collect();
+        inbox.bytes -= out.iter().map(Bytes::len).sum::<usize>();
         drop(inbox);
         if n > 0 {
             self.space.notify_one();
@@ -163,7 +215,12 @@ impl Session {
     }
 
     fn inbox_len(&self) -> usize {
-        self.inbox.lock().expect("inbox lock").len()
+        self.inbox.lock().expect("inbox lock").frames.len()
+    }
+
+    /// Bytes currently buffered — the memory this session's inbox holds.
+    fn inbox_bytes(&self) -> usize {
+        self.inbox.lock().expect("inbox lock").bytes
     }
 }
 
@@ -252,6 +309,15 @@ pub(crate) async fn serve(node: Arc<Node>, conn: Connection) {
         refuse("bad-hello");
         return;
     }
+    // A test seam for the forget-vs-admission window (finding H5): pause here,
+    // after the hello and before registration, so a test can forget the peer
+    // in exactly the window the finding describes.
+    #[cfg(test)]
+    node.admit_gate().await;
+    if node.sessions.at_capacity(remote) {
+        conn.close(VarInt::from_u32(CODE_REFUSED), b"too-many-sessions");
+        return;
+    }
     establish(&node, conn, send, recv, remote, role, false, hello).await;
 }
 
@@ -303,10 +369,19 @@ pub async fn connect(node: &Arc<Node>, peer_id: &str, hello: Value) -> Result<u6
             got: role,
         });
     }
-    let session = establish(node, conn, send, recv, id, role, true, hello).await;
+    if node.sessions.at_capacity(id) {
+        conn.close(VarInt::from_u32(CODE_REFUSED), b"too-many-sessions");
+        return Err(Error::TooManySessions);
+    }
+    let session = establish(node, conn, send, recv, id, role, true, hello)
+        .await
+        .ok_or_else(|| Error::SessionRefused("revoked".into()))?;
     Ok(session.id)
 }
 
+/// Register the session and start its loops, unless the peer was forgotten
+/// during the hello window. `None` means the session was refused and its
+/// connection closed; nothing was emitted.
 #[allow(clippy::too_many_arguments)]
 async fn establish(
     node: &Arc<Node>,
@@ -317,17 +392,38 @@ async fn establish(
     role: Role,
     initiator: bool,
     hello: Value,
-) -> Arc<Session> {
-    let session = node.sessions.register(|id| Session {
+) -> Option<Arc<Session>> {
+    let session = match node.sessions.register_within_caps(peer, |id| Session {
         id,
         peer_id: peer,
         conn,
         send: tokio::sync::Mutex::new(send),
-        inbox: Mutex::new(VecDeque::new()),
+        inbox: Mutex::new(Inbox::default()),
         space: Notify::new(),
         close_reason: Mutex::new(None),
         finished: AtomicBool::new(false),
-    });
+    }) {
+        Ok(session) => session,
+        Err(refused) => {
+            /* The atomic gate said no — a racing handshake took the last
+             * slot after this one's early check passed. */
+            refused.close_with("too-many-sessions");
+            return None;
+        }
+    };
+    // Finding H5 — the forget-vs-admission race. `forget_peer` removes the peer
+    // from the store and *then* closes its live sessions. We registered above,
+    // so any concurrent forget either sees this session (and closes it) or has
+    // already removed the peer (and this re-check sees the gap): no interleaving
+    // can leave a live session for a peer forgotten while its hello was in
+    // flight. A stale record captured before the hello no longer decides
+    // admission on its own.
+    let still_trusted = node.peers().get(&peer.to_string()).map(|r| r.role) == Some(role);
+    if !still_trusted {
+        session.close_with("revoked");
+        node.sessions.remove(session.id);
+        return None;
+    }
     let addrs = remote_addrs(node, peer).await;
     let _ = node.peers().touch_seen(&peer.to_string(), addrs);
     node.emit(PeerEvent::SessionOpen(SessionOpen {
@@ -339,21 +435,36 @@ async fn establish(
     }));
     tokio::spawn(reader_loop(node.clone(), session.clone(), recv));
     tokio::spawn(blob_accept_loop(node.clone(), session.clone()));
-    session
+    Some(session)
 }
 
 async fn reader_loop(node: Arc<Node>, session: Arc<Session>, mut recv: RecvStream) {
     loop {
-        while session.inbox_len() >= INBOX_CAP {
-            session.space.notified().await;
+        // Backpressure on *bytes* (the memory bound) and on frame count (a
+        // flood of empty frames). While over budget the reader stops pulling,
+        // and QUIC flow control stalls the sender; nothing is dropped. The
+        // wait also watches the CONNECTION: a peer that fills the inbox and
+        // closes would otherwise park this reader on a notification only a
+        // webview drain sends — and a closed session is never drained — so
+        // reader, connection and inbox bytes all leaked, repeatably.
+        while session.inbox_len() >= INBOX_CAP || session.inbox_bytes() >= INBOX_BYTE_CAP {
+            if session.finished.load(Ordering::SeqCst) || session.conn.close_reason().is_some() {
+                finish(&node, &session);
+                return;
+            }
+            tokio::select! {
+                _ = session.space.notified() => {}
+                _ = session.conn.closed() => {}
+            }
         }
         match read_frame(&mut recv).await {
             Ok(Some(frame)) => {
                 let (count, was_empty) = {
                     let mut inbox = session.inbox.lock().expect("inbox lock");
-                    let was_empty = inbox.is_empty();
-                    inbox.push_back(frame);
-                    (inbox.len(), was_empty)
+                    let was_empty = inbox.frames.is_empty();
+                    inbox.bytes += frame.len();
+                    inbox.frames.push_back(frame);
+                    (inbox.frames.len(), was_empty)
                 };
                 // Edge-triggered: one event when the inbox goes from empty
                 // to non-empty; the webview drains until `recv` is empty.
@@ -365,7 +476,7 @@ async fn reader_loop(node: Arc<Node>, session: Arc<Session>, mut recv: RecvStrea
                 }
             }
             Ok(None) => break,
-            Err(Error::FrameTooLarge(_)) => {
+            Err(Error::FrameTooLarge { .. }) => {
                 session.close_with("frame-too-large");
                 break;
             }
@@ -377,17 +488,24 @@ async fn reader_loop(node: Arc<Node>, session: Arc<Session>, mut recv: RecvStrea
 
 async fn blob_accept_loop(node: Arc<Node>, session: Arc<Session>) {
     while let Ok((send, recv)) = session.conn.accept_bi().await {
-        tokio::spawn(blobs::serve_stream(
-            node.clone(),
-            session.clone(),
-            send,
-            recv,
-        ));
+        // Cap concurrent blob-serve tasks so a peer cannot open unbounded
+        // streams and spawn unbounded tasks/descriptors. Over the cap, the
+        // stream is dropped (reset) rather than served.
+        let Ok(permit) = node.blob_serve_limit.clone().try_acquire_owned() else {
+            drop((send, recv));
+            continue;
+        };
+        let node = node.clone();
+        let session = session.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            blobs::serve_stream(node, session, send, recv).await;
+        });
     }
     finish(&node, &session);
 }
 
-/// Unregister and announce, once.
+/// Unregister, tear the connection down, and announce, once.
 fn finish(node: &Node, session: &Session) {
     if session.finished.swap(true, Ordering::SeqCst) {
         return;
@@ -400,6 +518,13 @@ fn finish(node: &Node, session: &Session) {
         .clone()
         .or_else(|| closed_reason(&session.conn))
         .unwrap_or_else(|| "lost".to_owned());
+    // Close the QUIC connection so the *other* loop riding it — blob-accept
+    // when the control stream ended, or the reader when blob-accept ended —
+    // unblocks and exits too. No connection (and no blob task on it) outlives
+    // its control stream. Idempotent: a prior `close_with` keeps its reason.
+    session
+        .conn
+        .close(VarInt::from_u32(CODE_OK), reason.as_bytes());
     node.emit(PeerEvent::SessionClosed(SessionClosed {
         session_id: session.id,
         reason,
@@ -709,6 +834,147 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("unknown-peer"), "{err}");
+        shelf.close().await;
+        satchel.close().await;
+    }
+
+    #[tokio::test]
+    async fn the_inbox_is_bounded_by_bytes_not_by_frame_count() {
+        // Finding H1: the inbox must be bounded by bytes, not frames. A peer
+        // flooding ~1 MiB frames without the reader draining must not buffer
+        // beyond the byte budget (plus one in-flight frame) — the old 4096
+        // frame-only cap allowed ~16 GiB.
+        let (mut shelf, mut satchel) = linked("sess-inbox-bytes").await;
+        let (shelf_sid, satchel_sid) = open(&mut shelf, &mut satchel).await;
+        let shelf_session = shelf.node.sessions.get(shelf_sid).unwrap();
+
+        const FRAME: usize = 1024 * 1024;
+        const FRAMES: u32 = 24; // 24 MiB — three times the 8 MiB budget
+        let payloads: Vec<Vec<u8>> = (0..FRAMES)
+            .map(|i| {
+                let mut v = vec![0u8; FRAME];
+                v[..4].copy_from_slice(&i.to_be_bytes());
+                v
+            })
+            .collect();
+        let sender = {
+            let satchel_node = satchel.node.clone();
+            let payloads = payloads.clone();
+            tokio::spawn(async move {
+                for p in &payloads {
+                    satchel_node.session_send(satchel_sid, p).await.unwrap();
+                }
+            })
+        };
+
+        // Let the reader fill to the budget and stall on backpressure.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let buffered = shelf_session.inbox_bytes();
+        assert!(
+            buffered <= INBOX_BYTE_CAP + crate::frame::MAX_FRAME as usize,
+            "buffered {buffered} bytes is over the budget plus one frame"
+        );
+        assert!(
+            buffered < (FRAMES as usize) * FRAME,
+            "the reader admitted everything ({buffered}); the cap did nothing"
+        );
+
+        // Drain it all, in order — nothing was dropped.
+        let mut got: Vec<Bytes> = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while got.len() < FRAMES as usize {
+            let batch = shelf.node.session_recv(shelf_sid, 8).unwrap();
+            if batch.is_empty() {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "all frames within 20s"
+                );
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                continue;
+            }
+            got.extend(batch);
+        }
+        sender.await.unwrap();
+        for (i, frame) in got.iter().enumerate() {
+            assert_eq!(frame.len(), FRAME);
+            assert_eq!(u32::from_be_bytes(frame[..4].try_into().unwrap()), i as u32);
+        }
+        shelf.close().await;
+        satchel.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_peer_cannot_open_more_than_its_session_cap() {
+        // Finding H2: a peer must not spawn unbounded sessions. After the
+        // per-peer cap, a further dial is refused.
+        let (shelf, satchel) = linked("sess-cap").await;
+        for _ in 0..MAX_SESSIONS_PER_PEER {
+            connect(&satchel.node, &shelf.id(), Value::Null)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            satchel.node.sessions.for_peer(shelf.node.id()).len(),
+            MAX_SESSIONS_PER_PEER
+        );
+        let err = connect(&satchel.node, &shelf.id(), Value::Null)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err.kind(), "tooManySessions" | "sessionRefused"),
+            "{err}"
+        );
+        assert!(
+            satchel.node.sessions.for_peer(shelf.node.id()).len() <= MAX_SESSIONS_PER_PEER,
+            "the dialer never exceeds its cap"
+        );
+        // Drain the shelf's open events so the drop is quiet.
+        while shelf.node.sessions.all().len() < MAX_SESSIONS_PER_PEER {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        shelf.close().await;
+        satchel.close().await;
+    }
+
+    #[tokio::test]
+    async fn forgetting_during_the_hello_window_leaves_no_live_session() {
+        // Finding H5: forgetting a peer while its hello is in flight — before
+        // any session is registered to close — must still leave no live
+        // session. The re-check after registration is what closes the window.
+        let (mut shelf, satchel) = linked("sess-admit-race").await;
+        let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *shelf.node.admit_hook.lock().expect("admit hook") = Some(crate::node::AdmitGate {
+            reached: reached_tx,
+            release: release_rx,
+        });
+
+        let dial = {
+            let satchel_node = satchel.node.clone();
+            let shelf_id = shelf.id();
+            tokio::spawn(async move { connect(&satchel_node, &shelf_id, Value::Null).await })
+        };
+
+        // The acceptor is paused right before registration: forget the peer in
+        // exactly the window the finding describes, then release.
+        reached_rx.await.unwrap();
+        shelf.node.forget_peer(&satchel.id()).unwrap();
+        release_tx.send(()).unwrap();
+
+        let _ = dial.await.unwrap();
+        assert!(
+            shelf.node.sessions.for_peer(satchel.node.id()).is_empty(),
+            "a forgotten peer keeps no live session on the shelf"
+        );
+        let opened = tokio::time::timeout(Duration::from_millis(400), async {
+            loop {
+                if let PeerEvent::SessionOpen(_) = shelf.next_event().await {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(opened.is_err(), "the shelf never announces an open session");
         shelf.close().await;
         satchel.close().await;
     }

@@ -28,7 +28,8 @@ import { BOOKS_DIR } from './bookFolder'
  * trash (or coming back) and `cards` for the cross-book card list, which is
  * not in any folder.
  */
-export type MutationKind = 'record' | 'marks' | 'cover' | 'content' | 'removed' | 'cards'
+export const MUTATION_KINDS = ['record', 'marks', 'cover', 'content', 'removed', 'cards'] as const
+export type MutationKind = (typeof MUTATION_KINDS)[number]
 
 /**
  * What `begin` hands out and `commit` takes back.
@@ -125,6 +126,17 @@ const BLOB_NAMES: ReadonlySet<string> = new Set([
 ])
 
 /**
+ * The names the kernel's REMOVE primitive accepts (`KernelServices.removeBlob`
+ * — WI-10.2): everything a blob may LAND under, plus the legacy `cover.webp`,
+ * which is read-only on the landing side but still has to be evictable — a
+ * jacket cached before the honest name existed would otherwise be immortal.
+ */
+export type RemovableBlobName = ContentBlobName | 'cover.webp'
+
+/** The closed set behind `RemovableBlobName`, for the runtime check. */
+export const REMOVABLE_BLOB_NAMES: ReadonlySet<string> = new Set([...BLOB_NAMES, 'cover.webp'])
+
+/**
  * The default port, over the app's data root.
  *
  * `root` is a string rather than resolved here because the kernel cannot
@@ -134,8 +146,16 @@ const BLOB_NAMES: ReadonlySet<string> = new Set([
  * root asks Rust (`paper_data_root`) once and hands the answer here.
  */
 export function contentBlobPort(root: string): ContentBlobPort {
-  if (typeof root !== 'string' || root === '') throw new Error('ContentBlobPort: root must be a path')
+  /* ABSOLUTE, as the contract says: the root is Rust's answer for the data
+   * directory, and a relative or blank one would silently anchor every
+   * target to whatever the working directory happens to be. Stripping the
+   * trailing separators must also not strip the answer to nothing — a root
+   * of "/" would have. */
+  if (typeof root !== 'string' || (!root.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(root))) {
+    throw new Error('ContentBlobPort: root must be an absolute path')
+  }
   const base = root.replace(/[\\/]+$/, '')
+  if (base === '') throw new Error('ContentBlobPort: root must name a directory, not the filesystem root')
   return {
     root: () => base,
     target: (folder, name) => {
@@ -212,6 +232,13 @@ export function defineSetting<T>(
   fallback: T,
   parse: (raw: unknown) => T | undefined,
 ): Setting<T> {
+  /* The template type accepts `.theme`, `kernel.` and `.` — an empty owner
+   * or an empty name — and an unowned key is exactly what the namespace
+   * wrappers cannot scope. Refused here, where every setting is minted. */
+  const dot = key.indexOf('.')
+  if (dot < 1 || dot === key.length - 1) {
+    throw new Error(`defineSetting: ${JSON.stringify(key)} must be "<namespace>.<name>", both non-empty`)
+  }
   return { key, fallback, parse }
 }
 

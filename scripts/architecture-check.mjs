@@ -8,6 +8,13 @@ import { isProcessEntry } from './lib/entry.mjs'
  * `pnpm architecture:check` — validate `capabilities.manifest.json` against
  * the rules in `scripts/lib/architecture.mjs` and the repository tree.
  *
+ * SCOPE, stated so it is not mistaken for more: this checks the manifest's own
+ * consistency (ids, `requires`, platforms, permissions) and that each `ts`
+ * directory exists with an `index`. It does NOT check that the platform
+ * compositions, `Cargo.toml`, `lib.rs` or the ACL grants actually MATCH the
+ * manifest — that drift is `pnpm compositions:check`, and `pnpm verify` runs
+ * both. A manifest that passes here can still disagree with the code.
+ *
  * A thin shell: read the file, hand the text to the library, print one line
  * per finding and a summary. Exit 0 when clean, 1 when there are findings,
  * 2 for a usage error. The rules and their tests live in the library; this
@@ -33,7 +40,9 @@ function parseArgs(argv, cwd) {
       i++
       continue
     }
-    return { error: `unknown argument ${JSON.stringify(arg)}` }
+    /* JSON.stringify escapes C0 but not C1 or U+2028/29 — strip them so a
+     * crafted argument cannot corrupt the terminal this errors to. */
+    return { error: `unknown argument ${JSON.stringify(arg).replace(/[\u007f-\u009f\u2028\u2029]/g, '')}` }
   }
   return { root: root ?? REPO_ROOT }
 }
@@ -64,7 +73,7 @@ function main(argv) {
   const { manifest, findings } = check(args.root)
   const lines = findings.map((f) => `${f.code} ${f.path === '' ? '(root)' : escapeControls(f.path)}: ${f.message}`)
   const count = Array.isArray(manifest?.capabilities) ? manifest.capabilities.length : 0
-  lines.push(`architecture-check: ${count} capabilities, ${findings.length} findings`)
+  lines.push(`architecture-check: ${count} capabilities, ${findings.length} findings (manifest + tree; composition/Cargo/ACL drift is compositions:check)`)
   process.stdout.write(`${lines.join('\n')}\n`)
   return findings.length > 0 ? 1 : 0
 }

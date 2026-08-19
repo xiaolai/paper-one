@@ -13,11 +13,10 @@ import viteConfig from './vite.config'
  *
  * Add a project here when a plan item lands its first test file there; add the
  * matching `exclude` to whichever broader project would otherwise also match
- * it. `passWithNoTests` is set because several projects are declared before
- * they have a file (`kernel-contract` lands with WI-5.5, `capabilities`,
- * `composition-contract` and `service-envelope` with WI-5.6): an empty project
- * must not fail the run, and `vitest run --project <name>` on one must not
- * either. `test:projects` is what stops that from hiding a project whose glob
+ * it. Every project has files now; `passWithNoTests` stays because
+ * `pnpm verify:without <id>` runs this config over a tree with a capability
+ * removed — a project emptied by the removal must not fail that run.
+ * `test:projects` is what stops the flag from hiding a project whose glob
  * has drifted away from its files.
  *
  * Environment is Node everywhere, deliberately: several kernel tests assert
@@ -60,9 +59,7 @@ const PROJECTS: readonly Project[] = [
  * vanish from the total; without it a source area no project reaches reports
  * nothing and drags nothing down.
  *
- * `include` names source areas, not test areas: `src/capabilities/**` and
- * `src/app/**` are listed before they exist (WI-5.6) so their first file is
- * measured from the day it lands. Test files, test kits, self-tests, the
+ * `include` names source areas, not test areas. Test files, test kits, self-tests, the
  * Vite entry and the emitted `.types/` declarations are excluded because a
  * test's own lines being "covered" is not information.
  *
@@ -122,6 +119,12 @@ export default mergeConfig(
   defineConfig({
     test: {
       passWithNoTests: true,
+      // 15s, not the 5s default: v8 coverage instrumentation makes tests 3–5×
+      // slower, and a handful of compute-heavy ones (large-buffer hashing in
+      // marks, a deep requires-graph in the architecture validator) can exceed
+      // 5s under `--coverage` on a loaded or slow CI runner. Still fast enough
+      // to catch a genuine hang.
+      testTimeout: 15000,
       coverage: {
         provider: 'v8',
         all: true,

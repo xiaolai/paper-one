@@ -51,8 +51,12 @@ function parseArgs(argv, cwd) {
 export function readOrNull(root, rel) {
   try {
     return readFileSync(path.join(root, rel), 'utf8')
-  } catch {
-    return null
+  } catch (error) {
+    /* ONLY absence is null. A permission or I/O failure reported as
+     * "missing" lets a check quietly skip a file that exists — and lets a
+     * removal treat unreadable state as already-clean. */
+    if (error && error.code === 'ENOENT') return null
+    throw error
   }
 }
 

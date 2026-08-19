@@ -110,12 +110,27 @@ export function createDevicesModel({
     )
   }
 
+  /* Refreshes overlap — a listener fires one while a command's own refresh
+   * is in flight — and they can resolve out of order; only the NEWEST may
+   * publish, or an older peer list overwrites a newer one. */
+  let refreshGeneration = 0
+  /* One generation for every pairing-shaped operation (begin, pair-by-code,
+   * cancel): whichever started LAST owns the next publish, and a disposal
+   * bumps it so nothing publishes into a dead model. */
+  let beginGeneration = 0
+  let disposed = false
+  /* Attempts whose confirmation is already in flight — a second click on
+   * the same attempt must not race the first and overwrite its outcome. */
+  const confirming = new Set<string>()
   const refresh = async (): Promise<void> => {
     if (!port) return
+    const mine = ++refreshGeneration
     try {
       const [status, peers] = await Promise.all([port.status(), port.listPeers()])
+      if (mine !== refreshGeneration) return
       publish({ role: status.role, endpointId: status.endpointId, peers, error: null })
     } catch (thrown) {
+      if (mine !== refreshGeneration) return
       publish({ error: said(thrown) })
     }
   }
@@ -128,44 +143,95 @@ export function createDevicesModel({
     },
     refresh,
     beginPairing: async (name) => {
-      if (!port) return
+      if (!port || disposed) return
+      /* Generation-tokened like refresh: two overlapping begins resolve in
+       * either order, and only the NEWEST may publish its offer — the older
+       * one's QR is already replaced on the backend. Beginning a NEW attempt
+       * legitimately clears a previous attempt's result and SAS — refusing
+       * to publish while `lastResult` was set left every later begin with a
+       * live backend attempt and no visible QR. Only a confirmation the
+       * human is mid-way through (`pending`) may not be stomped. */
+      const mine = ++beginGeneration
       try {
-        publish({ offer: await port.pairBegin(name), lastResult: null, error: null })
+        const offer = await port.pairBegin(name)
+        if (mine !== beginGeneration || disposed) return
+        if (snapshot.pending === null) {
+          publish({ offer, lastResult: null, sas: null, error: null })
+        }
       } catch (thrown) {
+        if (mine !== beginGeneration || disposed) return
         publish({ error: said(thrown) })
       }
     },
     cancelPairing: async () => {
-      if (!port) return
-      await port.pairCancel().catch(() => {})
-      publish({ offer: null, pending: null, sas: null })
-    },
-    confirmPairing: async (accept) => {
-      if (!port) return
+      if (!port || disposed) return
+      /* Cancelling supersedes any begin still in flight — its offer must
+       * not re-appear after this clears the pane. */
+      const mine = ++beginGeneration
       try {
-        await port.pairConfirm(accept, accept ? OWN_DEVICE_GRANTS : undefined)
-        publish({ pending: null, offer: null, error: null })
-        await refresh()
+        await port.pairCancel()
+        if (mine !== beginGeneration || disposed) return
+        publish({ offer: null, pending: null, sas: null, error: null })
       } catch (thrown) {
+        /* The native attempt may still be live — saying "stopped" while it
+         * runs would be a lie. Keep the state, show the failure. */
+        if (mine !== beginGeneration || disposed) return
         publish({ error: said(thrown) })
       }
     },
-    pairWithCode: async (uri) => {
+    confirmPairing: async (accept) => {
       if (!port) return
+      /* Bind the confirmation to the attempt the human is looking at, so a
+       * pre-played QR that started a different attempt cannot be confirmed
+       * by this click. CAPTURED FIRST and REQUIRED: with no pending attempt
+       * there is nothing this click can honestly approve, and an id-less
+       * confirmation would fall back to Rust's unbound legacy path. */
+      const pending = snapshot.pending
+      if (!pending) {
+        publish({ error: 'nothing is pending confirmation' })
+        return
+      }
+      /* One confirmation per attempt: a double-click's second call would
+       * race the first and could overwrite its success with a refusal. */
+      if (confirming.has(pending.attemptId)) return
+      confirming.add(pending.attemptId)
+      try {
+        await port.pairConfirm(accept, accept ? OWN_DEVICE_GRANTS : undefined, pending.attemptId)
+        if (disposed) return
+        /* Clear only what this click confirmed — a NEWER attempt that arrived
+         * while the confirmation was in flight stays pending. */
+        if (snapshot.pending === null || snapshot.pending.attemptId === pending.attemptId) {
+          publish({ pending: null, offer: null, error: null })
+        }
+        await refresh()
+      } catch (thrown) {
+        if (!disposed) publish({ error: said(thrown) })
+      } finally {
+        confirming.delete(pending.attemptId)
+      }
+    },
+    pairWithCode: async (uri) => {
+      if (!port || disposed) return
+      /* Same ordering rule as beginPairing: only the newest attempt's SAS
+       * may land. */
+      const mine = ++beginGeneration
       try {
         const start = await port.pairFromUri(uri.trim(), undefined, OWN_DEVICE_GRANTS)
+        if (mine !== beginGeneration || disposed) return
         publish({ sas: start.sas, lastResult: null, error: null })
       } catch (thrown) {
+        if (mine !== beginGeneration || disposed) return
         publish({ error: said(thrown) })
       }
     },
     forget: async (id) => {
-      if (!port) return
+      if (!port || disposed) return
       try {
         await port.forgetPeer(id)
+        if (disposed) return
         await refresh()
       } catch (thrown) {
-        publish({ error: said(thrown) })
+        if (!disposed) publish({ error: said(thrown) })
       }
     },
     setLocalOnly: (on) => {
@@ -173,6 +239,11 @@ export function createDevicesModel({
       publish({ localOnly: on })
     },
     dispose: () => {
+      /* Invalidate everything in flight: a command resolving after this
+       * must neither publish nor start follow-up IPC. */
+      disposed = true
+      beginGeneration++
+      refreshGeneration++
       for (const off of offs.splice(0)) off()
       listeners.clear()
     },

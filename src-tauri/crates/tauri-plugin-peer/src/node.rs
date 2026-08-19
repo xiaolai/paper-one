@@ -5,15 +5,16 @@
 //! process (`RelayMode::Disabled`, no discovery, scratch data roots).
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
 use iroh::endpoint::{presets, Connection, VarInt};
 use iroh::{Endpoint, EndpointId, RelayMode};
+use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
-use crate::blobs::Transfers;
+use crate::blobs::{Transfers, MAX_BLOB_STREAMS};
 use crate::error::{Error, Result};
 use crate::events::{EventSink, PeerEvent};
 use crate::identity;
@@ -70,6 +71,11 @@ impl NodeConfig {
     }
 }
 
+/// The default idle deadline for a blob body: if no byte moves on the transfer
+/// stream within this window the stalled peer is dropped (finding H2). Held as
+/// milliseconds so a test can shorten it.
+const BLOB_IDLE_TIMEOUT_MS: u64 = 60_000;
+
 pub struct Node {
     root: PathBuf,
     role: Role,
@@ -78,10 +84,31 @@ pub struct Node {
     pub(crate) pairing: PairingState,
     pub(crate) sessions: Sessions,
     pub(crate) transfers: Transfers,
+    /// Caps concurrent blob-serve tasks so a peer cannot open unbounded streams.
+    pub(crate) blob_serve_limit: Arc<Semaphore>,
+    /// Idle deadline (ms) for a blob body transfer.
+    blob_idle_timeout_ms: AtomicU64,
     ready: AtomicBool,
     sink: EventSink,
     pub(crate) confirm_timeout: Duration,
     accept_task: Mutex<Option<JoinHandle<()>>>,
+    /// Test seam for the forget-vs-admission window (finding H5): if set, the
+    /// acceptor pauses right before registering a session.
+    #[cfg(test)]
+    pub(crate) admit_hook: Mutex<Option<AdmitGate>>,
+    /// Test seam for the blob-body idle deadline (finding H2): if set, the
+    /// server pauses after sending the header so a fetch can idle out.
+    #[cfg(test)]
+    pub(crate) serve_body_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+}
+
+/// A one-shot admission gate for the finding-H5 test: the acceptor signals
+/// `reached` when it arrives at the pre-registration point, then waits on
+/// `release` so the test can forget the peer inside that window.
+#[cfg(test)]
+pub(crate) struct AdmitGate {
+    pub reached: tokio::sync::oneshot::Sender<()>,
+    pub release: tokio::sync::oneshot::Receiver<()>,
 }
 
 impl std::fmt::Debug for Node {
@@ -134,10 +161,16 @@ impl Node {
             pairing: PairingState::default(),
             sessions: Sessions::default(),
             transfers: Transfers::default(),
+            blob_serve_limit: Arc::new(Semaphore::new(MAX_BLOB_STREAMS)),
+            blob_idle_timeout_ms: AtomicU64::new(BLOB_IDLE_TIMEOUT_MS),
             ready: AtomicBool::new(false),
             sink: config.sink,
             confirm_timeout: config.confirm_timeout,
             accept_task: Mutex::new(None),
+            #[cfg(test)]
+            admit_hook: Mutex::new(None),
+            #[cfg(test)]
+            serve_body_gate: Mutex::new(None),
         });
         let task = tokio::spawn(accept_loop(Arc::downgrade(&node), endpoint));
         *node.accept_task.lock().expect("accept task lock") = Some(task);
@@ -158,6 +191,29 @@ impl Node {
 
     pub fn endpoint(&self) -> &Endpoint {
         &self.endpoint
+    }
+
+    /// The idle deadline for a blob body transfer.
+    pub(crate) fn blob_idle_timeout(&self) -> Duration {
+        Duration::from_millis(self.blob_idle_timeout_ms.load(Ordering::Relaxed))
+    }
+
+    /// Shorten the blob-body idle deadline so a test does not wait a minute.
+    #[cfg(test)]
+    pub(crate) fn set_blob_idle_timeout(&self, timeout: Duration) {
+        self.blob_idle_timeout_ms
+            .store(timeout.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// The finding-H5 admission gate: if a test armed it, signal that the
+    /// acceptor reached the pre-registration point and wait for release.
+    #[cfg(test)]
+    pub(crate) async fn admit_gate(&self) {
+        let gate = self.admit_hook.lock().expect("admit hook").take();
+        if let Some(gate) = gate {
+            let _ = gate.reached.send(());
+            let _ = gate.release.await;
+        }
     }
 
     pub(crate) fn emit(&self, event: PeerEvent) {
@@ -333,9 +389,13 @@ pub(crate) mod testkit {
                 .expect("event channel open")
         }
 
-        /// The next event of a kind, skipping others, within two seconds.
+        /// The next event of a kind, skipping others. The deadline is a
+        /// BACKSTOP against a hang, not an assertion of speed: at two
+        /// seconds the hundred-attempt pairing test flaked under a full
+        /// `cargo test --workspace` run, where every crate's tests contend
+        /// for the same cores.
         pub async fn next_event_where(&mut self, pred: impl Fn(&PeerEvent) -> bool) -> PeerEvent {
-            tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::time::timeout(Duration::from_secs(30), async {
                 loop {
                     let event = self.events.recv().await.expect("event channel open");
                     if pred(&event) {
@@ -344,7 +404,7 @@ pub(crate) mod testkit {
                 }
             })
             .await
-            .expect("a matching event within 2s")
+            .expect("a matching event within 30s")
         }
 
         pub async fn close(self) {

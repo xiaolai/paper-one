@@ -109,9 +109,18 @@ export function removeFromComposition(source, dir) {
   } else rebuilt = kept.join(', ')
   text = text.slice(0, array.open + 1) + rebuilt + text.slice(array.close)
 
+  /* String literals masked line-bounded (see `maskStrings`' rationale):
+   * a UI label MENTIONING a capability's name must not refuse its removal. */
+  /* Plain strings only: a TEMPLATE literal may interpolate the binding,
+   * which is an executable reference masking would hide — templates stay
+   * visible, at the cost of refusing on template prose. */
   const code = stripComments(text)
+    .replace(/'(?:[^'\\\n]|\\.)*'/g, "''")
+    .replace(/"(?:[^"\\\n]|\\.)*"/g, '""')
   for (const name of names) {
-    if (new RegExp(`\\b${escapeRegExp(name)}\\b`).test(code)) {
+    /* Identifier-aware boundaries: `\b` sits between word and non-word, so
+     * a name starting `$` matched nothing and a residual `$cap` survived. */
+    if (new RegExp(`(?<![\\w$])${escapeRegExp(name)}(?![\\w$])`).test(code)) {
       throw new RemovalRefused(`composition still references ${JSON.stringify(name)} after removing its import and array element; edit it by hand`)
     }
   }
@@ -260,8 +269,9 @@ function trimEnd(text, at) {
  */
 export function removeJsonElements(text, array, indices) {
   const drop = new Set(indices)
+  if (drop.size === 0) return text
   const { elements, open, close } = array
-  const survivors = elements.map((e, i) => i).filter((i) => !drop.has(i))
+  const survivors = [...elements.keys()].filter((i) => !drop.has(i))
   if (survivors.length === 0) return text.slice(0, open + 1) + text.slice(close)
   // Rebuilt from the survivors: the gap after `[`, each survivor followed by
   // the separator that followed it originally (whether or not its original
@@ -300,22 +310,21 @@ export function removeManifestEntry(text, id) {
 }
 
 /**
- * Take every grant under `namespace:` (`peer:default`, `peer:allow-status`)
- * out of an ACL capability file, whether written as a string or as an
- * object with `identifier`. `{ text, changed, removed }`.
+ * Take the ACL grants a `predicate` selects out of an ACL capability file,
+ * whether each is written as a bare string or an object with `identifier`.
+ * `{ text, changed, removed }`.
  */
-export function removeAclGrants(text, namespace) {
+function removeAclWhere(text, predicate) {
   const json = JSON.parse(text)
   if (!Array.isArray(json.permissions)) return { text, changed: false, removed: [] }
   const array = findJsonArray(text, 'permissions')
   if (array === null || array.elements.length !== json.permissions.length) throw new RemovalRefused('cannot locate the permissions array in the ACL text')
-  const prefix = `${namespace}:`
   const identifierOf = (item) => (typeof item === 'string' ? item : item && typeof item.identifier === 'string' ? item.identifier : null)
   const indices = []
   const removed = []
   json.permissions.forEach((item, i) => {
     const identifier = identifierOf(item)
-    if (identifier !== null && identifier.startsWith(prefix)) {
+    if (identifier !== null && predicate(identifier)) {
       indices.push(i)
       removed.push(identifier)
     }
@@ -325,6 +334,27 @@ export function removeAclGrants(text, namespace) {
   const expected = { ...json, permissions: json.permissions.filter((_, i) => !indices.includes(i)) }
   if (JSON.stringify(JSON.parse(out)) !== JSON.stringify(expected)) throw new RemovalRefused('ACL edit did not produce the expected document; refusing to write')
   return { text: out, changed: true, removed }
+}
+
+/**
+ * Take every grant under `namespace:` (`peer:default`, `peer:allow-status`)
+ * out of an ACL capability file. `{ text, changed, removed }`.
+ */
+export function removeAclGrants(text, namespace) {
+  const prefix = `${namespace}:`
+  return removeAclWhere(text, (identifier) => identifier.startsWith(prefix))
+}
+
+/**
+ * Take the EXACT grant identifiers `wanted` out of an ACL capability file —
+ * for removal driven by a manifest's declared `permissions`, where the ACL
+ * namespace (`peer`) is not the crate name (`tauri-plugin-peer`) and a prefix
+ * guessed from the crate would miss the grant entirely.
+ * `{ text, changed, removed }`.
+ */
+export function removeAclIdentifiers(text, wanted) {
+  const set = new Set(wanted)
+  return removeAclWhere(text, (identifier) => set.has(identifier))
 }
 
 /* ------------------------------------------------------------- Cargo.toml */
@@ -374,7 +404,16 @@ export function removeCargoDependency(text, depName) {
  */
 function rewriteFeatureLine(line, gone) {
   const [code, comment] = splitComment(line)
-  const tokens = [...code.matchAll(/"(?:[^"\\]|\\.)*"|'[^']*'/g)]
+  /* Items live to the RIGHT of the assignment: a quoted feature key
+   * (`"my-feature" = [...]`) is syntax, and tokenizing it as an item once
+   * deleted the key and left invalid TOML. */
+  const eq = assignmentEq(code)
+  const value = eq === -1 ? code : code.slice(eq)
+  const offset = eq === -1 ? 0 : eq
+  const tokens = [...value.matchAll(/"(?:[^"\\]|\\.)*"|'[^']*'/g)].map((t) => {
+    t.index += offset
+    return t
+  })
   if (tokens.length === 0) return line
   const values = tokens.map((t) => (t[0].startsWith('"') ? JSON.parse(t[0]) : t[0].slice(1, -1)))
   if (!values.some((v) => gone.has(v))) return line
@@ -386,7 +425,10 @@ function rewriteFeatureLine(line, gone) {
     // trailing comment goes with it — it was about them. A bracket or other
     // code after them stays.
     suffix = suffix.replace(/^\s*,\s*/, '')
-    if (suffix.trim() === '') return null
+    /* Deleted only when NOTHING structural was on it: a prefix like `f = [`
+     * is the assignment's opening syntax, and deleting its line leaves
+     * invalid TOML behind. */
+    if (suffix.trim() === '' && prefix.trim() === '') return null
     return `${prefix}${suffix}${comment}`.replace(/\s+$/, '')
   }
   return `${prefix}${kept.join(', ')}${suffix}${comment}`.replace(/\s+$/, '')
@@ -418,11 +460,15 @@ export function removePluginRegistration(source, name) {
   let changed = false
 
   for (;;) {
-    const at = lines.findIndex((line) => call.test(splitRustComment(line)))
+    const at = lines.findIndex((line) => call.test(maskStrings(splitRustComment(line))))
     if (at === -1) break
     changed = true
     const line = lines[at]
-    const own = new RegExp(`^(\\s*)${call.source}\\s*(;?)\\s*$`).exec(line)
+    /* Judged comment-free AND string-masked: a trailing note must not hide
+     * the own-line shape, and a log line QUOTING the call must not be
+     * edited as if it were the call — masked, it never matches, and the
+     * residual-reference refusal below answers for it instead. */
+    const own = new RegExp(`^(\\s*)${call.source}\\s*(;?)\\s*$`).exec(maskStrings(splitRustComment(line)))
     let statementGone = -1 // index of a whole statement removed (case S)
     if (own) {
       const from = commentRunAbove(lines, at, isComment)
@@ -431,12 +477,22 @@ export function removePluginRegistration(source, name) {
       let prev = from - 1
       if (semicolon) {
         if (prev < 0) throw new RemovalRefused('lib.rs: a chained .plugin() call with nothing before it')
-        if (isSelfAssignment(`${lines[prev]};`)) statementGone = prev
-        else lines[prev] = `${lines[prev]};`
+        /* Code and trailing comment are judged — and edited — apart: the
+         * comment hid `builder = builder` from the self-assignment check,
+         * and appending `;` after it put the semicolon inside the comment. */
+        const code = splitRustComment(lines[prev])
+        const comment = lines[prev].slice(code.length).trim()
+        if (isSelfAssignment(`${code.trimEnd()};`)) statementGone = prev
+        else lines[prev] = comment === '' ? `${lines[prev]};` : `${code.trimEnd()}; ${comment}`
       }
     } else {
-      const rewritten = line.replace(call, '')
-      if (isSelfAssignment(rewritten)) statementGone = at
+      /* Spliced by the MASKED match's indexes: a raw `replace` would hit a
+       * quoted decoy earlier on the same line and edit prose instead of the
+       * call. The mask is length-preserving, so the indexes line up. */
+      const found = call.exec(maskStrings(splitRustComment(line)))
+      const rewritten =
+        found === null ? line.replace(call, '') : line.slice(0, found.index) + line.slice(found.index + found[0].length)
+      if (isSelfAssignment(splitRustComment(rewritten))) statementGone = at
       else lines[at] = rewritten
     }
     if (statementGone !== -1) {
@@ -458,18 +514,58 @@ export function removePluginRegistration(source, name) {
     }
     lines = collapseBlankRuns(lines)
   }
-  if (!changed) return { text: source, changed: false }
+  if (!changed) {
+    /* No single-line registration matched — but the crate may still be
+     * referenced in a shape this tool cannot edit (a multi-line
+     * `.plugin(...)`, a `use`). Returning `changed: false` here once let a
+     * caller prune the crate while its registration stayed live; a
+     * reference it cannot remove is a refusal. String literals are masked
+     * first — a log line MENTIONING the crate is prose, not a reference. */
+    if (new RegExp(`(?<![\\w$])${escapeRegExp(name)}(?![\\w$])`).test(maskStrings(stripComments(source)))) {
+      throw new RemovalRefused(`lib.rs references ${name} in a shape this tool cannot edit (a multi-line .plugin(...) call, a use, or another call); edit it by hand`)
+    }
+    return { text: source, changed: false }
+  }
   const text = lines.join('\n')
-  if (new RegExp(`\\b${escapeRegExp(name)}\\b`).test(stripComments(text))) {
+  if (new RegExp(`(?<![\\w$])${escapeRegExp(name)}(?![\\w$])`).test(maskStrings(stripComments(text)))) {
     throw new RemovalRefused(`lib.rs still references ${name} after removing its .plugin() registration (a \`use\`, or another call); edit it by hand`)
   }
   return { text, changed: true }
 }
 
-/** `x = x;` — what a builder statement becomes when its only call goes. */
+/** `x = x;` — what a builder statement becomes when its only call goes.
+ *  Callers hand this COMMENT-FREE text (`splitRustComment`), or a trailing
+ *  comment would hide the very statement this exists to catch. */
 function isSelfAssignment(line) {
   const m = /^\s*([A-Za-z_][\w]*)\s*=\s*([A-Za-z_][\w]*)\s*;\s*$/.exec(line)
   return m !== null && m[1] === m[2]
+}
+
+/** The index of the first `=` OUTSIDE any quoted string — a quoted TOML key
+ *  may itself contain one (`"a=b" = [...]`). -1 when the line assigns
+ *  nothing. */
+function assignmentEq(code) {
+  let quote = null
+  for (let i = 0; i < code.length; i++) {
+    const c = code[i]
+    if (quote !== null) {
+      if (c === '\\' && quote === '"') i++
+      else if (c === quote) quote = null
+      continue
+    }
+    if (c === '"' || c === "'") quote = c
+    else if (c === '=') return i
+  }
+  return -1
+}
+
+/** Line-bounded string literals blanked, so a name inside prose cannot pass
+ *  for a code reference. Bounded per line on purpose: an unpaired quote (a
+ *  char literal, an apostrophe) must not swallow the lines after it. */
+function maskStrings(text) {
+  /* LENGTH-PRESERVING: callers match against the masked text and edit the
+   * RAW text by the match's indexes, so every character must stay put. */
+  return text.replace(/"(?:[^"\\\n]|\\.)*"/g, (m) => `"${' '.repeat(m.length - 2)}"`)
 }
 
 /** A Rust line without its `//` comment (strings respected). */
@@ -484,6 +580,12 @@ function splitRustComment(line) {
     }
     if (c === '"') quote = true
     else if (c === '/' && line[i + 1] === '/') return line.slice(0, i)
+    else if (c === '/' && line[i + 1] === '*') {
+      /* A trailing single-line block comment hides code state the same way
+       * `//` does; one that does not close on this line is treated the
+       * same — the caller judges the code before it. */
+      return line.slice(0, i)
+    }
   }
   return line
 }

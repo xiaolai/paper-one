@@ -27,6 +27,10 @@ async function world() {
       removed.push(book)
       const folder = `book_${book.slice('book:'.length)}`
       await fs.remove(`books/${folder}/content.epub`)
+      /* The ACTION owns the size row (`removeDownloadAction` drops it after
+       * the ledger delete) — this fake mirrors that ownership, and the model
+       * must not drop it a second time. */
+      await dropDownloadSize(fs, book)
       await services.library.refreshContent(book)
     },
   })
@@ -55,7 +59,7 @@ describe('the storage model', () => {
     expect(rows.find((r) => r.book === 'book:b')?.size).toBeNull()
   })
 
-  it('remove download delegates, drops the ledger row, and refreshes', async () => {
+  it('remove download delegates — the action owns the ledger row — and refreshes', async () => {
     const w = await world()
     await w.seed('book:a', true)
     await recordDownloadSize(w.fs, 'book:a', 12345)

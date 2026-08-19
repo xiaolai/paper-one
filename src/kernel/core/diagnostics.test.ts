@@ -26,12 +26,11 @@ describe('redact', () => {
     }
     const out = redact(fields)
     for (const key of Object.keys(fields)) {
-      if (key === 'secrets') continue
       expect(out[key], key).toBe(REDACTED)
     }
-    // `secrets` is not `secret`: the rule is words, not stems. Named so nobody
-    // "fixes" it into a substring match by accident — see the next case.
-    expect(out['secrets']).toBe(12)
+    // `secrets` IS redacted: a trailing-`s` plural counts as its singular. This
+    // stays a word rule, not a substring one — the next case proves `peerless`
+    // and friends (which merely end in `s`) are left alone.
   })
 
   it('leaves a key that merely contains a reserved word alone', () => {
@@ -45,8 +44,8 @@ describe('redact', () => {
     })
   })
 
-  it('walks arrays and plain objects, and passes other values through', () => {
-    const error = new Error('boom')
+  it('walks arrays and plain objects, reduces an Error to its type, and passes other values through', () => {
+    const error = new Error('a line of the book leaked into a throw')
     const date = new Date(0)
     const out = redact({
       list: [{ token: 'x', n: 1 }, 'plain', 2],
@@ -57,10 +56,43 @@ describe('redact', () => {
     expect(out).toEqual({
       list: [{ token: REDACTED, n: 1 }, 'plain', 2],
       deep: { a: { b: { peer: REDACTED, keep: true } } },
-      error,
+      // The Error's message — which could be book text or a secret — is gone;
+      // only its type survives.
+      error: '[Error]',
       date,
     })
-    expect(out['error']).toBe(error)
+  })
+
+  it('splits acronym boundaries, so APIKey and JWTToken cannot sail past the list', () => {
+    const out = redact({ APIKey: 'k', JWTToken: 't', HTTPAuthorization: 'a', APIVersion: 3 })
+    expect(out['APIKey']).toBe(REDACTED)
+    expect(out['JWTToken']).toBe(REDACTED)
+    expect(out['HTTPAuthorization']).toBe(REDACTED)
+    // A benign acronym compound is untouched.
+    expect(out['APIVersion']).toBe(3)
+  })
+
+  it("keeps an Error's name only when it is shaped like a type", () => {
+    const hostile = new Error('x')
+    hostile.name = 'the secret is hunter2'
+    expect(redact({ hostile })['hostile']).toBe('[Error]')
+    class CapabilityError extends Error {
+      override name = 'CapabilityError'
+    }
+    expect(redact({ typed: new CapabilityError('y') })['typed']).toBe('[CapabilityError]')
+  })
+
+  it('reduces containers it cannot walk — a Map, a Set, a class instance — to their type', () => {
+    class Session {
+      token = 'secret'
+    }
+    const out = redact({
+      map: new Map([['token', 'secret']]),
+      set: new Set(['secret']),
+      bytes: new Uint8Array([1, 2, 3]),
+      instance: new Session(),
+    })
+    expect(out).toEqual({ map: '[Map]', set: '[Set]', bytes: '[Uint8Array]', instance: '[Session]' })
   })
 
   it('bounds the depth it walks, so a cycle cannot hang the logger', () => {

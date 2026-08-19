@@ -1,6 +1,7 @@
 import type {
   BookAction,
   Capability,
+  CapabilityContext,
   ClientContribution,
   Command,
   CommandContext,
@@ -10,6 +11,7 @@ import type {
   ServiceContribution,
   SettingsSection,
 } from './capability'
+import type { SettingsStore } from './ports'
 import type { KernelServices } from './services'
 import { isKernelPaneId, type ContributedPaneId, type PaneId } from './uiTypes'
 
@@ -86,6 +88,143 @@ export interface Composition extends Contributions, Disposable {
 /** The `KernelApi` for a set of services — the same store and diagnostics they hold. */
 export function kernelApi(services: KernelServices): KernelApi {
   return { services, settings: services.settings, diagnostics: services.diagnostics }
+}
+
+/**
+ * A capability's own view of the settings store: reads and writes must name a
+ * key in its `<id>.` namespace, and `getSnapshot` shows only that namespace.
+ *
+ * Namespacing was a naming convention the boundaries could not enforce — a
+ * capability could `defineSetting('other.secret')` and read or overwrite it,
+ * or `getSnapshot()` the lot. This makes the convention an invariant at the
+ * one seam a capability reaches the store through, the same way its
+ * `Diagnostics` is already scoped to its id. The kernel's own settings pane
+ * reads the unscoped store, so nothing it draws changes.
+ */
+export function scopeSettings(store: SettingsStore, capId: string): SettingsStore {
+  const prefix = `${capId}.`
+  const guard = (key: string): void => {
+    if (!key.startsWith(prefix)) {
+      throw invalid('namespace', capId, `capability "${capId}" may only touch settings under "${prefix}", not ${JSON.stringify(key)}`)
+    }
+  }
+  /* The filtered snapshot is CACHED on the underlying snapshot's identity:
+   * `getSnapshot` is the `useSyncExternalStore` read, and that contract is
+   * "the same object until the store changed" — a fresh object per call is
+   * an every-render change, which is a render loop. */
+  let seen: Readonly<Record<string, unknown>> | null = null
+  let mine: Readonly<Record<string, unknown>> = {}
+  return {
+    get: (setting) => {
+      guard(setting.key)
+      return store.get(setting)
+    },
+    set: (setting, value) => {
+      guard(setting.key)
+      store.set(setting, value)
+    },
+    subscribe: (listener) => store.subscribe(listener),
+    getSnapshot: () => {
+      const all = store.getSnapshot()
+      if (all !== seen) {
+        const filtered: Record<string, unknown> = {}
+        for (const [key, value] of Object.entries(all)) if (key.startsWith(prefix)) filtered[key] = value
+        seen = all
+        mine = filtered
+      }
+      return mine
+    },
+  }
+}
+
+/**
+ * Resolve a webview-relative path to its canonical form, or null for one
+ * that cannot be trusted: empty, absolute (POSIX or drive-lettered),
+ * backslashed, or climbing above the data root. `a/b/../c` resolves to
+ * `a/c`; a `..` with nothing left to pop is an escape and refuses.
+ */
+function normalizeRelative(path: string): string | null {
+  if (typeof path !== 'string' || path === '') return null
+  if (path.includes('\\')) return null
+  if (path.startsWith('/') || /^[A-Za-z]:/.test(path)) return null
+  const segments: string[] = []
+  for (const segment of path.split('/')) {
+    if (segment === '' || segment === '.') continue
+    if (segment === '..') {
+      if (segments.length === 0) return null
+      segments.pop()
+      continue
+    }
+    segments.push(segment)
+  }
+  return segments.join('/')
+}
+
+/**
+ * A capability's own view of the filesystem: every WRITE — writeFile,
+ * remove, removeDir, rename, mkdir, appendFile — must resolve under
+ * `<id>/**` (or name the `<id>` directory itself, which `mkdir` needs),
+ * path-normalized first so `<id>/../books/x` is refused. Reads stay open:
+ * the finding this closes is integrity — a buggy capability deleting or
+ * overwriting kernel-owned files — and the one real consumer legitimately
+ * reads `books/**` to digest it (phase 10, WI-10.3; the read tightening is
+ * deferred, deliberately).
+ *
+ * Same enforcement class as `scopeSettings`: a wrapper the capability
+ * cannot see behind. The kernel's own stores keep the raw handle; the only
+ * `books/<id>/` delete a capability can still trigger is the closed-name
+ * `removeBlob` primitive (WI-10.2). Wrappers are async so a refusal is a
+ * REJECTION — the shape every fs caller already handles — not a sync throw.
+ */
+export function scopeFs(fs: KernelServices['fs'], capId: string): KernelServices['fs'] {
+  if (fs === null) return null
+  const prefix = `${capId}/`
+  const guard = (op: string, path: string): string => {
+    const normal = normalizeRelative(path)
+    if (normal === null || (normal !== capId && !normal.startsWith(prefix))) {
+      throw invalid('namespace', capId, `capability "${capId}" may only ${op} under "${prefix}", not ${JSON.stringify(path)}`)
+    }
+    return path
+  }
+  const scoped: NonNullable<KernelServices['fs']> = {
+    readFile: async (path) => fs.readFile(path),
+    readDir: async (path) => fs.readDir(path),
+    exists: async (path) => fs.exists(path),
+    writeFile: async (path, bytes) => fs.writeFile(guard('writeFile', path), bytes),
+    mkdir: async (path) => fs.mkdir(guard('mkdir', path)),
+    remove: async (path) => fs.remove(guard('remove', path)),
+    removeDir: async (path) => fs.removeDir(guard('removeDir', path)),
+    rename: async (from, to) => fs.rename(guard('rename', from), guard('rename', to)),
+  }
+  /* `appendFile` is a capability's cue that the platform appends natively
+   * (the journal falls back to read-then-rewrite without it) — so it exists
+   * on the wrapper exactly when it exists behind it. */
+  const append = fs.appendFile
+  return append ? { ...scoped, appendFile: async (path, bytes) => append.call(fs, guard('appendFile', path), bytes) } : scoped
+}
+
+/**
+ * A capability's own view of the flat store: reads AND writes must name a
+ * key under `<id>.` — strict on both sides, because no capability needs a
+ * foreign key any more: the one read that did (the sync journal digesting
+ * the kernel's cards) rides `services.cards.stored()` instead (WI-10.4).
+ * `flush` passes through — it is "are the bytes down", not a key.
+ */
+export function scopeStorage(storage: KernelServices['storage'], capId: string): KernelServices['storage'] {
+  if (storage === null) return null
+  const prefix = `${capId}.`
+  const guard = (op: string, key: string): string => {
+    if (typeof key !== 'string' || !key.startsWith(prefix)) {
+      throw invalid('namespace', capId, `capability "${capId}" may only ${op} keys under "${prefix}", not ${JSON.stringify(key)}`)
+    }
+    return key
+  }
+  const flush = storage.flush
+  return {
+    getItem: (key) => storage.getItem(guard('read', key)),
+    setItem: (key, value) => storage.setItem(guard('write', key), value),
+    ...(flush ? { flush: () => flush.call(storage) } : {}),
+  }
 }
 
 /* ------------------------------------------------------------- pane ids */
@@ -254,6 +393,7 @@ function checkNamespaces(caps: readonly Capability[]): void {
   const sections = new Set<string>()
   const actions = new Set<string>()
   const services = new Set<string>()
+  const clients = new Set<string>()
 
   const claim = (set: Set<string>, kind: string, key: string, cap: string) => {
     if (set.has(key)) throw invalid('duplicate-contribution', cap, `${kind} "${key}" is registered twice`)
@@ -288,7 +428,10 @@ function checkNamespaces(caps: readonly Capability[]): void {
       prefixed('grant', service.grant, colon, cap.id)
       claim(services, 'service', service.name, cap.id)
     }
-    for (const client of cap.clients ?? []) prefixed('client name', client.name, dot, cap.id)
+    for (const client of cap.clients ?? []) {
+      prefixed('client name', client.name, dot, cap.id)
+      claim(clients, 'client', client.name, cap.id)
+    }
   }
 }
 
@@ -347,39 +490,131 @@ export async function composeCapabilities(
 
   if (signal.aborted) throw invalid('aborted', null, 'composition aborted before any capability started')
 
-  const started: { id: string; disposable: Disposable }[] = []
-  const rollback = (cause: unknown, id: string, why: string): never => {
-    const failures = disposeAll(started)
-    started.length = 0
-    const message = `capability "${id}" ${why}; ${failures.length === 0 ? 'nothing stays registered' : `and ${failures.length} dispose(s) failed during rollback`}`
-    throw new CapabilityError('start-failed', id, message, {
-      cause: failures.length === 0 ? cause : new AggregateError([cause, ...failures.map((f) => f.error)], message),
-    })
-  }
-
-  for (const cap of ordered) {
-    if (signal.aborted) rollback(undefined, cap.id, 'was not started: the composition was aborted')
-    let disposable: Disposable | undefined
-    try {
-      disposable = cap.start ? await cap.start({ ...api, diagnostics: api.diagnostics.child(cap.id) }, signal) : NOTHING
-    } catch (cause) {
-      rollback(cause, cap.id, 'failed to start')
-    }
-    if (typeof disposable?.dispose !== 'function') {
-      rollback(undefined, cap.id, 'returned no Disposable from start')
-    }
-    started.push({ id: cap.id, disposable: disposable as Disposable })
-  }
-
+  /* Snapshot every contribution BEFORE a single capability starts, from the
+   * arrays `checkNamespaces` just validated. A `start` that mutates its own
+   * `panes`/`services`/… array — pushing an unnamespaced or another
+   * capability's name — therefore cannot reach the composition's registries:
+   * they are frozen copies of the validated state, not live references. */
   const panes = sortPanes(ordered)
-  const settings = Object.freeze(ordered.flatMap((cap) => cap.settings ?? []))
-  const bookActions = Object.freeze(ordered.flatMap((cap) => cap.bookActions ?? []))
-  const clients = Object.freeze(ordered.flatMap((cap) => cap.clients ?? []))
+  const settings = Object.freeze(ordered.flatMap((cap) => [...(cap.settings ?? [])]))
+  const bookActions = Object.freeze(ordered.flatMap((cap) => [...(cap.bookActions ?? [])]))
+  const clients = Object.freeze(ordered.flatMap((cap) => [...(cap.clients ?? [])]))
   const services: ReadonlyMap<string, ServiceContribution> = new Map(
     ordered.flatMap((cap) => (cap.services ?? []).map((service) => [service.name, service] as const)),
   )
   const frozenOrder = Object.freeze([...order])
   let disposed = false
+
+  const started: { id: string; disposable: Disposable }[] = []
+  const rollback = (cause: unknown, id: string, why: string, extra: readonly unknown[] = []): never => {
+    const failures = disposeAll(started)
+    started.length = 0
+    const errors = [...extra, ...failures.map((f) => f.error)]
+    const message = `capability "${id}" ${why}; ${errors.length === 0 ? 'nothing stays registered' : `${errors.length} teardown(s) failed during rollback`}`
+    throw new CapabilityError('start-failed', id, message, {
+      cause: errors.length === 0 ? cause : new AggregateError(cause === undefined ? errors : [cause, ...errors], message),
+    })
+  }
+
+  for (const cap of ordered) {
+    if (signal.aborted) rollback(undefined, cap.id, 'was not started: the composition was aborted')
+    /* This capability's disposer stack: each resource it acquires registers
+     * its own teardown through `onCleanup`. Run in reverse, it undoes a
+     * half-finished `start` (so a throw leaves nothing) and, harmlessly
+     * again, folds into normal dispose. This is what makes `start` atomic. */
+    const cleanups: (() => void)[] = []
+    const unwind = (): unknown[] => {
+      const errors: unknown[] = []
+      for (let i = cleanups.length - 1; i >= 0; i--) {
+        try {
+          ;(cleanups[i] as () => void)()
+        } catch (error) {
+          errors.push(error)
+        }
+      }
+      cleanups.length = 0
+      return errors
+    }
+    const ctx: CapabilityContext = {
+      ...api,
+      /* The services A CAPABILITY sees: the kernel's own stores, with every
+       * tree-wide handle swapped for a namespace-confined wrapper — the
+       * filesystem (WI-10.3), the flat store (WI-10.4), and the settings
+       * store, which `ctx.settings` already scoped but which also rides the
+       * services and must not arrive raw by that door. The kernel keeps the
+       * raw handles; only what is HANDED OUT is confined. */
+      services: {
+        ...api.services,
+        settings: scopeSettings(api.services.settings, cap.id),
+        fs: scopeFs(api.services.fs, cap.id),
+        storage: scopeStorage(api.services.storage, cap.id),
+      },
+      settings: scopeSettings(api.settings, cap.id),
+      diagnostics: api.diagnostics.child(cap.id),
+      onCleanup: (dispose) => {
+        cleanups.push(dispose)
+      },
+    }
+    let disposable: Disposable | undefined
+    try {
+      disposable = cap.start ? await cap.start(ctx, signal) : NOTHING
+    } catch (cause) {
+      rollback(cause, cap.id, 'failed to start', unwind())
+    }
+    /* The property READ is inside the guard too: `dispose` could be a
+     * getter, and a getter that throws here must roll back like any other
+     * misbehaving start, not escape past the started list. */
+    let disposeFn: unknown
+    try {
+      disposeFn = disposable?.dispose
+    } catch (cause) {
+      rollback(cause, cap.id, 'has a Disposable whose dispose cannot be read', unwind())
+    }
+    if (typeof disposeFn !== 'function') {
+      rollback(undefined, cap.id, 'returned no Disposable from start', unwind())
+    }
+    /* Fold the disposer stack into teardown: the returned `Disposable`, then
+     * the registered cleanups in reverse. Both run on normal dispose. */
+    const returned = disposable as Disposable
+    /* Wrapped even when the stack is empty NOW: `onCleanup` may legally be
+     * called later (a resource acquired lazily after start), and the wrapper
+     * is what guarantees those registrations still run at dispose. */
+    const disposeCap: Disposable = {
+            dispose: () => {
+              /* Every failure is REPORTED, not just the first: the returned
+               * Disposable's throw must not eat the cleanups' errors, nor
+               * the other way round — `dispose` documents an AggregateError
+               * carrying all of them. */
+              const errors: unknown[] = []
+              try {
+                returned.dispose()
+              } catch (error) {
+                errors.push(error)
+              }
+              errors.push(...unwind())
+              if (errors.length === 1) throw errors[0]
+              if (errors.length > 1) throw new AggregateError(errors, `capability "${cap.id}" teardown failed`)
+            },
+          }
+    started.push({ id: cap.id, disposable: disposeCap })
+    /* The signal may have aborted WHILE this `start` was awaiting. This
+     * capability is fully started, but the composition's lifetime is over —
+     * unwind everything (including this one) rather than hand back a
+     * live-looking composition whose abort has already fired. */
+    if (signal.aborted) rollback(undefined, cap.id, 'was aborted while starting')
+  }
+
+  /* Every capability has started, so every delegating service handler's target
+   * is ready: serve the composed services through the bound host (the peer
+   * transport on a shelf; a no-op with no host bound — a satchel, a browser
+   * tab, a test). Best-effort — replication is the spine, services enhance it,
+   * so a serve that fails degrades visibly rather than failing the boot. */
+  let servingDisposer: Disposable = NOTHING
+  try {
+    servingDisposer = await api.services.serveServices([...services.values()])
+  } catch (error) {
+    api.diagnostics.error('composition.serve-failed', { message: error instanceof Error ? error.message : String(error) })
+  }
 
   const composition: Composition = {
     order: frozenOrder,
@@ -389,11 +624,16 @@ export async function composeCapabilities(
     commands(ctx) {
       if (disposed) return []
       const out: Command[] = []
+      const seen = new Set<string>()
       for (const cap of ordered) {
         for (const command of cap.commands?.(ctx) ?? []) {
           if (!command.id.startsWith(`${cap.id}:`) || command.id.length === cap.id.length + 1) {
             throw invalid('namespace', cap.id, `command id ${JSON.stringify(command.id)} of capability "${cap.id}" must be "${cap.id}:<name>"`)
           }
+          if (seen.has(command.id)) {
+            throw invalid('duplicate-contribution', cap.id, `command id ${JSON.stringify(command.id)} is registered twice`)
+          }
+          seen.add(command.id)
           out.push(command)
         }
       }
@@ -414,6 +654,16 @@ export async function composeCapabilities(
     dispose() {
       if (disposed) return
       disposed = true
+      /* Direct dispose retires the lifetime listener too, so a long-lived
+       * signal stops retaining this composition and its capabilities. */
+      signal.removeEventListener('abort', onAbort)
+      /* Unserve the composed services before the capabilities behind their
+       * handlers tear down, so no request lands on a half-disposed handler. */
+      try {
+        servingDisposer.dispose()
+      } catch (error) {
+        api.diagnostics.error('composition.unserve-failed', { message: error instanceof Error ? error.message : String(error) })
+      }
       const failures = disposeAll(started)
       started.length = 0
       api.diagnostics.info('composition.disposed', { order: frozenOrder })
@@ -427,18 +677,25 @@ export async function composeCapabilities(
   }
 
   /* An abort listener has nobody to throw to, so a dispose that fails here
-   * is reported rather than raised. `dispose()` called directly still throws. */
-  signal.addEventListener(
-    'abort',
-    () => {
-      try {
-        composition.dispose()
-      } catch (error) {
-        api.diagnostics.error('composition.dispose-failed', { message: error instanceof Error ? error.message : String(error) })
-      }
-    },
-    { once: true },
-  )
+   * is reported rather than raised. `dispose()` called directly still throws
+   * — and detaches this listener, so it is named rather than anonymous. */
+  const onAbort = (): void => {
+    try {
+      composition.dispose()
+    } catch (error) {
+      api.diagnostics.error('composition.dispose-failed', { message: error instanceof Error ? error.message : String(error) })
+    }
+  }
+  signal.addEventListener('abort', onAbort, { once: true })
+  /* The signal may have aborted WHILE the services were being served — after
+   * the start-loop's last check, before this listener existed. An 'abort'
+   * that has already fired never reaches a newly added listener, so ask once,
+   * now: a composition whose lifetime is over is disposed and refused, never
+   * returned looking alive. */
+  if (signal.aborted) {
+    onAbort()
+    throw invalid('aborted', null, 'composition aborted while its services were being served')
+  }
   api.diagnostics.info('composition.started', { order: frozenOrder })
   return composition
 }

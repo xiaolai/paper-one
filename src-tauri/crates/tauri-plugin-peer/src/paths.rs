@@ -88,11 +88,59 @@ impl BlobTarget {
     /// whose folder is missing is [`Error::FolderGone`], which is the answer
     /// both a serve (nothing to serve) and a fetch (nothing to write into)
     /// need.
+    ///
+    /// This covers the *folder*. The final component (the content file or its
+    /// `.part`) is checked by [`checked_read`](Self::checked_read) and
+    /// [`checked_part`](Self::checked_part), and the actual opens use
+    /// `O_NOFOLLOW` so a symlink planted between check and open still fails.
     pub fn checked(&self, root: &Path) -> Result<()> {
-        if !self.folder_dir.is_dir() {
-            return Err(Error::FolderGone(self.folder.clone()));
+        /* Fallible on purpose: `is_dir()` folded every metadata failure —
+         * permission denied, I/O error — into "gone", and GONE has a benign
+         * meaning here that a failing disk does not deserve. */
+        match std::fs::metadata(&self.folder_dir) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => return Err(Error::FolderGone(self.folder.clone())),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Err(Error::FolderGone(self.folder.clone()));
+            }
+            Err(err) => return Err(err.into()),
         }
         checked_target(root, &self.folder_dir).map(|_| ())
+    }
+
+    /// [`checked`](Self::checked), plus: the content file, if it exists, must
+    /// be a real file and not a final-component symlink out of the folder.
+    /// The serve side reads through this name.
+    pub fn checked_read(&self, root: &Path) -> Result<()> {
+        self.checked(root)?;
+        refuse_symlink(&self.path, root)
+    }
+
+    /// [`checked`](Self::checked), plus: neither the `.part` a fetch appends
+    /// into nor the content file the `.part` is renamed onto may be a
+    /// final-component symlink. Re-run immediately before the rename to close
+    /// the check→rename race.
+    pub fn checked_part(&self, root: &Path) -> Result<()> {
+        self.checked(root)?;
+        refuse_symlink(&self.part_path(), root)?;
+        refuse_symlink(&self.path, root)
+    }
+}
+
+/// A final-component symlink is refused as outside the containment boundary. A
+/// missing path (nothing planted) or a plain file passes. This is `lstat`
+/// (`symlink_metadata`) so it inspects the link itself, never its target.
+fn refuse_symlink(path: &Path, root: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(Error::PathOutsideDataRoot {
+            path: path.to_path_buf(),
+            root: root.to_path_buf(),
+        }),
+        Ok(_) => Ok(()),
+        /* ONLY absence passes: a permission or I/O failure answered "safe"
+         * would let a containment check fail open. */
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
     }
 }
 
@@ -304,6 +352,57 @@ mod tests {
         let target = BlobTarget::resolve(&root, "escape", "content.epub", Access::Write).unwrap();
         assert_eq!(
             target.checked(&root).unwrap_err().kind(),
+            "pathOutsideDataRoot"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checked_read_refuses_a_final_component_symlink() {
+        // The folder is real, but `content.epub` inside it is a symlink to a
+        // file outside the root. `checked` (folder only) passes; the closed
+        // name and folder grammar pass; only the final-component check catches
+        // it.
+        let dir = ScratchDir::new("paths-final-symlink");
+        let root = dir.path().join("root");
+        let folder = root.join("books").join("bk1");
+        let secret = dir.path().join("outside.txt");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(&secret, b"not yours").unwrap();
+        std::os::unix::fs::symlink(&secret, folder.join("content.epub")).unwrap();
+        let target = BlobTarget::resolve(&root, "bk1", "content.epub", Access::Read).unwrap();
+        assert!(target.checked(&root).is_ok(), "folder alone is fine");
+        assert_eq!(
+            target.checked_read(&root).unwrap_err().kind(),
+            "pathOutsideDataRoot"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checked_part_refuses_a_symlinked_part_and_rename_target() {
+        let dir = ScratchDir::new("paths-part-symlink");
+        let root = dir.path().join("root");
+        let folder = root.join("books").join("bk1");
+        let secret = dir.path().join("outside.bin");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(&secret, b"victim").unwrap();
+        // `.part` is a symlink out of the root — a fetch would append peer
+        // bytes through it.
+        std::os::unix::fs::symlink(&secret, folder.join("content.epub.part")).unwrap();
+        let target = BlobTarget::resolve(&root, "bk1", "content.epub", Access::Write).unwrap();
+        assert_eq!(
+            target.checked_part(&root).unwrap_err().kind(),
+            "pathOutsideDataRoot"
+        );
+        // A real `.part` (a genuine resume) passes.
+        std::fs::remove_file(folder.join("content.epub.part")).unwrap();
+        std::fs::write(folder.join("content.epub.part"), b"partial").unwrap();
+        assert!(target.checked_part(&root).is_ok());
+        // The rename target being a symlink is refused too.
+        std::os::unix::fs::symlink(&secret, folder.join("content.epub")).unwrap();
+        assert_eq!(
+            target.checked_part(&root).unwrap_err().kind(),
             "pathOutsideDataRoot"
         );
     }

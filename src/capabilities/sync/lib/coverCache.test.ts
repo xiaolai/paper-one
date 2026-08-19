@@ -55,6 +55,9 @@ async function world() {
     lookup,
     fetchBlob: (peerId, folder, blob) =>
       port.fetchBlob({ peerId, folder, name: blob.name, expectedSize: blob.size, expectedHash: blob.hash }),
+    // The REAL kernel primitive (WI-10.2/10.5), so eviction here proves the
+    // closed-name door — not a stand-in that would accept anything.
+    removeBlob: (book, name) => services.removeBlob(book, name),
     now: () => ++now,
   })
   return { cache, fs, serve, services }

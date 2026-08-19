@@ -29,6 +29,12 @@ export const PLATFORMS = Object.freeze(['desktop', 'ios', 'android'])
 /** A capability id: lowercase, starts with a letter, then letters/digits/hyphens. */
 export const ID_PATTERN = /^[a-z][a-z0-9-]*$/
 
+/** Ids the runtime registry refuses (`registry.ts`): the kernel is not a
+ *  capability. The validator refuses them too, so the manifest and the
+ *  registry agree rather than a `kernel` entry passing here and failing only
+ *  when the composition boots. */
+export const RESERVED_IDS = Object.freeze(['kernel'])
+
 /** A single directory name: no separators, and not `.` or `..`. Anything a
  *  manifest could use to walk out of `src/capabilities/` fails this before
  *  the filesystem is ever asked. */
@@ -49,6 +55,7 @@ export const FINDING_CODES = Object.freeze([
   'ID_MISSING',
   'ID_SHAPE',
   'ID_INVALID',
+  'ID_RESERVED',
   'ID_DUPLICATE',
   'REQUIRES_SHAPE',
   'REQUIRES_UNRESOLVED',
@@ -70,6 +77,7 @@ export const FINDING_CODES = Object.freeze([
   'CRATE_ABSENT',
   'PLUGIN_SHAPE',
   'PERMISSIONS_SHAPE',
+  'PERMISSIONS_NAMESPACE',
 ])
 
 const ROOT_FIELD_SET = new Set(ROOT_FIELDS)
@@ -168,7 +176,10 @@ export function validateManifest(manifest, fsProbe) {
   const ids = idTable(entries)
   const cycles = cycleTable(entries, ids)
   entries.forEach((entry, index) => {
-    findings.push(...validateEntry(entry, index, { ids, cycles, fsProbe }))
+    /* Appended by iteration: `push(...huge)` is a call whose ARGUMENT COUNT
+     * is the array length, and a malformed manifest with a hundred-thousand
+     * findings would overflow the call stack inside the validator. */
+    for (const one of validateEntry(entry, index, { ids, cycles, fsProbe })) findings.push(one)
   })
   return findings
 }
@@ -280,15 +291,20 @@ function validateEntry(entry, index, context) {
   for (const key of Object.keys(entry)) {
     if (!ENTRY_FIELD_SET.has(key)) findings.push(finding('UNKNOWN_FIELD', [...at, key], `unknown field ${show(key)} in capability #${index}`))
   }
-  findings.push(
-    ...validateId(entry, index, at, context),
-    ...validateRequires(entry, index, at, context),
-    ...validateDirField(entry, at, context, TS_FIELD),
-    ...validatePlatforms(entry, at),
-    ...validateDirField(entry, at, context, CRATE_FIELD),
-    ...validatePlugin(entry, at),
-    ...validatePermissions(entry, at),
-  )
+  /* Appended by iteration — `push(...list)`'s argument count is the list
+   * length, and a pathological entry (a hundred-thousand-element
+   * `requires`) would overflow the call stack. */
+  for (const list of [
+    validateId(entry, index, at, context),
+    validateRequires(entry, index, at, context),
+    validateDirField(entry, at, context, TS_FIELD),
+    validatePlatforms(entry, at),
+    validateDirField(entry, at, context, CRATE_FIELD),
+    validatePlugin(entry, at),
+    validatePermissions(entry, at),
+  ]) {
+    for (const one of list) findings.push(one)
+  }
   return findings
 }
 
@@ -300,6 +316,9 @@ function validateId(entry, index, at, { ids }) {
   const findings = []
   if (!ID_PATTERN.test(id)) {
     findings.push(finding('ID_INVALID', p, `id ${show(id)} must match ${ID_PATTERN.source}`))
+  }
+  if (RESERVED_IDS.includes(id)) {
+    findings.push(finding('ID_RESERVED', p, `id ${show(id)} is reserved for the kernel and cannot name a capability`))
   }
   const first = ids.get(id)
   if (first !== index) {
@@ -400,9 +419,29 @@ function validatePlatforms(entry, at) {
 function validatePlugin(entry, at) {
   if (!has(entry, 'plugin')) return []
   const plugin = entry.plugin
-  if (typeof plugin === 'string') return []
-  return [finding('PLUGIN_SHAPE', [...at, 'plugin'], `plugin must be a string, got ${typeName(plugin)}`)]
+  if (typeof plugin !== 'string') {
+    return [finding('PLUGIN_SHAPE', [...at, 'plugin'], `plugin must be a string, got ${typeName(plugin)}`)]
+  }
+  /* The STRING must also normalise to a real ACL namespace: `""` and
+   * `"tauri-plugin-"` both normalise to the empty namespace, which would
+   * make every permission check below vacuously prefix-match `":"`. */
+  const ns = normalizePluginNamespace(plugin)
+  if (!NAMESPACE_PATTERN.test(ns)) {
+    return [finding('PLUGIN_SHAPE', [...at, 'plugin'], `plugin ${show(plugin)} must normalise to a namespace matching ${NAMESPACE_PATTERN.source}, got ${show(ns)}`)]
+  }
+  return []
 }
+
+/** The ACL namespace a `plugin` crate name maps to: Tauri strips the crate
+ *  prefix. ONE copy — the plugin validator and the permission check both
+ *  read it, so they cannot drift. */
+function normalizePluginNamespace(plugin) {
+  return plugin.replace(/^tauri-plugin-/, '')
+}
+
+/** Hyphen-separated lower-alphanumeric words — no leading, trailing or
+ *  doubled hyphen, which `[a-z0-9-]*` accepted. */
+const NAMESPACE_PATTERN = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/
 
 function validatePermissions(entry, at) {
   const p = [...at, 'permissions']
@@ -410,9 +449,19 @@ function validatePermissions(entry, at) {
   const permissions = entry.permissions
   if (!Array.isArray(permissions)) return [finding('PERMISSIONS_SHAPE', p, `permissions must be an array, got ${typeName(permissions)}`)]
   const findings = []
+  /* The ACL namespace is the plugin name (Tauri strips its `tauri-plugin-`
+   * crate prefix), falling back to the id. Every grant must live under it, so
+   * `capability:remove` can find them and a wrong `plugin` cannot hide one. */
+  const ns =
+    typeof entry.plugin === 'string' ? normalizePluginNamespace(entry.plugin) : typeof entry.id === 'string' ? entry.id : null
   permissions.forEach((item, k) => {
     if (typeof item !== 'string') {
       findings.push(finding('PERMISSIONS_SHAPE', [...p, k], `permission must be a string, got ${typeName(item)}`))
+      return
+    }
+    const suffix = ns !== null && item.startsWith(`${ns}:`) ? item.slice(ns.length + 1) : null
+    if (ns !== null && (suffix === null || !/^[a-zA-Z][a-zA-Z0-9]*(-[a-zA-Z0-9]+)*$/.test(suffix))) {
+      findings.push(finding('PERMISSIONS_NAMESPACE', [...p, k], `permission ${show(item)} must be ${show(`${ns}:`)} followed by a permission name`))
     }
   })
   return findings

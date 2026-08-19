@@ -99,7 +99,7 @@ class FakeWireImpl implements FakeWire {
   private nextSession = 1
   private nextTransfer = 1
   private offer: { secret: string; offer: PairOffer } | null = null
-  private pending: { satchel: FakeWireImpl; name: string; grants: readonly string[] } | null = null
+  private pending: { satchel: FakeWireImpl; name: string; grants: readonly string[]; attemptId: string } | null = null
   private readonly listeners: Listeners = {
     'pairing-pending': new Set(),
     'pairing-result': new Set(),
@@ -218,9 +218,15 @@ class FakeWireImpl implements FakeWire {
     this.pending = null
   }
 
-  async pairConfirm(accept: boolean, grants?: readonly string[]): Promise<WirePeer | null> {
+  async pairConfirm(accept: boolean, grants: readonly string[] | undefined, attemptId: string): Promise<WirePeer | null> {
     const pending = this.pending
     if (!pending) throw peerError('noPendingPairing', 'nothing to confirm')
+    /* Mirror the Rust: when an attempt id is supplied it must match the pending
+     * one, so a confirmation bound to a different (pre-played) attempt is
+     * refused without consuming this one. Absent id keeps the old behaviour. */
+    if (attemptId !== pending.attemptId) {
+      throw peerError('noPendingPairing', 'confirmation does not match the pending pairing attempt')
+    }
     this.pending = null
     this.offer = null
     const satchel = pending.satchel
@@ -262,9 +268,10 @@ class FakeWireImpl implements FakeWire {
     const shelf = this.links.get(parsed[1] as string)
     if (!shelf || !this.online) throw peerError('iroh', 'shelf unreachable')
     if (!shelf.offer || shelf.offer.secret !== parsed[2]) throw peerError('noPendingPairing', 'no such offer')
-    const sas = '0000'
-    shelf.pending = { satchel: this, name: name ?? this.name, grants: grants ?? [] }
-    shelf.emit('pairing-pending', { id: this.id, name: name ?? this.name, platform: 'test', sas })
+    const sas = '000000'
+    const attemptId = `att-${this.id}`
+    shelf.pending = { satchel: this, name: name ?? this.name, grants: grants ?? [], attemptId }
+    shelf.emit('pairing-pending', { id: this.id, name: name ?? this.name, platform: 'test', sas, attemptId })
     return { sas }
   }
 

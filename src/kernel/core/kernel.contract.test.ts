@@ -664,6 +664,59 @@ describe('ContentBlobPort', () => {
   })
 })
 
+describe('removeBlob — the closed-name delete twin of the blob port (WI-10.2)', () => {
+  const BOOK = 'book:a'
+  const FOLDER = folderOf(BOOK)
+
+  function blobWorld() {
+    const w = world()
+    w.fs.store.set(recordPath(BOOK), new TextEncoder().encode(JSON.stringify(REC_A)))
+    w.fs.store.set(`${FOLDER}/content.epub`, new TextEncoder().encode('bytes'))
+    w.fs.store.set(`${FOLDER}/cover.jpg`, new TextEncoder().encode('jacket'))
+    w.fs.store.set(`${FOLDER}/cover.webp`, new TextEncoder().encode('legacy jacket'))
+    return w
+  }
+
+  it('removes a closed-name blob — content, cover, and the legacy evict-only cover', async () => {
+    const w = blobWorld()
+    await w.kernel.removeBlob(BOOK, 'content.epub')
+    await w.kernel.removeBlob(BOOK, 'cover.jpg')
+    await w.kernel.removeBlob(BOOK, 'cover.webp')
+    expect(w.fs.store.has(`${FOLDER}/content.epub`)).toBe(false)
+    expect(w.fs.store.has(`${FOLDER}/cover.jpg`)).toBe(false)
+    expect(w.fs.store.has(`${FOLDER}/cover.webp`)).toBe(false)
+    // The record it sat beside is untouched.
+    expect(w.fs.store.has(recordPath(BOOK))).toBe(true)
+  })
+
+  it('removing a blob that is not there is done, not an error', async () => {
+    const w = world()
+    await expect(w.kernel.removeBlob(BOOK, 'content.epub')).resolves.toBeUndefined()
+  })
+
+  it('refuses book.json, a ../ escape, and a name outside the closed set', async () => {
+    const w = blobWorld()
+    for (const bad of ['book.json', '../book.json', 'marks.json', 'content.exe', 'content.', 'cover.png', '']) {
+      await expect(w.kernel.removeBlob(BOOK, bad as 'cover.jpg'), bad).rejects.toThrow(/not a blob/)
+    }
+    // Nothing was deleted by any refused call.
+    expect(w.fs.store.size).toBe(4)
+  })
+
+  it('a hostile book id cannot name a path — the folder is sanitised', async () => {
+    const w = blobWorld()
+    w.fs.store.set('elsewhere/content.epub', new TextEncoder().encode('not a book'))
+    await w.kernel.removeBlob('../../elsewhere', 'content.epub')
+    expect(w.fs.store.has('elsewhere/content.epub')).toBe(true)
+  })
+
+  it('without a filesystem a good name is a no-op and a bad name still throws', async () => {
+    const kernel = createKernelServices({ fs: null, storage: null })
+    await expect(kernel.removeBlob(BOOK, 'content.epub')).resolves.toBeUndefined()
+    await expect(kernel.removeBlob(BOOK, 'book.json' as 'cover.jpg')).rejects.toThrow(/not a blob/)
+  })
+})
+
 describe('SettingsStore', () => {
   it('round-trips through the flat store under one versioned key', () => {
     const storage = memoryStorage()

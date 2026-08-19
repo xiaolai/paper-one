@@ -6,10 +6,11 @@
 //! the peer holds `blob:read` (the app decides who does; `blob:*` covers
 //! it), answers `{ok, size, blake3}` — the BLAKE3 of the whole file — and
 //! streams the bytes from `offset`. The requester appends to `<target>.part`,
-//! resuming from that file's length, hashes everything including the resumed
-//! prefix, and on a match renames `.part` into place after re-checking the
-//! book folder is still there. On a mismatch the `.part` is deleted. One
-//! transfer per target at a time.
+//! resuming from that file's length; before promoting it re-hashes the whole
+//! `.part` from disk (never the stream incrementally, so an out-of-band change
+//! cannot slip through) and re-validates containment, then renames `.part`
+//! into place. On a size, hash, or containment mismatch the `.part` is
+//! deleted. One transfer per target at a time.
 //!
 //! Symmetric: a shelf serves its books to a satchel; a satchel serves a book
 //! it imported to the shelf. Neither side writes anything but the blob.
@@ -40,6 +41,55 @@ const PROGRESS_EVERY: u64 = 1024 * 1024;
 const HEADER_TIMEOUT: Duration = Duration::from_secs(30);
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The most concurrent blob-serve tasks one node runs. A peer opens streams on
+/// its session; without a cap it could spawn unbounded tasks and descriptors
+/// (finding H2). Over the cap, an extra stream is dropped rather than served.
+pub const MAX_BLOB_STREAMS: usize = 16;
+
+/// The largest blob this node accepts, serving or fetching. A peer advertising
+/// a multi-terabyte (or simply lying) size cannot make the fetcher fill its
+/// disk: the size is refused before a byte is written (finding M6). A generous
+/// ceiling for a single book or cover, not a per-library budget.
+pub const MAX_BLOB_SIZE: u64 = 4 * 1024 * 1024 * 1024;
+
+/// Open a file for reading without following a final-component symlink, so a
+/// planted link cannot redirect the read out of the data root even if it is
+/// swapped in after the [`BlobTarget`] check (finding H4). On Unix this is
+/// `O_NOFOLLOW`; elsewhere a pre-open `symlink_metadata` check stands in.
+async fn open_read_no_follow(path: &Path) -> Result<tokio::fs::File> {
+    let mut opts = tokio::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    opts.custom_flags(libc::O_NOFOLLOW);
+    #[cfg(not(unix))]
+    refuse_symlink_open(path)?;
+    Ok(opts.open(path).await?)
+}
+
+/// Open (creating if absent) a file for append without following a
+/// final-component symlink — a fetch must not append peer bytes through a
+/// planted link (finding H4).
+async fn open_append_no_follow(path: &Path) -> Result<tokio::fs::File> {
+    let mut opts = tokio::fs::OpenOptions::new();
+    opts.append(true).create(true);
+    #[cfg(unix)]
+    opts.custom_flags(libc::O_NOFOLLOW);
+    #[cfg(not(unix))]
+    refuse_symlink_open(path)?;
+    Ok(opts.open(path).await?)
+}
+
+/// The Windows/non-Unix stand-in for `O_NOFOLLOW`: refuse if the final
+/// component is already a symlink (reparse points there need privilege, so the
+/// residual check→open race is negligible).
+#[cfg(not(unix))]
+fn refuse_symlink_open(path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(Error::BlobRefused("not-found".into())),
+        _ => Ok(()),
+    }
+}
+
 // ── registry ──────────────────────────────────────────────────────────────
 
 /// Which targets have a transfer running, and the transfer id counter.
@@ -61,6 +111,21 @@ impl Transfers {
 
     fn release(&self, target: &Path) {
         self.active.lock().expect("transfers lock").remove(target);
+    }
+}
+
+/// A claimed target that RELEASES ITSELF: the release used to be a plain
+/// statement after the transfer future, so aborting or panicking the task
+/// skipped it and the target answered `TransferBusy` forever after. `Drop`
+/// runs on completion, panic and abort alike.
+struct TransferClaim {
+    node: Arc<Node>,
+    target: PathBuf,
+}
+
+impl Drop for TransferClaim {
+    fn drop(&mut self) {
+        self.node.transfers.release(&self.target);
     }
 }
 
@@ -99,12 +164,12 @@ pub struct HashResult {
 /// BLAKE3 and size of `<root>/books/<folder>/<name>`.
 pub async fn hash_file(root: &Path, folder: &str, name: &str) -> Result<HashResult> {
     let target = BlobTarget::resolve(root, folder, name, Access::Read)?;
-    target.checked(root)?;
+    target.checked_read(root)?;
     hash_path(target.path()).await
 }
 
 async fn hash_path(path: &Path) -> Result<HashResult> {
-    let mut file = tokio::fs::File::open(path).await?;
+    let mut file = open_read_no_follow(path).await?;
     let mut hasher = blake3::Hasher::new();
     let mut buf = vec![0u8; CHUNK];
     let mut size = 0u64;
@@ -180,8 +245,25 @@ async fn serve_inner(
         return Err(Error::BlobRefused("ungranted".into()));
     }
     let target = BlobTarget::resolve(node.root(), &request.folder, &request.name, Access::Read)?;
-    target.checked(node.root())?;
+    target.checked_read(node.root())?;
+    /* The size gate runs on METADATA before any byte is hashed — hashing an
+     * oversized file first meant gigabytes of I/O spent computing a digest
+     * for a transfer about to be refused. The post-hash check stays, in case
+     * the file grew mid-hash. */
+    let early_size = tokio::fs::metadata(target.path()).await?.len();
+    if early_size > MAX_BLOB_SIZE {
+        return Err(Error::BlobTooLarge {
+            size: early_size,
+            max: MAX_BLOB_SIZE,
+        });
+    }
     let hash = hash_path(target.path()).await?;
+    if hash.size > MAX_BLOB_SIZE {
+        return Err(Error::BlobTooLarge {
+            size: hash.size,
+            max: MAX_BLOB_SIZE,
+        });
+    }
     if request.offset > hash.size {
         return Err(Error::BlobRefused("bad-offset".into()));
     }
@@ -197,16 +279,36 @@ async fn serve_inner(
     .await?;
     *header_sent = true;
 
-    let mut file = tokio::fs::File::open(target.path()).await?;
+    // A test seam for the fetch-side idle deadline (finding H2): pause after
+    // the header so a fetcher with a short idle timeout stalls waiting for the
+    // body, then times out.
+    #[cfg(test)]
+    {
+        let gate = node.serve_body_gate.lock().expect("serve gate").take();
+        if let Some(gate) = gate {
+            let _ = gate.await;
+        }
+    }
+
+    let idle = node.blob_idle_timeout();
+    let mut file = open_read_no_follow(target.path()).await?;
     file.seek(std::io::SeekFrom::Start(request.offset)).await?;
     let mut buf = vec![0u8; CHUNK];
     let mut sent = request.offset;
     while sent < hash.size {
-        let n = file.read(&mut buf).await?;
+        /* Read no further than the advertised body: a file grown or
+         * replaced mid-serve must not push bytes past the size and hash
+         * the header promised. */
+        let want = CHUNK.min((hash.size - sent) as usize);
+        let n = file.read(&mut buf[..want]).await?;
         if n == 0 {
             break;
         }
-        send.write_all(&buf[..n]).await?;
+        // Idle deadline on the write: a requester that stops reading stalls
+        // this on flow control; drop it rather than hold the task forever.
+        timeout(idle, send.write_all(&buf[..n]))
+            .await
+            .map_err(|_| Error::Timeout("blob body write"))??;
         sent += n as u64;
     }
     Ok(())
@@ -256,12 +358,18 @@ pub async fn fetch(
 ) -> Result<(u64, JoinHandle<Result<()>>)> {
     let peer = parse_peer_id(&request.peer_id)?;
     let target = BlobTarget::resolve(node.root(), &request.folder, &request.name, Access::Write)?;
+    if request.expected_size > MAX_BLOB_SIZE {
+        return Err(Error::BlobTooLarge {
+            size: request.expected_size,
+            max: MAX_BLOB_SIZE,
+        });
+    }
     let expected =
         blake3::Hash::from_hex(&request.expected_hash).map_err(|_| Error::BlobMismatch {
             expected: request.expected_hash.clone(),
             got: "not a BLAKE3 hex digest".into(),
         })?;
-    target.checked(node.root())?;
+    target.checked_part(node.root())?;
     let session = node
         .sessions
         .any_for_peer(peer)
@@ -270,7 +378,15 @@ pub async fn fetch(
 
     let node = node.clone();
     let total = request.expected_size;
+    let claim = TransferClaim {
+        node: node.clone(),
+        target: target.path().to_path_buf(),
+    };
     let task = tokio::spawn(async move {
+        /* Bytes on disk so far, updated by every progress emission — so a
+         * failure AFTER data arrived (a bad hash, a rename refused) reports
+         * what actually landed instead of a flat zero. */
+        let landed = Arc::new(AtomicU64::new(0));
         let result = run(
             &node,
             &session,
@@ -279,9 +395,9 @@ pub async fn fetch(
             expected,
             transfer_id,
             hooks,
+            &landed,
         )
         .await;
-        node.transfers.release(target.path());
         let (state, received, error) = match &result {
             Ok(()) => (TransferState::Done, total, None),
             Err(Error::BlobInterrupted { received, .. }) => (
@@ -289,7 +405,11 @@ pub async fn fetch(
                 *received,
                 Some("blobInterrupted".to_owned()),
             ),
-            Err(err) => (TransferState::Failed, 0, Some(err.kind().to_owned())),
+            Err(err) => (
+                TransferState::Failed,
+                landed.load(Ordering::Relaxed),
+                Some(err.kind().to_owned()),
+            ),
         };
         node.emit(PeerEvent::Transfer(TransferProgress {
             transfer_id,
@@ -298,12 +418,16 @@ pub async fn fetch(
             state,
             error,
         }));
+        /* Released only NOW — after the terminal event — so a second
+         * transfer claiming this target cannot slip its first progress in
+         * before this one's Done/Failed reaches the webview. */
+        drop(claim);
         result
     });
     Ok((transfer_id, task))
 }
 
-#[allow(unused_mut, unused_variables)]
+#[allow(clippy::too_many_arguments)]
 async fn run(
     node: &Node,
     session: &Session,
@@ -311,10 +435,19 @@ async fn run(
     expected_size: u64,
     expected: blake3::Hash,
     transfer_id: u64,
-    mut hooks: FetchHooks,
+    hooks: FetchHooks,
+    landed: &AtomicU64,
 ) -> Result<()> {
+    /* The fault-injection hooks exist only under `cfg(test)`; production
+     * consumes the empty struct here — explicitly, so no warning needs
+     * suppressing — and the test build rebinds it mutable for `pause_at`. */
+    #[cfg(not(test))]
+    let FetchHooks { _private: () } = hooks;
+    #[cfg(test)]
+    let mut hooks = hooks;
     let part = target.part_path();
     let progress = |received: u64| {
+        landed.store(received, Ordering::Relaxed);
         node.emit(PeerEvent::Transfer(TransferProgress {
             transfer_id,
             received,
@@ -324,8 +457,10 @@ async fn run(
         }));
     };
 
-    // Resume point: whatever `.part` already holds, re-hashed so the final
-    // digest covers the whole file.
+    // Resume point: whatever `.part` already holds. Its bytes are not trusted
+    // incrementally — the whole file is re-hashed from disk before promotion
+    // (finding M7), so a prefix poisoned or grown out of band between writes
+    // cannot be promoted as verified.
     let mut offset = match tokio::fs::metadata(&part).await {
         Ok(meta) => meta.len(),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => 0,
@@ -334,18 +469,6 @@ async fn run(
     if offset > expected_size {
         tokio::fs::remove_file(&part).await?;
         offset = 0;
-    }
-    let mut hasher = blake3::Hasher::new();
-    if offset > 0 {
-        let mut existing = tokio::fs::File::open(&part).await?;
-        let mut buf = vec![0u8; CHUNK];
-        loop {
-            let n = existing.read(&mut buf).await?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-        }
     }
 
     let (mut send, mut recv) = session.conn().open_bi().await?;
@@ -369,6 +492,15 @@ async fn run(
         ));
     }
     let size = header.size.unwrap_or(0);
+    if size > MAX_BLOB_SIZE {
+        // A lying or oversized advertisement: refuse before writing a byte so
+        // a peer cannot fill the disk (finding M6).
+        let _ = tokio::fs::remove_file(&part).await;
+        return Err(Error::BlobTooLarge {
+            size,
+            max: MAX_BLOB_SIZE,
+        });
+    }
     let hash = header.blake3.clone().unwrap_or_default();
     if size != expected_size || blake3::Hash::from_hex(&hash).ok().as_ref() != Some(&expected) {
         // The record that named this blob is stale, or the remote's file
@@ -381,18 +513,23 @@ async fn run(
     }
     progress(offset);
 
-    let mut file = tokio::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(&part)
-        .await?;
+    let idle = node.blob_idle_timeout();
+    let mut file = open_append_no_follow(&part).await?;
     let mut received = offset;
     let mut since_event = 0u64;
     let mut buf = vec![0u8; CHUNK];
     while received < size {
         let want = CHUNK.min((size - received) as usize);
-        // iroh's inherent `read`: `Ok(None)` is the end of the stream.
-        let Some(n) = recv.read(&mut buf[..want]).await? else {
+        // iroh's inherent `read`: `Ok(None)` is the end of the stream. An idle
+        // deadline drops a server that stalls or trickles (finding H2); the
+        // `.part` is kept for a resume.
+        let Some(n) = timeout(idle, recv.read(&mut buf[..want]))
+            .await
+            .map_err(|_| Error::BlobInterrupted {
+                received,
+                total: size,
+            })??
+        else {
             break;
         };
         #[cfg(test)]
@@ -402,8 +539,11 @@ async fn run(
             }
         }
         file.write_all(&buf[..n]).await?;
-        hasher.update(&buf[..n]);
         received += n as u64;
+        /* Every landed byte counts NOW; only the EVENT is throttled — the
+         * terminal accounting reads this, and updating it per event let a
+         * failure between intervals underreport by up to the interval. */
+        landed.store(received, Ordering::Relaxed);
         since_event += n as u64;
         if since_event >= PROGRESS_EVERY {
             since_event = 0;
@@ -435,16 +575,34 @@ async fn run(
             total: size,
         });
     }
-    if hasher.finalize() != expected {
+
+    // Promotion is decided by the bytes actually on disk — re-hashed through a
+    // no-follow handle — never the incremental stream hash (finding M7). A
+    // `.part` poisoned or grown out of band between writes changes this digest
+    // or length and is refused. A missing folder here reads as `FolderGone`,
+    // the same answer the pre-rename check gives.
+    let on_disk = match hash_path(&part).await {
+        Ok(result) => result,
+        Err(Error::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(Error::FolderGone(target.folder().to_owned()));
+        }
+        Err(err) => return Err(err),
+    };
+    if on_disk.size != expected_size
+        || blake3::Hash::from_hex(&on_disk.blake3).ok().as_ref() != Some(&expected)
+    {
         let _ = tokio::fs::remove_file(&part).await;
         return Err(Error::BlobHashMismatch);
     }
 
-    // The folder may have been trashed while the bytes were arriving; the
-    // rename must not resurrect it, and the `.part` must not be promoted.
-    if !target.folder_dir().is_dir() {
+    // The folder may have been trashed — or swapped for an outside symlink —
+    // while the bytes arrived. Re-validate containment and the final component
+    // atomically right before the rename (finding H4): the rename must not
+    // resurrect a trashed folder, promote through a planted symlink, or escape
+    // the data root.
+    if let Err(err) = target.checked_part(node.root()) {
         let _ = tokio::fs::remove_file(&part).await;
-        return Err(Error::FolderGone(target.folder().to_owned()));
+        return Err(err);
     }
     match tokio::fs::rename(&part, target.path()).await {
         Ok(()) => {}
@@ -968,6 +1126,141 @@ mod tests {
             "noSession"
         );
         lonely.close().await;
+        pair.shelf.close().await;
+        pair.satchel.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_blob_larger_than_the_maximum_is_refused_before_any_byte() {
+        // Finding M6: a peer advertising a huge (or lying) size must be refused
+        // before a byte is written, so it cannot fill the disk.
+        let pair = linked("blob-toobig", &["blob:*"]).await;
+        let folder = pair.satchel.dir.path().join("books").join("bk1");
+        std::fs::create_dir_all(&folder).unwrap();
+        let err = fetch(
+            &pair.satchel.node,
+            request(
+                &pair,
+                "bk1",
+                "content.epub",
+                MAX_BLOB_SIZE + 1,
+                &"0".repeat(64),
+            ),
+            FetchHooks::default(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.kind(), "blobTooLarge");
+        assert!(!folder.join("content.epub.part").exists());
+        pair.shelf.close().await;
+        pair.satchel.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_part_poisoned_between_writes_is_not_promoted() {
+        // Finding M7: extra bytes appended to `.part` out of band change the
+        // on-disk digest and length; promotion is from disk, so it is refused.
+        let mut pair = linked("blob-poison", &["blob:*"]).await;
+        let (_, hash) = write_book(pair.shelf.dir.path(), "bk1", 3 * MB as usize, 13);
+        let folder = pair.satchel.dir.path().join("books").join("bk1");
+        std::fs::create_dir_all(&folder).unwrap();
+        let part = folder.join("content.epub.part");
+        let (gate_tx, gate_rx) = tokio::sync::oneshot::channel();
+        let (_, task) = fetch(
+            &pair.satchel.node,
+            request(&pair, "bk1", "content.epub", 3 * MB, &hash),
+            FetchHooks {
+                pause_at: Some((MB, gate_rx)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        loop {
+            if let PeerEvent::Transfer(p) = pair.satchel.next_event().await {
+                if p.received >= MB {
+                    break;
+                }
+            }
+        }
+        // Poison the `.part` while the transfer is parked: bytes it never sent.
+        {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&part)
+                .unwrap();
+            f.write_all(b"POISONED-EXTRA-BYTES").unwrap();
+        }
+        gate_tx.send(()).unwrap();
+        let err = timeout(Duration::from_secs(30), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.kind(), "blobHashMismatch");
+        assert!(!folder.join("content.epub").exists());
+        assert!(!part.exists(), "the poisoned part is removed");
+        pair.shelf.close().await;
+        pair.satchel.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_stalled_server_trips_the_fetch_idle_deadline() {
+        // Finding H2: a server that sends the header then stops must not hold
+        // the transfer open forever — the idle deadline drops it.
+        let pair = linked("blob-idle", &["blob:*"]).await;
+        pair.satchel
+            .node
+            .set_blob_idle_timeout(Duration::from_millis(300));
+        let (_, hash) = write_book(pair.shelf.dir.path(), "bk1", 2 * MB as usize, 21);
+        std::fs::create_dir_all(pair.satchel.dir.path().join("books").join("bk1")).unwrap();
+        // The shelf sends the header, then stalls before the body.
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *pair.shelf.node.serve_body_gate.lock().expect("serve gate") = Some(release_rx);
+        let (_, task) = fetch(
+            &pair.satchel.node,
+            request(&pair, "bk1", "content.epub", 2 * MB, &hash),
+            FetchHooks::default(),
+        )
+        .await
+        .unwrap();
+        let err = timeout(Duration::from_secs(10), task)
+            .await
+            .expect("the idle deadline fires well within 10s")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.kind(), "blobInterrupted");
+        let _ = release_tx.send(()); // let the shelf task unwind
+        pair.shelf.close().await;
+        pair.satchel.close().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlinked_part_is_refused_before_the_fetch() {
+        // Finding H4: a `.part` planted as a symlink out of the root must be
+        // refused, not appended through.
+        let pair = linked("blob-partlink", &["blob:*"]).await;
+        let (_, hash) = write_book(pair.shelf.dir.path(), "bk1", MB as usize, 4);
+        let folder = pair.satchel.dir.path().join("books").join("bk1");
+        std::fs::create_dir_all(&folder).unwrap();
+        let victim = pair.satchel.dir.path().join("victim");
+        std::fs::write(&victim, b"x").unwrap();
+        std::os::unix::fs::symlink(&victim, folder.join("content.epub.part")).unwrap();
+        let err = fetch(
+            &pair.satchel.node,
+            request(&pair, "bk1", "content.epub", MB, &hash),
+            FetchHooks::default(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.kind(), "pathOutsideDataRoot");
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"x",
+            "the victim is untouched"
+        );
         pair.shelf.close().await;
         pair.satchel.close().await;
     }

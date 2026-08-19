@@ -28,7 +28,10 @@ pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Option<B
     };
     let len = u32::from_be_bytes(len_buf);
     if len > MAX_FRAME {
-        return Err(Error::FrameTooLarge(len));
+        return Err(Error::FrameTooLarge {
+            size: len,
+            max: MAX_FRAME,
+        });
     }
     let mut buf = vec![0u8; len as usize];
     reader.read_exact(&mut buf).await?;
@@ -40,9 +43,10 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(writer: &mut W, payload: &[u8]) 
     let len = u32::try_from(payload.len())
         .ok()
         .filter(|&len| len <= MAX_FRAME)
-        .ok_or(Error::FrameTooLarge(
-            payload.len().min(u32::MAX as usize) as u32
-        ))?;
+        .ok_or(Error::FrameTooLarge {
+            size: payload.len().min(u32::MAX as usize) as u32,
+            max: MAX_FRAME,
+        })?;
     writer.write_all(&len.to_be_bytes()).await?;
     writer.write_all(payload).await?;
     Ok(())

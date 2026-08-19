@@ -112,6 +112,12 @@ export function crashableFs(seed: Record<string, string> = {}): CrashableFs {
       return [...names].map((name) => ({ name, isDirectory: !name.includes('.') }))
     },
     fsync: async (path) => {
+      /* HONEST like the real plugin: fsync opens the path, and a path that
+       * is neither a file nor a directory holding one is an error. The
+       * permissive fake hid exactly one real bug — the empty-shelf
+       * bootstrap fsyncing a journal file it never wrote. */
+      const isDir = [...store.keys()].some((k) => k.startsWith(`${path}/`))
+      if (!store.has(path) && !isDir) throw new Error(`fsync: no such file or directory: ${path}`)
       log({ kind: 'fsync', path })
     },
     durableView: (k, policy, tear = 0.5) => {

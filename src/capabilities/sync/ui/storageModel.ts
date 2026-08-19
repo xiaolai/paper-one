@@ -55,16 +55,31 @@ export async function readDownloadSizes(fs: IndexFs): Promise<Readonly<Record<st
   }
 }
 
-export async function recordDownloadSize(fs: IndexFs, book: string, size: number): Promise<void> {
-  const held = { ...(await readDownloadSizes(fs)), [book]: size }
-  await atomicWrite(fs, DOWNLOADS_INDEX_PATH, new TextEncoder().encode(JSON.stringify(held)))
+/* ONE writer at a time: record and drop are each a read-modify-write over
+ * one file, so a download landing while another's removal drops its row
+ * could lose an entry — or collide on the same `.writing` neighbour. The
+ * writers are serialised here, at the only place they exist. */
+let writing: Promise<unknown> = Promise.resolve()
+const serialWrite = <T,>(task: () => Promise<T>): Promise<T> => {
+  const next = writing.then(task, task)
+  writing = next.catch(() => {})
+  return next
 }
 
-export async function dropDownloadSize(fs: IndexFs, book: string): Promise<void> {
-  const held = { ...(await readDownloadSizes(fs)) }
-  if (!(book in held)) return
-  delete held[book]
-  await atomicWrite(fs, DOWNLOADS_INDEX_PATH, new TextEncoder().encode(JSON.stringify(held)))
+export function recordDownloadSize(fs: IndexFs, book: string, size: number): Promise<void> {
+  return serialWrite(async () => {
+    const held = { ...(await readDownloadSizes(fs)), [book]: size }
+    await atomicWrite(fs, DOWNLOADS_INDEX_PATH, new TextEncoder().encode(JSON.stringify(held)))
+  })
+}
+
+export function dropDownloadSize(fs: IndexFs, book: string): Promise<void> {
+  return serialWrite(async () => {
+    const held = { ...(await readDownloadSizes(fs)) }
+    if (!(book in held)) return
+    delete held[book]
+    await atomicWrite(fs, DOWNLOADS_INDEX_PATH, new TextEncoder().encode(JSON.stringify(held)))
+  })
 }
 
 /* --------------------------------------------------------------- model */
@@ -118,8 +133,9 @@ export function createStorageModel({ services, coverCache, status, removeDownloa
       if (!removeDownload) return
       publish({ busy: book })
       try {
+        /* The action OWNS the ledger delete AND its size row — dropping the
+         * row here too was a second delete of the same entry. */
         await removeDownload(book)
-        if (fs) await dropDownloadSize(fs, book)
       } finally {
         publish({ busy: null })
         await refresh()

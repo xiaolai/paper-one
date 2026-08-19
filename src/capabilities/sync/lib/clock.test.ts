@@ -1,6 +1,6 @@
 import fc from 'fast-check'
 import { describe, expect, it } from 'vitest'
-import { createSettingsStore } from '../../../kernel'
+import { HLC_MAX_MS, createSettingsStore } from '../../../kernel'
 import {
   ZERO_DEVICE,
   compareHlc,
@@ -126,6 +126,20 @@ describe('persistence — a restart cannot reissue', () => {
 
   it('refuses a load that is not a stamp — fail loud, not below the floor', () => {
     expect(() => createClock({ deviceId: DEV, load: () => 'garbage' as Hlc })).toThrow(/not a stamp/)
+  })
+
+  it('refuses to witness a stamp implausibly far in the future — the floor is persisted, and a floor near HLC_MAX_MS is a clock bricked forever', () => {
+    let persisted: Hlc | null = null
+    const clock = createClock({ deviceId: DEV, now: () => 1_750_000_000_000, save: (last) => void (persisted = last) })
+    const before = clock.last()
+    expect(() => clock.witness(makeHlc(HLC_MAX_MS, 0, OTHER))).toThrow(/implausibly far/)
+    // The floor did not move and nothing was persisted — the clock survives.
+    expect(clock.last()).toBe(before)
+    expect(persisted).toBeNull()
+    // A drastically skewed but sub-century stamp still witnesses fine.
+    const skewed = makeHlc(1_750_000_000_000 + 70 * 365 * 24 * 60 * 60 * 1000, 0, OTHER)
+    clock.witness(skewed)
+    expect(clock.now() > skewed).toBe(true)
   })
 })
 

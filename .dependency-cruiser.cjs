@@ -122,6 +122,36 @@ module.exports = {
       to: { path: '^src/capabilities/(?!$1/)[^/]+/', pathNot: CAPABILITY_INDEX },
     },
     {
+      name: 'capability-index-only-from-composition',
+      severity: 'error',
+      comment:
+        "A capability's index.ts is imported only by a composition root or by another capability " +
+        '(which capability-requires-declared then checks against `requires`). A shared/other module ' +
+        'under src/ — anything that is neither a composition root, nor a capability, nor the kernel ' +
+        '(which no-kernel-to-capabilities already stops) — importing a capability index is a back ' +
+        'door: capability A could reach an undeclared capability B THROUGH that intermediary, and the ' +
+        'requires check sees only the direct A->B edge, not A->shared->B. Forbidding the intermediary ' +
+        'edge closes the barrel. src/main.tsx and the composition roots are the allowed non-capability ' +
+        'importers.',
+      from: { path: '^src/', pathNot: [...COMPOSITION_ROOTS, '^src/capabilities/', '^src/kernel/'] },
+      to: { path: CAPABILITY_INDEX },
+    },
+    {
+      name: 'no-capability-to-composition-root',
+      severity: 'error',
+      comment:
+        'NOTHING imports a composition root (nor src/main.tsx) but a test: the root imports EVERY ' +
+        "composed capability's index, so the edge would hand the importer the whole composition — " +
+        'each capability reachable without a `requires` declaration, because ' +
+        'capability-requires-declared judges only direct capability-to-capability edges. And the rule ' +
+        'covers every module, not just capabilities, so a capability cannot launder the edge through ' +
+        'a shared intermediary either — and one PLATFORM root cannot import another, which would ' +
+        'braid two platforms\' capability graphs. Only src/main.tsx (the entry choosing its root) and ' +
+        'tests are exempt.',
+      from: { path: '^src/', pathNot: ['^src/main\\.tsx$', '\\.(test|testkit)\\.tsx?$'] },
+      to: { path: '^src/app/composition\\.(desktop|ios|android)\\.ts$' },
+    },
+    {
       name: 'no-circular',
       severity: 'error',
       comment:

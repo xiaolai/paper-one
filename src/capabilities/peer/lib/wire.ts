@@ -43,14 +43,18 @@ export interface WirePeer {
 }
 
 export interface PairOffer {
+  /** CARRIES THE SECRET (it is what the other device scans) — sensitive,
+   *  never logged; diagnostics' redaction covers `url` keys. */
   readonly url: string
-  /** The QR, as SVG markup — rendered in Rust so the secret never enters JS state. */
+  /** The QR, as SVG markup — rendered in Rust rather than by a JS QR
+   *  library, but it ENCODES the same secret the url carries: treat both
+   *  as sensitive. */
   readonly svg: string
   readonly expiresAt: number
 }
 
 export interface PairStart {
-  /** The 4-digit SAS to show while the other side's human decides. */
+  /** The 6-digit SAS to show while the other side's human decides. */
   readonly sas: string
 }
 
@@ -59,6 +63,10 @@ export interface PairingPending {
   readonly name: string
   readonly platform: string
   readonly sas: string
+  /** The unguessable id of THIS pairing attempt. Echoed back to
+   *  `pairConfirm` so a confirmation is bound to the attempt the human saw,
+   *  not to whatever a pre-played QR has since started (Rust M9). */
+  readonly attemptId: string
 }
 
 export interface PairingResult {
@@ -131,7 +139,9 @@ export interface PeerWire {
 
   pairBegin(name?: string): Promise<PairOffer>
   pairCancel(): Promise<void>
-  pairConfirm(accept: boolean, grants?: readonly string[]): Promise<WirePeer | null>
+  /** `attemptId` is REQUIRED — the binding that stops a stale or pre-played
+   *  confirmation approving whichever attempt happens to be pending. */
+  pairConfirm(accept: boolean, grants: readonly string[] | undefined, attemptId: string): Promise<WirePeer | null>
   pairFromUri(uri: string, name?: string, grants?: readonly string[]): Promise<PairStart>
 
   ready(): Promise<void>
@@ -164,7 +174,12 @@ function subscription<T>(event: string, fn: (payload: T) => void): Unsubscribe {
   const pending = listen<T>(event, (received) => {
     if (live) fn(received.payload)
   })
+  /* A registration that FAILS must not sit as an unhandled rejection until
+   * somebody unsubscribes — it is contained here, once, and unsubscribing
+   * then finds nothing to detach. */
+  void pending.catch(() => {})
   return () => {
+    if (!live) return
     live = false
     void pending.then((unlisten) => unlisten()).catch(() => {})
   }
@@ -185,7 +200,7 @@ export function tauriWire(): PeerWire {
 
     pairBegin: (name) => invoke(command('peer_pair_begin'), { name: name ?? null }),
     pairCancel: () => invoke(command('peer_pair_cancel')),
-    pairConfirm: (accept, grants) => invoke(command('peer_pair_confirm'), { accept, grants: grants ?? null }),
+    pairConfirm: (accept, grants, attemptId) => invoke(command('peer_pair_confirm'), { accept, grants: grants ?? null, attemptId }),
     pairFromUri: (uri, name, grants) => invoke(command('peer_pair_from_uri'), { uri, name: name ?? null, grants: grants ?? null }),
 
     ready: () => invoke(command('peer_ready')),

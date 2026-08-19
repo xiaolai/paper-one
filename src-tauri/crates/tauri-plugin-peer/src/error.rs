@@ -67,6 +67,16 @@ pub enum Error {
         source: serde_json::Error,
     },
 
+    /// `peer/peers.json` declares a format this build does not speak.
+    /// Refused rather than read as version 1 — a future format silently
+    /// reinterpreted is a store scrambled with every field looking fine.
+    #[error("peers file {} is format {version}; this build speaks {supported}", path.display())]
+    PeersUnsupportedVersion {
+        path: PathBuf,
+        version: u32,
+        supported: u32,
+    },
+
     /// A string that should name a peer is not an iroh endpoint id.
     #[error("not an endpoint id: {0:?}")]
     InvalidPeerId(String),
@@ -113,10 +123,11 @@ pub enum Error {
     #[error("stream already closed: {0}")]
     StreamClosed(#[from] iroh::endpoint::ClosedStream),
 
-    /// A frame's declared length is above the 4 MiB cap. Nothing was
-    /// allocated for it.
-    #[error("frame of {0} bytes exceeds the 4 MiB cap")]
-    FrameTooLarge(u32),
+    /// A frame's declared length is above the cap (`frame::MAX_FRAME`,
+    /// carried here so the message cannot go stale if the cap moves).
+    /// Nothing was allocated for it.
+    #[error("frame of {size} bytes exceeds the {max}-byte cap")]
+    FrameTooLarge { size: u32, max: u32 },
 
     /// A control frame (hello, pairing, blob request/header) did not parse.
     #[error("malformed control frame: {0}")]
@@ -157,6 +168,11 @@ pub enum Error {
     #[error("unknown session {0}")]
     SessionUnknown(u64),
 
+    /// The session cap (global or per-peer) is reached; a further session is
+    /// refused rather than letting a peer spawn unbounded connections/tasks.
+    #[error("too many open sessions")]
+    TooManySessions,
+
     /// A blob fetch needs an open session with the peer; there is none.
     #[error("no open session with peer {0}")]
     NoSession(String),
@@ -176,6 +192,12 @@ pub enum Error {
     /// `.part` was deleted.
     #[error("blob hash mismatch")]
     BlobHashMismatch,
+
+    /// The advertised (or requested) blob size is above the accepted maximum.
+    /// Refused before a byte is written, so a peer cannot fill the disk with a
+    /// huge or lying size.
+    #[error("blob of {size} bytes exceeds the {max}-byte maximum")]
+    BlobTooLarge { size: u64, max: u64 },
 
     /// The stream ended before `size` bytes arrived. The `.part` is kept
     /// for a resume.
@@ -202,6 +224,7 @@ impl Error {
             Error::UnknownRole(_) => "unknownRole",
             Error::IdentityCorrupt { .. } => "identityCorrupt",
             Error::PeersMalformed { .. } => "peersMalformed",
+            Error::PeersUnsupportedVersion { .. } => "peersUnsupportedVersion",
             Error::InvalidPeerId(_) => "invalidPeerId",
             Error::PeerUnknown(_) => "peerUnknown",
             Error::InvalidFolder(_) => "invalidFolder",
@@ -214,7 +237,7 @@ impl Error {
             Error::StreamRead(_) => "streamRead",
             Error::StreamReadExact(_) => "streamReadExact",
             Error::StreamClosed(_) => "streamClosed",
-            Error::FrameTooLarge(_) => "frameTooLarge",
+            Error::FrameTooLarge { .. } => "frameTooLarge",
             Error::FrameMalformed(_) => "frameMalformed",
             Error::Timeout(_) => "timeout",
             Error::PairUriInvalid(_) => "pairUriInvalid",
@@ -224,10 +247,12 @@ impl Error {
             Error::PairingRefused(_) => "pairingRefused",
             Error::SessionRefused(_) => "sessionRefused",
             Error::SessionUnknown(_) => "sessionUnknown",
+            Error::TooManySessions => "tooManySessions",
             Error::NoSession(_) => "noSession",
             Error::BlobRefused(_) => "blobRefused",
             Error::BlobMismatch { .. } => "blobMismatch",
             Error::BlobHashMismatch => "blobHashMismatch",
+            Error::BlobTooLarge { .. } => "blobTooLarge",
             Error::BlobInterrupted { .. } => "blobInterrupted",
             Error::TransferBusy(_) => "transferBusy",
         }
@@ -286,13 +311,19 @@ mod tests {
                 source: serde_json::from_str::<u8>("x").unwrap_err(),
             }
             .kind(),
+            Error::PeersUnsupportedVersion {
+                path: PathBuf::new(),
+                version: 0,
+                supported: 0,
+            }
+            .kind(),
             Error::InvalidPeerId(String::new()).kind(),
             Error::PeerUnknown(String::new()).kind(),
             Error::InvalidFolder(String::new()).kind(),
             Error::InvalidBlobName(String::new()).kind(),
             Error::ReadOnlyBlobName(String::new()).kind(),
             Error::FolderGone(String::new()).kind(),
-            Error::FrameTooLarge(0).kind(),
+            Error::FrameTooLarge { size: 0, max: 0 }.kind(),
             Error::FrameMalformed(String::new()).kind(),
             Error::Timeout("").kind(),
             Error::PairUriInvalid(String::new()).kind(),
@@ -306,6 +337,7 @@ mod tests {
             Error::PairingRefused(String::new()).kind(),
             Error::SessionRefused(String::new()).kind(),
             Error::SessionUnknown(0).kind(),
+            Error::TooManySessions.kind(),
             Error::NoSession(String::new()).kind(),
             Error::BlobRefused(String::new()).kind(),
             Error::BlobMismatch {
@@ -314,6 +346,7 @@ mod tests {
             }
             .kind(),
             Error::BlobHashMismatch.kind(),
+            Error::BlobTooLarge { size: 0, max: 0 }.kind(),
             Error::BlobInterrupted {
                 received: 0,
                 total: 0,
@@ -323,5 +356,22 @@ mod tests {
         ];
         let unique: std::collections::BTreeSet<_> = all.iter().collect();
         assert_eq!(unique.len(), all.len());
+        // The wrapped-foreign variants named in the comment above, by
+        // inspection of `kind()` — folded into the same uniqueness check, so
+        // a new variant that reuses one of THEIR tags fails here too instead
+        // of hiding behind "cannot be constructed".
+        let foreign = [
+            "bind",
+            "tauri",
+            "connect",
+            "connection",
+            "streamWrite",
+            "streamRead",
+            "streamReadExact",
+            "streamClosed",
+        ];
+        let with_foreign: std::collections::BTreeSet<&str> =
+            all.iter().copied().chain(foreign).collect();
+        assert_eq!(with_foreign.len(), all.len() + foreign.len());
     }
 }

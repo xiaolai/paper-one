@@ -5518,6 +5518,7 @@ dependencies = [
  "data-encoding",
  "iroh",
  "iroh-mdns-address-lookup",
+ "libc",
  "log",
  "qrcode",
  "rand 0.10.2",

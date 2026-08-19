@@ -1,5 +1,5 @@
 import { createElement } from 'react'
-import type { Capability, Disposable, KernelApi } from '../../kernel'
+import type { Capability, CapabilityContext, Disposable } from '../../kernel'
 import { createPeerPort, type PeerPort } from './lib/port'
 import { hasTauri, tauriWire } from './lib/wire'
 import { createDevicesModel, type DevicesModel } from './ui/devicesModel'
@@ -54,21 +54,75 @@ export const peer: Capability = {
     },
   ],
 
-  start(api: KernelApi, signal: AbortSignal): Disposable {
-    port = hasTauri() ? createPeerPort(tauriWire()) : null
-    model = createDevicesModel({ port, settings: api.settings })
-    void model.refresh()
-    api.diagnostics.info('peer.started', { available: port !== null })
+  start(api: CapabilityContext, signal: AbortSignal): Disposable {
+    /* Teardown FIRST, acquisitions after: `stop` reads this invocation's own
+     * slots and is registered with the kernel's disposer stack BEFORE
+     * anything is acquired, so a `createDevicesModel` that throws leaves no
+     * live port behind. And it clears the module slots only while it still
+     * owns them — an overlapping restart's newer instances are not this
+     * stop's to destroy. */
+    let myPort: PeerPort | null = null
+    let myModel: DevicesModel | null = null
+    let unbindServiceHost: Disposable | null = null
     let stopped = false
     const stop = () => {
       if (stopped) return
       stopped = true
-      model?.dispose()
-      model = null
-      port = null
       signal.removeEventListener('abort', stop)
+      /* Each step isolated: a throwing dispose must not rob the later steps
+       * — nor leave the module slots pointing at a dead instance. */
+      const step = (label: string, fn: () => void) => {
+        try {
+          fn()
+        } catch (error) {
+          api.diagnostics.warn('peer.teardown-step-failed', {
+            label,
+            message: error instanceof Error ? error.message : String(error),
+          })
+        }
+      }
+      step('service-host', () => unbindServiceHost?.dispose())
+      step('devices-model', () => myModel?.dispose())
+      if (model === myModel) model = null
+      if (port === myPort) port = null
     }
+    api.onCleanup(stop)
     signal.addEventListener('abort', stop, { once: true })
+
+    myPort = hasTauri() ? createPeerPort(tauriWire()) : null
+    port = myPort
+    myModel = createDevicesModel({ port: myPort, settings: api.settings })
+    model = myModel
+    void myModel.refresh()
+
+    /* Own the SHELF side of the contribution API's `services`: when the kernel
+     * serves the composed set (after every capability has started), a shelf
+     * serves them over the router, a satchel serves nothing. This is what
+     * makes a declared service actually reachable — not each capability
+     * serving its own subset. The callback awaits, so teardown is re-checked
+     * after every await: a serve that resolves past `stop` is unserved on
+     * the spot rather than leaking listeners into an ended lifetime. */
+    const NOTHING_SERVED = { dispose: () => {} }
+    const held = myPort
+    unbindServiceHost = api.services.bindServiceHost(async (services) => {
+      if (!held || stopped) return NOTHING_SERVED
+      const role = await held.localRole().catch((error: unknown) => {
+        /* Serving nothing is the safe side, but a role that could not be
+         * read means this shelf's services silently never serve — a fact
+         * for the log, not a silent guess. */
+        api.diagnostics.warn('peer.role-unknown', { message: error instanceof Error ? error.message : String(error) })
+        return 'satchel' as const
+      })
+      if (stopped || role !== 'shelf' || services.length === 0) return NOTHING_SERVED
+      const unserve = await held.serve(services)
+      if (stopped) {
+        unserve()
+        return NOTHING_SERVED
+      }
+      return { dispose: () => unserve() }
+    })
+
+    api.diagnostics.info('peer.started', { available: myPort !== null })
     return { dispose: stop }
   },
 }

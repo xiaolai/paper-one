@@ -1,9 +1,10 @@
 //! The commands. Each is one line of policy on top of a module that does the
 //! work, so the modules stay testable without a Tauri app.
 //!
-//! Adding a command means three edits: here, `COMMANDS` in `build.rs`, and
-//! `permissions/default.toml`. Miss the second and the command is unreachable;
-//! miss the third and it is refused by the ACL.
+//! Adding a command means four edits: here, `generate_handler!` in `lib.rs`,
+//! `COMMANDS` in `build.rs`, and `permissions/default.toml`. Miss the handler
+//! or the build list and the command is unreachable; miss the ACL and it is
+//! refused.
 //!
 //! Frames cross IPC as byte arrays (`Vec<u8>` ⇄ a JSON array of numbers).
 //! Correct and simple; if the envelope traffic ever makes it the bottleneck,
@@ -158,16 +159,21 @@ pub async fn peer_pair_cancel<R: Runtime>(
 
 /// Shelf: the human's answer to `peer://pairing-pending`. On accept the
 /// satchel is persisted with `grants` (default none) and the record is
-/// returned; on refuse, `null`.
+/// returned; on refuse, `null`. `attemptId` is the id from the
+/// `peer://pairing-pending` event, REQUIRED: it binds this answer to that
+/// exact attempt, so a stale confirm — or one meant for a pre-played attempt
+/// — is refused (finding M9). The optional form restored the unbound
+/// behaviour the binding exists to close, and is gone.
 #[tauri::command]
 pub async fn peer_pair_confirm<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, PeerState>,
     accept: bool,
     grants: Option<Vec<String>>,
+    attempt_id: String,
 ) -> Result<Option<PeerRecord>> {
     let node = state.node(&app).await?;
-    pairing::confirm(&node, accept, grants.unwrap_or_default()).await
+    pairing::confirm(&node, accept, grants.unwrap_or_default(), attempt_id).await
 }
 
 /// Satchel: dial the shelf in the URI. Returns the SAS to show at once; the

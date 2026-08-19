@@ -108,10 +108,12 @@ describe('a tree with crates', () => {
     expect(lines.map((l) => l.split(' ')[0])).toEqual([
       'COMPOSITION_EXTRA',
       'COMPOSITION_MISSING',
+      // Permissions report first now: the ACL pass covers every entry that
+      // lists permissions, crate or not, so it runs before the Cargo pass.
+      'PERMISSION_UNGRANTED',
+      'PERMISSION_UNGRANTED',
+      'PERMISSION_UNGRANTED',
       'PLUGIN_UNREGISTERED',
-      'PERMISSION_UNGRANTED',
-      'PERMISSION_UNGRANTED',
-      'PERMISSION_UNGRANTED',
       'CRATE_PLATFORMS_DIFFER',
       'note:',
       'compositions-check:',

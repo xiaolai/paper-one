@@ -44,7 +44,7 @@ export function compositionFile(platform) {
   return `src/app/composition.${platform}.ts`
 }
 
-const COMPOSITION_FILE = /^src\/app\/composition\.(desktop|ios|android)\.ts$/
+const COMPOSITION_FILE = new RegExp(`^src/app/composition\\.(${PLATFORMS.join('|')})\\.ts$`)
 const CAPABILITY_MODULE = /^src\/capabilities\/([^/]+)(?:\/|$)/
 
 /* ------------------------------------------------------------ composition */
@@ -85,6 +85,75 @@ export function parseCompositionImports(source) {
     if (cap !== null) dynamic.push({ specifier: m[1], dir: cap.dir })
   }
   return { imports, dynamic }
+}
+
+/**
+ * The local binding each capability index is imported under, by ts directory:
+ * `import { sync } from '../capabilities/sync'` → `sync → 'sync'`, and
+ * `import { peer as p } from '…/peer'` → `peer → 'p'`. Only non-deep capability
+ * imports; comments stripped first. This is what the exported `capabilities`
+ * array must list, so a name renamed at import is still matched by its binding.
+ */
+export function capabilityBindings(source) {
+  const code = stripComments(source)
+  const byDir = new Map()
+  const RE = /\bimport\s+(?:type\s+)?\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]/g
+  for (const m of code.matchAll(RE)) {
+    const cap = capabilityDirOf(m[2])
+    if (cap === null || cap.deep) continue
+    /* EVERY binding, not the last: `import { capability, helper }` bound the
+     * directory to `helper`, and the order check then demanded the wrong
+     * identifier in the array. */
+    const names = byDir.get(cap.dir) ?? new Set()
+    for (const raw of m[1].split(',')) {
+      const name = raw.trim()
+      if (name === '') continue
+      const as = /^[A-Za-z_$][\w$]*\s+as\s+([A-Za-z_$][\w$]*)$/.exec(name)
+      const bare = /^([A-Za-z_$][\w$]*)$/.exec(name)
+      if (as) names.add(as[1])
+      else if (bare) names.add(bare[1])
+    }
+    if (names.size > 0) byDir.set(cap.dir, names)
+  }
+  return byDir
+}
+
+/**
+ * The exported `capabilities` list, PARSED — a static composition is an array
+ * LITERAL of bare capability identifiers, never a computed expression. Returns
+ * `{ literal, ids, reason? }`: `all.filter(...)`, `[...base, x]`, a conditional
+ * or a function call are `literal: false` with a reason. Comments stripped, so
+ * a bracket in prose is not the array. The type annotation's `Capability[]`
+ * carries no `=`, so anchoring on `= [` skips it.
+ */
+export function parseCompositionExport(source) {
+  const code = stripComments(source)
+  const m = /export\s+const\s+capabilities\b[^=]*=\s*\[([^\]]*)\]/.exec(code)
+  if (!m) {
+    return { literal: false, ids: [], reason: '`export const capabilities` is not an array literal — a composition is a static list, not a computed one' }
+  }
+  const rest = code.slice(m.index + m[0].length)
+  const trailing = (/^[^\n;]*/.exec(rest)?.[0] ?? '').trim()
+  if (trailing !== '') {
+    return { literal: false, ids: [], reason: `the capabilities array is followed by ${JSON.stringify(trailing)} — it must be a plain array literal, not a computed expression` }
+  }
+  /* Across LINES too: `[a, b]\n  .reverse()` put the continuation past the
+   * old same-line check, and the registration order silently stopped being
+   * the literal's. Anything that can continue the expression refuses. */
+  const continuation = /^\s*(\?\.|!\.|&&|\|\||\?\?|===|!==|==|!=|<=|>=|(?:as|satisfies|in|instanceof)\b|[.([\`+\-*/&|?=<>%^])/.exec(rest)
+  if (continuation) {
+    return { literal: false, ids: [], reason: `the capabilities array is continued by ${JSON.stringify(continuation[1])} on a following line — it must be a plain array literal, not a computed expression` }
+  }
+  const ids = []
+  for (const raw of m[1].split(',')) {
+    const part = raw.trim()
+    if (part === '') continue
+    if (!/^[A-Za-z_$][\w$]*$/.test(part)) {
+      return { literal: false, ids: [], reason: `the capabilities array contains ${JSON.stringify(part)}, not a bare capability identifier — no spreads, calls or computed members` }
+    }
+    ids.push(part)
+  }
+  return { literal: true, ids }
 }
 
 /** `../capabilities/x`, `../capabilities/x/index`, `../capabilities/x/index.ts`
@@ -175,6 +244,7 @@ export const FINDING_CODES = Object.freeze([
   'COMPOSITION_UNKNOWN',
   'COMPOSITION_DEEP',
   'COMPOSITION_DYNAMIC',
+  'COMPOSITION_EXPORT',
   'CARGO_UNREADABLE',
   'CRATE_DEP_ABSENT',
   'CRATE_PLATFORMS_DIFFER',
@@ -203,6 +273,7 @@ export function checkCompositionFiles(manifest, read) {
       findings.push(finding('COMPOSITION_ABSENT', file, `${file} does not exist; every platform has a static composition`))
       continue
     }
+    const before = findings.length
     const { imports, dynamic } = parseCompositionImports(source)
     const expected = manifestSet(manifest, platform)
     const imported = new Set()
@@ -235,6 +306,35 @@ export function checkCompositionFiles(manifest, read) {
     for (const item of dynamic) {
       findings.push(finding('COMPOSITION_DYNAMIC', file, `import(${JSON.stringify(item.specifier)}): a composition is static, never a runtime choice`))
     }
+    /* The exported list itself must be a static array literal of exactly the
+     * imported capabilities, in manifest order — matching the imports is not
+     * enough if the export is `all.filter(...)` or a reordered/computed list,
+     * which the module graph and the bundle still see as all modules. The
+     * order comparison runs only when the imports for this file were clean, so
+     * a bad import is reported once, not echoed here. Literal-ness is always
+     * checked, since it is independent of the imports. */
+    const exp = parseCompositionExport(source)
+    if (!exp.literal) {
+      findings.push(finding('COMPOSITION_EXPORT', file, exp.reason))
+    } else if (findings.length === before) {
+      const bindings = capabilityBindings(source)
+      const ordered = manifest.capabilities.filter((entry) => imported.has(entry.id))
+      /* Each position must hold ONE OF the directory's bindings — an import
+       * clause may bind several names (`{ capability, helper }`), and any of
+       * them can be the value the array lists. */
+      const matches =
+        exp.ids.length === ordered.length && exp.ids.every((id, k) => bindings.get(ordered[k].ts)?.has(id) === true)
+      if (!matches) {
+        const want = ordered.map((entry) => [...(bindings.get(entry.ts) ?? [])].join('|') || '?')
+        findings.push(
+          finding(
+            'COMPOSITION_EXPORT',
+            file,
+            `the capabilities array is [${exp.ids.join(', ')}] but must be [${want.join(', ')}] — the imported capabilities, in manifest order`,
+          ),
+        )
+      }
+    }
   }
   return findings
 }
@@ -254,6 +354,26 @@ export function checkCompositionFiles(manifest, read) {
 export function checkRustSurfaces(manifest, files) {
   const findings = []
   const withCrate = manifest.capabilities.filter((entry) => typeof entry.crate === 'string')
+  const withPermissions = manifest.capabilities.filter((entry) => (entry.permissions ?? []).length > 0)
+
+  /* The ACL half runs for EVERY entry that lists permissions — a capability
+   * whose plugin comes from a registry (no local `crate`) still needs its
+   * grants, and the old crate-only loop skipped it entirely. */
+  if (withPermissions.length > 0) {
+    const acl = readAcl(files.acl, findings)
+    for (const entry of withPermissions) {
+      const where = `capabilities/${entry.id}`
+      for (const permission of entry.permissions ?? []) {
+        for (const platform of entry.platforms) {
+          if (!acl.grants(permission, platform)) {
+            findings.push(
+              finding('PERMISSION_UNGRANTED', where, `permission ${JSON.stringify(permission)} is not granted for ${platform} by any src-tauri/capabilities/*.json`),
+            )
+          }
+        }
+      }
+    }
+  }
   if (withCrate.length === 0) return { findings, crates: 0 }
 
   let cargo = null
@@ -266,7 +386,6 @@ export function checkRustSurfaces(manifest, files) {
       findings.push(finding('CARGO_UNREADABLE', 'src-tauri/Cargo.toml', cause.message))
     }
   }
-  const acl = readAcl(files.acl, findings)
 
   for (const entry of withCrate) {
     const where = `capabilities/${entry.id}`
@@ -298,22 +417,16 @@ export function checkRustSurfaces(manifest, files) {
         }
       }
     }
-    for (const permission of entry.permissions ?? []) {
-      for (const platform of entry.platforms) {
-        if (!acl.grants(permission, platform)) {
-          findings.push(
-            finding('PERMISSION_UNGRANTED', where, `permission ${JSON.stringify(permission)} is not granted for ${platform} by any src-tauri/capabilities/*.json`),
-          )
-        }
-      }
-    }
   }
   return { findings, crates: withCrate.length }
 }
 
-/** `.plugin(<name>::init())`, whitespace-tolerant, outside comments. */
+/** `.plugin(<name>::init())`, whitespace-tolerant, outside comments AND
+ *  outside single-line string literals — a log line quoting the call is not
+ *  the call. The mask is LINE-BOUNDED on purpose: an unpaired quote (in a
+ *  char literal, or prose) must not swallow the lines after it. */
 export function registersPlugin(libRs, name) {
-  const code = stripComments(libRs)
+  const code = stripComments(libRs).replace(/"(?:[^"\\\n]|\\.)*"/g, '""')
   return new RegExp(`\\.plugin\\(\\s*${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}::init\\(\\)\\s*\\)`).test(code)
 }
 
@@ -337,6 +450,17 @@ function readAcl(files, findings) {
     }
     if (typeof json !== 'object' || json === null || Array.isArray(json)) {
       findings.push(finding('ACL_UNREADABLE', file, `${file} is not a JSON object`))
+      continue
+    }
+    /* Present-but-invalid must not fail OPEN: a malformed `platforms`
+     * read as null meant "all platforms", and a malformed `permissions`
+     * read as none silently erased a file's grants from the check. */
+    if ('platforms' in json && !Array.isArray(json.platforms)) {
+      findings.push(finding('ACL_UNREADABLE', file, `${file} has a platforms field that is not an array`))
+      continue
+    }
+    if ('permissions' in json && !Array.isArray(json.permissions)) {
+      findings.push(finding('ACL_UNREADABLE', file, `${file} has a permissions field that is not an array`))
       continue
     }
     const platforms = Array.isArray(json.platforms) ? new Set(json.platforms.map(String)) : null
@@ -403,7 +527,10 @@ export function decideBundle(platform, moduleIds, manifest, roots) {
             `${rel} is in the ${platform} bundle but capability ${JSON.stringify(entry.id)} is composed on [${entry.platforms.join(', ')}] only`,
           ),
         )
-      } else {
+      } else if (/^src\/capabilities\/[^/]+\/index\.tsx?$/.test(rel)) {
+        /* PRESENT is the capability's root module. A bundle holding only
+         * `<dir>/lib/helper.ts` — the index tree-shaken or mis-resolved —
+         * is not a composed capability and must fail the absence check. */
         present.add(entry.id)
       }
       continue

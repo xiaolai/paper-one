@@ -18,7 +18,8 @@ import { collapse, createFsProbe, escapeControls, parseManifest, validateManifes
 const SCRIPT = fileURLToPath(new URL('./architecture-check.mjs', import.meta.url))
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
 const MANIFEST = 'capabilities.manifest.json'
-const SUMMARY = /^architecture-check: (\d+) capabilities, (\d+) findings$/
+const SUMMARY_SUFFIX = ' (manifest + tree; composition/Cargo/ACL drift is compositions:check)'
+const SUMMARY = /^architecture-check: (\d+) capabilities, (\d+) findings \(manifest \+ tree; composition\/Cargo\/ACL drift is compositions:check\)$/
 
 function run(args, options = {}) {
   const result = spawnSync(process.execPath, [SCRIPT, ...args], {
@@ -65,13 +66,13 @@ function expectedOutput(root) {
     text = readFileSync(join(root, MANIFEST), 'utf8')
   } catch (cause) {
     const line = `MANIFEST_MISSING (root): ${escapeControls(collapse(`cannot read ${MANIFEST} (${cause.code}): ${cause.message}`))}`
-    return { out: `${line}\narchitecture-check: 0 capabilities, 1 findings\n`, code: 1 }
+    return { out: `${line}\narchitecture-check: 0 capabilities, 1 findings${SUMMARY_SUFFIX}\n`, code: 1 }
   }
   const { manifest, findings: parseFindings } = parseManifest(text)
   const findings = parseFindings.length ? parseFindings : validateManifest(manifest, createFsProbe(root))
   const count = Array.isArray(manifest?.capabilities) ? manifest.capabilities.length : 0
   const lines = findings.map((f) => `${f.code} ${f.path === '' ? '(root)' : escapeControls(f.path)}: ${f.message}`)
-  lines.push(`architecture-check: ${count} capabilities, ${findings.length} findings`)
+  lines.push(`architecture-check: ${count} capabilities, ${findings.length} findings${SUMMARY_SUFFIX}`)
   return { out: `${lines.join('\n')}\n`, code: findings.length ? 1 : 0 }
 }
 
@@ -99,7 +100,7 @@ describe('architecture-check', () => {
     // The repository's own manifest, found from a cwd that has none: the count
     // is whatever the tree holds today (one since WI-5.6, none after WI-5.12
     // removes `example`), the findings are the assertion.
-    expect(out).toMatch(/^architecture-check: \d+ capabilities, 0 findings\n$/)
+    expect(out).toMatch(/^architecture-check: \d+ capabilities, 0 findings \(manifest \+ tree; composition\/Cargo\/ACL drift is compositions:check\)\n$/)
     expect(code).toBe(0)
   })
 
@@ -107,7 +108,7 @@ describe('architecture-check', () => {
     const root = fixture(complete, { ts: ['peer'], crates: ['tauri-plugin-peer'] })
     const { code, out, err } = run(['--root', root])
     expect(err).toBe('')
-    expect(out).toBe('architecture-check: 1 capabilities, 0 findings\n')
+    expect(out).toBe(`architecture-check: 1 capabilities, 0 findings${SUMMARY_SUFFIX}\n`)
     expect(code).toBe(0)
   })
 
@@ -117,7 +118,7 @@ describe('architecture-check', () => {
     expect(err).toBe('')
     const lines = out.split('\n')
     expect(lines[0].startsWith('TS_DIR_ABSENT /capabilities/0/ts: ')).toBe(true)
-    expect(lines[1]).toBe('architecture-check: 1 capabilities, 1 findings')
+    expect(lines[1]).toBe(`architecture-check: 1 capabilities, 1 findings${SUMMARY_SUFFIX}`)
     expect(lines).toHaveLength(3)
     expect(code).toBe(1)
   })
@@ -129,7 +130,7 @@ describe('architecture-check', () => {
     let lines = result.out.split('\n')
     expect(lines).toHaveLength(3)
     expect(lines[0].startsWith('MANIFEST_PARSE (root): ')).toBe(true)
-    expect(lines[1]).toBe('architecture-check: 0 capabilities, 1 findings')
+    expect(lines[1]).toBe(`architecture-check: 0 capabilities, 1 findings${SUMMARY_SUFFIX}`)
     expect(result.code).toBe(1)
 
     const missing = fixture(null)
@@ -139,7 +140,7 @@ describe('architecture-check', () => {
     expect(lines).toHaveLength(3)
     expect(lines[0].startsWith('MANIFEST_MISSING (root): ')).toBe(true)
     expect(lines[0]).toContain('ENOENT')
-    expect(lines[1]).toBe('architecture-check: 0 capabilities, 1 findings')
+    expect(lines[1]).toBe(`architecture-check: 0 capabilities, 1 findings${SUMMARY_SUFFIX}`)
     expect(result.code).toBe(1)
   })
 
@@ -149,7 +150,7 @@ describe('architecture-check', () => {
     expect(err).toBe('')
     const lines = out.split('\n')
     expect(lines[0].startsWith('MANIFEST_SHAPE (root): ')).toBe(true)
-    expect(lines[1]).toBe('architecture-check: 0 capabilities, 1 findings')
+    expect(lines[1]).toBe(`architecture-check: 0 capabilities, 1 findings${SUMMARY_SUFFIX}`)
     expect(code).toBe(1)
   })
 
@@ -169,7 +170,7 @@ describe('architecture-check', () => {
     const name = relative(parent, root)
     const { code, out, err } = run(['--root', name], { cwd: parent })
     expect(err).toBe('')
-    expect(out).toBe('architecture-check: 1 capabilities, 0 findings\n')
+    expect(out).toBe(`architecture-check: 1 capabilities, 0 findings${SUMMARY_SUFFIX}\n`)
     expect(code).toBe(0)
   })
 
@@ -217,7 +218,7 @@ describe('architecture-check', () => {
     expect(err).toBe('')
     const lines = out.split('\n')
     expect(lines[0].startsWith('MANIFEST_SHAPE /capabilities: ')).toBe(true)
-    expect(lines[1]).toBe('architecture-check: 0 capabilities, 1 findings')
+    expect(lines[1]).toBe(`architecture-check: 0 capabilities, 1 findings${SUMMARY_SUFFIX}`)
     expect(code).toBe(1)
   })
 
@@ -229,7 +230,7 @@ describe('architecture-check', () => {
     expect(lines).toHaveLength(3)
     expect(lines[0].startsWith('MANIFEST_MISSING (root): ')).toBe(true)
     expect(lines[0]).toContain('ENOTDIR')
-    expect(lines[1]).toBe('architecture-check: 0 capabilities, 1 findings')
+    expect(lines[1]).toBe(`architecture-check: 0 capabilities, 1 findings${SUMMARY_SUFFIX}`)
     expect(result.err).toBe('')
     expect(result.out).not.toMatch(/^\s+at /m)
     expect(result.code).toBe(1)
@@ -241,7 +242,7 @@ describe('architecture-check', () => {
     expect(lines).toHaveLength(3)
     expect(lines[0].startsWith('MANIFEST_MISSING (root): ')).toBe(true)
     expect(lines[0]).toContain('ELOOP')
-    expect(lines[1]).toBe('architecture-check: 0 capabilities, 1 findings')
+    expect(lines[1]).toBe(`architecture-check: 0 capabilities, 1 findings${SUMMARY_SUFFIX}`)
     expect(result.err).toBe('')
     expect(result.out).not.toMatch(/^\s+at /m)
     expect(result.code).toBe(1)
@@ -252,7 +253,7 @@ describe('architecture-check', () => {
     symlinkSync(SCRIPT, link)
     const result = spawnSync(process.execPath, [link], { encoding: 'utf8', timeout: 30_000, cwd: tmpdir() })
     expect(result.stderr).toBe('')
-    expect(result.stdout).toMatch(/^architecture-check: \d+ capabilities, 0 findings\n$/)
+    expect(result.stdout).toMatch(/^architecture-check: \d+ capabilities, 0 findings \(manifest \+ tree; composition\/Cargo\/ACL drift is compositions:check\)\n$/)
     expect(result.status).toBe(0)
   })
 
@@ -264,7 +265,7 @@ describe('architecture-check', () => {
     expect(lines).toHaveLength(4)
     expect(lines[0].startsWith('UNKNOWN_FIELD /capabilities/0/x\\u001by: ')).toBe(true)
     expect(lines[1].startsWith('UNKNOWN_FIELD /capabilities/0/p\\u2028q\\u000ar: ')).toBe(true)
-    expect(lines[2]).toBe('architecture-check: 1 capabilities, 2 findings')
+    expect(lines[2]).toBe(`architecture-check: 1 capabilities, 2 findings${SUMMARY_SUFFIX}`)
     expect(out).not.toMatch(CONTROL)
     expect(code).toBe(1)
   })

@@ -391,6 +391,9 @@ describe('validateManifest — shapes and fields', () => {
     }
     expect(validate(manifestOf(cap('a')))).toEqual([])
     expect(validate(manifestOf(cap('a-1'), cap('b2')))).toEqual([])
+    // `kernel` matches the id pattern but is reserved for the kernel itself —
+    // the runtime registry refuses it, so the validator must too.
+    expect(strip(validate(manifestOf(cap('kernel'))))).toEqual([{ code: 'ID_RESERVED', path: '/capabilities/0/id' }])
   })
 
   it('V-6 requires: not an array, unresolved, self, duplicates, and an invalid id still resolves', () => {
@@ -535,10 +538,31 @@ describe('validateManifest — shapes and fields', () => {
     expect(strip(validate(manifestOf(cap('a', { permissions: [1] }))))).toEqual([
       { code: 'PERMISSIONS_SHAPE', path: '/capabilities/0/permissions/0' },
     ])
-    expect(strip(validate(manifestOf(cap('a', { permissions: ['x', 1, 'y'] }))))).toEqual([
+    expect(strip(validate(manifestOf(cap('a', { permissions: ['a:x', 1, 'a:y'] }))))).toEqual([
       { code: 'PERMISSIONS_SHAPE', path: '/capabilities/0/permissions/1' },
     ])
-    expect(validate(manifestOf(cap('a', { plugin: 'peer', permissions: ['a:default', 'a:default'] })))).toEqual([])
+    // A grant outside the ACL namespace (id `a`, or `plugin` if set) is a
+    // PERMISSIONS_NAMESPACE finding — this is what stops a `capability:remove`
+    // from missing a grant the manifest hid under the wrong prefix.
+    expect(strip(validate(manifestOf(cap('a', { permissions: ['b:default'] }))))).toEqual([
+      { code: 'PERMISSIONS_NAMESPACE', path: '/capabilities/0/permissions/0' },
+    ])
+    // The ACL namespace is `plugin` with `tauri-plugin-` stripped, so a crate
+    // plugin still validates grants under the short name Tauri actually uses.
+    expect(validate(manifestOf(cap('a', { plugin: 'tauri-plugin-peer', permissions: ['peer:default'] })))).toEqual([])
+    expect(validate(manifestOf(cap('a', { plugin: 'a', permissions: ['a:default', 'a:default'] })))).toEqual([])
+    // A plugin that normalises to an EMPTY namespace would make every grant
+    // vacuously prefix-match `":"` — refused at the plugin field itself.
+    expect(strip(validate(manifestOf(cap('a', { plugin: '' }))))).toEqual([
+      { code: 'PLUGIN_SHAPE', path: '/capabilities/0/plugin' },
+    ])
+    expect(strip(validate(manifestOf(cap('a', { plugin: 'tauri-plugin-' }))))).toEqual([
+      { code: 'PLUGIN_SHAPE', path: '/capabilities/0/plugin' },
+    ])
+    // A bare `a:` names the namespace and no permission.
+    expect(strip(validate(manifestOf(cap('a', { permissions: ['a:'] }))))).toEqual([
+      { code: 'PERMISSIONS_NAMESPACE', path: '/capabilities/0/permissions/0' },
+    ])
   })
 
   it('V-11 a mixed five-defect manifest reports in decision-6 order, identically on two calls', () => {
@@ -948,12 +972,12 @@ const REACHED_BY = {
   'V-2': ['MANIFEST_SHAPE'],
   'V-3': ['UNKNOWN_FIELD'],
   'V-4': ['ENTRY_SHAPE'],
-  'V-5': ['ID_MISSING', 'ID_SHAPE', 'ID_INVALID'],
+  'V-5': ['ID_MISSING', 'ID_SHAPE', 'ID_INVALID', 'ID_RESERVED'],
   'V-6': ['REQUIRES_SHAPE', 'REQUIRES_UNRESOLVED', 'REQUIRES_SELF', 'REQUIRES_DUPLICATE', 'ID_INVALID'],
   'V-7': ['REQUIRES_CYCLE', 'REQUIRES_UNRESOLVED', 'ID_INVALID'],
   'V-8': ['TS_INVALID', 'CRATE_INVALID'],
   'V-9': ['PLATFORMS_EMPTY', 'PLATFORMS_UNKNOWN', 'PLATFORMS_DUPLICATE', 'PLATFORMS_SHAPE'],
-  'V-10': ['PLUGIN_SHAPE', 'PERMISSIONS_SHAPE'],
+  'V-10': ['PLUGIN_SHAPE', 'PERMISSIONS_SHAPE', 'PERMISSIONS_NAMESPACE'],
   'V-11': ['UNKNOWN_FIELD', 'TS_MISSING', 'REQUIRES_UNRESOLVED', 'PLATFORMS_MISSING', 'ID_INVALID'],
   'V-12': ['REQUIRES_SHAPE', 'CRATE_SHAPE', 'PLUGIN_SHAPE', 'PERMISSIONS_SHAPE', 'ID_SHAPE', 'TS_SHAPE', 'PLATFORMS_SHAPE', 'MANIFEST_SHAPE'],
   'V-13': ['UNKNOWN_FIELD', 'MANIFEST_SHAPE'],
@@ -989,12 +1013,12 @@ describe('constants', () => {
     expect(ENTRY_FIELDS).toEqual(['id', 'requires', 'ts', 'platforms', 'crate', 'plugin', 'permissions'])
     expect(FINDING_CODES).toEqual([
       'MANIFEST_MISSING', 'MANIFEST_PARSE', 'MANIFEST_SHAPE', 'UNKNOWN_FIELD', 'ENTRY_SHAPE',
-      'ID_MISSING', 'ID_SHAPE', 'ID_INVALID', 'ID_DUPLICATE',
+      'ID_MISSING', 'ID_SHAPE', 'ID_INVALID', 'ID_RESERVED', 'ID_DUPLICATE',
       'REQUIRES_SHAPE', 'REQUIRES_UNRESOLVED', 'REQUIRES_SELF', 'REQUIRES_DUPLICATE', 'REQUIRES_CYCLE',
       'TS_MISSING', 'TS_SHAPE', 'TS_INVALID', 'TS_DIR_ABSENT', 'TS_INDEX_ABSENT',
       'PLATFORMS_MISSING', 'PLATFORMS_SHAPE', 'PLATFORMS_EMPTY', 'PLATFORMS_UNKNOWN', 'PLATFORMS_DUPLICATE',
       'CRATE_SHAPE', 'CRATE_INVALID', 'CRATE_ABSENT',
-      'PLUGIN_SHAPE', 'PERMISSIONS_SHAPE',
+      'PLUGIN_SHAPE', 'PERMISSIONS_SHAPE', 'PERMISSIONS_NAMESPACE',
     ])
     expect(new Set(FINDING_CODES).size).toBe(FINDING_CODES.length)
     expect(collapse('  a\r\n b\n\nc\rd\te ')).toBe('a b c d e')

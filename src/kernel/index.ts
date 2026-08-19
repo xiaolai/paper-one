@@ -33,6 +33,7 @@ export type { CardSnapshot, CardStorage, Cards, CardsOptions } from './core/card
 export type {
   BookAction,
   Capability,
+  CapabilityContext,
   ClientContribution,
   Command,
   CommandContext,
@@ -58,7 +59,7 @@ export {
 export type { CapabilityErrorCode, Composition, Contributions } from './core/registry'
 
 /* The ports, and their defaults. */
-export { NOOP_DIAGNOSTICS, NOOP_RECORDER, contentBlobPort, defineSetting, recorded, BLOB_FOLDER } from './core/ports'
+export { MUTATION_KINDS, NOOP_DIAGNOSTICS, NOOP_RECORDER, contentBlobPort, defineSetting, recorded, BLOB_FOLDER } from './core/ports'
 export type {
   ContentBlobName,
   ContentBlobPort,
@@ -66,6 +67,7 @@ export type {
   MutationKind,
   MutationRecorder,
   MutationToken,
+  RemovableBlobName,
   Setting,
   SettingKey,
   SettingsStore,

@@ -29,7 +29,11 @@ const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
 
 const MANIFEST = (entries) => `${JSON.stringify({ $schema: './capabilities.manifest.schema.json', capabilities: entries }, null, 2)}\n`
 const EXAMPLE = { id: 'example', requires: [], ts: 'example', platforms: ['desktop', 'ios', 'android'] }
-const PEER = { id: 'peer', requires: [], ts: 'peer', platforms: ['desktop', 'ios', 'android'], crate: 'tauri-plugin-peer', plugin: 'peer', permissions: ['peer:default'] }
+// `plugin` is the crate name here, as the real manifest carries it — Tauri
+// strips the `tauri-plugin-` prefix, so the ACL namespace is `peer` and the
+// grant is `peer:default`. This exercises exactly that mismatch: removal must
+// still find `peer:default`, driven by the declared `permissions`.
+const PEER = { id: 'peer', requires: [], ts: 'peer', platforms: ['desktop', 'ios', 'android'], crate: 'tauri-plugin-peer', plugin: 'tauri-plugin-peer', permissions: ['peer:default'] }
 
 const composition = (platform, names) =>
   `import type { Capability } from '../kernel'\n${names.map((n) => `import { ${n} } from '../capabilities/${n}'\n`).join('')}\n/**\n * The ${platform} composition — STATIC; \`capability:remove <id>\` edits it.\n */\nexport const capabilities: readonly Capability[] = [${names.join(', ')}]\n`
@@ -370,12 +374,49 @@ describe('the pieces', () => {
     expect(calls).toEqual(['rm src/capabilities/peer', 'prune true'])
     expect(lines.at(-1)).toBe('pruned  src-tauri/Cargo.lock (cargo metadata --offline)')
     expect(lines).toContain('deleted src/capabilities/peer/ (git rm --cached, then removed)')
-    // A capability no composition imports is noted, not refused.
+    // A capability a composition already dropped is NOTED, not refused — so a
+    // partial removal can be re-run — but the note names it as drift rather
+    // than laundering it, since the manifest still composes it on android.
     const lonely = fixture({ 'src/app/composition.android.ts': "import type { Capability } from '../kernel'\nexport const capabilities: readonly Capability[] = []\n" })
     const p2 = planRemoval(lonely, 'example', { deleteFiles: false })
-    expect(p2.notes).toEqual(['src/app/composition.android.ts: does not import example; nothing to remove'])
+    expect(p2.notes).toEqual([
+      'src/app/composition.android.ts: DRIFT — the manifest composes "example" on android but this file does not import it (pnpm compositions:check); nothing to remove here',
+    ])
     expect(p2.deletions).toEqual([])
-    expect(describePlan(p2)).toContain('  keep    src/app/composition.android.ts: does not import example; nothing to remove')
+    expect(describePlan(p2)).toContain(
+      '  keep    src/app/composition.android.ts: DRIFT — the manifest composes "example" on android but this file does not import it (pnpm compositions:check); nothing to remove here',
+    )
     expect(() => planRemoval(lonely, 'nope')).toThrow(RemovalRefused)
+  })
+
+  it('rolls the edits back when a step after them fails, so the registration surfaces stay consistent', () => {
+    const root = fixtureWithCrate()
+    const before = snapshot(root)
+    const plan = planRemoval(root, 'peer', { rustfmt: false, hooks: { isTracked: () => false } })
+    // The Cargo prune throws after the edits are on disk (an offline/locked cargo).
+    expect(() =>
+      applyPlan(root, plan, {
+        hooks: {
+          gitRm: () => {},
+          cargoPrune: () => {
+            throw new Error('offline: cargo metadata failed')
+          },
+        },
+      }),
+    ).toThrow(/restored/)
+    const after = snapshot(root)
+    // Every EDITED registration surface is back to its pre-removal bytes, so a
+    // retry is not fighting a half-applied removal.
+    for (const file of [
+      'capabilities.manifest.json',
+      'src/app/composition.desktop.ts',
+      'src/app/composition.ios.ts',
+      'src/app/composition.android.ts',
+      'src-tauri/Cargo.toml',
+      'src-tauri/src/lib.rs',
+      'src-tauri/capabilities/default.json',
+    ]) {
+      expect(after.get(file), file).toBe(before.get(file))
+    }
   })
 })

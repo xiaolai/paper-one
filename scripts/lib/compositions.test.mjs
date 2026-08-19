@@ -185,6 +185,49 @@ describe('checkCompositionFiles', () => {
     expect(findings[1].message).toContain('import("../capabilities/b")')
   })
 
+  it('COMPOSITION_EXPORT when the export is computed, not a literal array', () => {
+    const findings = checkCompositionFiles(
+      m,
+      files({ 'src/app/composition.ios.ts': "import { a } from '../capabilities/a'\nimport { b } from '../capabilities/b'\nexport const capabilities = [a, b].filter(Boolean)\n" }),
+    )
+    expect(codes(findings)).toEqual(['COMPOSITION_EXPORT'])
+    expect(findings[0].message).toContain('.filter')
+  })
+
+  it('COMPOSITION_EXPORT when the export spreads instead of listing', () => {
+    const findings = checkCompositionFiles(
+      m,
+      files({ 'src/app/composition.ios.ts': "import { a } from '../capabilities/a'\nimport { b } from '../capabilities/b'\nconst base = [a]\nexport const capabilities = [...base, b]\n" }),
+    )
+    expect(codes(findings)).toEqual(['COMPOSITION_EXPORT'])
+    expect(findings[0].message).toContain('...base')
+  })
+
+  it('COMPOSITION_EXPORT when the array reorders the imported capabilities', () => {
+    const findings = checkCompositionFiles(
+      m,
+      files({ 'src/app/composition.ios.ts': "import { a } from '../capabilities/a'\nimport { b } from '../capabilities/b'\nexport const capabilities = [b, a]\n" }),
+    )
+    expect(codes(findings)).toEqual(['COMPOSITION_EXPORT'])
+    expect(findings[0].message).toContain('must be [a, b]')
+  })
+
+  it('COMPOSITION_EXPORT when an imported capability is left out of the array', () => {
+    const findings = checkCompositionFiles(
+      m,
+      files({ 'src/app/composition.ios.ts': "import { a } from '../capabilities/a'\nimport { b } from '../capabilities/b'\nexport const capabilities = [a]\n" }),
+    )
+    expect(codes(findings)).toEqual(['COMPOSITION_EXPORT'])
+  })
+
+  it('accepts a capability renamed at import, matched by its binding', () => {
+    const findings = checkCompositionFiles(
+      m,
+      files({ 'src/app/composition.ios.ts': "import { a } from '../capabilities/a'\nimport { b as bee } from '../capabilities/b'\nexport const capabilities = [a, bee]\n" }),
+    )
+    expect(findings).toEqual([])
+  })
+
   it('the real compositions pass against the real manifest', () => {
     const real = JSON.parse(readFileSync(new URL('../../capabilities.manifest.json', import.meta.url), 'utf8'))
     const read = (rel) => readFileSync(new URL(`../../${rel}`, import.meta.url), 'utf8')

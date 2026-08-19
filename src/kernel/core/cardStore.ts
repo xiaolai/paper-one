@@ -63,6 +63,17 @@ export interface Cards {
    */
   apply(mutate: (prev: readonly Card[]) => readonly Card[]): Promise<void>
   /**
+   * Every held row, TOMBSTONES INCLUDED — the canonical collection a
+   * replicator digests, serves and merges (phase 10, WI-10.4). This is the
+   * read that lets the sync capability drop its raw flat-store handle: the
+   * journal's cards baseline and the ledger's serve both need the whole
+   * list, and `getSnapshot().all` filters to live for the UI and must stay
+   * that way. The held list is the authority between writes — a coalesced
+   * write still in flight is HERE before it is on disk — so this is never
+   * staler than the stored bytes.
+   */
+  stored(): readonly Card[]
+  /**
    * Move every row from a superseded book id onto the current one.
    *
    * A no-op unless the reader has rows written under the previous identity
@@ -109,14 +120,20 @@ export function createCards({
   queue,
 }: CardsOptions): Cards {
   /* Loaded once. A storage that throws on READ — disabled mid-session, or a
-   * hostile stub — must not stop the pane from rendering. */
+   * hostile stub — must not stop the pane from rendering. But a failed load
+   * is NOT an empty collection: writing "empty plus this edit" over bytes
+   * that were merely unreadable this launch would be data loss, so a load
+   * failure makes the store SESSION-ONLY — it never writes, and `persistent`
+   * says so from the first snapshot (as it does with no storage at all). */
   let all: readonly Card[] = []
+  let unloadable = false
   try {
     all = storage ? byNewest(parseCards(storage.getItem(CARDS_STORAGE_KEY))) : []
   } catch {
     all = []
+    unloadable = true
   }
-  let persistent = true
+  let persistent = storage !== null && !unloadable
 
   const listeners = new Set<() => void>()
   // Filtered to live at the one door a subscriber reads through — the held
@@ -124,7 +141,15 @@ export function createCards({
   let snapshot: CardSnapshot = { all: liveCards(all), persistent }
   const publish = () => {
     snapshot = { all: liveCards(all), persistent }
-    for (const listener of [...listeners]) listener()
+    for (const listener of [...listeners]) {
+      /* Isolated: a throwing subscriber must not stop later listeners, nor —
+       * mid-mutation — abort the persist that follows this notification. */
+      try {
+        listener()
+      } catch {
+        /* A listener's failure is its own; the store's write still happens. */
+      }
+    }
   }
 
   /**
@@ -135,52 +160,60 @@ export function createCards({
    * rejection is what a caller that awaited durability needs. Both, because
    * they are answers to different questions.
    */
-  const persist = (): Promise<void> => {
-    const write = async (): Promise<void> => {
-      if (!storage) {
-        if (persistent) {
-          persistent = false
-          publish()
-        }
-        return
-      }
-      const target = storage
-      try {
-        /* Recorded under `CARDS_BOOK`, whichever card was touched — one
-         * surface, one journal stream. The write serialises the WHOLE held
-         * list, read at run time, so a queued write persists the newest
-         * state and never a stale snapshot. */
-        await recorded(recorder, CARDS_BOOK, 'cards', async () => {
-          target.setItem(CARDS_STORAGE_KEY, JSON.stringify(all))
-          await target.flush?.()
-        })
-        if (!persistent) {
-          persistent = true
-          publish()
-        }
-      } catch (cause) {
-        if (persistent) {
-          persistent = false
-          publish()
-        }
-        throw cause
-      }
+  let dirty = false
+  const persist = async (): Promise<void> => {
+    if (!storage || unloadable) {
+      /* Session-only: `persistent` began false on this path and nothing
+       * flips it back, so there is no transition to publish — just no
+       * write. */
+      return
     }
-    /* ENQUEUED SYNCHRONOUSLY when a queue exists — the ordering the sync
-     * ledger's fence relies on: whatever was on the cards key before this
-     * call has already begun by the time this write's bracket opens. */
-    return queue ? queue.append(CARDS_BOOK, write) : write()
+    const target = storage
+    try {
+      /* Recorded under `CARDS_BOOK`, whichever card was touched — one
+       * surface, one journal stream. The write serialises the WHOLE held
+       * list, which the queued task has already updated in place (below), so
+       * the bytes are this bracket's own state and never a later edit's. */
+      await recorded(recorder, CARDS_BOOK, 'cards', async () => {
+        target.setItem(CARDS_STORAGE_KEY, JSON.stringify(all))
+        await target.flush?.()
+      })
+      dirty = false
+      if (!persistent) {
+        persistent = true
+        publish()
+      }
+    } catch (cause) {
+      dirty = true
+      if (persistent) {
+        persistent = false
+        publish()
+      }
+      throw cause
+    }
   }
 
   const applyCards = (mutate: (prev: readonly Card[]) => readonly Card[]): Promise<void> => {
-    const next = mutate(all)
-    /* NOTHING MOVED, so nothing is written. The mutation is applied to the
-     * held list, which is authoritative and updated synchronously — so a
-     * mutation returning its input BY IDENTITY is a reliable "no change". */
-    if (next === all) return Promise.resolve()
-    all = next
-    publish()
-    return persist()
+    /* THE MUTATION, THE IDENTITY GUARD AND THE PUBLISH ALL RUN INSIDE THE
+     * QUEUED TASK — not before it. `all` was updated synchronously here once,
+     * which let a later local edit's state be serialised INSIDE an earlier
+     * remote apply's begin/commit bracket (the remote persist task was still
+     * waiting on its journal begin): a crash then left the local edit durable
+     * but recorded `remote`, so it never pushed. Applied in queue order, each
+     * write's bytes — and its bracket — are its own edit's, and a mutation
+     * returning its input BY IDENTITY still writes and brackets nothing. */
+    const run = async (): Promise<void> => {
+      const next = mutate(all)
+      /* Identity means "no change" ONLY while the store is clean: after a
+       * failed persist the memory is ahead of the disk, and a retried merge
+       * that returns its input by identity must still write — or the retry
+       * resolves, gets acked, and the rows it acked never reach storage. */
+      if (next === all && !dirty) return
+      all = next
+      publish()
+      await persist()
+    }
+    return queue ? queue.append(CARDS_BOOK, run) : run()
   }
 
   return {
@@ -195,13 +228,10 @@ export function createCards({
     // A tombstone, not a vanished row — see `removeCard`.
     remove: (id) => applyCards((prev) => removeCard(prev, id, clock())),
     apply: (mutate) => applyCards(mutate),
-    /* `apply` persists whatever the mutation returns even when nothing changed,
-     * and this runs on every open — so the guard is here, reading the identity
-     * `rekeyBook` returns when it found nothing to move. */
-    rekey: (from, to) =>
-      applyCards((prev) => {
-        const next = rekeyBook(prev, from, to)
-        return next === prev ? prev : [...next]
-      }),
+    stored: () => all,
+    /* `rekeyBook` answers by IDENTITY when nothing moved, and `applyCards`'s
+     * own identity guard is what turns that into "write nothing" — this runs
+     * on every open, so a no-op must cost no disk write. */
+    rekey: (from, to) => applyCards((prev) => rekeyBook(prev, from, to)),
   }
 }

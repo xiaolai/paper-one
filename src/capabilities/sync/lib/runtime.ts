@@ -16,17 +16,38 @@ export const syncStatus: SyncStatusStore = createSyncStatus()
 
 let scheduler: SyncScheduler | null = null
 let role: SyncRole | null = null
+let roleOwner: object | null = null
 
 export function bindScheduler(next: SyncScheduler | null): void {
   scheduler = next
+}
+
+/** Unbind ONLY when `own` is still the bound scheduler — an older stop
+ *  firing after a restart must not strip the newer start's binding. */
+export function unbindScheduler(own: SyncScheduler): void {
+  if (scheduler === own) scheduler = null
 }
 
 export function syncNow(): void {
   scheduler?.syncNow()
 }
 
-export function bindRole(next: SyncRole | null): void {
+/** Bind the role and take OWNERSHIP: the returned token is what `unbindRole`
+ *  demands, so an older lifetime's stop cannot strip a newer binding of the
+ *  same role value (roles are plain strings — value identity is not
+ *  ownership). */
+export function bindRole(next: SyncRole | null): object {
   role = next
+  const token = {}
+  roleOwner = token
+  return token
+}
+
+export function unbindRole(own: object): void {
+  if (roleOwner === own) {
+    role = null
+    roleOwner = null
+  }
 }
 
 export function currentRole(): SyncRole | null {
