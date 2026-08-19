@@ -1,4 +1,6 @@
 import { useMemo, useState } from 'react'
+import { PaneGroup } from './PaneGroup'
+
 import {
   X,
   BookmarkPlus,
@@ -8,7 +10,6 @@ import {
   ArrowDownWideNarrow,
   BookOpen,
   Check,
-  ChevronRight,
   Circle,
   CircleDashed,
   CircleDot,
@@ -161,6 +162,13 @@ export function LibraryPanel({
   const [order, setOrder] = useState<TagOrder>('count')
   const [filter, setFilter] = useState('')
   const [subjectsOpen, setSubjectsOpen] = useState(true)
+  /* OPEN AT REST, both of them: Views and Tags are what this panel is FOR, and
+     a reader who opened it to reach a tag should not have to open it twice.
+     They can be put away now, which is the part that was missing — a shelf
+     with sixty tags made the scopes above them unreachable without scrolling
+     past all sixty. */
+  const [viewsOpen, setViewsOpen] = useState(true)
+  const [tagsOpen, setTagsOpen] = useState(true)
   /** Naming a view, in place — the same shape the tag rename uses. */
   const [naming, setNaming] = useState(false)
   const [viewName, setViewName] = useState('')
@@ -404,9 +412,12 @@ export function LibraryPanel({
           state a view has. Nothing is hidden behind it. */}
       {(views.length > 0 || savable) && (
         <>
-          <div className={styles.groupTitleRow}>
-            <span className={styles.groupTitle}>Views</span>
-          </div>
+          <PaneGroup
+            title="Views"
+            count={views.length}
+            open={viewsOpen}
+            onToggle={() => setViewsOpen((open) => !open)}
+          >
           {views.map((view) => {
             const on = query.trim() === view.query
             return (
@@ -479,30 +490,36 @@ export function LibraryPanel({
                 <span className={styles.scopeLabel}>Save this view</span>
               </button>
             ))}
+          </PaneGroup>
         </>
       )}
 
       {anyTags && (
         <>
-          <div className={styles.groupTitleRow}>
-            <span className={styles.groupTitle}>Tags</span>
-            {/* The other order — the icon is what pressing it GIVES you, as
-                the shelf's view toggle does. Most-used-first is for seeing a
-                scheme; A–Z is for finding a name in a long list. */}
-            <button
-              type="button"
-              className={styles.groupTool}
-              aria-label={order === 'count' ? 'Sort tags by name' : 'Sort tags by how many books'}
-              title={order === 'count' ? 'Sort by name' : 'Sort by count'}
-              onClick={() => setOrder(order === 'count' ? 'name' : 'count')}
-            >
-              {order === 'count' ? (
-                <ArrowDownAZ size={ICON.control} strokeWidth={ICON.stroke} />
-              ) : (
-                <ArrowDownWideNarrow size={ICON.control} strokeWidth={ICON.stroke} />
-              )}
-            </button>
-          </div>
+          <PaneGroup
+            title="Tags"
+            open={tagsOpen}
+            onToggle={() => setTagsOpen((open) => !open)}
+            /* The other order — the icon is what pressing it GIVES you, as
+               the shelf's view toggle does. Most-used-first is for seeing a
+               scheme; A–Z is for finding a name in a long list. Beside the
+               heading rather than in it, because the heading is a button. */
+            tool={
+              <button
+                type="button"
+                className={styles.groupTool}
+                aria-label={order === 'count' ? 'Sort tags by name' : 'Sort tags by how many books'}
+                title={order === 'count' ? 'Sort by name' : 'Sort by count'}
+                onClick={() => setOrder(order === 'count' ? 'name' : 'count')}
+              >
+                {order === 'count' ? (
+                  <ArrowDownAZ size={ICON.control} strokeWidth={ICON.stroke} />
+                ) : (
+                  <ArrowDownWideNarrow size={ICON.control} strokeWidth={ICON.stroke} />
+                )}
+              </button>
+            }
+          >
 
           {/* A field to narrow the list by name, once the list is long enough
               to need one. Below that it would be a control for a problem the
@@ -590,25 +607,18 @@ export function LibraryPanel({
 
           {subjects.length > 0 && (
             <>
-              <button
-                type="button"
-                className={styles.groupToggle}
-                aria-expanded={subjectsOpen}
-                onClick={() => setSubjectsOpen((open) => !open)}
-                title="What the publishers say the books are about"
+              <PaneGroup
+                title="Subjects"
+                count={subjects.length}
+                open={subjectsOpen}
+                onToggle={() => setSubjectsOpen((open) => !open)}
+                hint="What the publishers say the books are about"
               >
-                <ChevronRight
-                  className={styles.groupChevron}
-                  data-open={subjectsOpen}
-                  size={ICON.control}
-                  strokeWidth={ICON.stroke}
-                />
-                Subjects
-                <span className={styles.groupCount}>{subjects.length}</span>
-              </button>
-              {subjectsOpen && subjects.map((one) => row(one))}
+                {subjects.map((one) => row(one))}
+              </PaneGroup>
             </>
           )}
+          </PaneGroup>
         </>
       )}
 

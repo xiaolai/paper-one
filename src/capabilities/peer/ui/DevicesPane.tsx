@@ -31,7 +31,15 @@ export function DevicesPane({ model, syncNow }: DevicesPaneProps) {
   const [code, setCode] = useState('')
 
   if (!snapshot.available) {
-    return <div className={ui.hint}>Devices need the Paper app — there is no peer plugin in a browser tab.</div>
+    /* INSIDE A SECTION, like every other state this pane can be in. The
+       section is what carries the inset that lines a contributed row up with
+       the kernel's own, so a bare hint returned here sat ten pixels left of
+       everything above it. */
+    return (
+      <div className={ui.section}>
+        <div className={ui.hint}>Devices need the Paper app — there is no peer plugin in a browser tab.</div>
+      </div>
+    )
   }
 
   return (

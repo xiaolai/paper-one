@@ -35,19 +35,42 @@
 
 /* --- structure ---------------------------------------------------------- */
 
+/* THE SECTION CARRIES THE INSET, once, for everything in it.
+ *
+ * The kernel's own settings rows are `padding: 0 var(--space-10)` (see
+ * `.settingRow`), and a contributed section had none — so "This device" sat
+ * ten pixels to the left of "Flow" directly above it, and every hint,
+ * button row and code block under it sat there too. Two columns of labels in
+ * one list, which is the kind of thing that reads as wrong before anybody can
+ * say why.
+ *
+ * Put HERE rather than on each child because the alternative is remembering
+ * it on every rule this file grows, and the one that forgets is invisible
+ * until somebody photographs the pane. A capability that adds a control gets
+ * the alignment by being inside a section. */
 .paper-cap-section {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+  padding-inline: var(--space-10);
 }
 
 /* A label and its value, the shape every settings row in the app already has,
-   so a contributed row sits in the same rhythm as the kernel's own. */
+   so a contributed row sits in the same rhythm as the kernel's own.
+
+   `--row-book`, NOT `--row-compact`, and the ramp says which: compact is for a
+   list that is SCANNED — a scope, a chapter, a search result — and book is for
+   "a setting … a row that is read". A contributed row is a settings row, and
+   at 36px against the kernel's 46px the pane had two rhythms in one column.
+
+   A MINIMUM rather than a height, because unlike `.settingRow` these rows hold
+   things that wrap: a pairing sentence, a form, a confirmation with a code in
+   it. Fixed, those overflow their own row. */
 .paper-cap-row {
   display: flex;
   align-items: center;
-  gap: var(--space-8);
-  min-height: var(--row-compact);
+  gap: var(--space-10);
+  min-height: var(--row-book);
   font-size: var(--text-ui);
 }
 
@@ -83,7 +106,9 @@
   align-items: center;
   gap: var(--space-8);
   flex-wrap: wrap;
-  padding: var(--space-4) 0;
+  /* Vertical only — the horizontal inset is the section's, so this row lines
+     up with the labels above and below it. */
+  padding-block: var(--space-4);
 }
 
 /* --- buttons ------------------------------------------------------------ */
@@ -151,14 +176,34 @@
 
 /* --- fields ------------------------------------------------------------- */
 
+/* A FILLED PILL, WHICH IS WHAT A FIELD LOOKS LIKE IN THIS APP.
+ *
+ * The pane's own text entry — the Companion composer and the pane search —
+ * is a `--wash` pill with a bare input inside it and no border anywhere (see
+ * `.composer` / `.searchInput`). This drew a bordered rectangle instead, and
+ * on two counts it could not have been further from the rest of the pane:
+ *
+ *   HEIGHT. It took `--control-field`, whose own definition says it is "the
+ *   command palette's own field, which is the largest control in the app …
+ *   deliberately a step above `CONTROL.lg` — the ramp describes controls that
+ *   sit among other controls, and this one does not". This one does: it sits
+ *   in a row beside a 28px Pair button. 52 against 28, in a row whose text is
+ *   `--text-small`. `--control-sm` is the ramp's own answer — "a chip, a
+ *   stepper, AN INLINE FIELD — a control inside a row" — and it is what the
+ *   button beside it already uses, so the pair now matches by construction.
+ *
+ *   SHAPE. A 10px-radius bordered box next to a fully-rounded pill button,
+ *   in a pane that draws no field borders anywhere else. The border is what
+ *   made it read as a web form dropped into Paper.
+ */
 .paper-cap-field {
   flex: 1 1 auto;
   min-width: 0;
-  height: var(--control-field);
-  padding: 0 var(--space-10);
-  border: 1px solid var(--line-2);
-  border-radius: var(--radius-control);
-  background: var(--surface);
+  height: var(--control-sm);
+  padding: 0 var(--space-12);
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--wash);
   color: var(--ink);
   font: inherit;
   font-size: var(--text-small);
@@ -174,6 +219,18 @@
   flex: 0 0 auto;
   width: var(--tag-editor-w);
   max-width: 30%;
+  /* NO NATIVE STEPPER. `<input type="number">` draws the platform's own
+     spinner — grey chevrons in a box with its own metrics and its own idea of
+     a hover — which is precisely the browser chrome this whole file exists to
+     get out of Paper's panes. The value is typed, and the arrow keys still
+     step it; what goes is the drawing. */
+  appearance: textfield;
+}
+
+.paper-cap-field-narrow::-webkit-outer-spin-button,
+.paper-cap-field-narrow::-webkit-inner-spin-button {
+  appearance: none;
+  margin: 0;
 }
 
 /* The reader's own accent on a native checkbox, which is the whole of what was

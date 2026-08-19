@@ -587,6 +587,11 @@
    thing — a quiet mark until it is wanted. */
 .groupTool {
   composes: more from '../styles/controls.module.css';
+  /* The heading takes the row's slack; the tool keeps its width. A flex item
+     shrinks below its own `width` by default, and the heading beside this one
+     asks for 100% — so without this the sort mark was squeezed thinner than
+     the icon inside it. Same rule as `.paper-cap-button`. */
+  flex: 0 0 auto;
 }
 
 /* The count on a collapsible group's heading, so a closed group still says
@@ -1044,6 +1049,22 @@
 /* A group heading that is also its own disclosure. Built from `.groupTitle` so
    a group that can be put away and one that cannot read as the same rank —
    the only difference is the mark, and that it can be pressed. */
+/* WHAT THE GROUP HOLDS, INDENTED UNDER ITS HEADING.
+ *
+ * The rows were flush with the heading, so a group said nothing about where
+ * it ended: a closed group and an open one differed only in how many rows
+ * followed, and with two groups in a column the reader had to count chevrons
+ * to work out which rows belonged to which.
+ *
+ * The indent is DERIVED, not chosen — it is the chevron plus the gap after
+ * it, so a row's label starts in the same column as the heading's own label
+ * rather than under its disclosure mark. That is the alignment an accordion
+ * is read by, and taking it from the two values that actually draw the
+ * heading means it stays true if either changes. */
+.groupBody {
+  padding-inline-start: calc(var(--icon-control) + var(--space-6));
+}
+
 .groupToggle {
   composes: groupTitle;
   display: flex;
