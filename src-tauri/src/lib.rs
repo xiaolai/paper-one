@@ -24,14 +24,18 @@ const MCP_BRIDGE_PORT: u16 = 31415;
 
 /// The bridge port for this process: `PAPER_MCP_PORT` if set, else the pin.
 ///
-/// The override exists for the two-instance harness (a shelf and a satchel
-/// on one machine, each with its own `PAPER_TEST_DATA_DIR`): the plugin would
-/// scan past a taken 31415 on its own, but the MCP host attaches to a port it
-/// was told, so the second instance has to be given one on purpose. Debug
-/// desktop builds only, like the bridge itself. A value that is not a port
-/// number stops the launch with the value named rather than quietly falling
-/// back to the pin — a harness that thinks it set a port must not attach to
-/// the wrong instance.
+/// The override exists so a second app on ONE machine can be driven without
+/// the two fighting over 31415: the plugin would scan past a taken port on its
+/// own, but the MCP host attaches to a port it was told, so the second instance
+/// has to be given one on purpose. Debug desktop builds only, like the bridge
+/// itself. A value that is not a port number stops the launch with the value
+/// named rather than quietly falling back to the pin — a harness that thinks it
+/// set a port must not attach to the wrong instance.
+///
+/// NOT, any longer, for the shelf ⇄ satchel harness. That runs two MACHINES
+/// (`scripts/second-instance.sh`), because `PAPER_TEST_DATA_DIR` moves the peer
+/// plugin's root and not the kernel's — see the header of `data_root.rs`. Two
+/// instances here would still share one book vault, whatever ports they hold.
 #[cfg(all(feature = "desktop", debug_assertions))]
 fn mcp_bridge_port() -> u16 {
     match std::env::var("PAPER_MCP_PORT") {

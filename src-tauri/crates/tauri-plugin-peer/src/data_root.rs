@@ -3,14 +3,25 @@
 //!
 //! The root is `app_data_dir()` — `$APPDATA`, the same root the fs plugin's
 //! ACL scope is written against — except in debug builds, where
-//! `PAPER_TEST_DATA_DIR` overrides it. That override is what lets two
-//! instances of the app run side by side against two disjoint stores (the
-//! two-instance sync harness) and lets a test point the app at a scratch
-//! directory. It is compiled out of release builds: `cfg!(debug_assertions)`,
-//! not a runtime check, so a release binary never consults the environment.
+//! `PAPER_TEST_DATA_DIR` overrides it, letting a test point THIS PLUGIN at a
+//! scratch directory. It is compiled out of release builds:
+//! `cfg!(debug_assertions)`, not a runtime check, so a release binary never
+//! consults the environment.
 //!
-//! The TypeScript side asks for the root through `paper_data_root` rather
-//! than computing `appDataDir()` itself, so both halves agree by construction.
+//! ⚠️ **THE OVERRIDE MOVES THIS PLUGIN ONLY, AND IS NOT A SECOND-INSTANCE
+//! SWITCH.** It used to be described as one here, and that was wrong. The
+//! kernel's own storage — `bookVault.ts`, `appStorage.ts`, `bookFiles.ts` —
+//! passes `BaseDirectory.AppData`, so `index.json`, every book folder, the flat
+//! store and `sync/journal.*` stay in the real `$APPDATA` no matter what this
+//! variable says. Two app instances started with two different values share one
+//! book vault while holding separate identities, and nothing complains until
+//! the first journal append hands `fs_fsync` a path from THIS root for a file
+//! the kernel wrote in the other one. Measured 2026-08-20; the two-instance
+//! harness is two machines (`scripts/second-instance.sh`, `docs/sync.md`).
+//!
+//! The sync capability asks for the root through `paper_data_root` rather than
+//! computing `appDataDir()` itself, so ITS paths agree with this plugin's. The
+//! kernel's do not yet — closing that is what would make the override honest.
 
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
