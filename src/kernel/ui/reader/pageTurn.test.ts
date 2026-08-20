@@ -287,6 +287,36 @@ describe('the renderer Paper actually ships', () => {
   it('still eases the turn over the 300ms the motion table reports', () => {
     expect(paginator).toContain('300, easeOutQuad')
   })
+
+  /**
+   * A turn asked for mid-ease is queued, not discarded.
+   *
+   * This PINS THE COMMIT, and is not a test of the behaviour — the behaviour
+   * needs a real layout engine and a real clock, and under jsdom there is
+   * neither. It was verified in the running app instead, and the numbers are
+   * worth keeping: 15 presses at 33ms apart — a held arrow key — turned 2 pages
+   * before and 15 after, with a relocate for every one of them and the scroll
+   * settling exactly on a page boundary.
+   *
+   * Pinned because it lives in the fork, and `docs/foliate-fork.md` is explicit
+   * that a clean rebase means the text merged, not that the reader works. This
+   * commit is the kind that drops out silently: nothing else in Paper mentions
+   * it, and its absence looks like sluggishness rather than like breakage.
+   */
+  it('still queues a turn asked for mid-animation rather than dropping it', () => {
+    // The lock used to return early here; now it remembers one turn.
+    expect(paginator).toContain('#queuedTurn')
+    // And lands the running ease so the queue drains at the reader's pace.
+    expect(paginator).toContain('#skipScroll')
+  })
+
+  /* `snap` reaches `#goTo` without taking the lock, so a touch flick whose
+   * scroll was superseded could still load the section it had decided to cross
+   * into — racing the navigation that superseded it. The guard is a sequence
+   * number rather than the lock for exactly that reason. */
+  it('still stops a superseded snap from crossing a section behind the turn', () => {
+    expect(paginator).toContain('#navSeq')
+  })
 })
 
 /*
