@@ -58,12 +58,46 @@
   color: var(--ink);
 }
 
+/*
+ * THE PANE SCROLLS WITHOUT RESERVING A LANE FOR SAYING SO.
+ *
+ * `global.css` styles `::-webkit-scrollbar`, and styling it at all opts the
+ * element out of the platform's overlay scrollbars — so the bar takes real
+ * layout width, 15px of it, the moment the content overflows. In a card of a
+ * fixed 400px that is not a bar appearing, it is every row in the panel moving:
+ * measured, switching Flow to Scrolled adds two rows to Settings, overflows the
+ * body by 36px, and shifts the whole panel's right edge from 1418 to 1403.
+ *
+ * The pane cannot do what the shelf does about this. `Library.module.css` pays
+ * for the same 15px by adding `--scrollbar-w` to its own padding, which works
+ * there because the grid is centred in a wide, variable space and nobody can
+ * see that the right padding is larger. Here the card is narrow and fixed, and
+ * a permanent lane down one side of it would read as the panel being off
+ * centre — which is the state this is fixing, made permanent instead of
+ * intermittent.
+ *
+ * So the bar goes. Scrolling does not: the wheel, the trackpad, the arrow keys
+ * and Page Up/Down all still work, which is the same argument §06 already makes
+ * for the READER's scrollbar being off by default. What is lost is the standing
+ * hint that a panel continues below the fold, and the long ones — Contents,
+ * Notes — lose it too.
+ */
 .body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  scrollbar-width: none;
   display: flex;
   flex-direction: column;
+}
+
+/* `scrollbar-width` is the standard property and WebKit honours it, but the
+   global `::-webkit-scrollbar` rule sets a width of its own and would otherwise
+   go on claiming those pixels. Both spellings, for the same reason the book's
+   hyphenation carries both. */
+.body::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 .panel {
