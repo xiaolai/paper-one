@@ -511,6 +511,49 @@ export function proseBleed(grid: ProseGrid): { start: number; end: number } {
 }
 
 /**
+ * The white a PAGE carries, outside its own text — both sides together.
+ *
+ * §03 puts the reading margins in the HOST grid, as the gutter and margin
+ * tracks, because the ruler hint and the companion marks live in them. That is
+ * right for everything that stands still, and wrong for the one thing that
+ * moves: foliate's page was then the bare measure, so a turn slid a column of
+ * text against a column of text with nothing in between and the two abutted
+ * mid-word for the whole 300ms. A page turn is only legible if the thing that
+ * turns has edges.
+ *
+ * So the page gets margins of its own, taken out of the lane it is already
+ * sitting inside: half of this on each side. It is the widest a page can be
+ * before foliate's own shadow grid overflows, so it reaches that ceiling rather
+ * than picking a number — `pageTurn.test.ts` derives the ceiling from
+ * `paginator.js` and holds this against it at every stage width.
+ *
+ * ONE NUMBER, TWO READINGS. Halved, it is the white either side of the text at
+ * rest; whole, it is the white between one page and the next while the turn is
+ * running, since each page contributes one of its sides.
+ *
+ * THE NARROWER LANE, not the gutter. The book element spans the whole prose
+ * grid and `proseBleed` trims it back to symmetry about the measure, so what it
+ * is actually given is `measure + 2 × min(gutter, marginCol) + 2 × gap` — and
+ * those two are NOT interchangeable. `proseGrid` spends the mark lane first and
+ * down to zero, so a narrow window with marks leaves a 56px gutter beside a
+ * margin column of nothing; taking the gutter there would ask for a page some
+ * 60px wider than the element holding it. foliate would not report that. Its
+ * centre track is `minmax(0, …)`, so it absorbs the overflow silently and the
+ * column comes out narrower than the grid reserved — the same edge-to-edge
+ * failure `applyLayout` already records, arriving through the one lane nobody
+ * measures.
+ *
+ * FLOORED HERE, and that is load-bearing rather than tidiness. The renderer is
+ * given `measure + this`, and foliate needs `measure + 2 × this` to fit inside
+ * the element's width. Flooring the SUM keeps that true for every fractional
+ * grid; flooring the page and the measure separately does not, and the pixel it
+ * costs the column is one `Math.trunc` then makes permanent.
+ */
+export function pageMargins(grid: ProseGrid): number {
+  return Math.floor(Math.min(grid.gutter, grid.marginCol) + grid.gap)
+}
+
+/**
  * §03 control and row heights — the RAMP, not a list.
  *
  * A control's height was written wherever a control was drawn, and the app

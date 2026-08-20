@@ -6,6 +6,7 @@ import {
   PANE_TRACK,
   STAGE_PADDING_X,
   measureForStep,
+  pageMargins,
   paneTakesTrack,
   proseBleed,
   proseColumn,
@@ -442,6 +443,10 @@ export function Reader({
                          `applyLayout` — the renderer drew over the gutter for
                          as long as it derived this for itself. */
                       measure={grid.measure}
+                      /* The page's own margins — see `pageMargins`. Off the
+                         same grid as the measure, because the renderer adds
+                         the two to size the page it turns. */
+                      pageMargins={pageMargins(grid)}
                       theme={state.theme}
                       typeface={state.typeface}
                     spacing={state.spacing}
