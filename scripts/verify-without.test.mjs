@@ -196,11 +196,38 @@ describe('the workflow names a capability that can actually be removed', () => {
     expect(named().length).toBeGreaterThan(0)
   })
 
+  /**
+   * IS THIS THE REAL REPOSITORY, OR THE COPY THIS SCRIPT MAKES?
+   *
+   * It has to be asked, because the two look identical from inside once the
+   * removal has run: a workflow naming a capability the manifest does not
+   * declare is the `example` defect above in a checkout, and is simply the
+   * proof doing its job in the copy. `verify-without` copies the tree WITHOUT
+   * `.git` — deliberately, see the module header — and every checkout has one,
+   * so its absence is the copy identifying itself. `no-binary-source.test.mjs`
+   * turns on the same fact, for the same reason.
+   */
+  const isCheckout = () => existsSync(fileURLToPath(new URL('../.git', import.meta.url)))
+
   it('names only ids the manifest declares, and only ones nothing requires', () => {
     const manifest = JSON.parse(readFileSync(MANIFEST, 'utf8'))
     const ids = manifest.capabilities.map((c) => c.id)
     for (const id of named()) {
-      expect(ids, `verify:without ${id} — the manifest declares ${ids.join(', ')}`).toContain(id)
+      if (!ids.includes(id)) {
+        /* THIS TEST IS ITSELF A TEST THAT NAMES A CAPABILITY FROM THE REAL
+         * TREE — the exact class phase 5 wrote down as "a test the deletion
+         * proof will find" — and the proof duly found it on the first run.
+         *
+         * In a checkout, an id the manifest does not declare is the defect
+         * this whole block exists for, and it fails. In the copy, the id is
+         * missing because `capability:remove` has just taken it out, which is
+         * the point; asserted, not skipped, by requiring the removal to be
+         * complete — the directory has to be gone too. */
+        expect(isCheckout(), `verify:without ${id} — the manifest declares ${ids.join(', ')}`).toBe(false)
+        const dir = fileURLToPath(new URL(`../src/capabilities/${id}`, import.meta.url))
+        expect(existsSync(dir), `${id} left the manifest but its sources are still here`).toBe(false)
+        continue
+      }
       const dependents = manifest.capabilities
         .filter((c) => (c.requires ?? []).includes(id))
         .map((c) => c.id)
