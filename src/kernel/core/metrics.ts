@@ -893,6 +893,25 @@ export const ICON = {
   control: 15,
   tab: 17,
   prominent: 19,
+  /**
+   * A control STANDING ALONE, with nothing beside it to be sized against.
+   *
+   * The rest of the ramp is for icons inside chrome — in a row, in a bar, in a
+   * button with a fill behind it — where the neighbours give the eye its scale
+   * and 19 is already emphatic. The page-turn chevrons have none of that: they
+   * sit in open white margin, revealed on the pointer, with the nearest thing
+   * to them 44px of nothing. At `prominent` they read as a hint that something
+   * might be there rather than as a control, which is the one thing a control
+   * revealed by hovering cannot afford.
+   *
+   * 2em, at the app's 16px root — twice the interface's own type, which is the
+   * proportion this was specified in. Written as a number rather than as `2em`
+   * in the stylesheet for two reasons: `tokens.test.ts` refuses a raw value
+   * where a token belongs, and a `<button>` does not inherit font-size, so an
+   * `em` there would have resolved against the UA's own 11px and come out at 22
+   * — SMALLER than the 19 it was meant to enlarge.
+   */
+  standalone: 32,
   stroke: 1.75,
 } as const
 
@@ -970,6 +989,9 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
     // this rung, because publishing the other four would put four tokens that
     // nothing reads next to the one that does.
     '--icon-control': px(ICON.control),
+    // The page-turn chevrons, which are drawn by CSS in a lane the stylesheet
+    // sizes — so unlike the other rungs this one has to cross into CSS.
+    '--icon-standalone': px(ICON.standalone),
     // The shelf's card: its width for the grid's `repeat()`, its cover's
     // proportion for `aspect-ratio`, and its height — which, with a fixed
     // width, is a CONSTANT, not something to measure at runtime. All three from

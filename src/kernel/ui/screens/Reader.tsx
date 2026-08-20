@@ -1,5 +1,5 @@
 import { useCallback, useLayoutEffect, useMemo, useState, type CSSProperties } from 'react'
-import { Library, Plus } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Library, Plus } from 'lucide-react'
 import type { Platform } from '../../core/metrics'
 import {
   ICON,
@@ -185,6 +185,11 @@ export function Reader({
      * hooks; the shadow root is closed and a custom property is the only thing
      * that crosses it. Inert in paginated flow, where the fork reads them only
      * under `:host([flow="scrolled"])`. */
+    /* HALF the page's margins — the lane between the book element's edge and
+       the page's own, which is where the turn controls sit. Published rather
+       than restated in CSS because it is the same number `applyLayout` adds to
+       the measure to size the page, and the two must not drift. */
+    '--page-margin': `${pageMargins(grid) / 2}px`,
     '--paper-scroll-pad-start': `${bleed.start}px`,
     '--paper-scroll-pad-end': `${bleed.end}px`,
     /* §06: the bar is off by default. `none` hides it without disabling the
@@ -482,6 +487,57 @@ export function Reader({
                          where a reader goes to READ a note rather than to act
                          on the passage it belongs to. */
                     />
+
+                    {/* §11: the page to either side, on the pointer.
+                        PAGED FLOW ONLY, which is the same line the reading
+                        ruler is drawn on from the other side — the ruler is
+                        scrolled-only because there are no lines to advance in
+                        paged flow, and these are paged-only because there are
+                        no pages to turn in scrolled flow. The two can never be
+                        on screen together, so they can share the gutter.
+
+                        SIDES, NOT NEXT AND PREVIOUS. `onPageIntent` resolves
+                        which page a side is through foliate's `goLeft`/
+                        `goRight`, so in a right-to-left book the left chevron
+                        advances — and it carries the guards this must not
+                        skip: it clears the selection, refuses while the palette
+                        or switcher is open, and refuses when the pane is a
+                        sheet over the reader rather than a track beside it.
+
+                        NOT IN THE TAB ORDER. The arrow keys already turn the
+                        page and are published in the palette, and a focused
+                        button here would swallow them: `App`'s key handler
+                        stands down when focus is on a control, so clicking a
+                        chevron would stop ← and → working until the reader
+                        clicked somewhere else. */}
+                    {state.pageLayout === 'paginated' && !book.error && book.source && (
+                      <>
+                        <button
+                          type="button"
+                          tabIndex={-1}
+                          aria-label="Page to the left"
+                          className={styles.turn}
+                          data-side="left"
+                          onClick={() => onPageIntent('left')}
+                        >
+                          <span className={styles.turnGlyph}>
+                            <ChevronLeft strokeWidth={ICON.stroke} />
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          tabIndex={-1}
+                          aria-label="Page to the right"
+                          className={styles.turn}
+                          data-side="right"
+                          onClick={() => onPageIntent('right')}
+                        >
+                          <span className={styles.turnGlyph}>
+                            <ChevronRight strokeWidth={ICON.stroke} />
+                          </span>
+                        </button>
+                      </>
+                    )}
                   </div>
 
                   {/* Rendered only when there is something to put in it; the
