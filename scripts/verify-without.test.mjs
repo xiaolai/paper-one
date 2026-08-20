@@ -160,3 +160,51 @@ describe('parseArgs and the CLI', () => {
     expect(bad.stderr).toContain('a capability id is required')
   })
 })
+
+/**
+ * CI RUNS THIS SCRIPT WITH AN ARGUMENT, AND NOTHING CHECKED THE ARGUMENT.
+ *
+ * `.github/workflows/verify.yml` ends with a step named "Deletion is an
+ * operation" — the physical proof of ADR 0001 decision 7. It ran
+ * `pnpm verify:without example`, and the capability called `example` was
+ * deleted in 19bac0e, whose subject is "Delete the capability that existed to
+ * be deleted". The workflow was not updated with it.
+ *
+ * `capability:remove` refused the unknown id — correctly, and loudly — so the
+ * step failed on every push from that commit onward, and the proof it exists to
+ * run proved nothing for the whole of that time. A red step that has been red
+ * long enough stops being read.
+ *
+ * So the argument is checked HERE, in the suite that gates every push, where a
+ * rename fails in seconds instead of at the end of a 7-minute CI job. Two
+ * things have to hold, and the second is the one that is easy to get wrong:
+ * the id must be a capability the manifest declares, and NOTHING may require
+ * it — `capability:remove` refuses to remove a capability another one depends
+ * on, so naming `peer` here would fail just as surely as naming a ghost.
+ */
+describe('the workflow names a capability that can actually be removed', () => {
+  const WORKFLOW = fileURLToPath(new URL('../.github/workflows/verify.yml', import.meta.url))
+  const MANIFEST = fileURLToPath(new URL('../capabilities.manifest.json', import.meta.url))
+
+  /** Every `pnpm verify:without <id>` the workflow runs. */
+  const named = () => [
+    ...readFileSync(WORKFLOW, 'utf8').matchAll(/verify:without\s+([A-Za-z0-9._-]+)/g),
+  ].map((m) => m[1])
+
+  it('runs the deletion proof at all', () => {
+    // A regex that matches nothing passes every assertion below it.
+    expect(named().length).toBeGreaterThan(0)
+  })
+
+  it('names only ids the manifest declares, and only ones nothing requires', () => {
+    const manifest = JSON.parse(readFileSync(MANIFEST, 'utf8'))
+    const ids = manifest.capabilities.map((c) => c.id)
+    for (const id of named()) {
+      expect(ids, `verify:without ${id} — the manifest declares ${ids.join(', ')}`).toContain(id)
+      const dependents = manifest.capabilities
+        .filter((c) => (c.requires ?? []).includes(id))
+        .map((c) => c.id)
+      expect(dependents, `verify:without ${id} — ${dependents.join(', ')} require it, so removal is refused`).toEqual([])
+    }
+  })
+})

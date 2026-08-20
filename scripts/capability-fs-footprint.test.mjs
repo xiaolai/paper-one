@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
@@ -191,18 +191,87 @@ const SYNC_PATH_CONSTANTS = [
   ['src/kernel/core/presence.ts', 'PRESENCE_PATH', 'sync/removed.json'],
 ]
 
+/* ------------------------------------------------- capabilities come and go */
+
+/**
+ * A CAPABILITY CAN BE DELETED, and this file has to survive that.
+ *
+ * `capability:remove <id>` deletes `src/capabilities/<id>/` outright — that is
+ * the point of it, and `pnpm verify:without <id>` holds the resulting tree to
+ * the gates as the physical proof that deletion is an operation (ADR 0001
+ * decision 7). This test read the sync sources unconditionally and compared the
+ * WHOLE footprint with `toEqual`, so in that tree it failed twice: an ENOENT on
+ * `sync/lib/journal.ts`, and an allowlist listing entries no longer in the
+ * tree. The proof could not pass while the thing proving it was here.
+ *
+ * The fix is NOT to skip when the directory is gone — a check that quietly does
+ * nothing is the defect this file exists to prevent, wearing a different hat.
+ * Both states are asserted instead: a capability that is PRESENT must match its
+ * reviewed entries exactly, and one that is ABSENT must contribute none at all.
+ * The removed tree therefore checks something stronger than the full tree does
+ * — that the removal was complete — rather than checking less.
+ */
+
+/** The capability a footprint entry belongs to: the first path segment of
+ *  `"<capability>/<file> <signature>"`. */
+const ownerOfEntry = (entry) => entry.slice(0, entry.indexOf('/'))
+
+/** The capability a repo-relative file belongs to, or null for a kernel file —
+ *  which has no capability to be removed with, so its absence is a defect. */
+function ownerOfFile(file) {
+  const m = /^src\/capabilities\/([^/]+)\//.exec(file)
+  return m ? m[1] : null
+}
+
+/** Whether a capability's source is still in the tree. */
+const present = (id) => existsSync(path.join(CAPABILITIES_ROOT, id))
+
+/** Every capability the allowlist speaks for, in sorted order. */
+const REVIEWED_CAPABILITIES = [...new Set(REVIEWED_FOOTPRINT.map(ownerOfEntry))].sort()
+
 /* --------------------------------------------------------------- the test */
 
 describe('the capability fs/storage footprint (WI-10.1)', () => {
-  it('matches the reviewed allowlist exactly — no new raw write, key or handle', () => {
+  const scanned = () => {
     const actual = new Set()
     for (const file of productionSources()) for (const entry of scanFile(file)) actual.add(entry)
-    expect([...actual].sort()).toEqual(REVIEWED_FOOTPRINT)
+    return [...actual].sort()
+  }
+
+  it('matches the reviewed allowlist exactly — no new raw write, key or handle', () => {
+    const actual = scanned()
+
+    /* PER CAPABILITY, so a removed one is accounted for rather than skipped.
+       Present: its entries must be exactly the reviewed set — the ratchet, and
+       it still bites in the real tree where both capabilities are here.
+       Absent: it must contribute nothing, which is what makes the removal
+       complete rather than merely started. */
+    for (const id of REVIEWED_CAPABILITIES) {
+      const mine = actual.filter((entry) => ownerOfEntry(entry) === id)
+      const reviewed = REVIEWED_FOOTPRINT.filter((entry) => ownerOfEntry(entry) === id)
+      if (present(id)) expect(mine, `${id} is in the tree`).toEqual(reviewed)
+      else expect(mine, `${id} was removed — it must leave no footprint`).toEqual([])
+    }
+
+    /* And nothing from a capability the allowlist has never seen. A new
+       capability that touches the filesystem is a review, not a silent pass. */
+    const unreviewed = actual.filter((entry) => !REVIEWED_CAPABILITIES.includes(ownerOfEntry(entry)))
+    expect(unreviewed, 'a capability outside the reviewed set touched fs or storage').toEqual([])
   })
 
   it('every path constant the allowlist leans on resolves under sync/', () => {
     for (const [file, name, value] of SYNC_PATH_CONSTANTS) {
-      const text = readFileSync(path.join(REPO_ROOT, file), 'utf8')
+      const full = path.join(REPO_ROOT, file)
+      if (!existsSync(full)) {
+        /* Absence is ASSERTED, not skipped: the only thing that may take one of
+           these files away is the removal of the capability that owns it. A
+           kernel file owns no capability, so its disappearance fails here. */
+        const owner = ownerOfFile(file)
+        expect(owner, `${file} is gone and belongs to no capability`).not.toBeNull()
+        expect(present(owner), `${file} is gone but ${owner} is still in the tree`).toBe(false)
+        continue
+      }
+      const text = readFileSync(full, 'utf8')
       const m = new RegExp(`const ${name} = '([^']*)'`).exec(text)
       expect(m, `${name} in ${file}`).not.toBeNull()
       expect(m[1], `${name} in ${file}`).toBe(value)
