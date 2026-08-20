@@ -120,6 +120,44 @@
   flex-wrap: wrap;
 }
 
+/*
+ * Two filter groups on ONE line, with a rule between them.
+ *
+ * Marginalia filters on two independent axes — what kind of thing, and whose
+ * book — and as words its seven chips wrapped to three lines of chrome above
+ * the list at the pane's 400px. As icons they are one line with room to spare:
+ * seven controls at `--control-sm` plus their gaps come to roughly 230px inside
+ * a 372px content box.
+ *
+ * The rule is not decoration. Seven identical round buttons in a row read as
+ * one question with seven answers, and these are two questions with five and
+ * two — a reader has to be able to see that picking Notes does not un-pick This
+ * book. The groups keep their own `role="group"` and label for the same reason.
+ */
+.filterBar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  padding: 0 var(--space-6) var(--space-12);
+}
+
+/* The groups give up their own padding to the bar, and stop wrapping: the
+   point of the icons is that they do not have to. */
+.filterBar .filters {
+  padding: 0;
+  flex-wrap: nowrap;
+}
+
+/* `--line-3`, not `--line-2`, which is what the chips' own borders are drawn
+   in — a divider in the same value reads as one more chip edge rather than as
+   the thing separating two groups. One step darker is the whole difference. */
+.filterDivider {
+  flex: 0 0 auto;
+  width: 1px;
+  height: var(--space-16);
+  background: var(--line-3);
+}
+
 .filter {
   height: var(--control-sm);
   padding: 0 var(--space-12);
@@ -138,6 +176,14 @@
   background: var(--ink);
   border-color: var(--ink);
   color: var(--surface);
+}
+
+/* An icon chip is square rather than pill-shaped — there is no word to give it
+   a length, so the padding that sizes a text chip would make it a lozenge
+   around a 12px glyph. */
+.filter[data-icon='true'] {
+  width: var(--control-sm);
+  padding: 0;
 }
 
 /* --- contents -------------------------------------------------------- */

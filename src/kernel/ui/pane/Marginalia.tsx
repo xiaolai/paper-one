@@ -1,5 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Layers, Trash2 } from 'lucide-react'
+import {
+  Asterisk,
+  /* Aliased: `Bookmark` is also the record type this file is largely about,
+     and the icon is the lesser of the two claims on the name. */
+  Bookmark as BookmarkIcon,
+  BookOpen,
+  Highlighter,
+  Layers,
+  LibraryBig,
+  PenLine,
+  Sparkles,
+  Trash2,
+} from 'lucide-react'
 import { cardFromMark } from '../../core/cards'
 import {
   compareMarks,
@@ -45,6 +57,34 @@ const KINDS: readonly KindFilter[] = ['All', 'Marks', 'Notes', 'Bookmarks', 'Com
 /** The scope chips. Only offered with a book open — see the render. */
 type ScopeFilter = 'All books' | 'This book'
 const SCOPES: readonly ScopeFilter[] = ['All books', 'This book']
+
+/**
+ * The chips are icons, and each one BORROWS AN ASSOCIATION THE APP HAS ALREADY
+ * TAUGHT rather than inventing a glyph.
+ *
+ * Sparkles is the Companion's own rail icon and LibraryBig is the Library's, so
+ * a reader who has used either panel already knows what those two mean here.
+ * Bookmark is the ribbon the toggle draws on the page. Highlighter is this
+ * panel's own rail icon, which is right for the kind of thing this panel is
+ * mostly made of. PenLine is the note — §15's word for what you wrote on a
+ * mark — and BookOpen is the one you have open. Asterisk is the wildcard, which
+ * is the only one of the seven that is a convention rather than a recall.
+ *
+ * Typed as a total Record, so adding a filter without an icon fails to compile
+ * instead of drawing an empty button — see `FilterChipsProps.icons`.
+ */
+const KIND_ICONS: Readonly<Record<KindFilter, typeof Asterisk>> = {
+  All: Asterisk,
+  Marks: Highlighter,
+  Notes: PenLine,
+  Bookmarks: BookmarkIcon,
+  Companion: Sparkles,
+}
+
+const SCOPE_ICONS: Readonly<Record<ScopeFilter, typeof Asterisk>> = {
+  'All books': LibraryBig,
+  'This book': BookOpen,
+}
 
 function matches(mark: Mark, filter: KindFilter): boolean {
   switch (filter) {
@@ -412,14 +452,37 @@ export function Marginalia({
         </div>
       )}
 
-      <FilterChips options={KINDS} active={filter} onSelect={setFilter} label="Filter by kind" />
-
-      {/* ONLY WITH A BOOK OPEN. With none, "This book" names nothing and would
-          empty the list for a reason the reader cannot see — a control that is
-          present and inert is a worse answer than one that is absent. */}
-      {bookId && (
-        <FilterChips options={SCOPES} active={scope} onSelect={setScope} label="Filter by book" />
-      )}
+      {/* BOTH AXES ON ONE LINE, with a rule between them.
+          As words the seven wrapped to three lines of chrome above the list at
+          the pane's 400px. As icons they are one, and the rule is what keeps
+          them legible as two questions rather than one row of seven — a reader
+          has to be able to see that picking "Notes" does not un-pick "This
+          book". */}
+      <div className={styles.filterBar}>
+        <FilterChips
+          options={KINDS}
+          active={filter}
+          onSelect={setFilter}
+          label="Filter by kind"
+          icons={KIND_ICONS}
+        />
+        {/* ONLY WITH A BOOK OPEN. With none, "This book" names nothing and
+            would empty the list for a reason the reader cannot see — a control
+            that is present and inert is a worse answer than one that is
+            absent. The rule goes with them, or it divides nothing. */}
+        {bookId && (
+          <>
+            <span className={styles.filterDivider} aria-hidden="true" />
+            <FilterChips
+              options={SCOPES}
+              active={scope}
+              onSelect={setScope}
+              label="Filter by book"
+              icons={SCOPE_ICONS}
+            />
+          </>
+        )}
+      </div>
 
       {shown.length === 0 && everything.length > 0 && (
         <div className={styles.empty}>
