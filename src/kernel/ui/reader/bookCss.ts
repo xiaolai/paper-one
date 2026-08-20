@@ -211,7 +211,14 @@ export interface BookCssOptions {
    *
    * REPLACES a `justify` boolean and a `hyphenate` boolean, which were two
    * settings for one decision and allowed a combination that is simply bad
-   * typography — see the note where it is used.
+   * typography: justified WITHOUT hyphens, which opens rivers at this measure.
+   * Collapsing them made that unrepresentable, and it still is.
+   *
+   * It also made ragged-with-hyphens unrepresentable, and that one was a loss
+   * rather than a saving — it is ordinary typography, and it halves the rag.
+   * So hyphenation is no longer on this axis at all; both values hyphenate, and
+   * this setting means only what its name says. See the note where it is used
+   * for the measurements.
    */
   readonly align: Align
   /** How open the type is set — see `SPACING`. */
@@ -237,6 +244,12 @@ export function bookCss({
   contrast,
 }: BookCssOptions): string {
   const step = readingStep(stepIdx)
+  /* THE THREE STATES, RESOLVED INTO THE TWO PROPERTIES THEY MEAN. Alignment and
+     hyphenation are separate declarations but not separate settings — see
+     `ALIGNS`, which lists the three combinations worth offering and leaves the
+     fourth unreachable. */
+  const flush = align !== 'ragged'
+  const breakWords = align === 'justified'
   const c = bookColours(theme, brightness, contrast)
   const face = faceById(typeface)
   const stack = face.stack
@@ -303,20 +316,34 @@ body {
    * follows the book's own dir and writing-mode, and a heuristic guessing
    * direction from character ranges would be worse than the declaration it was
    * overriding. */
-  text-align: ${align === 'justified' ? 'justify' : 'start'};
-  /* HYPHENATION FOLLOWS THE ALIGNMENT rather than being its own switch.
-   * Justifying without it stretches the word spaces to fill the line instead,
-   * which at this measure opens rivers — measured on a real book at a narrow
-   * measure, hyphenation absorbed two lines' worth of slack that would
-   * otherwise have become white space. Ragged text has nowhere for that slack
-   * to go: the line simply ends early, so hyphens buy nothing and cost an
-   * interruption.
+  text-align: ${flush ? 'justify' : 'start'};
+  /* HYPHENATION IS HALF OF THE ALIGNMENT SETTING, not a switch of its own.
+   *
+   * The three states ALIGNS offers are two of alignment and two of hyphenation
+   * minus the pairing nobody wants, and the pairing that survives on each side
+   * is not arbitrary:
+   *
+   *   justified            breaks words, so the spaces need not stretch
+   *   justified-no-hyphens keeps words whole, so the spaces stretch instead
+   *   ragged               keeps words whole, and lets the line end early
+   *
+   * The middle one is the one to be careful about rather than the one to
+   * forbid. With both edges flush and no word allowed to break, the only place
+   * the slack can go is between the words, and at a narrow measure that opens
+   * rivers of white down the page. It is offered because a reader who does not
+   * want words broken is entitled to say so, and because the alternative to
+   * offering it is the reader believing the app cannot do it.
+   *
+   * Ragged carries no hyphenation by decision rather than by mechanics.
+   * Measured on a real book at the 660px measure, hyphens do halve the rag —
+   * 15px mean against 29px, 34px worst against 73px — so the case for them is
+   * real. It is overruled: a rag is what a reader picking ragged asked for.
    *
    * Hyphenating needs the document's language and does nothing at all without
    * it, silently — which is why the session supplies one when the book has not.
    * See ensureLang there. */
-  -webkit-hyphens: ${align === 'justified' ? 'auto' : 'manual'};
-  hyphens: ${align === 'justified' ? 'auto' : 'manual'};
+  -webkit-hyphens: ${breakWords ? 'auto' : 'manual'};
+  hyphens: ${breakWords ? 'auto' : 'manual'};
   -webkit-font-smoothing: antialiased;
   overflow-wrap: break-word;
 }
@@ -345,6 +372,37 @@ p, li, blockquote, dd {
   line-height: var(--paper-line) !important;
   letter-spacing: ${letter}em !important;
   word-spacing: ${word}em !important;
+}
+
+/* ALIGNMENT IS THE READER'S TOO, BUT IT CANNOT SIMPLY JOIN THE RULE ABOVE.
+ *
+ * It is a control, so the argument at the head of that rule applies unchanged:
+ * left to inherit from body it loses to any rule that matches the element, and
+ * measured over 400 books in the library, 32% set paragraph alignment ONLY from
+ * a class — on all of those the Alignment setting did exactly nothing, in
+ * either position.
+ *
+ * What stops it being one more property in that list is that text-align is
+ * the one place where a book is not stating a default but COMPOSING. 45% of
+ * those same 400 centre paragraphs from a class — dedications, epigraphs,
+ * verse, chapter numbers — and !important on p flattens every one of them
+ * into running prose. That is not the reader's setting winning, it is the book
+ * being damaged by it.
+ *
+ * So the reader's alignment is applied only where the book expressed no view
+ * worth keeping: markProse in session.ts marks the elements whose own
+ * alignment is a justification decision — justify, start, or the reading edge —
+ * and leaves centred and far-edge text unmarked and untouched. The VALUE stays
+ * here in CSS rather than going on the elements, so changing the setting is
+ * still one stylesheet swap and the marks never need revisiting. */
+[data-paper-prose] {
+  text-align: ${flush ? 'justify' : 'start'} !important;
+  /* Hyphenation rides with the alignment rather than sitting in the rule above,
+     because it is half of the same setting and must land on the same elements.
+     Marked prose is the reader's; a centred dedication that asked for
+     hyphens: manual is the book composing, and keeps what it asked for. */
+  -webkit-hyphens: ${breakWords ? 'auto' : 'manual'} !important;
+  hyphens: ${breakWords ? 'auto' : 'manual'} !important;
 }
 
 p {

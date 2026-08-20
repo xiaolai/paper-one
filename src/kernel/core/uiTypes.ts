@@ -116,6 +116,22 @@ export type SpacingKey = keyof SpacingIndices
  * Arabic, and at the TOP in vertical Japanese. There is one behaviour and three
  * appearances, and naming it by one of them would be wrong in the other two.
  * `ragged` names what the far edge does, which is the same in all three.
+ *
+ * THREE STATES, NOT AN ALIGNMENT AND A HYPHENATION SWITCH. The two axes have
+ * four combinations and only three of them are worth offering, so this enum
+ * lists the three rather than letting a reader assemble the fourth by accident:
+ *
+ *   justified            both edges flush, long words broken to fit
+ *   justified-no-hyphens both edges flush, the word spaces stretched instead
+ *   ragged               reading edge flush, the far edge left uneven
+ *
+ * Ragged carries no hyphenation, deliberately. It is the one combination of the
+ * four that is a matter of taste rather than of mechanics — hyphens do measure
+ * shorter in a rag, 15px mean against 29px on a real page at the 660px measure,
+ * but a rag is what a reader picking this asked for and breaking words to even
+ * it out is answering a question they did not put.
+ *
+ * The order is the cycle the Settings row walks, most-worked to least.
  */
-export const ALIGNS = ['justified', 'ragged'] as const
+export const ALIGNS = ['justified', 'justified-no-hyphens', 'ragged'] as const
 export type Align = (typeof ALIGNS)[number]

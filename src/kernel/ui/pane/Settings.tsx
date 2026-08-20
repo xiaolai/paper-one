@@ -13,6 +13,7 @@ import type {
   Theme,
   Typeface,
 } from '../state'
+import { ALIGNS } from '../../core/uiTypes'
 import { PaneGroup } from './PaneGroup'
 import { StepRow } from './StepRow'
 import styles from './SidePane.module.css'
@@ -125,6 +126,23 @@ export interface SettingsProps {
   contrast: number
   onContrast: (idx: number) => void
   onTypeface: (typeface: Typeface) => void
+}
+
+/**
+ * What each of the three states is called in the row.
+ *
+ * A RECORD RATHER THAN A TERNARY, so the compiler fails the day a fourth state
+ * is added and nobody comes back here — a cycle whose label falls through to
+ * "Justified" for an unnamed state is a control that lies about where it is.
+ *
+ * "No hyphens" rather than "Unhyphenated": the row is 400px wide with a value
+ * right-aligned in it, and the reader is choosing between three things they can
+ * see on the page, not reading a typographic term.
+ */
+const ALIGN_LABELS: Record<Align, string> = {
+  justified: 'Justified',
+  'justified-no-hyphens': 'Justified, no hyphens',
+  ragged: 'Ragged',
 }
 
 export function Settings({
@@ -305,12 +323,17 @@ export function Settings({
           Nothing here touches the MEASURE. That is the size step's, and letting
           a second control move it would make the line length depend on which
           one was touched last. */}
-      {/* ONE DECISION, NOT TWO. It was `justify` and `hyphenate`, both hardcoded
-          on and neither reachable — and as a pair they allowed justified text
-          with no hyphens, which is the one combination that is simply worse:
-          the word spaces stretch to fill the line instead, and at this measure
-          that opens rivers. Ragged text has nowhere for the slack to go, so
-          hyphens there buy nothing and cost an interruption.
+      {/* ONE DECISION, NOT TWO — but three states rather than two. It was
+          `justify` and `hyphenate`, two booleans and four combinations, of
+          which one is simply worse and shipping it by accident was the reason
+          they were collapsed. `ALIGNS` keeps the collapse and lists the three
+          worth having, so the reader cycles through decisions rather than
+          assembling one from parts.
+
+          THE ROW CYCLES, and it says which of the three it is on rather than
+          naming an alignment and hiding the hyphenation inside it — "Justified"
+          twice over, differing only in something invisible in the label, is a
+          control that looks broken the first time you press it.
 
           Not "Left" and "Justified": the flush edge is on the left in English,
           the right in Arabic and the top in vertical Japanese, and the book
@@ -318,12 +341,10 @@ export function Settings({
       <button
         type="button"
         className={styles.settingRow}
-        onClick={() => onAlign(align === 'justified' ? 'ragged' : 'justified')}
+        onClick={() => onAlign(ALIGNS[(ALIGNS.indexOf(align) + 1) % ALIGNS.length] ?? ALIGNS[0])}
       >
         <span style={{ flex: 1 }}>Alignment</span>
-        <span className={styles.settingValue}>
-          {align === 'justified' ? 'Justified' : 'Ragged'}
-        </span>
+        <span className={styles.settingValue}>{ALIGN_LABELS[align]}</span>
       </button>
       </PaneGroup>
 
