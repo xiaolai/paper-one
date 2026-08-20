@@ -14,13 +14,14 @@ import { STEPS, parseArgs, runSteps, spawnStep } from './verify.mjs'
 const SCRIPT = fileURLToPath(new URL('./verify.mjs', import.meta.url))
 
 describe('the steps', () => {
-  it('are the plan\'s, in order: manifest, compositions, boundaries (and its selftest, and the test-project check), types, coverage, build, then Cargo', () => {
+  it('are the plan\'s, in order: manifest, compositions, boundaries (and its selftest, the test-project check and the test ledger), types, coverage, build, then Cargo', () => {
     expect(STEPS.map((s) => s.name)).toEqual([
       'architecture:check',
       'compositions:check',
       'boundaries',
       'boundaries:selftest',
       'test:projects',
+      'test:ledger',
       'typecheck',
       'test:coverage',
       'build',

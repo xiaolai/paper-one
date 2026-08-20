@@ -33,6 +33,12 @@ export const STEPS = Object.freeze([
   // one project. Cheap, and a gate CI never runs is a comment.
   { name: 'boundaries:selftest', cmd: 'pnpm', args: ['boundaries:selftest'] },
   { name: 'test:projects', cmd: 'pnpm', args: ['test:projects'] },
+  /* A DELETED TEST IS INVISIBLE TO EVERY OTHER STEP HERE. Coverage cannot see
+   * it — the lines go on being executed by whatever replaced it — and the run
+   * is green because the thing that stopped running stopped being counted at
+   * the same moment. This one names them. See scripts/check-test-ledger.mjs
+   * for the incident that bought it. */
+  { name: 'test:ledger', cmd: 'pnpm', args: ['test:ledger'] },
   { name: 'typecheck', cmd: 'pnpm', args: ['typecheck'] },
   { name: 'test:coverage', cmd: 'pnpm', args: ['test:coverage'] },
   { name: 'build', cmd: 'pnpm', args: ['build'] },
