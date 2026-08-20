@@ -302,6 +302,21 @@
   opacity: 1;
 }
 
+/*
+ * A CONTROL THAT CANNOT BE REVEALED MUST NOT BE TAPPABLE.
+ *
+ * The reveal is `:hover`, and a touch screen has none — so on iOS and Android,
+ * which this repo builds for, these would be invisible buttons occupying 44px
+ * down both edges of the page, turning it on a tap that was meant for the text
+ * or for nothing at all. Hidden and inert is the honest state there; the swipe
+ * already turns the page and is the gesture that platform expects.
+ */
+@media (hover: none) {
+  .turn {
+    display: none;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .turn,
   .turnGlyph {

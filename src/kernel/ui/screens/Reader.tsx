@@ -510,7 +510,18 @@ export function Reader({
                         stands down when focus is on a control, so clicking a
                         chevron would stop ← and → working until the reader
                         clicked somewhere else. */}
-                    {state.pageLayout === 'paginated' && !book.error && book.source && (
+                    {/* REFLOWABLE ONLY, and not merely paged. `--page-margin`
+                        comes off the prose grid, and `foliate-fxl` reads none
+                        of it — not `max-inline-size`, not `gap` — it scales and
+                        centres its own page. So on a PDF these lanes describe a
+                        page that is not there, and the chevrons can land over
+                        the page instead of beside it. The arrow keys and the
+                        wheel already turn a PDF; this is the one route that
+                        needs geometry the renderer will not give.
+
+                        The `book.source` and `book.error` guards that were here
+                        are redundant — this subtree is already inside both. */}
+                    {state.pageLayout === 'paginated' && !book.fixedLayout && (
                       <>
                         <button
                           type="button"

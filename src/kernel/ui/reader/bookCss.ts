@@ -207,18 +207,21 @@ export interface BookCssOptions {
   readonly theme: Theme
   readonly typeface: Typeface
   /**
-   * Justified, or flush to the reading edge.
+   * How a line fills its measure, and whether words may break to help it.
    *
-   * REPLACES a `justify` boolean and a `hyphenate` boolean, which were two
-   * settings for one decision and allowed a combination that is simply bad
-   * typography: justified WITHOUT hyphens, which opens rivers at this measure.
-   * Collapsing them made that unrepresentable, and it still is.
+   * REPLACES a `justify` boolean and a `hyphenate` boolean — two settings for
+   * one decision, with four combinations of which only three are worth having.
+   * `ALIGNS` lists those three, so the reader cycles decisions rather than
+   * assembling one from parts:
    *
-   * It also made ragged-with-hyphens unrepresentable, and that one was a loss
-   * rather than a saving — it is ordinary typography, and it halves the rag.
-   * So hyphenation is no longer on this axis at all; both values hyphenate, and
-   * this setting means only what its name says. See the note where it is used
-   * for the measurements.
+   *   justified             both edges flush, long words broken to fit
+   *   justified-no-hyphens  both edges flush, the word spaces stretched instead
+   *   ragged                reading edge flush, the far edge left uneven
+   *
+   * The middle one is the one to be careful about rather than the one to
+   * forbid — measured on a page, the worst word gap goes from 12px hyphenated
+   * to 27px without, against a natural space of 4px, which is what rivers are.
+   * See the note where this is used for the rest of the measurements.
    */
   readonly align: Align
   /** How open the type is set — see `SPACING`. */
@@ -395,12 +398,32 @@ p, li, blockquote, dd {
  * and leaves centred and far-edge text unmarked and untouched. The VALUE stays
  * here in CSS rather than going on the elements, so changing the setting is
  * still one stylesheet swap and the marks never need revisiting. */
-[data-paper-prose] {
+/* THE ELEMENT IS NAMED AS WELL AS THE MARKER, and it buys one thing: weight.
+ *
+ * [data-paper-prose] alone is specificity (0,1,0), and a book that writes
+ * p.body { text-align: justify !important } is (0,1,1) — higher, so it wins
+ * even against an important declaration here. Naming the element takes this to
+ * (0,1,1) too, and a tie goes to the later origin, which is this sheet.
+ *
+ * It does not win everything and is not meant to. p[data-paper-prose] is one
+ * attribute and one element, so it TIES anything of the same weight — p.body,
+ * and .chapter p as well, both of which are one class and one element — and a
+ * tie goes to this sheet. What still beats it is two classes deep:
+ * .chapter p.body is (0,2,1). Measured over 400 EPUBs, 1.2% use !important on
+ * paragraph alignment at all, so this closes the common half of a rare case for
+ * the cost of four selectors. */
+p[data-paper-prose],
+li[data-paper-prose],
+blockquote[data-paper-prose],
+dd[data-paper-prose] {
   text-align: ${flush ? 'justify' : 'start'} !important;
   /* Hyphenation rides with the alignment rather than sitting in the rule above,
      because it is half of the same setting and must land on the same elements.
-     Marked prose is the reader's; a centred dedication that asked for
-     hyphens: manual is the book composing, and keeps what it asked for. */
+     A centred dedication that asked for hyphens: manual is the book composing,
+     and keeps what it asked for — that rule matches the element and this one
+     does not reach it. Composition that expressed NO view on hyphenation still
+     inherits the reader's from body below, which is right: the setting is a
+     default, and an element that said nothing has not been overruled. */
   -webkit-hyphens: ${breakWords ? 'auto' : 'manual'} !important;
   hyphens: ${breakWords ? 'auto' : 'manual'} !important;
 }

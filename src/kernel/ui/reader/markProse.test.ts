@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { alignsAsProse, markProse } from './markProse'
+import { alignsAsProse, markProse, type StyleReader } from './markProse'
 
 /**
  * The line between a book stating a default and a book composing.
@@ -95,6 +95,92 @@ describe('the whole table, so nothing is decided by accident', () => {
     const rtl = VALUES.filter((v) => alignsAsProse(v, 'rtl'))
     expect(ltr).toEqual(['', 'start', 'left', 'justify'])
     expect(rtl).toEqual(['', 'start', 'right', 'justify'])
+  })
+})
+
+/**
+ * THE WALK, through the seam.
+ *
+ * Not a test of the cascade — jsdom cannot do that part, and pretending
+ * otherwise is how the first version of this file passed while marking nothing.
+ * This drives the traversal with a reader that answers for each element, which
+ * is the half that is ordinary logic: which elements are marked, and the
+ * read-before-write ordering that keeps a chapter from recomputing style once
+ * per paragraph.
+ */
+describe('the walk over a document', () => {
+  /** A document whose paragraphs answer with whatever the table says. */
+  const bookOf = (spec: readonly (readonly [string, string, string])[]) => {
+    const els = spec.map(([cls, textAlign, direction]) => {
+      const attrs = new Map<string, string>()
+      return {
+        cls, textAlign, direction, attrs,
+        setAttribute: (n: string, v: string): void => { attrs.set(n, v) },
+        marked: () => attrs.has('data-paper-prose'),
+      }
+    })
+    const order: string[] = []
+    const doc = {
+      defaultView: {},
+      body: { querySelectorAll: () => els },
+    } as unknown as Document
+    const read: StyleReader = (el) => {
+      const e = el as unknown as (typeof els)[number]
+      order.push(`read:${e.cls}`)
+      return { textAlign: e.textAlign, direction: e.direction }
+    }
+    for (const e of els) {
+      const set = e.setAttribute
+      e.setAttribute = (n: string, v: string) => { order.push(`write:${e.cls}`); set(n, v) }
+    }
+    return { doc, read, els, order }
+  }
+
+  it('marks the prose and leaves the composition alone', () => {
+    const { doc, read, els } = bookOf([
+      ['body-text', 'justify', 'ltr'],
+      ['dedication', 'center', 'ltr'],
+      ['plain', '', 'ltr'],
+      ['attrib', 'right', 'ltr'],
+    ])
+    markProse(doc, read)
+    expect(els.filter((e) => e.marked()).map((e) => e.cls)).toEqual(['body-text', 'plain'])
+  })
+
+  /* The finding this seam exists for: taken once off `body`, an RTL passage
+   * inside an LTR chapter was classified by the WRONG direction — its
+   * right-aligned prose read as deliberate placement and never got the setting,
+   * while a left-placed line in it would have been flattened. */
+  it('judges each element by its own direction, not the document’s', () => {
+    const { doc, read, els } = bookOf([
+      ['english', 'left', 'ltr'],
+      ['hebrew-quote', 'right', 'rtl'],
+      ['placed-in-hebrew', 'left', 'rtl'],
+    ])
+    markProse(doc, read)
+    expect(els.filter((e) => e.marked()).map((e) => e.cls)).toEqual(['english', 'hebrew-quote'])
+  })
+
+  /* Reading flushes pending style and writing invalidates it again, so an
+   * interleaved walk recomputes the whole document once per paragraph. */
+  it('reads every element before it writes any', () => {
+    const { doc, read, order } = bookOf([
+      ['a', 'justify', 'ltr'],
+      ['b', 'justify', 'ltr'],
+      ['c', 'justify', 'ltr'],
+    ])
+    markProse(doc, read)
+    const firstWrite = order.findIndex((s) => s.startsWith('write:'))
+    const lastRead = order.map((s) => s.startsWith('read:')).lastIndexOf(true)
+    expect(lastRead).toBeLessThan(firstWrite)
+  })
+
+  /* A suite that only exercised the guards passed with this function emptied —
+   * which is exactly what happened. This fails if it stops marking anything. */
+  it('marks something at all, so an empty implementation cannot pass', () => {
+    const { doc, read, els } = bookOf([['only', 'justify', 'ltr']])
+    markProse(doc, read)
+    expect(els.filter((e) => e.marked())).toHaveLength(1)
   })
 })
 

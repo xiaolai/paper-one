@@ -44,13 +44,41 @@ function ruleValue(source: string, selector: string, property: string): string |
   return match?.[1]?.trim() ?? null
 }
 
-/** What a state resolves to, on the marked prose the reader's settings own. */
+/**
+ * What a state resolves to, on the marked prose the reader's settings own.
+ *
+ * FOUND BY THE MARKER, not by an exact selector string — the rule names the
+ * four prose elements as well as the attribute, to outweigh a book's own
+ * `p.class` rule, and a helper keyed to the literal text would go quietly blank
+ * the next time that changes. It THROWS rather than returning null, because a
+ * missing rule read as `null` is how `never writes a physical side` passed
+ * against nothing at all: `null ?? ''` matches no physical side either.
+ */
 const resolved = (align: Align) => {
-  const css = bookCss(settings(align))
-  return {
-    align: ruleValue(css, '[data-paper-prose]', 'text-align'),
-    hyphens: ruleValue(css, '[data-paper-prose]', 'hyphens'),
+  const css = bookCss(settings(align)).replace(/\/\*[\s\S]*?\*\//g, '')
+  const match = /([^{}]*\[data-paper-prose\][^{}]*)\{([^{}]*)\}/.exec(css)
+  if (!match) throw new Error('no rule targets [data-paper-prose] — the marker rule is gone')
+  const declarations = match[2] ?? ''
+  const value = (property: string) => {
+    const found = new RegExp(`(?:^|;)\\s*${property}:\\s*([^;]+)`, 'm').exec(declarations)
+    if (!found) throw new Error(`the prose rule declares no ${property}`)
+    return (found[1] ?? '').trim()
   }
+  return { align: value('text-align'), hyphens: value('hyphens') }
+}
+
+/** The same rule, with the prefixed spelling WebKit is the one that reads. */
+const resolvedWithPrefix = (align: Align) => {
+  const css = bookCss(settings(align)).replace(/\/\*[\s\S]*?\*\//g, '')
+  const match = /([^{}]*\[data-paper-prose\][^{}]*)\{([^{}]*)\}/.exec(css)
+  if (!match) throw new Error('no rule targets [data-paper-prose] — the marker rule is gone')
+  const declarations = match[2] ?? ''
+  const read = (property: string) => {
+    const found = new RegExp(`(?:^|;)\\s*${property}:\\s*([^;]+)`, 'm').exec(declarations)
+    if (!found) throw new Error(`the prose rule declares no ${property}`)
+    return (found[1] ?? '').trim()
+  }
+  return { hyphens: read('hyphens'), prefixed: read('-webkit-hyphens') }
 }
 
 /**
@@ -78,14 +106,20 @@ describe('the three states', () => {
   })
 
   /* Exhaustive over `ALIGNS`, so a fourth state cannot land here with no
-   * decision made about what it means — it fails rather than inheriting the
-   * `else` branch of whatever conditional it fell into. */
-  it('gives every declared state a resolution', () => {
-    for (const align of ALIGNS) {
-      const { align: value, hyphens } = resolved(align)
-      expect(value, align).toMatch(/^(justify|start) !important$/)
-      expect(hyphens, align).toMatch(/^(auto|manual) !important$/)
+   * decision made about what it means.
+   *
+   * AGAINST A DECLARED TABLE, not against a pattern. Matching each value to
+   * /justify|start/ accepted ANY pair, so a new state falling through an `else`
+   * to justify/manual passed — which is precisely the silence this was written
+   * to prevent. The table has to name the state before the test can go green. */
+  it('gives every declared state a resolution, and only the declared ones', () => {
+    const EXPECTED: Record<Align, { align: string; hyphens: string }> = {
+      justified: { align: 'justify !important', hyphens: 'auto !important' },
+      'justified-no-hyphens': { align: 'justify !important', hyphens: 'manual !important' },
+      ragged: { align: 'start !important', hyphens: 'manual !important' },
     }
+    expect(Object.keys(EXPECTED).sort()).toEqual([...ALIGNS].sort())
+    for (const align of ALIGNS) expect(resolved(align), align).toEqual(EXPECTED[align])
   })
 
   /* The absent fourth. Hyphens do measure shorter in a rag — 15px mean against
@@ -117,10 +151,14 @@ describe('hyphenation', () => {
    * prefixed one. Writing only the standard property is a change that looks
    * correct, passes review, and silently stops hyphenating the whole app. */
   it('carries the prefixed property WebKit actually reads, in every state', () => {
+    /* Through `resolved`, which finds the rule by its marker and THROWS when it
+       cannot. Read with an exact selector string this compared null to null the
+       moment the selector grew its element names — passing while asserting
+       nothing, which is the defect this whole round is about. */
     for (const align of ALIGNS) {
-      const css = bookCss(settings(align))
-      expect(ruleValue(css, '[data-paper-prose]', '-webkit-hyphens'), align)
-        .toBe(ruleValue(css, '[data-paper-prose]', 'hyphens'))
+      const { hyphens, prefixed } = resolvedWithPrefix(align)
+      expect(prefixed, align).toBe(hyphens)
+      expect(prefixed, align).toMatch(/^(auto|manual) !important$/)
     }
   })
 })
@@ -139,13 +177,30 @@ describe('hyphenation', () => {
 describe('the reader’s settings reach the prose', () => {
   it('applies both halves against the prose marker, not the element', () => {
     const css = bookCss(settings('ragged'))
-    /* Against the attribute, never against `p`. Marked on the element selector
-       it would flatten every centred dedication, epigraph and verse line in
-       nearly half the library — 45% of the same 400 books. */
-    const proseRule = css.slice(css.indexOf('\np, li, blockquote, dd {'))
-    const declarations = proseRule.slice(0, proseRule.indexOf('\n}'))
+    /* Against the marker, never against a bare `p`. On the element selector it
+       would flatten every centred dedication, epigraph and verse line in nearly
+       half the library — 45% of the same 400 books.
+
+       THE RULE IS ASSERTED PRESENT FIRST, and that is not ceremony: this was
+       written as `slice(indexOf(sel))`, and `indexOf` returns −1 when the rule
+       is gone, so the slice came out empty and `not.toMatch` passed. The test
+       could not fail for the reason it exists. */
+    const start = css.indexOf('\np, li, blockquote, dd {')
+    expect(start, 'the shared prose rule is gone — this test asserts nothing').toBeGreaterThan(-1)
+    const declarations = css.slice(start, css.indexOf('\n}', start))
     expect(declarations).not.toMatch(/text-align/)
     expect(declarations).not.toMatch(/hyphens/)
+  })
+
+  /* And nowhere else. A bare `p { text-align: … !important }` added later would
+   * be invisible to the rule above, which only inspects one known selector. */
+  it('marks alignment under no selector but the prose marker', () => {
+    const css = bookCss(settings('ragged')).replace(/\/\*[\s\S]*?\*\//g, '')
+    for (const [, selector, body] of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      if (!/text-align:[^;]*!important|hyphens:[^;]*!important/.test(body ?? '')) continue
+      expect(selector ?? '', 'important alignment under an unmarked selector')
+        .toMatch(/\[data-paper-prose\]/)
+    }
   })
 
   /* The body declarations stay as the fallback for prose the walk never reached
@@ -157,9 +212,26 @@ describe('the reader’s settings reach the prose', () => {
     expect(ruleValue(css, 'body', 'hyphens')).toBe('manual')
   })
 
-  it('moves the fallback with the setting, so the two cannot disagree', () => {
-    const css = bookCss(settings('justified'))
-    expect(ruleValue(css, 'body', 'text-align')).toBe('justify')
-    expect(ruleValue(css, 'body', 'hyphens')).toBe('auto')
+  /* ALL THREE STATES, AND BOTH SPELLINGS. Two of the three were checked, so
+   * `justified-no-hyphens` could have hyphenated in the fallback — or the
+   * prefixed property, the one WebKit actually reads, could have stopped
+   * following the setting — with the suite still green. */
+  it('moves the fallback with the setting, in every state and both spellings', () => {
+    const EXPECTED: Record<Align, { align: string; hyphens: string }> = {
+      justified: { align: 'justify', hyphens: 'auto' },
+      'justified-no-hyphens': { align: 'justify', hyphens: 'manual' },
+      ragged: { align: 'start', hyphens: 'manual' },
+    }
+    for (const align of ALIGNS) {
+      const css = bookCss(settings(align))
+      expect(
+        {
+          align: ruleValue(css, 'body', 'text-align'),
+          hyphens: ruleValue(css, 'body', 'hyphens'),
+        },
+        align,
+      ).toEqual(EXPECTED[align])
+      expect(ruleValue(css, 'body', '-webkit-hyphens'), align).toBe(EXPECTED[align].hyphens)
+    }
   })
 })

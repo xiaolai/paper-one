@@ -6,15 +6,20 @@
  * — is the whole of it, and it is the kind of decision that is only safe while
  * something checks it.
  *
- * SPLIT INTO A DECISION AND A WALK, deliberately. `alignsAsProse` is a pure
- * function of two strings and is exhaustively tested; `markProse` is the DOM
- * traversal around it and is not, because it cannot honestly be. The question
- * it asks is what the BOOK's own stylesheet computed to, and jsdom does not
- * implement that: measured, a `.body-text { text-align: justify }` rule leaves
- * `getComputedStyle(p).textAlign` as the empty string there, and only inline
- * styles come back at all. A test written against that would be asserting the
- * fake rather than the cascade, which is the one thing it exists to check. The
- * walk is verified in the running app instead.
+ * SPLIT INTO A DECISION, A WALK, AND A READER. `alignsAsProse` is a pure
+ * function of two strings and is exhaustively tested. `markProse` is the DOM
+ * traversal around it, and it takes the style reader as an argument so that the
+ * traversal can be tested too — which elements it marks, and that it reads
+ * every one before it writes any.
+ *
+ * The seam is not a way to test the cascade, and no test should pretend it is.
+ * What the walk asks is what the BOOK's own stylesheet computed to, and jsdom
+ * does not implement that part: measured, a `.body-text { text-align: justify }`
+ * rule leaves `getComputedStyle(p).textAlign` as the empty string there, and
+ * only inline styles come back at all. So the cascade is verified in the running
+ * app, and the seam covers the part that is ordinary logic — which, before it
+ * existed, was covered by nothing: both tests here exercised early returns, and
+ * emptying this function left the suite green.
  */
 
 /**
@@ -42,6 +47,15 @@ export function alignsAsProse(align: string, direction: string): boolean {
 /** The elements a reader means by "the text" — running prose, and nothing else. */
 const PROSE = 'p, li, blockquote, dd'
 
+/** What the walk needs to know about one element. */
+export interface ProseStyle {
+  readonly textAlign: string
+  readonly direction: string
+}
+
+/** How the walk reads an element's own alignment — the seam. */
+export type StyleReader = (el: Element) => ProseStyle
+
 /**
  * Mark the running prose, so the reader's alignment can reach it.
  *
@@ -66,14 +80,19 @@ const PROSE = 'p, li, blockquote, dd'
  * and these marks never need revisiting — which also means this can run once
  * per document, at load, rather than on every settings pass.
  */
-export function markProse(doc: Document): void {
+export function markProse(doc: Document, readStyle?: StyleReader): void {
   /* A section that failed to parse hands back a document with neither, and this
      runs on every section that loads — the same case `ensureLang` guards. */
   const win = doc.defaultView
   const body = doc.body as HTMLElement | null
-  if (!win || !body) return
+  if (!body || (!win && !readStyle)) return
 
-  const direction = win.getComputedStyle(body).direction
+  const read: StyleReader =
+    readStyle ??
+    ((el) => {
+      const style = win!.getComputedStyle(el)
+      return { textAlign: style.textAlign, direction: style.direction }
+    })
 
   /* READ EVERY ELEMENT BEFORE WRITING ANY. `getComputedStyle` flushes pending
      style and setting an attribute invalidates it again, so interleaving the
@@ -81,7 +100,13 @@ export function markProse(doc: Document): void {
      hundred is enough for that to show on a section load. */
   const prose: Element[] = []
   for (const el of body.querySelectorAll(PROSE)) {
-    if (alignsAsProse(win.getComputedStyle(el).textAlign, direction)) prose.push(el)
+    /* DIRECTION PER ELEMENT, from the same read as the alignment. Taken once off
+       `body` it was wrong for any subtree that sets its own — a quoted passage
+       in Hebrew inside an English chapter, which is the ordinary case in exactly
+       the books that have one. Both come from one call, so they cannot describe
+       different elements. */
+    const { textAlign, direction } = read(el)
+    if (alignsAsProse(textAlign, direction)) prose.push(el)
   }
   for (const el of prose) el.setAttribute('data-paper-prose', '')
 }

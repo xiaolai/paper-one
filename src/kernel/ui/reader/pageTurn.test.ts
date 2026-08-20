@@ -235,6 +235,13 @@ describe('the page the reader turns', () => {
         const halfGap = parseFloat(attributes.get('gap') ?? '') / 100 / 2
         const where = `stage ${stage}, marks ${marks}`
         expect(page + 2 * halfGap * top, where).toBeLessThanOrEqual(top)
+        /* AND IT REACHES THE CEILING, which is the half that was missing. Under
+         * `<=` alone a `pageMargins` returning some small constant at every
+         * width passed everywhere — the column still landed on the measure, so
+         * the second assertion held too, while every wide page quietly lost the
+         * margin it was supposed to have. The slack is the flooring: `page` and
+         * the ceiling are each rounded down once. */
+        expect(top - (page + 2 * halfGap * top), where).toBeLessThanOrEqual(2)
         // And the column still lands on the measure the grid reserved.
         expect(foliateColumn(attributes), where).toBe(Math.floor(grid.measure))
       }

@@ -203,8 +203,12 @@ describe('the reader’s spacings survive a book’s own stylesheet', () => {
         new RegExp(`\\[data-paper-prose\\]\\s*\\{[^}]*${prop}:[^;]*!important`),
       )
     }
-    const proseRule = css().slice(css().indexOf('\np, li, blockquote, dd {'))
-    const declarations = proseRule.slice(0, proseRule.indexOf('\n}'))
+    /* THE RULE IS ASSERTED PRESENT FIRST. Written as `slice(indexOf(sel))` this
+       passed when the rule was GONE: indexOf returns −1, the slice comes out
+       empty, and `not.toMatch` is satisfied by nothing. */
+    const start = css().indexOf('\np, li, blockquote, dd {')
+    expect(start, 'the shared prose rule is gone — this test asserts nothing').toBeGreaterThan(-1)
+    const declarations = css().slice(start, css().indexOf('\n}', start))
     expect(declarations).not.toMatch(/text-align/)
     expect(declarations).not.toMatch(/hyphens/)
   })
