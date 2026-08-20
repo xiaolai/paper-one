@@ -26,6 +26,14 @@ export interface FoliateViewProps {
    * stage cannot hold it.
    */
   measure: number
+  /**
+   * The white the page carries outside its own text, both sides together.
+   *
+   * From `pageMargins`, and the reason the page turn reads as a page rather
+   * than as text sliding over text. Paginated flow only; scrolled flow has no
+   * turn and ignores it.
+   */
+  pageMargins: number
   theme: Theme
   /** The face the BOOK is set in — never the interface's. */
   typeface: Typeface
@@ -85,6 +93,14 @@ export interface FoliateViewProps {
 
 interface Settings {
   stepIdx: number
+  /**
+   * The white the PAGE carries, both sides together — see `pageMargins`.
+   *
+   * Kept beside the measure rather than folded into it because the renderer
+   * needs both: their sum is the page it turns, their difference is the text it
+   * lays out, and a single number could only ever say one of the two.
+   */
+  pageMargins: number
   /** How open the type is set — see `SPACING`. */
   spacing: SpacingIndices
   /** Justified, or flush to the reading edge. */
@@ -138,6 +154,37 @@ export function applySettings(renderer: Renderer, settings: Settings): void {
  * in one function meant the attribute contract — including whether the page
  * turn animates at all — could only be exercised somewhere with a DOM.
  */
+/**
+ * The `gap` percentage that lays the column out at exactly the measure.
+ *
+ * foliate does not take a page margin. It takes a gap, in percent, and works
+ * the margin out from it — `paginator.js` converts the attribute with
+ *
+ *   gap = -g / (g - 1) * size          // g = parseFloat(attribute) / 100
+ *   columnWidth = size / divisor - gap // divisor is 1 at max-column-count 1
+ *
+ * where `size` is the scroll port, which is `max-inline-size`. That conversion
+ * is not the identity and is not close to it: the gap it produces is a share of
+ * the COLUMN, not of the port, and foliate applies the inverse of a converging
+ * series to make the outer padding and the inner gap come out even. Reading the
+ * percentage as "the fraction of the page that is margin" is wrong by a factor
+ * that grows with the value, and wrong quietly, because the text still renders.
+ *
+ * So invert it rather than guess. Solving `g / (1 - g) * page = margins`:
+ *
+ *   g = margins / (page + margins)
+ *
+ * Substituting back gives `columnWidth = page - margins = measure` with no
+ * remainder at all — the two roundings foliate applies (`Math.trunc` on the
+ * column, a CSS percentage on the grid track) have nothing left to lose, which
+ * is why this can be asserted exactly rather than within a pixel.
+ */
+export function pageGap(measure: number, page: number): number {
+  const margins = page - measure
+  if (margins <= 0) return 0
+  return (100 * margins) / (page + margins)
+}
+
 export function applyLayout(renderer: Renderer, settings: Settings): void {
   /* Order matters. `flow` is what triggers the paginator to re-render, and the
    * sizing attributes are read during that render rather than each being
@@ -153,7 +200,6 @@ export function applyLayout(renderer: Renderer, settings: Settings): void {
    * and the tracks fall back to auto — sizing to content instead of to the
    * measure, with every attribute apparently correct and no error anywhere. */
   renderer.setAttribute('margin', '0px')
-  renderer.setAttribute('gap', '0px')
   renderer.setAttribute('max-column-count', '1')
   /* THE MEASURE THE GRID SETTLED ON, not the one the reading step asks for.
    *
@@ -172,7 +218,37 @@ export function applyLayout(renderer: Renderer, settings: Settings): void {
   // FLOORED, not rounded: a rounded-up value can exceed the fractional width
   // the grid actually allocated, by up to half a pixel — which is a column
   // break's worth on a paginated page. Floor never asks for more than exists.
-  renderer.setAttribute('max-inline-size', `${Math.floor(settings.measure)}px`)
+  const measure = Math.floor(settings.measure)
+  /* `max-inline-size` IS THE PAGE, and the page is wider than the measure.
+   *
+   * The name says inline size and the value used to be the measure, which read
+   * as the same thing and is not: foliate takes this as the width of its scroll
+   * port — the box it clips the book to and scrolls by one width per turn — and
+   * derives the column from it by subtracting the gap. With the gap at zero the
+   * two coincided, so the port WAS the text and a turn slid text against text
+   * with nothing between them. `pageMargins` is what pulls them apart.
+   *
+   * In scrolled flow they stay the same number, because there is no turn and
+   * nothing to separate: `scrolled()` sets `body { max-width: columnWidth }`
+   * with `columnWidth = maxInlineSize`, so a page-width here would widen the
+   * text past its own measure — the very failure the paragraph above records,
+   * arriving from the other side. */
+  const page = settings.paginated ? measure + settings.pageMargins : measure
+  renderer.setAttribute('max-inline-size', `${page}px`)
+  /* The gap is a PERCENTAGE, whatever unit is written on it.
+   *
+   * foliate does `parseFloat(gap) / 100` and never looks at the unit, so the
+   * `'0px'` that was here for years was only ever read as 0% — correct by
+   * accident, and the accident is why a length looks safe to write here. It is
+   * not: `'88px'` would ask for 88%, and the reader would get a page of margin
+   * with a sliver of text down the middle.
+   *
+   * `pageGap` inverts foliate's own conversion so the column lands on exactly
+   * the measure. Two places consume this value and they resolve it against
+   * DIFFERENT boxes — the shadow grid takes it as a CSS percentage of the
+   * paginator, while `#render` parses it as a bare number against the scroll
+   * port — which is precisely why it cannot be eyeballed. */
+  renderer.setAttribute('gap', `${pageGap(measure, page)}%`)
   /* The page slide, which foliate has always been able to do and Paper never
    * asked for: `#scrollTo` eases over 300ms when this attribute is present and
    * jumps when it is not. It was `0ms` in §08's motion table for exactly as long
@@ -252,6 +328,7 @@ export function FoliateView({
   generation,
   stepIdx,
   measure,
+  pageMargins,
   theme,
   typeface,
   spacing,
@@ -314,7 +391,7 @@ export function FoliateView({
    * whenever a section's overlay is built, which happens as the reader scrolls
    * — long after any value captured at startup went stale. */
   const marksRef = useRef(marks)
-  const settings = useRef<Settings>({ stepIdx, measure, theme, typeface, spacing, align, brightness, contrast, animated, paginated })
+  const settings = useRef<Settings>({ stepIdx, measure, pageMargins, theme, typeface, spacing, align, brightness, contrast, animated, paginated })
   /* Through a ref for the same reason, and for one that is specific to it: the
    * saved position is derived from the book's content id, which resolves a few
    * milliseconds AFTER the reader mounts. A prop read at mount is read before
@@ -328,7 +405,7 @@ export function FoliateView({
   useLayoutEffect(() => {
     handlers.current = currentHandlers
     marksRef.current = marks
-    settings.current = { stepIdx, measure, theme, typeface, spacing, align, brightness, contrast, animated, paginated }
+    settings.current = { stepIdx, measure, pageMargins, theme, typeface, spacing, align, brightness, contrast, animated, paginated }
     lastLocationRef.current = lastLocation
   })
 
@@ -464,7 +541,7 @@ export function FoliateView({
      * the effect and unmounted the React tree — the reader vanished instead of
      * the theme failing to change. */
     try {
-      applySettings(renderer, { stepIdx, measure: settings.current.measure, theme, typeface, spacing, align, brightness, contrast, animated, paginated })
+      applySettings(renderer, { stepIdx, measure: settings.current.measure, pageMargins: settings.current.pageMargins, theme, typeface, spacing, align, brightness, contrast, animated, paginated })
       /* A theme change reaches the book through `setStyles`, which restyles the
        * document WITHOUT rebuilding the section — so no `create-overlay` fires
        * and the marks keep the colour they were painted in. Changing the step or
@@ -492,14 +569,20 @@ export function FoliateView({
      * a spacing has not moved — so depending on the object cannot loop. */
   }, [stepIdx, theme, typeface, spacing, align, brightness, contrast, animated, paginated, ready, generation, fontsReady])
 
-  /* THE MEASURE ALONE, and only the layout attributes for it.
+  /* THE GRID ALONE, and only the layout attributes for it.
    *
    * The measure changes on every frame of a pane opening — 220ms of it — and it
    * was in the effect above, so each frame rebuilt the whole book stylesheet
    * (`bookCss` reads the host's `@font-face` rules out of `document.styleSheets`
    * every time) and redrew every mark, for a change `bookCss` does not even
    * take. Foliate re-renders on the attribute regardless; the stylesheet and
-   * the marks were pure waste, a dozen times over per animation. */
+   * the marks were pure waste, a dozen times over per animation.
+   *
+   * `pageMargins` belongs here for the same reason and not as an afterthought:
+   * it comes off the SAME grid as the measure, so it moves on those same
+   * frames. Left out, a pane opening would narrow the measure while the page
+   * kept the old margins — and the two are added together to size the scroll
+   * port, so the port would outrun the grid by exactly the difference. */
   useEffect(() => {
     const session = sessionRef.current
     const renderer = session?.view?.renderer
@@ -510,7 +593,7 @@ export function FoliateView({
       console.error('Paper: applying the measure failed', cause)
       handlers.current.onError(generation, 'That setting could not be applied.')
     }
-  }, [measure, ready, generation])
+  }, [measure, pageMargins, ready, generation])
 
   /* Redraw when the MARKS change, not only when a setting does.
    *

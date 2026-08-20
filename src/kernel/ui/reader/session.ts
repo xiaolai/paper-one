@@ -6,6 +6,7 @@ import type {
   TocItem,
   View,
 } from 'foliate-js/view.js'
+import { markProse } from './markProse'
 import { MARK_STYLES, MARK_TINTS, type MarkKind, type MarkStyle, type MarkTint } from '../../core/marks'
 import type { BookMeta, ReaderPosition } from '../../core/bookMeta'
 import { coverFrom } from '../../core/coverArt'
@@ -547,6 +548,10 @@ export class ReaderSession {
 
       this.#redrawWhenFontsLand(doc)
       ensureLang(doc, view)
+      /* AFTER the book's own stylesheet has applied, which by this point it
+         has: the mark records what the BOOK asked for, and reading it before
+         the author's rules landed would mark centred paragraphs as prose. */
+      markProse(doc)
 
       this.#cb.onDocument(doc)
     })

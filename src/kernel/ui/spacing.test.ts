@@ -146,7 +146,23 @@ describe('light: the theme is the ceiling', () => {
  * computed paragraph spacing to 0px. The marks are the only mechanism that
  * reliably wins, so this asserts they are still there — a well-meaning cleanup
  * removing them would break the settings on a large share of the library and
- * break nothing that any other test can see. */
+ * break nothing that any other test can see.
+ *
+ * THE FOUR ARE NOW SIX. Alignment and hyphenation were left inheriting from
+ * `body` long after the argument above was written, and inheritance loses to
+ * any rule that matches the element — so they were the two controls this
+ * paragraph describes, still broken. Measured over 400 EPUBs in the library,
+ * 32% set paragraph alignment only from a class and reached neither position of
+ * the Alignment control.
+ *
+ * They are not marked the same way as the other four, and the difference is the
+ * point. `text-align` is the one property here a book uses to COMPOSE rather
+ * than to state a default — 45% of those same 400 centre paragraphs from a
+ * class — so forcing it on `p` would flatten every dedication, epigraph and
+ * verse line among them. Both halves are marked against `[data-paper-prose]`
+ * instead, which `markProse` puts only on paragraphs the book had not
+ * deliberately placed; hyphenation rides with the alignment because it is half
+ * of the same setting and has to land on the same elements. */
 describe('the reader’s spacings survive a book’s own stylesheet', () => {
   /* `bookCss` copies the host's `@font-face` rules into the book, so it reads
      `document.styleSheets`. There is no document here and none is needed —
@@ -178,16 +194,38 @@ describe('the reader’s spacings survive a book’s own stylesheet', () => {
     }
   })
 
+  it('marks the alignment and the hyphenation, only against the prose marker', () => {
+    /* Against the attribute, never against `p` — see the head of this block.
+       Marked on the element selector they would flatten every centred
+       dedication, epigraph and verse line in nearly half the library. */
+    for (const prop of ['text-align', 'hyphens', '-webkit-hyphens']) {
+      expect(css(), prop).toMatch(
+        new RegExp(`\\[data-paper-prose\\]\\s*\\{[^}]*${prop}:[^;]*!important`),
+      )
+    }
+    /* THE RULE IS ASSERTED PRESENT FIRST. Written as `slice(indexOf(sel))` this
+       passed when the rule was GONE: indexOf returns −1, the slice comes out
+       empty, and `not.toMatch` is satisfied by nothing. */
+    const start = css().indexOf('\np, li, blockquote, dd {')
+    expect(start, 'the shared prose rule is gone — this test asserts nothing').toBeGreaterThan(-1)
+    const declarations = css().slice(start, css().indexOf('\n}', start))
+    expect(declarations).not.toMatch(/text-align/)
+    expect(declarations).not.toMatch(/hyphens/)
+  })
+
   /* And nothing else. The rest of the sheet IS a default — a book that styles
    * its own headings, links or blockquotes must go on winning. */
-  it('marks nothing that is not one of the four', () => {
+  it('marks nothing that is not one of the six', () => {
     /* Comments stripped first: this file's prose says "not" and "important" in
        several places, and a regex over the whole sheet reads those as
        declarations. */
     const code = css().replace(/\/\*[\s\S]*?\*\//g, '')
     const marked = [...code.matchAll(/([a-z-]+)\s*:[^;{}]*!important/g)].map((m) => m[1])
     expect(new Set(marked)).toEqual(
-      new Set(['margin', 'line-height', 'letter-spacing', 'word-spacing']),
+      new Set([
+        'margin', 'line-height', 'letter-spacing', 'word-spacing',
+        'hyphens', '-webkit-hyphens', 'text-align',
+      ]),
     )
   })
 })

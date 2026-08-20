@@ -1,11 +1,12 @@
 import { useCallback, useLayoutEffect, useMemo, useState, type CSSProperties } from 'react'
-import { Library, Plus } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Library, Plus } from 'lucide-react'
 import type { Platform } from '../../core/metrics'
 import {
   ICON,
   PANE_TRACK,
   STAGE_PADDING_X,
   measureForStep,
+  pageMargins,
   paneTakesTrack,
   proseBleed,
   proseColumn,
@@ -184,6 +185,11 @@ export function Reader({
      * hooks; the shadow root is closed and a custom property is the only thing
      * that crosses it. Inert in paginated flow, where the fork reads them only
      * under `:host([flow="scrolled"])`. */
+    /* HALF the page's margins — the lane between the book element's edge and
+       the page's own, which is where the turn controls sit. Published rather
+       than restated in CSS because it is the same number `applyLayout` adds to
+       the measure to size the page, and the two must not drift. */
+    '--page-margin': `${pageMargins(grid) / 2}px`,
     '--paper-scroll-pad-start': `${bleed.start}px`,
     '--paper-scroll-pad-end': `${bleed.end}px`,
     /* §06: the bar is off by default. `none` hides it without disabling the
@@ -442,6 +448,10 @@ export function Reader({
                          `applyLayout` — the renderer drew over the gutter for
                          as long as it derived this for itself. */
                       measure={grid.measure}
+                      /* The page's own margins — see `pageMargins`. Off the
+                         same grid as the measure, because the renderer adds
+                         the two to size the page it turns. */
+                      pageMargins={pageMargins(grid)}
                       theme={state.theme}
                       typeface={state.typeface}
                     spacing={state.spacing}
@@ -477,6 +487,68 @@ export function Reader({
                          where a reader goes to READ a note rather than to act
                          on the passage it belongs to. */
                     />
+
+                    {/* §11: the page to either side, on the pointer.
+                        PAGED FLOW ONLY, which is the same line the reading
+                        ruler is drawn on from the other side — the ruler is
+                        scrolled-only because there are no lines to advance in
+                        paged flow, and these are paged-only because there are
+                        no pages to turn in scrolled flow. The two can never be
+                        on screen together, so they can share the gutter.
+
+                        SIDES, NOT NEXT AND PREVIOUS. `onPageIntent` resolves
+                        which page a side is through foliate's `goLeft`/
+                        `goRight`, so in a right-to-left book the left chevron
+                        advances — and it carries the guards this must not
+                        skip: it clears the selection, refuses while the palette
+                        or switcher is open, and refuses when the pane is a
+                        sheet over the reader rather than a track beside it.
+
+                        NOT IN THE TAB ORDER. The arrow keys already turn the
+                        page and are published in the palette, and a focused
+                        button here would swallow them: `App`'s key handler
+                        stands down when focus is on a control, so clicking a
+                        chevron would stop ← and → working until the reader
+                        clicked somewhere else. */}
+                    {/* REFLOWABLE ONLY, and not merely paged. `--page-margin`
+                        comes off the prose grid, and `foliate-fxl` reads none
+                        of it — not `max-inline-size`, not `gap` — it scales and
+                        centres its own page. So on a PDF these lanes describe a
+                        page that is not there, and the chevrons can land over
+                        the page instead of beside it. The arrow keys and the
+                        wheel already turn a PDF; this is the one route that
+                        needs geometry the renderer will not give.
+
+                        The `book.source` and `book.error` guards that were here
+                        are redundant — this subtree is already inside both. */}
+                    {state.pageLayout === 'paginated' && !book.fixedLayout && (
+                      <>
+                        <button
+                          type="button"
+                          tabIndex={-1}
+                          aria-label="Page to the left"
+                          className={styles.turn}
+                          data-side="left"
+                          onClick={() => onPageIntent('left')}
+                        >
+                          <span className={styles.turnGlyph}>
+                            <ChevronLeft strokeWidth={ICON.stroke} />
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          tabIndex={-1}
+                          aria-label="Page to the right"
+                          className={styles.turn}
+                          data-side="right"
+                          onClick={() => onPageIntent('right')}
+                        >
+                          <span className={styles.turnGlyph}>
+                            <ChevronRight strokeWidth={ICON.stroke} />
+                          </span>
+                        </button>
+                      </>
+                    )}
                   </div>
 
                   {/* Rendered only when there is something to put in it; the

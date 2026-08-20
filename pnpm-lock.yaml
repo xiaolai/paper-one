@@ -30,8 +30,8 @@ importers:
         specifier: ^2.5.1
         version: 2.5.1
       foliate-js:
-        specifier: github:xiaolai/foliate-js#e3fde49acc53f6bc649c7f411dc6cbe6465cc182
-        version: https://codeload.github.com/xiaolai/foliate-js/tar.gz/e3fde49acc53f6bc649c7f411dc6cbe6465cc182
+        specifier: github:xiaolai/foliate-js#eef3cec5b1fb0e46c3417b67ae5175cb3c38603e
+        version: https://codeload.github.com/xiaolai/foliate-js/tar.gz/eef3cec5b1fb0e46c3417b67ae5175cb3c38603e
       lucide-react:
         specifier: ^1.31.0
         version: 1.31.0(react@19.2.8)
@@ -1101,8 +1101,8 @@ packages:
     resolution: {integrity: sha512-d+l3qxjSesT4V7v2fh+QnmFnUWv9lSpjarhShNTgBOfA0ttejbQUAlHLitbjkoRiDulW0OPoQPYIGhIC8ohejg==}
     engines: {node: '>=18'}
 
-  foliate-js@https://codeload.github.com/xiaolai/foliate-js/tar.gz/e3fde49acc53f6bc649c7f411dc6cbe6465cc182:
-    resolution: {tarball: https://codeload.github.com/xiaolai/foliate-js/tar.gz/e3fde49acc53f6bc649c7f411dc6cbe6465cc182}
+  foliate-js@https://codeload.github.com/xiaolai/foliate-js/tar.gz/eef3cec5b1fb0e46c3417b67ae5175cb3c38603e:
+    resolution: {tarball: https://codeload.github.com/xiaolai/foliate-js/tar.gz/eef3cec5b1fb0e46c3417b67ae5175cb3c38603e}
     version: 0.0.0
 
   foreground-child@3.3.1:
@@ -2654,7 +2654,7 @@ snapshots:
     dependencies:
       is-unicode-supported: 2.1.0
 
-  foliate-js@https://codeload.github.com/xiaolai/foliate-js/tar.gz/e3fde49acc53f6bc649c7f411dc6cbe6465cc182: {}
+  foliate-js@https://codeload.github.com/xiaolai/foliate-js/tar.gz/eef3cec5b1fb0e46c3417b67ae5175cb3c38603e: {}
 
   foreground-child@3.3.1:
     dependencies:

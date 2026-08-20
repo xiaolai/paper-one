@@ -205,6 +205,125 @@
   margin-inline: 0;
 }
 
+/*
+ * §11 page turn, on the pointer — the page to either side.
+ *
+ * REVEALED BY :hover ON THE STAGE, and that works for a reason worth recording
+ * rather than rediscovering: the book is an iframe, so the instinct is that the
+ * host cannot know where the pointer is. It can. `elementsFromPoint` over the
+ * words returns FOLIATE-VIEW with `.text` and `.stage` above it in the same
+ * stack — the iframe is a DESCENDANT of the stage, and :hover applies to the
+ * element under the pointer and every ancestor of it. So the stage is hovered
+ * whenever the pointer is anywhere over the book, and `mouseleave` does not
+ * fire on the way in, because entering a descendant is not leaving.
+ *
+ * That is why there is no JavaScript here, no pointer state and nothing
+ * injected into the book document. One selector does it.
+ *
+ * IN THE LANE OUTSIDE THE PAGE, not over it. `--page-margin` is half of what
+ * `applyLayout` adds to the measure to make the page, so this is exactly the
+ * strip between the book element's edge and the page's own — 44px at the
+ * default reading size. The text starts on the far side of it, so a chevron
+ * never sits over a word and never takes a click meant for one.
+ */
+.turn {
+  position: absolute;
+  inset-block: 0;
+  width: var(--page-margin, 44px);
+  z-index: var(--z-chrome);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  /* The FILL is on the glyph, never here: this box is the full height of the
+     page so that the pointer finds it easily, and a wash across it would be a
+     grey bar down the edge of the book rather than a control. */
+  opacity: 0;
+  transition: opacity var(--motion-chrome);
+}
+
+/*
+ * The visible control — square, centred in the lane, and the only part of this
+ * that is ever painted.
+ *
+ * `--icon-standalone` is 2em at the app's root, and the box is sized FROM the
+ * icon rather than the other way round, so moving that one rung moves the fill
+ * with it and the two cannot drift.
+ */
+.turnGlyph {
+  display: grid;
+  place-items: center;
+  width: calc(var(--icon-standalone) + var(--space-8));
+  height: calc(var(--icon-standalone) + var(--space-8));
+  border-radius: var(--radius-control);
+  color: var(--muted);
+  transition: background var(--motion-chrome), color var(--motion-chrome);
+}
+
+.turn svg {
+  /* Overrides lucide's own width/height attributes, which is the point of
+     sizing here rather than passing `size` — a presentation attribute loses to
+     a stylesheet, so the type scale wins over the component's default. */
+  width: var(--icon-standalone);
+  height: var(--icon-standalone);
+}
+
+/* PHYSICAL SIDES, deliberately, and the one place in the reader where that is
+   right: these name where the control IS, not which page it fetches. Which
+   page a side holds is the book's to answer — see `onPageIntent`. */
+.turn[data-side='left'] {
+  left: 0;
+}
+
+.turn[data-side='right'] {
+  right: 0;
+}
+
+.stage:hover .turn {
+  opacity: 1;
+}
+
+/* §07's hover fill, on the glyph. Reached from the BUTTON's hover rather than
+   the glyph's own, so the whole tall target lights the control up — a fill that
+   appeared only once the pointer found the small square would make the large
+   target feel like it was not there. */
+.turn:hover .turnGlyph,
+.turn:focus-visible .turnGlyph {
+  background: var(--wash);
+  color: var(--ink);
+}
+
+/* The pointer is already on it, so there is nothing to reveal and no reason to
+   wait: a control that fades in under a stationary pointer reads as lag. */
+.turn:focus-visible {
+  opacity: 1;
+}
+
+/*
+ * A CONTROL THAT CANNOT BE REVEALED MUST NOT BE TAPPABLE.
+ *
+ * The reveal is `:hover`, and a touch screen has none — so on iOS and Android,
+ * which this repo builds for, these would be invisible buttons occupying 44px
+ * down both edges of the page, turning it on a tap that was meant for the text
+ * or for nothing at all. Hidden and inert is the honest state there; the swipe
+ * already turns the page and is the gesture that platform expects.
+ */
+@media (hover: none) {
+  .turn {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .turn,
+  .turnGlyph {
+    transition: none;
+  }
+}
+
 /* `.pdfStage` and `.loading` were here, for a second reader that no longer
  * exists: a PDF is now a Book like any other and goes through the same stage,
  * which is what gives it marks, search and the ruler. Their markup went with
