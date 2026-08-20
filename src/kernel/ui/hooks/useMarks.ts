@@ -22,8 +22,10 @@ export interface MarksView {
   /** The open book's ANNOTATIONS, in book order. Never a bookmark — the store
    *  splits the two at its own door, see `MarkSnapshot.bookmarks`. */
   readonly current: readonly Annotation[]
-  /** The open book's BOOKMARKS, in book order. */
+  /** The open book's BOOKMARKS, in book order — what the ribbon reads. */
   readonly bookmarks: readonly Bookmark[]
+  /** Every book's bookmarks, beside `all`. Empty until `loadAll` has run. */
+  readonly allBookmarks: readonly Bookmark[]
   /** False once a write has failed — see `MarkSnapshot.persistent`. */
   readonly persistent: boolean
   /** Whether this book's marks have been READ — see `MarkSnapshot.ready`.
@@ -92,12 +94,13 @@ export function useMarks(store: MarkStore, bookId: string | null): MarksView {
   return useMemo<MarksView>(
     () => ({
       all: snapshot.all,
+      allBookmarks: snapshot.allBookmarks,
       current,
       bookmarks,
       persistent: snapshot.persistent,
       ready: snapshot.ready && snapshot.bookId === bookId,
       ...verbs,
     }),
-    [snapshot.all, current, bookmarks, snapshot.persistent, snapshot.ready, snapshot.bookId, bookId, verbs],
+    [snapshot.all, snapshot.allBookmarks, current, bookmarks, snapshot.persistent, snapshot.ready, snapshot.bookId, bookId, verbs],
   )
 }

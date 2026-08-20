@@ -387,7 +387,7 @@ export function Reader({
   const showInNotes = useCallback(
     (id: string | null, editing = false) => {
       if (id) marking.focusMark(id, editing)
-      dispatch({ type: 'openPane', pane: 'notes' })
+      dispatch({ type: 'openPane', pane: 'marginalia' })
     },
     [marking, dispatch],
   )

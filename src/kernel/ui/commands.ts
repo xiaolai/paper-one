@@ -445,7 +445,7 @@ export function buildCommands(ctx: KernelCommandContext): Command[] {
  * Rank commands against a query.
  *
  * A prefix match on the label beats a match inside it, which beats a match on
- * the keywords — so typing "not" puts "Open Notes" first rather than whichever
+ * the keywords — so typing "marg" puts "Open Marginalia" first rather than whichever
  * command happens to contain those letters earliest. Returns null for a miss so
  * the caller can drop the row rather than showing every command at rank zero.
  */

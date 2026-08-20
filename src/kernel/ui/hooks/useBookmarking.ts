@@ -20,8 +20,6 @@ import type { MarksView } from './useMarks'
  */
 
 export interface Bookmarking {
-  /** The open book's bookmarks, in book order. */
-  readonly all: readonly Bookmark[]
   /**
    * The bookmark on the place the reader is at, or null.
    *
@@ -47,24 +45,18 @@ export interface Bookmarking {
    * pressed a control labelled "Remove this bookmark" and the bookmark stayed.
    */
   readonly canBookmark: boolean
-  /**
-   * False once a write has failed — passed straight through from the marks
-   * store.
-   *
-   * NOT DROPPED, which it was. Notes and Cards both surface this, because a
-   * store that has silently stopped persisting is indistinguishable from one
-   * that works; a bookmark list is if anything the worse place to hide it,
-   * since a bookmark's entire purpose is to still be there tomorrow.
-   */
-  readonly persistent: boolean
-  /** Whether this book's marks have arrived — see `canBookmark`. */
-  readonly ready: boolean
   /** Put a bookmark here, or take off the one that is here. */
   toggle: () => void
-  /** Take one off from the list, where the reader is not standing on it. */
+  /**
+   * Take one off — from any book, routed by id through the store.
+   *
+   * The one verb here that is not about "here". Marginalia lists every book's
+   * places and its rows have to be removable; the list itself, the persistence
+   * warning and the navigation all belong to that panel, which reads them from
+   * `MarksView` directly. This hook kept copies of all three while it also fed
+   * a panel of its own, and they went dead with it.
+   */
   remove: (bookmark: Bookmark) => void
-  /** Go to one. */
-  goTo: (bookmark: Bookmark) => void
 }
 
 export function useBookmarking(book: Book, marks: MarksView): Bookmarking {
@@ -143,12 +135,8 @@ export function useBookmarking(book: Book, marks: MarksView): Bookmarking {
 
   const remove = useCallback((bookmark: Bookmark) => marks.remove(bookmark.id), [marks])
 
-  /* THE CFI, not the chapter href. Two bookmarks in one chapter are two places,
-   * and navigating by the chapter would send both to its first page. */
-  const goTo = useCallback((bookmark: Bookmark) => book.goTo(bookmark.cfi), [book])
-
   return useMemo<Bookmarking>(
-    () => ({ all, here, canBookmark, persistent: marks.persistent, ready: marks.ready, toggle, remove, goTo }),
-    [all, here, canBookmark, marks.persistent, marks.ready, toggle, remove, goTo],
+    () => ({ here, canBookmark, toggle, remove }),
+    [here, canBookmark, toggle, remove],
   )
 }

@@ -1,5 +1,4 @@
 import {
-  Bookmark,
   ChartNoAxesColumn,
   Highlighter,
   Layers,
@@ -22,14 +21,13 @@ import type { MarkFocus } from '../hooks/useMarking'
 import type { CardsView } from '../hooks/useCards'
 import type { MarksView } from '../hooks/useMarks'
 import type { Bookmarking } from '../hooks/useBookmarking'
-import { Bookmarks } from './Bookmarks'
 import { Companion } from './Companion'
 import { Contents } from './Contents'
 import type { Face } from '../../core/typefaces'
 import { LibraryPanel } from './LibraryPanel'
 import type { TagPrefsStore } from '../hooks/useTagPrefs'
 import { Cards } from './Cards'
-import { Notes } from './Notes'
+import { Marginalia } from './Marginalia'
 import { SearchPanel } from './SearchPanel'
 import { Settings } from './Settings'
 import styles from './SidePane.module.css'
@@ -68,9 +66,8 @@ import styles from './SidePane.module.css'
 const RAIL_ENTRIES = [
   { id: 'toc', Icon: List },
   { id: 'companion', Icon: Sparkles },
-  { id: 'notes', Icon: Highlighter },
+  { id: 'marginalia', Icon: Highlighter },
   { id: 'cards', Icon: Layers },
-  { id: 'bookmarks', Icon: Bookmark },
   { id: 'search', Icon: Search },
   { id: 'stats', Icon: ChartNoAxesColumn },
   { id: 'library', Icon: LibraryBig },
@@ -220,12 +217,14 @@ export function SidePane({
           />
         )}
 
-        {pane === 'notes' && (
-          <Notes
+        {pane === 'marginalia' && (
+          <Marginalia
             marks={marks}
             cards={cards}
             bookId={book.bookId}
             onDelete={onDeleteMark}
+            onDeleteBookmark={bookmarking.remove}
+            platform={platform}
             focus={markFocus}
             {...(onGoTo ? { onGoTo } : {})}
           />
@@ -233,14 +232,6 @@ export function SidePane({
 
         {pane === 'cards' && (
           <Cards cards={cards} bookId={book.bookId} {...(onGoTo ? { onGoTo } : {})} />
-        )}
-
-        {pane === 'bookmarks' && (
-          <Bookmarks
-            bookmarking={bookmarking}
-            hasBook={book.source !== null}
-            platform={platform}
-          />
         )}
 
         {pane === 'search' && <SearchPanel book={book} />}

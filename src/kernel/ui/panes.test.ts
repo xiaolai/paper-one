@@ -15,7 +15,7 @@ const contributed: PaneContribution[] = [
 
 describe('shownPane', () => {
   it('names a kernel pane by the registry title, a contributed one by its label', () => {
-    expect(shownPane('notes', contributed, 'companion')).toEqual({ id: 'notes', title: 'Notes', contribution: null })
+    expect(shownPane('marginalia', contributed, 'companion')).toEqual({ id: 'marginalia', title: 'Marginalia', contribution: null })
     expect(shownPane('example:pane', contributed, 'companion')).toEqual({ id: 'example:pane', title: 'Example', contribution: contributed[0] })
   })
 
@@ -43,14 +43,13 @@ describe('renderContribution', () => {
 })
 
 describe('the kernel registry keeps its shortcuts', () => {
-  it('binds ⌘1…6 to kernel panes only', () => {
+  it('binds ⌘1…5 to kernel panes only', () => {
     expect(PANE_SHORTCUTS.map((s) => s.pane)).toEqual([
       'toc',
-      'notes',
+      'marginalia',
       'search',
       'cards',
       'stats',
-      'bookmarks',
     ])
     expect(PANES.every((pane) => pane.id in PANE_TITLES)).toBe(true)
   })

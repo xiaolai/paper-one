@@ -44,20 +44,24 @@ export type Typeface = string
  * meant two surfaces competing for the same job. One pane holds every tool;
  * the reader stays the only permanent full-width surface.
  *
- * `notes` rather than "annotation": §15's lexicon is explicit that the word is
- * Note. `library` is the collection panel — what the pane holds when the shelf
+ * `marginalia` is everything the reader put in a book — marks, the notes on
+ * them, the companion's claims, and the places they kept. It was `notes`, and
+ * that stopped being true when bookmarks joined it: §15 owns the words mark and
+ * note precisely, so a panel holding four things could not name itself after
+ * one of them. "Annotations" is the obvious replacement and is the one word §15
+ * rules out here.
+ *
+ * `library` is the collection panel — what the pane holds when the shelf
  * is the screen; it replaced an `import` panel that was one paragraph and a
  * button the toolbar already had.
  *
- * `bookmarks` is the reader's own places in this book, and it is a panel of its
- * own rather than a section at the head of Contents — which was the other
- * candidate, on the reasoning that both answer "take me somewhere in this
- * book". It is separate because the two lists are not the same kind of thing:
- * a table of contents is the BOOK's structure, the same for every reader and
- * not editable by any of them, and a bookmark list is one reader's marginalia.
- * Putting the second above the first would have made a panel whose top half
- * can be changed and whose bottom half cannot, under one title naming only the
- * bottom half.
+ * There is no `bookmarks` panel. Places were briefly one, and they belong with
+ * the rest of a reader's marginalia instead: the same list, one more filter
+ * chip, and a scope chip that says whether it is this book or all of them.
+ * Contents stays separate for the reason that pairing fails — it is the BOOK's
+ * structure, the same for every reader and editable by none, so a panel with it
+ * on top and a reader's own places below would have had a top half that cannot
+ * be changed and a bottom half that can.
  *
  * A VALUE as well as a type, because the registry (`registry.ts`) has to
  * answer "is this id one of the kernel's" at runtime — for a remembered pane
@@ -67,9 +71,8 @@ export type Typeface = string
 export const KERNEL_PANE_IDS = [
   'toc',
   'companion',
-  'notes',
+  'marginalia',
   'cards',
-  'bookmarks',
   'search',
   'stats',
   'library',

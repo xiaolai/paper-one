@@ -70,11 +70,22 @@ export interface MarkSnapshot {
    * subscriber reads through is what makes all four of those true by
    * construction rather than by four filters that each have to remember.
    *
-   * PER BOOK ONLY, with no cross-book counterpart to `all`. A bookmark is a
-   * place in a book you are reading; there is no surface that browses everyone
-   * else's, so there is no read to pay for.
+   * PER BOOK, for the surfaces that ask "is THIS place kept" — the ribbon and
+   * the footer toggle. `allBookmarks` is the cross-book list beside it.
    */
   readonly bookmarks: readonly Bookmark[]
+  /**
+   * Every LIVE BOOKMARK, across every book — the other half of what Marginalia
+   * browses. Empty until `loadAll` has run, exactly like `all`.
+   *
+   * FREE, and that is why it can exist. `loadAll` already scans every book's
+   * marks file and both classes live in the same file, so the rows are already
+   * in hand; this is a projection of what was read, not a second read. The
+   * per-book list above stays because the ribbon asks a different question —
+   * "is this place kept" — and answering it from a cross-book list would mean
+   * filtering the whole library on every page turn.
+   */
+  readonly allBookmarks: readonly Bookmark[]
   /** Which book `current` and `bookmarks` are for. */
   readonly bookId: string | null
   /**
@@ -214,6 +225,7 @@ export function createMarkStore({
   const listeners = new Set<() => void>()
   let snapshot: MarkSnapshot = {
     all: EMPTY,
+    allBookmarks: NO_BOOKMARKS,
     current: EMPTY,
     bookmarks: NO_BOOKMARKS,
     bookId: null,
@@ -238,7 +250,11 @@ export function createMarkStore({
     annotations: readonly Annotation[]
     bookmarks: readonly Bookmark[]
   } | null = null
-  let allCache: { source: readonly Mark[]; annotations: readonly Annotation[] } | null = null
+  let allCache: {
+    source: readonly Mark[]
+    annotations: readonly Annotation[]
+    bookmarks: readonly Bookmark[]
+  } | null = null
 
   const publish = () => {
     /* FILTERED TO LIVE AT THE ONE DOOR a subscriber reads through. The
@@ -263,10 +279,17 @@ export function createMarkStore({
       }
     }
     if (!allCache || allCache.source !== all) {
-      allCache = { source: all, annotations: annotationsIn(liveMarks(all)) }
+      const live = liveMarks(all)
+      const places = bookmarksIn(live)
+      allCache = {
+        source: all,
+        annotations: annotationsIn(live),
+        bookmarks: places.length > 0 ? places : NO_BOOKMARKS,
+      }
     }
     snapshot = {
       all: allCache.annotations,
+      allBookmarks: allCache.bookmarks,
       current: cache.annotations,
       bookmarks: cache.bookmarks,
       bookId: openId,

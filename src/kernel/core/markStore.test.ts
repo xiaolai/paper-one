@@ -191,10 +191,33 @@ describe('the mark store splits bookmarks from annotations', () => {
     expect(reopened.getSnapshot().bookmarks.map((m) => m.kind)).toEqual(['bookmark'])
   })
 
-  /* `all` is what the Notes panel browses, and Notes lists annotations. A
-   * bookmark reaching it would be a row about a place in a list about
-   * passages, with a delete button that reads "remove this mark". */
-  it('keeps bookmarks out of the cross-book list Notes reads', async () => {
+  /* Marginalia browses BOTH classes across every book, so the cross-book read
+   * has to answer for both — and it costs nothing extra, because `loadAll`
+   * already scans every book's marks file and the two classes share it. */
+  it('lists every book’s bookmarks beside every book’s annotations', async () => {
+    const { store: marks } = store()
+    await marks.open(BOOK)
+    await marks.add(highlight())
+    await marks.add(place())
+    await marks.loadAll()
+
+    expect(marks.getSnapshot().allBookmarks.map((m) => m.kind)).toEqual(['bookmark'])
+    expect(marks.getSnapshot().all.map((m) => m.kind)).toEqual(['highlight'])
+  })
+
+  it('shares one empty list for a library with no bookmarks at all', async () => {
+    const { store: marks } = store()
+    await marks.open(BOOK)
+    await marks.add(highlight())
+    const before = marks.getSnapshot().allBookmarks
+    await marks.loadAll()
+    expect(marks.getSnapshot().allBookmarks).toBe(before)
+  })
+
+  /* `all` stays annotations-only even though Marginalia shows both: the split
+   * at the door is what keeps a bookmark out of the painter, the margin and a
+   * selection. The panel takes the two lists and joins them itself. */
+  it('keeps the two classes in separate lists, mixed only by whoever asks for both', async () => {
     const { store: marks } = store()
     await marks.open(BOOK)
     await marks.add(highlight())

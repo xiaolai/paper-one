@@ -1010,15 +1010,15 @@ describe('resolvePaneId — a persisted lastPane naming an absent pane', () => {
 
   it('keeps a contributed id the composition has, and every kernel id', () => {
     expect(resolvePaneId('sync:status', known)).toBe('sync:status')
-    expect(resolvePaneId('notes', known)).toBe('notes')
+    expect(resolvePaneId('marginalia', known)).toBe('marginalia')
     expect(resolvePaneId('library', [])).toBe('library')
   })
 
   it('treats anything that is not a string, or a string that is neither, as absent', () => {
     expect(resolvePaneId(undefined, known)).toBe(KERNEL_DEFAULT_PANE)
     expect(resolvePaneId(42, known)).toBe(KERNEL_DEFAULT_PANE)
-    expect(resolvePaneId('Notes', known)).toBe(KERNEL_DEFAULT_PANE)
-    expect(resolvePaneId('kernel:notes', known)).toBe(KERNEL_DEFAULT_PANE)
+    expect(resolvePaneId('Marginalia', known)).toBe(KERNEL_DEFAULT_PANE)
+    expect(resolvePaneId('kernel:marginalia', known)).toBe(KERNEL_DEFAULT_PANE)
   })
 
   it('takes the fallback the caller names — the screen\'s default, in the UI', () => {

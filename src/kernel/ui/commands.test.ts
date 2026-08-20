@@ -31,13 +31,13 @@ const find = (commands: Command[], id: string) => commands.find((c) => c.id === 
 
 describe('buildCommands', () => {
   it('names the action, not the thing — a pane that is open offers to close', () => {
-    const open = buildCommands(context({ pane: 'notes' }).ctx)
-    expect(find(open, 'pane:notes')?.label).toBe('Close Notes')
-    expect(find(open, 'pane:notes')?.on).toBe(true)
+    const open = buildCommands(context({ pane: 'marginalia' }).ctx)
+    expect(find(open, 'pane:marginalia')?.label).toBe('Close Marginalia')
+    expect(find(open, 'pane:marginalia')?.on).toBe(true)
 
     const shut = buildCommands(context({ pane: null }).ctx)
-    expect(find(shut, 'pane:notes')?.label).toBe('Open Notes')
-    expect(find(shut, 'pane:notes')?.on).toBe(false)
+    expect(find(shut, 'pane:marginalia')?.label).toBe('Open Marginalia')
+    expect(find(shut, 'pane:marginalia')?.on).toBe(false)
   })
 
   it('carries §11 combos, so the palette shows what the handler binds', () => {
@@ -67,20 +67,19 @@ describe('buildCommands', () => {
     expect(find(library, 'pane:companion')).toBeUndefined()
 
     // The cross-book ones stay: they are why the library has a pane at all.
-    expect(find(library, 'pane:notes')).toBeDefined()
+    expect(find(library, 'pane:marginalia')).toBeDefined()
     expect(find(library, 'pane:cards')).toBeDefined()
     expect(find(library, 'pane:settings')).toBeDefined()
   })
 
   it('offers all of them in a book', () => {
     /* Every kernel panel the reader screen has, from the registry — the list
-     * written out here omitted Bookmarks and Reading, so "all of them" was a
-     * claim about five of the eight. */
+     * written out here omitted Reading, so "all of them" was a claim about
+     * five of the eight. */
     const reader = buildCommands(context({ screen: 'reader' }).ctx)
     for (const pane of panesFor('reader')) {
       expect(find(reader, `pane:${pane.id}`), pane.id).toBeDefined()
     }
-    expect(find(reader, 'pane:bookmarks')).toBeDefined()
   })
 
   it('omits the ruler in paginated flow, where it cannot do anything', () => {
@@ -140,8 +139,8 @@ describe('buildCommands', () => {
 
   it('runs the action it advertises', () => {
     const { ctx, dispatched } = context({ pane: null })
-    find(buildCommands(ctx), 'pane:notes')?.run()
-    expect(dispatched).toEqual([{ type: 'openPane', pane: 'notes' }])
+    find(buildCommands(ctx), 'pane:marginalia')?.run()
+    expect(dispatched).toEqual([{ type: 'openPane', pane: 'marginalia' }])
   })
 
   describe('reading size', () => {
@@ -292,14 +291,14 @@ describe('PANE_SHORTCUTS', () => {
     /* THE DIGITS ARE NOT THE RAIL'S ORDER. They are the order the panels were
      * published in, and a digit belongs to a panel rather than to a position —
      * renumbering to match the rail would move ⌘3 off Search for every reader
-     * who has it in their fingers. Bookmarks is sixth because it arrived sixth. */
+     * who has it in their fingers. ⌘2 stayed with Marginalia through its rename
+     * from Notes for the same reason. */
     expect(PANE_SHORTCUTS.map((s) => [s.digit, s.pane])).toEqual([
       ['1', 'toc'],
-      ['2', 'notes'],
+      ['2', 'marginalia'],
       ['3', 'search'],
       ['4', 'cards'],
       ['5', 'stats'],
-      ['6', 'bookmarks'],
     ])
   })
 
@@ -327,18 +326,18 @@ describe('PANE_SHORTCUTS', () => {
 describe('score', () => {
   const command: Command = {
     id: 'x',
-    label: 'Open Notes',
+    label: 'Open Marginalia',
     group: 'Panels',
     keywords: 'pane panel sidebar',
     run: () => {},
   }
 
   it('ranks a label prefix above a match inside the label', () => {
-    expect(score(command, 'open')).toBeLessThan(score({ ...command, label: 'Reopen Notes' }, 'open') ?? Infinity)
+    expect(score(command, 'open')).toBeLessThan(score({ ...command, label: 'Reopen Marginalia' }, 'open') ?? Infinity)
   })
 
   it('ranks a label match above a keyword match', () => {
-    const byLabel = score(command, 'notes')
+    const byLabel = score(command, 'marginalia')
     const byKeyword = score(command, 'sidebar')
     expect(byLabel).not.toBeNull()
     expect(byKeyword).not.toBeNull()
@@ -408,8 +407,8 @@ describe('importing a folder', () => {
 describe('filterCommands', () => {
   it('puts the best match first', () => {
     const commands = buildCommands(context({ pane: null }).ctx)
-    const ranked = filterCommands(commands, 'notes')
-    expect(ranked[0]?.label).toBe('Open Notes')
+    const ranked = filterCommands(commands, 'marginalia')
+    expect(ranked[0]?.label).toBe('Open Marginalia')
   })
 
   it('drops misses entirely', () => {
@@ -456,7 +455,7 @@ describe('the tag archive commands', () => {
 describe('contributed commands', () => {
   it('are appended after the kernel\'s, with a context derived from the same state', () => {
     const seen: unknown[] = []
-    const { ctx, dispatched } = context({ screen: 'library', pane: 'notes' })
+    const { ctx, dispatched } = context({ screen: 'library', pane: 'marginalia' })
     const commands = buildCommands({
       ...ctx,
       contributed: (capability) => {
@@ -466,7 +465,7 @@ describe('contributed commands', () => {
     })
     expect(commands.at(-1)?.id).toBe('example:hello')
     expect(seen).toHaveLength(1)
-    expect(seen[0]).toMatchObject({ screen: 'library', pane: 'notes', hasBook: true })
+    expect(seen[0]).toMatchObject({ screen: 'library', pane: 'marginalia', hasBook: true })
     commands.at(-1)?.run()
     expect(dispatched).toEqual([{ type: 'openPane', pane: 'example:pane' }])
   })

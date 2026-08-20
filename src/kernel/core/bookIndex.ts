@@ -562,7 +562,7 @@ export async function writeIndex(
 /**
  * Every book's marks, for the one view that needs them all.
  *
- * `pane/Notes.tsx` shows the open book's marks first and every other book's
+ * `pane/Marginalia.tsx` shows the open book's marks first and every other book's
  * after, deliberately — and marks living in book folders means answering that
  * costs one read per book. So it is paid ONLY when the Notes pane is mounted,
  * which is the moment somebody asked for cross-book notes, rather than at boot
