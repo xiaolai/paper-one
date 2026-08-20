@@ -2,12 +2,6 @@
   "$schema": "./capabilities.manifest.schema.json",
   "capabilities": [
     {
-      "id": "example",
-      "requires": [],
-      "ts": "example",
-      "platforms": ["desktop", "ios", "android"]
-    },
-    {
       "id": "peer",
       "requires": [],
       "ts": "peer",

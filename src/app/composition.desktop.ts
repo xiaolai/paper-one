@@ -1,5 +1,4 @@
 import type { Capability } from '../kernel'
-import { example } from '../capabilities/example'
 import { peer } from '../capabilities/peer'
 import { sync } from '../capabilities/sync'
 
@@ -22,4 +21,4 @@ import { sync } from '../capabilities/sync'
  * A composition root is the one place allowed to import every capability's
  * `index.ts` and both kernel entries (`.dependency-cruiser.cjs`).
  */
-export const capabilities: readonly Capability[] = [example, peer, sync]
+export const capabilities: readonly Capability[] = [peer, sync]

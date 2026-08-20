@@ -1,5 +1,4 @@
 import type { Capability } from '../kernel'
-import { example } from '../capabilities/example'
 import { peer } from '../capabilities/peer'
 import { sync } from '../capabilities/sync'
 
@@ -17,4 +16,4 @@ import { sync } from '../capabilities/sync'
  * one is. `pnpm compositions:check` holds this list to the manifest;
  * `capability:remove <id>` edits it.
  */
-export const capabilities: readonly Capability[] = [example, peer, sync]
+export const capabilities: readonly Capability[] = [peer, sync]
