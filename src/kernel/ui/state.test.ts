@@ -287,7 +287,11 @@ describe('the pane follows the screen', () => {
   const at = (over: Partial<AppState>) => ({ ...initialState, ...over })
 
   it('knows which panels need a book', () => {
-    for (const pane of ['toc', 'search', 'companion'] as const) {
+    /* `bookmarks` is here and `notes` is not, which is the one pairing worth
+     * stating: bookmarks are read per book and there is no cross-book read to
+     * show, so the panel could only ever say 'open a book first'. Notes
+     * browses every book's marks, which is why it stays. */
+    for (const pane of ['toc', 'search', 'companion', 'bookmarks'] as const) {
       expect(paneFits('reader', pane)).toBe(true)
       expect(paneFits('library', pane)).toBe(false)
     }

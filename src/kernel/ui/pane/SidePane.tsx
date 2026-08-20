@@ -1,4 +1,5 @@
 import {
+  Bookmark,
   ChartNoAxesColumn,
   Highlighter,
   Layers,
@@ -12,14 +13,16 @@ import {
 import type { IndexedBook } from '../../core/bookIndex'
 import type { PaneContribution, SettingsSection } from '../../core/capability'
 import type { CompanionProvider } from '../../core/companion'
-import { ICON } from '../../core/metrics'
+import { ICON, type Platform } from '../../core/metrics'
 import { PANE_TITLES, renderContribution, shownPane } from '../panes'
 import { defaultPaneFor, paneFits, type AppDispatch, type AppState, type KernelPaneId } from '../state'
 import type { Book } from '../hooks/useBook'
-import type { Mark } from '../../core/marks'
+import type { Annotation } from '../../core/marks'
 import type { MarkFocus } from '../hooks/useMarking'
 import type { CardsView } from '../hooks/useCards'
 import type { MarksView } from '../hooks/useMarks'
+import type { Bookmarking } from '../hooks/useBookmarking'
+import { Bookmarks } from './Bookmarks'
 import { Companion } from './Companion'
 import { Contents } from './Contents'
 import type { Face } from '../../core/typefaces'
@@ -67,6 +70,7 @@ const RAIL_ENTRIES = [
   { id: 'companion', Icon: Sparkles },
   { id: 'notes', Icon: Highlighter },
   { id: 'cards', Icon: Layers },
+  { id: 'bookmarks', Icon: Bookmark },
   { id: 'search', Icon: Search },
   { id: 'stats', Icon: ChartNoAxesColumn },
   { id: 'library', Icon: LibraryBig },
@@ -102,10 +106,14 @@ export interface SidePaneProps {
   dispatch: AppDispatch
   book: Book
   marks: MarksView
+  /** The open book's places, and the rule for putting one here — see the panel. */
+  bookmarking: Bookmarking
+  /** Which keyboard this reader has — the Bookmarks panel teaches ⌘B/Ctrl+B. */
+  platform: Platform
   cards: CardsView
   onGoTo?: (target: string) => void
   /** Removes a mark from the store AND from the page — see `Notes`. */
-  onDeleteMark: (mark: Mark) => void
+  onDeleteMark: (mark: Annotation) => void
   /** The mark Notes should reveal, if one has been asked for. */
   markFocus: MarkFocus | null
   /**
@@ -150,6 +158,8 @@ export function SidePane({
   dispatch,
   book,
   marks,
+  bookmarking,
+  platform,
   cards,
   onGoTo,
   onDeleteMark,
@@ -223,6 +233,14 @@ export function SidePane({
 
         {pane === 'cards' && (
           <Cards cards={cards} bookId={book.bookId} {...(onGoTo ? { onGoTo } : {})} />
+        )}
+
+        {pane === 'bookmarks' && (
+          <Bookmarks
+            bookmarking={bookmarking}
+            hasBook={book.source !== null}
+            platform={platform}
+          />
         )}
 
         {pane === 'search' && <SearchPanel book={book} />}

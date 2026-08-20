@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useSyncExternalStore } from 'react'
 import type { MarkStore } from '../../core/markStore'
-import { createMark, type Mark, type NewMark } from '../../core/marks'
+import { createMark, type Annotation, type Bookmark, type NewMark } from '../../core/marks'
 
 /**
  * The annotation store, bound to React — an ADAPTER over `core/markStore`.
@@ -12,23 +12,30 @@ import { createMark, type Mark, type NewMark } from '../../core/marks'
  */
 
 /** One shared empty list, so a book with no marks does not re-render on identity. */
-const EMPTY: readonly Mark[] = []
+const EMPTY: readonly Annotation[] = []
+const NO_BOOKMARKS: readonly Bookmark[] = []
 
 export interface MarksView {
-  /** Every mark, across every book — what the Notes panel browses. Empty
+  /** Every ANNOTATION, across every book — what the Notes panel browses. Empty
    *  until `loadAll` has run, because it costs a read per book. */
-  readonly all: readonly Mark[]
-  /** The open book's marks, in book order. */
-  readonly current: readonly Mark[]
+  readonly all: readonly Annotation[]
+  /** The open book's ANNOTATIONS, in book order. Never a bookmark — the store
+   *  splits the two at its own door, see `MarkSnapshot.bookmarks`. */
+  readonly current: readonly Annotation[]
+  /** The open book's BOOKMARKS, in book order. */
+  readonly bookmarks: readonly Bookmark[]
   /** False once a write has failed — see `MarkSnapshot.persistent`. */
   readonly persistent: boolean
+  /** Whether this book's marks have been READ — see `MarkSnapshot.ready`.
+   *  Paired with the book asked for, like the two lists above. */
+  readonly ready: boolean
   /**
    * Add a mark and hand it back AT ONCE, because the reader draws it before
    * the write lands: foliate only offers marks to an overlay when it builds
    * one, so without the mark in hand the highlight would not appear until
    * the reader scrolled away and back.
    */
-  add: (draft: NewMark) => Mark
+  add: <T extends NewMark>(draft: T) => T & { id: string; createdAt: number }
   remove: (id: string) => void
   setNote: (id: string, note: string) => void
   /** Move every row from a superseded book id onto the current one — see the service. */
@@ -58,12 +65,18 @@ export function useMarks(store: MarkStore, bookId: string | null): MarksView {
   /* PAIRED WITH THE BOOK ASKED FOR, not merely with what the service holds.
    * Between the render that names a new book and the effect that opens it,
    * the snapshot is still the previous book's — and showing those marks for a
-   * frame is showing, and letting the overlay DRAW, another book's highlights. */
+   * frame is showing, and letting the overlay DRAW, another book's highlights.
+   *
+   * The bookmarks take the same pairing, and need it for the same reason one
+   * step further on: the ribbon and the footer toggle both read "is THIS place
+   * bookmarked", so the previous book's places would light the ribbon over the
+   * opening page of the new one. */
   const current = snapshot.bookId === bookId ? snapshot.current : EMPTY
+  const bookmarks = snapshot.bookId === bookId ? snapshot.bookmarks : NO_BOOKMARKS
 
   const verbs = useMemo(
     () => ({
-      add: (draft: NewMark): Mark => {
+      add: <T extends NewMark>(draft: T) => {
         const mark = createMark(draft)
         letGo(store.add(mark))
         return mark
@@ -77,7 +90,14 @@ export function useMarks(store: MarkStore, bookId: string | null): MarksView {
   )
 
   return useMemo<MarksView>(
-    () => ({ all: snapshot.all, current, persistent: snapshot.persistent, ...verbs }),
-    [snapshot.all, current, snapshot.persistent, verbs],
+    () => ({
+      all: snapshot.all,
+      current,
+      bookmarks,
+      persistent: snapshot.persistent,
+      ready: snapshot.ready && snapshot.bookId === bookId,
+      ...verbs,
+    }),
+    [snapshot.all, current, bookmarks, snapshot.persistent, snapshot.ready, snapshot.bookId, bookId, verbs],
   )
 }

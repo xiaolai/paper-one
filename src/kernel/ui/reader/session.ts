@@ -7,7 +7,7 @@ import type {
   View,
 } from 'foliate-js/view.js'
 import { markProse } from './markProse'
-import { MARK_STYLES, MARK_TINTS, type MarkKind, type MarkStyle, type MarkTint } from '../../core/marks'
+import { MARK_STYLES, MARK_TINTS, type AnnotationKind, type MarkStyle, type MarkTint } from '../../core/marks'
 import type { BookMeta, ReaderPosition } from '../../core/bookMeta'
 import { coverFrom } from '../../core/coverArt'
 import { deferSnap } from './wordSnap/deferredSnap'
@@ -104,7 +104,16 @@ export interface SearchHit {
 export interface MarkAnchor {
   readonly cfi: string
   readonly sectionIndex: number
-  readonly kind: MarkKind
+  /**
+   * `AnnotationKind`, NOT `MarkKind` — a bookmark cannot be drawn.
+   *
+   * The runtime split at `MarkSnapshot` already keeps one away from here, and
+   * that was the only thing doing so: this field took the whole union, so the
+   * guarantee rested on every caller reading from the right list. `drawMark`
+   * is public on the navigator. Narrowing it makes the compiler refuse a
+   * bookmark at the painter's door instead.
+   */
+  readonly kind: AnnotationKind
   /* Carried on the anchor rather than looked up when the overlay draws: the
      painter runs inside a `draw-annotation` handler that has the annotation and
      nothing else, and giving it the store to search would be a second source of
@@ -244,6 +253,29 @@ export interface SessionCallbacks {
   onFixedLayout: (fixed: boolean) => void
 }
 
+/**
+ * A place in the book, as everything a bookmark is made from — see
+ * `ReaderSession.placeHere`.
+ *
+ * The same five fields a selection publishes (`SelectionSnapshot`) minus the
+ * live Range, and for the same reasons: the CFI is the anchor, the section is
+ * what orders and matches it, and the text with its neighbours is what lets
+ * the place be recognised — and, one day, re-found in another build of the
+ * same work where the CFI resolves to the wrong words. See `Mark.prefix`.
+ */
+export type BookmarkPlace = Omit<SelectionSnapshot, 'range'> & {
+  /**
+   * The TOC label for this place, from the SAME relocation as the anchor.
+   *
+   * Here rather than read off `ReaderPosition` by the caller, which is where it
+   * came from and which left one field of the bookmark a React commit behind
+   * the other four: a bookmark made while the reader was crossing a chapter
+   * boundary carried this chapter's anchor under the previous chapter's name,
+   * and the list is sorted and read by that name.
+   */
+  readonly chapter: string
+}
+
 export interface SessionNavigator {
   goTo: (target: string) => void
   /** Streams hits as they are found; stops when `signal` aborts. */
@@ -272,6 +304,17 @@ export interface SessionNavigator {
    */
   goLeft: () => void
   goRight: () => void
+  /**
+   * Where the reader is, as a bookmark's worth of detail — null when this
+   * place cannot be pinned down. See `ReaderSession.placeHere`.
+   *
+   * Takes NOTHING. It took the current CFI, on the reasoning that the host
+   * already holds one and reading a second copy would be a second answer to a
+   * settled question. The host's copy is a React commit behind this session's,
+   * so the two differ exactly while a relocation is in flight — which is when
+   * a reader pressing ⌘B is most likely to be caught.
+   */
+  placeHere: () => BookmarkPlace | null
 }
 
 export interface SessionDeps {
@@ -314,6 +357,9 @@ export interface SessionDeps {
  * it immediately, which is the argument for keeping those tests DOM-free.
  */
 const ELEMENT_NODE = 1
+
+/** `Node.DOCUMENT_NODE`, spelled as its value, for the reason above. */
+const DOCUMENT_NODE = 9
 
 /**
  * A prepared book that owns resources of its own.
@@ -390,6 +436,48 @@ export class ReaderSession {
   /** Which spine item each live document is, so a per-document redraw can find
    *  the one section it needs to touch. */
   readonly #indexOf = new WeakMap<Document, number>()
+
+  /**
+   * The section most recently RENDERED, as the fallback for "where is the
+   * reader" when a relocation reports no range of its own.
+   *
+   * A fallback and not the answer: see `ReaderPosition.sectionIndex` for the
+   * boundary case that makes the range's own document the better source when
+   * there is one. Every fixed-layout book takes this path, because `foliate-fxl`
+   * reports no range at all.
+   */
+  #renderedIndex: number | null = null
+
+  /**
+   * The last relocation, as ONE value: where it was, which section, and the
+   * range it covered.
+   *
+   * HELD RATHER THAN PUBLISHED, and that is the point of keeping it. The range
+   * is what a bookmark's remembered text and context are read out of, and
+   * reading them costs a walk of the page's text nodes. Doing that on every
+   * relocation would put it on every page turn, for a value almost every turn
+   * throws away; doing it in `placeHere` puts it on the press of ⌘B, which
+   * happens when the reader asks for it.
+   *
+   * ONE FIELD RATHER THAN THREE, and that is not tidiness. `placeHere` used to
+   * take the CFI from its caller — the host holds one, it arrives on
+   * `ReaderPosition` — and pair it with whatever range this session had most
+   * recently seen. Those two are updated on different schedules: the host's
+   * copy lands when React commits, this one when the event fires. Between a
+   * relocation and that commit they describe different pages, so a bookmark
+   * made in that window carried the previous page's anchor with this page's
+   * section and text. Stored together, they cannot disagree.
+   *
+   * The range stays live, so it may have been detached by the time it is read —
+   * a section re-render replaces the nodes under it. `placeHere` checks before
+   * trusting it, exactly as `publish` does for a selection.
+   */
+  #relocated: {
+    cfi: string | null
+    sectionIndex: number | null
+    chapter: string
+    range: Range | null
+  } | null = null
 
   /**
    * The document whose selection is currently on screen, or null.
@@ -544,6 +632,7 @@ export class ReaderSession {
        * longer exist — work that rises with the length of the reading session
        * and accomplishes nothing after the first few. */
       this.#indexOf.set(doc, index)
+      this.#renderedIndex = index
       this.#onTeardown(doc, () => this.#sections.delete(index))
 
       this.#redrawWhenFontsLand(doc)
@@ -677,13 +766,22 @@ export class ReaderSession {
     view.addEventListener('relocate', (event) => {
       if (this.#disposed) return
       const detail = (event as CustomEvent<RelocateDetail>).detail
+      const cfi = detail.cfi ?? null
+      const sectionIndex = this.#sectionOf(detail)
+      const chapterLabel = detail.tocItem?.label ?? ''
+      /* Held as one value for `placeHere`, which is the only thing that reads
+       * the page's text — and reads it on demand rather than here. Captured
+       * together so a bookmark cannot pair one page's anchor with another
+       * page's section. See the field. */
+      this.#relocated = { cfi, sectionIndex, chapter: chapterLabel, range: detail.range ?? null }
       this.#cb.onRelocate({
         fraction: detail.fraction,
-        chapterLabel: detail.tocItem?.label ?? '',
+        chapterLabel,
         chapterHref: detail.tocItem?.href ?? '',
         // Carried through rather than dropped, which is what this handler used
         // to do with it. It is what `lastLocation` below is given back.
-        cfi: detail.cfi ?? null,
+        cfi,
+        sectionIndex,
       })
     })
   }
@@ -760,6 +858,7 @@ export class ReaderSession {
       prev: () => void view.prev()?.catch?.(reportNavigation('prev')),
       goLeft: () => void view.goLeft()?.catch?.(reportNavigation('goLeft')),
       goRight: () => void view.goRight()?.catch?.(reportNavigation('goRight')),
+      placeHere: () => this.placeHere(),
     })
 
     this.#cb.onFixedLayout(view.isFixedLayout)
@@ -839,6 +938,95 @@ export class ReaderSession {
     for (const anchor of this.#cb.getMarks()) {
       if (anchor.sectionIndex !== index) continue
       attachMark(view, anchor)
+    }
+  }
+
+  /**
+   * Which spine item this relocation is in.
+   *
+   * THREE SOURCES, BEST FIRST, and the order is the point.
+   *
+   * `detail.section.current` is the renderer's OWN index — the same number
+   * `load` carries — and it is simply correct. It was not used at first
+   * because `vite-env.d.ts` did not declare it; see that file for the
+   * measurement, and for the fixed-layout spread this fixes.
+   *
+   * The range's own document is the fallback for a renderer that publishes no
+   * section. `#indexOf` is keyed by document and populated on `load`, so it is
+   * the same number the selection path stamps onto a mark, and it is exact at
+   * a section boundary in scrolled flow where two documents are on screen.
+   *
+   * The last-rendered section is the last resort, and it is the one that can
+   * be wrong: a fixed-layout spread loads its left page and then its right,
+   * and can afterwards show either without loading again. Reached only when a
+   * renderer gives neither of the other two.
+   *
+   * Null when none of the three can answer, which is before the first section
+   * has loaded — and null rather than 0, because 0 is a real section.
+   */
+  #sectionOf(detail: Pick<RelocateDetail, 'section' | 'range'>): number | null {
+    const published = detail.section?.current
+    if (typeof published === 'number' && Number.isInteger(published) && published >= 0) {
+      return published
+    }
+    const range = detail.range
+    if (!range) return this.#renderedIndex
+    const node = range.startContainer
+    /* A Document's own `ownerDocument` is null — it does not have an owner, it
+     * IS one. A range anchored at the document node is not the ordinary case,
+     * but it costs one comparison to not read null out of it and fall through
+     * to a section the reader is not in. */
+    const doc = node.nodeType === DOCUMENT_NODE ? (node as Document) : node.ownerDocument
+    if (!doc) return this.#renderedIndex
+    return this.#indexOf.get(doc) ?? this.#renderedIndex
+  }
+
+  /**
+   * Where the reader is, as everything a bookmark needs to be made from — or
+   * null when this place cannot be pinned down.
+   *
+   * ON DEMAND, which is the reason it is a method rather than more fields on
+   * `ReaderPosition`. The cheap half of "where am I" — the CFI and the section
+   * — is published on every relocation because the ribbon and the toggle read
+   * it on every page turn. The expensive half is this: `rangeText` walks the
+   * page's text nodes and `markContext` walks its neighbours, and both are
+   * paid once, when the reader actually asks for a bookmark.
+   *
+   * Null rather than a degraded answer for a place with no CFI or no section:
+   * a bookmark whose anchor cannot be resolved is a row in a list that goes
+   * nowhere, and it would be indistinguishable from one whose book has simply
+   * changed underneath it.
+   *
+   * TAKES NO ARGUMENT, and it used to take the CFI. The reasoning for passing
+   * one in was that the host already holds the current CFI, so reading a
+   * second copy here would be a second answer to a question that already has
+   * one — and that was exactly backwards. The host's copy and this session's
+   * range are updated on different schedules, so between a relocation and
+   * React committing it they describe different pages; pairing them produced a
+   * bookmark carrying the previous page's anchor with this page's section and
+   * text. There is one answer, it is `#relocated`, and it is taken whole.
+   *
+   * The TEXT is allowed to be empty and the place still stands. A fixed-layout
+   * book reports no range, so there is nothing to read a line out of — and a
+   * PDF page is exactly the kind of place a reader wants to bookmark. The list
+   * falls back to the chapter for those.
+   */
+  placeHere(): BookmarkPlace | null {
+    const at = this.#relocated
+    if (!at || !at.cfi || at.sectionIndex === null) return null
+    /* A range whose ends have left the document describes a page that has been
+     * re-rendered since — the same check `publish` makes on a selection, for
+     * the same reason. The place is still good; only its remembered text is
+     * not, so the text is dropped rather than the bookmark. */
+    const range = at.range && connectedRange(at.range) ? at.range : null
+    const context = range ? markContext(range) : { prefix: '', suffix: '' }
+    return {
+      cfi: at.cfi,
+      sectionIndex: at.sectionIndex,
+      chapter: at.chapter,
+      text: range ? rangeText(range) : '',
+      prefix: context.prefix,
+      suffix: context.suffix,
     }
   }
 
@@ -1502,7 +1690,7 @@ function quietly(what: string, step: () => void): void {
  */
 function annotationFor(
   anchor: MarkAnchor,
-): { value: string; kind: MarkKind; tint: MarkTint; style: MarkStyle } {
+): { value: string; kind: AnnotationKind; tint: MarkTint; style: MarkStyle } {
   return { value: anchor.cfi, kind: anchor.kind, tint: anchor.tint, style: anchor.style }
 }
 

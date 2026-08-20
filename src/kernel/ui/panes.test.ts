@@ -43,8 +43,15 @@ describe('renderContribution', () => {
 })
 
 describe('the kernel registry keeps its shortcuts', () => {
-  it('binds ⌘1…5 to kernel panes only', () => {
-    expect(PANE_SHORTCUTS.map((s) => s.pane)).toEqual(['toc', 'notes', 'search', 'cards', 'stats'])
+  it('binds ⌘1…6 to kernel panes only', () => {
+    expect(PANE_SHORTCUTS.map((s) => s.pane)).toEqual([
+      'toc',
+      'notes',
+      'search',
+      'cards',
+      'stats',
+      'bookmarks',
+    ])
     expect(PANES.every((pane) => pane.id in PANE_TITLES)).toBe(true)
   })
 })

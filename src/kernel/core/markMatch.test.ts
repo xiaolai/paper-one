@@ -287,3 +287,59 @@ describe('upsertOverlapping', () => {
     expect(marks).toEqual(before)
   })
 })
+
+/**
+ * A bookmark anchors to the VISIBLE PAGE, so it overlaps every highlight on
+ * that page by construction — which makes overlap-replacement, the rule this
+ * whole module exists for, exactly the wrong rule to apply across the two.
+ */
+describe('upsertOverlapping keeps bookmarks and annotations off each other', () => {
+  /* A page-sized range, the shape a relocation reports: it covers the
+   * character range every mark on that page sits inside. */
+  const page = 'epubcfi(/6/4!/4/2,/1:0,/1:400)'
+
+  it('does not let a bookmark of the page tombstone a highlight on it', () => {
+    const highlight = mark({ id: 'h', cfi: 'epubcfi(/6/4!/4/2,/1:5,/1:12)', note: 'kept' })
+    const place = mark({ id: 'b', kind: 'bookmark', cfi: page, createdAt: 2000 })
+
+    const next = upsertOverlapping([highlight], place)
+
+    expect(liveMarks(next).map((row) => row.id).sort()).toEqual(['b', 'h'])
+    expect(next.find((row) => row.id === 'h')?.deletedAt).toBeUndefined()
+  })
+
+  it('does not let a highlight tombstone the bookmark of the page it is on', () => {
+    const place = mark({ id: 'b', kind: 'bookmark', cfi: page })
+    const highlight = mark({ id: 'h', cfi: 'epubcfi(/6/4!/4/2,/1:5,/1:12)', createdAt: 2000 })
+
+    const next = upsertOverlapping([place], highlight)
+
+    expect(liveMarks(next).map((row) => row.id).sort()).toEqual(['b', 'h'])
+    expect(next.find((row) => row.id === 'b')?.deletedAt).toBeUndefined()
+  })
+
+  /* The candidates are NARROWED rather than the answer screened afterwards,
+   * and this is the case that tells the two apart: `findMark` returns the
+   * first in document order, so a bookmark starting before the highlight would
+   * be picked and then discarded — leaving the highlight that should have been
+   * superseded standing, and a duplicate drawn over it. */
+  it('supersedes the highlight even when a bookmark sorts ahead of it', () => {
+    const place = mark({ id: 'b', kind: 'bookmark', cfi: page })
+    const highlight = mark({ id: 'h', cfi: 'epubcfi(/6/4!/4/2,/1:5,/1:12)' })
+    const remark = mark({ id: 'h2', cfi: 'epubcfi(/6/4!/4/2,/1:0,/1:20)', createdAt: 2000 })
+
+    const next = upsertOverlapping([place, highlight], remark)
+
+    expect(liveMarks(next).map((row) => row.id).sort()).toEqual(['b', 'h2'])
+    expect(next.find((row) => row.id === 'h')?.deletedAt).toBeDefined()
+  })
+
+  /* And within the class the rule is unchanged, which is what makes the toggle
+   * work: bookmarking a page that already carries one replaces it rather than
+   * stacking a second a line below the first. */
+  it('replaces a bookmark with a bookmark of the same page', () => {
+    const first = mark({ id: 'b1', kind: 'bookmark', cfi: page })
+    const again = mark({ id: 'b2', kind: 'bookmark', cfi: 'epubcfi(/6/4!/4/2,/1:20,/1:420)', createdAt: 2000 })
+    expect(liveMarks(upsertOverlapping([first], again)).map((row) => row.id)).toEqual(['b2'])
+  })
+})

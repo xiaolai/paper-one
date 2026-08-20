@@ -49,6 +49,16 @@ export type Typeface = string
  * is the screen; it replaced an `import` panel that was one paragraph and a
  * button the toolbar already had.
  *
+ * `bookmarks` is the reader's own places in this book, and it is a panel of its
+ * own rather than a section at the head of Contents — which was the other
+ * candidate, on the reasoning that both answer "take me somewhere in this
+ * book". It is separate because the two lists are not the same kind of thing:
+ * a table of contents is the BOOK's structure, the same for every reader and
+ * not editable by any of them, and a bookmark list is one reader's marginalia.
+ * Putting the second above the first would have made a panel whose top half
+ * can be changed and whose bottom half cannot, under one title naming only the
+ * bottom half.
+ *
  * A VALUE as well as a type, because the registry (`registry.ts`) has to
  * answer "is this id one of the kernel's" at runtime — for a remembered pane
  * that names a capability no longer composed — and a union alone cannot be
@@ -59,6 +69,7 @@ export const KERNEL_PANE_IDS = [
   'companion',
   'notes',
   'cards',
+  'bookmarks',
   'search',
   'stats',
   'library',

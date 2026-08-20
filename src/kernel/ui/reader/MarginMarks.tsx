@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import type { Mark } from '../../core/marks'
+import type { Annotation } from '../../core/marks'
 import { LINE } from '../../core/metrics'
 import { frameBoxInHost, overlaps, rangeRectsInHost, watchGeometry } from './coordinates'
 import styles from './MarginMarks.module.css'
@@ -19,7 +19,7 @@ import styles from './MarginMarks.module.css'
 
 export interface MarginMarksProps {
   /** The marks worth showing here — see `marginMarks`. */
-  marks: readonly Mark[]
+  marks: readonly Annotation[]
   /** Live ranges by CFI, for the marks foliate has actually drawn. */
   ranges: ReadonlyMap<string, Range>
   /** The positioned ancestor these are placed within. */
@@ -36,11 +36,11 @@ export interface MarginMarksProps {
    * does; the position is the one already flowing through the reader.
    */
   position: unknown
-  onSelect: (mark: Mark) => void
+  onSelect: (mark: Annotation) => void
 }
 
 interface Placed {
-  readonly mark: Mark
+  readonly mark: Annotation
   readonly top: number
 }
 
@@ -70,7 +70,7 @@ const GAP = 6
  *     the lane, which trades exact alignment — already lost the moment two
  *     notes collide — for notes that can still be read and clicked.
  */
-function stack(placed: Placed[], height: (mark: Mark) => number, lane: number): Placed[] {
+function stack(placed: Placed[], height: (mark: Annotation) => number, lane: number): Placed[] {
   let floor = -Infinity
   const down = placed.map(({ mark, top }) => {
     const settled = Math.max(top, floor)
@@ -172,7 +172,7 @@ export function MarginMarks({ marks, ranges, stage, doc, position, onSelect }: M
     if (Math.abs(laneHeight - lane) > 0.5) setLane(laneHeight)
   }, [placed, heights, lane])
 
-  const heightOf = (mark: Mark) => heights[mark.id] ?? LINE
+  const heightOf = (mark: Annotation) => heights[mark.id] ?? LINE
   const settled = stack(placed, heightOf, lane)
 
   return (

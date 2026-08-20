@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { buildCommands, filterCommands, score, type Command } from './commands'
 import { DEFAULT_STEP_IDX, READING_STEPS } from '../core/metrics'
-import { PANE_SHORTCUTS } from './panes'
+import { PANE_SHORTCUTS, panesFor } from './panes'
 import { initialState, type AppState } from './state'
 
 function context(over: Partial<AppState> = {}) {
@@ -13,6 +13,8 @@ function context(over: Partial<AppState> = {}) {
     dispatch: (action: unknown) => dispatched.push(action),
     hasBook: true,
     markSelection: null,
+    toggleBookmark: null,
+    bookmarked: false,
     openBookPicker: () => {},
     importFolder: () => {},
     importing: false,
@@ -39,12 +41,14 @@ describe('buildCommands', () => {
   })
 
   it('carries §11 combos, so the palette shows what the handler binds', () => {
-    // On the READER, where every panel exists — see the library case below.
+    /* FROM THE REGISTRY, not from a list written out here. The hand-written
+     * version named four of the five panels that carry a digit and had already
+     * drifted — it did not include Bookmarks, and nothing compared it with
+     * `PANES`. A second copy of a registry is a second opinion about it. */
     const commands = buildCommands(context({ screen: 'reader' }).ctx)
-    expect(find(commands, 'pane:toc')?.combo).toBe('⌘1')
-    expect(find(commands, 'pane:notes')?.combo).toBe('⌘2')
-    expect(find(commands, 'pane:search')?.combo).toBe('⌘3')
-    expect(find(commands, 'pane:stats')?.combo).toBe('⌘5')
+    for (const { combo, pane } of PANE_SHORTCUTS) {
+      expect(find(commands, `pane:${pane}`)?.combo, `pane:${pane}`).toBe(combo)
+    }
     expect(find(commands, 'pane:toggle')?.combo).toBe('⌘\\')
   })
 
@@ -69,10 +73,14 @@ describe('buildCommands', () => {
   })
 
   it('offers all of them in a book', () => {
+    /* Every kernel panel the reader screen has, from the registry — the list
+     * written out here omitted Bookmarks and Reading, so "all of them" was a
+     * claim about five of the eight. */
     const reader = buildCommands(context({ screen: 'reader' }).ctx)
-    for (const id of ['toc', 'search', 'companion', 'notes', 'cards']) {
-      expect(find(reader, `pane:${id}`)).toBeDefined()
+    for (const pane of panesFor('reader')) {
+      expect(find(reader, `pane:${pane.id}`), pane.id).toBeDefined()
     }
+    expect(find(reader, 'pane:bookmarks')).toBeDefined()
   })
 
   it('omits the ruler in paginated flow, where it cannot do anything', () => {
@@ -91,6 +99,31 @@ describe('buildCommands', () => {
 
     const withSelection = { ...ctx, markSelection: () => {} }
     expect(find(buildCommands(withSelection), 'book:mark')?.combo).toBe('⌘D')
+  })
+
+  /* The same rule ⌘D follows for an absent selection: a palette row that runs
+   * and changes nothing is worse than one that is not there, because the reader
+   * has already decided by the time they press return. */
+  it('offers bookmarking only where a place can be pinned down', () => {
+    const { ctx } = context()
+    expect(find(buildCommands(ctx), 'book:bookmark')).toBeUndefined()
+
+    const somewhere = { ...ctx, toggleBookmark: () => {} }
+    expect(find(buildCommands(somewhere), 'book:bookmark')?.combo).toBe('⌘B')
+  })
+
+  /* Says what pressing it DOES, against what is true right now — the same
+   * wording the footer button carries, so one action cannot be described two
+   * ways by two surfaces. */
+  it('names the direction the bookmark toggle would go', () => {
+    const { ctx } = context()
+    const fresh = { ...ctx, toggleBookmark: () => {}, bookmarked: false }
+    expect(find(buildCommands(fresh), 'book:bookmark')?.label).toBe('Bookmark this place')
+    expect(find(buildCommands(fresh), 'book:bookmark')?.on).toBe(false)
+
+    const kept = { ...ctx, toggleBookmark: () => {}, bookmarked: true }
+    expect(find(buildCommands(kept), 'book:bookmark')?.label).toBe('Remove this bookmark')
+    expect(find(buildCommands(kept), 'book:bookmark')?.on).toBe(true)
   })
 
   it('offers closing the book only when one is open', () => {
@@ -185,6 +218,12 @@ describe('advertised combos are bound', () => {
     '⌘K': ['k'],
     '⌘\\': ['\\\\'],
     '⌘D': ['d'],
+    '⌘B': ['b'],
+    /* ⌘T was escaping this check for exactly the reason ⌘B was — `editTags`
+     * was null in the fixture, so the command was never built and its combo
+     * never reached the table. Switching every conditional command on is what
+     * surfaced it. */
+    '⌘T': ['t'],
     '⌘L': ['l'],
     '⌘+': ['=', '+'],
     '⌘−': ['-', '_'],
@@ -192,13 +231,40 @@ describe('advertised combos are bound', () => {
   }
 
   it('binds every combo the palette prints', () => {
+    /*
+     * EVERY CONDITIONAL COMMAND SWITCHED ON, and on the READER screen.
+     *
+     * This ran on the library with `toggleBookmark` and `editTags` null, so the
+     * commands that only exist under a condition were never built and their
+     * combos were never examined — ⌘B could have been advertised and bound to
+     * nothing and this would still have passed. The screen matters for the same
+     * reason: three panels do not exist on the library, so ⌘6 was absent too.
+     *
+     * The pane digits are excluded through `PANE_SHORTCUTS` rather than a
+     * `⌘[1-5]` regex. The regex was a second copy of the registry written as a
+     * character range, and it silently stopped covering the registry the moment
+     * a sixth panel arrived: ⌘6 fell through into the table lookup below, which
+     * would have failed for the right reason by luck rather than by design.
+     */
+    const everything = {
+      ...context({ screen: 'reader' }).ctx,
+      markSelection: () => {},
+      toggleBookmark: () => {},
+      editTags: () => {},
+      exportTags: () => {},
+      importTags: () => {},
+    }
+    const digits = new Set(PANE_SHORTCUTS.map((entry) => entry.combo))
     const advertised = new Set(
-      buildCommands({ ...context().ctx, markSelection: () => {} })
+      buildCommands(everything)
         .map((command) => command.combo)
         .filter((combo): combo is string => combo !== undefined)
-        .filter((combo) => !/^⌘[1-5]$/.test(combo)),
+        .filter((combo) => !digits.has(combo)),
     )
     expect(advertised.size).toBeGreaterThan(0)
+    // The commands this test exists for must actually be in the set it checks.
+    expect(advertised.has('⌘B')).toBe(true)
+    expect(advertised.has('⌘D')).toBe(true)
 
     for (const combo of advertised) {
       const keys = KEYS_FOR_COMBO[combo]
@@ -222,13 +288,18 @@ describe('advertised combos are bound', () => {
 })
 
 describe('PANE_SHORTCUTS', () => {
-  it('binds §11\'s ⌘1…5 to contents, notes, search, cards and stats', () => {
+  it('binds §11\'s ⌘1…6 to contents, notes, search, cards, stats and bookmarks', () => {
+    /* THE DIGITS ARE NOT THE RAIL'S ORDER. They are the order the panels were
+     * published in, and a digit belongs to a panel rather than to a position —
+     * renumbering to match the rail would move ⌘3 off Search for every reader
+     * who has it in their fingers. Bookmarks is sixth because it arrived sixth. */
     expect(PANE_SHORTCUTS.map((s) => [s.digit, s.pane])).toEqual([
       ['1', 'toc'],
       ['2', 'notes'],
       ['3', 'search'],
       ['4', 'cards'],
       ['5', 'stats'],
+      ['6', 'bookmarks'],
     ])
   })
 

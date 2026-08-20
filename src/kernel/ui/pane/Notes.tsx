@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Layers, Trash2 } from 'lucide-react'
 import { cardFromMark } from '../../core/cards'
-import type { Mark } from '../../core/marks'
+import type { Annotation, Mark } from '../../core/marks'
 import type { MarkFocus } from '../hooks/useMarking'
 import { ICON } from '../../core/metrics'
 import { onBeforeClose } from '../../core/beforeClose'
@@ -148,7 +148,7 @@ export interface NotesProps {
    * from this list while its highlight stayed on the text, and the margin went
    * on showing it, until something else happened to force a redraw.
    */
-  onDelete: (mark: Mark) => void
+  onDelete: (mark: Annotation) => void
   /**
    * The mark to reveal, from a click on the page or on a margin note.
    *

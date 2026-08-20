@@ -438,9 +438,16 @@ export type AppDispatch = Dispatch<Action>
  * Not a style question, and not a list anyone should keep a second copy of.
  * `Contents` lists the open book's own table of contents, `Companion` says as
  * much in its own subtitle — "grounded in this book only" — and `Search` takes
- * a `Book` and scans it. On the library screen all three are a title above an
+ * a `Book` and scans it. On the library screen all four are a title above an
  * apology, and the pane OPENED ONTO ONE OF THEM: the first thing Paper showed a
  * reader with a full shelf was a panel saying it was not available.
+ *
+ * `Bookmarks` is here and Notes is not, which is the one pairing in this list
+ * worth stating out loud, because the two look alike from a distance. Notes
+ * browses EVERY book's marks and is the reason the shelf has a pane at all;
+ * bookmarks are read per book and there is no cross-book read to show — see
+ * `MarkSnapshot.bookmarks`. A Bookmarks panel on the shelf could only ever say
+ * "open a book first".
  *
  * Notes and Cards are deliberately absent from this list. Both are cross-book
  * by design — Notes shows every book's marks — and they are why the library has
@@ -449,7 +456,7 @@ export type AppDispatch = Dispatch<Action>
  * It lives here rather than in the pane registry because the ids are declared
  * here and the reducer below needs the same answer. The registry reads it.
  */
-const BOOK_ONLY: readonly PaneId[] = ['toc', 'search', 'companion']
+const BOOK_ONLY: readonly PaneId[] = ['toc', 'search', 'companion', 'bookmarks']
 
 /**
  * The panels that mean something only on the SHELF.

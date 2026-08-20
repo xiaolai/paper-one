@@ -41,6 +41,21 @@ export interface KernelCommandContext {
   faces?: readonly Face[]
   /** Marks the current selection, when there is one. */
   markSelection: (() => void) | null
+  /**
+   * Keeps the place the reader is at, or gives it back. Null when no place can
+   * be pinned down — see `Bookmarking.canBookmark`.
+   */
+  toggleBookmark: (() => void) | null
+  /**
+   * Whether that place is ALREADY kept, so the row can say which of the two
+   * things it does.
+   *
+   * Separate from `toggleBookmark` rather than folded into a nullable pair,
+   * because the two answer different questions: one is "can this be done here",
+   * the other is "which way round is it". A single value cannot distinguish
+   * "nowhere to put one" from "there is not one here yet".
+   */
+  bookmarked: boolean
   openBookPicker: () => void
   /**
    * Import a folder of books.
@@ -278,6 +293,27 @@ export function buildCommands(ctx: KernelCommandContext): Command[] {
       combo: '⌘D',
       keywords: 'highlight annotate',
       run: mark,
+    })
+  }
+
+  /* Omitted where a place cannot be pinned down — before the renderer has
+   * reported a position, and with no book open. The same rule ⌘D follows for
+   * an absent selection, and for the same reason: a palette row that runs and
+   * changes nothing is worse than one that is not there, because the reader
+   * has already decided by the time they press return. */
+  if (ctx.toggleBookmark) {
+    const toggle = ctx.toggleBookmark
+    commands.push({
+      id: 'book:bookmark',
+      /* Says what pressing it DOES, against what is true right now — the same
+       * wording the footer button carries, so the two surfaces cannot describe
+       * one action two ways. */
+      label: ctx.bookmarked ? 'Remove this bookmark' : 'Bookmark this place',
+      group: 'Book',
+      combo: '⌘B',
+      keywords: 'bookmark place keep return ribbon',
+      on: ctx.bookmarked,
+      run: toggle,
     })
   }
 

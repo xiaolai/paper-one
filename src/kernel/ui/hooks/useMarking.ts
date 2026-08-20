@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { findMark } from '../../core/markMatch'
-import type { Mark, MarkAppearance } from '../../core/marks'
+import type { Annotation, MarkAppearance } from '../../core/marks'
 import type { SelectionSnapshot } from '../reader/session'
 import type { Book } from './useBook'
 import type { MarksView } from './useMarks'
@@ -41,7 +41,7 @@ export interface Marking {
   readonly ranges: ReadonlyMap<string, Range>
   onMarkDrawn: (cfi: string, range: Range) => void
   /** The existing mark on the current selection, if that passage is marked. */
-  readonly selected: Mark | null
+  readonly selected: Annotation | null
   /**
    * Mark the selection in the given tint and style. Returns the mark, or null
    * if nothing was selected.
@@ -52,8 +52,8 @@ export interface Marking {
    * reader comparing a rule against a wave cannot compare anything if the first
    * press takes the popup away.
    */
-  mark: (note: string, appearance: MarkAppearance, keep?: boolean) => Mark | null
-  unmark: (target: Mark) => void
+  mark: (note: string, appearance: MarkAppearance, keep?: boolean) => Annotation | null
+  unmark: (target: Annotation) => void
   /** The mark the Notes panel should reveal, if any. */
   readonly focus: MarkFocus | null
   /** Ask Notes to show a mark — and to open its editor when `edit`. */
@@ -144,7 +144,7 @@ export function useMarking(book: Book, marks: MarksView): Marking {
    * back.
    */
   const mark = useCallback(
-    (note: string, appearance: MarkAppearance, keep = false): Mark | null => {
+    (note: string, appearance: MarkAppearance, keep = false): Annotation | null => {
       if (!selection || !bookId) return null
       const created = marks.add({
         bookId,
@@ -198,7 +198,7 @@ export function useMarking(book: Book, marks: MarksView): Marking {
   }, [])
 
   const unmark = useCallback(
-    (target: Mark) => {
+    (target: Annotation) => {
       /* The row always goes. The DRAWING only goes when the mark belongs to the
        * book on screen: `eraseMark` and the range cache both address the
        * current renderer, and a CFI is only unique within a section of one

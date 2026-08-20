@@ -24,6 +24,7 @@ import { useLibrary } from './hooks/useLibrary'
 import { useCards } from './hooks/useCards'
 import { useMarks } from './hooks/useMarks'
 import { useMarking } from './hooks/useMarking'
+import { useBookmarking } from './hooks/useBookmarking'
 import { extensionFor, readOwnedBook, storedBookName } from '../core/bookVault'
 import type { IndexedBook } from '../core/bookIndex'
 import type { IndexFs } from '../core/bookIndex'
@@ -114,6 +115,9 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
   const marks = useMarks(services.marks, book.bookId)
   const cards = useCards(services.cards)
   const marking = useMarking(book, marks)
+  /* Beside marking, not inside it. Marking acts on a selection and
+   * bookmarking acts on a place — see `useBookmarking`. */
+  const bookmarking = useBookmarking(book, marks)
   /* Pins, colours, hidden subjects and saved views — the reader's decisions
      ABOUT their tags, as opposed to which books carry them. See `tagPrefs`. */
   const tagPrefs = useTagPrefs(services.storage)
@@ -995,7 +999,11 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
    * neither ⌘T nor the palette offers to tag a book that has no record to
    * write the tag into. FROM `openRow`, which is the same lookup made once
    * above — this ran its own scan of the shelf beside it. */
-  const readingBook = state.screen === 'reader' ? (openRow ?? null) : null
+  /* Whether the reader is actually LOOKING at the book. The reader screen stays
+   * mounted under the library — see `Reader.inert` — so nothing downstream of
+   * it can be trusted to say which screen is on top. */
+  const onReader = state.screen === 'reader'
+  const readingBook = onReader ? (openRow ?? null) : null
   /* Memoized as the one-element list `TagEditor` takes, or a fresh `[book]`
    * inline at the render defeated every books-keyed memo inside it. */
   const readingBooks = useMemo(() => (readingBook ? [readingBook] : []), [readingBook])
@@ -1029,6 +1037,16 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
         markSelection: marking.selection
           ? () => marking.mark('', { tint: state.markTint, style: state.markStyle })
           : null,
+        /* Null where there is no place to keep — the palette then does not
+           offer the row at all, rather than offering one that does nothing.
+           AND ONLY ON THE READER, which is not the same condition. The reader
+           stays MOUNTED under the library so foliate is not torn down and the
+           position survives, so it goes on reporting a perfectly good place
+           the whole time the reader is browsing their shelf — and the palette
+           offered to bookmark a page nobody could see. `editTags` is guarded
+           on the screen for the same reason, three lines up. */
+        toggleBookmark: onReader && bookmarking.canBookmark ? bookmarking.toggle : null,
+        bookmarked: onReader && bookmarking.here !== null,
         openBookPicker: addBooks,
         /* The palette is where the folder import lives now that the toolbar
          * carries one action — see `KernelCommandContext`. */
@@ -1038,7 +1056,11 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
         openSwitcher: () => dispatch({ type: 'toggleLayer', layer: 'switcherOpen' }),
         contributed: composition.commands,
       }),
-    [state, dispatch, book, marking, addBooks, addFolder, importing, readingBook, openTags, composition],
+    /* `bookmarking` is READ inside this builder, so it belongs here. It was
+       missing, and the memo only stayed fresh because `book` happens to change
+       on every relocation — a dependency that held by accident and would have
+       stopped holding the moment the hook's inputs changed. */
+    [state, dispatch, book, marking, bookmarking, onReader, addBooks, addFolder, importing, readingBook, openTags, composition],
   )
 
   /* §11's keyboard map. Every combo the design publishes is bound here, and
@@ -1177,6 +1199,20 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
         marking.mark('', { tint: state.markTint, style: state.markStyle })
         return
       }
+      /* ⌘B: keep this place, or give it back. Only where a place can be pinned
+       * down, on exactly the reasoning ⌘D and ⌘T are guarded by — a combo
+       * swallowed in order to do nothing is worse than one left unbound,
+       * because the platform's own meaning for it goes with it. */
+      if (event.key === 'b') {
+        /* Not from the shelf. The reader is still mounted underneath with a
+           live position, so without the screen check ⌘B on the library
+           bookmarked a page nobody was looking at — silently, since neither
+           the ribbon nor the footer is on screen to show it happened. */
+        if (!onReader || !bookmarking.canBookmark) return
+        event.preventDefault()
+        bookmarking.toggle()
+        return
+      }
       /* ⌘T: the tags of the book being read — the palette's "Tags for this
        * book…". Only when there is such a book, on the same reasoning as ⌘D:
        * a combo swallowed to do nothing is worse than one left unbound. */
@@ -1243,6 +1279,11 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
     state.stepIdx,
     readingBook,
     openTags,
+    /* The whole object, because ⌘B reads two things off it — whether a place
+       can be kept, and whether it already is — and a handler closed over a
+       stale one would toggle against the previous page. */
+    bookmarking,
+    onReader,
   ])
 
   /* Titlebar metadata comes from the OPEN book, and from nothing else.
@@ -1322,6 +1363,8 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
             dispatch={dispatch}
             book={book}
             marks={marks}
+            bookmarking={bookmarking}
+            platform={platform}
             cards={cards}
             onGoTo={book.goTo}
             onDeleteMark={marking.unmark}
@@ -1359,6 +1402,7 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
           book={book}
           marks={marks}
           marking={marking}
+          bookmarking={bookmarking}
           /* Read at every render and consumed once, when the book finishes
              parsing. It is null for the first few milliseconds of an open —
              `bookId` is derived from the file's content — which is why the

@@ -23,12 +23,53 @@ import { compare } from 'foliate-js/epubcfi.js'
 import { hlcOf, isHlc, laterHlc, type Hlc } from './hlc'
 
 /**
- * §01 gives marks two provenances and draws them differently: your own
- * highlight is a gold fill, the companion's is an amber underline. They are one
- * type rather than two because everything else about them — anchor, note,
- * lifecycle, the Notes list — is identical.
+ * WHAT A RECORD IS — no longer only whose it is.
+ *
+ * This field was PROVENANCE for as long as there were two things in the world
+ * that could be written against a passage: §01 gives marks two of them and
+ * draws them differently, your own highlight a gold fill and the companion's an
+ * amber underline, and they were one type rather than two because everything
+ * else about them — anchor, note, lifecycle, the Notes list — is identical.
+ *
+ * A bookmark broke that reading, and it is worth being plain about how rather
+ * than quietly widening the union. A bookmark is not a third author; it is a
+ * different KIND OF THING with the same shape — a place the reader chose to be
+ * able to return to, carrying an anchor, a section, a chapter label and the
+ * stamps, and carrying them so exactly that a separate record would have been
+ * the same eleven fields under another name. What it does not have is a
+ * drawing: nothing paints it into the text, so `tint` and `style` mean nothing
+ * on one, and it never reaches a painter, the margin or the Notes list.
+ *
+ * PROVENANCE IS NOW DERIVED, not stored: the companion's is the one kind that
+ * is not the reader's. That is the same information as before, asked as a
+ * question instead of read off a field.
+ *
+ * The separation this buys is in `annotationsIn` and `bookmarksIn`, applied at
+ * the ONE door the store publishes through — see `MarkSnapshot`. Nothing
+ * downstream filters on this, and nothing downstream can be handed a bookmark
+ * by accident.
  */
-export type MarkKind = 'highlight' | 'companion'
+export const MARK_KINDS = ['highlight', 'companion', 'bookmark'] as const
+export type MarkKind = (typeof MARK_KINDS)[number]
+
+/**
+ * A kind that can be DRAWN — everything a painter, the margin column, the
+ * Notes list and a selection may legitimately be handed.
+ *
+ * Derived by subtraction rather than written out, so it cannot be forgotten
+ * when a kind is added: a new drawable kind joins automatically, and a new
+ * undrawable one has to be excluded here deliberately.
+ *
+ * This exists because the runtime split at `MarkSnapshot` was the ONLY thing
+ * keeping a bookmark away from the painter. Nothing reached it — `getMarks`
+ * hands over `snapshot.current`, which is annotations — but `MarkAnchor.kind`
+ * accepted the whole union, so the promise was kept by every caller
+ * remembering rather than by the types. `drawMark` is public on the navigator;
+ * one future caller reading from the wrong list is all it would take, and a
+ * bookmark drawn as a highlight is a gold band over a page the reader never
+ * marked.
+ */
+export type AnnotationKind = Exclude<MarkKind, 'bookmark'>
 
 /**
  * Which of the three tints the reader chose for a mark.
@@ -363,6 +404,94 @@ export function liveMarks(marks: readonly Mark[]): readonly Mark[] {
 }
 
 /**
+ * The two classes of record, as types.
+ *
+ * The split used to exist only at runtime, in `MarkSnapshot`, and that was the
+ * whole of it: every downstream promise — nothing paints a bookmark, the
+ * margin reserves no column for one, Notes never lists one — rested on each
+ * consumer reading from the correct list. A `Mark` was a `Mark`, so the
+ * compiler had no opinion. Naming the classes moves those promises into the
+ * types, where forgetting one is a build failure instead of a gold band drawn
+ * over a page the reader never marked.
+ *
+ * INTERSECTIONS RATHER THAN A DISCRIMINATED UNION OF TWO RECORD SHAPES, which
+ * was the other candidate and is deliberately not taken. `Mark` is also the
+ * WIRE type: `parseWireMarks` reads it off a peer's frame and `marksDigest` is
+ * computed over it, so splitting the stored shape in two would put a protocol
+ * change under a type-safety improvement. One record on disk and on the wire,
+ * two views of it in the code.
+ */
+export type Annotation = Mark & { readonly kind: AnnotationKind }
+export type Bookmark = Mark & { readonly kind: 'bookmark' }
+
+/**
+ * Which side of the line a record is on.
+ *
+ * TYPE PREDICATES, so the answer narrows rather than merely being known. The
+ * read models below are written in terms of these two and nothing else tests
+ * `kind` directly, which is what keeps "which side is this on" a question with
+ * exactly one implementation.
+ */
+export function isBookmark(mark: Mark): mark is Bookmark {
+  return mark.kind === 'bookmark'
+}
+
+export function isAnnotation(mark: Mark): mark is Annotation {
+  return mark.kind !== 'bookmark'
+}
+
+/**
+ * Whether two records are the same KIND OF THING — both places, or both about
+ * a passage.
+ *
+ * THE LINE THAT REPLACEMENT RESPECTS, and it is not `kind === kind`. A reader
+ * marking over a passage the companion has claimed replaces it, and always
+ * has; that is two kinds, one class, and it stays. What must never happen is a
+ * bookmark and a highlight superseding one another because they share an
+ * anchor — bookmarking the page you are reading would silently delete the
+ * highlight you made on it, and re-marking that highlight would delete the
+ * bookmark back. The two are not competing for the same place; they are not
+ * the same kind of claim on it.
+ */
+export function sameClass(a: Mark, b: Mark): boolean {
+  return isBookmark(a) === isBookmark(b)
+}
+
+/**
+ * The records that are ABOUT A PASSAGE — a highlight of the reader's, or a
+ * claim of the companion's.
+ *
+ * This is what gets painted into the text, listed in Notes, counted for the
+ * margin and resolved against a selection. A bookmark is none of those things,
+ * and this is the filter that means no consumer of any of them has to know
+ * bookmarks exist.
+ *
+ * Returns its input by identity when there is nothing to drop, the convention
+ * every store's change-detection relies on.
+ */
+export function annotationsIn(marks: readonly Mark[]): readonly Annotation[] {
+  /* `every` with a type predicate narrows the ARRAY, which is what lets the
+   * no-write convention survive the stronger return type: a list that is
+   * already all annotations is handed back by identity, not copied to satisfy
+   * the compiler. */
+  return marks.every(isAnnotation) ? marks : marks.filter(isAnnotation)
+}
+
+/**
+ * The records that are A PLACE — in book order, which is the order a reader
+ * expects to find their own bookmarks in.
+ *
+ * SORTED HERE, unlike `annotationsIn`, because there is nowhere else it could
+ * happen: the Notes list sorts its own rows after filtering across books, and
+ * the bookmark list has no such step to hang a sort on. `compareMarks` is the
+ * same ordering, section first and then CFI — see its note on why the two
+ * cannot be compared the other way round.
+ */
+export function bookmarksIn(marks: readonly Mark[]): Bookmark[] {
+  return marks.filter(isBookmark).sort(compareMarks)
+}
+
+/**
  * When a mark was last ACTED ON — edit or deletion, whichever is later — and,
  * for a mark from before the ledger, the moment it was made. This is the
  * stamp `mergeMarks` compares and a marks digest is computed over.
@@ -416,12 +545,6 @@ export function mergeMarks(a: readonly Mark[], b: readonly Mark[]): readonly Mar
   return changed ? [...byId.values()] : a
 }
 
-/** Every LIVE mark belonging to one book, in book order. */
-export function marksForBook(marks: readonly Mark[], bookId: string | null): Mark[] {
-  if (!bookId) return []
-  return marks.filter((mark) => mark.bookId === bookId && mark.deletedAt === undefined).sort(compareMarks)
-}
-
 /**
  * The marks that earn a place in the margin column.
  *
@@ -434,7 +557,7 @@ export function marksForBook(marks: readonly Mark[], bookId: string | null): Mar
  * there is something to put in it. Counting every highlight instead would open
  * a 250px column to display nothing.
  */
-export function marginMarks(marks: readonly Mark[]): Mark[] {
+export function marginMarks(marks: readonly Annotation[]): Annotation[] {
   return marks.filter((mark) => mark.note !== '' || mark.kind === 'companion')
 }
 
@@ -451,13 +574,33 @@ export function marginMarks(marks: readonly Mark[]): Mark[] {
  * a replica still holding the old mark would read its absence as "not seen
  * yet" and put it back. `at` stamps the tombstone; the default is the same
  * legacy clock every unstamped write gets.
+ *
+ * AND ONLY WITHIN A CLASS — see `sameClass`. A bookmark shares an anchor with
+ * whatever the reader had highlighted on that page as a matter of course, and
+ * without this the two take turns deleting each other.
  */
 export function upsertMark(marks: readonly Mark[], mark: Mark, at: Hlc = hlcOf(Date.now())): Mark[] {
-  const kept = marks.map((existing) =>
-    existing.bookId === mark.bookId && existing.cfi === mark.cfi && existing.deletedAt === undefined
-      ? { ...existing, deletedAt: at }
-      : existing,
-  )
+  const kept = marks
+    /* THE SAME ID IS THE SAME RECORD, so the incoming row REPLACES it rather
+     * than superseding it. Without this, re-adding a mark under an id already
+     * present tombstoned the held row and appended the new one beside it —
+     * leaving two rows sharing an id, which `dedupeById` then resolves on the
+     * next load by keeping the FIRST. The first is the tombstone, so the mark
+     * vanishes: a write that looked like an update, read back as a deletion.
+     *
+     * Not reachable from the app, where `createMark` mints a fresh uuid every
+     * time and remote rows arrive through `mergeMarks` instead. `MarkStore.add`
+     * takes a caller's mark, though, and a store that loses a record when
+     * handed one it already holds is not a contract worth documenting around. */
+    .filter((existing) => existing.id !== mark.id)
+    .map((existing) =>
+      existing.bookId === mark.bookId &&
+      existing.cfi === mark.cfi &&
+      existing.deletedAt === undefined &&
+      sameClass(existing, mark)
+        ? { ...existing, deletedAt: at }
+        : existing,
+    )
   return [...kept, mark]
 }
 
@@ -508,8 +651,90 @@ export function newMarkId(): string {
   return `m-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
 }
 
-export function createMark(draft: NewMark): Mark {
+/**
+ * GENERIC over the draft, so the kind survives.
+ *
+ * A plain `(draft: NewMark) => Mark` widened every created record back to the
+ * full union, which put the one place a highlight is made — `useMarking` —
+ * one step away from the painter with a value the painter's own type now
+ * refuses. Carrying the draft's type through costs nothing at runtime and
+ * means `createMark({ kind: 'highlight', … })` IS an `Annotation` to the
+ * compiler, with no cast anywhere to say so.
+ */
+export function createMark<T extends NewMark>(draft: T): T & { id: string; createdAt: number } {
   return { ...draft, id: newMarkId(), createdAt: Date.now() }
+}
+
+/**
+ * How much of the page a bookmark remembers.
+ *
+ * A highlight's `text` is what the reader selected, which is as long as they
+ * meant it to be. A bookmark's is whatever was visible when they pressed the
+ * key — a whole page — and storing that would put a screenful of prose into
+ * `marks.json` for every bookmark, and onto the wire for every sync. What the
+ * list needs is enough to recognise the place by, which is the opening line.
+ */
+export const BOOKMARK_TEXT_MAX = 140
+
+/**
+ * The opening line of a bookmarked page, as it is worth storing.
+ *
+ * COLLAPSED BEFORE IT IS CUT, and that order is the whole function. The text
+ * comes off a rendered page, so it arrives carrying the newlines and the
+ * indentation of the markup it was walked out of — a real capture began
+ * `'y\n + ing \u279a\n simplify\n ing\n'`, in which a quarter of the budget
+ * was whitespace. Cutting first spends the allowance on layout and leaves the
+ * row saying less than it could.
+ *
+ * BY CODE POINT, not by `slice`. A string index is a UTF-16 unit, so cutting
+ * at 140 can land between the halves of a surrogate pair and store a lone
+ * surrogate — a character that is not a character, in a field that is written
+ * to disk, sent over the wire and rendered. An emoji or a rarer CJK glyph at
+ * the boundary is all it takes; spreading the string iterates whole code
+ * points, so the cut can only fall between them.
+ */
+export function openingLine(text: string): string {
+  return [...text.replace(/\s+/gu, ' ').trim()].slice(0, BOOKMARK_TEXT_MAX).join('')
+}
+
+/** Where a bookmark goes, and what was on the page there. */
+export interface BookmarkDraft {
+  readonly bookId: string
+  readonly cfi: string
+  readonly sectionIndex: number
+  /** The opening words of the bookmarked page — truncated, see above. */
+  readonly text: string
+  readonly prefix: string
+  readonly suffix: string
+  readonly chapter: string
+}
+
+/**
+ * A bookmark, as the fields a mark record needs.
+ *
+ * THE ONE PLACE A BOOKMARK IS BUILT, so the three fields that mean nothing on
+ * one cannot be filled in differently by two callers.
+ *
+ * `note` is empty and stays empty: a bookmark is a place, not something
+ * written, and a bookmark carrying a note would appear in the margin —
+ * `marginMarks` keeps every row with one. That the split at the store's door
+ * already stops it from getting there is not a reason to write a value whose
+ * only correct handling is to be ignored.
+ *
+ * `tint` and `style` are exactly what a row WITHOUT them reads back as — see
+ * `readTint` and `readStyle`. Nothing paints a bookmark, so the honest value
+ * is the one that says nothing, and this is how that is spelled in a type that
+ * requires both.
+ */
+export function bookmarkFrom(draft: BookmarkDraft): NewMark {
+  return {
+    ...draft,
+    text: openingLine(draft.text),
+    note: '',
+    kind: 'bookmark',
+    tint: 'yellow',
+    style: 'fill',
+  }
 }
 
 /**
@@ -560,7 +785,12 @@ function isMark(value: unknown): value is StoredMark {
     m['sectionIndex'] >= 0 &&
     typeof m['text'] === 'string' &&
     typeof m['note'] === 'string' &&
-    (m['kind'] === 'highlight' || m['kind'] === 'companion') &&
+    /* AGAINST THE REGISTRY, not against a pair written out here. The two were
+     * spelled inline for as long as there were two, and a third kind then has
+     * to be added in a place a reader of `MarkKind` has no reason to look —
+     * with the failure being that every bookmark on disk is dropped on load,
+     * silently, because `validMarks` filters rather than throws. */
+    MARK_KINDS.includes(m['kind'] as MarkKind) &&
     typeof m['chapter'] === 'string' &&
     typeof m['createdAt'] === 'number' &&
     Number.isFinite(m['createdAt']) &&

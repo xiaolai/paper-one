@@ -461,6 +461,47 @@
   color: var(--amber);
 }
 
+/* --- bookmarks -------------------------------------------------------- */
+
+/* A bookmark row is the note row's shape, and it borrows the whole of it —
+ * `.note`, `.noteJump`, `.noteBody`, `.noteSource`, `.noteDelete`. Those are
+ * the parts of a row in this pane, not anything specific to an annotation, and
+ * a second set under other names would be the same rules drifting apart.
+ *
+ * ONE THING HAS TO GO, and it is the tint bar. `.note::before` paints the
+ * mark's own colour down the leading edge and falls back to yellow for a row
+ * that carries none — so a list of bookmarks, which carry none by
+ * construction, came out as a column of yellow rules saying something about
+ * marks that were not there. Suppressed by attribute rather than by a rival
+ * class, so the row keeps every other rule automatically. */
+.note[data-place='true']::before {
+  display: none;
+}
+
+/* The chapter, which is the coordinate a reader holds a place by.
+ *
+ * NOT `.noteKind`, which is uppercased small caps for a category word —
+ * Companion, Excerpt, Idea. A chapter is a title, and titles set in caps stop
+ * being readable as titles: "LOOMINGS" is a label about the row, and "Loomings"
+ * is the name of the place. */
+.placeChapter {
+  display: block;
+  font-size: var(--text-small);
+  color: var(--ink-2);
+}
+
+/* The remembered opening line, one line of it. It is there to confirm the
+ * place, not to be read — the reader has the whole page one click away — so it
+ * is clamped rather than allowed to set the height of every row. */
+.placeLine {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  padding-top: var(--space-4);
+}
+
 /* --- search ---------------------------------------------------------- */
 
 .searchField {

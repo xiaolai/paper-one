@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { TocItem } from 'foliate-js/view.js'
-import type { MarkAnchor, SearchHit, SessionNavigator } from '../reader/session'
+import type { BookmarkPlace, MarkAnchor, SearchHit, SessionNavigator } from '../reader/session'
 import type { BookMeta, ReaderPosition } from '../../core/bookMeta'
 import { bookIdFor } from '../../core/marks'
 
@@ -86,6 +86,15 @@ export interface Book extends BookState {
    */
   goLeft: () => void
   goRight: () => void
+  /**
+   * Where the reader is, as everything a bookmark is made from — null before
+   * the renderer is up, and for a place that cannot be pinned down.
+   *
+   * Takes no anchor: the session holds the relocation whole, and pairing this
+   * hook's copy of the CFI with the session's range is what produced a
+   * bookmark describing two different pages. See `ReaderSession.placeHere`.
+   */
+  placeHere: () => BookmarkPlace | null
   setNavigator: (generation: number, navigator: BookNavigator | null) => void
   /** Renderer callbacks. Each takes the generation it was issued under. */
   setToc: (generation: number, toc: readonly TocItem[]) => void
@@ -104,6 +113,10 @@ const NOWHERE: ReaderPosition = {
   chapterLabel: '',
   chapterHref: '',
   cfi: null,
+  /* Null, not 0 — the name of this constant is the argument. Nowhere is not
+   * the first section; nothing has been rendered yet. See
+   * `ReaderPosition.sectionIndex`. */
+  sectionIndex: null,
 }
 
 /**
@@ -246,6 +259,7 @@ export function useBook(): Book {
   const prev = useCallback(() => navigatorRef.current?.prev(), [])
   const goLeft = useCallback(() => navigatorRef.current?.goLeft(), [])
   const goRight = useCallback(() => navigatorRef.current?.goRight(), [])
+  const placeHere = useCallback(() => navigatorRef.current?.placeHere() ?? null, [])
   /* GENERATION-TAGGED like every other renderer callback. It was the only one
    * that was not, so a session being torn down could install ITS navigator over
    * the one belonging to the book that replaced it — and page turns then went to
@@ -318,6 +332,7 @@ export function useBook(): Book {
       prev,
       goLeft,
       goRight,
+      placeHere,
       setNavigator,
       setToc,
       setPosition,
@@ -352,6 +367,7 @@ export function useBook(): Book {
       prev,
       goLeft,
       goRight,
+      placeHere,
       setNavigator,
       setToc,
       setPosition,

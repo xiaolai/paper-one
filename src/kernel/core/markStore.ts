@@ -2,7 +2,18 @@ import { folderOf, marksPathIn, readMarks, trashOf, writeMarks } from './bookFol
 import { scanAllMarks, type IndexFs } from './bookIndex'
 import { hlcOf, type Hlc } from './hlc'
 import { upsertOverlapping } from './markMatch'
-import { liveMarks, mergeMarks, removeMark, updateNote as updateNoteIn, validMarks, type Mark } from './marks'
+import {
+  annotationsIn,
+  bookmarksIn,
+  liveMarks,
+  mergeMarks,
+  removeMark,
+  updateNote as updateNoteIn,
+  validMarks,
+  type Annotation,
+  type Bookmark,
+  type Mark,
+} from './marks'
 import { NOOP_RECORDER, recorded, type MutationRecorder } from './ports'
 import type { WriteQueue } from './writeQueue'
 
@@ -33,19 +44,54 @@ import type { WriteQueue } from './writeQueue'
  * the write is on disk, or with the write's error.
  */
 
-/** One shared empty list, so a book with no marks does not re-render on identity. */
-const EMPTY: readonly Mark[] = []
+/** One shared empty list per class, so a book with none does not re-render on
+ *  identity. Two constants because the two are differently typed now. */
+const EMPTY: readonly Annotation[] = []
+const NO_BOOKMARKS: readonly Bookmark[] = []
 
 export interface MarkSnapshot {
-  /** Every LIVE mark, across every book — what the Notes panel browses.
+  /** Every LIVE ANNOTATION, across every book — what the Notes panel browses.
    *  Empty until `loadAll` has run, because it costs a read per book.
    *  Tombstoned rows stay in the files and in the store's own working lists
    *  (a merge needs them); no snapshot ever shows one. */
-  readonly all: readonly Mark[]
-  /** The open book's LIVE marks. `EMPTY` until its file is read. */
-  readonly current: readonly Mark[]
-  /** Which book `current` is for. */
+  readonly all: readonly Annotation[]
+  /** The open book's LIVE ANNOTATIONS. `EMPTY` until its file is read. */
+  readonly current: readonly Annotation[]
+  /**
+   * The open book's LIVE BOOKMARKS, in book order. `EMPTY` until its file is
+   * read, and for a book with none.
+   *
+   * THE OTHER HALF OF THE SPLIT, and the reason `all` and `current` can stay
+   * the names they were. Bookmarks share the file, the queue, the tombstones
+   * and the merge with annotations — they are the same record with a different
+   * `kind` — and they share none of the CONSUMERS: nothing paints one, the
+   * margin does not reserve a column for one, Notes does not list one, and a
+   * selection never resolves to one. Separating them at the one door every
+   * subscriber reads through is what makes all four of those true by
+   * construction rather than by four filters that each have to remember.
+   *
+   * PER BOOK ONLY, with no cross-book counterpart to `all`. A bookmark is a
+   * place in a book you are reading; there is no surface that browses everyone
+   * else's, so there is no read to pay for.
+   */
+  readonly bookmarks: readonly Bookmark[]
+  /** Which book `current` and `bookmarks` are for. */
   readonly bookId: string | null
+  /**
+   * Whether the open book's file has actually been READ yet.
+   *
+   * Without it, "this book has no bookmarks" and "this book's marks have not
+   * arrived" are the same empty list, and every consumer has to guess. The
+   * Bookmarks panel guessed wrong in the honest direction — it announced "No
+   * bookmarks in this book" over a book with several, for as long as the read
+   * took — and the toggle guessed wrong in the harmful one: with the list
+   * still empty, ⌘B on an already-bookmarked page reads as "not bookmarked"
+   * and re-places it instead of removing it.
+   *
+   * False with no book open, which is the honest answer to "have this book's
+   * marks been read" when there is no book.
+   */
+  readonly ready: boolean
   /**
    * False once a write has failed. Surfaced rather than swallowed so the
    * reader can be told their marks are not being saved; a store that silently
@@ -166,15 +212,65 @@ export function createMarkStore({
   let generation = 0
 
   const listeners = new Set<() => void>()
-  let snapshot: MarkSnapshot = { all, current: EMPTY, bookId: null, persistent }
+  let snapshot: MarkSnapshot = {
+    all: EMPTY,
+    current: EMPTY,
+    bookmarks: NO_BOOKMARKS,
+    bookId: null,
+    ready: false,
+    persistent,
+  }
+
+  /**
+   * The last source list each projection was derived from, and what it gave.
+   *
+   * DERIVED ONCE PER SOURCE, not once per publish. `publish` runs for every
+   * change the store makes — a note edit, a remote merge, a failed write
+   * flipping `persistent` — and each of the three projections filters, and one
+   * of them also SORTS. Recomputing all three on every publish handed every
+   * subscriber three new array identities whether or not any mark had moved,
+   * which defeats exactly the memo that `useSyncExternalStore` consumers hang
+   * their re-render decisions on. Keyed by source identity because the working
+   * lists are replaced rather than mutated, so identity is a sound key.
+   */
+  let cache: {
+    source: readonly Mark[]
+    annotations: readonly Annotation[]
+    bookmarks: readonly Bookmark[]
+  } | null = null
+  let allCache: { source: readonly Mark[]; annotations: readonly Annotation[] } | null = null
+
   const publish = () => {
     /* FILTERED TO LIVE AT THE ONE DOOR a subscriber reads through. The
      * working lists keep their tombstones — a merge and a write both need
-     * them — and nothing outside this store ever sees one. */
+     * them — and nothing outside this store ever sees one.
+     *
+     * AND SPLIT BY CLASS AT THE SAME DOOR, for the same reason: the working
+     * lists hold both, because they are one file and one merge, and no
+     * subscriber is ever handed the two mixed. See `MarkSnapshot.bookmarks`. */
+    const ready = openId !== null && loaded.bookId === openId
+    const held = ready ? loaded.marks : EMPTY
+    if (!cache || cache.source !== held) {
+      const live = liveMarks(held)
+      const places = bookmarksIn(live)
+      cache = {
+        source: held,
+        annotations: annotationsIn(live),
+        /* One shared empty list when there are none, because `bookmarksIn`
+         * filters AND sorts and so cannot return its input by identity — and
+         * most books have no bookmarks at all. */
+        bookmarks: places.length > 0 ? places : NO_BOOKMARKS,
+      }
+    }
+    if (!allCache || allCache.source !== all) {
+      allCache = { source: all, annotations: annotationsIn(liveMarks(all)) }
+    }
     snapshot = {
-      all: liveMarks(all),
-      current: loaded.bookId === openId ? liveMarks(loaded.marks) : EMPTY,
+      all: allCache.annotations,
+      current: cache.annotations,
+      bookmarks: cache.bookmarks,
       bookId: openId,
+      ready,
       persistent,
     }
     for (const listener of [...listeners]) listener()
