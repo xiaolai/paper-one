@@ -46,8 +46,20 @@ export interface FootnotePopoverProps {
    * the grid and has no measure to be bounded by.
    */
   column: { readonly left: number; readonly width: number } | null
-  /** Hand the session the box to render into. Called on mount and unmount. */
-  onMount: (mount: HTMLElement | null) => void
+  /**
+   * Hand the session the box to render into, and the box this one is POSITIONED
+   * IN. Called on mount and unmount.
+   *
+   * TWO ELEMENTS, because they are two different boxes and deriving one from
+   * the other is what broke it. The mount is `.body`, a child of the popover;
+   * the popover is `position: absolute`, so the mount's own `offsetParent` is
+   * the POPOVER — and while the popover is parked at `left: -99999` every
+   * anchor measured against it came out a hundred thousand pixels away, which
+   * `place` correctly called `detached`, which hid the note. Every time. Only
+   * this component knows which box its `left` and `top` resolve against, so
+   * only this component can say.
+   */
+  onMount: (mount: HTMLElement | null, within: HTMLElement | null) => void
   /** Put the note on the clipboard. The host owns the failure path — see `Reader`. */
   onCopy: (text: string) => void
   onDismiss: () => void
@@ -143,8 +155,8 @@ export function FootnotePopover({
   /* Registered once. Every note is appended into this element, and it has to
      be the SAME element every time — see the note on re-parenting above. */
   useEffect(() => {
-    onMount(body.current)
-    return () => onMount(null)
+    onMount(body.current, (surface.current?.offsetParent as HTMLElement | null) ?? null)
+    return () => onMount(null, null)
   }, [onMount])
 
   useEffect(() => {
@@ -314,24 +326,29 @@ export function FootnotePopover({
         })
       : null
 
-  /* NO ANCHOR, BUT STILL A NOTE. `at` is null when the reference's document has
-     gone out from under it, and the reader asked for this note either way —
-     centred in the column beats not showing it at all, which is what deferring
-     to `place` alone would do. Kept from the arithmetic this replaced, because
-     it was the one thing that arithmetic got right that `place` cannot know. */
-  const centred =
-    !at && box
-      ? {
-          left: within.left + Math.max(0, (within.width - box.width) / 2),
-          top: Math.max(GAP, ((stageBox?.height ?? box.height) - box.height) / 2),
-        }
-      : null
+  /* SOMEWHERE, NEVER NOWHERE. Used when there is no anchor to hang from — `at`
+     is null once the reference's document has gone — and when `place` reports
+     `detached`, which means the reference is wholly outside the column.
 
-  /* `place` REPORTS how well it did. `detached` means the reference is wholly
-     outside the column — it has been paged past, or it is on a page that is not
-     the one being shown — and placement's contract is to hide the surface then.
-     What would be drawn is a note hanging from nothing, at whatever spot inside
-     the column happened to be closest. */
+     Placement's own contract for `detached` is to HIDE the surface, and that is
+     right for a menu: one hanging off a row that has scrolled away is offering
+     to act on something invisible. A note is not that. The reader asked for
+     THIS note and it has already been fetched and rendered; showing it in the
+     middle costs them a moment's "why is it there", and hiding it costs them
+     the note.
+
+     It is also the difference between a coordinate mistake that looks wrong and
+     one that looks like nothing. Measuring the anchor against the parked
+     popover put every reference a hundred thousand pixels away — `detached` for
+     all of them — and the whole feature simply stopped appearing, with no error
+     and nothing on screen to work back from. */
+  const centred = box
+    ? {
+        left: within.left + Math.max(0, (within.width - box.width) / 2),
+        top: Math.max(GAP, ((stageBox?.height ?? box.height) - box.height) / 2),
+      }
+    : null
+
   const spot = placed && placed.fit !== 'detached' ? placed : centred
   const shown = note !== null && spot !== null
 

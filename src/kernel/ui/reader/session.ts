@@ -259,10 +259,17 @@ export function releaseNoteView(view: Pick<View, 'close' | 'remove'>): void {
 /**
  * The origin a note's anchor rect is measured from.
  *
- * THE POPOVER'S OWN OFFSET PARENT, which is by definition the element its
- * `left` and `top` resolve against — so the number this produces and the number
- * the stylesheet consumes are in one space by construction, rather than by two
- * files continuing to agree.
+ * THE BOX THE POPOVER SAYS IT IS POSITIONED IN — its own offset parent, which
+ * is by definition the element its `left` and `top` resolve against, reported
+ * through `setFootnoteMount`. So the number this produces and the number the
+ * stylesheet consumes are in one space.
+ *
+ * REPORTED, NOT DERIVED. Working it out here as `mount.offsetParent` looks
+ * equivalent and is not: the mount is a CHILD of the popover and the popover is
+ * `position: absolute`, so that expression returns the popover — parked at
+ * `left: -99999` while a note measures. Every anchor came out a hundred
+ * thousand pixels away, `place` called every one of them `detached`, and the
+ * popover stopped appearing at all.
  *
  * It was `#host`, the element foliate renders into, and that is a DIFFERENT
  * box: inside the stage's padding, inside the reading column's titlebar inset.
@@ -278,13 +285,13 @@ export function releaseNoteView(view: Pick<View, 'close' | 'remove'>): void {
  * in two tests, the moment this was written that way. What the caller needs is
  * a box, so a box is what is asked for.
  *
- * Falls back to the host when there is no mount, or when the mount has no
- * offset parent: `display: none` has none, which is one of the reasons the
- * popover is parked off-screen rather than hidden.
+ * Falls back to the host when nothing was reported — before the popover has
+ * mounted, and for a popover with no offset parent, which is what `display:
+ * none` produces. The fallback is the behaviour this replaced, so a wiring
+ * failure puts the note back where it used to be rather than nowhere.
  */
-export function noteSpace(mount: HTMLElement | null, host: HTMLElement): HTMLElement {
-  const parent = mount?.offsetParent as HTMLElement | null | undefined
-  return typeof parent?.getBoundingClientRect === 'function' ? parent : host
+export function noteSpace(within: HTMLElement | null, host: HTMLElement): HTMLElement {
+  return typeof within?.getBoundingClientRect === 'function' ? within : host
 }
 
 /** What a link inside a note needs, to move the reader instead of the note. */
@@ -513,7 +520,7 @@ export interface SessionNavigator {
    * Register the box notes render into. See `ReaderSession.setFootnoteMount` —
    * it must be one element that never moves.
    */
-  setFootnoteMount: (mount: HTMLElement | null) => void
+  setFootnoteMount: (mount: HTMLElement | null, within: HTMLElement | null) => void
   /**
    * §11's ← and →.
    *
@@ -776,6 +783,19 @@ export class ReaderSession {
    * front and every note is appended into it in place.
    */
   #footnoteMount: HTMLElement | null = null
+
+  /**
+   * The box the popover is POSITIONED IN — the origin its anchor rects use.
+   *
+   * NOT DERIVED FROM THE MOUNT, and that distinction cost the feature entirely.
+   * The mount is a child of the popover and the popover is `position:
+   * absolute`, so `mount.offsetParent` is the POPOVER — parked off-screen at
+   * `left: -99999` while a note measures, which made every anchor read as a
+   * hundred thousand pixels away, which `place` correctly called `detached`,
+   * which hid the note. The component knows which box its `left` and `top`
+   * resolve against; nothing else can work it out. See `noteSpace`.
+   */
+  #footnoteSpace: HTMLElement | null = null
   readonly #host: HTMLElement
   readonly #cb: SessionCallbacks
 
@@ -1203,7 +1223,7 @@ export class ReaderSession {
       eraseMark: (anchor) => attachMark(view, anchor, { remove: true, report: true }),
       deselect: () => view.deselect(),
       closeFootnote: () => this.closeFootnote(),
-      setFootnoteMount: (mount) => this.setFootnoteMount(mount),
+      setFootnoteMount: (mount, within) => this.setFootnoteMount(mount, within),
       next: () => void view.next()?.catch?.(reportNavigation('next')),
       prev: () => void view.prev()?.catch?.(reportNavigation('prev')),
       goLeft: () => void view.goLeft()?.catch?.(reportNavigation('goLeft')),
@@ -1418,12 +1438,13 @@ export class ReaderSession {
 
   /** See `noteSpace` — exported, because the choice is the whole of it. */
   #noteSpace(): HTMLElement {
-    return noteSpace(this.#footnoteMount, this.#host)
+    return noteSpace(this.#footnoteSpace, this.#host)
   }
 
   /** Where notes are rendered. Null puts them back on the host — see the field. */
-  setFootnoteMount(mount: HTMLElement | null): void {
+  setFootnoteMount(mount: HTMLElement | null, within: HTMLElement | null = null): void {
     this.#footnoteMount = mount
+    this.#footnoteSpace = within
   }
 
   /** Close whatever note is open, and let go of the view it was rendered in. */

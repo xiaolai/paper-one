@@ -87,7 +87,7 @@ export interface Book extends BookState {
   /** Dismiss the footnote popover — the session holds its view. */
   closeFootnote: () => void
   /** Register the box notes render into — see the session. */
-  setFootnoteMount: (mount: HTMLElement | null) => void
+  setFootnoteMount: (mount: HTMLElement | null, within: HTMLElement | null) => void
   /** Turn the page. The only way through a fixed-layout book. */
   next: () => void
   prev: () => void
@@ -286,10 +286,18 @@ export function useBook(): Book {
    * book is ready rather than when the host happens to know it.
    */
   const footnoteMountRef = useRef<HTMLElement | null>(null)
-  const setFootnoteMount = useCallback((mount: HTMLElement | null) => {
-    footnoteMountRef.current = mount
-    navigatorRef.current?.setFootnoteMount(mount)
-  }, [])
+  const footnoteSpaceRef = useRef<HTMLElement | null>(null)
+  const setFootnoteMount = useCallback(
+    (mount: HTMLElement | null, within: HTMLElement | null) => {
+      footnoteMountRef.current = mount
+      /* The box the popover is POSITIONED IN, kept beside the box notes render
+         into — see `FootnotePopover.onMount`. Held in a ref for the same reason
+         the mount is: the navigator may not exist yet. */
+      footnoteSpaceRef.current = within
+      navigatorRef.current?.setFootnoteMount(mount, within)
+    },
+    [],
+  )
   const next = useCallback(() => navigatorRef.current?.next(), [])
   const prev = useCallback(() => navigatorRef.current?.prev(), [])
   const goLeft = useCallback(() => navigatorRef.current?.goLeft(), [])
@@ -305,7 +313,8 @@ export function useBook(): Book {
     /* The mount the host registered before this session existed. Every new
        book gets a fresh navigator, so without this the popover would work
        for exactly no books — see `setFootnoteMount`. */
-    if (navigator && footnoteMountRef.current) navigator.setFootnoteMount(footnoteMountRef.current)
+    if (navigator && footnoteMountRef.current)
+      navigator.setFootnoteMount(footnoteMountRef.current, footnoteSpaceRef.current)
   }, [])
   const setToc = useCallback(
     (generation: number, value: readonly TocItem[]) => {

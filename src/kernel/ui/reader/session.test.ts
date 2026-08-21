@@ -1044,29 +1044,38 @@ describe('noteSpace', () => {
   const boxed = (name: string) => ({ name, getBoundingClientRect: () => ({}) })
   const host = boxed('host') as unknown as HTMLElement
 
-  it("takes the mount's offset parent, which is the space `left` resolves in", () => {
-    const parent = boxed('offsetParent')
-    const mount = { offsetParent: parent } as unknown as HTMLElement
-    expect(noteSpace(mount, host)).toBe(parent)
+  it('takes the box the popover reported, which is the space `left` resolves in', () => {
+    const within = boxed('stage') as unknown as HTMLElement
+    expect(noteSpace(within, host)).toBe(within)
   })
 
-  it('falls back to the host before the popover has registered a mount', () => {
+  it('falls back to the host before the popover has mounted', () => {
+    /* And the fallback is the OLD behaviour, deliberately: a wiring failure
+       should put the note back where it used to be, not nowhere. */
     expect(noteSpace(null, host)).toBe(host)
-  })
-
-  it('falls back to the host for a mount with no offset parent', () => {
-    /* `display: none` has none. The popover is parked off-screen rather than
-       hidden partly for this reason, but a fallback that guesses would put the
-       note at the wrong offset instead of the old one. */
-    const mount = { offsetParent: null } as unknown as HTMLElement
-    expect(noteSpace(mount, host)).toBe(host)
   })
 
   it('falls back to the host for something that cannot be measured', () => {
     /* The capability, not the constructor — naming `HTMLElement` here throws
        in these suites, which have no DOM. */
-    const mount = { offsetParent: { nodeName: 'DIV' } } as unknown as HTMLElement
-    expect(noteSpace(mount, host)).toBe(host)
+    const within = { nodeName: 'DIV' } as unknown as HTMLElement
+    expect(noteSpace(within, host)).toBe(host)
+  })
+
+  it('never reads `offsetParent`, which is the mistake it exists to prevent', () => {
+    /* Derived as `mount.offsetParent`, this returned the POPOVER — parked at
+       `left: -99999` — and every note was `detached` and invisible. If this
+       ever consults it again, the getter says so. */
+    let asked = 0
+    const within = {
+      getBoundingClientRect: () => ({}),
+      get offsetParent() {
+        asked += 1
+        return null
+      },
+    } as unknown as HTMLElement
+    expect(noteSpace(within, host)).toBe(within)
+    expect(asked).toBe(0)
   })
 })
 
