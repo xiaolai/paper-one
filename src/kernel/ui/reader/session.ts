@@ -16,6 +16,8 @@ import {
 import { rangeBoxInHost, type HostRect } from './coordinates'
 import { isBacklink } from './backlink'
 import { suppressEmptyGeneratedContent } from './generatedContent'
+import { markFigures } from './markFigures'
+import { matteFigures } from './matteFigures'
 import { markProse } from './markProse'
 import {
   ANNOTATION_KINDS,
@@ -967,6 +969,12 @@ export class ReaderSession {
          has: the mark records what the BOOK asked for, and reading it before
          the author's rules landed would mark centred paragraphs as prose. */
       markProse(doc)
+      /* Beside `markProse`, and after the book's stylesheet for the same
+         reason: which images are figures is a question about the DOCUMENT, and
+         the answer is written as an attribute so the sheet can select on it.
+         `matteFigures` follows because it only looks at what this marked. */
+      markFigures(doc)
+      matteFigures(doc)
       /* Beside `markProse`, and for the same reason it is here: this reads the
          BOOK'S OWN rules, so the author's stylesheet has to have landed. See
          `suppressEmptyGeneratedContent` — the box it deletes was appearing over

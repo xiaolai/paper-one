@@ -586,6 +586,44 @@ img, svg, video {
   height: auto;
 }
 
+/* A FIGURE, which is not the same thing as an image — see markFigures. 45.0%
+   of the images in this library sit beside text, and centring those at 95% of
+   the measure turns a drop cap or a gaiji into a full-width plate mid-sentence.
+   The attribute is the answer to a question CSS cannot ask: does this image's
+   block carry any words. */
+img[data-paper-figure],
+svg[data-paper-figure] {
+  display: block;
+  /* MAX-width, never width. A third of the images in the library declare a size
+     under 100px, and width: 95% would inflate every icon to fill the measure.
+     This only ever makes something smaller. */
+  max-width: 95%;
+  /* A page-tall figure otherwise breaks pagination outright — Readium carries
+     the same safeguard, at the same value. Capping is also what makes a tall
+     figure sit alone and READ as centred: there is no vertical centring to be
+     had in a columnizer, because an image in normal flow has no box to be
+     centred in. */
+  max-height: 95vh;
+  margin-inline: auto;
+}
+
+/* MATTED IN ITS OWN COLOUR, so the white it was exported with becomes a plate
+   rather than a slab. The colour is sampled from the image's four corners at
+   load — see matteFigures — and set as a custom property on the element; only
+   images that HAVE a flat opaque background get the attribute, so a transparent
+   PNG is left exactly as it is.
+
+   This is the alternative to filtering. Darkening or inverting an image damages
+   the artwork, and invert() on a photograph is grotesque; a bare border does
+   not change a white rectangle into anything but a bordered white rectangle.
+   Extending the image's own background outward is how a printed book mounts a
+   plate on coloured stock: nothing is altered, and it stops looking broken. */
+img[data-paper-matte] {
+  background: var(--paper-matte);
+  padding: calc(var(--paper-line) * 0.375);
+  border-radius: calc(var(--paper-line) * 0.125);
+}
+
 blockquote {
   margin-inline: calc(var(--paper-line) * 0.75);
   font-style: italic;
