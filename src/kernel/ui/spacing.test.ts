@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { BRIGHTNESS, CONTRAST, DEFAULT_STEP_IDX, SPACING, spacingAt, stepAt } from '../core/metrics'
-import { bookCss } from './reader/bookCss'
+import { bookSheets, resolvedBookCss } from './reader/bookCss'
 import { initialState, reducer, type SpacingKey } from './state'
 
 const KEYS: readonly SpacingKey[] = ['letter', 'word', 'line', 'paragraph']
@@ -187,7 +187,7 @@ describe('the reader’s spacings survive a book’s own stylesheet', () => {
     vi.unstubAllGlobals()
   })
 
-  const css = () => bookCss({
+  const css = () => resolvedBookCss({
     stepIdx: DEFAULT_STEP_IDX,
     theme: 'paper',
     typeface: 'literata',
@@ -197,8 +197,17 @@ describe('the reader’s spacings survive a book’s own stylesheet', () => {
     contrast: 0,
   })
 
-  it('marks the paragraph spacing', () => {
-    expect(css()).toMatch(/margin:[^;]*--paper-line[^;]*!important/)
+  /* THE UNRESOLVED SHEET, for the questions that are about the sheet.
+     `css()` above substitutes the contract in, so `var(--paper-line)` reads as
+     `34px` there — right for "what does the reader see", wrong for "is the
+     paragraph spacing still a multiple of the line box". */
+  const sheetText = () => bookSheets().join('\n')
+
+  it('marks the paragraph spacing, as a multiple of the line box', () => {
+    expect(sheetText()).toMatch(/margin:[^;]*--paper-line[^;]*!important/)
+    /* And of the reader's paragraph setting, not a length: opening the leading
+       has to open the space between paragraphs with it. */
+    expect(sheetText()).toMatch(/margin:[^;]*--paper-para[^;]*!important/)
   })
 
   it('marks the line, letter and word spacing', () => {
@@ -228,18 +237,101 @@ describe('the reader’s spacings survive a book’s own stylesheet', () => {
 
   /* And nothing else. The rest of the sheet IS a default — a book that styles
    * its own headings, links or blockquotes must go on winning. */
-  it('marks nothing that is not one of the seven', () => {
+  /**
+   * And nothing else — EXCEPT WHAT THE THEME FORCES ON A DARK PAGE.
+   *
+   * The seven are the reader's typographic controls. WI-14.1 added a second
+   * marked set, and it is a different kind of thing: `color: inherit`,
+   * `background-color: transparent`, `border-color`, `fill`, `stroke` and the
+   * matte's `background` take the book's COLOURS over so a reader who picked a
+   * dark theme gets one. Every one of them is gated on `--paper-dark-page`, so
+   * on a light page nothing in this set applies at all.
+   *
+   * ASSERTED BY THE GATE, not by adding six names to the list. A list would
+   * accept the same six declarations written ungated — which is precisely the
+   * failure: `background-color: transparent !important` on every element of
+   * every book, on a white page, for ever.
+   */
+  it('marks nothing that is not one of the seven, unless the dark page forces it', () => {
     /* Comments stripped first: this file's prose says "not" and "important" in
        several places, and a regex over the whole sheet reads those as
        declarations. */
     const code = css().replace(/\/\*[\s\S]*?\*\//g, '')
-    const marked = [...code.matchAll(/([a-z-]+)\s*:[^;{}]*!important/g)].map((m) => m[1])
-    expect(new Set(marked)).toEqual(
-      new Set([
-        'margin', 'line-height', 'letter-spacing', 'word-spacing',
-        'hyphens', '-webkit-hyphens', 'text-align', 'font-size',
-      ]),
+    /* THE SEVEN ARE TEN, and the three WI-14.4 added are the same kind of
+       thing: a control a reader operated, which an inline style would otherwise
+       defeat. `text-indent` is half of paragraph separation, `max-width` is the
+       figure cap when it is set to follow the type, and `font-size` was already
+       here for the base and is now also the accessibility floor. Everything
+       WI-14.4 put in the `before` tier is absent from this list because it is
+       absent from that sheet's marks — a house default, which a book beats. */
+    const READER_CONTROLS = new Set([
+      'margin', 'line-height', 'letter-spacing', 'word-spacing',
+      'hyphens', '-webkit-hyphens', 'text-align', 'font-size',
+      'text-indent', 'max-width',
+    ])
+    const stray: string[] = []
+    for (const [, selector = '', body = ''] of code.matchAll(/([^{}]*)\{([^{}]*)\}/g)) {
+      const gated = selector.includes('--paper-dark-page')
+      for (const m of body.matchAll(/([a-z-]+)\s*:[^;{}]*!important/g)) {
+        const property = m[1] ?? ''
+        if (READER_CONTROLS.has(property) || gated) continue
+        stray.push(`${selector.trim().split('\n').pop()} { ${property} }`)
+      }
+    }
+    expect(stray, `\nmarked, and neither a reader control nor gated on a dark page:\n  ${stray.join('\n  ')}\n`).toEqual([])
+  })
+
+  /* The gate has to be able to fail: an ungated marked declaration outside the
+     seven is the thing above is for, and a scan that found none because its
+     regex had drifted would look identical. */
+  it('would catch a marked declaration that no dark page gates', () => {
+    const code = css().replace(/\/\*[\s\S]*?\*\//g, '')
+    const gatedRules = [...code.matchAll(/([^{}]*)\{([^{}]*)\}/g)].filter(
+      ([, selector = '', body = '']) =>
+        selector.includes('--paper-dark-page') && /!important/.test(body),
     )
+    expect(gatedRules.length, 'nothing is gated — the scan above asserts nothing').toBeGreaterThan(0)
+  })
+
+  /**
+   * A CONTROL THAT STOPS AT PROSE IS THE SAME DEFECT AS F1 (WI-14.0).
+   *
+   * `line-height` is forced on `p, li, blockquote, dd` from the reader's Line
+   * setting — and headings took a flat `1.2`, which is Paper's own declaration
+   * blocking the inherited value. So a reader who opened their leading got
+   * every paragraph in the book to move and every chapter title to stay exactly
+   * where it was. Not a book winning: Paper overruling its own control.
+   *
+   * The default is unchanged, which is the other half of the assertion — the
+   * setting is 1 at rest and 1.2 is what a heading has always had.
+   */
+  const cssAtLine = (idx: number) => resolvedBookCss({
+    stepIdx: DEFAULT_STEP_IDX,
+    theme: 'paper',
+    typeface: 'literata',
+    align: 'justified',
+    spacing: { letter: 1, word: 1, line: idx, paragraph: 1 },
+    brightness: 1,
+    contrast: 0,
+  }).replace(/\/\*[\s\S]*?\*\//g, '')
+
+  const headingLine = (idx: number) => {
+    const code = cssAtLine(idx)
+    const start = code.indexOf('\nh1, h2, h3, h4, h5, h6 {')
+    expect(start, 'the heading rule is gone — this test asserts nothing').toBeGreaterThan(-1)
+    return /line-height:\s*([^;]+);/.exec(code.slice(start, code.indexOf('\n}', start)))?.[1]?.trim()
+  }
+
+  it('lets the line setting reach a heading, not only the prose', () => {
+    const at = SPACING.line.steps.map((_, idx) => headingLine(idx))
+    /* Every step distinct: a heading that reads the same at every position of
+       the control is the control not reaching it, which is what this is for. */
+    expect(new Set(at).size, `heading line-heights: ${at.join(', ')}`).toBe(SPACING.line.steps.length)
+  })
+
+  it('leaves a heading at 1.2 where the reader has not moved the line', () => {
+    expect(spacingAt('line', SPACING.line.def)).toBe(1)
+    expect(headingLine(SPACING.line.def)).toBe('calc(1.2 * 1)')
   })
 
   it('never marks the font-size on prose, only on the base', () => {
@@ -253,7 +345,20 @@ describe('the reader’s spacings survive a book’s own stylesheet', () => {
     const forcing = rules.filter(([, , body]) => /font-size:[^;]*!important/.test(body ?? ''))
     expect(forcing.length, 'no rule forces a font-size — the base is not marked').toBeGreaterThan(0)
     for (const [, selector] of forcing) {
-      const last = (selector ?? '').trim().split('\n').pop()?.trim()
+      const last = (selector ?? '').trim().split('\n').pop()?.trim() ?? ''
+      /* THE ACCESSIBILITY FLOOR IS THE ONE EXCEPTION, and it is allowed here
+         only because it cannot do the damage this test exists to prevent.
+         `markSmallText` marks an element ONLY when it is already smaller than
+         the base, so `[data-paper-em]` can never match a heading, and the value
+         is `max(<the element's own ratio>, floor)` — which keeps the author's
+         proportions above the floor exactly. The rule that could not be allowed
+         is `* { font-size: max(1em, floor) }`, where `1em` is the PARENT's size
+         and every enlarged opener in the library flattens. That rule was
+         written first and this test caught it. */
+      if (last.endsWith('[data-paper-em]')) {
+        expect(last, 'the floor must be gated, or it runs on every book').toContain('--paper-min-size')
+        continue
+      }
       expect(['html', 'body'], `font-size forced on ${last}`).toContain(last)
     }
   })

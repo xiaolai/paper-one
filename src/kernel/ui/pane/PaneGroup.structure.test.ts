@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import { DEFAULT_READING_STYLE } from '../../core/metrics'
 
 /**
  * ONE ACCORDION IN THE SIDE PANE, AND EVERY SETTING INSIDE ONE.
@@ -27,6 +28,9 @@ import { describe, expect, it } from 'vitest'
  * test: nobody reads the whole file when adding one row to the end.
  */
 const HERE = fileURLToPath(new URL('.', import.meta.url))
+
+/** The fifteen, from the type rather than from a list kept in step by hand. */
+const READING_STYLE_KEYS = Object.keys(DEFAULT_READING_STYLE)
 
 /** Every panel in the side pane, by file — not a list to keep in step. */
 const PANELS = readdirSync(HERE).filter(
@@ -74,8 +78,17 @@ describe.each(PANELS)('%s', (panel) => {
   })
 })
 
-/** Anything in the settings panel that renders a control a reader can set. */
-const CONTROL = /styles\.settingRow|<StepRow|styles\.themeGrid/
+/**
+ * Anything in the settings panel that renders a control a reader can set.
+ *
+ * THE SHARED ROWS ARE CONTROLS TOO. WI-14.4 added fifteen settings and eleven
+ * of them are the same cycling row, so it became a component — and a component
+ * is invisible to a scan for `styles.settingRow`, which would have let every
+ * one of the fifteen sit outside a group with this test still green. Named
+ * here, and the walk below starts inside `Settings` so the components' own
+ * DEFINITIONS are not read as ungrouped rows.
+ */
+const CONTROL = /styles\.settingRow|<StepRow|<CycleRow|<ToggleRow|styles\.themeGrid/
 
 describe('the settings panel', () => {
   /**
@@ -86,14 +99,47 @@ describe('the settings panel', () => {
   it('puts every control inside a group', () => {
     const orphans: string[] = []
     let depth = 0
-    for (const [at, line] of markup('Settings.tsx').split('\n').entries()) {
+    const lines = markup('Settings.tsx').split('\n')
+    /* FROM THE PANEL'S OWN JSX, not from the top of the file. The shared row
+       components are declared above it and contain `styles.settingRow` in their
+       own markup; read from line one they are fifteen orphans that are not
+       there. What this test is about is where a row is USED. */
+    const opens = lines.findIndex((line) => line.includes('export function Settings('))
+    expect(opens, 'Settings.tsx has no panel — this test would assert nothing').toBeGreaterThan(-1)
+    for (const [at, line] of lines.slice(opens).entries()) {
       /* Counted before the control check, so a control on the same line as its
        * group's opening tag is inside it. */
       if (line.includes('<PaneGroup')) depth += 1
       if (line.includes('</PaneGroup>')) depth -= 1
-      if (depth === 0 && CONTROL.test(line)) orphans.push(`${String(at + 1)}: ${line.trim()}`)
+      if (depth === 0 && CONTROL.test(line)) orphans.push(`${String(at + opens + 1)}: ${line.trim()}`)
     }
     expect(orphans, `settings outside any group:\n${orphans.join('\n')}`).toEqual([])
+  })
+})
+
+/**
+ * EVERY READING SETTING HAS A ROW, or it is unreachable.
+ *
+ * WI-14.4 added fifteen at once. A setting with a `--paper-*` property, a rule
+ * that reads it and no control in the panel is invisible in every direction:
+ * the sheets test passes, the contract test passes, the reducer branch is
+ * covered by its own test, and no reader can ever move it. Derived from the
+ * type's own keys, so a sixteenth fails here rather than shipping unreachable.
+ */
+describe('the reading settings are all reachable', () => {
+  const panel = markup('Settings.tsx')
+
+  it('gives every setting in ReadingStyle a control', () => {
+    const missing = READING_STYLE_KEYS.filter((key) => !panel.includes(`'${key}'`))
+    expect(
+      missing,
+      `\nsettings with no row in the panel:\n  ${missing.join('\n  ')}\n`,
+    ).toEqual([])
+  })
+
+  it('knows what the settings are, so the check above can fail', () => {
+    expect(READING_STYLE_KEYS.length).toBe(15)
+    expect(panel.includes("'notASetting'")).toBe(false)
   })
 })
 

@@ -4,7 +4,7 @@
 // so it needs a document even where the assertion is about a plain declaration.
 import { describe, expect, it } from 'vitest'
 import { THEME_IDS } from '../../core/uiTypes'
-import { bookCss, isDark } from './bookCss'
+import { bookSheets, bookVars, isDark, resolvedBookCss } from './bookCss'
 
 /**
  * Whose colour wins, and where the book's own furniture stops.
@@ -30,10 +30,28 @@ const settings = (theme: (typeof THEME_IDS)[number]) => ({
 })
 
 const sheet = (theme: (typeof THEME_IDS)[number]) =>
-  bookCss(settings(theme)).replace(/\/\*[\s\S]*?\*\//g, '')
+  resolvedBookCss(settings(theme)).replace(/\/\*[\s\S]*?\*\//g, '')
+
+/** The contract written onto the document's root — where the switch lives. */
+const vars = (theme: (typeof THEME_IDS)[number]) => bookVars(settings(theme))
 
 /**
- * A rule beginning with `:root *`, by index, or null.
+ * WHAT MOVED, AND WHY THESE TESTS ASK A DIFFERENT QUESTION NOW (WI-14.3).
+ *
+ * These rules used to be ABSENT from the sheet on a light theme — the whole
+ * block was interpolated in only when the page was dark. The sheet is static
+ * now, so they are always in it, and whether they APPLY is decided by one
+ * property on the root: present, and every rule keyed to its name matches;
+ * removed, and none of them do.
+ *
+ * So "leaves a light page alone" is an assertion about `bookVars`, not about
+ * the text of the sheet. Asked of the sheet it would now pass for the wrong
+ * reason in one direction and fail for the wrong reason in the other.
+ */
+const DARK_GATE = ':root:where([style*="--paper-dark-page"])'
+
+/**
+ * A rule beginning with the dark gate and `*`, by index, or null.
  *
  * THERE ARE TWO OF THEM AND THAT IS DELIBERATE. The first forces colour and
  * border on every descendant; the second clears backgrounds and carries the
@@ -44,7 +62,7 @@ const sheet = (theme: (typeof THEME_IDS)[number]) =>
 function rootRule(css: string, nth = 0): string | null {
   let at = -1
   for (let i = 0; i <= nth; i += 1) {
-    at = css.indexOf('\n:root *', at + 1)
+    at = css.indexOf(`\n${DARK_GATE} *`, at + 1)
     if (at < 0) return null
   }
   return css.slice(at, css.indexOf('\n}', at))
@@ -71,10 +89,32 @@ describe('isDark', () => {
     expect(isDark('not a colour')).toBe(false)
   })
 
+  it('reads a three-digit hex as the colour it is', () => {
+    /* `parseInt('fff', 16)` is 4095, which as a six-digit colour is
+       `rgb(0, 15, 255)` — luma 38, DARK. White reported as dark, and every rule
+       gated on a dark page would have come on over it. Paper's own themes are
+       all six-digit so nothing shipped wrong, but `isDark` is exported and
+       `pageFilter` decides a PDF's inversion with it. */
+    expect(isDark('#fff')).toBe(false)
+    expect(isDark('#000')).toBe(true)
+    expect(isDark('#FFF')).toBe(false)
+  })
+
+  it('refuses a string that is not a colour rather than parsing a prefix of it', () => {
+    /* `parseInt` stops at the first character it cannot read, so `#ffgarbage`
+       came out as `0xff` — a very dark blue — and returned true. */
+    expect(isDark('#ffgarbage')).toBe(false)
+    expect(isDark('#ff')).toBe(false)
+    expect(isDark('')).toBe(false)
+  })
+
   it('agrees with every theme the app actually ships', () => {
     /* Exactly one of the five is dark. A second one appearing without this
-       file changing is the case the whole derivation exists for. */
-    const dark = THEME_IDS.filter((t) => inkRule(sheet(t)) !== null)
+       file changing is the case the whole derivation exists for.
+
+       ASKED OF THE SWITCH, not of the sheet — see `DARK_GATE`. The rules are in
+       the sheet for every theme now and it is this property that decides. */
+    const dark = THEME_IDS.filter((t) => vars(t)['--paper-dark-page'] !== null)
     expect(dark).toEqual(['night'])
   })
 })
@@ -89,7 +129,7 @@ describe('the theme wins on a dark page', () => {
        defect is made of, turned on the fix. `:root *` reaches any depth. */
     const rule = inkRule(sheet('night'))
     expect(rule).not.toBeNull()
-    expect(rule).toContain(':root *')
+    expect(rule).toContain(`${DARK_GATE} *`)
     expect(rule).not.toContain('data-paper-prose')
   })
 
@@ -117,7 +157,8 @@ describe('the theme wins on a dark page', () => {
 
   it('reaches SVG text, which takes fill and not color', () => {
     /* No colour rule however broad touches it — a separate failure mode. */
-    expect(sheet('night')).toMatch(/:root svg text \{[^}]*fill: currentColor !important/)
+    expect(sheet('night')).toContain(`${DARK_GATE} svg text {`)
+    expect(sheet('night')).toMatch(/svg text \{[^}]*fill: currentColor !important/)
   })
 
   it('spares a matted figure, or the matte is deleted where it is needed', () => {
@@ -146,15 +187,61 @@ describe('the theme wins on a dark page', () => {
     /* `*` would match `html`, and an important transparent background there
        takes the theme away altogether. */
     const rule = inkRule(sheet('night')) ?? ''
-    expect(rule.startsWith('\n:root *')).toBe(true)
+    expect(rule.startsWith(`\n${DARK_GATE} *`)).toBe(true)
   })
 
   it('leaves a light page entirely alone', () => {
     /* A book's dark ink reads perfectly well on a light page, and taking its
-       colours over there would flatten composition for no reader benefit. */
+       colours over there would flatten composition for no reader benefit.
+
+       The switch is REMOVED, not set to something falsy. A custom property
+       present with an empty value is still present, and `[style*=...]` would go
+       on matching — every rule above in force on a white page. */
     for (const theme of ['paper', 'sepia', 'sage', 'slate'] as const) {
-      expect(inkRule(sheet(theme)), theme).toBeNull()
+      expect(vars(theme)['--paper-dark-page'], theme).toBeNull()
     }
+  })
+
+  /**
+   * THE GATE COSTS NO SPECIFICITY, which is the whole of why the split could be
+   * behaviour-preserving.
+   *
+   * `:root:where([style*=…])` is `(0,1,0)` — exactly `:root`, because `:where()`
+   * contributes nothing. Written `:root[style*=…]` it would be `(0,2,0)`, and
+   * these rules would start winning arguments against Paper's OWN important
+   * declarations that they used to lose. The matte is the one that already went
+   * wrong once that way.
+   */
+  it('forces the root’s own colour, not only its descendants’', () => {
+    /**
+     * THE HOLE IN THE MIDDLE OF THIS RULE. Everything below inherits from the
+     * root — that is the whole mechanism — so a publisher who wins the root
+     * wins the document: `html.chapter { background: #fff; color: #111 }`
+     * outranks Paper's bare `html` rule, and every descendant then dutifully
+     * inherits the publisher's ink onto a page the reader asked to be dark.
+     *
+     * Readium marks the root for exactly this reason and WI-14.1 quotes the
+     * rule with the mark on it; Paper shipped the descendants marked and the
+     * root not.
+     */
+    const css = sheet('night')
+    const at = css.indexOf(`\n${DARK_GATE} {`)
+    expect(at, 'there is no rule forcing the root itself').toBeGreaterThan(-1)
+    const rule = css.slice(at, css.indexOf('\n}', at))
+    expect(rule).toContain('color: #E9EAE8 !important')
+    expect(rule).toContain('background: #16191C !important')
+    /* And the scheme with them, or form controls and scrollbars keep the
+       publisher's light idea of the page. */
+    expect(rule).toContain('color-scheme: dark !important')
+  })
+
+  it('gates on the property being present, at no cost in specificity', () => {
+    const rule = inkRule(sheet('night')) ?? ''
+    expect(rule).toContain(':where([style*=')
+    expect(rule).not.toContain(':root[style*=')
+    /* And the NAME, never the value: how a browser serialises a declaration it
+       was handed through `setProperty` is not something to depend on. */
+    expect(rule).not.toContain('--paper-dark-page:')
   })
 })
 
@@ -167,6 +254,16 @@ describe('a <font> tag does not outrank the reader', () => {
       expect(sheet(theme), theme).toMatch(/\nfont \{[^}]*font: inherit/)
       expect(sheet(theme), theme).toMatch(/\nfont \{[^}]*color: inherit/)
     }
+  })
+
+  it('sits in the before tier, which is what lets a book win at all', () => {
+    /* Unmarked is half of it; the tier is the other half. In the appended
+       sheet an unmarked rule still beats the book's equal-specificity
+       declaration on source order — see WI-14.0, where that is measured as the
+       thing Paper had been doing to 61%% of the library by accident. */
+    const [before, after] = bookSheets()
+    expect(before.replace(/\/\*[\s\S]*?\*\//g, '')).toMatch(/\nfont \{/)
+    expect(after.replace(/\/\*[\s\S]*?\*\//g, '')).not.toMatch(/\nfont \{/)
   })
 
   it('is unmarked, so a book with real CSS still wins', () => {

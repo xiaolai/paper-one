@@ -148,3 +148,159 @@ export type SpacingKey = keyof SpacingIndices
  */
 export const ALIGNS = ['justified', 'justified-no-hyphens', 'ragged'] as const
 export type Align = (typeof ALIGNS)[number]
+
+/**
+ * Whose typography wins where Paper's and the publisher's disagree.
+ *
+ * THE ANSWER TO AN OBJECTION, NOT A PREFERENCE INVENTED FOR ITS OWN SAKE.
+ * Paper injects one house stylesheet into the slot foliate appends AFTER the
+ * book's own, so every unmarked rule in it beats the book's equal-specificity
+ * declaration on source order alone. Measured over 1,957 books, that reaches
+ * 649 of them on `a { text-decoration }` and 181 on `h1-h6 { font-weight }` —
+ * see WI-14.0. Nobody chose that; it is a consequence of having one slot, and
+ * the reader has never been able to decline it.
+ *
+ * Both reference systems that solve this solve it the same way and Paper copies
+ * them: the READER WINS BY DEFAULT, and stepping back from that is a named,
+ * documented control rather than a heuristic. Apple Books uses white text on a
+ * dark theme unless the publisher writes
+ * `class="ibooks-dark-theme-use-custom-text-color"`; Kindle enforces its own
+ * typesetting unless Enhanced Typesetting is turned off for the title.
+ *
+ *   paper      Paper's house typography wins — links, headings, blockquotes.
+ *   publisher  The book's own wins wherever it states one; Paper's remains as
+ *              a default for the books that state nothing.
+ *
+ * WHAT IT IS NOT. It does not touch the reader's own controls — size, measure,
+ * leading, alignment, theme. Those are the reader's under both, because a
+ * control that can be overruled is not a control. It governs only the house
+ * DEFAULTS, which is the part that was never anybody's decision.
+ *
+ * `paper` is first because it is the default and the behaviour Paper shipped
+ * before the dial existed.
+ */
+export const FIDELITIES = ['paper', 'publisher'] as const
+export type Fidelity = (typeof FIDELITIES)[number]
+
+/**
+ * HOW A PARAGRAPH IS TOLD FROM THE ONE BEFORE IT.
+ *
+ * Print has two answers and they are alternatives: a blank line, or a first-line
+ * indent. `both` is offered because plenty of real books set an indent AND a
+ * small space and a reader may want to match one, but it is the state to be
+ * careful about rather than the state to forbid — a reader who chooses it has
+ * asked for it.
+ *
+ * THERE IS NO "NEITHER", and that is the one combination genuinely worth
+ * refusing: no space and no indent runs the prose together with nothing to
+ * separate it. `SPACING.paragraph` records that it once offered a zero step and
+ * withdrew it for exactly that reason — "nothing here indents a paragraph, so
+ * no space between them runs the prose together". Something does now, which is
+ * why `indent` can take the space away and `neither` still cannot.
+ */
+export const SEPARATIONS = ['space', 'indent', 'both'] as const
+export type Separation = (typeof SEPARATIONS)[number]
+
+/**
+ * How the first paragraph of a section opens.
+ *
+ * Both are `::first-letter` and `::first-line` — pseudo-elements, which draw
+ * nothing into the document. That is not a convenience: every mark in this app
+ * is CFI-anchored with 32 characters of context either side, and inserting so
+ * much as a `<span>` would invalidate them all.
+ */
+export const FLOURISHES = ['none', 'drop-cap', 'small-caps'] as const
+export type Flourish = (typeof FLOURISHES)[number]
+
+/**
+ * Whether headings take the book's own sizes or one scale across the library.
+ *
+ * `publisher` is the default and it is what Paper has always done: it sets a
+ * heading's weight, leading and space and has never touched its SIZE, so
+ * `h1 { font-size: 2.25em }` resolves against the reader's base and the
+ * author's proportions survive whole. `paper` imposes one scale, which is what
+ * makes a shelf of converted books read alike.
+ */
+export const HEADING_SCALES = ['publisher', 'paper'] as const
+export type HeadingScale = (typeof HEADING_SCALES)[number]
+
+/** How a quotation is set apart: indented, ruled, or ruled and tinted. */
+export const QUOTE_STYLES = ['indent', 'rule', 'tint'] as const
+export type QuoteStyle = (typeof QUOTE_STYLES)[number]
+
+/** Whether code is set in the book's face or in Paper's bundled mono. */
+export const CODE_FACES = ['publisher', 'paper'] as const
+export type CodeFace = (typeof CODE_FACES)[number]
+
+/**
+ * What a line of code too long for the measure does.
+ *
+ * `scroll` is the default because it is the only one of the two that alters
+ * nothing about the code: the lines stay where the author broke them, and the
+ * block gets a scroll port instead of spilling out of the column, which is what
+ * an unstyled `pre` does today.
+ */
+export const CODE_WRAPS = ['scroll', 'wrap'] as const
+export type CodeWrap = (typeof CODE_WRAPS)[number]
+
+/** What a figure is set in, if anything. */
+export const FIGURE_FRAMES = ['none', 'hairline', 'shadow'] as const
+export type FigureFrame = (typeof FIGURE_FRAMES)[number]
+
+/** What a table wider than the measure does — the same choice as `CODE_WRAPS`. */
+export const TABLE_FITS = ['scroll', 'shrink'] as const
+export type TableFit = (typeof TABLE_FITS)[number]
+
+/**
+ * How big the text of a note is in the popover.
+ *
+ * Books set notes smaller than the prose — measured, `.footnote` is 70% and
+ * `.footnote2` is 75% on one real book — and on the PAGE that is right: a note
+ * at the foot of a page is subordinate to the text it annotates, and the
+ * reduction is how print says so. In a popover there is no prose beside it, the
+ * reason for the reduction is absent, and all it costs is legibility. `prose`
+ * is the default for that reason; `publisher` hands the book its own back.
+ */
+export const NOTE_SIZES = ['prose', 'publisher'] as const
+export type NoteSize = (typeof NOTE_SIZES)[number]
+
+/**
+ * Everything about how a book is SET that is not a size, a colour or a spacing.
+ *
+ * ONE FIELD RATHER THAN FIFTEEN, exactly as `SpacingIndices` is one field
+ * rather than four, and for the same two reasons: a reader adjusts them
+ * together, and the reducer can take one action for all of them instead of
+ * fifteen near-identical branches.
+ *
+ * EVERY DEFAULT IS WHAT PAPER RENDERED BEFORE THE SETTING EXISTED. That is the
+ * property to hold on to — a reader who never opens these gets the book they
+ * had. Two of them are not quite that and say so where they are declared:
+ * `codeWrap` and `wideTables` both default to containing an overflow that today
+ * simply spills out of the column, and both sit in the `before` tier, so a book
+ * that styles `pre` or `table` still wins.
+ */
+export interface ReadingStyle {
+  readonly separation: Separation
+  readonly flourish: Flourish
+  readonly headingScale: HeadingScale
+  readonly blockquote: QuoteStyle
+  readonly codeFace: CodeFace
+  readonly codeWrap: CodeWrap
+  /** Index into `FIGURE_WIDTHS`. */
+  readonly figureWidth: number
+  readonly figureFrame: FigureFrame
+  /** Whether a figure's cap is read in `em`, so it grows with the type. */
+  readonly figureScalesWithText: boolean
+  /** Index into `FIGURE_HEIGHTS`. */
+  readonly figureHeight: number
+  readonly wideTables: TableFit
+  readonly noteSize: NoteSize
+  /** `text-autospace` between CJK and Latin runs. */
+  readonly cjkSpacing: boolean
+  /** Index into `MINIMUM_SIZES`; step 0 is off. */
+  readonly minimumSize: number
+  readonly fidelity: Fidelity
+}
+
+/** The keys, so a caller cannot name one the type does not have. */
+export type ReadingStyleKey = keyof ReadingStyle

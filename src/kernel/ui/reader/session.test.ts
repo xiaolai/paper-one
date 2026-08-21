@@ -258,6 +258,7 @@ const deps = (view: View) => ({
   createView: () => Promise.resolve(view),
   loadPainters: () => Promise.resolve(painters),
   applySettings: () => {},
+  applyVars: () => {},
 })
 
 describe('ReaderSession disposal', () => {
@@ -310,6 +311,7 @@ describe('ReaderSession disposal', () => {
       },
       loadPainters: () => Promise.resolve(painters),
       applySettings: () => {},
+      applyVars: () => {},
     })
 
     session.dispose()
@@ -474,6 +476,7 @@ describe('ReaderSession disposal', () => {
       createView: () => Promise.reject(new Error('module missing')),
       loadPainters: () => Promise.resolve(painters),
       applySettings: () => {},
+      applyVars: () => {},
     })
     expect(cb.calls['onError']?.[0]?.[0]).toBe('module missing')
   })
@@ -486,6 +489,7 @@ describe('ReaderSession disposal', () => {
       createView: () => Promise.reject(new Error('module missing')),
       loadPainters: () => Promise.resolve(painters),
       applySettings: () => {},
+      applyVars: () => {},
     })
     expect(cb.calls['onError'] ?? []).toHaveLength(0)
   })
@@ -1552,6 +1556,7 @@ describe('ReaderSession marks', () => {
       createView: () => Promise.resolve(view),
       loadPainters: () => Promise.reject(new Error('overlayer missing')),
       applySettings: () => {},
+      applyVars: () => {},
     })
 
     expect(cb.calls['onError']?.[0]?.[0]).toBe('overlayer missing')

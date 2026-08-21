@@ -14,7 +14,7 @@ import type { PaneContribution, SettingsSection } from '../../core/capability'
 import type { CompanionProvider } from '../../core/companion'
 import { ICON, type Platform } from '../../core/metrics'
 import { PANE_TITLES, renderContribution, shownPane } from '../panes'
-import { defaultPaneFor, paneFits, type AppDispatch, type AppState, type KernelPaneId } from '../state'
+import { defaultPaneFor, paneFits, setReadingStyle, type AppDispatch, type AppState, type KernelPaneId } from '../state'
 import type { Book } from '../hooks/useBook'
 import type { Annotation } from '../../core/marks'
 import type { MarkFocus } from '../hooks/useMarking'
@@ -294,6 +294,8 @@ export function SidePane({
             onSpacing={(key, idx) => dispatch({ type: 'setSpacing', key, idx })}
             align={state.align}
             onAlign={(align) => dispatch({ type: 'setAlign', align })}
+            style={state.readingStyle}
+            onStyle={(key, value) => dispatch(setReadingStyle(key, value))}
             brightness={state.brightness}
             onBrightness={(idx) => dispatch({ type: 'setBrightness', idx })}
             contrast={state.contrast}

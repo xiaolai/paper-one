@@ -5,7 +5,7 @@
 // a plain declaration. See docs/hook-tests.md for the per-file opt-in.
 import { describe, expect, it } from 'vitest'
 import { ALIGNS, type Align } from '../../core/uiTypes'
-import { bookCss } from './bookCss'
+import { resolvedBookCss } from './bookCss'
 
 /**
  * Alignment, and the hyphenation that is half of it.
@@ -55,7 +55,7 @@ function ruleValue(source: string, selector: string, property: string): string |
  * against nothing at all: `null ?? ''` matches no physical side either.
  */
 const resolved = (align: Align) => {
-  const css = bookCss(settings(align)).replace(/\/\*[\s\S]*?\*\//g, '')
+  const css = resolvedBookCss(settings(align)).replace(/\/\*[\s\S]*?\*\//g, '')
   const match = /([^{}]*\[data-paper-prose\][^{}]*)\{([^{}]*)\}/.exec(css)
   if (!match) throw new Error('no rule targets [data-paper-prose] — the marker rule is gone')
   const declarations = match[2] ?? ''
@@ -69,7 +69,7 @@ const resolved = (align: Align) => {
 
 /** The same rule, with the prefixed spelling WebKit is the one that reads. */
 const resolvedWithPrefix = (align: Align) => {
-  const css = bookCss(settings(align)).replace(/\/\*[\s\S]*?\*\//g, '')
+  const css = resolvedBookCss(settings(align)).replace(/\/\*[\s\S]*?\*\//g, '')
   const match = /([^{}]*\[data-paper-prose\][^{}]*)\{([^{}]*)\}/.exec(css)
   if (!match) throw new Error('no rule targets [data-paper-prose] — the marker rule is gone')
   const declarations = match[2] ?? ''
@@ -176,7 +176,7 @@ describe('hyphenation', () => {
  */
 describe('the reader’s settings reach the prose', () => {
   it('applies both halves against the prose marker, not the element', () => {
-    const css = bookCss(settings('ragged'))
+    const css = resolvedBookCss(settings('ragged'))
     /* Against the marker, never against a bare `p`. On the element selector it
        would flatten every centred dedication, epigraph and verse line in nearly
        half the library — 45% of the same 400 books.
@@ -195,7 +195,7 @@ describe('the reader’s settings reach the prose', () => {
   /* And nowhere else. A bare `p { text-align: … !important }` added later would
    * be invisible to the rule above, which only inspects one known selector. */
   it('marks alignment under no selector but the prose marker', () => {
-    const css = bookCss(settings('ragged')).replace(/\/\*[\s\S]*?\*\//g, '')
+    const css = resolvedBookCss(settings('ragged')).replace(/\/\*[\s\S]*?\*\//g, '')
     for (const [, selector, body] of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
       if (!/text-align:[^;]*!important|hyphens:[^;]*!important/.test(body ?? '')) continue
       expect(selector ?? '', 'important alignment under an unmarked selector')
@@ -207,7 +207,7 @@ describe('the reader’s settings reach the prose', () => {
    * — a book that sets its paragraphs in divs, or a section that failed to
    * parse. They are defaults there, and correctly not important. */
   it('keeps the body declarations as the unmarked fallback, and unforced', () => {
-    const css = bookCss(settings('ragged'))
+    const css = resolvedBookCss(settings('ragged'))
     expect(ruleValue(css, 'body', 'text-align')).toBe('start')
     expect(ruleValue(css, 'body', 'hyphens')).toBe('manual')
   })
@@ -223,7 +223,7 @@ describe('the reader’s settings reach the prose', () => {
       ragged: { align: 'start', hyphens: 'manual' },
     }
     for (const align of ALIGNS) {
-      const css = bookCss(settings(align))
+      const css = resolvedBookCss(settings(align))
       expect(
         {
           align: ruleValue(css, 'body', 'text-align'),

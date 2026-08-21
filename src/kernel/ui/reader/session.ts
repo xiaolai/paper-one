@@ -19,6 +19,7 @@ import { suppressEmptyGeneratedContent } from './generatedContent'
 import { markFigures } from './markFigures'
 import { matteFigures } from './matteFigures'
 import { markProse } from './markProse'
+import { markSmallText } from './markSmallText'
 import {
   ANNOTATION_KINDS,
   MARK_STYLES,
@@ -574,6 +575,23 @@ export interface SessionDeps {
   prepare?: (source: File | string) => Promise<unknown>
   applySettings: (view: View) => void
   /**
+   * The reader's settings, as custom properties on ONE document's root.
+   *
+   * SEPARATE FROM `applySettings` BECAUSE IT IS PER DOCUMENT, NOT PER VIEW.
+   * The two sheets are static and read `var(--paper-*)`; the values live inline
+   * on each document's `:root`, which is what lets an attribute-presence
+   * selector switch a whole tier and what stops a settings change re-parsing
+   * the sheet. Every document that shows the book's text needs it: each section
+   * as it loads, and the note popover's own document, which is rendered in a
+   * view this session did not build.
+   *
+   * REQUIRED, unlike `styleNote`. A document that misses this has no
+   * `--paper-line`, so every `calc(var(--paper-line) * 1.5)` in the sheets is
+   * invalid at computed-value time and drops — an unstyled book, with nothing
+   * logged. A required dep is the compiler saying so at the call site.
+   */
+  applyVars: (doc: Document) => void
+  /**
    * The reader's typography, for a NOTE's view.
    *
    * Separate from `applySettings` because a note is not a page: it takes the
@@ -809,6 +827,8 @@ export class ReaderSession {
 
   /** See `SessionDeps.styleNote`. Held from `start`, used on every note. */
   #styleNote: ((view: View) => void) | null = null
+  /** See `SessionDeps.applyVars`. Held from `start`, used on every document. */
+  #applyVars: ((doc: Document) => void) | null = null
   readonly #host: HTMLElement
   readonly #cb: SessionCallbacks
 
@@ -862,6 +882,7 @@ export class ReaderSession {
        is wired once here and fires whenever a reader opens a note, by which
        time `deps` is three call frames gone. */
     this.#styleNote = deps.styleNote ?? null
+    this.#applyVars = deps.applyVars
     this.#bind(view)
 
     if (!(await this.#openBook(view, source, deps))) return
@@ -962,6 +983,12 @@ export class ReaderSession {
          pointing at whatever now occupies those coordinates. */
       this.closeFootnote()
 
+      /* BEFORE ANYTHING MEASURES THIS DOCUMENT. The sheets are already in —
+         foliate writes them in the same `onLoad` that dispatches this event —
+         but they read `var(--paper-*)`, and until the contract is on the root
+         every length in them is invalid and drops. `markProse` below reads
+         computed styles, and it would be reading an unstyled document. */
+      this.#applyVars?.(doc)
       this.#redrawWhenFontsLand(doc)
       ensureLang(doc, view)
       this.#cb.onDirection(directionOf(doc))
@@ -975,6 +1002,12 @@ export class ReaderSession {
          `matteFigures` follows because it only looks at what this marked. */
       markFigures(doc)
       matteFigures(doc)
+      /* Beside the other two, and after the book's stylesheet for the same
+         reason: how small a piece of text is relative to the base is a question
+         about the DOCUMENT, and it can only be asked once the author's rules
+         have landed. See markSmallText for why the accessibility floor cannot
+         be a rule on its own. */
+      markSmallText(doc)
       /* Beside `markProse`, and for the same reason it is here: this reads the
          BOOK'S OWN rules, so the author's stylesheet has to have landed. See
          `suppressEmptyGeneratedContent` — the box it deletes was appearing over
@@ -1394,6 +1427,17 @@ export class ReaderSession {
     noteView.addEventListener('load', (event) => {
       if (this.#disposed) return
       const { doc } = (event as CustomEvent<LoadDetail>).detail
+      /* The note's document gets the contract too, and for the same reason the
+         page's does: the sheets it was handed at `before-render` are static and
+         read `var(--paper-*)` from the root. Without this the popover is the
+         11.2px note again, by a different route. */
+      this.#applyVars?.(doc)
+      /* AND THE SAME MEASUREMENT THE PAGE GETS. `applyVars` re-measures only
+         when the base MOVES, which on a freshly built note document it has
+         not — so without this call the accessibility floor was inert inside
+         every footnote popover, which is precisely where a book's smallest
+         text lives. */
+      markSmallText(doc)
       suppressEmptyGeneratedContent(doc)
     })
   }

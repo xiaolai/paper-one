@@ -5,7 +5,7 @@
 // See docs/hook-tests.md for the per-file opt-in.
 import { describe, expect, it } from 'vitest'
 import { READING_STEPS } from '../../core/metrics'
-import { bookCss } from './bookCss'
+import { bookSheets, resolvedBookCss } from './bookCss'
 
 /**
  * Where the reader's size setting actually lands.
@@ -44,19 +44,19 @@ describe('the base size', () => {
     /* THE REGRESSION TEST FOR THE WHOLE CLASS. With this on `body` instead,
        every rem in every book stays pinned to the browser's 16px however the
        reader moves the control, and nothing else in the suite notices. */
-    const size = ruleValue(bookCss(settings(2)), 'html', 'font-size')
+    const size = ruleValue(resolvedBookCss(settings(2)), 'html', 'font-size')
     expect(size).not.toBeNull()
     expect(size).toMatch(/^\d+px !important$/)
   })
 
   it('moves with the step, on the root', () => {
-    const at = (i: number) => ruleValue(bookCss(settings(i)), 'html', 'font-size')
+    const at = (i: number) => ruleValue(resolvedBookCss(settings(i)), 'html', 'font-size')
     expect(at(0)).not.toBe(at(READING_STEPS.length - 1))
   })
 
   it('ties body to the root rather than repeating the number', () => {
     /* Two numbers that must agree are one number that can disagree. */
-    expect(ruleValue(bookCss(settings(2)), 'body', 'font-size')).toBe('1rem !important')
+    expect(ruleValue(resolvedBookCss(settings(2)), 'body', 'font-size')).toBe('1rem !important')
   })
 
   it('never forces a font-size on a descendant, which is what keeps proportion', () => {
@@ -64,11 +64,19 @@ describe('the base size', () => {
        2.25x it. Forcing a descendant would flatten every heading, note and drop
        cap in the library into one size. The rule is that only html and body may
        carry an important font-size. */
-    const css = bookCss(settings(2)).replace(/\/\*[\s\S]*?\*\//g, '')
+    const css = resolvedBookCss(settings(2)).replace(/\/\*[\s\S]*?\*\//g, '')
     const forced = [...css.matchAll(/([^{}]*)\{([^{}]*)\}/g)]
       .filter(([, , body]) => /font-size:[^;]*!important/.test(body ?? ''))
       .map(([, selector]) => (selector ?? '').trim().split('\n').pop()?.trim())
-    expect(forced.sort()).toEqual(['body', 'html'])
+    /* THE ACCESSIBILITY FLOOR IS THE ONE EXCEPTION, and only because it cannot
+       do the damage this test exists to prevent: `markSmallText` marks an
+       element ONLY when it is already smaller than the base, so the selector
+       can never reach a heading, and the value keeps the element's own ratio
+       above the floor. See `markSmallText.test.ts`, which asserts that
+       directly. */
+    const floor = forced.filter((s) => s?.endsWith('[data-paper-em]'))
+    expect(floor.length, 'the floor rule is gone — this exception asserts nothing').toBe(1)
+    expect(forced.filter((s) => !s?.endsWith('[data-paper-em]')).sort()).toEqual(['body', 'html'])
   })
 })
 
@@ -77,8 +85,12 @@ describe('the prose line box', () => {
     /* The grid is the point of a fixed line, and enlarged prose is the
        exception — not the other way round. At the 21/34 default, 1.2em is 25px
        against the grid's 34, so ordinary prose is unaffected by the max(). */
-    const line = ruleValue(bookCss(settings(2)), 'p, li, blockquote, dd', 'line-height')
-    expect(line).toBe('max(var(--paper-line), 1.2em) !important')
+    const line = ruleValue(resolvedBookCss(settings(2)), 'p, li, blockquote, dd', 'line-height')
+    /* RESOLVED, which is what makes the comment above checkable. The sheet
+       itself says `max(var(--paper-line), 1.2em)`; the contract puts 34px in
+       it at this step, and 34 against 1.2em is the whole claim. */
+    expect(line).toBe('max(34px, 1.2em) !important')
+    expect(bookSheets().join('\n')).toContain('max(var(--paper-line), 1.2em) !important')
   })
 
   it('gives enlarged prose a line of its own rather than crushing it', () => {

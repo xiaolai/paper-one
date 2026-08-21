@@ -246,12 +246,27 @@ declare module 'foliate-js/view.js' {
   }
 
   /**
+   * The two style elements the paginator gives every document, in the order it
+   * puts them in: one PREPENDED to `head` and one APPENDED to it.
+   *
+   * `paginator.js` creates both in `afterLoad` and `setStyles` writes the tuple
+   * into them; a bare string writes only the appended one. That is the whole
+   * mechanism behind Paper's `before` and `after` tiers — see `bookSheets`.
+   */
+  export type Styles = string | readonly [before: string, after: string]
+
+  /**
    * The renderer owns the book's iframes. `flow` is set as an ATTRIBUTE —
    * there is no JS property for it — and `setStyles` is optional because the
    * fixed-layout renderer does not implement it.
+   *
+   * IT TAKES A TUPLE, and the declaration said it took a string. foliate has
+   * accepted `[before, after]` at `paginator.js:1332` all along; typed as
+   * `(css: string)` the second tier was unreachable from TypeScript, and the
+   * type was the only thing forbidding it.
    */
   export interface Renderer extends HTMLElement {
-    setStyles?: (css: string) => void
+    setStyles?: (css: Styles) => void
     next(): Promise<void>
     prev(): Promise<void>
     /**

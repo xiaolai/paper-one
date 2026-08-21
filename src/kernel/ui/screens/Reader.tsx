@@ -36,6 +36,7 @@ import { MarginMarks } from '../reader/MarginMarks'
 import { ReadingRuler } from '../reader/ReadingRuler'
 import { SelectionTools } from '../reader/SelectionTools'
 import styles from './Reader.module.css'
+import { pageFilter } from '../reader/fixedLayout'
 
 
 /**
@@ -299,6 +300,19 @@ export function Reader({
     '--track-measure': `${grid.measure}px`,
     '--track-margin': `${grid.marginCol}px`,
     '--track-gap': `${grid.gap}px`,
+    /* WI-14.5 — THE ONLY THING A FIXED-LAYOUT PAGE CAN TAKE FROM THE READER'S
+       LIGHT. A PDF page is pixels pdf.js painted onto a canvas, so there is no
+       colour to declare and no `setStyles` to declare it with; what there IS,
+       on both renderers, is `part="filter"` on the page's iframe, exported
+       through the view's closed shadow root. See `fixedLayout.ts` for the
+       contract and for what the inversion costs.
+
+       `none` FOR A REFLOWABLE BOOK, and not because it would be redundant: the
+       book's own sheet already carries the theme, the brightness and the
+       contrast, so a filter on top would apply every one of them TWICE. */
+    '--paper-page-filter': book.fixedLayout
+      ? pageFilter({ theme: state.theme, brightness: state.brightness, contrast: state.contrast })
+      : 'none',
   } as CSSProperties
 
   /**
@@ -588,6 +602,11 @@ export function Reader({
                       theme={state.theme}
                       typeface={state.typeface}
                     spacing={state.spacing}
+                    /* WI-14.4's fifteen, handed down whole — see `ReadingStyle`.
+                       The reducer returns the SAME object when a setting has not
+                       moved, so this cannot re-run the settings effect on an
+                       unrelated dispatch. */
+                    style={state.readingStyle}
                     align={state.align}
                     /* RESOLVED here, not passed as indices: the book is an
                        iframe and cannot read the app's custom properties, so it

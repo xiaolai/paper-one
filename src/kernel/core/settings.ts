@@ -1,13 +1,35 @@
 import { MARK_TINTS, READER_STYLES, type MarkStorage, type MarkStyle, type MarkTint } from './marks'
-import { BRIGHTNESS, CONTRAST, DEFAULT_STEP_IDX, READING_STEPS, SPACING } from './metrics'
+import {
+  BRIGHTNESS,
+  CONTRAST,
+  DEFAULT_READING_STYLE,
+  DEFAULT_STEP_IDX,
+  FIGURE_HEIGHTS,
+  FIGURE_WIDTHS,
+  MINIMUM_SIZES,
+  READING_STEPS,
+  SPACING,
+  type SpacingScale,
+} from './metrics'
 import { defineSetting, type Setting, type SettingsStore } from './ports'
 import {
   ALIGNS,
+  CODE_FACES,
+  CODE_WRAPS,
+  FIDELITIES,
+  FIGURE_FRAMES,
+  FLOURISHES,
+  HEADING_SCALES,
+  NOTE_SIZES,
   PAGE_LAYOUTS,
+  QUOTE_STYLES,
+  SEPARATIONS,
   SIDES,
+  TABLE_FITS,
   THEME_IDS,
   type Align,
   type PageLayout,
+  type ReadingStyle,
   type Side,
   type SpacingIndices,
   type Theme,
@@ -222,6 +244,48 @@ const spacingIndices = (raw: unknown): SpacingIndices | undefined => {
 }
 
 /**
+ * WI-14.4's fifteen, validated one key at a time.
+ *
+ * FIELD BY FIELD, NEVER AS A BLOB. This value is read back off disk and may
+ * have been hand-edited, or written by a build whose scales were a different
+ * length — so each key is validated against the same list or scale the UI
+ * offers, and anything unrecognised falls back to that setting's own default
+ * rather than taking the whole object down with it. Exactly what
+ * `spacingIndices` does above, for the same reason.
+ *
+ * A MISSING KEY IS THE ORDINARY CASE, not an error: every settings file written
+ * before this landed has none of them, and a reader upgrading must get the
+ * defaults rather than an empty panel.
+ */
+const readingStyle = (raw: unknown): ReadingStyle | undefined => {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
+  const row = raw as Record<string, unknown>
+  const pick = <T extends string>(key: keyof ReadingStyle, from: readonly T[]): T =>
+    (oneOf(from)(row[key]) ?? DEFAULT_READING_STYLE[key]) as T
+  const step = (key: keyof ReadingStyle, scale: SpacingScale): number =>
+    index(scale.steps.length)(row[key]) ?? (DEFAULT_READING_STYLE[key] as number)
+  const flag = (key: keyof ReadingStyle): boolean =>
+    boolean(row[key]) ?? (DEFAULT_READING_STYLE[key] as boolean)
+  return {
+    separation: pick('separation', SEPARATIONS),
+    flourish: pick('flourish', FLOURISHES),
+    headingScale: pick('headingScale', HEADING_SCALES),
+    blockquote: pick('blockquote', QUOTE_STYLES),
+    codeFace: pick('codeFace', CODE_FACES),
+    codeWrap: pick('codeWrap', CODE_WRAPS),
+    figureWidth: step('figureWidth', FIGURE_WIDTHS),
+    figureFrame: pick('figureFrame', FIGURE_FRAMES),
+    figureScalesWithText: flag('figureScalesWithText'),
+    figureHeight: step('figureHeight', FIGURE_HEIGHTS),
+    wideTables: pick('wideTables', TABLE_FITS),
+    noteSize: pick('noteSize', NOTE_SIZES),
+    cjkSpacing: flag('cjkSpacing'),
+    minimumSize: step('minimumSize', MINIMUM_SIZES),
+    fidelity: pick('fidelity', FIDELITIES),
+  }
+}
+
+/**
  * The reading preferences that survive a launch. Names match the `AppState`
  * fields they mirror; keys carry the `kernel.` namespace.
  */
@@ -259,6 +323,12 @@ export const KERNEL_SETTINGS = {
      a build that offered it, must not hand the reader a style they cannot
      choose and cannot see the provenance rule behind. */
   markStyle: defineSetting<MarkStyle>('kernel.markStyle', 'fill', oneOf(READER_STYLES)),
+  /* WI-14.4's fifteen. They persist for the same reason every other reading
+     setting here does — a reader who set them up should not have to do it
+     again on the next launch — and their absence was a real defect for exactly
+     as long as it took an audit to notice that `theme`, `stepIdx`, `spacing`
+     and `align` are all in this list and these fifteen were not. */
+  readingStyle: defineSetting<ReadingStyle>('kernel.readingStyle', DEFAULT_READING_STYLE, readingStyle),
 } as const satisfies Record<string, Setting<unknown>>
 
 export type KernelSettingName = keyof typeof KERNEL_SETTINGS
@@ -285,24 +355,26 @@ export function readKernelPreferences(store: SettingsStore): KernelPreferences {
     contrast: store.get(KERNEL_SETTINGS.contrast),
     markTint: store.get(KERNEL_SETTINGS.markTint),
     markStyle: store.get(KERNEL_SETTINGS.markStyle),
+    readingStyle: store.get(KERNEL_SETTINGS.readingStyle),
   }
 }
 
 /** Write every kernel preference that differs from what is stored. */
 export function writeKernelPreferences(store: SettingsStore, prefs: KernelPreferences): void {
-  store.set(KERNEL_SETTINGS.theme, prefs.theme)
-  store.set(KERNEL_SETTINGS.themeFollowsOs, prefs.themeFollowsOs)
-  store.set(KERNEL_SETTINGS.typeface, prefs.typeface)
-  store.set(KERNEL_SETTINGS.stepIdx, prefs.stepIdx)
-  store.set(KERNEL_SETTINGS.pageLayout, prefs.pageLayout)
-  store.set(KERNEL_SETTINGS.side, prefs.side)
-  store.set(KERNEL_SETTINGS.rulerOn, prefs.rulerOn)
-  store.set(KERNEL_SETTINGS.scrollbarOn, prefs.scrollbarOn)
-  store.set(KERNEL_SETTINGS.progressLineOn, prefs.progressLineOn)
-  store.set(KERNEL_SETTINGS.spacing, prefs.spacing)
-  store.set(KERNEL_SETTINGS.align, prefs.align)
-  store.set(KERNEL_SETTINGS.brightness, prefs.brightness)
-  store.set(KERNEL_SETTINGS.contrast, prefs.contrast)
-  store.set(KERNEL_SETTINGS.markTint, prefs.markTint)
-  store.set(KERNEL_SETTINGS.markStyle, prefs.markStyle)
+  /* EVERY SETTING IN THE TABLE, DERIVED — never a second hand-written list.
+   *
+   * This was sixteen `store.set` calls mirroring `KERNEL_SETTINGS` by hand, and
+   * the asymmetry is the trap: an omitted field in the READER is a type error,
+   * because `KernelPreferences` is mapped from the table — an omitted `set`
+   * here is nothing at all, and the setting simply never persists. WI-14.4's
+   * fifteen were shipped that way for exactly as long as it took an audit to
+   * ask why the panel reset on every launch.
+   *
+   * The cast is the one place the derivation cannot be expressed: `store.set`
+   * is generic in the setting's own type, and iterating the table erases the
+   * link between key and value that `KernelPreferences` already guarantees.
+   */
+  for (const name of Object.keys(KERNEL_SETTINGS) as KernelSettingName[]) {
+    store.set(KERNEL_SETTINGS[name] as Setting<unknown>, prefs[name])
+  }
 }

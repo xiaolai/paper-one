@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useReducer, type Dispatch } from 'react'
 import type { MarkStyle, MarkTint } from '../core/marks'
-import { BRIGHTNESS, CONTRAST, DEFAULT_STEP_IDX, READING_STEPS, SPACING } from '../core/metrics'
+import { BRIGHTNESS, CONTRAST, DEFAULT_READING_STYLE, DEFAULT_STEP_IDX, FIGURE_HEIGHTS, FIGURE_WIDTHS, MINIMUM_SIZES, READING_STEPS, SPACING, type SpacingScale } from '../core/metrics'
 import type { SettingsStore } from '../core/ports'
 import { readKernelPreferences, writeKernelPreferences, type KernelPreferences } from '../core/settings'
 import type { PaneContribution } from '../core/capability'
-import { isContributedPaneId, type Align, type PageLayout, type PaneId, type Screen, type Side, type SpacingIndices, type SpacingKey, type Theme, type Typeface } from '../core/uiTypes'
+import { isContributedPaneId, type Align, type PageLayout, type PaneId, type ReadingStyle, type ReadingStyleKey, type Screen, type Side, type SpacingIndices, type SpacingKey, type Theme, type Typeface } from '../core/uiTypes'
 
 /**
  * Application state.
@@ -46,7 +46,12 @@ export type Layer = (typeof LAYER_ORDER)[number]
  * React in it can name them: a durable setting under `kernel.theme`, a pane a
  * capability contributes. Re-exported here, so nothing that named them through
  * this module has moved. */
-export type { Align, ContributedPaneId, KernelPaneId, PageLayout, PaneId, Screen, Side, SpacingIndices, SpacingKey, Theme, Typeface } from '../core/uiTypes'
+export type {
+  Align, CodeFace, CodeWrap, ContributedPaneId, Fidelity, FigureFrame, Flourish,
+  HeadingScale, KernelPaneId, NoteSize, PageLayout, PaneId, QuoteStyle, ReadingStyle,
+  ReadingStyleKey, Screen, Separation, Side, SpacingIndices, SpacingKey, TableFit,
+  Theme, Typeface,
+} from '../core/uiTypes'
 
 /**
  * What the reducer needs to know about a contributed pane: its id and the
@@ -147,6 +152,19 @@ export interface AppState {
    */
   readonly markTint: MarkTint
   readonly markStyle: MarkStyle
+  /**
+   * How the book is SET — WI-14.4's fifteen, the fidelity dial among them.
+   *
+   * ONE FIELD RATHER THAN FIFTEEN, exactly as `spacing` is one rather than
+   * four, and for the same two reasons: a reader adjusts them together, and the
+   * reducer takes one action for all of them instead of fifteen near-identical
+   * branches that would each have to remember the same clamping trap.
+   *
+   * Every default is what Paper rendered before the settings existed — see
+   * `DEFAULT_READING_STYLE`, which is where that promise is kept and where a
+   * test holds it.
+   */
+  readonly readingStyle: ReadingStyle
 }
 
 /**
@@ -207,6 +225,10 @@ export const initialState: AppState = {
   pageLayout: 'scrolled',
   markTint: 'yellow',
   markStyle: 'fill',
+  /* The book exactly as it reads today — a reader who never opens any of these
+     gets no change. Imported rather than restated, so the seed and the
+     stylesheet's own defaults cannot come to disagree. */
+  readingStyle: DEFAULT_READING_STYLE,
 }
 
 export type Action =
@@ -236,6 +258,16 @@ export type Action =
   | { type: 'setPageLayout'; layout: PageLayout }
   | { type: 'setMarkTint'; tint: MarkTint }
   | { type: 'setMarkStyle'; style: MarkStyle }
+  /**
+   * One action for all fifteen — see `readingStyle`.
+   *
+   * GENERIC IN THE KEY, so the value is checked against the key's own type: a
+   * `separation` of `'shadow'` is a compile error rather than a state that
+   * reaches the stylesheet and silently matches no rule.
+   */
+  | {
+      [K in ReadingStyleKey]: { type: 'setReadingStyle'; key: K; value: ReadingStyle[K] }
+    }[ReadingStyleKey]
 
 /**
  * An index into a scale of `length` steps, or null for input that must not
@@ -245,6 +277,19 @@ export type Action =
  * to remember the same trap: NaN survives `Math.min`/`Math.max` unchanged, so
  * a clamp without the finite check let NaN straight through to the lookup.
  */
+/**
+ * Which of `ReadingStyle`'s fifteen are INDICES into a scale.
+ *
+ * A table rather than a condition in the reducer, so adding a scaled setting is
+ * one line here and forgetting to clamp it is not possible in the other
+ * direction — an unlisted key is a closed set the compiler already checked.
+ */
+const READING_STYLE_SCALES: Partial<Record<ReadingStyleKey, SpacingScale>> = {
+  figureWidth: FIGURE_WIDTHS,
+  figureHeight: FIGURE_HEIGHTS,
+  minimumSize: MINIMUM_SIZES,
+}
+
 function scaleIndex(idx: number, length: number): number | null {
   if (!Number.isFinite(idx)) return null
   return Math.min(Math.max(Math.round(idx), 0), length - 1)
@@ -381,6 +426,30 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
       return { ...state, spacing: { ...state.spacing, [action.key]: idx } }
     }
 
+    /**
+     * One branch for all fifteen — see `readingStyle`.
+     *
+     * THE THREE INDEX FIELDS ARE CLAMPED AND THE REST ARE NOT, and the
+     * difference is what each one is. `figureWidth`, `figureHeight` and
+     * `minimumSize` are positions in a scale, and a stale index from a build
+     * with a shorter scale reaches an array lookup — the trap `setSpacing`
+     * documents, where `undefined` arrives at the stylesheet as the string
+     * "undefined". The other twelve are closed sets the compiler checks at the
+     * call site, so there is nothing left for a clamp to do.
+     *
+     * SAME STATE WHEN NOTHING MOVED, exactly as `setSpacing` returns, and this
+     * one earns its keep: `readingStyle` is a dependency of the effect that
+     * re-applies the reader's settings to the book, and a new object identity
+     * for an unchanged setting would re-run it on every dispatch.
+     */
+    case 'setReadingStyle': {
+      const scale = READING_STYLE_SCALES[action.key]
+      const value =
+        scale === undefined ? action.value : scaleIndex(action.value as number, scale.steps.length)
+      if (value === null || state.readingStyle[action.key] === value) return state
+      return { ...state, readingStyle: { ...state.readingStyle, [action.key]: value } }
+    }
+
     case 'setBrightness':
     case 'setContrast': {
       const key = action.type === 'setBrightness' ? 'brightness' : 'contrast'
@@ -421,6 +490,26 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
 }
 
 export type AppDispatch = Dispatch<Action>
+
+/**
+ * A `setReadingStyle` action, with the key and the value checked against each
+ * other.
+ *
+ * THE CAST IS HERE AND NOWHERE ELSE, and it is a limit of the type system
+ * rather than a shortcut. `Action` distributes over the fifteen keys so the
+ * REDUCER can narrow `value` from `key` — which is the property worth having,
+ * because it is what makes a `separation` of `'shadow'` a compile error. What
+ * TypeScript cannot then prove is that a `{ key: K; value: ReadingStyle[K] }`
+ * built from a generic `K` is one of those fifteen members, though it is one by
+ * construction. Every call site stays type-checked; this one function absorbs
+ * the gap, with the assertion written down.
+ */
+export function setReadingStyle<K extends ReadingStyleKey>(
+  key: K,
+  value: ReadingStyle[K],
+): Action {
+  return { type: 'setReadingStyle', key, value } as Action
+}
 
 /**
  * Which screen a launch starts on.
@@ -575,6 +664,14 @@ export function useAppState(settings: SettingsStore, contributed: ContributedPan
     prefs.progressLineOn,
     prefs.markTint,
     prefs.markStyle,
+    /* THE OBJECT, not its fifteen fields — and unlike `spacing` above, that is
+       safe here. `setReadingStyle` returns the SAME object when a setting has
+       not moved, so its identity is stable across a page turn or a keystroke;
+       `spacing` is listed field by field because `preferencesOf` builds a fresh
+       wrapper each render and its own reducer branch predates that guarantee.
+       Omitted entirely at first, which meant fifteen settings a reader could
+       move and never save — the effect simply never re-ran. */
+    prefs.readingStyle,
   ])
   return [state, dispatch]
 }
@@ -597,6 +694,7 @@ export function preferencesOf(state: AppState): KernelPreferences {
     progressLineOn: state.progressLineOn,
     markTint: state.markTint,
     markStyle: state.markStyle,
+    readingStyle: state.readingStyle,
   }
 }
 

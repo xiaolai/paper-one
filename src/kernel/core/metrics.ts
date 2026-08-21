@@ -1,3 +1,4 @@
+import type { ReadingStyle } from './uiTypes'
 /**
  * Paper — layout metrics.
  *
@@ -205,8 +206,14 @@ export const READING_STEPS: readonly ReadingStep[] = [
 export interface SpacingScale {
   readonly steps: readonly number[]
   readonly def: number
-  /** How the value is written into the book's CSS. */
-  readonly unit: 'em' | 'x'
+  /**
+   * How the value is written into the book's CSS.
+   *
+   * `x` is a bare multiplier and has no unit at all — it is spelled here so
+   * `StepRow` can report "1.15×" rather than "1.15", which reads as a length.
+   * The rest are CSS units and are appended verbatim.
+   */
+  readonly unit: 'em' | 'x' | '%' | 'vh' | 'px'
 }
 
 export const SPACING: Record<'letter' | 'word' | 'line' | 'paragraph', SpacingScale> = {
@@ -1047,3 +1054,100 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
     root.style.setProperty(name, value)
   }
 }
+
+/**
+ * THE THREE SCALES WI-14.4 ADDS, and the one constant beside them.
+ *
+ * `SpacingScale` is the shape every other reader control here uses — a list of
+ * steps and an index into it — and these take it so `StepRow` can draw them
+ * without a second kind of row. Values, not indices, reach the stylesheet;
+ * `stepAt` clamps, because an index can arrive from state a newer build wrote.
+ *
+ * EVERY DEFAULT IS WHERE PAPER ALREADY WAS. The point is repeated here rather
+ * than assumed: a reader who never opens these must get the book they had, and
+ * a scale whose default is a new number is a silent change to the whole library
+ * dressed as a new feature.
+ */
+
+/**
+ * How wide a figure may be, as a share of the measure.
+ *
+ * 95 IS IN THE LIST BECAUSE IT IS WHERE PAPER ALREADY WAS. The plan named
+ * 70/80/90/100, which has no step at the value the sheet has been shipping, so
+ * adding the control would have moved every figure in the library by five
+ * points on the day it landed. The four named steps are all here; 95 is a fifth
+ * between two of them and it is the default.
+ */
+export const FIGURE_WIDTHS: SpacingScale = { steps: [70, 80, 90, 95, 100], def: 3, unit: '%' }
+
+/**
+ * How tall a figure may be, as a share of the page.
+ *
+ * A page-tall figure breaks pagination outright, which is why there is a cap at
+ * all and why Readium carries the same safeguard at the same value. The lower
+ * steps are for a reader who would rather see a figure and the text around it
+ * than a figure alone.
+ */
+export const FIGURE_HEIGHTS: SpacingScale = { steps: [50, 70, 85, 95], def: 3, unit: 'vh' }
+
+/**
+ * A floor under the smallest text in the book — F5.
+ *
+ * THE MEASUREMENT BEHIND IT. The median book's smallest relative size is 0.70
+ * of the base and the 5th percentile is 0.50, so at step 0 (17px) that is
+ * 11.9px in the typical book and **8.5px in one book in twenty**. A reader who
+ * chose the smallest step did not choose 8.5px; the book did, against a base
+ * that has since moved under it.
+ *
+ * ZERO IS OFF, AND IT IS THE DEFAULT. A floor is a genuine override of the
+ * author's proportions — it flattens a run of small caps into the size of the
+ * prose around it — so it is offered rather than imposed. The steps are the
+ * three sizes below which a paragraph stops being readable at arm's length,
+ * not a scale anybody should read a curve into.
+ */
+export const MINIMUM_SIZES: SpacingScale = { steps: [0, 11, 12, 14], def: 0, unit: 'px' }
+
+/**
+ * The first-line indent, when the reader asks for one.
+ *
+ * In `em`, so it follows the type rather than the window, and NOT a scale: a
+ * paragraph indent is a typographic constant of about one to two ems in every
+ * printed book anybody has read, and offering five steps of it would be a
+ * control over something no reader wants to tune. `SEPARATIONS` is the control;
+ * this is the value it uses.
+ */
+export const PARAGRAPH_INDENT = 1.5
+
+/**
+ * What Paper rendered before WI-14.4, spelled as the settings that describe it.
+ *
+ * THE PROPERTY THIS TABLE EXISTS TO HOLD: a reader who never opens any of these
+ * gets the book they had. Every value here was read off the sheet as it stood,
+ * not chosen — blockquote: indent because the sheet indented and did nothing
+ * else, headingScale: publisher because Paper has never set a heading's size,
+ * figureWidth at the step that IS 95%.
+ *
+ * TWO ARE NOT QUITE THAT, and they are the two the sheet said nothing about at
+ * all. codeWrap and wideTables default to containing an overflow that today
+ * spills out of the column — which is a defect rather than a design, and both
+ * rules sit in the before tier, so a book that styles pre or table still
+ * wins outright.
+ */
+export const DEFAULT_READING_STYLE: ReadingStyle = {
+  separation: 'space',
+  flourish: 'none',
+  headingScale: 'publisher',
+  blockquote: 'indent',
+  codeFace: 'publisher',
+  codeWrap: 'scroll',
+  figureWidth: FIGURE_WIDTHS.def,
+  figureFrame: 'none',
+  figureScalesWithText: false,
+  figureHeight: FIGURE_HEIGHTS.def,
+  wideTables: 'scroll',
+  noteSize: 'prose',
+  cjkSpacing: false,
+  minimumSize: MINIMUM_SIZES.def,
+  fidelity: 'paper',
+}
+

@@ -99,9 +99,18 @@ function* contentRules(doc: Document): Generator<ContentRule> {
  * Stop a document drawing generated content that resolves to nothing.
  *
  * `!important` rather than trusting the cascade. This installs a sheet at the
- * end of `head`, which would win on order alone today — but `bookCss` is
- * re-applied whenever the reader changes a setting, and a fix that depends on
+ * end of `head`, which would win on order alone today — but the reader's sheet
+ * is re-applied whenever the bundled faces land, and a fix that depends on
  * nothing ever being appended after it is a fix with a date on it.
+ *
+ * THE FOURTH SHEET, AND THE TIER MODEL NAMES IT RATHER THAN PRETENDING IT IS
+ * NOT THERE. `bookSheets` describes three layers — `before`, the book's own,
+ * `after` — and this appends a fourth at runtime, carrying selectors read out
+ * of the book itself. It is NOT a tier: a tier holds rules decided in advance,
+ * and this holds one rule proven against one document. It is marked for the
+ * reason above and for no other, and its scope is the narrowest fact there is —
+ * a `content` value that is a single `attr()` for an attribute the document
+ * does not have, which can only ever draw an empty box.
  */
 export function suppressEmptyGeneratedContent(doc: Document): void {
   const dead = deadContentSelectors(contentRules(doc), (name) => {

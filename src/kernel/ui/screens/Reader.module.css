@@ -652,3 +652,23 @@
   line-height: 1.6;
   text-align: start;
 }
+
+/*
+ * WI-14.5 — the reader's light on a FIXED-LAYOUT page.
+ *
+ * A PDF page is pixels, not a document: pdf.js paints the words onto a canvas,
+ * so there is no colour to declare and no stylesheet to declare it in. What
+ * there is, on both of foliate's renderers, is `part="filter"` on the page's
+ * iframe — and `view.js` sets `exportparts="head,foot,filter"`, which is what
+ * carries the part out through TWO closed shadow roots to here. Read out of the
+ * running app rather than inferred: `foliate-view::part(filter)` resolves.
+ *
+ * `none` FOR EVERY REFLOWABLE BOOK, and not merely as an optimisation. Those
+ * carry the theme, the brightness and the contrast in their own injected sheet,
+ * so a filter here would apply all three a second time. `Reader.tsx` decides
+ * which case this is; see `pageFilter`, which returns `none` at the defaults so
+ * an untouched reader never pays for a compositing layer.
+ */
+.text foliate-view::part(filter) {
+  filter: var(--paper-page-filter, none);
+}

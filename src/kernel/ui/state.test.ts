@@ -507,6 +507,29 @@ describe('bootState with remembered preferences', () => {
       progressLineOn: true,
       markTint: 'purple' as const,
       markStyle: 'underline' as const,
+      /* WI-14.4's fifteen, and NOT at their defaults — a round trip through
+         values that happen to equal the seed proves only that the seed is the
+         seed. Every one of these differs from `DEFAULT_READING_STYLE`, so a
+         field dropped anywhere along `preferencesOf` → `bootState` fails here
+         rather than silently resetting a reader's panel on the next launch,
+         which is exactly what shipped before an audit noticed. */
+      readingStyle: {
+        separation: 'both' as const,
+        flourish: 'drop-cap' as const,
+        headingScale: 'paper' as const,
+        blockquote: 'tint' as const,
+        codeFace: 'paper' as const,
+        codeWrap: 'wrap' as const,
+        figureWidth: 0,
+        figureFrame: 'shadow' as const,
+        figureScalesWithText: true,
+        figureHeight: 0,
+        wideTables: 'shrink' as const,
+        noteSize: 'publisher' as const,
+        cjkSpacing: true,
+        minimumSize: 2,
+        fidelity: 'publisher' as const,
+      },
     }
     expect(preferencesOf(bootState('', remembered))).toEqual(remembered)
   })

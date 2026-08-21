@@ -1,11 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ExternalLinkDetail, LinkDetail, Renderer, TocItem, View } from 'foliate-js/view.js'
 import type { MarkPainter } from 'foliate-js/overlayer.js'
-import type { Align, SpacingIndices, Theme, Typeface } from '../state'
+import type { Align, ReadingStyle, SpacingIndices, Theme, Typeface } from '../state'
 import type { BookMeta, BookNavigator, ReaderPosition } from '../hooks/useBook'
 import { useFontsReady } from '../fontProbe'
 import { isPdf } from '../../core/formats'
-import { bookCss, markPalette } from './bookCss'
+import { applyBookVars, bookSheets, markPalette, noteSheets } from './bookCss'
 import { balanceRects } from './markGeometry'
 import { ReaderSession, type FootnoteRender, type MarkAnchor, type SelectionSnapshot } from './session'
 import type { PageIntent } from './wheelPaging'
@@ -15,6 +15,12 @@ export interface FoliateViewProps {
    * The book to open — a picked/dropped File, or a URL for a book the app
    * already has on disk. Null renders the empty state instead.
    */
+  /**
+   * How the book is SET — WI-14.4's fifteen. Handed down whole, exactly as
+   * `spacing` is: they are one contract, and fifteen props would be fifteen
+   * chances for one to be forgotten at a call site with nothing to say so.
+   */
+  style: ReadingStyle
   file: File | string | null
   /** Advances on every open; every callback echoes it back so the book store
    *  can drop results from a reader that has since been replaced. */
@@ -131,6 +137,14 @@ interface Settings {
    * behaviour, not one of several.
    */
   animated: boolean
+  /**
+   * How the book is SET — WI-14.4's fifteen, the fidelity dial among them.
+   *
+   * One field rather than fifteen props, exactly as `spacing` is one field
+   * rather than four. Every default is what Paper rendered before the settings
+   * existed; see `DEFAULT_READING_STYLE`.
+   */
+  style: ReadingStyle
 }
 
 /**
@@ -142,12 +156,22 @@ interface Settings {
  */
 export function applySettings(renderer: Renderer, settings: Settings): void {
   applyLayout(renderer, settings)
-  renderer.setStyles?.(readingCss(settings))
+  applySheets(renderer)
+  /* THE CHANGE ITSELF IS THE VARIABLES, and the sheets above almost never move.
+     Every document already on screen is written to here; one that arrives later
+     is written to as it loads — see `applyVars` in the session's deps. */
+  for (const { doc } of renderer.getContents()) applyBookVars(doc, readingVars(settings))
 }
 
-/** The reader's own typography, for any document that shows the book's text. */
-function readingCss(settings: Settings): string {
-  return bookCss({
+/**
+ * The reader's settings as `bookCss` takes them.
+ *
+ * The shapes differ by more than a rename — `Settings` also carries the
+ * measure, the page margins, the flow and whether a turn animates, none of
+ * which the stylesheet has ever taken.
+ */
+export function readingVars(settings: Settings): Parameters<typeof applyBookVars>[1] {
+  const base = {
     stepIdx: settings.stepIdx,
     theme: settings.theme,
     typeface: settings.typeface,
@@ -155,30 +179,32 @@ function readingCss(settings: Settings): string {
     brightness: settings.brightness,
     contrast: settings.contrast,
     align: settings.align,
-  })
+  }
+  return { ...base, style: settings.style }
 }
 
 /**
- * A NOTE IS NOT SUBORDINATE TO ANYTHING IN A POPOVER.
+ * The two sheets, and ONLY WHEN THEY HAVE CHANGED.
  *
- * Books set notes smaller than the text — measured on What's Our Problem?,
- * .footnote is 70% and .footnote2 is 75% — and on the page that is right: a
- * note at the foot of a page is subordinate to the prose it annotates, and the
- * reduction is how print says so. In a popover there IS no prose beside it.
- * The note is alone in its own box, the reason for the reduction is absent, and
- * all it costs there is legibility.
+ * `setStyles` writes `textContent` on two style elements, and writing the same
+ * string back still re-parses the sheet in every open document. That re-parse
+ * on every settings change is F4, the defect the variable contract exists to
+ * remove — so skipping the call when nothing moved is not an optimisation, it
+ * is the feature.
  *
- * BY STRUCTURE, NOT BY CLASS NAME. There is no generic selector for "the rule
- * that shrinks notes" — every book spells it differently. What is the same in
- * every book is the SHAPE of what the popover holds: FootnoteHandler extracts
- * the note into the document body, so the note's own blocks are body's direct
- * children and nothing else is. Resetting those to the base leaves everything
- * NESTED — a citation at 0.9em, an emphasised run — proportional, which is the
- * author's typography and stays.
+ * `bookSheets()` returns the same tuple by identity until the bundled faces
+ * land, which is the one thing that legitimately changes it. Keyed per
+ * RENDERER, because a note's view is a different renderer with its own two
+ * style elements and its own tuple.
  */
-const NOTE_CSS = `
-body > * { font-size: 1rem; }
-`
+const appliedSheets = new WeakMap<Renderer, unknown>()
+
+function applySheets(renderer: Renderer, sheets = bookSheets()): void {
+  if (appliedSheets.get(renderer) === sheets) return
+  renderer.setStyles?.(sheets)
+  appliedSheets.set(renderer, sheets)
+}
+
 
 /**
  * Style a note's view.
@@ -191,9 +217,17 @@ body > * { font-size: 1rem; }
  * the same slot. That is the whole of why a note came out at 11.2px beside a
  * page at 21px — the book's 70% resolving against a base nobody had set.
  */
-export function styleNoteView(renderer: Renderer, settings: Settings): void {
-  renderer.setStyles?.(readingCss(settings) + NOTE_CSS)
+export function styleNoteView(renderer: Renderer): void {
+  /* `NOTE_CSS` GOES IN `after`, AND CONCATENATION IS NOT AN OPTION.
+   *
+   * This read `readingCss(settings) + NOTE_CSS` while the sheet was one string.
+   * A tuple concatenated to a string is garbage — `before,after` with a rule
+   * glued to the end of it — and the rule has to land in the appended tier
+   * anyway: in `before` the book's own note rule wins on source order and the
+   * 11.2px regression comes back. */
+  applySheets(renderer, noteSheets())
 }
+
 
 /**
  * The renderer's layout ATTRIBUTES, separately from the stylesheet.
@@ -386,6 +420,7 @@ export function FoliateView({
   align,
   brightness,
   contrast,
+  style,
   animated,
   paginated,
   lastLocation,
@@ -450,7 +485,7 @@ export function FoliateView({
    * whenever a section's overlay is built, which happens as the reader scrolls
    * — long after any value captured at startup went stale. */
   const marksRef = useRef(marks)
-  const settings = useRef<Settings>({ stepIdx, measure, pageMargins, theme, typeface, spacing, align, brightness, contrast, animated, paginated })
+  const settings = useRef<Settings>({ stepIdx, measure, pageMargins, theme, typeface, spacing, align, brightness, contrast, animated, paginated, style })
   /* Through a ref for the same reason, and for one that is specific to it: the
    * saved position is derived from the book's content id, which resolves a few
    * milliseconds AFTER the reader mounts. A prop read at mount is read before
@@ -464,7 +499,7 @@ export function FoliateView({
   useLayoutEffect(() => {
     handlers.current = currentHandlers
     marksRef.current = marks
-    settings.current = { stepIdx, measure, pageMargins, theme, typeface, spacing, align, brightness, contrast, animated, paginated }
+    settings.current = { stepIdx, measure, pageMargins, theme, typeface, spacing, align, brightness, contrast, animated, paginated, style }
     lastLocationRef.current = lastLocation
   })
 
@@ -568,7 +603,8 @@ export function FoliateView({
           })
         },
         applySettings: (view: View) => applySettings(view.renderer, settings.current),
-        styleNote: (view: View) => styleNoteView(view.renderer, settings.current),
+        applyVars: (doc: Document) => applyBookVars(doc, readingVars(settings.current)),
+        styleNote: (view: View) => styleNoteView(view.renderer),
         lastLocation: () => lastLocationRef.current,
       })
       .then(() => {
@@ -605,7 +641,7 @@ export function FoliateView({
      * the effect and unmounted the React tree — the reader vanished instead of
      * the theme failing to change. */
     try {
-      applySettings(renderer, { stepIdx, measure: settings.current.measure, pageMargins: settings.current.pageMargins, theme, typeface, spacing, align, brightness, contrast, animated, paginated })
+      applySettings(renderer, { stepIdx, measure: settings.current.measure, pageMargins: settings.current.pageMargins, theme, typeface, spacing, align, brightness, contrast, style, animated, paginated })
       /* A theme change reaches the book through `setStyles`, which restyles the
        * document WITHOUT rebuilding the section — so no `create-overlay` fires
        * and the marks keep the colour they were painted in. Changing the step or
@@ -630,7 +666,12 @@ export function FoliateView({
      * controls that change how the type is set, so the pips moved and the page
      * did not. Its identity is stable — the reducer returns the SAME state when
      * a spacing has not moved — so depending on the object cannot loop. */
-  }, [stepIdx, theme, typeface, spacing, align, brightness, contrast, animated, paginated, ready, generation, fontsReady])
+    /* `style` is in the deps for the same reason `spacing` is: it IS the
+     * stylesheet's contract now, and leaving it out means fifteen controls that
+     * move the pips and not the page. Its identity is stable — the reducer
+     * returns the SAME object when a setting has not moved — so depending on
+     * the object cannot loop. */
+  }, [stepIdx, theme, typeface, spacing, align, brightness, contrast, style, animated, paginated, ready, generation, fontsReady])
 
   /* THE GRID ALONE, and only the layout attributes for it.
    *

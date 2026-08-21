@@ -33,7 +33,10 @@ export function StepRow({ label, scale, value, onChange }: StepRowProps) {
   const last = scale.steps.length - 1
   const at = Math.min(last, Math.max(0, value))
   const amount = stepAt(scale, at)
-  const title = `${label}: ${amount}${scale.unit === 'em' ? 'em' : '×'}`
+  /* `x` is a bare multiplier with no unit, and "1.15" alone reads as a length —
+     so it is reported with a times sign. Every other unit is a real CSS one and
+     is written as it is. */
+  const title = `${label}: ${amount}${scale.unit === 'x' ? '×' : scale.unit}`
 
   return (
     <div className={`${styles.settingRow} ${styles.settingStatic}`}>

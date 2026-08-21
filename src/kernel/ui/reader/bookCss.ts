@@ -1,10 +1,21 @@
 import type { MarkTint } from '../../core/marks'
 import type { MarkPalette } from './session'
-import type { Align, SpacingIndices, Theme, Typeface } from '../state'
-import { readingStep, spacingAt } from '../../core/metrics'
+import type { Align, ReadingStyle, SpacingIndices, Theme, Typeface } from '../state'
+import {
+  DEFAULT_READING_STYLE,
+  FIGURE_HEIGHTS,
+  MOTION,
+  FIGURE_WIDTHS,
+  MINIMUM_SIZES,
+  PARAGRAPH_INDENT,
+  readingStep,
+  spacingAt,
+  stepAt,
+} from '../../core/metrics'
 import { dimBackground, inkFor } from '../../core/palette'
 import { faceById } from '../../core/typefaces'
 import { opticalScale } from '../fontProbe'
+import { FLOOR_VAR, SMALL_ATTR, SMALL_VAR, markSmallText } from './markSmallText'
 
 /**
  * The stylesheet injected into the book document.
@@ -64,6 +75,65 @@ interface BookColours {
  * generous on purpose: it decides whether to TAKE OVER the book's colours, and
  * doing that to a page that did not need it is the more damaging mistake.
  */
+/**
+ * HOW ONE STATIC SHEET SERVES EVERY CONFIGURATION (WI-14.3).
+ *
+ * A custom property cannot make a stylesheet disappear — that objection killed
+ * the first version of the fidelity dial, and it is correct. An
+ * ATTRIBUTE-PRESENCE SELECTOR on the root can, and it is what Readium has used
+ * for years: :root[style*="--USER__textColor"]. A property written into the
+ * root's inline style makes every rule keyed to its NAME apply, and removing
+ * the property makes every one of them stop. The sheet never changes.
+ *
+ * THE NAME, NEVER THE VALUE. [style*="--paper-dark-page: 1"] would depend on
+ * how a browser chooses to serialise a declaration it was handed through
+ * setProperty — whitespace included. So a switch is a property that is either
+ * PRESENT or ABSENT, and bookVars returns null for absent so the difference
+ * cannot be expressed as an empty string by accident.
+ *
+ * THE TWO WRAPPERS ADD NO SPECIFICITY, and that is the whole of why the split
+ * is behaviour-preserving. :where() contributes zero, so:
+ *
+ *   WHEN_DARK + img[data-paper-matte]  is (0,1,1), as img[data-paper-matte]
+ *   ROOT_WHEN_DARK +  *:not(a)         is (0,1,1), as :root *:not(a)
+ *
+ * Which one a rule takes depends on whether its ORIGINAL selector already had
+ * :root as an ancestor. Getting that backwards is silent: the rule goes on
+ * matching and merely wins or loses one argument it did not use to.
+ */
+const WHEN_DARK = ':where(:root[style*="--paper-dark-page"]) '
+const ROOT_WHEN_DARK = ':root:where([style*="--paper-dark-page"])'
+
+/**
+ * The same mechanism for the fidelity dial — see Fidelity.
+ *
+ * PRESENT MEANS PAPER WINS. The house typography sits unmarked in the before
+ * sheet, where a book that states anything beats it; this gate repeats it in
+ * after, where Paper beats the book on source order. Take the property away
+ * and the repeat stops matching, so the book keeps its own links, headings and
+ * blockquotes and Paper's remain only as a default for books that state none.
+ *
+ * Zero added specificity again, and here it is load-bearing rather than tidy:
+ * at (0,1,1) this would start beating .chapter h1, which today wins. The
+ * dial is meant to hand typography BACK, never to take more of it.
+ */
+const WHEN_PAPER = ':where(:root[style*="--paper-fidelity-paper"]) '
+
+/**
+ * WI-14.4's settings, each a gate of the same shape.
+ *
+ * ONE FUNCTION RATHER THAN FIFTEEN CONSTANTS, because the shape is the whole
+ * of it and fifteen near-identical strings is fifteen chances to mistype a
+ * property name — which fails SILENTLY, as a rule that never matches.
+ *
+ * THE NAME IS A PREFIX MATCH, and two of these have to be read with that in
+ * mind. [style*="--paper-figure-hairline"] cannot collide with
+ * --paper-figure-height, but [style*="--paper-indent"] WOULD have collided
+ * with a --paper-indent-on beside it, which is one of the reasons there is no
+ * such property. A test asserts no gate name is a prefix of another.
+ */
+export const when = (name: string) => `:where(:root[style*="${name}"]) `
+
 const DARK_INK = `
  
 /* THE READER'S INK WINS ON A DARK PAGE, WHEREVER THE BOOK SPEAKS.
@@ -120,7 +190,25 @@ const DARK_INK = `
  * STILL MISSING: an image with a baked-in white background is untouched by any
  * of this — background-color does not reach pixels. Readium darkens and
  * inverts behind their own settings; that is the image work, not this. */
-:root *:not(a) {
+/* THE ROOT'S OWN COLOUR IS FORCED TOO, and leaving it unmarked was a hole in
+   the middle of this rule. Everything below inherits from the root — that is
+   the whole mechanism — so a publisher who wins the root wins the document:
+   html.chapter { background: #fff; color: #111 } outranks Paper's bare html
+   rule, and every descendant then dutifully inherits the publisher's ink onto
+   a page the reader asked to be dark.
+
+   Readium marks the root for exactly this reason, and WI-14.1 quotes the rule
+   with the mark on it — :root[style*="--USER__textColor"] { color: var(…)
+   !important } — while Paper shipped the descendants marked and the root not.
+   color-scheme goes with them, or form controls and scrollbars keep the
+   publisher's light idea of the page. */
+${ROOT_WHEN_DARK} {
+  color: var(--paper-ink) !important;
+  background: var(--paper-surface) !important;
+  color-scheme: var(--paper-color-scheme) !important;
+}
+
+${ROOT_WHEN_DARK} *:not(a) {
   color: inherit !important;
   border-color: currentColor !important;
 }
@@ -129,11 +217,11 @@ const DARK_INK = `
    from clearing a background and nothing else. Folded into the rule above, the
    exclusion also took color and border-color away from a matted figure —
    which is not what "keep your own background" means. */
-:root *:not(a):not(.paper-ruler-band):not(.paper-spoken-word):not([data-paper-matte]) {
+${ROOT_WHEN_DARK} *:not(a):not(.paper-ruler-band):not(.paper-spoken-word):not([data-paper-matte]) {
   background-color: transparent !important;
 }
 
-:root svg text {
+${ROOT_WHEN_DARK} svg text {
   fill: currentColor !important;
   stroke: none !important;
 }
@@ -156,16 +244,32 @@ const DARK_INK = `
  * proportion to a small image instead of swallowing it.
  */
 const MATTE = `
-img[data-paper-matte] {
+${WHEN_DARK}img[data-paper-matte] {
   background: var(--paper-matte) !important;
-  padding: min(calc(var(--paper-line) * 0.375), 0.5em);
+  padding: min(calc(var(--paper-line) * 0.375), 0.5em); /* constant: half the type it sits in, so a 16px ornament keeps its proportions */
   border-radius: calc(var(--paper-line) * 0.125);
 }
 `
 
 export function isDark(hex: string): boolean {
-  const n = Number.parseInt(hex.replace('#', ''), 16)
-  if (!Number.isFinite(n)) return false
+  /**
+   * THE WHOLE STRING, AND BOTH LENGTHS.
+   *
+   * `parseInt` stops at the first character it cannot read, so `#ffgarbage`
+   * parsed as `0xff` — a very dark blue — and returned true for a string that
+   * is not a colour. And a three-digit hex is a real CSS colour that this read
+   * as a six-digit one: `#fff` became `0x000fff`, which is `rgb(0, 15, 255)`,
+   * luma 38, DARK. White reported as dark, and every rule gated on a dark page
+   * would have come on over it.
+   *
+   * Paper's own five themes are all six-digit, so nothing shipped wrong — but
+   * this is exported, `pageFilter` decides a PDF's inversion with it, and "no
+   * caller passes a short hex today" is not a property anything checks.
+   */
+  const raw = hex.trim().replace(/^#/, '')
+  const full = /^[0-9a-f]{3}$/i.test(raw) ? raw.replace(/./g, (c) => c + c) : raw
+  if (!/^[0-9a-f]{6}$/i.test(full)) return false
+  const n = Number.parseInt(full, 16)
   const [r, g, b] = [(n >> 16) & 255, (n >> 8) & 255, n & 255]
   return (r * 299 + g * 587 + b * 114) / 1000 < 90
 }
@@ -349,9 +453,40 @@ export interface BookCssOptions {
    */
   readonly brightness: number
   readonly contrast: number
+  /**
+   * How the book is SET — WI-14.4's fifteen, including the fidelity dial.
+   *
+   * OPTIONAL, AND EVERY DEFAULT IS THE BEHAVIOUR PAPER ALREADY SHIPPED, so a
+   * caller that says nothing gets exactly what it got before these existed.
+   * DEFAULT_READING_STYLE is where that promise is kept, and a test holds the
+   * sheets to it.
+   */
+  readonly style?: Partial<ReadingStyle>
 }
 
-export function bookCss({
+/**
+ * The reader's settings, as the custom properties the two sheets read.
+ *
+ * THIS IS THE CONTRACT (WI-14.3). Everything that varies is here; everything
+ * that does not is in the sheets, which are built once. A settings change used
+ * to rebuild all 585 lines of the stylesheet as a string — re-running
+ * `hostFontFaces()` against `document.styleSheets` on the way — and re-inject
+ * it, forcing a full CSS re-parse in every open document, for a change of one
+ * number. Now it is a property write.
+ *
+ * That is the visible half. The invisible half is why the phase needed it:
+ * adding a setting meant editing a template literal, so there was nowhere to
+ * put a fidelity dial and no way for PDF to share any of it.
+ *
+ * `null` MEANS REMOVE, and it is not the same as an empty string. Two of these
+ * are switches read by an attribute-presence selector — see `WHEN_DARK` — and
+ * for those, presence IS the value. Writing `--paper-dark-page: ` with nothing
+ * after it leaves the property present and every dark rule in force on a white
+ * page.
+ */
+export type BookVars = Readonly<Record<string, string | null>>
+
+export function bookVars({
   stepIdx,
   theme,
   typeface,
@@ -359,7 +494,9 @@ export function bookCss({
   spacing,
   brightness,
   contrast,
-}: BookCssOptions): string {
+  style,
+}: BookCssOptions): BookVars {
+  const set: ReadingStyle = { ...DEFAULT_READING_STYLE, ...style }
   const step = readingStep(stepIdx)
   /* THE THREE STATES, RESOLVED INTO THE TWO PROPERTIES THEY MEAN. Alignment and
      hyphenation are separate declarations but not separate settings — see
@@ -369,7 +506,6 @@ export function bookCss({
   const breakWords = align === 'justified'
   const c = bookColours(theme, brightness, contrast)
   const face = faceById(typeface)
-  const stack = face.stack
   /* THE SIZE THE READER ASKED FOR, CORRECTED FOR THIS FACE. Two faces at 21px
    * do not read the same size — see typefaces.ts — so a reader who switched
    * face found their book had silently changed size and raised the step to
@@ -379,11 +515,17 @@ export function bookCss({
   /* THE LINE BOX IS THE GRID, and everything else is measured against it.
    * Paragraph spacing is a multiple of it rather than a length so that opening
    * the leading opens the space between paragraphs with it — otherwise a reader
-   * who loosened their lines got paragraphs that looked tighter than before. */
-  const line = Math.round(step.line * spacingAt('line', spacing.line))
-  const letter = spacingAt('letter', spacing.letter)
-  const word = spacingAt('word', spacing.word)
-  const para = spacingAt('paragraph', spacing.paragraph)
+   * who loosened their lines got paragraphs that looked tighter than before.
+   *
+   * THE READER'S LEADING IS ALSO KEPT AS A RATIO, because the two are wanted in
+   * different places. Prose gets the line BOX, in pixels, so consecutive
+   * paragraphs sit on one grid. A heading has no business on that grid — its
+   * type is a different size — but it does have business following the Line
+   * control, and before WI-14.0 it did not: it took a hardcoded 1.2 and the
+   * setting stopped at the prose. Same shape as F1, a control that appears
+   * global and is not. */
+  const lineScale = spacingAt('line', spacing.line)
+  const line = Math.round(step.line * lineScale)
   /* IS THE PAGE DARK? Asked of the colour rather than of the theme's NAME.
      theme === 'night' was the test, in one place, and the moment a second
      place needed the same answer it became a fact stored twice — the next dark
@@ -391,17 +533,412 @@ export function bookCss({
      black text unforced, which is a defect nothing would report. */
   const darkPage = isDark(c.surface)
 
-  return `
-@namespace epub "http://www.idpf.org/2007/ops";
+  return {
+    '--paper-ink': c.ink,
+    '--paper-surface': c.surface,
+    '--paper-accent': c.accent,
+    '--paper-band': c.band,
+    '--paper-mark': c.mark,
+    '--paper-color-scheme': darkPage ? 'dark' : 'light',
+    '--paper-size': `${size}px`,
+    /* THE READER'S LINE, not the step's. Paragraphs, lists and quotes all read
+       this rather than the body's own line-height, so leaving the step's value
+       on `body` would have let the setting move the body and nothing else —
+       which is every block of prose in the book. */
+    '--paper-line': `${line}px`,
+    '--paper-line-scale': String(lineScale),
+    /* Written unconditionally, including at zero: an author stylesheet may set
+       either of these, and a rule that appeared only when the reader had moved
+       it would leave the book's own tracking in force at the default — so "0"
+       would mean two different things depending on the book. */
+    '--paper-letter': `${spacingAt('letter', spacing.letter)}em`,
+    '--paper-word': `${spacingAt('word', spacing.word)}em`,
+    '--paper-family': face.stack,
+    /* START, NEVER LEFT. The flush edge is on the left in English, on the right
+       in Arabic and at the top in vertical Japanese: one behaviour, three
+       appearances, and the document says which it is. Nothing here detects
+       anything — a logical value follows the book's own dir and writing-mode,
+       and a heuristic guessing direction from character ranges would be worse
+       than the declaration it was overriding. */
+    '--paper-align': flush ? 'justify' : 'start',
+    '--paper-hyphens': breakWords ? 'auto' : 'manual',
+    /* THE PARAGRAPH SPACING, AND THE SEPARATION SETTING CAN TAKE IT AWAY.
+       SPACING.paragraph deliberately has no zero step — it had one and
+       withdrew it, because "nothing here indents a paragraph, so no space
+       between them runs the prose together". Something does now, and this is
+       where the two controls meet: choosing indent zeroes the space without
+       moving the reader's position on the spacing scale, so the value is still
+       there when they choose space again. The Settings panel hides that row
+       while it cannot do anything, rather than leaving a dead control. */
+    '--paper-para': set.separation === 'indent' ? '0' : String(spacingAt('paragraph', spacing.paragraph)),
+    /* THE VALUE IS THE SWITCH, which is Readium's own idiom —
+       :root[style*="--USER__textColor"] { color: var(--USER__textColor) }. A
+       separate --paper-indent-on beside it would be two properties that must
+       agree, and the rule needs a gate rather than a zero: text-indent: 0
+       !important on every prose paragraph would take a book's own indent away
+       in the state where the reader asked for no indent AT ALL. */
+    '--paper-indent': set.separation === 'space' ? null : `${PARAGRAPH_INDENT}em`,
+    /* THE FIGURE CAP, IN ONE UNIT OR THE OTHER. A share of the measure is what
+       a figure has always taken; em makes it grow with the type instead,
+       which is what a reader who enlarges the text for their eyes rather than
+       for the layout is asking for. The number is the same either way — 95 of
+       the measure, or 95 tenths of an em — so the scale reads the same in both. */
+    '--paper-figure-width': set.figureScalesWithText
+      ? `${stepAt(FIGURE_WIDTHS, set.figureWidth) / 10}em`
+      : `${stepAt(FIGURE_WIDTHS, set.figureWidth)}%`,
+    '--paper-figure-height': `${stepAt(FIGURE_HEIGHTS, set.figureHeight)}vh`,
+    /* inherit rather than absent, because pre and code take the browser's
+       monospace by default and the reader asking for the book's face means the
+       BOOK's, not the UA's. */
+    '--paper-code-family': set.codeFace === 'paper' ? faceById('plex').stack : 'inherit',
+    /* THE SWITCHES. Presence, never a value — see WHEN_DARK. A null here is
+       a property REMOVED from the root, which is what makes the rule keyed to
+       its name stop matching; an empty string would leave it in force. */
+    '--paper-dark-page': darkPage ? '1' : null,
+    '--paper-fidelity-paper': set.fidelity === 'paper' ? '1' : null,
+    '--paper-drop-cap': set.flourish === 'drop-cap' ? '1' : null,
+    '--paper-small-caps': set.flourish === 'small-caps' ? '1' : null,
+    '--paper-heading-scale': set.headingScale === 'paper' ? '1' : null,
+    '--paper-quote-rule': set.blockquote === 'indent' ? null : '1',
+    '--paper-quote-tint': set.blockquote === 'tint' ? '1' : null,
+    '--paper-code-wrap': set.codeWrap === 'wrap' ? '1' : null,
+    '--paper-figure-hairline': set.figureFrame === 'hairline' ? '1' : null,
+    '--paper-figure-shadow': set.figureFrame === 'shadow' ? '1' : null,
+    '--paper-table-shrink': set.wideTables === 'shrink' ? '1' : null,
+    '--paper-note-prose': set.noteSize === 'prose' ? '1' : null,
+    '--paper-figure-scale': set.figureScalesWithText ? '1' : null,
+    '--paper-cjk-space': set.cjkSpacing ? '1' : null,
+    /* A FLOOR IS AN OVERRIDE OF THE AUTHOR'S PROPORTIONS, so step 0 is off and
+       the property is absent rather than set to zero — a max(1em, 0px) would
+       be a rule that runs on every element in every book to accomplish
+       nothing. See MINIMUM_SIZES for the 8.5px that bought this. */
+    '--paper-min-size': stepAt(MINIMUM_SIZES, set.minimumSize) === 0
+      ? null
+      : `${stepAt(MINIMUM_SIZES, set.minimumSize)}px`,
+  }
+}
 
-/* The bundled faces, carried in from the host — see hostFontFaces(). Without
- * them the stack below falls through to Georgia in every book. */
-${hostFontFaces()}
+/**
+ * Write the contract onto a document's root.
+ *
+ * INLINE ON `:root`, WHICH IS NOT AN IMPLEMENTATION DETAIL. A rule in a
+ * stylesheet would carry the same values, and the two switches would stop
+ * working: `[style*="--paper-dark-page"]` reads the root's `style` ATTRIBUTE,
+ * and a custom property declared in a sheet never appears there. That is
+ * Readium's mechanism and it is the reason the fidelity dial can exist at all.
+ *
+ * Every document that shows the book's text needs this — the page's, and the
+ * note popover's, which renders in a view the session did not build. A document
+ * that misses it has no `--paper-line`, so every `calc(var(--paper-line) * 1.5)`
+ * in the sheets is invalid at computed-value time and silently drops. See the
+ * test that asserts the sheets read no variable this does not define.
+ */
+export function applyBookVars(doc: Document, options: BookCssOptions): void {
+  const root = doc.documentElement as HTMLElement | null
+  if (!root?.style) return
+  const before = measurementKey(root)
+  for (const [name, value] of Object.entries(bookVars(options))) {
+    if (value === null) root.style.removeProperty(name)
+    else root.style.setProperty(name, value)
+  }
+  /* THE ACCESSIBILITY FLOOR'S MEASUREMENTS ARE RELATIVE TO THE BASE, AND THE
+     BASE JUST MOVED. `markSmallText` stores each small element's size as a
+     share of the root, which holds for `em`, `rem` and `%` and NOT for an
+     absolute size: a book's `.note { font-size: 12px }` keeps its 12px while
+     the root changes underneath it, so the stored share goes stale. Roughly 1%
+     of the library sizes text absolutely.
 
+     Only when the base actually moved, which is the reading step and the
+     typeface and nothing else — a theme or a brightness change costs nothing
+     here. And skipped on the FIRST write, when there is no previous value: the
+     session's load handler runs the walk itself, after the book's own
+     stylesheet has landed. */
+  if (before !== '' && before !== measurementKey(root)) markSmallText(doc)
+}
+
+/**
+ * Everything on the root that can change a computed font size in the document.
+ *
+ * NOT JUST `--paper-size`, which is what this compared first and was not
+ * enough. The heading scale gives `h1`-`h6` sizes they did not have, and the
+ * note size resets the popover's own blocks — so an `h5` measured at the UA's
+ * 0.83em is marked as small text, and turning Paper's heading scale on takes it
+ * to 1.1em while the mark and its 0.83 ratio stay. The floor rule is
+ * `!important`, so it would then SHRINK the heading to 0.83rem: the exact
+ * damage `markSmallText` exists to avoid, arriving through a stale measurement
+ * rather than through a bad selector.
+ *
+ * A KEY RATHER THAN THREE COMPARISONS, so adding a size-affecting setting is
+ * one entry here and not a fourth branch somebody has to remember.
+ */
+export function measurementKey(root: HTMLElement): string {
+  return ['--paper-size', '--paper-heading-scale', '--paper-note-prose']
+    .map((name) => root.style.getPropertyValue(name))
+    .join('|')
+}
+
+/**
+ * The two sheets, in the order foliate takes them.
+ *
+ * `before` is PREPENDED to the book's head and `after` is APPENDED to it — see
+ * `paginator.js`, which creates both and hands them out as a tuple. So the
+ * cascade the reader gets is:
+ *
+ *   before                house defaults, unmarked
+ *   the book's stylesheet
+ *   the book's inline styles
+ *   after                 the reader's controls, marked
+ *
+ * WHICH TIER A RULE BELONGS IN IS DECIDED BY ONE QUESTION, and the corpus
+ * answers it rather than taste: can an inline style defeat it, and does that
+ * matter. 90.5% of books carry inline styles and they beat `before`, the book's
+ * own sheet and `after` alike — everything except `!important`. So `before`
+ * cannot hold a reader's control; it can only hold a default that stands down
+ * gracefully in a book that speaks.
+ *
+ * A FOURTH SHEET EXISTS AND IS NAMED RATHER THAN IGNORED.
+ * `generatedContent.ts` appends one at runtime, against selectors read out of
+ * the book itself, carrying `content: none !important`. It is not a tier: it is
+ * a narrowly-proven repair for a rule whose box can only ever be empty, and it
+ * is marked because it must survive anything appended after it.
+ *
+ * (A code span is kept on ONE line throughout this file. Split across a line
+ * break it leaves an odd backtick on each, which the compiler ignores and every
+ * line-based reader of this file does not — see the guard in
+ * `bookTokens.test.ts`, which was added after one cost an afternoon.)
+ */
+export type BookSheets = readonly [before: string, after: string]
+
+/**
+ * `@namespace` IS PER STYLESHEET, and this is the trap the split had waiting.
+ *
+ * The noteref rule is `a[epub|type~="noteref"]`, which needs the prefix
+ * declared in the sheet that uses it. Splitting one sheet into two and leaving
+ * the declaration in the other does not error: the selector simply stops
+ * matching, every footnote link loses its superscript, and nothing anywhere
+ * says why. Each sheet carries its own prologue.
+ */
+const PROLOGUE = '@namespace epub "http://www.idpf.org/2007/ops";'
+
+/**
+ * The house typography, written ONCE and placed in both tiers.
+ *
+ * `gate` is empty for `before` and `WHEN_PAPER` for `after`. That is the whole
+ * of the fidelity dial: under `paper` the `after` copy applies and Paper wins on
+ * source order, exactly as it did when there was one sheet; under `publisher`
+ * the copy matches nothing and the book keeps its own, with `before` left as a
+ * default for books that state none.
+ *
+ * ONE SOURCE, because two copies of nine declarations that must agree is a
+ * drift waiting to happen, and the drift would be invisible: the sheets would
+ * still parse and only one configuration would be wrong.
+ *
+ * MEASURED, NOT ASSUMED. These three selectors are the contested house
+ * typography WI-14.0 measured over 1,957 books — links (1,134 books declare a
+ * text-decoration), headings (912 a margin, 831 a weight, 425 a line-height)
+ * and blockquotes (690 a margin, 50 a font-style). The other rows of that table
+ * are not here and should not be: `body { text-align }` and
+ * `body { font-family }` are the READER'S controls, which no dial may take
+ * away, and `img { max-width }` turned out not to compete at all.
+ */
+const house = (gate: string) => `
+${gate}h1, ${gate}h2, ${gate}h3, ${gate}h4, ${gate}h5, ${gate}h6 {
+  font-weight: 600; /* constant: the house weight for a heading; a weight is a step of the face, not of any scale here */
+  /* THE HOUSE RATIO, TIMES THE READER'S LINE SETTING. A flat 1.2 was the one
+     place the Line control could not reach, so a reader who opened their
+     leading got every paragraph in the book to move and every chapter title to
+     stay exactly where it was. At the default the setting is 1 and this is 1.2,
+     which is what it has always been. */
+  line-height: calc(1.2 * var(--paper-line-scale));
+  /* Round the heading's own space to the grid even though its line box is
+     not on it — this is the cheapest way to stop a chapter opener pushing all
+     following text permanently off the baseline. */
+  margin-block: calc(var(--paper-line) * 1.5) var(--paper-line);
+  text-wrap: balance;
+}
+
+${gate}a {
+  color: var(--paper-accent);
+  text-decoration: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--paper-accent) 30%, transparent);
+}
+
+${gate}blockquote {
+  margin-inline: calc(var(--paper-line) * 0.75);
+  font-style: italic;
+}
+`
+
+/**
+ * The `before` sheet: house defaults, and nothing marked.
+ *
+ * NOTHING IN HERE IS !important, and a test holds it to that. The tier only
+ * means anything because a book that states a view wins here; a marked rule in
+ * `before` would beat the book from the wrong end of the cascade and make the
+ * two sheets one again.
+ */
+const BEFORE = `
+${PROLOGUE}
+
+/* A <font> TAG IS FURNITURE FROM 1997, AND IT OUTRANKS THE READER.
+ *
+ * 114 books ship them, 308,899 of them between them — an affected book is
+ * saturated, averaging over two thousand. They carry size= (205,416), color=
+ * (102,602) and face= (21,085), and every one of those is a PRESENTATIONAL
+ * HINT: a declared value on the element, so it beats anything the reader's
+ * settings reach it by, which is inheritance.
+ *
+ * A hint loses to any author rule, so this one line is the whole fix, and it
+ * belongs in this tier for exactly that reason — a book with real CSS for these
+ * elements still wins. Measured before writing it: 24 books style the font
+ * element in CSS, 114 use the tag, and ZERO do both, so nothing in the library
+ * is affected by which of the two wins here.
+ *
+ * <center> IS LEFT ALONE. 1,666 books contain one, almost always exactly one —
+ * a title page, a dedication. That is the book composing, and markProse
+ * already exists to tell composition from a converter's default.
+ */
+font {
+  font: inherit;
+  color: inherit;
+}
+${house('')}
+/* WI-14.4's house settings. Every one is unmarked and in this tier, which is
+ * what the plan's tier column says and what makes them DEFAULTS: a book that
+ * states a view on its own headings, quotations, code or tables goes on
+ * winning, and these reach the books that state none. The reader's controls —
+ * separation, note size, the figure's text-scaling and the minimum size — are
+ * in the other sheet, marked, for the opposite reason.
+ */
+
+/* THE OPENING FLOURISH. Both states are pseudo-elements, which draw nothing
+ * into the document — and that is not a convenience. Every mark in this app is
+ * CFI-anchored with 32 characters of context either side, and inserting so much
+ * as a span would invalidate all of them. markProse says which paragraph the
+ * opening is, because CSS cannot: p:first-of-type matches the first paragraph
+ * of every blockquote, note and aside in the chapter as readily as the one the
+ * chapter opens with. */
+${when('--paper-drop-cap')}p[data-paper-opening]::first-letter {
+  /* -webkit- ONLY, AND THAT IS MEASURED, NOT CAUTION. Asked of the running
+     app: CSS.supports('initial-letter', '2') is false and the prefixed form is
+     true. The unprefixed property is written beside it so this starts working
+     the day WebKit ships it, and neither is a fallback for the other — an
+     unsupported declaration is dropped and the supported one stands. */
+  -webkit-initial-letter: 3; /* constant: three lines deep, which is what a drop cap is in print */
+  initial-letter: 3; /* constant: three lines deep, the unprefixed spelling of the line above */
+  margin-inline-end: 0.1em; /* constant: the sidebearing a raised initial needs, in its own size */
+  font-weight: 600; /* constant: the house weight for an initial, which is a step of the face */
+}
+
+${when('--paper-small-caps')}p[data-paper-opening]::first-line {
+  font-variant-caps: small-caps;
+  letter-spacing: 0.04em; /* constant: small caps need opening up or they set as a dark band */
+}
+
+/* HEADINGS ON ONE SCALE, for a shelf of converted books that each invented
+ * their own. Off by default: Paper has never set a heading's SIZE, and that is
+ * deliberate — h1 { font-size: 2.25em } resolves against the reader's base, so
+ * the author's proportions survive whole. This takes them. */
+${when('--paper-heading-scale')}h1 { font-size: 2em; }   /* constant: the classic double-body first level */
+${when('--paper-heading-scale')}h2 { font-size: 1.6em; } /* constant: one step down the same fourth */
+${when('--paper-heading-scale')}h3 { font-size: 1.3em; } /* constant: one step down again */
+${when('--paper-heading-scale')}h4,
+${when('--paper-heading-scale')}h5,
+${when('--paper-heading-scale')}h6 { font-size: 1.1em; } /* constant: barely above the prose, which is what a fourth level is */
+
+/* A QUOTATION, SET APART. The indent is what the sheet has always done and is
+ * the default; the rule and the tint are the two other ways print does it. */
+${when('--paper-quote-rule')}blockquote {
+  border-inline-start: 2px solid color-mix(in srgb, var(--paper-ink) 25%, transparent); /* constant: a rule the eye reads as a rule, not as a hairline border */
+  padding-inline-start: calc(var(--paper-line) * 0.5);
+  font-style: normal;
+}
+
+${when('--paper-quote-tint')}blockquote {
+  background: color-mix(in srgb, var(--paper-ink) 5%, transparent); /* constant: a tint at the threshold of visible, so the quote is set apart and not boxed */
+  padding-block: calc(var(--paper-line) * 0.25);
+  padding-inline-end: calc(var(--paper-line) * 0.5);
+  border-radius: 3px; /* constant: enough that the corner is not hard, as the ruler band is */
+}
+
+/* CODE. The face is one property; what a line too long for the measure does is
+ * the other, and it is the same question a wide table asks below. */
+pre, code, kbd, samp {
+  font-family: var(--paper-code-family);
+}
+
+/* SCROLL IS THE DEFAULT AND WRAP IS THE CHOICE, because scrolling alters
+ * nothing: the lines stay where the author broke them. What Paper does today is
+ * neither — an unstyled pre spills out of the column and is simply cut off. */
+pre {
+  overflow-x: auto;
+}
+
+${when('--paper-code-wrap')}pre {
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  overflow-x: visible;
+}
+
+/* A WIDE TABLE, and the same two answers. display: block is what makes the
+ * table itself the scroll port — there is no wrapper to give it one, and there
+ * will not be: inserting an element invalidates every CFI in the section. */
+table {
+  /* display: block IS THE WHOLE RULE, not decoration beside it. overflow-x
+     is not honoured on a display: table box, so this branch scrolled nothing
+     at all until an audit read the comment against the code — the comment had
+     said so from the start. Making the table a block box gives it a scroll port
+     of its own; its rows stay a table by anonymous-box generation. */
+  display: block;
+  overflow-x: auto;
+}
+
+${when('--paper-table-shrink')}table {
+  display: table;
+  table-layout: fixed;
+  width: 100%;
+  overflow-x: visible;
+}
+
+/* THE FIGURE, and the settings that size and frame it — see markFigures for
+ * which images are figures and why CSS cannot answer that question. */
+img[data-paper-figure],
+svg[data-paper-figure] {
+  max-width: var(--paper-figure-width);
+  max-height: var(--paper-figure-height);
+}
+
+${when('--paper-figure-hairline')}img[data-paper-figure],
+${when('--paper-figure-hairline')}svg[data-paper-figure] {
+  border: 1px solid color-mix(in srgb, var(--paper-ink) 20%, transparent);
+}
+
+${when('--paper-figure-shadow')}img[data-paper-figure],
+${when('--paper-figure-shadow')}svg[data-paper-figure] {
+  box-shadow: 0 2px 12px color-mix(in srgb, var(--paper-ink) 18%, transparent); /* constant: one soft drop, the plate lifted off the page */
+}
+
+/* SPACE BETWEEN CJK AND LATIN. text-autospace, never pangu.js and never
+ * anything that inserts a character: 7 books of 1,957 carry substantial CJK,
+ * and not one of them is worth invalidating a reader's marks for. Asked of the
+ * running app rather than assumed — this WebKit supports the property, so the
+ * control is real rather than a row that does nothing. */
+${when('--paper-cjk-space')}body {
+  text-autospace: ideograph-alpha ideograph-numeric;
+}
+`
+
+/**
+ * The `after` sheet, without the bundled faces — see `bookSheets`.
+ *
+ * THE READER'S CONTROLS LIVE HERE AND NOWHERE ELSE, because a control that an
+ * inline style can defeat is not a control, and only `!important` beats one.
+ */
+const AFTER_BODY = `
 html {
-  color-scheme: ${darkPage ? 'dark' : 'light'};
-  color: ${c.ink};
-  background: ${c.surface};
+  color-scheme: var(--paper-color-scheme);
+  color: var(--paper-ink);
+  background: var(--paper-surface);
   /* THE BASE, ON THE ROOT, AND THIS IS WHERE IT HAS TO BE.
    *
    * rem resolves against the ROOT, never against body — so a size declared
@@ -423,13 +960,7 @@ html {
    * forcing a descendant is not: h1 { font-size: 2.25em } still resolves to
    * 2.25 x the base, so the author's proportions survive intact. It is only
    * ever the starting number that is taken. */
-  font-size: ${size}px !important;
-  /* The line box is the unit everything else is a multiple of. */
-  /* THE READER'S LINE, not the step's. Paragraphs, lists and quotes all read
-     this rather than the body's own line-height, so leaving the step's value
-     here would have let the setting move the body and nothing else — which is
-     every block of prose in the book. */
-  --paper-line: ${line}px;
+  font-size: var(--paper-size) !important;
   hanging-punctuation: allow-end last;
 }
 
@@ -443,7 +974,7 @@ body {
    * it here. Note: no backticks in this file's CSS comments — it is a template
    * literal, and one would end the string. */
   background: transparent;
-  font-family: ${stack};
+  font-family: var(--paper-family);
   /* FROM THE ROOT, so there is one number rather than two that must agree.
    * Marked for the same reason the root is: a book that adjusts its own body
    * size is stating a default, and the default is precisely what the reader's
@@ -451,23 +982,10 @@ body {
    * source order, and this keeps that true against a higher-specificity rule
    * such as body.chapter. */
   font-size: 1rem !important;
-  line-height: ${line}px;
-  /* Written unconditionally, including at zero: an author stylesheet may set
-   * either of these, and a rule that appears only when the reader has moved it
-   * would leave the book's own tracking in force at the default — so "0" would
-   * mean two different things depending on the book. */
-  letter-spacing: ${letter}em;
-  word-spacing: ${word}em;
-  /* START, NEVER LEFT — and no backticks in here, per the rule this file states
-   * further up: it is a template literal and one would end the string.
-   *
-   * The flush edge is on the left in English, on the right in Arabic and at the
-   * top in vertical Japanese: one behaviour, three appearances, and the
-   * document says which it is. Nothing here detects anything. A logical value
-   * follows the book's own dir and writing-mode, and a heuristic guessing
-   * direction from character ranges would be worse than the declaration it was
-   * overriding. */
-  text-align: ${flush ? 'justify' : 'start'};
+  line-height: var(--paper-line);
+  letter-spacing: var(--paper-letter);
+  word-spacing: var(--paper-word);
+  text-align: var(--paper-align);
   /* HYPHENATION IS HALF OF THE ALIGNMENT SETTING, not a switch of its own.
    *
    * The three states ALIGNS offers are two of alignment and two of hyphenation
@@ -493,8 +1011,8 @@ body {
    * Hyphenating needs the document's language and does nothing at all without
    * it, silently — which is why the session supplies one when the book has not.
    * See ensureLang there. */
-  -webkit-hyphens: ${breakWords ? 'auto' : 'manual'};
-  hyphens: ${breakWords ? 'auto' : 'manual'};
+  -webkit-hyphens: var(--paper-hyphens);
+  hyphens: var(--paper-hyphens);
   -webkit-font-smoothing: antialiased;
   overflow-wrap: break-word;
 }
@@ -503,10 +1021,9 @@ body {
  * on grid even though headings and figures will not. */
 /* THE READER'S OWN SETTINGS, AND THEREFORE NOT DEFAULTS.
  *
- * Everything else this stylesheet injects is a default that a book may override
- * — that is stated at the top of the file and it is right. These four are not:
- * they are controls a reader operated, and a control that silently does nothing
- * is worse than no control.
+ * Everything the before sheet injects is a default that a book may override.
+ * These are not: they are controls a reader operated, and a control that
+ * silently does nothing is worse than no control.
  *
  * A BOOK BEATS AN ELEMENT SELECTOR WITHOUT TRYING. Measured on a real one, On
  * China ships p.nonindent { margin-bottom: 0em } — one class, specificity
@@ -536,9 +1053,9 @@ p, li, blockquote, dd {
    * 50 declarations at 1.2rem are untouched and only deliberately-enlarged
    * text gets a line of its own. The setting still moves every line of prose
    * in the book; it simply stops being able to crush the exceptions. */
-  line-height: max(var(--paper-line), 1.2em) !important;
-  letter-spacing: ${letter}em !important;
-  word-spacing: ${word}em !important;
+  line-height: max(var(--paper-line), 1.2em) !important; /* constant: the floor, one-and-a-fifth of the enlarged text own size */
+  letter-spacing: var(--paper-letter) !important;
+  word-spacing: var(--paper-word) !important;
 }
 
 /* ALIGNMENT IS THE READER'S TOO, BUT IT CANNOT SIMPLY JOIN THE RULE ABOVE.
@@ -560,8 +1077,8 @@ p, li, blockquote, dd {
  * worth keeping: markProse in session.ts marks the elements whose own
  * alignment is a justification decision — justify, start, or the reading edge —
  * and leaves centred and far-edge text unmarked and untouched. The VALUE stays
- * here in CSS rather than going on the elements, so changing the setting is
- * still one stylesheet swap and the marks never need revisiting. */
+ * in the contract rather than going on the elements, so changing the setting is
+ * still one property write and the marks never need revisiting. */
 /* THE ELEMENT IS NAMED AS WELL AS THE MARKER, and it buys one thing: weight.
  *
  * [data-paper-prose] alone is specificity (0,1,0), and a book that writes
@@ -580,20 +1097,62 @@ p[data-paper-prose],
 li[data-paper-prose],
 blockquote[data-paper-prose],
 dd[data-paper-prose] {
-  text-align: ${flush ? 'justify' : 'start'} !important;
+  text-align: var(--paper-align) !important;
   /* Hyphenation rides with the alignment rather than sitting in the rule above,
      because it is half of the same setting and must land on the same elements.
      A centred dedication that asked for hyphens: manual is the book composing,
      and keeps what it asked for — that rule matches the element and this one
      does not reach it. Composition that expressed NO view on hyphenation still
-     inherits the reader's from body below, which is right: the setting is a
+     inherits the reader's from body above, which is right: the setting is a
      default, and an element that said nothing has not been overruled. */
-  -webkit-hyphens: ${breakWords ? 'auto' : 'manual'} !important;
-  hyphens: ${breakWords ? 'auto' : 'manual'} !important;
+  -webkit-hyphens: var(--paper-hyphens) !important;
+  hyphens: var(--paper-hyphens) !important;
 }
 
 p {
-  margin: 0 0 calc(var(--paper-line) * ${para}) !important;
+  margin: 0 0 calc(var(--paper-line) * var(--paper-para)) !important;
+}
+
+/* THE OTHER HALF OF PARAGRAPH SEPARATION — see SEPARATIONS. Print has two
+ * answers and they are alternatives; both is offered because real books set
+ * an indent and a small space together and a reader may want to match one.
+ *
+ * +, WHICH IS THE CONVENTION AND NOT A TRICK. The first paragraph after a
+ * heading takes no indent, because there is nothing above it to be told apart
+ * from — and an adjacent-sibling selector says exactly that and nothing else.
+ * Against the PROSE MARKER on both sides, so a centred dedication following a
+ * centred epigraph is not indented into running text.
+ *
+ * GATED ON THE VALUE ITSELF, Readium's idiom: no property, no rule. Written as
+ * text-indent: 0 !important in the off state it would take a book's own
+ * indent away from a reader who asked for none — Paper overriding in the state
+ * that means "do not override". */
+${when('--paper-indent')}p[data-paper-prose] + p[data-paper-prose] {
+  text-indent: var(--paper-indent) !important;
+}
+
+/* A FLOOR UNDER THE SMALLEST TEXT — F5. The median book's smallest relative
+ * size is 0.70 of the base and the 5th percentile is 0.50, so at the smallest
+ * step that is 11.9px typically and 8.5px in one book in twenty. The reader
+ * chose the step; the book chose the 0.50, against a base that has since moved
+ * under it.
+ *
+ * NOT max(1em, floor) ON *, which is the obvious rule and is wrong: inside
+ * font-size, 1em is the PARENT's size, so h1 { font-size: 2em } would resolve
+ * to the parent's and every heading, note and drop cap in the library would
+ * flatten into the size of the text around it. spacing.test.ts has said so for
+ * a long time and caught that rule the day it was written.
+ *
+ * The element's OWN ratio is measured once and written on it — see
+ * markSmallText, which answers a question CSS cannot ask. Above the floor an
+ * element keeps its ratio exactly; below it, it is raised to the floor and no
+ * further. Only elements SMALLER than the base are marked, so no rule here can
+ * reach a heading at all.
+ *
+ * Off by default: a floor IS an override of the author's proportions, so it is
+ * offered rather than imposed. */
+${when(FLOOR_VAR)}[${SMALL_ATTR}] {
+  font-size: max(calc(var(${SMALL_VAR}) * 1rem), var(${FLOOR_VAR})) !important;
 }
 
 /* An adjacent-sibling paragraph rule was here, zeroing margin-top, and it did
@@ -604,23 +1163,14 @@ p {
  * specificity exactly — not something the injected sheet should decide.
  * (And no backticks in here: this is a template literal, as the rule further
  * down says out loud.) */
-
-h1, h2, h3, h4, h5, h6 {
-  font-weight: 600;
-  line-height: 1.2;
-  /* Round the heading's own space to the grid even though its line box is
-   * not on it — this is the cheapest way to stop a chapter opener pushing all
-   * following text permanently off the baseline. */
-  margin-block: calc(var(--paper-line) * 1.5) var(--paper-line);
-  text-wrap: balance;
-}
-
-a {
-  color: ${c.accent};
-  text-decoration: none;
-  border-bottom: 1px solid color-mix(in srgb, ${c.accent} 30%, transparent);
-}
-
+${house(WHEN_PAPER)}
+/* NOT FIDELITY-GATED, AND THE MEASUREMENT IS WHY. This was listed among the
+ * house rules a book contests, on the reading that a book's img { width }
+ * competes with it. It does not — width and max-width are different properties
+ * and both apply — and the declaration that would compete, the book's own
+ * max-width, is in 7 books of 1,957. There is nothing here to hand back, and it
+ * is a safety rule besides: without it an oversized image overruns the column
+ * whoever the fidelity belongs to. */
 img, svg, video {
   max-width: 100%;
   height: auto;
@@ -631,19 +1181,13 @@ img, svg, video {
    the measure turns a drop cap or a gaiji into a full-width plate mid-sentence.
    The attribute is the answer to a question CSS cannot ask: does this image's
    block carry any words. */
+/* THE CAPS MOVED TO THE OTHER SHEET WITH WI-14.4, and only the caps. What a
+   figure IS — a block, centred in the measure — is not a setting and stays
+   here; how wide and how tall it may be became two, and the plan's tier column
+   puts them among the house defaults. */
 img[data-paper-figure],
 svg[data-paper-figure] {
   display: block;
-  /* MAX-width, never width. A third of the images in the library declare a size
-     under 100px, and width: 95% would inflate every icon to fill the measure.
-     This only ever makes something smaller. */
-  max-width: 95%;
-  /* A page-tall figure otherwise breaks pagination outright — Readium carries
-     the same safeguard, at the same value. Capping is also what makes a tall
-     figure sit alone and READ as centred: there is no vertical centring to be
-     had in a columnizer, because an image in normal flow has no box to be
-     centred in. */
-  max-height: 95vh;
   margin-inline: auto;
 }
 
@@ -658,13 +1202,7 @@ svg[data-paper-figure] {
    not change a white rectangle into anything but a bordered white rectangle.
    Extending the image's own background outward is how a printed book mounts a
    plate on coloured stock: nothing is altered, and it stops looking broken. */
-${darkPage ? MATTE : ''}
-
-blockquote {
-  margin-inline: calc(var(--paper-line) * 0.75);
-  font-style: italic;
-}
-
+${MATTE}
 /* The containing block for the ruler's band and the spoken-word box. foliate
  * centres the measure by giving body its own width and auto side margins, so
  * anchoring to body is what sizes the band to the text column; static body
@@ -696,12 +1234,16 @@ blockquote {
  * decoration — so the transition is shortened there rather than removed. */
 .paper-ruler-band {
   position: absolute;
-  z-index: -1;
-  inset-inline: -10px;
-  background: ${c.band};
-  border-radius: 3px;
+  z-index: -1; /* constant: one layer behind the text, which is not a depth on any scale */
+  inset-inline: -10px; /* constant: clear of the glyphs, so it reads as a band rather than a box */
+  background: var(--paper-band);
+  border-radius: 3px; /* constant: enough that the corner is not hard, which is a threshold and not a size */
   pointer-events: none;
-  transition: top 90ms ease;
+  /* FROM THE MOTION TABLE, not a literal beside it. This was 90ms written out
+     here while MOTION.rulerTrack held the same value and nothing read it — so
+     the token was decoration and changing it did nothing. The token is the
+     value now, and the reduced-motion variant below shortens it. */
+  transition: top ${MOTION.rulerTrack};
 }
 
 /* §08 keeps the ruler's track under reduced motion — it is a reading aid, not
@@ -711,7 +1253,7 @@ blockquote {
  * reads as the band moving rather than teleporting. */
 @media (prefers-reduced-motion: reduce) {
   .paper-ruler-band {
-    transition-duration: 40ms;
+    transition-duration: 40ms; /* constant: still movement rather than a teleport, which is what reduced motion asks for */
   }
 }
 
@@ -722,43 +1264,148 @@ blockquote {
  * a colour the themes do not re-value. */
 .paper-spoken-word {
   position: absolute;
-  z-index: -1;
-  background: ${c.mark};
-  border-radius: 2px;
+  z-index: -1; /* constant: one layer behind the text, as the ruler band is */
+  background: var(--paper-mark);
+  border-radius: 2px; /* constant: enough that the corner is not hard, on a box the size of one word */
   pointer-events: none;
 }
 
 ::selection {
-  background: color-mix(in srgb, ${c.accent} 24%, transparent);
+  background: color-mix(in srgb, var(--paper-accent) 24%, transparent);
+}
+${DARK_INK}
+/* A FIGURE'S CAP GROWS WITH THE TYPE, when the reader asks it to.
+ *
+ * IN THIS TIER, unlike the rest of the figure settings, and the plan's tier
+ * column is right about that: a share of the measure is a house default, and
+ * "make the pictures bigger when I make the text bigger" is a reader saying
+ * something about their eyes. The value is one property either way — see
+ * --paper-figure-width — so what this rule adds is the mark, which is what
+ * lets it beat a book's own inline width on the image. */
+${when('--paper-figure-scale')}img[data-paper-figure],
+${when('--paper-figure-scale')}svg[data-paper-figure] {
+  max-width: var(--paper-figure-width) !important;
 }
 
-/* A <font> TAG IS FURNITURE FROM 1997, AND IT OUTRANKS THE READER.
- *
- * 114 books ship them, 308,899 of them between them — an affected book is
- * saturated, averaging over two thousand. They carry size= (205,416), color=
- * (102,602) and face= (21,085), and every one of those is a PRESENTATIONAL
- * HINT: a declared value on the element, so it beats anything the reader's
- * settings reach it by, which is inheritance.
- *
- * A hint loses to any author rule, so this one line is the whole fix, and it
- * is deliberately UNMARKED so a book with real CSS for these elements still
- * wins. Measured before writing it: 24 books style the font element in CSS,
- * 114 use the tag, and ZERO do both — so nothing in the library is affected
- * by which of the two wins here.
- *
- * <center> IS LEFT ALONE. 1,666 books contain one, almost always exactly one —
- * a title page, a dedication. That is the book composing, and markProse
- * already exists to tell composition from a converter's default. */
-font {
-  font: inherit;
-  color: inherit;
-}
-${darkPage ? DARK_INK : ''}
-/* Footnote and endnote links are targets for the popover, not destinations. */
+/* Footnote and endnote links are targets for the popover, not destinations.
+ * The epub prefix this needs is declared at the head of THIS sheet — see
+ * PROLOGUE, and the note there about what happens when it is not. */
 a[epub|type~="noteref"] {
   vertical-align: super;
-  font-size: 0.75em;
+  font-size: 0.75em; /* constant: three quarters of its own context, the printer own reference size */
   border-bottom: none;
 }
 `.trim()
+
+/**
+ * The two sheets to hand `renderer.setStyles`.
+ *
+ * Static but for the bundled faces, which cannot be: `hostFontFaces()` reads
+ * the host's own `document.styleSheets`, and a book opened before the webfont
+ * CSS has landed would otherwise pin an empty result for the session. It caches
+ * once it finds something, so this is one array join on the common path.
+ *
+ * THE FACES BELONG IN `after` AND ONLY THERE. The last matching `@font-face`
+ * for a family wins, so a copy in `before` could be shadowed by a book that
+ * declares a face of the same name — and the bundled Literata the whole reading
+ * typography is specified around would silently become somebody else's.
+ */
+let cachedSheets: BookSheets | null = null
+let cachedSheetFaces: string | null = null
+
+export function bookSheets(): BookSheets {
+  const faces = hostFontFaces()
+  /* Cached on the faces rather than unconditionally, and handed back by
+     IDENTITY: the caller skips `setStyles` when the tuple has not changed, and
+     setting a style element's textContent to the same string still re-parses
+     the sheet in every open document. That is the cost F4 names. */
+  if (cachedSheets && cachedSheetFaces === faces) return cachedSheets
+  cachedSheetFaces = faces
+  cachedSheets = [
+    BEFORE,
+    [
+      PROLOGUE,
+      '',
+      '/* The bundled faces, carried in from the host — see hostFontFaces(). Without',
+      ' * them the stack below falls through to Georgia in every book. */',
+      faces,
+      AFTER_BODY,
+    ].join('\n'),
+  ] as const
+  return cachedSheets
+}
+
+/**
+ * A NOTE IS NOT SUBORDINATE TO ANYTHING IN A POPOVER.
+ *
+ * Books set notes smaller than the text — measured on What's Our Problem?,
+ * .footnote is 70% and .footnote2 is 75% — and on the page that is right: a
+ * note at the foot of a page is subordinate to the prose it annotates, and the
+ * reduction is how print says so. In a popover there IS no prose beside it.
+ * The note is alone in its own box, the reason for the reduction is absent, and
+ * all it costs there is legibility.
+ *
+ * BY STRUCTURE, NOT BY CLASS NAME. There is no generic selector for "the rule
+ * that shrinks notes" — every book spells it differently. What is the same in
+ * every book is the SHAPE of what the popover holds: FootnoteHandler extracts
+ * the note into the document body, so the note's own blocks are body's direct
+ * children and nothing else is. Resetting those to the base leaves everything
+ * NESTED — a citation at 0.9em, an emphasised run — proportional, which is the
+ * author's typography and stays.
+ *
+ * MARKED, BECAUSE IT IS THE READER'S AND NOT A DEFAULT. `body > *` is (0,0,1)
+ * and a book's own `.footnote { font-size: 70% }` is (0,1,0) — higher, so
+ * unmarked this loses to the very rule it exists to answer and the 11.2px note
+ * comes back on any book that names its notes by class. WI-14.4 puts the Note
+ * size setting in the `after` tier, and `after` means marked; it shipped
+ * unmarked and an audit caught it.
+ */
+const NOTE_CSS = `
+${when('--paper-note-prose')}body > * { font-size: 1rem !important; }
+`
+
+/**
+ * The page's two sheets, with the note's one extra rule in the appended tier.
+ *
+ * Cached against the tuple it was built from, so it too is stable by identity
+ * — the caller skips on identity, and a fresh array every call would defeat
+ * it silently rather than loudly.
+ */
+let cachedNoteSheets: BookSheets | null = null
+let cachedNoteSheetsFrom: unknown = null
+
+export function noteSheets(): BookSheets {
+  const sheets = bookSheets()
+  if (!cachedNoteSheets || cachedNoteSheetsFrom !== sheets) {
+    cachedNoteSheetsFrom = sheets
+    cachedNoteSheets = [sheets[0], sheets[1] + NOTE_CSS] as const
+  }
+  return cachedNoteSheets
+}
+
+/**
+ * `var(--paper-*)` substituted from a contract, for a test that wants to read
+ * the value a declaration resolves to.
+ *
+ * FOR TESTS AND DIAGNOSTICS. The app never does this — the whole point of the
+ * split is that the sheet is not rebuilt — but an assertion about what a reader
+ * SEES is an assertion about the resolved value, and reading it any other way
+ * would be asserting the contract against itself.
+ */
+export function resolveBookVars(css: string, vars: BookVars): string {
+  return css.replace(/var\((--paper-[\w-]+)\)/g, (whole, name: string) => vars[name] ?? whole)
+}
+
+/**
+ * Both sheets, resolved, as one string — what the document effectively sees.
+ *
+ * FOR TESTS AND DIAGNOSTICS, and it is not what the app builds. The two
+ * attribute-presence switches cannot be represented here, because they read the
+ * root's inline `style`: a rule gated on `--paper-dark-page` appears in this
+ * string whatever the theme, and whether it APPLIES is decided by `bookVars`.
+ * A test about a switch asserts the variable, not this.
+ */
+export function resolvedBookCss(options: BookCssOptions): string {
+  const [before, after] = bookSheets()
+  return resolveBookVars(`${before}\n${after}`, bookVars(options))
 }

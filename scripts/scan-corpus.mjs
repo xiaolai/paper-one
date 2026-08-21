@@ -46,8 +46,183 @@ const DEFAULT_LIB = join(homedir(), 'Library/Application Support/one.paper.reade
 /** A rule block, roughly: everything up to `{`, then its declarations. */
 const RULE = /([^{}]*)\{([^{}]*)\}/g
 
-const declaration = (body, property) =>
-  new RegExp(`(^|[;{\\s])${property}\\s*:([^;}]*)`, 'i').exec(body)?.[2]?.trim()
+const declaration = (body, property) => declarations(body, property)[0]
+
+/**
+ * EVERY declaration of a property in a rule block, in source order.
+ *
+ * A block may declare one property more than once — the fallback idiom
+ * `font-size: 12px; font-size: 1rem` is exactly that, and so is a stylesheet
+ * that appends an override to a rule it already wrote. Reading only the first
+ * misses the one that actually applies, and misses an `!important` written on
+ * the second: `h1 { font-weight: 300; font-weight: 400 !important }` was read
+ * as unmarked and counted as a rule Paper takes.
+ */
+const declarations = (body, property) =>
+  [...body.matchAll(new RegExp(`(?:^|[;{\\s])${property}\\s*:([^;}]*)`, 'gi'))]
+    .map((m) => m[1]?.trim())
+    .filter((v) => v !== undefined && v !== '')
+
+/**
+ * The rightmost compound of a selector — the element the rule actually styles.
+ *
+ * `.chapter > h1` styles an `h1`; `h1 .small` does not. Paper's house rules are
+ * bare element selectors, so "does this book contest Paper's `h1` rule" is a
+ * question about the SUBJECT of the book's selector and about nothing to its
+ * left. Reading the whole string instead counts `h1 .small { font-weight }` as
+ * a heading rule, which it is not.
+ */
+export function subject(selector) {
+  const parts = selector.trim().split(/[\s>+~]+/).filter(Boolean)
+  return parts[parts.length - 1] ?? ''
+}
+
+/**
+ * A selector list, split on the commas that actually separate selectors.
+ *
+ * NOT `String.split(',')`. A comma inside `:is(h1, h2)`, `:not(a, button)` or
+ * an attribute value like `[title="a,b"]` separates nothing, and splitting on
+ * it produces two fragments that are each nonsense — one of which can still
+ * match a pattern here and be counted. Depth-aware, which is all that is needed
+ * for CSS: brackets and parentheses nest, quotes do not.
+ */
+export function selectorList(text) {
+  const out = []
+  let depth = 0
+  let quote = ''
+  let at = 0
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]
+    if (quote !== '') {
+      if (c === quote && text[i - 1] !== '\\') quote = ''
+      continue
+    }
+    if (c === '"' || c === "'") quote = c
+    else if (c === '(' || c === '[') depth += 1
+    else if (c === ')' || c === ']') depth -= 1
+    else if (c === ',' && depth === 0) {
+      out.push(text.slice(at, i))
+      at = i + 1
+    }
+  }
+  out.push(text.slice(at))
+  return out
+}
+
+/**
+ * The type selector leading a compound, or `''` when it has none.
+ *
+ * `h1.title` styles an `h1`; `.title` may style anything and this scanner will
+ * not guess. That makes every count below a LOWER bound in one direction as
+ * well as an upper bound in the other — a book whose whole typography is
+ * written against classes contests Paper's rules invisibly here. Both bounds
+ * are printed with the table rather than left for a later reader to discover.
+ */
+export function elementOf(compound) {
+  return /^[a-zA-Z][-\w]*/.exec(compound)?.[0] ?? ''
+}
+
+/**
+ * A selector's specificity as `[ids, classes, types]`, near enough to decide
+ * one question: is it above a bare element selector?
+ *
+ * THE WHOLE POINT OF COMPUTING IT. Paper's house rules are `(0,0,1)` — `h1`,
+ * `a`, `blockquote` — and they sit in the appended slot, so they beat any book
+ * declaration at `(0,0,1)` or below on source order alone and lose to anything
+ * above it. A count of books that declare `font-weight` on a heading is
+ * therefore an UPPER BOUND on the books Paper silently overrides, and the plan
+ * that first drew that table said so without being able to narrow it. This
+ * narrows it: `.chapter h1 { font-weight: 300 }` is `(0,1,1)` and the book
+ * still wins.
+ *
+ * APPROXIMATE IN TWO KNOWN WAYS, both stated rather than hidden. `:not(.x)`
+ * is counted as one class, which is what it is, but `:not(#x)` is counted as
+ * one class too. And a selector written across several lines inside one
+ * comma-separated list is read whole here, unlike the older detectors above,
+ * which read the last line only.
+ */
+export function specificity(selector) {
+  /* `:where()` CONTRIBUTES ZERO, by definition, and Paper's own sheet leans on
+     that — every gate in `bookCss.ts` is written `:where(:root[style*=…])`
+     precisely so it adds nothing. A scan that counted it would rank Paper's own
+     rules above the books they are careful not to outrank. */
+  const flat = stripWhere(selector)
+    .replace(/\s*[>+~]\s*/g, ' ')
+    .trim()
+  const ids = (flat.match(/#[-\w]+/g) ?? []).length
+  const classes = (flat.match(/\.[-\w]+|\[[^\]]*\]|(?<!:):[-\w]+(?:\([^)]*\))?/g) ?? []).length
+  const elements = (flat.match(/(?:^|[\s(])[a-zA-Z][-\w]*/g) ?? []).length
+  const pseudoElements = (flat.match(/::[-\w]+/g) ?? []).length
+  return [ids, classes, elements + pseudoElements]
+}
+
+/**
+ * `:where(…)` removed, arguments and all, however deeply they nest.
+ *
+ * NOT `/:where\([^)]*\)/`. That stops at the FIRST `)`, so
+ * `:where(:is(.a), #x) h1` loses only `:where(:is(.a)` and leaves `, #x)` —
+ * which then counts as an id and ranks the selector above a bare element rule.
+ * Paper's own sheet is written entirely in `:where()` gates, so getting this
+ * wrong ranks Paper's rules above the books they are careful not to outrank.
+ */
+export function stripWhere(selector) {
+  let out = ''
+  for (let i = 0; i < selector.length; i++) {
+    if (!/^:where\(/i.test(selector.slice(i))) {
+      out += selector[i]
+      continue
+    }
+    let depth = 0
+    let j = i + ':where'.length
+    for (; j < selector.length; j++) {
+      if (selector[j] === '(') depth += 1
+      else if (selector[j] === ')') {
+        depth -= 1
+        if (depth === 0) break
+      }
+    }
+    out += ' '
+    i = j
+  }
+  return out
+}
+
+/** True when `selector` outranks a bare element selector such as `h1`. */
+export function outranksElement(selector) {
+  const [ids, classes, types] = specificity(selector)
+  return ids > 0 || classes > 0 || types > 1
+}
+
+/**
+ * The house rules `bookCss.ts` injects that a book's own stylesheet contests,
+ * and the declaration that contests each.
+ *
+ * PAPER IS ALREADY A UNIFICATION SYSTEM BY ACCIDENT, and this table is how
+ * that claim is re-measured rather than retold. Its one sheet is injected into
+ * the slot foliate appends AFTER the book's own, so every unmarked house rule
+ * in it outranks the book's equal-specificity declaration on source order
+ * alone. Nobody chose that; it is a consequence of having one slot.
+ *
+ * `img { width }` IS NOT IN THIS TABLE, and its absence is the correction that
+ * bought the table its name. It was listed as competing with Paper's
+ * `max-width: 100%` — but `width` and `max-width` are DIFFERENT PROPERTIES and
+ * do not contest each other at all: a book's `width: 400px` and Paper's
+ * `max-width: 100%` both apply, and the image comes out at 400px unless the
+ * column is narrower. The declaration that genuinely contests Paper's rule is
+ * the book's own `max-width`, which is what is counted here.
+ */
+export const COMPETING = [
+  { key: 'aDecoration', label: 'a { text-decoration }', element: /^a$/i, properties: ['text-decoration', 'text-decoration-line'] },
+  { key: 'headingMargin', label: 'h1-h6 { margin }', element: /^h[1-6]$/i, properties: ['margin', 'margin-block', 'margin-block-start', 'margin-block-end', 'margin-top', 'margin-bottom'] },
+  { key: 'headingWeight', label: 'h1-h6 { font-weight }', element: /^h[1-6]$/i, properties: ['font-weight'] },
+  { key: 'quoteMargin', label: 'blockquote { margin }', element: /^blockquote$/i, properties: ['margin', 'margin-inline', 'margin-inline-start', 'margin-inline-end', 'margin-left', 'margin-right'] },
+  { key: 'aColour', label: 'a { color }', element: /^a$/i, properties: ['color'] },
+  { key: 'mediaMaxWidth', label: 'img/svg/video { max-width }', element: /^(img|svg|video)$/i, properties: ['max-width'] },
+  { key: 'bodyAlign', label: 'body { text-align }', element: /^body$/i, properties: ['text-align'] },
+  { key: 'headingLineHeight', label: 'h1-h6 { line-height }', element: /^h[1-6]$/i, properties: ['line-height'] },
+  { key: 'bodyFamily', label: 'body { font-family }', element: /^body$/i, properties: ['font-family'] },
+  { key: 'quoteStyle', label: 'blockquote { font-style }', element: /^blockquote$/i, properties: ['font-style'] },
+]
 
 /**
  * Han, kana and hangul.
@@ -80,6 +255,15 @@ export function verifyDetectors() {
   const probe = analyseCss('p { font-size: 1.5rem } h1 { font-size: 1em }')
   if (!probe.usesRem) throw new Error('CSS analysis does not see rem')
   if (probe.headingSizes.length !== 1) throw new Error('CSS analysis does not see headings')
+  /* The competing table gets the same treatment as the CJK detector, and for
+     the same reason: a row reading 0 books is indistinguishable from a row
+     whose selector pattern never matched anything. One sample it must find,
+     one it must rank above a bare element rule, one it must leave alone. */
+  const contest = analyseCss('h1 { font-weight: 300 } .chapter h2 { line-height: 2 } h3 em { color: red }')
+  if (!contest.competing.headingWeight) throw new Error('competing scan misses a bare heading rule')
+  if (contest.competingAbove.headingWeight) throw new Error('competing scan ranks a bare element rule above one')
+  if (!contest.competingAbove.headingLineHeight) throw new Error('competing scan misses a class-qualified rule')
+  if (contest.competing.aColour) throw new Error('competing scan reads a descendant of a heading as a link rule')
   return true
 }
 
@@ -105,9 +289,34 @@ export function analyseCss(css) {
     absoluteDeclarations: 0,
     headingSizes: [],
     proseRemSizes: [],
+    /** Per `COMPETING` key: does this book contest the house rule at all, and
+     *  does it do so from a selector Paper's bare element rule cannot beat. */
+    competing: {},
+    competingAbove: {},
   }
   for (const [, selectorRaw, body = ''] of source.matchAll(RULE)) {
     const selector = selectorRaw.split('\n').pop()?.trim() ?? ''
+    /* THE WHOLE SELECTOR, not its last line — see `specificity`. The older
+       detectors below read `selector`, and changing them would silently move
+       measurements this plan already recorded against the numbers they gave. */
+    for (const part of selectorList(selectorRaw)) {
+      const compound = subject(part)
+      const element = elementOf(compound)
+      if (!element) continue
+      for (const rule of COMPETING) {
+        if (!rule.element.test(element)) continue
+        const declared = rule.properties.flatMap((property) => declarations(body, property))
+        if (declared.length === 0) continue
+        out.competing[rule.key] = true
+        /* `!important` BEATS EVERYTHING PAPER HAS, whatever the specificity and
+           whatever the source order — so a book that marks its own declaration
+           wins outright, and counting it as one Paper takes was simply wrong.
+           Paper's house rules are unmarked by construction: that is what the
+           `before` tier means, and `bookTiers.test.ts` holds it. */
+        const important = declared.some((value) => /!important/i.test(value))
+        if (important || outranksElement(part)) out.competingAbove[rule.key] = true
+      }
+    }
     const size = declaration(body, 'font-size')
     if (size) {
       const value = size.replace(/\s*!important/i, '').trim()
@@ -164,12 +373,45 @@ export function cjkDensity(text) {
  * single pattern, where 11 really does mean "none". The test beside this one
  * fails if it goes back.
  */
+/**
+ * `unzip -p` exit codes this scan actually distinguishes.
+ *
+ * 0 is success and 11 is "no matching files" — a book with no stylesheet, which
+ * is a FINDING and the trap the header records. Everything else is the tool
+ * failing: a corrupt archive (9), a missing binary, a signal, a `maxBuffer`
+ * overrun. Folded together, all of those read as "this book has no CSS", and a
+ * shelf of corrupt books would report as a shelf of books Paper styles
+ * entirely — a silence dressed as a measurement, which is the one failure mode
+ * this file exists to refuse.
+ */
+const NO_MATCHING_FILES = 11
+
+/**
+ * What `readMembers` returns for an archive it could not read at all.
+ *
+ * A SENTINEL, not `null`, because `null` already means something precise here —
+ * "this archive holds no member matching the pattern", which for CSS is a book
+ * whose whole typography is Paper's sheet and is one of this file's headline
+ * findings. A corrupt EPUB is a different thing and must not be counted as it.
+ */
+export const UNREADABLE = Symbol('unreadable')
+
 function readMembers(epub, patterns, encoding) {
   const run = spawnSync('unzip', ['-p', epub, ...patterns], {
     encoding,
     maxBuffer: 64 * 1024 * 1024,
     stdio: ['ignore', 'pipe', 'ignore'],
   })
+  /* A MISSING BINARY IS NOT A FINDING ABOUT THE SHELF, and it would otherwise
+     make every book on it report as having no CSS — a whole library's worth of
+     silence dressed as a measurement. It stops the run. */
+  if (run.error) throw new Error(`scan-corpus: cannot run unzip on ${epub}: ${run.error.message}`)
+  /* A CORRUPT BOOK IS A THIRD OUTCOME, and this is the correction. It was
+     folded into "no CSS" — indistinguishable from a book Paper styles entirely
+     — and the first run after the guard landed found one on a real shelf of
+     1,960. It does not stop the scan either: one damaged archive must not cost
+     the other 1,959 books their measurement. It is counted and printed. */
+  if (run.status !== 0 && run.status !== NO_MATCHING_FILES) return UNREADABLE
   const out = run.stdout
   return out ? out : null
 }
@@ -183,11 +425,17 @@ export function scanLibrary(lib, { limit = Infinity, cjkSampleBytes = 300_000 } 
     found: dirs.length,
     scanned: 0,
     withoutCss: 0,
+    /** Archives `unzip` could not read — see `UNREADABLE`. */
+    unreadable: 0,
     withCjk: 0,
     books: {},
     declarations: { rem: 0, absolute: 0 },
     headingSizes: new Map(),
     proseRemSizes: [],
+    /** Per `COMPETING` key: books contesting the house rule, and the subset
+     *  contesting it from above a bare element selector. */
+    competing: {},
+    competingAbove: {},
   }
   const count = (key) => {
     totals.books[key] = (totals.books[key] ?? 0) + 1
@@ -198,10 +446,18 @@ export function scanLibrary(lib, { limit = Infinity, cjkSampleBytes = 300_000 } 
     totals.scanned += 1
 
     const text = readMembers(epub, ['*.xhtml', '*.html', '*.htm'], 'utf8')
+    if (text === UNREADABLE) {
+      totals.unreadable += 1
+      continue
+    }
     if (text && cjkDensity(text.slice(0, cjkSampleBytes)) > 50) totals.withCjk += 1
 
     /* latin1: a CSS file that will not decode is still a CSS file. */
     const css = readMembers(epub, ['*.css'], 'latin1')
+    if (css === UNREADABLE) {
+      totals.unreadable += 1
+      continue
+    }
     if (css === null) {
       totals.withoutCss += 1
       continue
@@ -217,6 +473,14 @@ export function scanLibrary(lib, { limit = Infinity, cjkSampleBytes = 300_000 } 
     if (seen.sizesMediaByFont) count('mediaFontUnit')
     totals.declarations.rem += seen.remDeclarations
     totals.declarations.absolute += seen.absoluteDeclarations
+    for (const rule of COMPETING) {
+      if (seen.competing[rule.key]) {
+        totals.competing[rule.key] = (totals.competing[rule.key] ?? 0) + 1
+      }
+      if (seen.competingAbove[rule.key]) {
+        totals.competingAbove[rule.key] = (totals.competingAbove[rule.key] ?? 0) + 1
+      }
+    }
     for (const v of seen.headingSizes) {
       totals.headingSizes.set(v, (totals.headingSizes.get(v) ?? 0) + 1)
     }
@@ -227,7 +491,7 @@ export function scanLibrary(lib, { limit = Infinity, cjkSampleBytes = 300_000 } 
 
 /** The report, as text a person reads or JSON a person diffs. */
 export function report(totals, { json = false, at } = {}) {
-  const withCss = totals.scanned - totals.withoutCss
+  const withCss = totals.scanned - totals.withoutCss - totals.unreadable
   const top = [...totals.headingSizes.entries()].sort((a, b) => b[1] - a[1]).slice(0, 14)
   if (json) {
     return JSON.stringify(
@@ -245,6 +509,10 @@ export function report(totals, { json = false, at } = {}) {
     ``,
     `${totals.scanned} books scanned of ${totals.found} found.`,
     `${withCss} ship CSS; ${totals.withoutCss} ship none and render on Paper's sheet alone.`,
+    /* PRINTED EVEN AT ZERO, because the number's job is to be looked at. Folded
+       into "no CSS" — which is where these used to go — a shelf of damaged
+       archives reads as a shelf Paper styles entirely. */
+    `${totals.unreadable} could not be read at all, and are counted in neither.`,
     `${totals.withCjk} carry substantial CJK text.`,
     ``,
     `                              books        %  declarations`,
@@ -259,6 +527,40 @@ export function report(totals, { json = false, at } = {}) {
     ``,
     `heading font-size, most declared values:`,
     ...top.map(([value, n]) => `  ${String(n).padStart(6)}  ${value}`),
+    ``,
+    /* THE TABLE'S NAME IS ITS MOST IMPORTANT COLUMN. An earlier version of it
+       was headed "Paper silently wins", which is a claim about what RENDERS —
+       and this instrument reads declarations, which is a different thing.
+       Phase 13 was deleted for exactly that substitution. What is certain is
+       the MECHANISM and its scale; the `above` column is how much of the
+       upper bound the scan can honestly take back. */
+    `books containing potentially competing declarations:`,
+    ``,
+    `  Paper's house rule is contested by      books        %   book wins >=1     %`,
+    ...COMPETING.map((rule) => {
+      const all = totals.competing[rule.key] ?? 0
+      const above = totals.competingAbove[rule.key] ?? 0
+      return `  ${rule.label.padEnd(36)} ${String(all).padStart(5)}  ${pct(all).padStart(7)}  ${String(above).padStart(11)}  ${pct(above).padStart(6)}`
+    }),
+    ``,
+    `  "book wins >=1" counts books declaring the property at least once in a`,
+    `  way Paper cannot beat: from a selector that outranks its bare element`,
+    `  rule — a class, an id, a second element — or with !important, which beats`,
+    `  everything Paper has, since its house rules are unmarked by construction.`,
+    ``,
+    `  READ THE TWO COLUMNS AS BOUNDS, NEVER SUBTRACT THEM FOR A COUNT. The`,
+    `  first is the upper bound on books Paper silently overrides. The`,
+    `  difference is a NARROWER bound, not a count: books whose every competing`,
+    `  declaration is bare and unmarked, so Paper takes each one it MATCHES on`,
+    `  source order. A book in the second column may still lose its others, and`,
+    `  a bare rule that matches no element in its own book is overridden in the`,
+    `  cascade and changes nothing on the page.`,
+    ``,
+    `  BOUNDED IN BOTH DIRECTIONS, and neither bound is tight. It over-counts`,
+    `  because a declaration is not a rendered pixel: a rule may match nothing`,
+    `  in the book that ships it. It under-counts because a book whose whole`,
+    `  typography is written against classes — .chapter-title rather than h1 —`,
+    `  contests the same house rules invisibly here.`,
   ]
   const overGrid = totals.proseRemSizes.filter((v) => v >= 1.4)
   lines.push(``, `prose sized in rem at >= 1.4rem: ${overGrid.length} declarations`)
@@ -268,9 +570,35 @@ export function report(totals, { json = false, at } = {}) {
 /* The CLI. Nothing above this line reads a flag or prints. */
 if (process.argv[1] && import.meta.url.endsWith(process.argv[1].split('/').pop() ?? '')) {
   const argv = process.argv.slice(2)
+  /**
+   * A flag's value, and a flag written without one is an ERROR.
+   *
+   * `--limit` with nothing after it read as `undefined`, became `NaN` through
+   * `Number`, and `slice(0, NaN)` is the empty array — so the run scanned zero
+   * books, printed a clean report of zero, and exited 0. A silent zero is the
+   * exact failure `verifyDetectors` exists to prevent, arriving through the
+   * argument parser instead of through a detector.
+   */
   const flag = (name, fallback) => {
     const i = argv.indexOf(`--${name}`)
-    return i >= 0 ? argv[i + 1] : fallback
+    if (i < 0) return fallback
+    const value = argv[i + 1]
+    if (value === undefined || value.startsWith('--')) {
+      console.error(`scan-corpus: --${name} needs a value`)
+      process.exit(2)
+    }
+    return value
+  }
+  /** A non-negative integer, or the whole shelf. See `flag` for the zero. */
+  const limitFlag = () => {
+    const raw = flag('limit', null)
+    if (raw === null) return Infinity
+    const n = Number(raw)
+    if (!Number.isInteger(n) || n < 0) {
+      console.error(`scan-corpus: --limit must be a non-negative integer, not ${JSON.stringify(raw)}`)
+      process.exit(2)
+    }
+    return n
   }
   const lib = flag('lib', process.env.PAPER_LIBRARY ?? DEFAULT_LIB)
   if (!existsSync(lib)) {
@@ -278,7 +606,7 @@ if (process.argv[1] && import.meta.url.endsWith(process.argv[1].split('/').pop()
     process.exit(2)
   }
   verifyDetectors()
-  const totals = scanLibrary(lib, { limit: Number(flag('limit', Infinity)) })
+  const totals = scanLibrary(lib, { limit: limitFlag() })
   console.log(
     report(totals, {
       json: argv.includes('--json'),

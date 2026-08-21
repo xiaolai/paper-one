@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 import type { Renderer } from 'foliate-js/view.js'
 import { READING_STEPS, pageMargins, proseBleed, proseGrid } from '../../core/metrics'
 import { applyLayout } from './FoliateView'
+import { DEFAULT_READING_STYLE } from '../../core/metrics'
 
 /**
  * The page turn slides, and there is no setting for it.
@@ -57,6 +58,10 @@ const settings = (animated: boolean) => ({
   align: 'justified' as const,
   brightness: 1,
   contrast: 0,
+  /* WI-14.4's fifteen, at the values that render what Paper rendered before
+     they existed. This suite is about layout ATTRIBUTES, which none of them
+     touch — but `Settings` is one type and the compiler is right to insist. */
+  style: DEFAULT_READING_STYLE,
   animated,
   paginated: true,
 })
