@@ -34,8 +34,14 @@ describe('matteFor', () => {
     expect(matteFor(four(px(255, 255, 255, 128)))).toBeNull()
   })
 
-  it('accepts near-opaque, because a JPEG re-encode lands at 254', () => {
-    expect(matteFor(four(px(255, 255, 255, 252)))).not.toBeNull()
+  it('refuses anything less than fully opaque', () => {
+    /* The first version allowed 250 and justified it as "a JPEG re-encode can
+       land at 254". JPEG HAS NO ALPHA CHANNEL and decodes to 255 everywhere, so
+       the rationale was simply false — and what the threshold actually did was
+       accept a slightly transparent PNG edge and paint a solid colour behind
+       it, which is the one case this exists to refuse. */
+    expect(matteFor(four(px(255, 255, 255, 254)))).toBeNull()
+    expect(matteFor(four(px(255, 255, 255, 255)))).not.toBeNull()
   })
 
   it('refuses corners that disagree, which is a photograph', () => {
@@ -43,13 +49,30 @@ describe('matteFor', () => {
     expect(matteFor(corners)).toBeNull()
   })
 
-  it('refuses a gradient, while forgiving compression noise', () => {
-    /* Eight levels of slack: enough for JPEG ringing at an edge, not enough for
-       a background that is actually changing. */
-    expect(matteFor([px(255, 255, 255), px(250, 250, 250), px(253, 253, 253), px(255, 255, 255)]))
+  it('forgives compression noise and refuses a gradient', () => {
+    expect(matteFor([px(255, 255, 255), px(252, 252, 252), px(253, 253, 253), px(255, 255, 255)]))
       .not.toBeNull()
     expect(matteFor([px(255, 255, 255), px(230, 230, 230), px(255, 255, 255), px(255, 255, 255)]))
       .toBeNull()
+  })
+
+  it('measures every corner against the centre, not against the first one', () => {
+    /* Compared with corner zero, two corners could sit either side of it and be
+       twice the tolerance apart from EACH OTHER and still pass — and corner
+       zero, chosen only for being first, then became the matte colour, so one
+       compression artefact set the colour of the whole plate. */
+    /* 92 and 108 are each exactly 8 from 100, so the old first-corner rule with
+       its 8-level slack accepted both — while they are SIXTEEN apart from one
+       another, which is a gradient, not noise. Against the mean of 100 with 6
+       levels, the outliers fail. Written first as `262 - 12`, which is 250 and
+       therefore identical to its neighbours: arithmetic that tested nothing. */
+    const spread = [px(100, 100, 100), px(92, 100, 100), px(108, 100, 100), px(100, 100, 100)]
+    expect(matteFor(spread)).toBeNull()
+  })
+
+  it('draws the mean, so no single corner decides the colour', () => {
+    const noisy = [px(200, 200, 200), px(204, 204, 204), px(202, 202, 202), px(202, 202, 202)]
+    expect(matteFor(noisy)).toEqual({ css: 'rgb(202 202 202)' })
   })
 
   it('refuses a reading it did not get four corners for', () => {

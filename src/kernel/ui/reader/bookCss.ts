@@ -120,15 +120,46 @@ const DARK_INK = `
  * STILL MISSING: an image with a baked-in white background is untouched by any
  * of this — background-color does not reach pixels. Readium darkens and
  * inverts behind their own settings; that is the image work, not this. */
-:root *:not(a):not(.paper-ruler-band):not(.paper-spoken-word):not([data-paper-matte]) {
+:root *:not(a) {
   color: inherit !important;
-  background-color: transparent !important;
   border-color: currentColor !important;
+}
+
+/* THE BACKGROUND EXEMPTIONS ARE THEIR OWN RULE, because they are exemptions
+   from clearing a background and nothing else. Folded into the rule above, the
+   exclusion also took color and border-color away from a matted figure —
+   which is not what "keep your own background" means. */
+:root *:not(a):not(.paper-ruler-band):not(.paper-spoken-word):not([data-paper-matte]) {
+  background-color: transparent !important;
 }
 
 :root svg text {
   fill: currentColor !important;
   stroke: none !important;
+}
+`
+
+/**
+ * The plate itself. See matteFigures for how the colour is chosen.
+ *
+ * ONLY ON A DARK PAGE. Written unconditionally first, while every word of its
+ * rationale was about dark pages — so Paper, Slate, Sepia and Sage all gained
+ * padding and a radius around every flat-backed figure, for a problem none of
+ * them has. A 16px ornament took roughly 25px of padding at the default line
+ * and more than doubled the box it occupies, which quietly undid the
+ * "max-width, never width" promise the rule above makes about small images.
+ *
+ * MARKED, because it is Paper painting, not a default: unmarked it loses to any
+ * publisher background, and losing means the slab comes back.
+ *
+ * The padding is capped in em as well as in the line, so it stays in
+ * proportion to a small image instead of swallowing it.
+ */
+const MATTE = `
+img[data-paper-matte] {
+  background: var(--paper-matte) !important;
+  padding: min(calc(var(--paper-line) * 0.375), 0.5em);
+  border-radius: calc(var(--paper-line) * 0.125);
 }
 `
 
@@ -292,9 +323,9 @@ export interface BookCssOptions {
   /**
    * How a line fills its measure, and whether words may break to help it.
    *
-   * REPLACES a `justify` boolean and a `hyphenate` boolean — two settings for
+   * REPLACES a justify boolean and a hyphenate boolean — two settings for
    * one decision, with four combinations of which only three are worth having.
-   * `ALIGNS` lists those three, so the reader cycles decisions rather than
+   * ALIGNS lists those three, so the reader cycles decisions rather than
    * assembling one from parts:
    *
    *   justified             both edges flush, long words broken to fit
@@ -307,14 +338,14 @@ export interface BookCssOptions {
    * See the note where this is used for the rest of the measurements.
    */
   readonly align: Align
-  /** How open the type is set — see `SPACING`. */
+  /** How open the type is set — see SPACING. */
   readonly spacing: SpacingIndices
   /**
    * The reader's brightness and contrast, RESOLVED rather than as indices.
    *
    * The book is an iframe with its own document, so the custom properties the
    * app writes for these do not reach it — it has to be told. See
-   * `bookColours`.
+   * bookColours.
    */
   readonly brightness: number
   readonly contrast: number
@@ -332,7 +363,7 @@ export function bookCss({
   const step = readingStep(stepIdx)
   /* THE THREE STATES, RESOLVED INTO THE TWO PROPERTIES THEY MEAN. Alignment and
      hyphenation are separate declarations but not separate settings — see
-     `ALIGNS`, which lists the three combinations worth offering and leaves the
+     ALIGNS, which lists the three combinations worth offering and leaves the
      fourth unreachable. */
   const flush = align !== 'ragged'
   const breakWords = align === 'justified'
@@ -340,7 +371,7 @@ export function bookCss({
   const face = faceById(typeface)
   const stack = face.stack
   /* THE SIZE THE READER ASKED FOR, CORRECTED FOR THIS FACE. Two faces at 21px
-   * do not read the same size — see `typefaces.ts` — so a reader who switched
+   * do not read the same size — see typefaces.ts — so a reader who switched
    * face found their book had silently changed size and raised the step to
    * compensate, which changed their measure as well. Rounded, because a
    * fractional font-size lands text on half pixels. */
@@ -354,9 +385,9 @@ export function bookCss({
   const word = spacingAt('word', spacing.word)
   const para = spacingAt('paragraph', spacing.paragraph)
   /* IS THE PAGE DARK? Asked of the colour rather than of the theme's NAME.
-     `theme === 'night'` was the test, in one place, and the moment a second
+     theme === 'night' was the test, in one place, and the moment a second
      place needed the same answer it became a fact stored twice — the next dark
-     theme would have set `color-scheme` correctly and left every book's own
+     theme would have set color-scheme correctly and left every book's own
      black text unforced, which is a defect nothing would report. */
   const darkPage = isDark(c.surface)
 
@@ -627,11 +658,7 @@ svg[data-paper-figure] {
    not change a white rectangle into anything but a bordered white rectangle.
    Extending the image's own background outward is how a printed book mounts a
    plate on coloured stock: nothing is altered, and it stops looking broken. */
-img[data-paper-matte] {
-  background: var(--paper-matte);
-  padding: calc(var(--paper-line) * 0.375);
-  border-radius: calc(var(--paper-line) * 0.125);
-}
+${darkPage ? MATTE : ''}
 
 blockquote {
   margin-inline: calc(var(--paper-line) * 0.75);

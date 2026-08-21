@@ -32,12 +32,28 @@ const settings = (theme: (typeof THEME_IDS)[number]) => ({
 const sheet = (theme: (typeof THEME_IDS)[number]) =>
   bookCss(settings(theme)).replace(/\/\*[\s\S]*?\*\//g, '')
 
-/** The rule that takes the book's colours over, or null when it is absent. */
-function inkRule(css: string): string | null {
-  const start = css.indexOf('\n:root *')
-  if (start < 0) return null
-  return css.slice(start, css.indexOf('\n}', start))
+/**
+ * A rule beginning with `:root *`, by index, or null.
+ *
+ * THERE ARE TWO OF THEM AND THAT IS DELIBERATE. The first forces colour and
+ * border on every descendant; the second clears backgrounds and carries the
+ * exemptions, because an element that keeps its own background — a matted
+ * figure, the ruler band — should still take the reader's ink. Folded into one
+ * rule, the exemption took `color` away too.
+ */
+function rootRule(css: string, nth = 0): string | null {
+  let at = -1
+  for (let i = 0; i <= nth; i += 1) {
+    at = css.indexOf('\n:root *', at + 1)
+    if (at < 0) return null
+  }
+  return css.slice(at, css.indexOf('\n}', at))
 }
+
+/** The rule that takes the book's ink over. */
+const inkRule = (css: string) => rootRule(css, 0)
+/** The rule that clears the book's backgrounds, and its exemptions. */
+const backgroundRule = (css: string) => rootRule(css, 1)
 
 describe('isDark', () => {
   it('knows the library from its page colour, not from a theme name', () => {
@@ -92,7 +108,7 @@ describe('the theme wins on a dark page', () => {
   it('clears the book’s backgrounds, which the defect’s own name omits', () => {
     /* A callout with `background: #fff` is a white slab on a dark page however
        right its text colour is. */
-    expect(inkRule(sheet('night'))).toContain('background-color: transparent !important')
+    expect(backgroundRule(sheet('night'))).toContain('background-color: transparent !important')
   })
 
   it('carries borders to the current colour', () => {
@@ -112,13 +128,16 @@ describe('the theme wins on a dark page', () => {
        which is the sole place a matte does anything. The feature was inert
        where it mattered and intact where it did not, which is the shape of a
        defect nobody notices for a long time. */
-    expect(inkRule(sheet('night'))).toContain(':not([data-paper-matte])')
+    expect(backgroundRule(sheet('night'))).toContain(':not([data-paper-matte])')
+    /* And ONLY from the background rule: a matted figure still takes the
+       reader's ink and border, which the first version took away with it. */
+    expect(inkRule(sheet('night'))).not.toContain(':not([data-paper-matte])')
   })
 
   it("spares Paper's own painted elements", () => {
     /* The ruler band and the spoken word ARE backgrounds. Swept up by a blanket
        transparent, the reading ruler stops existing in night mode. */
-    const rule = inkRule(sheet('night'))
+    const rule = backgroundRule(sheet('night'))
     expect(rule).toContain(':not(.paper-ruler-band)')
     expect(rule).toContain(':not(.paper-spoken-word)')
   })

@@ -48,18 +48,27 @@ export function matteFor(corners: readonly (readonly number[])[]): Matte | null 
   if (corners.length !== 4) return null
   for (const c of corners) {
     if (c.length < 4) return null
-    /* Anything but fully opaque means the image was authored to sit on whatever
-       is behind it. Near-opaque counts as opaque: a JPEG re-encode of a flat
-       white can land at 254. */
-    if ((c[3] ?? 0) < 250) return null
+    /* FULLY OPAQUE, and nothing less. The first version allowed 250 and
+       justified it as "a JPEG re-encode can land at 254" — which is simply
+       untrue: JPEG HAS NO ALPHA CHANNEL and decodes to 255 everywhere. What
+       that threshold actually did was accept a slightly transparent PNG edge
+       and replace it with a solid colour, which is the one case this is
+       supposed to refuse. */
+    if (c[3] !== 255) return null
   }
-  const [r0 = 0, g0 = 0, b0 = 0] = corners[0] ?? []
-  for (const [r = 0, g = 0, b = 0] of corners) {
-    /* Eight levels of slack per channel, which covers JPEG ringing at an edge
-       and rejects a gradient. */
-    if (Math.abs(r - r0) > 8 || Math.abs(g - g0) > 8 || Math.abs(b - b0) > 8) return null
+  /* AGAINST THE CENTRE, NOT AGAINST THE FIRST CORNER. Compared with corner
+     zero, two corners could sit eight levels either side of it and sixteen
+     apart from each other and still pass — and corner zero, chosen only for
+     being first, then became the matte colour, so a compression artefact at one
+     corner set the colour for the whole plate. The mean is what they are all
+     measured against and what gets drawn. */
+  const mean = [0, 1, 2].map((i) => Math.round(corners.reduce((n, c) => n + (c[i] ?? 0), 0) / 4))
+  for (const c of corners) {
+    for (const i of [0, 1, 2]) {
+      if (Math.abs((c[i] ?? 0) - (mean[i] ?? 0)) > 6) return null
+    }
   }
-  return { css: `rgb(${r0} ${g0} ${b0})` }
+  return { css: `rgb(${mean[0]} ${mean[1]} ${mean[2]})` }
 }
 
 /** Where to read, for an image of this size. */
@@ -98,13 +107,33 @@ export const canvasSampler: Sampler = (img) => {
   const height = img.naturalHeight
   if (!width || !height) return null
   try {
+    /* TWO PIXELS BY TWO, NEVER THE IMAGE'S OWN SIZE. The first version
+       allocated a canvas of width x height and drew the whole image in order to
+       read four pixels: a 4000x3000 figure is 48MB of RGBA backing, and a
+       section with forty of them is over two gigabytes of pixel writes — on the
+       main thread, inside the load handler, which foliate calls BEFORE its first
+       render. It blocked pagination to answer a question about four bytes.
+
+       The nine-argument drawImage copies a 1x1 source rectangle into a 1x1
+       destination, so each corner lands in one pixel of a four-pixel canvas and
+       one getImageData reads all of them.
+
+       No `willReadFrequently`: it hints at repeated reads of a canvas drawn
+       many times, and can force a software backing. This one is drawn four
+       times, read once, and thrown away. */
     const canvas = img.ownerDocument.createElement('canvas')
-    canvas.width = width
-    canvas.height = height
-    const ctx = canvas.getContext('2d', { willReadFrequently: true })
+    canvas.width = 2
+    canvas.height = 2
+    const ctx = canvas.getContext('2d')
     if (!ctx) return null
-    ctx.drawImage(img, 0, 0)
-    return cornerPoints(width, height).map(([x, y]) => [...ctx.getImageData(x, y, 1, 1).data])
+    const points = cornerPoints(width, height)
+    points.forEach(([x, y], i) => {
+      ctx.drawImage(img, x, y, 1, 1, i % 2, i < 2 ? 0 : 1, 1, 1)
+    })
+    const { data } = ctx.getImageData(0, 0, 2, 2)
+    /* Back into corner order: the loop above wrote 0,1 across the top row and
+       2,3 across the bottom, which is the order `cornerPoints` returns. */
+    return [0, 1, 2, 3].map((i) => [...data.slice(i * 4, i * 4 + 4)])
   } catch {
     /* A tainted canvas, a decode that failed, an image the engine will not
        hand back. None of them is worth reporting: the figure keeps the
