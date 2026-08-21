@@ -32,13 +32,34 @@ export interface PaneEntry {
   readonly combo?: string
 }
 
+/* THE READING PANE IS GONE, AND ⌘5 WITH IT — deliberately, 2026-08-21.
+ *
+ * It rendered "Reading statistics are not recorded yet" in one of eight slots
+ * on a 400px rail. The sentence was honest, and it replaced a worse version
+ * that promised time, pages and streaks "once you have spent a session with a
+ * book" — a promise nothing could keep, because nothing records a session.
+ *
+ * By this project's own standard that is the same species as folder watching,
+ * which was deleted for naming something that did not exist. A permanently
+ * empty pane is a milder case, not a different one, and the rail is the
+ * scarcest surface in the app.
+ *
+ * `PANE_SHORTCUTS` is derived from this list, so ⌘5 stopped being bound the
+ * moment the row left — `resolveAccel` now returns null for '5', which is what
+ * this codebase means by leaving a key to the platform. That is correct and it
+ * is a real loss for a reader who had it in their fingers; it is named here so
+ * the next person meets it as a decision rather than a mystery.
+ *
+ * The panel COMPONENT is not what was deleted — there was never one, only an
+ * empty state inline in `SidePane`. Reinstating this is one row plus one id in
+ * `KERNEL_PANE_IDS`, the day something fills it. See
+ * `docs/plans/phase-12-the-return-path.md`, WI-12.5. */
 export const PANES: readonly PaneEntry[] = [
   { id: 'toc', label: 'Contents', combo: '⌘1' },
   { id: 'marginalia', label: 'Marginalia', combo: '⌘2' },
   { id: 'search', label: 'Search', combo: '⌘3' },
   { id: 'cards', label: 'Cards', combo: '⌘4' },
   { id: 'companion', label: 'Companion' },
-  { id: 'stats', label: 'Reading', combo: '⌘5' },
   { id: 'library', label: 'Library' },
   { id: 'settings', label: 'Settings' },
 ]
@@ -57,8 +78,9 @@ export function panesFor(screen: Screen): readonly PaneEntry[] {
 }
 
 /**
- * §11 binds ⌘1…5 to "Contents, marginalia, search, cards, stats" — kernel
- * panes only; a contributed pane gets no digit.
+ * §11 bound ⌘1…5 to "Contents, marginalia, search, cards, stats"; it is ⌘1…4
+ * now that the Reading pane is gone — kernel panes only, and a contributed
+ * pane gets no digit.
  *
  * The digits are NOT the rail's order and never were: they are the order the
  * panels were published in, and the rail groups them by what they are for. A

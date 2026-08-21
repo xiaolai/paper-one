@@ -65,6 +65,24 @@ export interface MarksView {
   rekey: (from: string, to: string) => void
   /** Read every book's marks into `all`. Called by the Marginalia pane when it mounts. */
   loadAll: () => void
+  /**
+   * Read every book's marks and RESOLVE WITH THEM — annotations and bookmarks
+   * together, which is what a whole-library reader needs.
+   *
+   * WHY THIS EXISTS RATHER THAN `loadAll()` FOLLOWED BY READING `all`. The
+   * cross-book lists are empty until a scan has run, and the ONLY caller of
+   * `loadAll` is the Marginalia panel mounting. So an export from the command
+   * palette, in a session where that panel was never opened, walked an empty
+   * list, wrote `{"version":1,"books":[]}` and reported success — a backup that
+   * exists, opens, and contains nothing. The reader does not find out until the
+   * day they need it.
+   *
+   * Awaiting `loadAll()` and then reading the hook's `all` would not fix it
+   * either: `all` is a value captured in the closure that called it, one React
+   * commit behind the store. This asks the store and hands the rows straight
+   * back, so there is no render in the path at all.
+   */
+  loadAllNow: () => Promise<readonly Mark[]>
 }
 
 const SAVE_FAILED = "Paper: could not save that book's marks"
@@ -108,6 +126,14 @@ export function useMarks(store: MarkStore, bookId: string | null): MarksView {
       setNote: (mark: MarkRef, note: string) => letGo(store.updateNote(mark.id, note, mark.bookId)),
       rekey: (from: string, to: string) => letGo(store.rekey(from, to)),
       loadAll: () => letGo(store.loadAll()),
+      loadAllNow: async () => {
+        await store.loadAll()
+        const fresh = store.getSnapshot()
+        /* BOTH CLASSES. They share a file and a store and are split at the
+           snapshot; anything that wants the whole of what a reader left in
+           their books has to put them back together. */
+        return [...fresh.all, ...fresh.allBookmarks]
+      },
     }),
     [store],
   )

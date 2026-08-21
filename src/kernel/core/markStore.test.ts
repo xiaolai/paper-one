@@ -380,3 +380,36 @@ describe('the mark store splits bookmarks from annotations', () => {
     ).toEqual(['first', 'second'])
   })
 })
+
+/**
+ * THE ASSERTION THAT STOPS AN EMPTY BACKUP COMING BACK.
+ *
+ * The cross-book lists are empty until `loadAll` has scanned every book's
+ * file, and for a long time the only caller of `loadAll` was the Marginalia
+ * panel mounting. An export driven from the command palette, in a session
+ * where that panel was never opened, would therefore have walked an empty list
+ * and written a valid archive containing nothing — and reported success. The
+ * reader does not find out until the day they need it.
+ *
+ * `useMarks.loadAllNow` is the fix: it scans and hands the rows straight back,
+ * with no render in the path. This is the assertion beside it, because a fix
+ * removes today's failure and only an assertion stops it returning while still
+ * looking green.
+ */
+describe('every mark, without a panel having been opened', () => {
+  it('is empty before a scan and complete after one', async () => {
+    const { fs, store: marks } = store()
+    await marks.open(BOOK)
+    const kept = highlight()
+    await marks.add(kept)
+
+    /* A FRESH STORE over the same disk is the palette-without-the-panel case:
+       the rows are on disk, nothing has scanned them, and `all` is empty. */
+    const fresh = createMarkStore({ fs, queue: writeQueue() })
+    expect(fresh.getSnapshot().all).toEqual([])
+
+    await fresh.loadAll()
+    const scanned = fresh.getSnapshot()
+    expect([...scanned.all, ...scanned.allBookmarks].map((mark) => mark.id)).toEqual([kept.id])
+  })
+})

@@ -5,9 +5,10 @@ import { isProcessEntry } from './lib/entry.mjs'
 /**
  * `pnpm verify` — the unified gate (WI-5.12), one command, the same one CI
  * runs. Every check the phase added, in an order that fails fast and cheap:
- * the manifest, the compositions, the boundaries (and the selftest that
- * proves each rule still bites, and the check that every test file is in
- * exactly one project), the types, the tests with their coverage floors, the
+ * the manifest, the compositions, the boundaries (and the check that every
+ * test file is in exactly one project), the types, the tests with their
+ * coverage floors — which is where the boundary selftest's own cases run, see
+ * the note beside `boundaries` below — the
  * literal desktop build (which asserts its own bundle), then Cargo — the
  * lockfile, formatting, clippy, tests — for the whole workspace.
  *
@@ -39,10 +40,23 @@ export const STEPS = Object.freeze([
    * See scripts/lib/ledger.mjs. */
   { name: 'features:check', cmd: 'pnpm', args: ['features:check'] },
   { name: 'boundaries', cmd: 'pnpm', args: ['boundaries'] },
-  // The two K.4 gates that guard the gates: every boundary rule still
-  // rejects the edge it owns, and every test file still belongs to exactly
-  // one project. Cheap, and a gate CI never runs is a comment.
-  { name: 'boundaries:selftest', cmd: 'pnpm', args: ['boundaries:selftest'] },
+  /* `boundaries:selftest` IS NOT A STEP, AND THE CASES DID NOT STOP RUNNING.
+   *
+   * It ran the same 27 cases `check-boundaries.test.mjs` runs under
+   * `test:coverage` below — the same `CASES`, through the same `runCase`,
+   * asserting the same two conditions (`missing` empty, `unexpected` empty;
+   * neither side had a third). So every `pnpm verify` cruised those fixture
+   * trees TWICE, for one gate's worth of signal, at 21.6s a pass.
+   *
+   * The vitest run is the one kept, and the deciding argument is `test:ledger`:
+   * it names TESTS. Twenty-seven cases behind a standalone script are not in
+   * `tests/ledger.json`, so deleting one is invisible — which is precisely the
+   * defect that ledger was bought for, after twelve `pageTurn` tests vanished
+   * behind a rising count. Independence, the argument for keeping this step,
+   * protects against vitest being broken, and that failure is loud.
+   *
+   * `pnpm boundaries:selftest` still exists and still works; it is a thing to
+   * run by hand, not a gate that duplicates one. */
   { name: 'test:projects', cmd: 'pnpm', args: ['test:projects'] },
   /* A DELETED TEST IS INVISIBLE TO EVERY OTHER STEP HERE. Coverage cannot see
    * it — the lines go on being executed by whatever replaced it — and the run
@@ -56,7 +70,25 @@ export const STEPS = Object.freeze([
   { name: 'cargo metadata --locked', cmd: 'cargo', args: ['metadata', '--locked', '--format-version', '1', ...CARGO], quiet: true },
   { name: 'cargo fmt --check', cmd: 'cargo', args: ['fmt', ...CARGO, '--all', '--', '--check'] },
   { name: 'cargo clippy -D warnings', cmd: 'cargo', args: ['clippy', ...CARGO, '--workspace', '--all-targets', '--', '-D', 'warnings'] },
-  { name: 'cargo test --workspace', cmd: 'cargo', args: ['test', ...CARGO, '--workspace', '--all-targets'] },
+  /* ONE TEST THREAD, AND THE REASON IS MEASURED. `tauri-plugin-peer`'s pairing,
+   * session and blob tests stand up real iroh endpoints and wait on real
+   * sockets, and their deadlines — "an event within 2s" (`node.rs:388`), "all
+   * frames within 20s" (`session.rs:888`) — are the harness's patience, not the
+   * property under test. Under libtest's default pool those waits compete with
+   * the other 90-odd tests for the machine and lose: measured 2026-08-21 on a
+   * 10-core Mac, the parallel run failed 1–3 tests with a DIFFERENT set each
+   * time, and `--test-threads=1` passed 95/95 twice.
+   *
+   * It is close to free on a warm build: the serial step measured 15.9s inside
+   * a 135s gate. (A standalone `cargo test -p tauri-plugin-peer` reads 74s, but
+   * that figure is mostly compilation and is not what this step pays.) Even had
+   * it been dear, a gate that fails at random costs more — the first thing
+   * anyone does with one is re-run it, and the second is stop believing it.
+   *
+   * Widening the deadlines would have bought the same green by making the
+   * harness wait longer for a machine that is still oversubscribed: the number
+   * would move, the race would not. */
+  { name: 'cargo test --workspace', cmd: 'cargo', args: ['test', ...CARGO, '--workspace', '--all-targets', '--', '--test-threads=1'] },
 ])
 
 /**

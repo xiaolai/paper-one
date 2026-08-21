@@ -32,6 +32,8 @@ export type AccelAction =
   | { readonly kind: 'resetStep' }
   | { readonly kind: 'openPane'; readonly pane: KernelPaneId }
   | { readonly kind: 'closePane' }
+  | { readonly kind: 'jumpBack' }
+  | { readonly kind: 'jumpForward' }
 
 /** What the accelerator map needs to know about the moment the key arrived. */
 export interface AccelContext {
@@ -53,6 +55,13 @@ export interface AccelContext {
   readonly onReader: boolean
   /** Whether ⌘T has a book whose tags it could edit. */
   readonly hasBook: boolean
+  /**
+   * Whether ⌘[ and ⌘] have anywhere to go — `jumpStack`'s `canGoBack` and
+   * `canGoForward`, read here and by the two palette rows so the key and the
+   * row it is printed beside cannot disagree. Same rule as `canKeepPlace`.
+   */
+  readonly canJumpBack: boolean
+  readonly canJumpForward: boolean
 }
 
 /**
@@ -111,6 +120,21 @@ export function resolveAccel(
        book…". Only when there is such a book. */
     case 't':
       return context.hasBook ? { kind: 'editTags' } : null
+    /*
+     * ⌘[ and ⌘] — back to where you were, and forward again.
+     *
+     * NOT IN `TOGGLES`, deliberately. Holding ⌘[ to walk back several jumps is
+     * a real gesture with a real result at each repeat, exactly as the size
+     * steps below are, and the stack bottoms out on its own — `goBack` returns
+     * null on an empty one rather than throwing or wrapping.
+     *
+     * Guarded, so an empty stack leaves the combo to the platform rather than
+     * swallowing it to do nothing.
+     */
+    case '[':
+      return context.canJumpBack ? { kind: 'jumpBack' } : null
+    case ']':
+      return context.canJumpForward ? { kind: 'jumpForward' } : null
     /*
      * §09's reading sizes, on the combo every reader already knows.
      *

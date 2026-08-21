@@ -74,7 +74,6 @@ export const KERNEL_PANE_IDS = [
   'marginalia',
   'cards',
   'search',
-  'stats',
   'library',
   'settings',
 ] as const

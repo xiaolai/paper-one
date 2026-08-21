@@ -22,6 +22,7 @@ import {
   type Mark,
 } from '../../core/marks'
 import type { MarkFocus } from '../hooks/useMarking'
+import type { JumpTarget } from '../hooks/useJumps'
 import { ICON, type Platform } from '../../core/metrics'
 import { onBeforeClose } from '../../core/beforeClose'
 import { relativeTime } from '../../core/relativeTime'
@@ -250,7 +251,7 @@ function PlaceRow({
   bookmark: Bookmark
   now: number
   reachable: boolean
-  onGoTo?: (target: string) => void
+  onGoTo?: (target: JumpTarget) => void
   onDelete: (bookmark: Bookmark) => void
 }) {
   /* `bookmarkFrom` collapses the whitespace before storing, so this is already
@@ -267,10 +268,12 @@ function PlaceRow({
       <button
         type="button"
         className={styles.noteJump}
-        /* Only the open book can be navigated into — the same rule the mark
-           row follows, for the same reason. */
+        /* THE SAME RULE THE MARK ROW FOLLOWS, computed once by the panel and
+           handed down — see `reachable` there. It used to be "only the open
+           book"; it is now "a book still on the shelf", and a place in a book
+           Paper no longer holds is the case that stays disabled. */
         disabled={!reachable || !onGoTo}
-        onClick={() => onGoTo?.(bookmark.cfi)}
+        onClick={() => onGoTo?.({ bookId: bookmark.bookId, cfi: bookmark.cfi })}
       >
         <span className={styles.placeChapter}>{chapter}</span>
         {line && <span className={`${styles.noteBody} ${styles.placeLine}`}>{line}</span>}
@@ -336,7 +339,17 @@ export interface MarginaliaProps {
    * write rather than to read.
    */
   focus?: MarkFocus | null
-  onGoTo?: (target: string) => void
+  /**
+   * Whether a book is on the shelf, and so can be opened at all.
+   *
+   * WHAT DECIDES A CROSS-BOOK ROW'S REACHABILITY. Asked separately from
+   * `titleOf` on purpose: a shelved book with an empty title also has no title
+   * to return, so treating "no title" as "not here" would disable rows that
+   * work perfectly. Absent, every row outside the open book stays disabled —
+   * which is what this panel did before there was anywhere to come back to.
+   */
+  onShelf?: ((bookId: string) => boolean) | undefined
+  onGoTo?: (target: JumpTarget) => void
 }
 
 export function Marginalia({
@@ -348,6 +361,7 @@ export function Marginalia({
   platform,
   focus,
   onGoTo,
+  onShelf,
   now: injectedNow,
   titleOf,
 }: MarginaliaProps) {
@@ -357,6 +371,24 @@ export function Marginalia({
      panel they already know shows them. */
   const [scope, setScope] = useState<ScopeFilter>('All books')
   const now = useNow(injectedNow)
+  /**
+   * Whether a row can be jumped into.
+   *
+   * ONE RULE, THREE ROWS — the mark row, the place row, and anything added
+   * beside them. It used to be `mark.bookId === bookId` spelled twice, and the
+   * two were right only because nothing had changed yet.
+   *
+   * The open book is always reachable. Any other book is reachable when it is
+   * on the shelf, because opening it at a CFI is a path that already exists:
+   * reading-position restore hands `view.init` a location on every reopen.
+   * A book that has LEFT the shelf is not reachable, and its row stays
+   * disabled — `Marginalia` still refuses to draw a control that does nothing,
+   * which is the same rule as before with a narrower subject.
+   */
+  const reachable = useCallback(
+    (mark: Mark) => mark.bookId === bookId || (onShelf?.(mark.bookId) ?? false),
+    [bookId, onShelf],
+  )
   /** The mark whose note is being written. One at a time, like a text field. */
   /* Cross-book marks are read HERE, on mount, because this is the only view
    * that wants them — marks live in each book's folder, so answering "every
@@ -579,11 +611,14 @@ export function Marginalia({
           <button
             type="button"
             className={styles.noteJump}
-            /* Only the open book can be navigated into. A mark from another
-               book has nowhere to jump to until that book is opened, and a
-               control that silently does nothing is worse than none. */
-            disabled={mark.bookId !== bookId || !onGoTo}
-            onClick={() => onGoTo?.(mark.cfi)}
+            /* A control that silently does nothing is worse than none — the
+               rule stands; its subject narrowed. It used to be "only the open
+               book", because a mark from another book had nowhere to jump to.
+               There is somewhere now: the host opens that book AT the mark and
+               ⌘[ brings the reader home. What is still unreachable is a book
+               that has left the shelf, and those rows are still disabled. */
+            disabled={!reachable(mark) || !onGoTo}
+            onClick={() => onGoTo?.({ bookId: mark.bookId, cfi: mark.cfi })}
           >
             <span className={styles.noteBody}>{mark.text}</span>
           </button>
@@ -637,7 +672,7 @@ export function Marginalia({
             <PlaceRow
               bookmark={mark}
               now={now}
-              reachable={mark.bookId === bookId}
+              reachable={reachable(mark)}
               onDelete={onDeleteBookmark}
               {...(onGoTo ? { onGoTo } : {})}
             />

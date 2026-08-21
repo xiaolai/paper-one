@@ -183,6 +183,74 @@ fn look_up(term: String) -> Result<(), String> {
     }
 }
 
+/// The only two schemes a book may hand to the platform.
+///
+/// AN ALLOWLIST, NOT A BLOCKLIST, and the direction is the point: a list of the
+/// schemes somebody thought of is wrong the moment a platform adds one.
+const OPENABLE: [&str; 2] = ["http://", "https://"];
+
+/// The longest URL worth launching. See `externalLink.ts` for the same number.
+const MAX_URL: usize = 2048;
+
+/// Open a web link a book asked for.
+///
+/// WHY THIS COMMAND EXISTS AT ALL. foliate hands any link whose scheme leaves
+/// the package to `globalThis.open(href, '_blank')` unless the embedder cancels
+/// the event — and "external" under `epub.js` is `/^(?!blob)\w+:/i`, ANY scheme
+/// but `blob:`. So an EPUB, which is a zip a stranger wrote, could put
+/// `javascript:` or `data:` in front of the app's own window. Paper now cancels
+/// that event and routes the href here instead.
+///
+/// `look_up` says of itself that the scheme is written in Rust "so this cannot
+/// be turned into a general 'open any URL' command by passing one". This IS the
+/// general one, which is exactly why it validates rather than trusting: the TS
+/// side already refused everything but http and https, and a check that only
+/// exists on the caller's side is not a boundary.
+///
+/// NO SHELL IS INVOLVED — the URL is one `arg`, so it reaches `open` through
+/// `execve` as a single element and nothing in it is ever parsed as syntax.
+#[tauri::command]
+fn open_external(url: String) -> Result<(), String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() || trimmed.len() > MAX_URL {
+        return Err("that link cannot be opened".into());
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err("that link is malformed".into());
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if !OPENABLE.iter().any(|scheme| lower.starts_with(scheme)) {
+        return Err("Paper only opens web links".into());
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    {
+        #[cfg(target_os = "macos")]
+        let mut command = std::process::Command::new("open");
+        #[cfg(target_os = "linux")]
+        let mut command = std::process::Command::new("xdg-open");
+        #[cfg(target_os = "windows")]
+        let mut command = {
+            let mut c = std::process::Command::new("cmd");
+            c.args(["/c", "start", ""]);
+            c
+        };
+        command
+            .arg(trimmed)
+            .spawn()
+            .map_err(|cause| format!("could not open that link: {cause}"))?;
+        Ok(())
+    }
+
+    /* Loud rather than silently doing nothing, exactly as `look_up` is. The
+     * reader never reaches this — `canOpenExternal` decides whether the route
+     * exists at all — so arriving here means the two have drifted. */
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        Err("this platform has no browser to open a link in".into())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mut builder = tauri::Builder::default()
@@ -190,7 +258,7 @@ pub fn run() {
         gated by the capability file — an app command is reachable from the
         webview the moment it is registered here, which is why `look_up`
         validates its own argument rather than trusting the caller. */
-        .invoke_handler(tauri::generate_handler![look_up])
+        .invoke_handler(tauri::generate_handler![look_up, open_external])
         // Scoped by `capabilities/default.json`, not by these registrations —
         // registering a plugin grants nothing on its own.
         .plugin(tauri_plugin_fs::init())
@@ -265,4 +333,40 @@ pub fn run() {
     builder
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod open_external_tests {
+    use super::open_external;
+
+    #[test]
+    fn refuses_every_scheme_but_http_and_https() {
+        for url in [
+            "javascript:alert(1)",
+            "data:text/html,<script>x</script>",
+            "file:///etc/passwd",
+            "mailto:someone@example.org",
+            "itms-apps://open",
+            "",
+            "   ",
+        ] {
+            assert!(open_external(url.into()).is_err(), "should refuse {url}");
+        }
+    }
+
+    #[test]
+    fn refuses_control_characters_and_overlong_urls() {
+        assert!(open_external("https://example.org/\nx".into()).is_err());
+        assert!(open_external(format!("https://example.org/{}", "a".repeat(4096))).is_err());
+    }
+
+    /* THE BOUNDARY IS HERE TOO, not only in TypeScript. `externalLink.ts`
+     * refuses the same set, and a check that only exists on the caller's side
+     * is not a boundary — the webview is where the untrusted string comes
+     * from. This asserts the refusals rather than the launch, because
+     * launching a browser in a unit test is not something a test should do. */
+    #[test]
+    fn the_scheme_check_is_case_insensitive() {
+        assert!(open_external("JavaScript:alert(1)".into()).is_err());
+    }
 }

@@ -50,7 +50,6 @@ describe('the kernel registry keeps its shortcuts', () => {
       'marginalia',
       'search',
       'cards',
-      'stats',
     ])
     /* AGAINST THE ID REGISTRY, not against `PANE_TITLES` — that map is built
        BY `Object.fromEntries(PANES.map(…))`, so asking whether every pane is a

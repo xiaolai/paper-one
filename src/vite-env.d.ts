@@ -180,6 +180,48 @@ declare module 'foliate-js/view.js' {
   }
 
   /**
+   * `link` detail — a link inside the book that resolves WITHIN the book.
+   *
+   * The event is CANCELABLE and that is the whole of its usefulness.
+   * `#handleLinks` attaches one click listener per section document, calls
+   * `preventDefault()` on the DOM event itself, resolves the href through the
+   * section, then emits this — and only navigates if nothing cancelled it:
+   *
+   *     Promise.resolve(this.#emit('link', { a, href }, true))
+   *         .then(x => x ? this.goTo(href) : null)
+   *
+   * So a listener that calls `preventDefault()` takes the link over, and one
+   * that does not lets foliate navigate exactly as it always has. Paper needs
+   * both: a footnote is taken over and shown in place, and anything else is
+   * left to navigate — after the jump stack has recorded where the reader was.
+   *
+   * `href` is ALREADY RESOLVED against the section; `a` is the element clicked,
+   * which is what the footnote heuristics read (`epub:type`, `role`, and
+   * whether it is set as a superscript).
+   */
+  export interface LinkDetail {
+    readonly a: HTMLAnchorElement
+    readonly href: string
+  }
+
+  /**
+   * `external-link` detail — a link whose scheme leaves the book.
+   *
+   * NOT ONLY THE WEB. The EPUB backend's test is
+   * `uri => /^(?!blob)\w+:/i.test(uri)` — any scheme but `blob:` — so
+   * `javascript:` and `data:` arrive here too, and the unhandled branch hands
+   * whatever the book's author wrote to `globalThis.open`.
+   *
+   * `href_` is the RAW attribute, unresolved, because an external target is not
+   * relative to anything in the package. The trailing underscore is foliate's
+   * own name for it and is kept so the two can be compared.
+   */
+  export interface ExternalLinkDetail {
+    readonly a: HTMLAnchorElement
+    readonly href_: string
+  }
+
+  /**
    * What foliate resolves and draws.
    *
    * `value` is required and must be a string, because `addAnnotation` calls

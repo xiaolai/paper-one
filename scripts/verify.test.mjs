@@ -14,7 +14,7 @@ import { STEPS, parseArgs, runSteps, spawnStep } from './verify.mjs'
 const SCRIPT = fileURLToPath(new URL('./verify.mjs', import.meta.url))
 
 describe('the steps', () => {
-  it('are the plan\'s, in order: manifest, compositions, dead CSS, inert directives, the feature ledger, boundaries (and its selftest, the test-project check and the test ledger), types, coverage, build, then Cargo', () => {
+  it('are the plan\'s, in order: manifest, compositions, dead CSS, inert directives, the feature ledger, boundaries (and the test-project check and the test ledger), types, coverage, build, then Cargo', () => {
     /* THE CHEAP STATIC CHECKS COME FIRST, before the ones that spend a minute
        compiling — `css:check` and `directives:check` are a walk of `src` and
        answer in milliseconds, so failing there costs the reader nothing. Both
@@ -28,7 +28,6 @@ describe('the steps', () => {
       'directives:check',
       'features:check',
       'boundaries',
-      'boundaries:selftest',
       'test:projects',
       'test:ledger',
       'typecheck',
@@ -39,8 +38,19 @@ describe('the steps', () => {
       'cargo clippy -D warnings',
       'cargo test --workspace',
     ])
+    /* THE SELFTEST STEP IS GONE ON PURPOSE, and this pins it so putting it
+       back is a deliberate act rather than a reflex. Its 27 cases run under
+       `test:coverage` via `check-boundaries.test.mjs`, which is what puts them
+       in `tests/ledger.json`; as a step they ran a second time for no extra
+       signal. Re-adding it here restores the duplicate cruise. */
+    expect(STEPS.map((s) => s.name)).not.toContain('boundaries:selftest')
     for (const step of STEPS.filter((s) => s.cmd === 'cargo')) expect(step.args).toContain('src-tauri/Cargo.toml')
     expect(STEPS.find((s) => s.name === 'cargo clippy -D warnings').args.slice(-3)).toEqual(['--', '-D', 'warnings'])
+    /* The peer plugin's endpoint tests race each other for the machine and miss
+       their own waits; serial is the fix and it has to stay pinned, because the
+       failure it prevents is intermittent and would come back looking like bad
+       luck rather than like a deleted flag. See the note beside the step. */
+    expect(STEPS.find((s) => s.name === 'cargo test --workspace').args.slice(-2)).toEqual(['--', '--test-threads=1'])
     expect(STEPS.find((s) => s.name === 'build').args).toEqual(['build'])
   })
 })

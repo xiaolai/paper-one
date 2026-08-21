@@ -1,5 +1,6 @@
 import { useCallback, useLayoutEffect, useMemo, useState, type CSSProperties } from 'react'
 import { Bookmark, ChevronLeft, ChevronRight, Library, Plus } from 'lucide-react'
+import type { ExternalLinkDetail, LinkDetail } from 'foliate-js/view.js'
 import type { Platform } from '../../core/metrics'
 import {
   ICON,
@@ -43,6 +44,17 @@ export interface ReaderProps {
   marking: Marking
   /** Keeping a place, and telling whether this one is kept — see the hook. */
   bookmarking: Bookmarking
+  /**
+   * A link inside the book, before foliate navigates it.
+   *
+   * Passed straight through to `FoliateView` rather than handled here: the
+   * decision is the App's, because it needs the jump stack and (WI-12.3) the
+   * footnote surface, and neither belongs to a screen. Cancelable — see
+   * `LinkDetail`.
+   */
+  onLink: (detail: LinkDetail, event: Event) => void
+  /** A link whose scheme leaves the book. See `ExternalLinkDetail`. */
+  onExternalLink: (detail: ExternalLinkDetail, event: Event) => void
   /**
    * Where the open book was last left, or null to start at the beginning.
    *
@@ -107,6 +119,8 @@ export function Reader({
   marks,
   marking,
   bookmarking,
+  onLink,
+  onExternalLink,
   lastLocation,
   reducedMotion,
   onAddBooks,
@@ -533,6 +547,8 @@ export function Reader({
                       marks={marks.current}
                       onSelection={setSelection}
                       onMarkDrawn={onMarkDrawn}
+                      onLink={onLink}
+                      onExternalLink={onExternalLink}
                       onFileDropped={book.open}
                       onPageIntent={onPageIntent}
                       onFixedLayout={book.setFixedLayout}

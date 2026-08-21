@@ -24,6 +24,10 @@ function context(over: Partial<AppState> = {}) {
     editTags: null,
     exportTags: null,
     importTags: null,
+    jumpBack: null,
+    jumpForward: null,
+    exportMarks: null,
+    importMarks: null,
   }
   return { ctx, dispatched }
 }
@@ -212,6 +216,8 @@ describe('advertised combos are bound', () => {
     canBookmark: true,
     onReader: true,
     hasBook: true,
+    canJumpBack: true,
+    canJumpForward: true,
   } as const
 
   /**
@@ -247,6 +253,8 @@ describe('advertised combos are bound', () => {
     '⌘+': ['=', '+'],
     '⌘−': ['-', '_'],
     '⌘0': ['0'],
+    '⌘[': ['['],
+    '⌘]': [']'],
   }
 
   it('binds every combo the palette prints', () => {
@@ -272,6 +280,10 @@ describe('advertised combos are bound', () => {
       editTags: () => {},
       exportTags: () => {},
       importTags: () => {},
+      jumpBack: () => {},
+      jumpForward: () => {},
+      exportMarks: () => {},
+      importMarks: () => {},
     }
     const digits = new Set(PANE_SHORTCUTS.map((entry) => entry.combo))
     const advertised = new Set(
@@ -341,6 +353,11 @@ describe('advertised combos are bound', () => {
        underneath with a live position, and nothing on screen would show it. */
     expect(resolveAccel({ key: 'b', repeat: false }, { ...anything, onReader: false })).toBeNull()
     expect(resolveAccel({ key: 't', repeat: false }, { ...anything, hasBook: false })).toBeNull()
+    /* ⌘[ and ⌘] with nothing that way are LEFT TO THE PLATFORM, not swallowed.
+       The palette drops both rows on the same condition, so a reader never
+       sees a row whose printed key does nothing. */
+    expect(resolveAccel({ key: '[', repeat: false }, { ...anything, canJumpBack: false })).toBeNull()
+    expect(resolveAccel({ key: ']', repeat: false }, { ...anything, canJumpForward: false })).toBeNull()
   })
 
   /* HOLDING A TOGGLE IS ONE PRESS. Held ⌘B wrote a row and a tombstone to the
@@ -353,6 +370,17 @@ describe('advertised combos are bound', () => {
     }
     expect(resolveAccel({ key: '=', repeat: true }, anything)).toEqual({ kind: 'stepBy', delta: 1 })
     expect(resolveAccel({ key: '-', repeat: true }, anything)).toEqual({ kind: 'stepBy', delta: -1 })
+  })
+
+  it('resolves ⌘[ and ⌘] when the stack has somewhere to go, and repeats them', () => {
+    expect(resolveAccel({ key: '[', repeat: false }, anything)).toEqual({ kind: 'jumpBack' })
+    expect(resolveAccel({ key: ']', repeat: false }, anything)).toEqual({ kind: 'jumpForward' })
+    /* NOT REFUSED ON REPEAT, unlike every toggle. Holding ⌘[ to walk back
+       several jumps is a real gesture with a real result at each press, and
+       the stack bottoms out on its own — `goBack` returns null on an empty
+       one. Refusing the repeat would make the reader press it n times. */
+    expect(resolveAccel({ key: '[', repeat: true }, anything)).toEqual({ kind: 'jumpBack' })
+    expect(resolveAccel({ key: ']', repeat: true }, anything)).toEqual({ kind: 'jumpForward' })
   })
 
   it('advertises every reading-size key it binds, so none is a secret', () => {
@@ -381,7 +409,6 @@ describe('PANE_SHORTCUTS', () => {
       ['2', 'marginalia'],
       ['3', 'search'],
       ['4', 'cards'],
-      ['5', 'stats'],
     ])
   })
 

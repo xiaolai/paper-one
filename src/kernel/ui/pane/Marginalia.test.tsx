@@ -1,0 +1,175 @@
+// @vitest-environment jsdom
+import { cleanup, render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { Marginalia } from './Marginalia'
+import type { Annotation, Bookmark, Mark } from '../../core/marks'
+import type { MarksView } from '../hooks/useMarks'
+import type { CardsView } from '../hooks/useCards'
+import type { JumpTarget } from '../hooks/useJumps'
+
+/**
+ * The rows this panel draws across every book, and whether each one can be
+ * reached.
+ *
+ * WHY THIS FILE DID NOT EXIST BEFORE, which is the thing worth saying: the
+ * panel is the app's thesis — everything the reader put in a book, browsable
+ * across all of them — and it had no test at all. What that cost was a
+ * feature built and switched off: it went cross-book, and then disabled the
+ * jump on every row but the open book's, because there was nowhere for those
+ * rows to go. Nothing measured that most of the panel was inert.
+ *
+ * These assert the reachability rule and nothing else. Filtering, note
+ * editing and card-making are separate subjects and are not tested here.
+ */
+
+afterEach(cleanup)
+
+const ANNOTATION = (over: Partial<Mark> = {}): Annotation =>
+  ({
+    id: 'm1',
+    bookId: 'open-book',
+    cfi: 'epubcfi(/6/4!/4/2,/1:0,/1:9)',
+    sectionIndex: 0,
+    text: 'call me ishmael',
+    prefix: '',
+    suffix: '',
+    note: '',
+    kind: 'highlight',
+    tint: 'yellow',
+    style: 'fill',
+    chapter: 'Loomings',
+    createdAt: 1,
+    ...over,
+  }) as Annotation
+
+const BOOKMARK = (over: Partial<Mark> = {}): Bookmark =>
+  ({
+    ...ANNOTATION({ id: 'b1', kind: 'bookmark', text: '', ...over }),
+    kind: 'bookmark',
+  }) as Bookmark
+
+function marksView(over: Partial<MarksView> = {}): MarksView {
+  return {
+    all: [],
+    current: [],
+    bookmarks: [],
+    allBookmarks: [],
+    persistent: true,
+    ready: true,
+    add: vi.fn(),
+    remove: vi.fn(),
+    setNote: vi.fn(),
+    rekey: vi.fn(),
+    loadAll: vi.fn(),
+    ...over,
+  } as unknown as MarksView
+}
+
+const cardsView = (): CardsView =>
+  ({ all: [], persistent: true, make: vi.fn(), remove: vi.fn(), rekey: vi.fn() }) as unknown as CardsView
+
+/** The panel, with only the props these assertions care about varied. */
+function draw(over: {
+  all?: readonly Annotation[]
+  allBookmarks?: readonly Bookmark[]
+  onShelf?: (bookId: string) => boolean
+  onGoTo?: (target: JumpTarget) => void
+}) {
+  const onGoTo = over.onGoTo ?? vi.fn()
+  render(
+    <Marginalia
+      marks={marksView({
+        all: over.all ?? [],
+        allBookmarks: over.allBookmarks ?? [],
+      })}
+      cards={cardsView()}
+      bookId="open-book"
+      onDelete={vi.fn()}
+      onDeleteBookmark={vi.fn()}
+      platform="macos"
+      titleOf={(id) => (id === 'other-book' ? 'Ulysses' : undefined)}
+      {...(over.onShelf ? { onShelf: over.onShelf } : {})}
+      onGoTo={onGoTo}
+    />,
+  )
+  return { onGoTo }
+}
+
+/** The jump control on a mark row is the button carrying the mark's own text. */
+const rowFor = (text: string) => screen.getByRole('button', { name: new RegExp(text, 'i') })
+
+describe('a row from the open book', () => {
+  it('is enabled and jumps to its own place', () => {
+    const { onGoTo } = draw({ all: [ANNOTATION()] })
+    const row = rowFor('call me ishmael')
+    expect(row.hasAttribute('disabled')).toBe(false)
+    row.click()
+    expect(onGoTo).toHaveBeenCalledWith({
+      bookId: 'open-book',
+      cfi: 'epubcfi(/6/4!/4/2,/1:0,/1:9)',
+    })
+  })
+})
+
+describe('a row from another book', () => {
+  const OTHER = ANNOTATION({ id: 'm2', bookId: 'other-book', text: 'stately plump buck' })
+
+  it('is enabled when that book is on the shelf, and names the book it belongs to', () => {
+    /* THE FEATURE THAT WAS BUILT AND SWITCHED OFF. The panel has listed these
+       rows all along; what it lacked was anywhere for them to go. */
+    const { onGoTo } = draw({ all: [OTHER], onShelf: (id) => id === 'other-book' })
+    expect(screen.getByText('Ulysses')).toBeTruthy()
+    const row = rowFor('stately plump buck')
+    expect(row.hasAttribute('disabled')).toBe(false)
+    row.click()
+    expect(onGoTo).toHaveBeenCalledWith({
+      bookId: 'other-book',
+      cfi: OTHER.cfi,
+    })
+  })
+
+  it('stays disabled when that book has left the shelf', () => {
+    /* The rule did not go away, its subject narrowed. A book Paper no longer
+       holds cannot be opened at a CFI, and a control that silently does
+       nothing is still worse than none. */
+    const gone = ANNOTATION({ id: 'm3', bookId: 'deleted-book', text: 'a lost passage' })
+    draw({ all: [gone], onShelf: () => false })
+    expect(rowFor('a lost passage').hasAttribute('disabled')).toBe(true)
+  })
+
+  it('stays disabled when nothing was asked about the shelf at all', () => {
+    /* No `onShelf` means the host cannot say, and the honest answer to "can
+       this be reached" is then no. Defaulting the other way would enable every
+       row on a promise nobody made. */
+    draw({ all: [OTHER] })
+    expect(rowFor('stately plump buck').hasAttribute('disabled')).toBe(true)
+  })
+})
+
+describe('a place row', () => {
+  it('follows the same rule as a mark row, on all three cases at once', () => {
+    /* ONE RENDER, THREE ROWS, because the point is that they DIFFER: the panel
+       computes `reachable` once and hands it down, and a place row asking the
+       question a second way is how the two came apart before. */
+    const here = BOOKMARK({ id: 'b-open', bookId: 'open-book', chapter: 'Loomings' })
+    const away = BOOKMARK({ id: 'b-away', bookId: 'other-book', chapter: 'Telemachus' })
+    const gone = BOOKMARK({ id: 'b-gone', bookId: 'deleted-book', chapter: 'Nowhere' })
+    const { onGoTo } = draw({
+      allBookmarks: [here, away, gone],
+      onShelf: (id) => id !== 'deleted-book',
+    })
+    /* ANCHORED, because the delete button's `aria-label` is "Remove this
+       bookmark — <chapter>" and a loose match finds both. The jump button's
+       whole accessible name is the chapter when the place has no remembered
+       line, which these deliberately do not. */
+    const jump = (chapter: string) =>
+      screen.getByRole('button', { name: new RegExp(`^${chapter}$`) })
+
+    expect(jump('Loomings').hasAttribute('disabled')).toBe(false)
+    expect(jump('Telemachus').hasAttribute('disabled')).toBe(false)
+    expect(jump('Nowhere').hasAttribute('disabled')).toBe(true)
+
+    jump('Telemachus').click()
+    expect(onGoTo).toHaveBeenCalledWith({ bookId: 'other-book', cfi: away.cfi })
+  })
+})

@@ -296,7 +296,7 @@ describe('the pane follows the screen', () => {
       expect(paneFits('library', pane)).toBe(false)
     }
     // Cross-book by design, and the reason the library has a pane at all.
-    for (const pane of ['marginalia', 'cards', 'stats', 'library', 'settings'] as const) {
+    for (const pane of ['marginalia', 'cards', 'library', 'settings'] as const) {
       expect(paneFits('library', pane)).toBe(true)
     }
   })
@@ -306,7 +306,7 @@ describe('the pane follows the screen', () => {
    * worse, followed the reader into their first book as `lastPane`. */
   it('knows which panels need the shelf', () => {
     expect(paneFits('reader', 'library')).toBe(false)
-    for (const pane of ['marginalia', 'cards', 'stats', 'settings'] as const) {
+    for (const pane of ['marginalia', 'cards', 'settings'] as const) {
       expect(paneFits('reader', pane)).toBe(true)
     }
   })

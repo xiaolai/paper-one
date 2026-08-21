@@ -1,22 +1,49 @@
-import { describe, expect, it } from 'vitest'
+import { beforeAll, describe, expect, it } from 'vitest'
 import { REQUIRES_RULE, cruiserViolations, formatViolation, undeclaredRequires } from './check-boundaries.mjs'
-import { CASES, LEGAL_TREE, runCase, runCli } from './check-boundaries.selftest.mjs'
+import { CASES, LEGAL_TREE, caseFailure, runAll, runCli } from './check-boundaries.selftest.mjs'
 
 /**
  * The boundary selftest under Vitest, so `pnpm test` proves the boundary
  * check can fail. `check-boundaries.selftest.mjs` owns the cases and the
- * fixture tree; this file runs each of them (concurrently — every case is a
- * cruiser process) and adds what the standalone runner does not: the pure
- * `requires` pass on hand-made module lists, and the CLI's exit code and
- * line format end to end.
+ * fixture tree; this file runs them through its `runAll` — each case an
+ * IN-PROCESS cruise, not a child process; the only spawns here are `runCli`'s
+ * four — and adds what the standalone runner does not: the pure `requires`
+ * pass on hand-made module lists, and the CLI's exit code and line format end
+ * to end.
  */
 
+/**
+ * ONE CRUISE PER CASE PER `pnpm verify`, not two.
+ *
+ * The 27 cases used to run twice: once through this file's
+ * `it.concurrent.each`, and again through the selftest's own `main` as
+ * `verify.mjs` step 7. `boundaries:selftest` is gone from `STEPS`, and this is
+ * now the only place they run — kept over the standalone runner because
+ * `test:ledger` names TESTS: 27 cases behind a script leave the ledger, and a
+ * deleted case then disappears exactly the way the twelve `pageTurn` tests
+ * did. The two asserted the same two conditions, so nothing narrowed.
+ *
+ * `runAll` rather than `it.concurrent`: the cap is `defaultWidth()`, an
+ * explicit `min(6, availableParallelism())` that this repository chose, where
+ * `it.concurrent` was governed by vitest's `maxConcurrency` default while
+ * competing with every other test file in the run. `runAll` catches per case,
+ * so a case that throws fails its OWN name here rather than the hook.
+ */
 describe('every illegal edge is rejected by the rule that owns it', () => {
-  it.concurrent.each(CASES.map((c) => [c.name, c]))('%s', async (_name, testCase) => {
-    const { violations, missing, unexpected } = await runCase(testCase)
-    expect(missing, `not reported; saw:\n${violations.map(formatViolation).join('\n')}`).toEqual([])
-    expect(unexpected.map(formatViolation)).toEqual([])
-  }, 120_000)
+  /** Case name -> result, filled once before the assertions below. */
+  let results
+
+  beforeAll(async () => {
+    results = await runAll(CASES)
+    /* 300s, not the 120s a single case used to get: this hook now runs all of
+       them, and the whole set measured ~21.6s at this cap on an idle machine.
+       The margin is for a loaded one. */
+  }, 300_000)
+
+  it.each(CASES.map((c) => [c.name, c]))('%s', (_name, testCase) => {
+    const result = results[CASES.indexOf(testCase)]
+    expect(caseFailure(result, testCase) ?? 'ok').toBe('ok')
+  })
 })
 
 describe('undeclaredRequires', () => {
@@ -81,15 +108,15 @@ describe('cruiserViolations', () => {
 })
 
 describe('the CLI', () => {
-  it('exits 0 on the legal tree and says what it cruised', () => {
-    const { code, out, err } = runCli({})
+  it('exits 0 on the legal tree and says what it cruised', async () => {
+    const { code, out, err } = await runCli({})
     expect(err).toBe('')
     expect(code).toBe(0)
     expect(out).toMatch(/^check-boundaries: \d+ modules, \d+ dependencies, 0 violations\n$/)
   }, 120_000)
 
-  it('exits 1 on a violation and prints it as one line naming the rule and the edge', () => {
-    const { code, out } = runCli({
+  it('exits 1 on a violation and prints it as one line naming the rule and the edge', async () => {
+    const { code, out } = await runCli({
       'src/kernel/core/other.ts': "import { alpha } from '../../capabilities/alpha/index.ts'\nexport const other = alpha\nexport type OtherType = { m: number }\n",
     })
     expect(code).toBe(1)
@@ -98,15 +125,15 @@ describe('the CLI', () => {
     expect(lines.at(-1)).toMatch(/^check-boundaries: \d+ modules, \d+ dependencies, [1-9]\d* violations$/)
   }, 120_000)
 
-  it('exits 2 when the manifest cannot be trusted, rather than passing with an unchecked requires', () => {
-    const { code, err } = runCli({ 'capabilities.manifest.json': '{ "capabilities": [ { "id": "alpha" } ] }' })
+  it('exits 2 when the manifest cannot be trusted, rather than passing with an unchecked requires', async () => {
+    const { code, err } = await runCli({ 'capabilities.manifest.json': '{ "capabilities": [ { "id": "alpha" } ] }' })
     expect(code).toBe(2)
     expect(err).toMatch(/capabilities\.manifest\.json is invalid/)
   }, 120_000)
 
-  it('exits 2 when the tree has no kernel — a run that saw the wrong root must not pass', () => {
+  it('exits 2 when the tree has no kernel — a run that saw the wrong root must not pass', async () => {
     const files = Object.fromEntries(Object.keys(LEGAL_TREE).filter((k) => k.startsWith('src/kernel/')).map((k) => [k, null]))
-    const { code, err } = runCli(files)
+    const { code, err } = await runCli(files)
     expect(code).toBe(2)
     expect(err).toMatch(/nothing under src\/kernel\/ was cruised/)
   }, 120_000)

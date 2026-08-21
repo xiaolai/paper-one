@@ -1,6 +1,8 @@
 import type {
   CreateOverlayDetail,
   DrawAnnotationDetail,
+  ExternalLinkDetail,
+  LinkDetail,
   LoadDetail,
   RelocateDetail,
   TocItem,
@@ -183,6 +185,26 @@ export interface MarkPainters {
 }
 
 export interface SessionCallbacks {
+  /**
+   * A link inside the book was followed, BEFORE foliate acts on it.
+   *
+   * The host is handed the detail and the event, and what it does with the
+   * event decides what happens: `preventDefault()` takes the link over, and
+   * leaving it alone lets foliate navigate as it always has. See `LinkDetail`.
+   *
+   * The session does not decide. Whether a link is a footnote to show in
+   * place, or a destination to jump to with the origin recorded, is a question
+   * about panels and a jump stack — neither of which a renderer session has
+   * any business knowing about. This is the same boundary that keeps it from
+   * touching the mark store.
+   */
+  onLink: (detail: LinkDetail, event: Event) => void
+  /**
+   * A link whose scheme leaves the book. Same contract, and the same reason
+   * for existing at all: unhandled, foliate hands the raw href to
+   * `globalThis.open`, and an EPUB is a zip a stranger wrote.
+   */
+  onExternalLink: (detail: ExternalLinkDetail, event: Event) => void
   onToc: (toc: readonly TocItem[]) => void
   onRelocate: (position: ReaderPosition) => void
   onDocument: (doc: Document | null) => void
@@ -692,6 +714,18 @@ export class ReaderSession {
       markProse(doc)
 
       this.#cb.onDocument(doc)
+    })
+
+    /* Every link in the book, before foliate navigates — see `LinkDetail`.
+     * Cancelable, so the host decides; the session only carries it across. */
+    view.addEventListener('link', (event) => {
+      if (this.#disposed) return
+      this.#cb.onLink((event as CustomEvent<LinkDetail>).detail, event)
+    })
+
+    view.addEventListener('external-link', (event) => {
+      if (this.#disposed) return
+      this.#cb.onExternalLink((event as CustomEvent<ExternalLinkDetail>).detail, event)
     })
 
     /* foliate builds one overlay per spine item, and rebuilds it every time the

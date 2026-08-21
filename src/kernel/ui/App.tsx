@@ -11,6 +11,9 @@ import { isTauri, usePlatform, usePrefersDark, usePrefersReducedMotion } from '.
 import { NOT_CONFIGURED } from '../core/companion'
 import { planImport } from '../core/tagArchive'
 import { canArchiveTags, exportTagsToFile, importTagsFromFile } from './tagFiles'
+import { canArchiveMarks, exportMarksToFile, importMarksFromFile } from './marksFiles'
+import { openExternal } from './openExternal'
+import { planImport as planMarksImport } from '../core/marksArchive'
 import { hasOpenLayer, useAppState } from './state'
 import { useTagPrefs } from './hooks/useTagPrefs'
 import type { KernelServices } from '../core/services'
@@ -25,6 +28,9 @@ import { useCards } from './hooks/useCards'
 import { useMarks } from './hooks/useMarks'
 import { useMarking } from './hooks/useMarking'
 import { useBookmarking } from './hooks/useBookmarking'
+import { useJumps, type JumpTarget } from './hooks/useJumps'
+import { locationToOpen, overrideSpent, type Place } from '../core/jumpStack'
+import type { ExternalLinkDetail } from 'foliate-js/view.js'
 import { extensionFor, readOwnedBook, storedBookName } from '../core/bookVault'
 import type { IndexedBook } from '../core/bookIndex'
 import type { IndexFs } from '../core/bookIndex'
@@ -712,6 +718,107 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
         setImportNotice('That file could not be read.')
       })
   }, [library])
+  /**
+   * The reader's marginalia, out to a file and back.
+   *
+   * THE EMPTY-FILE TRAP, and it is why this awaits rather than reads.
+   * `MarksView.all` and `.allBookmarks` are empty until `loadAll()` has run,
+   * and the only caller of `loadAll` is the Marginalia panel mounting. So an
+   * export from the palette, in a session where that panel was never opened,
+   * would have walked an empty list, written `{"version":1,"books":[]}` and
+   * reported success — a backup that exists, opens, and contains nothing.
+   *
+   * That is "green is not evidence that anything happened" exactly, and it is
+   * the worst possible shape for THIS feature: the file is not read again
+   * until the day the reader needs it.
+   *
+   * `loadAllNow()` resolves with the rows rather than setting state and hoping
+   * a re-render arrives first — see `MarksView.loadAllNow`.
+   */
+  const exportMarksNow = useCallback(() => {
+    void (async () => {
+      /* CARDS ARE NOT LAZY — `CardStore` holds every row from the start,
+         because a card is explicitly cross-book and no surface ever asked for
+         one book's. Only the marks need the scan. */
+      const everyMark = await marks.loadAllNow()
+      const written = await exportMarksToFile(library.books, everyMark, cards.all, new Date())
+      if (!written) return
+      if (written.marks === 0 && written.cards === 0) {
+        setImportNotice('Nothing to export yet — no marks and no cards.')
+        return
+      }
+      const parts = [
+        `${written.marks} ${written.marks === 1 ? 'mark' : 'marks'}`,
+        `${written.cards} ${written.cards === 1 ? 'card' : 'cards'}`,
+      ]
+      /* SAYS WHICH FORMAT, because Markdown is a reading copy that cannot be
+         imported back — and a reader told only "exported" could keep one as
+         their only backup. */
+      const note = written.format === 'md' ? ' as Markdown, which cannot be imported back' : ''
+      setImportNotice(`Exported ${parts.join(' and ')} from ${written.books} ${written.books === 1 ? 'book' : 'books'}${note}.`)
+    })().catch((cause: unknown) => {
+      console.error('Paper: could not export your marginalia', cause)
+      setImportNotice('Those marks could not be written.')
+    })
+  }, [marks, cards, library.books])
+
+  const importMarksNow = useCallback(() => {
+    void (async () => {
+      const picked = await importMarksFromFile()
+      if (!picked) return
+      if (!picked.archive) {
+        setImportNotice('That file is not a Paper marginalia export.')
+        return
+      }
+      const everyMark = await marks.loadAllNow()
+      const plan = planMarksImport(picked.archive, library.books, everyMark, cards.all)
+      for (const one of plan.additions) {
+        for (const mark of one.marks) {
+          marks.add({
+            bookId: one.bookId,
+            cfi: mark.localAnchor.cfi,
+            sectionIndex: mark.localAnchor.sectionIndex,
+            text: mark.text,
+            prefix: mark.prefix,
+            suffix: mark.suffix,
+            note: mark.note,
+            kind: mark.kind,
+            tint: mark.tint,
+            style: mark.style,
+            chapter: mark.chapter,
+          })
+        }
+        for (const card of one.cards) {
+          cards.make({
+            bookId: one.bookId,
+            kind: card.kind,
+            body: card.body,
+            answer: card.answer,
+            source: card.source,
+            cfi: card.localAnchor?.cfi ?? null,
+          })
+        }
+      }
+      /* THE BOOKS THAT MATCHED NOTHING ARE NAMED, not counted. An archive from
+         another library matches nothing here, and an import that reports only
+         its successes leaves the reader believing it worked. Three titles fit
+         in a sentence; past that the count carries the rest. */
+      const missing = plan.unmatched
+      const named = missing.slice(0, 3).map((one) => one.title || 'an untitled book').join(', ')
+      const rest = missing.length > 3 ? ` and ${missing.length - 3} more` : ''
+      const missed = missing.length > 0 ? ` Not on this shelf: ${named}${rest}.` : ''
+      const already = plan.duplicates > 0 ? ` ${plan.duplicates} already here.` : ''
+      setImportNotice(
+        plan.marksAdded === 0 && plan.cardsAdded === 0
+          ? `Nothing to add.${already}${missed}`
+          : `Added ${plan.marksAdded} ${plan.marksAdded === 1 ? 'mark' : 'marks'} and ${plan.cardsAdded} ${plan.cardsAdded === 1 ? 'card' : 'cards'} across ${plan.booksTouched} ${plan.booksTouched === 1 ? 'book' : 'books'}.${already}${missed}`,
+      )
+    })().catch((cause: unknown) => {
+      console.error('Paper: could not import that marginalia', cause)
+      setImportNotice('That file could not be read.')
+    })
+  }, [marks, cards, library.books])
+
   const addFolder = useCallback(() => {
     void (async () => {
       /* REFUSES TO RE-ENTER. The toolbar button carried `disabled={importing
@@ -839,8 +946,45 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
       live = false
     }
   }, [bookId, fs])
-  const lastLocation =
-    resumeAt && resumeAt.bookId === bookId ? resumeAt.position : positionOf(bookId)
+  /**
+   * Open the NEXT book at a place, rather than where it was last left.
+   *
+   * "Open at a place" is not a new path — it is the path every reopen takes.
+   * `lastLocation` below is read exactly ONCE, when the book finishes parsing
+   * (`FoliateView` holds it in a ref; `session.ts` passes it to
+   * `view.init({ lastLocation })`), so a jump into another book only has to
+   * make that one read answer differently.
+   *
+   * KEYED BY `bookId`, NOT A FLAG. The id is derived from the file's content
+   * and arrives a few milliseconds after `open`, and the read happens at parse
+   * completion — so matching on it is exact, and an override left over from an
+   * open the reader abandoned cannot be applied to whatever they opened
+   * instead. `useBook`'s `generationRef` guards the same class of race, and its
+   * comment says what happens without one: every late callback from a book
+   * being closed wrote itself back over the book that replaced it.
+   *
+   * DECLARED HERE rather than beside `goToJump`, which is the only writer.
+   * `lastLocation` reads it, `lastLocation` is computed during render, and a
+   * `const` referenced above its own declaration is a temporal dead zone, not
+   * a hoist.
+   */
+  const [openAt, setOpenAt] = useState<Place | null>(null)
+
+  const lastLocation = locationToOpen(bookId, openAt, resumeAt, positionOf(bookId))
+
+  /**
+   * Spend the override once the reader has landed.
+   *
+   * ON THE POSITION, not on the id alone. The id resolves within a few
+   * milliseconds of the open and long before the section renders, so clearing
+   * on `bookId` would drop the override before `lastLocation` was ever read —
+   * the jump would open the right book at the wrong place, which is the failure
+   * this whole item is about. A published CFI means a section has rendered,
+   * which means the read has happened.
+   */
+  useEffect(() => {
+    if (overrideSpent(bookId, openAt, book.position.cfi)) setOpenAt(null)
+  }, [openAt, bookId, book.position.cfi])
 
   /**
    * Hold the window shut until everything written has landed.
@@ -1011,6 +1155,95 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
     () => dispatch({ type: 'toggleLayer', layer: 'tagsOpen' }),
     [dispatch],
   )
+
+  /**
+   * Where the reader is, as a `Place` — the session's answer, paired with the
+   * book's identity.
+   *
+   * `book.placeHere()` rather than `book.position.cfi`, and the difference is
+   * not cosmetic: the host's copy of the CFI is a React commit behind the
+   * session's, and pairing the two is what once produced a bookmark describing
+   * two different pages. Null when the place cannot be pinned down, or before
+   * the content-derived id has resolved — a jump stack entry with no book id
+   * names nothing.
+   */
+  const placeHere = useCallback((): Place | null => {
+    const here = book.placeHere()
+    const id = book.bookId
+    return here && here.cfi && id ? { bookId: id, cfi: here.cfi } : null
+  }, [book])
+
+  /** Go where a jump asks, and say whether it was accepted — see `JumpsDeps`. */
+  const goToJump = useCallback(
+    (target: JumpTarget): boolean => {
+      if (typeof target === 'string') {
+        book.goTo(target)
+        return true
+      }
+      if (target.bookId === book.bookId) {
+        book.goTo(target.cfi)
+        return true
+      }
+      const row = library.books.find((one) => one.bookId === target.bookId)
+      if (!row) {
+        /* The book left the shelf between the row being drawn and the row
+           being clicked. Marginalia disables such rows, so this is the race
+           rather than the ordinary case.
+
+           REFUSED, AND SAID SO. Returning false keeps the stack still — it
+           must not record a departure the reader never made — and the notice
+           is what stops this being the silent no-op the whole item exists to
+           delete. `console.warn` alone was exactly that. */
+        setImportNotice('That book is no longer on your shelf.')
+        return false
+      }
+      setOpenAt(target)
+      openStored(row)
+      return true
+    },
+    [book, library.books, openStored],
+  )
+
+  const jumps = useJumps({ placeHere, navigate: goToJump })
+
+  /**
+   * A link inside the book. Record the departure and let foliate navigate.
+   *
+   * NOT `jumpTo`. foliate navigates this one itself — `#handleLinks` calls
+   * `goTo(href)` unless the `link` event is cancelled — so calling `jumpTo`
+   * would move the reader twice and stack the origin twice. `record` is the
+   * push without the navigation, which is exactly the shape this needs.
+   *
+   * The event is left UNCANCELLED, which is what makes the link work. WI-12.3
+   * cancels it for a footnote and shows the note in place instead; everything
+   * that is not a footnote goes on navigating, with ⌘[ now able to bring the
+   * reader back.
+   */
+  const onBookLink = useCallback(() => {
+    jumps.record()
+  }, [jumps])
+
+  /**
+   * A link whose scheme leaves the book.
+   *
+   * CANCELLED, ALWAYS. Leaving the event alone is what let foliate hand the
+   * raw href to `globalThis.open(href, '_blank')` — and "external" under
+   * `epub.js` is any scheme but `blob:`, so `javascript:` and `data:` went the
+   * same way. A book file does not get to decide what this window does.
+   *
+   * The href then goes to the platform's own browser through a route Paper
+   * chose, and a refusal is SHOWN rather than swallowed: a link that silently
+   * does nothing is the failure this path exists to delete.
+   */
+  const onBookExternalLink = useCallback(
+    (detail: ExternalLinkDetail, event: Event) => {
+      event.preventDefault()
+      void openExternal(detail.href_).then((refusal) => {
+        if (refusal) setImportNotice(refusal)
+      })
+    },
+    [],
+  )
   /* Every tag on the shelf, for the sheet's suggestions. Only walked while the
    * sheet is up: the shelf computes its own for its own editors. */
   const shelfTags = useMemo(
@@ -1022,6 +1255,10 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
     () =>
       buildCommands({
         editTags: readingBook ? openTags : null,
+        jumpBack: jumps.canBack ? jumps.back : null,
+        jumpForward: jumps.canForward ? jumps.forward : null,
+        exportMarks: canArchiveMarks() ? exportMarksNow : null,
+        importMarks: canArchiveMarks() ? importMarksNow : null,
         exportTags: canArchiveTags() ? exportTagsNow : null,
         importTags: canArchiveTags() ? importTagsNow : null,
         /* The same faces the settings panel offers — see `offeredFaces`. */
@@ -1185,6 +1422,8 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
         canBookmark: bookmarking.canBookmark,
         onReader,
         hasBook: readingBook !== null,
+        canJumpBack: jumps.canBack,
+        canJumpForward: jumps.canForward,
       })
       if (!action) return
       event.preventDefault()
@@ -1223,6 +1462,12 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
           return
         case 'closePane':
           dispatch({ type: 'closePane' })
+          return
+        case 'jumpBack':
+          jumps.back()
+          return
+        case 'jumpForward':
+          jumps.forward()
           return
       }
     }
@@ -1336,7 +1581,7 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
             bookmarking={bookmarking}
             platform={platform}
             cards={cards}
-            onGoTo={book.goTo}
+            onGoTo={jumps.jumpTo}
             onDeleteMark={marking.unmark}
             markFocus={marking.focus}
             /* The one place the app decides what the companion is. There is no
@@ -1383,6 +1628,8 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
              parsing. It is null for the first few milliseconds of an open —
              `bookId` is derived from the file's content — which is why the
              reader takes it through a ref rather than at mount. */
+          onLink={onBookLink}
+          onExternalLink={onBookExternalLink}
           lastLocation={lastLocation}
           reducedMotion={reducedMotion}
           onAddBooks={addBooks}

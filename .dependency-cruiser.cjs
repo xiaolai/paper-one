@@ -51,12 +51,19 @@ const KERNEL_UI_ENTRY = '^src/kernel/ui/index\\.ts$'
  *  others are: it is the half of the tag archive that TOUCHES A FILE, split
  *  from `core/tagArchive.ts` — which decides what an archive contains and
  *  needs no filesystem to be tested. Both paths go through a dialog, so the
- *  file is one the reader pointed at; no path is constructed there. */
+ *  file is one the reader pointed at; no path is constructed there.
+ *
+ *  `marksFiles` is the same shape and here for the same reason: the I/O half
+ *  of `core/marksArchive.ts`, dialogs only, no path constructed. That two of
+ *  these now exist is the pattern, not an exception to it — an archive is a
+ *  pure document module plus a thin file half, and the file half is what goes
+ *  on this list. */
 const FS_ADAPTERS = [
   '^src/kernel/core/bookFiles\\.ts$',
   '^src/kernel/core/bookVault\\.ts$',
   '^src/kernel/ui/appStorage\\.ts$',
   '^src/kernel/ui/tagFiles\\.ts$',
+  '^src/kernel/ui/marksFiles\\.ts$',
 ]
 
 /** The peer capability's wire — the ONE capability file allowed to import

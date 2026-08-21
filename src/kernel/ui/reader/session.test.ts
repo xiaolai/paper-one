@@ -28,7 +28,12 @@ interface FakeView extends View {
   closed: number
   removed: number
   listeners: Record<string, ((e: unknown) => void)[]>
-  emit: (type: string, detail: unknown) => void
+  /**
+   * Dispatch a view event. Returns the REAL `CustomEvent` the listeners were
+   * given, so a test can assert whether a handler cancelled it — which is the
+   * entire contract of `link` and `external-link`.
+   */
+  emit: (type: string, detail: unknown, cancelable?: boolean) => CustomEvent
   /** Every addAnnotation call, so the drawing contract can be asserted. */
   annotations: { value: string; kind: string; remove: boolean }[]
   deselected: number
@@ -82,8 +87,13 @@ function fakeView(overrides: Partial<Record<'open' | 'init', () => Promise<void>
     addEventListener: (type: string, fn: (e: unknown) => void) => {
       ;(listeners[type] ??= []).push(fn)
     },
-    emit: (type: string, detail: unknown) => {
-      for (const fn of listeners[type] ?? []) fn({ detail })
+    emit: (type: string, detail: unknown, cancelable = false) => {
+      /* A REAL EVENT, not `{ detail }`. The object literal was enough for every
+         listener that only reads `detail`, and it silently cannot express the
+         one thing `link` is for: `preventDefault` and `defaultPrevented`. */
+      const event = new CustomEvent(type, { detail, cancelable })
+      for (const fn of listeners[type] ?? []) fn(event)
+      return event
     },
     open: overrides.open ?? (() => Promise.resolve()),
     /* Records what it was asked to show before delegating. The restore is only
@@ -194,6 +204,8 @@ function callbacks(
    * would let a newly-required callback go unimplemented — which it did, and
    * the only signal was a TypeError at runtime in one test. */
   const cb: SessionCallbacks = {
+    onLink: rec('onLink'),
+    onExternalLink: rec('onExternalLink'),
     onToc: rec('onToc'),
     onRelocate: rec('onRelocate'),
     onDocument: rec('onDocument'),
@@ -922,6 +934,79 @@ describe('ReaderSession places', () => {
   })
 })
 
+/**
+ * The book's own links, which foliate resolves and then ASKS ABOUT.
+ *
+ * `#handleLinks` puts one click listener on each section document, cancels the
+ * DOM event itself, resolves the href against the section, and emits a
+ * cancelable `link`. It navigates only if nothing cancelled it. That is the
+ * hook a footnote popover hangs on and the hook a jump stack records from, and
+ * neither is the session's business — it carries the event across and lets the
+ * host decide.
+ */
+describe('ReaderSession link events', () => {
+  const linked = async () => {
+    const view = fakeView()
+    const cb = callbacks()
+    const session = new ReaderSession(fakeHost(), cb)
+    await session.start('book.epub', deps(view))
+    return { view, cb, session }
+  }
+
+  const anchorEl = () => ({ getAttribute: () => '#note-1' }) as unknown as HTMLAnchorElement
+
+  it('hands an internal link to the host, with the href foliate already resolved', async () => {
+    const { view, cb } = await linked()
+    const a = anchorEl()
+    view.emit('link', { a, href: 'ch01.xhtml#note-1' }, true)
+    expect(cb.calls['onLink']?.map(([detail]) => detail)).toEqual([
+      { a, href: 'ch01.xhtml#note-1' },
+    ])
+  })
+
+  it('passes the real event, so a host that cancels it takes the link over', async () => {
+    /* THE WHOLE POINT OF THE LISTENER. foliate reads the return of
+       `dispatchEvent` and only calls `goTo` when nothing cancelled — so if the
+       session handed across a copy, or a plain object, a footnote popover
+       could never stop the navigation underneath itself. */
+    const view = fakeView()
+    const cb = callbacks()
+    const session = new ReaderSession(fakeHost(), {
+      ...cb,
+      onLink: (_detail, event) => event.preventDefault(),
+    })
+    await session.start('book.epub', deps(view))
+    const event = view.emit('link', { a: anchorEl(), href: 'ch01.xhtml' }, true)
+    expect(event.defaultPrevented).toBe(true)
+  })
+
+  it('leaves the event alone when the host does not cancel, so foliate navigates', async () => {
+    const { view } = await linked()
+    const event = view.emit('link', { a: anchorEl(), href: 'ch01.xhtml' }, true)
+    expect(event.defaultPrevented).toBe(false)
+  })
+
+  it('carries an external link separately, with the raw href', async () => {
+    /* `href_`, unresolved, because an external target is relative to nothing in
+       the package — and the branch matters: unhandled, foliate hands this
+       string to `globalThis.open`. */
+    const { view, cb } = await linked()
+    view.emit('external-link', { a: anchorEl(), href_: 'https://example.org/x' }, true)
+    expect(cb.calls['onExternalLink']?.map(([detail]) => detail)).toEqual([
+      { a: expect.anything(), href_: 'https://example.org/x' },
+    ])
+  })
+
+  it('says nothing after disposal', async () => {
+    const { view, cb, session } = await linked()
+    session.dispose()
+    view.emit('link', { a: anchorEl(), href: 'ch01.xhtml' }, true)
+    view.emit('external-link', { a: anchorEl(), href_: 'https://example.org' }, true)
+    expect(cb.calls['onLink']).toBeUndefined()
+    expect(cb.calls['onExternalLink']).toBeUndefined()
+  })
+})
+
 describe('ReaderSession marks', () => {
   const anchor = (over: Partial<MarkAnchor> = {}): MarkAnchor => ({
     cfi: 'epubcfi(/6/4)',
@@ -1231,7 +1316,9 @@ describe('ReaderSession gesture provenance', () => {
     const cb = callbacks()
     const session = new ReaderSession(fakeHost(), cb)
     await session.start('book.epub', deps(view))
-    const reload = (): void => view.emit('load', { doc: doc.asDocument(), index: 0 })
+    const reload = (): void => {
+      view.emit('load', { doc: doc.asDocument(), index: 0 })
+    }
     reload()
     return { doc, selection, session, view, cb, reload }
   }

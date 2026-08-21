@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { availableParallelism, tmpdir } from 'node:os'
 import path from 'node:path'
@@ -385,47 +385,119 @@ export async function runCase(testCase) {
   }
 }
 
-/** The CLI end to end over a fixture: `{ code, out, err }`. */
+/**
+ * The CLI end to end over a fixture: `{ code, out, err }`.
+ *
+ * ASYNC, AND THAT IS THE POINT. It was `spawnSync`, and these four calls are
+ * the only blocking work in this file — each holds the calling thread for the
+ * whole child run. Under Vitest that thread is a worker, and a blocked worker
+ * cannot service the reply to its own `onTaskUpdate` RPC until the child
+ * exits: on a loaded machine the reply misses vitest's deadline and the run
+ * dies with `Timeout calling "onTaskUpdate"`, an UNHANDLED ERROR rather than a
+ * failing assertion. 2540 green tests and exit 1, with nothing naming a cause.
+ *
+ * Measured 2026-08-21: `pnpm verify` uncontended passed 16/16 in 147.7s; the
+ * same command contended failed at `test:coverage` that way, and
+ * `pnpm test:coverage` alone went 47.8s uncontended to 123.0s contended with
+ * the same error. Making these four await removes the mechanism rather than
+ * trying to make the machine fast enough that it never fires.
+ *
+ * A non-zero exit RESOLVES — three of the four cases assert one. Only a
+ * failure to run at all, or the timeout, rejects.
+ */
 export function runCli(files) {
   const root = makeFixture(files)
-  try {
-    const result = spawnSync(process.execPath, [CHECK, '--root', root], { encoding: 'utf8', timeout: 300_000 })
-    if (result.error) throw result.error
-    return { code: result.status, out: result.stdout, err: result.stderr }
-  } finally {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [CHECK, '--root', root])
+    let out = ''
+    let err = ''
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL')
+      reject(new Error(`check-boundaries CLI did not finish within 300s for ${root}`))
+    }, 300_000)
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    child.stdout.on('data', (chunk) => {
+      out += chunk
+    })
+    child.stderr.on('data', (chunk) => {
+      err += chunk
+    })
+    child.on('error', (cause) => {
+      clearTimeout(timer)
+      reject(cause)
+    })
+    child.on('close', (code) => {
+      clearTimeout(timer)
+      resolve({ code, out, err })
+    })
+  }).finally(() => {
     rmSync(root, { recursive: true, force: true })
-  }
+  })
 }
 
-/** Every case, a few at a time (each is a cruiser process), results in
- *  case order. `Promise.all` over all twenty would start twenty TypeScript
- *  compilers at once. */
-async function runAll(cases, width) {
+/** Every case, a few at a time, results in case order.
+ *
+ *  Bounded because each case is an IN-PROCESS cruise — `runCase` awaits
+ *  `checkBoundaries(root)` — and all of them at once are CPU-bound enough to
+ *  starve the event loop they share. The count is `CASES.length`; do not
+ *  write it here, because the last two numbers written into this comment both
+ *  went stale.
+ *
+ *  IT WAS A CHILD PROCESS PER CASE, and this comment went on saying so long
+ *  after it stopped being true. A survey of this gate's flakiness read it,
+ *  concluded every case `spawnSync`s, and prescribed a fix for a mechanism
+ *  that is not there — the only blocking calls are `runCli`'s four. A stale
+ *  comment about concurrency is not a cosmetic defect. */
+export async function runAll(cases, width = defaultWidth()) {
   const results = new Array(cases.length)
   let next = 0
   const worker = async () => {
     while (next < cases.length) {
       const i = next++
-      results[i] = await runCase(cases[i])
+      /* CAUGHT PER CASE, not per pool. `Promise.all` over the workers means one
+         throw rejects the whole run, and both consumers then lose every OTHER
+         case's result — the standalone runner prints nothing and Vitest fails a
+         `beforeAll`, taking all of the case names down with it and naming none
+         of them. A case that could not run is a result like any other, and it
+         is reported against its own name. */
+      try {
+        results[i] = await runCase(cases[i])
+      } catch (cause) {
+        results[i] = { violations: [], missing: [], unexpected: [], error: cause }
+      }
     }
   }
-  await Promise.all(Array.from({ length: Math.min(width, cases.length) }, worker))
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(width, cases.length)) }, worker))
   return results
 }
 
+/** The cap both consumers get unless one asks for another. */
+export function defaultWidth() {
+  return Math.max(1, Math.min(6, availableParallelism()))
+}
+
+/** Why a case did not behave, as one line, or null when it did. */
+export function caseFailure({ violations, missing, unexpected, error }, testCase) {
+  if (error) return `could not run: ${error?.stack ?? String(error)}`
+  if (missing.length > 0) {
+    const saw = violations.map(formatViolation)
+    return `not reported: ${missing.join(', ')} for ${testCase.from} -> ${testCase.to}${
+      saw.length > 0 ? `\n     saw: ${saw.join('\n     saw: ')}` : ''
+    }`
+  }
+  if (unexpected.length > 0) return `unexpected: ${unexpected.map(formatViolation).join(', ')}`
+  return null
+}
+
 async function main() {
-  const results = await runAll(CASES, Math.max(1, Math.min(6, availableParallelism())))
+  const results = await runAll(CASES)
   let failed = 0
   CASES.forEach((testCase, i) => {
-    const { violations, missing, unexpected } = results[i]
-    const ok = missing.length === 0 && unexpected.length === 0
-    if (!ok) failed++
-    process.stdout.write(`${ok ? 'ok  ' : 'FAIL'} ${testCase.name}\n`)
-    if (missing.length > 0) {
-      process.stdout.write(`     not reported: ${missing.join(', ')} for ${testCase.from} -> ${testCase.to}\n`)
-      for (const v of violations) process.stdout.write(`     saw: ${formatViolation(v)}\n`)
-    }
-    for (const v of unexpected) process.stdout.write(`     unexpected: ${formatViolation(v)}\n`)
+    const why = caseFailure(results[i], testCase)
+    if (why) failed++
+    process.stdout.write(`${why ? 'FAIL' : 'ok  '} ${testCase.name}\n`)
+    if (why) process.stdout.write(`     ${why}\n`)
   })
   process.stdout.write(`check-boundaries selftest: ${CASES.length} cases, ${failed} failed\n`)
   return failed > 0 ? 1 : 0

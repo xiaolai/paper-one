@@ -101,6 +101,29 @@ export interface KernelCommandContext {
   exportTags: (() => void) | null
   importTags: (() => void) | null
   /**
+   * The reader's marginalia, out to a file and back.
+   *
+   * BESIDE THE TAG PAIR and for the same reason they are here rather than in a
+   * panel: backing up is not annotation MANAGEMENT. A reader looking at
+   * Marginalia is reading their notes, and a pair of file-dialog rows in that
+   * surface is a second subject. It is also a rare action — done once, or
+   * after something went wrong — which is what the palette is for.
+   */
+  exportMarks: (() => void) | null
+  importMarks: (() => void) | null
+  /**
+   * Back to where the reader was, and forward again — null when the stack has
+   * nothing that way.
+   *
+   * NULL RATHER THAN A DISABLED ROW, because the palette has no disabled state
+   * and inventing one here would be a row that looks like every other row and
+   * does nothing. The same condition gates the key in `accel.ts`, so a reader
+   * who finds the row also finds a combo that works. See `canKeepPlace` for
+   * the rule this follows.
+   */
+  jumpBack: (() => void) | null
+  jumpForward: (() => void) | null
+  /**
    * The composition's commands — `Composition.commands`. Appended after the
    * kernel's, built from a `CommandContext` derived from `state` here, so a
    * capability's `on` and labels reflect the same moment the kernel's do.
@@ -332,6 +355,62 @@ export function buildCommands(ctx: KernelCommandContext): Command[] {
       combo: '⌘T',
       keywords: 'tag label subject shelve',
       run: editTags,
+    })
+  }
+
+  if (ctx.jumpBack) {
+    const run = ctx.jumpBack
+    commands.push({
+      id: 'jump:back',
+      /* Named for what it does to the READER's position, not for the data
+         structure. "Back" alone reads as the browser's, and this is not a
+         page-turn history — it is the place they were before they followed
+         something. */
+      label: 'Back to where you were',
+      group: 'Book',
+      combo: '⌘[',
+      keywords: 'back return jump history previous where was undo navigate',
+      run,
+    })
+  }
+
+  if (ctx.jumpForward) {
+    const run = ctx.jumpForward
+    commands.push({
+      id: 'jump:forward',
+      label: 'Forward again',
+      group: 'Book',
+      combo: '⌘]',
+      keywords: 'forward jump history next redo navigate',
+      run,
+    })
+  }
+
+  if (ctx.exportMarks) {
+    const run = ctx.exportMarks
+    commands.push({
+      id: 'marks:export',
+      /* NAMES BOTH THINGS IT WRITES, because a reader looking for a way out
+         does not know whether Paper calls a card marginalia. */
+      label: 'Export your marks and cards…',
+      group: 'Library',
+      keywords: 'mark note card highlight annotation backup save export file json markdown archive',
+      run,
+    })
+  }
+
+  if (ctx.importMarks) {
+    const run = ctx.importMarks
+    commands.push({
+      id: 'marks:import',
+      /* "Merge" in the label, exactly as the tag import says it, and it is the
+         reassurance rather than the description: an import never removes a
+         mark, so restoring an old file cannot silently undo a month of
+         reading. */
+      label: 'Import marks from a file… (merge)',
+      group: 'Library',
+      keywords: 'mark note card highlight annotation restore load import merge file json archive backup',
+      run,
     })
   }
 

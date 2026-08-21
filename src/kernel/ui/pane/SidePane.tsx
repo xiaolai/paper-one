@@ -1,5 +1,4 @@
 import {
-  ChartNoAxesColumn,
   Highlighter,
   Layers,
   LibraryBig,
@@ -10,6 +9,7 @@ import {
   Sparkles,
 } from 'lucide-react'
 import type { IndexedBook } from '../../core/bookIndex'
+import type { JumpTarget } from '../hooks/useJumps'
 import type { PaneContribution, SettingsSection } from '../../core/capability'
 import type { CompanionProvider } from '../../core/companion'
 import { ICON, type Platform } from '../../core/metrics'
@@ -69,7 +69,6 @@ const RAIL_ENTRIES = [
   { id: 'marginalia', Icon: Highlighter },
   { id: 'cards', Icon: Layers },
   { id: 'search', Icon: Search },
-  { id: 'stats', Icon: ChartNoAxesColumn },
   { id: 'library', Icon: LibraryBig },
   { id: 'settings', Icon: SettingsIcon },
 ] as const satisfies readonly { id: KernelPaneId; Icon: typeof Search }[]
@@ -108,7 +107,12 @@ export interface SidePaneProps {
   /** Which keyboard this reader has — the Marginalia panel teaches ⌘B/Ctrl+B. */
   platform: Platform
   cards: CardsView
-  onGoTo?: (target: string) => void
+  /**
+   * Navigate somewhere non-linear. A string is the OPEN book — a CFI or an
+   * href, which foliate resolves either way — and a `Place` names the book as
+   * well, which is what a cross-book row needs. See `useJumps`.
+   */
+  onGoTo?: (target: JumpTarget) => void
   /** Removes a mark from the store AND from the page — see `Marginalia`. */
   onDeleteMark: (mark: Annotation) => void
   /** The mark Notes should reveal, if one has been asked for. */
@@ -239,6 +243,13 @@ export function SidePane({
             /* The shelf is already here for the Library panel; Marginalia needs
                it only to name the book a cross-book row came from. */
             titleOf={(id) => books.find((entry) => entry.bookId === id)?.title}
+            /* WHETHER THE BOOK CAN BE OPENED AT ALL, asked separately from
+               what it is called. `titleOf` returning undefined nearly answers
+               it, but a shelved book with an empty title answers the same way
+               — and conflating "has no title" with "is not here" would
+               silently disable rows that work. Same `books` list, two
+               questions, both answered where the list already is. */
+            onShelf={(id) => books.some((entry) => entry.bookId === id)}
             focus={markFocus}
             {...(onGoTo ? { onGoTo } : {})}
           />
@@ -282,20 +293,6 @@ export function SidePane({
             onContrast={(idx) => dispatch({ type: 'setContrast', idx })}
             onTypeface={(typeface) => dispatch({ type: 'setTypeface', typeface })}
           />
-        )}
-
-        {pane === 'stats' && (
-          <div className={styles.empty}>
-            <div className={styles.emptyTitle}>Reading statistics are not recorded yet</div>
-            {/* Says what is true. It used to promise that time, pages and
-                streaks would appear "once you have spent a session with a
-                book" — and nothing measures any of them, so the reader waits
-                for a panel that will never fill in. */}
-            <div className={styles.emptyBody}>
-              Nothing here measures your reading yet. Your marks are in Notes
-              and your cards are in Cards.
-            </div>
-          </div>
         )}
 
         {pane === 'library' && (

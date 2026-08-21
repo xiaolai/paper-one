@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import type { Renderer, TocItem, View } from 'foliate-js/view.js'
+import type { ExternalLinkDetail, LinkDetail, Renderer, TocItem, View } from 'foliate-js/view.js'
 import type { MarkPainter } from 'foliate-js/overlayer.js'
 import type { Align, SpacingIndices, Theme, Typeface } from '../state'
 import type { BookMeta, BookNavigator, ReaderPosition } from '../hooks/useBook'
@@ -84,6 +84,13 @@ export interface FoliateViewProps {
    * a book is open, and a drop over one goes to that document. Unhandled, the
    * webview navigates to the file and the app is gone.
    */
+  /**
+   * A link in the book, before foliate navigates it — cancelable, so calling
+   * `preventDefault()` on the event takes the link over. See `LinkDetail`.
+   */
+  onLink: (detail: LinkDetail, event: Event) => void
+  /** A link whose scheme leaves the book. See `ExternalLinkDetail`. */
+  onExternalLink: (detail: ExternalLinkDetail, event: Event) => void
   onFileDropped: (file: File) => void
   /** A wheel gesture asked for another page — see `wheelPaging`. */
   onPageIntent: (intent: PageIntent) => void
@@ -350,6 +357,8 @@ export function FoliateView({
   marks,
   onSelection,
   onMarkDrawn,
+  onLink,
+  onExternalLink,
   onFileDropped,
   onPageIntent,
   onFixedLayout,
@@ -384,6 +393,8 @@ export function FoliateView({
     onNavigator,
     onSelection,
     onMarkDrawn,
+    onLink,
+    onExternalLink,
     onFileDropped,
     onPageIntent,
     onFixedLayout,
@@ -440,6 +451,8 @@ export function FoliateView({
       onNavigator: (navigator) => handlers.current.onNavigator(gen, navigator),
       onSelection: (selection) => handlers.current.onSelection(selection),
       onMarkDrawn: (cfi, range) => handlers.current.onMarkDrawn(cfi, range),
+      onLink: (detail, event) => handlers.current.onLink(detail, event),
+      onExternalLink: (detail, event) => handlers.current.onExternalLink(detail, event),
       onFileDropped: (file) => handlers.current.onFileDropped(file),
       onPageIntent: (intent) => handlers.current.onPageIntent(intent),
       onFixedLayout: (fixed) => handlers.current.onFixedLayout(gen, fixed),

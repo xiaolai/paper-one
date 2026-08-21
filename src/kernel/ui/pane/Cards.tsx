@@ -3,6 +3,7 @@ import { Trash2 } from 'lucide-react'
 import { CARD_KINDS, type CardKind } from '../../core/cards'
 import { ICON } from '../../core/metrics'
 import type { CardsView } from '../hooks/useCards'
+import type { JumpTarget } from '../hooks/useJumps'
 import { FilterChips } from './FilterChips'
 import styles from './SidePane.module.css'
 
@@ -22,7 +23,7 @@ const FILTERS: readonly Filter[] = ['All', ...CARD_KINDS]
 export interface CardsProps {
   cards: CardsView
   bookId: string | null
-  onGoTo?: (target: string) => void
+  onGoTo?: (target: JumpTarget) => void
 }
 
 export function Cards({ cards, bookId, onGoTo }: CardsProps) {
