@@ -726,14 +726,14 @@ describe('SettingsStore', () => {
     const first = createSettingsStore({ storage })
     expect(first.get(KERNEL_SETTINGS.theme)).toBe('paper')
     first.set(KERNEL_SETTINGS.theme, 'night')
-    first.set(KERNEL_SETTINGS.stepIdx, 4)
+    first.set(KERNEL_SETTINGS.textSize, 19)
     expect(JSON.parse(storage.map.get(SETTINGS_STORAGE_KEY)!)).toEqual({
       version: 1,
-      values: { 'kernel.theme': 'night', 'kernel.stepIdx': 4 },
+      values: { 'kernel.theme': 'night', 'kernel.textSize': 19 },
     })
     const second = createSettingsStore({ storage })
     expect(second.get(KERNEL_SETTINGS.theme)).toBe('night')
-    expect(second.get(KERNEL_SETTINGS.stepIdx)).toBe(4)
+    expect(second.get(KERNEL_SETTINGS.textSize)).toBe(19)
     expect(second.get(KERNEL_SETTINGS.typeface)).toBe('literata')
   })
 
@@ -782,8 +782,8 @@ describe('SettingsStore', () => {
     })
     const store = createSettingsStore({ storage })
     expect(store.get(KERNEL_SETTINGS.theme)).toBe('paper')
-    // A non-integer indexes nothing, so it falls back…
-    expect(store.get(KERNEL_SETTINGS.stepIdx)).toBe(KERNEL_SETTINGS.stepIdx.fallback)
+    // A size that is not a positive number is not a size, so it falls back…
+    expect(store.get(KERNEL_SETTINGS.textSize)).toBe(KERNEL_SETTINGS.textSize.fallback)
     /* …while an integer past the end of this build's ramp CLAMPS rather than
        falling back: it is not malformed, it is describing the end of a scale
        this build has less of, and falling back would throw away a reader's

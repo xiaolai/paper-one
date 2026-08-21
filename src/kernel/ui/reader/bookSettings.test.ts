@@ -26,6 +26,7 @@ import {
 import { bookSheets, bookVars, noteSheets } from './bookCss'
 import { SMALL_ATTR, SMALL_VAR } from './markSmallText'
 import { DEFAULT_READING_STYLE } from '../../core/metrics'
+import { DEFAULT_STEP_IDX } from '../../core/metrics'
 
 /**
  * WI-14.4's fifteen: each one property and a rule that reads it.
@@ -43,7 +44,7 @@ import { DEFAULT_READING_STYLE } from '../../core/metrics'
  */
 
 const settings = (style: Partial<ReadingStyle> = {}) => ({
-  stepIdx: 2,
+  stepIdx: DEFAULT_STEP_IDX,
   theme: 'paper' as const,
   typeface: 'literata' as const,
   align: 'justified' as const,

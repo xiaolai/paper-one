@@ -4,7 +4,7 @@
 // it needs a document even when the assertion is about a plain declaration.
 // See docs/hook-tests.md for the per-file opt-in.
 import { describe, expect, it } from 'vitest'
-import { READING_STEPS } from '../../core/metrics'
+import { DEFAULT_STEP_IDX, READING_STEPS } from '../../core/metrics'
 import { bookSheets, resolvedBookCss } from './bookCss'
 
 /**
@@ -44,7 +44,7 @@ describe('the base size', () => {
     /* THE REGRESSION TEST FOR THE WHOLE CLASS. With this on `body` instead,
        every rem in every book stays pinned to the browser's 16px however the
        reader moves the control, and nothing else in the suite notices. */
-    const size = ruleValue(resolvedBookCss(settings(2)), 'html', 'font-size')
+    const size = ruleValue(resolvedBookCss(settings(DEFAULT_STEP_IDX)), 'html', 'font-size')
     expect(size).not.toBeNull()
     expect(size).toMatch(/^\d+px !important$/)
   })
@@ -56,7 +56,7 @@ describe('the base size', () => {
 
   it('ties body to the root rather than repeating the number', () => {
     /* Two numbers that must agree are one number that can disagree. */
-    expect(ruleValue(resolvedBookCss(settings(2)), 'body', 'font-size')).toBe('1rem !important')
+    expect(ruleValue(resolvedBookCss(settings(DEFAULT_STEP_IDX)), 'body', 'font-size')).toBe('1rem !important')
   })
 
   it('never forces a font-size on a descendant, which is what keeps proportion', () => {
@@ -64,7 +64,7 @@ describe('the base size', () => {
        2.25x it. Forcing a descendant would flatten every heading, note and drop
        cap in the library into one size. The rule is that only html and body may
        carry an important font-size. */
-    const css = resolvedBookCss(settings(2)).replace(/\/\*[\s\S]*?\*\//g, '')
+    const css = resolvedBookCss(settings(DEFAULT_STEP_IDX)).replace(/\/\*[\s\S]*?\*\//g, '')
     const forced = [...css.matchAll(/([^{}]*)\{([^{}]*)\}/g)]
       .filter(([, , body]) => /font-size:[^;]*!important/.test(body ?? ''))
       .map(([, selector]) => (selector ?? '').trim().split('\n').pop()?.trim())
@@ -85,7 +85,7 @@ describe('the prose line box', () => {
     /* The grid is the point of a fixed line, and enlarged prose is the
        exception — not the other way round. At the 21/34 default, 1.2em is 25px
        against the grid's 34, so ordinary prose is unaffected by the max(). */
-    const line = ruleValue(resolvedBookCss(settings(2)), 'p, li, blockquote, dd', 'line-height')
+    const line = ruleValue(resolvedBookCss(settings(DEFAULT_STEP_IDX)), 'p, li, blockquote, dd', 'line-height')
     /* RESOLVED, which is what makes the comment above checkable. The sheet
        itself says `max(var(--paper-line), 1.2em)`; the contract puts 34px in
        it at this step, and 34 against 1.2em is the whole claim. */
@@ -102,7 +102,7 @@ describe('the prose line box', () => {
 
        Computed here rather than asserted as a string, so the arithmetic that
        makes the claim true is the arithmetic the test checks. */
-    const step = READING_STEPS[2]
+    const step = READING_STEPS[DEFAULT_STEP_IDX]
     if (!step) throw new Error('the default step is gone')
     const grid = step.line
     const twoRem = 2 * step.size

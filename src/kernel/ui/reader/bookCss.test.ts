@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'vitest'
 import { ALIGNS, type Align } from '../../core/uiTypes'
 import { resolvedBookCss } from './bookCss'
+import { DEFAULT_STEP_IDX } from '../../core/metrics'
 
 /**
  * Alignment, and the hyphenation that is half of it.
@@ -17,7 +18,7 @@ import { resolvedBookCss } from './bookCss'
  */
 
 const settings = (align: Align) => ({
-  stepIdx: 2,
+  stepIdx: DEFAULT_STEP_IDX,
   theme: 'paper' as const,
   typeface: 'literata' as const,
   align,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { BRIGHTNESS, CONTRAST, READING_STEPS, SPACING } from './metrics'
+import { BRIGHTNESS, CONTRAST, LEGACY_READING_SIZES, READING_STEPS, SPACING, stepIndexForSize } from './metrics'
 import { initialState, preferencesOf } from '../ui/state'
 import {
   KERNEL_SETTINGS,
@@ -68,7 +68,7 @@ describe('what is persisted', () => {
        leaving; not restoring `theme` is the bug this file exists to fix. */
     const names = Object.keys(KERNEL_SETTINGS)
     expect(names).toContain('theme')
-    expect(names).toContain('stepIdx')
+    expect(names).toContain('textSize')
     expect(names).toContain('brightness')
     for (const session of ['screen', 'pane', 'paletteOpen', 'switcherOpen', 'libraryQuery', 'chromeOn', 'rulerPinned', 'tagsOpen']) {
       expect(names, session).not.toContain(session)
@@ -88,7 +88,7 @@ describe('what is persisted', () => {
       themeFollowsOs: false,
       side: 'left',
       rulerOn: true,
-      stepIdx: 1,
+      textSize: 19,
       spacing: { letter: 2, word: 1, line: 3, paragraph: 0 },
       align: 'ragged',
       brightness: 0,
@@ -125,14 +125,14 @@ describe('reading a file nobody can vouch for', () => {
     const got = readingBack(
       envelope({
         'kernel.theme': 'sepia',
-        'kernel.stepIdx': 'huge',
+        'kernel.textSize': 'huge',
         'kernel.align': 42,
         'kernel.spacing': 'no',
         'kernel.brightness': null,
       }),
     )
     expect(got.theme).toBe('sepia')
-    expect(got.stepIdx).toBe(DEFAULTS.stepIdx)
+    expect(got.textSize).toBe(DEFAULTS.textSize)
     expect(got.align).toBe(DEFAULTS.align)
     expect(got.spacing).toEqual(DEFAULTS.spacing)
     expect(got.brightness).toBe(DEFAULTS.brightness)
@@ -163,7 +163,10 @@ describe('indices into a scale', () => {
     const got = readingBack(
       envelope({ 'kernel.stepIdx': 999, 'kernel.brightness': -5, 'kernel.contrast': 999 }),
     )
-    expect(got.stepIdx).toBe(READING_STEPS.length - 1)
+    /* THE LEGACY INDEX STILL CLAMPS, and 999 still means "as large as it
+       goes" — read against the SEVEN-step ramp it was written for, so it lands
+       on that ramp's last size rather than on this one's. */
+    expect(got.textSize).toBe(LEGACY_READING_SIZES[LEGACY_READING_SIZES.length - 1])
     expect(got.brightness).toBe(0)
     expect(got.contrast).toBe(CONTRAST.steps.length - 1)
   })
@@ -171,7 +174,7 @@ describe('indices into a scale', () => {
   it('rejects a step that indexes nothing at all', () => {
     // A non-integer indexes nothing; `stepAt` on a NaN yields undefined.
     for (const bad of [1.5, Number.NaN, '3', null]) {
-      expect(readingBack(envelope({ 'kernel.stepIdx': bad })).stepIdx).toBe(DEFAULTS.stepIdx)
+      expect(readingBack(envelope({ 'kernel.stepIdx': bad })).textSize).toBe(DEFAULTS.textSize)
     }
   })
 
@@ -284,6 +287,52 @@ describe('writing only what moved', () => {
  * exact failure the settings file was added to fix, reintroduced by the file
  * format changing underneath it.
  */
+/**
+ * THE SIZE IS STORED AS PIXELS, AND ONE MIGRATION READS THE OLD INDEX.
+ *
+ * `kernel.stepIdx` held an INDEX into `READING_STEPS`, and an index means
+ * nothing across a change to that ramp. When it went from seven steps to
+ * fourteen, a stored `2` meant 21px on the old scale and 17px on the new one —
+ * so every reader would have opened the next launch with smaller type and
+ * nothing anywhere to say why. This is what stops that, and what stops it
+ * happening again the next time the ramp moves.
+ */
+describe('the reading size across a change to the ramp', () => {
+  it('reads a stored size back as itself', () => {
+    expect(readingBack(envelope({ 'kernel.textSize': 24 })).textSize).toBe(24)
+  })
+
+  it('migrates the old index through the ramp it was written for', () => {
+    /* Index 2 of the seven-step ramp was 21px, and 21px is what the reader
+       chose. On this ramp index 2 is 17px, which is what they would have been
+       given without this. */
+    expect(readingBack(envelope({ 'kernel.stepIdx': 2 })).textSize).toBe(21)
+    expect(readingBack(envelope({ 'kernel.stepIdx': 0 })).textSize).toBe(17)
+    expect(readingBack(envelope({ 'kernel.stepIdx': 6 })).textSize).toBe(30)
+  })
+
+  it('lets a stored size win outright, so the migration cannot fight it', () => {
+    /* ONE DIRECTION AND ONE TIME. Once `kernel.textSize` exists the legacy key
+       is never consulted again — otherwise a reader who changed their size
+       after upgrading would be dragged back to their old one on every launch. */
+    const both = envelope({ 'kernel.textSize': 15, 'kernel.stepIdx': 6 })
+    expect(readingBack(both).textSize).toBe(15)
+  })
+
+  it('keeps a size this ramp does not offer, and lands it on the nearest step', () => {
+    /* 30px was the old ramp's largest and is not on this one. The FILE keeps
+       what the reader chose; `bootState` is where it becomes an index. */
+    const got = readingBack(envelope({ 'kernel.stepIdx': 6 }))
+    expect(got.textSize).toBe(30)
+    expect(stepIndexForSize(got.textSize)).toBe(READING_STEPS.length - 1)
+  })
+
+  it('falls back to the default when there is nothing to migrate', () => {
+    expect(readingBack(envelope({})).textSize).toBe(DEFAULTS.textSize)
+    expect(readingBack(envelope({ 'kernel.stepIdx': 'two' })).textSize).toBe(DEFAULTS.textSize)
+  })
+})
+
 describe('carrying the pre-kernel settings file across', () => {
   it('restores a flat file written before the keys were namespaced', () => {
     const got = readingBack({
@@ -294,7 +343,10 @@ describe('carrying the pre-kernel settings file across', () => {
       spacing: { letter: 2, word: 1, line: 3, paragraph: 0 },
     })
     expect(got.theme).toBe('night')
-    expect(got.stepIdx).toBe(1)
+    /* An un-namespaced `stepIdx` is carried to `kernel.stepIdx` and THEN
+       migrated to a size — two migrations in sequence, each doing its own job.
+       Index 1 of the old seven-step ramp was 19px. */
+    expect(got.textSize).toBe(LEGACY_READING_SIZES[1])
     expect(got.align).toBe('ragged')
     expect(got.markTint).toBe('purple')
     expect(got.spacing).toEqual({ letter: 2, word: 1, line: 3, paragraph: 0 })
@@ -304,7 +356,7 @@ describe('carrying the pre-kernel settings file across', () => {
     // One migration, not a second copy of fifteen validators.
     const got = readingBack({ theme: 'aubergine', stepIdx: 999 })
     expect(got.theme).toBe(DEFAULTS.theme)
-    expect(got.stepIdx).toBe(READING_STEPS.length - 1)
+    expect(got.textSize).toBe(LEGACY_READING_SIZES[LEGACY_READING_SIZES.length - 1])
   })
 
   it('leaves an already-namespaced key alone, so it is safe to run twice', () => {

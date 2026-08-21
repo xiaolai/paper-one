@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'vitest'
 import { THEME_IDS } from '../../core/uiTypes'
 import { applyBookVars, bookSheets, bookVars, measurementKey, noteSheets, resolveBookVars } from './bookCss'
+import { DEFAULT_STEP_IDX } from '../../core/metrics'
 
 /**
  * THE VARIABLE CONTRACT (WI-14.3): two static sheets, and the settings as
@@ -26,7 +27,7 @@ import { applyBookVars, bookSheets, bookVars, measurementKey, noteSheets, resolv
  */
 
 const settings = (over: Partial<Parameters<typeof bookVars>[0]> = {}) => ({
-  stepIdx: 2,
+  stepIdx: DEFAULT_STEP_IDX,
   theme: 'paper' as const,
   typeface: 'literata' as const,
   align: 'justified' as const,

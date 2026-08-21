@@ -4,6 +4,7 @@ import {
   CONTRAST,
   DEFAULT_READING_STYLE,
   DEFAULT_STEP_IDX,
+  LEGACY_READING_SIZES,
   FIGURE_HEIGHTS,
   FIGURE_WIDTHS,
   MINIMUM_SIZES,
@@ -298,12 +299,25 @@ export const KERNEL_SETTINGS = {
   typeface: defineSetting<Typeface>('kernel.typeface', 'literata', (raw) =>
     typeof raw === 'string' && raw !== '' ? raw : undefined,
   ),
-  /* An INDEX into `READING_STEPS`, CLAMPED to it — see `index`. This used to
-   * reject anything past the end, which throws away a reader's deliberate "as
-   * large as it goes" the moment they open the same library on a build with a
-   * shorter ramp. Clamping keeps the intent and lands on the nearest thing
-   * this build can show. */
-  stepIdx: defineSetting<number>('kernel.stepIdx', DEFAULT_STEP_IDX, index(READING_STEPS.length)),
+  /**
+   * THE READING SIZE IN PIXELS, NOT AN INDEX INTO THE RAMP.
+   *
+   * It was `kernel.stepIdx`, an index, and an index means nothing across a
+   * change to `READING_STEPS`. When the ramp went from seven steps to fourteen
+   * a stored `2` meant 21px on the old scale and 17px on the new one — so every
+   * reader would have opened the next launch with smaller type and nothing to
+   * say why. Storing what the reader actually chose survives any ramp that
+   * still offers it, and `stepIndexForSize` lands them on the nearest step when
+   * one does not (30px was offered once and is not now).
+   *
+   * Validated as a finite positive number rather than against the ramp's own
+   * list, for the same reason `index` clamps instead of rejecting: a size this
+   * build does not offer is a reader's deliberate choice made on another build,
+   * and the nearest step honours it where refusing it would not.
+   */
+  textSize: defineSetting<number>('kernel.textSize', READING_STEPS[DEFAULT_STEP_IDX]!.size, (raw) =>
+    typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? raw : undefined,
+  ),
   pageLayout: defineSetting<PageLayout>('kernel.pageLayout', 'scrolled', oneOf(PAGE_LAYOUTS)),
   side: defineSetting<Side>('kernel.side', 'right', oneOf(SIDES)),
   rulerOn: defineSetting<boolean>('kernel.rulerOn', false, boolean),
@@ -338,12 +352,44 @@ export type KernelPreferences = {
   readonly [K in KernelSettingName]: (typeof KERNEL_SETTINGS)[K] extends Setting<infer T> ? T : never
 }
 
+/**
+ * The legacy index, for one migration, or `-1` when there is nothing to read.
+ *
+ * `store.get` NEVER FAILS — an absent or malformed value comes back as the
+ * setting's fallback — so "not stored" and "stored as rubbish" are the same
+ * answer, and the only way to ask the question is a fallback no real value can
+ * take. `-1` is not a legal index, and `index()` rejects it, so both cases land
+ * on it and both mean the same thing here: nothing to migrate.
+ */
+const LEGACY_STEP_IDX = defineSetting<number>('kernel.stepIdx', -1, index(LEGACY_READING_SIZES.length))
+
+/**
+ * The reading size, migrating a stored index from the seven-step ramp once.
+ *
+ * WITHOUT THIS, EVERY READER'S TYPE CHANGES SIZE ON THE LAUNCH AFTER THE RAMP
+ * DID. The default was index 2 of seven and is index 6 of fourteen; a settings
+ * file written before the change says `2`, which on this ramp is 17px. The
+ * reader chose 21px and would be given 17px, silently.
+ *
+ * ONE DIRECTION AND ONE TIME. Once `kernel.textSize` exists it wins outright
+ * and the legacy key is never consulted again, so this cannot fight a size the
+ * reader sets afterwards. The old key is left on disk rather than deleted: it
+ * costs one line of JSON, and a reader who moves a library back to an older
+ * build gets their size there too.
+ */
+function readTextSize(store: SettingsStore): number {
+  const stored = store.get(KERNEL_SETTINGS.textSize)
+  if (stored !== KERNEL_SETTINGS.textSize.fallback) return stored
+  const legacy = store.get(LEGACY_STEP_IDX)
+  return LEGACY_READING_SIZES[legacy] ?? stored
+}
+
 export function readKernelPreferences(store: SettingsStore): KernelPreferences {
   return {
     theme: store.get(KERNEL_SETTINGS.theme),
     themeFollowsOs: store.get(KERNEL_SETTINGS.themeFollowsOs),
     typeface: store.get(KERNEL_SETTINGS.typeface),
-    stepIdx: store.get(KERNEL_SETTINGS.stepIdx),
+    textSize: readTextSize(store),
     pageLayout: store.get(KERNEL_SETTINGS.pageLayout),
     side: store.get(KERNEL_SETTINGS.side),
     rulerOn: store.get(KERNEL_SETTINGS.rulerOn),

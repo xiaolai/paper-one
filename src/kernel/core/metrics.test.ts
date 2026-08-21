@@ -5,6 +5,7 @@ import {
   COVER_ASPECT,
   DEFAULT_STEP_IDX,
   GUTTER,
+  LINE,
   cellHeightFor,
   GUTTER_MIN,
   MARGIN_COL,
@@ -19,6 +20,7 @@ import {
   proseColumn,
   proseGrid,
   readingStep,
+  stepIndexForSize,
 } from './metrics'
 
 /** Where the measure track's centre falls inside the whole prose grid. */
@@ -200,6 +202,78 @@ describe('proseBleed', () => {
 
   it('needs no padding when the tracks already match', () => {
     expect(proseBleed(proseGrid(2000, false))).toEqual({ start: 0, end: 0 })
+  })
+})
+
+describe('the reading ramp', () => {
+  it('runs 15 to 28 by ones', () => {
+    expect(READING_STEPS.map((s) => s.size)).toEqual([15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28])
+  })
+
+  it('keeps 21/34/660 as the default, which the whole grid is specified around', () => {
+    const step = READING_STEPS[DEFAULT_STEP_IDX]!
+    expect([step.size, step.line, step.measure]).toEqual([21, LINE, MEASURE])
+  })
+
+  it('gives every step an integer line box', () => {
+    /* The rule the table states: a FRACTIONAL line box breaks the ruler and the
+       scroll snapping. Odd is fine and two of these are — 29 at 18px and 39 at
+       24px — because there are only twelve even numbers between 24 and 46 for
+       fourteen sizes, so rounding to even would collide with a neighbour. */
+    for (const step of READING_STEPS) expect(Number.isInteger(step.line), `${step.size}px`).toBe(true)
+  })
+
+  it('leads every step at between 1.57 and 1.66 of its size', () => {
+    /* The band the seven-step table already occupied, floor and ceiling both
+       set by steps that are still on this ramp — 19/30 and 23/38. */
+    for (const step of READING_STEPS) {
+      const ratio = step.line / step.size
+      expect(ratio, `${step.size}px leads at ${ratio}`).toBeGreaterThanOrEqual(30 / 19)
+      expect(ratio, `${step.size}px leads at ${ratio}`).toBeLessThanOrEqual(38 / 23)
+    }
+  })
+
+  it('keeps every size the seven-step ramp offered on its own line and measure', () => {
+    /* A reader already on one of these sees nothing move. 30px is the one the
+       old ramp had that this does not, which is what the range now stops short
+       of — `stepIndexForSize` lands it on 28. */
+    for (const [size, line, measure] of [[17, 28, 540], [19, 30, 600], [21, 34, 660], [23, 38, 700], [26, 42, 740], [28, 46, 780]]) {
+      const step = READING_STEPS.find((s) => s.size === size)
+      expect(step, `${size}px is gone`).toBeDefined()
+      expect([step!.line, step!.measure], `${size}px moved`).toEqual([line, measure])
+    }
+  })
+
+  it('widens the measure and narrows it in CHARACTERS as the type grows', () => {
+    /* What makes large print large print rather than merely wide. A step whose
+       measure gave MORE characters than the one below it would be a bigger size
+       on a longer line, which is the opposite of the intent. */
+    const chars = READING_STEPS.map((s) => s.measure / s.size)
+    for (let i = 1; i < chars.length; i++) {
+      expect(chars[i]!, `${READING_STEPS[i]!.size}px`).toBeLessThan(chars[i - 1]!)
+      expect(READING_STEPS[i]!.measure).toBeGreaterThan(READING_STEPS[i - 1]!.measure)
+    }
+  })
+})
+
+describe('stepIndexForSize', () => {
+  it('finds the step a size names', () => {
+    READING_STEPS.forEach((step, i) => expect(stepIndexForSize(step.size)).toBe(i))
+  })
+
+  it('lands a size this ramp no longer offers on the nearest it does', () => {
+    /* 30px was on the seven-step ramp. Dropping the reader to the DEFAULT would
+       throw away a deliberate "as large as it goes"; the nearest step honours
+       it, which is the argument `index` already makes for clamping. */
+    expect(stepIndexForSize(30)).toBe(READING_STEPS.length - 1)
+    expect(stepIndexForSize(2)).toBe(0)
+    expect(stepIndexForSize(19.4)).toBe(stepIndexForSize(19))
+  })
+
+  it('falls back rather than returning nonsense for a size that is not one', () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(stepIndexForSize(bad)).toBe(DEFAULT_STEP_IDX)
+    }
   })
 })
 

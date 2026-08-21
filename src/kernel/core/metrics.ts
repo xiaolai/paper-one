@@ -175,14 +175,46 @@ export interface ReadingStep {
   readonly note: string
 }
 
+/**
+ * 15px TO 28px, EVERY PIXEL. It was seven steps at 17, 19, 21, 23, 26, 28, 30
+ * — an uneven ramp, and coarse enough that the two sizes either side of a
+ * reader's preference were 2px away in each direction.
+ *
+ * EVERY EXISTING STEP KEPT ITS OWN LINE BOX AND ITS OWN MEASURE. 17/28/540,
+ * 19/30/600, 21/34/660, 23/38/700, 26/42/740 and 28/46/780 are the values they
+ * have always had, so a reader already on one of them sees nothing move. The
+ * new steps are interpolated between them; only 30px is gone, which is the one
+ * the range now stops short of.
+ *
+ * THE LINE IS ROUGHLY 1.6 OF THE SIZE, which is the band the old table already
+ * occupied — every ratio here falls between 1.579 and 1.652, the same floor and
+ * ceiling the seven had. Two of the interpolated line boxes are ODD (29 at 18px,
+ * 39 at 24px) and that is fine: the rule above forbids a FRACTIONAL line box,
+ * because the ruler and the scroll snapping break on one, and 29 is not
+ * fractional. Rounding those to even would have collided with a neighbour —
+ * there are only twelve even numbers between 24 and 46 for fourteen sizes.
+ *
+ * THE MEASURE FALLS IN CHARACTERS AS THE TYPE GROWS, from about 69 at 15px to
+ * about 60 at 28px, which is what the old table did and what makes large print
+ * large print rather than merely wide. Monotonic, and `metrics.test.ts` holds
+ * it — a step whose measure gave MORE characters than the one below it would be
+ * a larger size on a longer line, which is the opposite of the intent.
+ */
 export const READING_STEPS: readonly ReadingStep[] = [
-  { size: 17, line: 28, measure: 540, note: 'Minimum. Below this the measure falls under 60 characters.' },
+  { size: 15, line: 24, measure: 480, note: 'Minimum. 69 characters.' },
+  { size: 16, line: 26, measure: 510, note: '' },
+  { size: 17, line: 28, measure: 540, note: '' },
+  { size: 18, line: 29, measure: 570, note: '' },
   { size: 19, line: 30, measure: 600, note: '' },
+  { size: 20, line: 32, measure: 630, note: '' },
   { size: 21, line: LINE, measure: 660, note: 'Default. 68 characters.' },
+  { size: 22, line: 36, measure: 680, note: '' },
   { size: 23, line: 38, measure: 700, note: '' },
+  { size: 24, line: 39, measure: 713, note: '' },
+  { size: 25, line: 40, measure: 727, note: '' },
   { size: 26, line: 42, measure: 740, note: '' },
-  { size: 28, line: 46, measure: 780, note: '' },
-  { size: 30, line: 48, measure: 820, note: 'Maximum. Beyond this the page turns into a large-print edition.' },
+  { size: 27, line: 44, measure: 760, note: '' },
+  { size: 28, line: 46, measure: 780, note: 'Maximum. 60 characters; beyond this the page is a large-print edition.' },
 ] as const
 
 /**
@@ -292,7 +324,41 @@ export function spacingAt(key: keyof typeof SPACING, idx: number): number {
 }
 
 /** Index into READING_STEPS for the 21/34/660 default. */
-export const DEFAULT_STEP_IDX = 2
+export const DEFAULT_STEP_IDX = 6
+
+/**
+ * The seven sizes the ramp offered before it ran 15 to 28 by ones.
+ *
+ * KEPT ONLY SO A STORED INDEX CAN BE READ ONCE — see `readTextSize`. A settings
+ * file written before the change holds an index into THIS list, and without it
+ * the number means whatever the current ramp happens to have at that position.
+ * Nothing else may read it; it is a fact about a file format, not about type.
+ */
+/**
+ * The step nearest a size in px, clamped to the ramp.
+ *
+ * THE SETTING IS STORED AS A SIZE, NOT AS AN INDEX, and this is the function
+ * that makes that possible — see `KERNEL_SETTINGS.textSize`. An index means
+ * nothing across a change to the ramp: when this table went from seven steps to
+ * fourteen, a stored `2` meant 21px on the old scale and 17px on the new one,
+ * so every reader's type would have shrunk on the launch after the change with
+ * nothing to say why. A stored `21` means 21px on any ramp that offers it.
+ *
+ * NEAREST rather than exact, because a ramp may stop offering a size — 30px was
+ * on the old one and is not on this — and the reader's intent is better served
+ * by the closest thing this build can show than by dropping them to the default.
+ * That is the argument the `index` validator already makes for clamping.
+ */
+export const LEGACY_READING_SIZES: readonly number[] = [17, 19, 21, 23, 26, 28, 30]
+
+export function stepIndexForSize(px: number): number {
+  if (!Number.isFinite(px)) return DEFAULT_STEP_IDX
+  let best = 0
+  for (let i = 1; i < READING_STEPS.length; i++) {
+    if (Math.abs(READING_STEPS[i]!.size - px) < Math.abs(READING_STEPS[best]!.size - px)) best = i
+  }
+  return best
+}
 
 /** §03 reading measure — DERIVED from the default reading step, not restated.
  *  Written out as `660` it was a second copy of `READING_STEPS[2].measure`,
@@ -1117,6 +1183,7 @@ export const MINIMUM_SIZES: SpacingScale = { steps: [0, 11, 12, 14], def: 0, uni
  * this is the value it uses.
  */
 export const PARAGRAPH_INDENT = 1.5
+
 
 /**
  * What Paper rendered before WI-14.4, spelled as the settings that describe it.

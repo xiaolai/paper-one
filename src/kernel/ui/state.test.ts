@@ -472,7 +472,7 @@ describe('the hook starts from bootState', () => {
  */
 describe('bootState with remembered preferences', () => {
   it('starts from what was remembered, and from the defaults for the rest', () => {
-    const boot = bootState('', { theme: 'night', themeFollowsOs: false, typeface: 'crimson-pro', stepIdx: 4 })
+    const boot = bootState('', { theme: 'night', themeFollowsOs: false, typeface: 'crimson-pro', textSize: 19 })
     expect(boot.theme).toBe('night')
     expect(boot.themeFollowsOs).toBe(false)
     expect(boot.typeface).toBe('crimson-pro')
@@ -495,7 +495,7 @@ describe('bootState with remembered preferences', () => {
       theme: 'sage' as const,
       themeFollowsOs: false,
       typeface: 'literata',
-      stepIdx: 1,
+      textSize: 19,
       spacing: { letter: 2, word: 1, line: 3, paragraph: 0 },
       align: 'ragged' as const,
       brightness: 0,
@@ -555,7 +555,7 @@ describe('a launch restores what the reader chose', () => {
   const stored = {
     ...preferencesOf(initialState),
     theme: 'night' as const,
-    stepIdx: 1,
+    textSize: 16,
     brightness: 0,
     markTint: 'purple' as const,
     markStyle: 'underline' as const,
@@ -565,7 +565,11 @@ describe('a launch restores what the reader chose', () => {
   it('boots into the stored theme, size and mark appearance', () => {
     const state = bootState('', stored)
     expect(state.theme).toBe('night')
+    /* THE SIZE ROUND-TRIPS, NOT THE INDEX. 16px is index 1 of this ramp; the
+       point of storing pixels is that it would still be 16px on a ramp where
+       it is not. */
     expect(state.stepIdx).toBe(1)
+    expect(readingStep(state.stepIdx).size).toBe(16)
     expect(state.brightness).toBe(0)
     expect(state.markTint).toBe('purple')
     expect(state.markStyle).toBe('underline')

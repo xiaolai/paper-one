@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useReducer, type Dispatch } from 'react'
 import type { MarkStyle, MarkTint } from '../core/marks'
-import { BRIGHTNESS, CONTRAST, DEFAULT_READING_STYLE, DEFAULT_STEP_IDX, FIGURE_HEIGHTS, FIGURE_WIDTHS, MINIMUM_SIZES, READING_STEPS, SPACING, type SpacingScale } from '../core/metrics'
+import { BRIGHTNESS, CONTRAST, DEFAULT_READING_STYLE, DEFAULT_STEP_IDX, FIGURE_HEIGHTS, FIGURE_WIDTHS, MINIMUM_SIZES, READING_STEPS, SPACING, readingStep, stepIndexForSize, type SpacingScale } from '../core/metrics'
 import type { SettingsStore } from '../core/ports'
 import { readKernelPreferences, writeKernelPreferences, type KernelPreferences } from '../core/settings'
 import type { PaneContribution } from '../core/capability'
@@ -649,7 +649,7 @@ export function useAppState(settings: SettingsStore, contributed: ContributedPan
     prefs.theme,
     prefs.themeFollowsOs,
     prefs.typeface,
-    prefs.stepIdx,
+    prefs.textSize,
     prefs.spacing.letter,
     prefs.spacing.word,
     prefs.spacing.line,
@@ -682,7 +682,11 @@ export function preferencesOf(state: AppState): KernelPreferences {
     theme: state.theme,
     themeFollowsOs: state.themeFollowsOs,
     typeface: state.typeface,
-    stepIdx: state.stepIdx,
+    /* THE SIZE, NOT THE INDEX — see `KERNEL_SETTINGS.textSize`. `AppState`
+       keeps an index because the stepper and the ramp are indexed; the FILE
+       keeps pixels, because an index means nothing across a change to the
+       ramp and every reader's type would move the day one landed. */
+    textSize: readingStep(state.stepIdx).size,
     spacing: state.spacing,
     align: state.align,
     brightness: state.brightness,
@@ -733,9 +737,19 @@ export function bootState(
    * stored values can disagree — the layout written after the ruler — and a
    * launch must not start in a state no sequence of actions can reach. */
   const rulerOn = prefs.pageLayout === 'paginated' ? false : prefs.rulerOn
+  /* Back to an index, landing on the nearest step this build offers — see
+     `stepIndexForSize`, and the ramp note about 30px no longer being on it. */
+  /* `textSize` IS PULLED OUT OF THE SPREAD, not merely overridden after it.
+     It is a field of the FILE and not of `AppState`, and a spread carries
+     excess properties through without complaint — left in, every state object
+     would quietly grow a `textSize` nothing reads and the reducer would copy it
+     forward for the life of the session. */
+  const { textSize: _textSize, ...carried } = prefs
+  const stepIdx = stepIndexForSize(prefs.textSize)
   return {
     ...initialState,
-    ...prefs,
+    ...carried,
+    stepIdx,
     rulerOn,
     screen,
     pane,

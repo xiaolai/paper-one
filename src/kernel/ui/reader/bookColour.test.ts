@@ -5,6 +5,7 @@
 import { describe, expect, it } from 'vitest'
 import { THEME_IDS } from '../../core/uiTypes'
 import { bookSheets, bookVars, isDark, resolvedBookCss } from './bookCss'
+import { DEFAULT_STEP_IDX } from '../../core/metrics'
 
 /**
  * Whose colour wins, and where the book's own furniture stops.
@@ -20,7 +21,7 @@ import { bookSheets, bookVars, isDark, resolvedBookCss } from './bookCss'
  */
 
 const settings = (theme: (typeof THEME_IDS)[number]) => ({
-  stepIdx: 2,
+  stepIdx: DEFAULT_STEP_IDX,
   theme,
   typeface: 'literata' as const,
   align: 'justified' as const,
