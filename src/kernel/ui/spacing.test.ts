@@ -155,6 +155,19 @@ describe('light: the theme is the ceiling', () => {
  * 32% set paragraph alignment only from a class and reached neither position of
  * the Alignment control.
  *
+ * THE SIX ARE NOW SEVEN, and the seventh is different in kind from all of
+ * them. The other six are marked ON PROSE, to beat a book's own `p.class`. The
+ * base font-size is marked on `html` and `body` — never on an element — and
+ * that is what makes it safe: forcing the base leaves `h1 { font-size: 2.25em }`
+ * resolving to 2.25 x it, so the author's proportions survive whole, while
+ * forcing it on `p` would flatten every heading, note and drop cap in the
+ * library into one size. It is on `html` because `rem` resolves against the
+ * root: measured over 400 books, 128 of the 372 that ship CSS size text in
+ * `rem` and carry 11,584 such declarations between them, and a base declared
+ * only on `body` left every one of them pinned to the browser's 16px whatever
+ * the reader did with the control. Not one of the 372 sets a font-size on
+ * `html`, so nothing is taken from any author. See `bookSize.test.ts`.
+ *
  * They are not marked the same way as the other four, and the difference is the
  * point. `text-align` is the one property here a book uses to COMPOSE rather
  * than to state a default — 45% of those same 400 centre paragraphs from a
@@ -215,7 +228,7 @@ describe('the reader’s spacings survive a book’s own stylesheet', () => {
 
   /* And nothing else. The rest of the sheet IS a default — a book that styles
    * its own headings, links or blockquotes must go on winning. */
-  it('marks nothing that is not one of the six', () => {
+  it('marks nothing that is not one of the seven', () => {
     /* Comments stripped first: this file's prose says "not" and "important" in
        several places, and a regex over the whole sheet reads those as
        declarations. */
@@ -224,8 +237,24 @@ describe('the reader’s spacings survive a book’s own stylesheet', () => {
     expect(new Set(marked)).toEqual(
       new Set([
         'margin', 'line-height', 'letter-spacing', 'word-spacing',
-        'hyphens', '-webkit-hyphens', 'text-align',
+        'hyphens', '-webkit-hyphens', 'text-align', 'font-size',
       ]),
     )
+  })
+
+  it('never marks the font-size on prose, only on the base', () => {
+    /* THE DISTINCTION THE SEVENTH TURNS ON, and a list of property names cannot
+       see it. `font-size: … !important` on `html` is the reader's control
+       working; the same declaration on `p` would flatten every enlarged opener,
+       every note and every drop cap in the library into one size. Asserted by
+       WHERE rather than by WHAT, because only the where is dangerous. */
+    const code = css().replace(/\/\*[\s\S]*?\*\//g, '')
+    const rules = [...code.matchAll(/([^{}]*)\{([^{}]*)\}/g)]
+    const forcing = rules.filter(([, , body]) => /font-size:[^;]*!important/.test(body ?? ''))
+    expect(forcing.length, 'no rule forces a font-size — the base is not marked').toBeGreaterThan(0)
+    for (const [, selector] of forcing) {
+      const last = (selector ?? '').trim().split('\n').pop()?.trim()
+      expect(['html', 'body'], `font-size forced on ${last}`).toContain(last)
+    }
   })
 })

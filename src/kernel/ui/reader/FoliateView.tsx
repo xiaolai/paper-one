@@ -142,17 +142,57 @@ interface Settings {
  */
 export function applySettings(renderer: Renderer, settings: Settings): void {
   applyLayout(renderer, settings)
-  renderer.setStyles?.(
-    bookCss({
-      stepIdx: settings.stepIdx,
-      theme: settings.theme,
-      typeface: settings.typeface,
-      spacing: settings.spacing,
-      brightness: settings.brightness,
-      contrast: settings.contrast,
-      align: settings.align,
-    }),
-  )
+  renderer.setStyles?.(readingCss(settings))
+}
+
+/** The reader's own typography, for any document that shows the book's text. */
+function readingCss(settings: Settings): string {
+  return bookCss({
+    stepIdx: settings.stepIdx,
+    theme: settings.theme,
+    typeface: settings.typeface,
+    spacing: settings.spacing,
+    brightness: settings.brightness,
+    contrast: settings.contrast,
+    align: settings.align,
+  })
+}
+
+/**
+ * A NOTE IS NOT SUBORDINATE TO ANYTHING IN A POPOVER.
+ *
+ * Books set notes smaller than the text — measured on What's Our Problem?,
+ * .footnote is 70% and .footnote2 is 75% — and on the page that is right: a
+ * note at the foot of a page is subordinate to the prose it annotates, and the
+ * reduction is how print says so. In a popover there IS no prose beside it.
+ * The note is alone in its own box, the reason for the reduction is absent, and
+ * all it costs there is legibility.
+ *
+ * BY STRUCTURE, NOT BY CLASS NAME. There is no generic selector for "the rule
+ * that shrinks notes" — every book spells it differently. What is the same in
+ * every book is the SHAPE of what the popover holds: FootnoteHandler extracts
+ * the note into the document body, so the note's own blocks are body's direct
+ * children and nothing else is. Resetting those to the base leaves everything
+ * NESTED — a citation at 0.9em, an emphasised run — proportional, which is the
+ * author's typography and stays.
+ */
+const NOTE_CSS = `
+body > * { font-size: 1rem; }
+`
+
+/**
+ * Style a note's view.
+ *
+ * IT HAD NONE. `FootnoteHandler` builds its own view and the session never
+ * styled it, so the reader's typeface, size, theme, spacing and brightness all
+ * stopped at the popover's edge — the note rendered in the book's raw CSS
+ * against the browser's 16px default. Read out of the running app: the page's
+ * document carried 38 of Paper's rules and the note's document carried 0, in
+ * the same slot. That is the whole of why a note came out at 11.2px beside a
+ * page at 21px — the book's 70% resolving against a base nobody had set.
+ */
+export function styleNoteView(renderer: Renderer, settings: Settings): void {
+  renderer.setStyles?.(readingCss(settings) + NOTE_CSS)
 }
 
 /**
@@ -528,6 +568,7 @@ export function FoliateView({
           })
         },
         applySettings: (view: View) => applySettings(view.renderer, settings.current),
+        styleNote: (view: View) => styleNoteView(view.renderer, settings.current),
         lastLocation: () => lastLocationRef.current,
       })
       .then(() => {

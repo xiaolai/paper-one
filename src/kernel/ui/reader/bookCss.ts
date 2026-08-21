@@ -282,6 +282,25 @@ html {
   color-scheme: ${theme === 'night' ? 'dark' : 'light'};
   color: ${c.ink};
   background: ${c.surface};
+  /* THE BASE, ON THE ROOT, AND THIS IS WHERE IT HAS TO BE.
+   *
+   * rem resolves against the ROOT, never against body — so a size declared
+   * only on body leaves every rem in the book pinned to the browser's
+   * 16px, whatever the reader does with the control. Measured across 400 books
+   * in this library: 128 of the 372 that ship any CSS size text in rem, and
+   * they carry 11,584 such declarations between them. A THIRD OF THE LIBRARY
+   * had text the size setting could not move — chapter titles, drop caps,
+   * whole paragraphs — while the prose beside it scaled.
+   *
+   * NO BOOK CONTESTS THIS. Not one of those 372 sets a font-size on html, so
+   * claiming the root takes nothing away from any author.
+   *
+   * !important because the BASE IS THE READER'S, and 12 of those books mark
+   * their own font-size important. Forcing the base is safe in a way that
+   * forcing a descendant is not: h1 { font-size: 2.25em } still resolves to
+   * 2.25 x the base, so the author's proportions survive intact. It is only
+   * ever the starting number that is taken. */
+  font-size: ${size}px !important;
   /* The line box is the unit everything else is a multiple of. */
   /* THE READER'S LINE, not the step's. Paragraphs, lists and quotes all read
      this rather than the body's own line-height, so leaving the step's value
@@ -302,7 +321,13 @@ body {
    * literal, and one would end the string. */
   background: transparent;
   font-family: ${stack};
-  font-size: ${size}px;
+  /* FROM THE ROOT, so there is one number rather than two that must agree.
+   * Marked for the same reason the root is: a book that adjusts its own body
+   * size is stating a default, and the default is precisely what the reader's
+   * control owns. 15 of 372 books do; Paper already overrode all of them by
+   * source order, and this keeps that true against a higher-specificity rule
+   * such as body.chapter. */
+  font-size: 1rem !important;
   line-height: ${line}px;
   /* Written unconditionally, including at zero: an author stylesheet may set
    * either of these, and a rule that appears only when the reader has moved it
@@ -372,7 +397,23 @@ body {
  * tracking would have been defeated by the same p.class it was meant to survive.
  */
 p, li, blockquote, dd {
-  line-height: var(--paper-line) !important;
+  /* THE GRID, OR THE TEXT'S OWN LINE — whichever is taller.
+   *
+   * A flat var(--paper-line) is right for prose at the base and wrong for
+   * prose that is not. Books enlarge a paragraph — an opener, a pull quote —
+   * and 44 declarations across 400 books set a prose element at 1.5rem or
+   * more, up to 4rem. Those were sized against the browser's 16px, so
+   * p { font-size: 2rem } came out 32px inside a 34px line and just cleared
+   * it. Now that rem follows the reader, the same rule is 42px at the
+   * default step, and a fixed 34px line would lay one line of it across the
+   * next. The 4rem case has been overlapping all along.
+   *
+   * max() keeps the reading grid EXACTLY where the grid is the right answer:
+   * at the 21/34 default, prose stays on grid until 28.3px — 1.35rem — so the
+   * 50 declarations at 1.2rem are untouched and only deliberately-enlarged
+   * text gets a line of its own. The setting still moves every line of prose
+   * in the book; it simply stops being able to crush the exceptions. */
+  line-height: max(var(--paper-line), 1.2em) !important;
   letter-spacing: ${letter}em !important;
   word-spacing: ${word}em !important;
 }

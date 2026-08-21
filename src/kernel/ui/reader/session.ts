@@ -572,6 +572,14 @@ export interface SessionDeps {
   prepare?: (source: File | string) => Promise<unknown>
   applySettings: (view: View) => void
   /**
+   * The reader's typography, for a NOTE's view.
+   *
+   * Separate from `applySettings` because a note is not a page: it takes the
+   * same stylesheet plus one rule a page must not have — see `styleNoteView`.
+   * Optional, so a caller that only reads books needs no opinion about notes.
+   */
+  styleNote?: (view: View) => void
+  /**
    * Where this book was last left, if anywhere.
    *
    * A getter, and read at the LAST possible moment — after the book has been
@@ -796,6 +804,9 @@ export class ReaderSession {
    * resolve against; nothing else can work it out. See `noteSpace`.
    */
   #footnoteSpace: HTMLElement | null = null
+
+  /** See `SessionDeps.styleNote`. Held from `start`, used on every note. */
+  #styleNote: ((view: View) => void) | null = null
   readonly #host: HTMLElement
   readonly #cb: SessionCallbacks
 
@@ -845,6 +856,10 @@ export class ReaderSession {
     if (!view) return
 
     this.#mount(view)
+    /* HELD, because notes are styled long after this returns. `#watchFootnotes`
+       is wired once here and fires whenever a reader opens a note, by which
+       time `deps` is three call frames gone. */
+    this.#styleNote = deps.styleNote ?? null
     this.#bind(view)
 
     if (!(await this.#openBook(view, source, deps))) return
@@ -1274,6 +1289,13 @@ export class ReaderSession {
       const { view } = (event as CustomEvent<{ view: View }>).detail
       this.#watchNoteLinks(view)
       this.#cleanNoteDocument(view)
+      /* BEFORE `goTo`, like everything else in here. `setStyles` writes into
+         the style element foliate appends after the book's own sheet, and the
+         note has to be laid out with the reader's size rather than re-laid out
+         after it — the popover measures the note's height to size its box, and
+         measuring a note that is about to change size is measuring the wrong
+         note. */
+      this.#styleNote?.(view)
       /**
        * SCROLLED FLOW, NOT PAGINATED, and this is what lets the box fit the
        * note.
