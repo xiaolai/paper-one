@@ -1,6 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { View } from 'foliate-js/view.js'
-import { ReaderSession, directionOf, readMeta, releaseNoteView, watchNoteLinks } from './session'
+import {
+  ReaderSession,
+  directionOf,
+  noteSpace,
+  readMeta,
+  releaseNoteView,
+  watchNoteLinks,
+} from './session'
 import type { MarkAnchor, MarkPalette, SelectionSnapshot, SessionCallbacks } from './session'
 import { buildFixture, elem, txt } from './wordSnap/domFake.testkit'
 import { fakeDocument, type FakeDocument } from './wordSnap/documentFake.testkit'
@@ -1023,6 +1030,46 @@ describe('releaseNoteView', () => {
  * box while the reader stayed where they were. Measured in the app before the
  * fix, against *What's Our Problem?*.
  */
+/**
+ * Which box a note's anchor rect is measured from.
+ *
+ * `at` is consumed as the `left` and `top` of an absolutely positioned box, so
+ * it has to be measured from the element those resolve against. Taken from the
+ * element foliate renders into, as it was, every rect is valid and every note
+ * is drawn off by the stage's padding plus the column's titlebar inset — a
+ * whole class of wrongness that no type and no rendering test can see, because
+ * every number involved is correct.
+ */
+describe('noteSpace', () => {
+  const boxed = (name: string) => ({ name, getBoundingClientRect: () => ({}) })
+  const host = boxed('host') as unknown as HTMLElement
+
+  it("takes the mount's offset parent, which is the space `left` resolves in", () => {
+    const parent = boxed('offsetParent')
+    const mount = { offsetParent: parent } as unknown as HTMLElement
+    expect(noteSpace(mount, host)).toBe(parent)
+  })
+
+  it('falls back to the host before the popover has registered a mount', () => {
+    expect(noteSpace(null, host)).toBe(host)
+  })
+
+  it('falls back to the host for a mount with no offset parent', () => {
+    /* `display: none` has none. The popover is parked off-screen rather than
+       hidden partly for this reason, but a fallback that guesses would put the
+       note at the wrong offset instead of the old one. */
+    const mount = { offsetParent: null } as unknown as HTMLElement
+    expect(noteSpace(mount, host)).toBe(host)
+  })
+
+  it('falls back to the host for something that cannot be measured', () => {
+    /* The capability, not the constructor — naming `HTMLElement` here throws
+       in these suites, which have no DOM. */
+    const mount = { offsetParent: { nodeName: 'DIV' } } as unknown as HTMLElement
+    expect(noteSpace(mount, host)).toBe(host)
+  })
+})
+
 describe('watchNoteLinks', () => {
   /** A note view that hands its listeners straight back, with no DOM. */
   const noteView = () => {
@@ -1193,6 +1240,33 @@ describe('ReaderSession link events', () => {
       true,
     )
     expect(event.defaultPrevented).toBe(false)
+  })
+
+  it("neutralises a book's dead tooltip on the page it renders", async () => {
+    /* THE WIRING, not the decision — `generatedContent.test.ts` owns that.
+       What this proves is that `load` reaches it at all: the fake document
+       carries no CSS by default, so the call is a silent no-op in every other
+       test here and a session that stopped making it would look exactly the
+       same. Hand it a rule and the sheet has to appear. */
+    const view = fakeView()
+    const session = new ReaderSession(fakeHost(), callbacks())
+    await session.start('book.epub', deps(view))
+    const page = fakeDocument().withStyleSheets([
+      {
+        cssRules: [
+          {
+            selectorText: '.footnote:hover::after',
+            style: { getPropertyValue: (name: string) => (name === 'content' ? 'attr(data-note)' : '') },
+          },
+        ],
+      },
+    ])
+
+    view.emit('load', { doc: page.asDocument(), index: 0 })
+
+    expect(page.getElementById('paper-dead-content')?.textContent).toBe(
+      '.footnote:hover::after{content:none!important}',
+    )
   })
 
   it('declines the mark inside a note, though the book calls that a noteref too', async () => {

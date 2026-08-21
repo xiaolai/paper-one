@@ -132,9 +132,70 @@ export class FakeWindow extends FakeEventTarget {
   }
 }
 
+/** A `<style>` the app creates and may later find again or take back off. */
+export interface FakeStyleElement {
+  id: string
+  textContent: string
+  remove(): void
+}
+
 export class FakeDocument extends FakeEventTarget {
+  /**
+   * The document's stylesheets. EMPTY IS A REAL ANSWER; ABSENT IS NOT.
+   *
+   * Every `Document` has a `StyleSheetList`, and it is iterable — a book with
+   * no CSS has an empty one. Leaving the property off made this fake the only
+   * document in existence without it, and when the session began reading the
+   * book's own rules (`suppressEmptyGeneratedContent`) that showed up as
+   * `doc.styleSheets is not iterable` in seventy-three tests that have nothing
+   * to do with stylesheets.
+   *
+   * Mutable so a test can put rules in it; see `withStyleSheets`.
+   */
+  styleSheets: { cssRules: unknown[] }[] = []
+
+  /**
+   * Just enough `head` to hold a `<style>` the app installs.
+   *
+   * `suppressEmptyGeneratedContent` appends one and looks it up again by id, so
+   * a fake that could be handed a stylesheet but not remember what was done
+   * about it would report the first pass and lose the second.
+   */
+  readonly head = {
+    children: [] as FakeStyleElement[],
+    appendChild(el: FakeStyleElement) {
+      this.children.push(el)
+    },
+  }
+
   constructor(readonly defaultView: FakeWindow | null) {
     super()
+  }
+
+  createElement(_tag: string): FakeStyleElement {
+    const head = this.head
+    return {
+      id: '',
+      textContent: '',
+      remove() {
+        head.children = head.children.filter((el) => el !== this)
+      },
+    }
+  }
+
+  getElementById(id: string): FakeStyleElement | null {
+    return this.head.children.find((el) => el.id === id) ?? null
+  }
+
+  /** Nothing in this fake carries attributes, so nothing matches. */
+  querySelector(_selectors: string): null {
+    return null
+  }
+
+  /** Give this document some CSS to be read. Returns itself, for chaining. */
+  withStyleSheets(sheets: { cssRules: unknown[] }[]): this {
+    this.styleSheets = sheets
+    return this
   }
 
   asDocument(): Document {

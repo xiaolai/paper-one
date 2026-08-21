@@ -1266,10 +1266,24 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
    * cancels it for a footnote and shows the note in place instead; everything
    * that is not a footnote goes on navigating, with ⌘[ now able to bring the
    * reader back.
+   *
+   * AND IT SAYS SO, which it did not. `record` pushed the origin and stopped
+   * there, so following a link armed ⌘[ and showed nothing — the reader landed
+   * somewhere else with no sign that going back was on offer. That is invisible
+   * for any link and unusable for a note: the whole point of the `*` at the
+   * head of a footnote, or the `↩` at the end of an endnote, is the round trip,
+   * and half of it was silent. The hint is the same one `jumpTo` raises,
+   * because it is the same movement — non-linear, and undoable.
+   *
+   * READ BEFORE THE PUSH. `record` does not navigate — foliate does, after this
+   * returns — so the label is where the reader still is either way; taking it
+   * first is what keeps that true if `record` ever does move them.
    */
   const onBookLink = useCallback(() => {
+    const leaving = book.position.chapterLabel
     jumps.record()
-  }, [jumps])
+    if (leaving) setReturnTo(leaving)
+  }, [jumps, book.position.chapterLabel])
 
   /**
    * A link whose scheme leaves the book.

@@ -15,6 +15,7 @@ import {
 } from 'foliate-js/footnotes.js'
 import { rangeBoxInHost, type HostRect } from './coordinates'
 import { isBacklink } from './backlink'
+import { suppressEmptyGeneratedContent } from './generatedContent'
 import { markProse } from './markProse'
 import {
   ANNOTATION_KINDS,
@@ -253,6 +254,37 @@ export function releaseNoteView(view: Pick<View, 'close' | 'remove'>): void {
     console.warn('Paper: a note view would not close cleanly', cause)
   }
   view.remove()
+}
+
+/**
+ * The origin a note's anchor rect is measured from.
+ *
+ * THE POPOVER'S OWN OFFSET PARENT, which is by definition the element its
+ * `left` and `top` resolve against — so the number this produces and the number
+ * the stylesheet consumes are in one space by construction, rather than by two
+ * files continuing to agree.
+ *
+ * It was `#host`, the element foliate renders into, and that is a DIFFERENT
+ * box: inside the stage's padding, inside the reading column's titlebar inset.
+ * Every rect was correct and every note was drawn off by the sum of those —
+ * the exact failure `placement.ts` names in its header, numerically valid and
+ * wrong by a container's offset, with nothing able to tell. It is also the
+ * space `proseColumn` reports the measure in, which is what lets the popover be
+ * bounded by the words rather than by the whole grid.
+ *
+ * BY CAPABILITY, NOT BY `instanceof HTMLElement`. These suites run without a
+ * DOM on purpose, so naming a DOM constructor at run time throws `HTMLElement
+ * is not defined` in a session that is otherwise perfectly testable — it did,
+ * in two tests, the moment this was written that way. What the caller needs is
+ * a box, so a box is what is asked for.
+ *
+ * Falls back to the host when there is no mount, or when the mount has no
+ * offset parent: `display: none` has none, which is one of the reasons the
+ * popover is parked off-screen rather than hidden.
+ */
+export function noteSpace(mount: HTMLElement | null, host: HTMLElement): HTMLElement {
+  const parent = mount?.offsetParent as HTMLElement | null | undefined
+  return typeof parent?.getBoundingClientRect === 'function' ? parent : host
 }
 
 /** What a link inside a note needs, to move the reader instead of the note. */
@@ -900,6 +932,11 @@ export class ReaderSession {
          has: the mark records what the BOOK asked for, and reading it before
          the author's rules landed would mark centred paragraphs as prose. */
       markProse(doc)
+      /* Beside `markProse`, and for the same reason it is here: this reads the
+         BOOK'S OWN rules, so the author's stylesheet has to have landed. See
+         `suppressEmptyGeneratedContent` — the box it deletes was appearing over
+         the page, not only inside the note popover. */
+      suppressEmptyGeneratedContent(doc)
 
       this.#cb.onDocument(doc)
     })
@@ -1216,6 +1253,7 @@ export class ReaderSession {
       if (this.#disposed) return
       const { view } = (event as CustomEvent<{ view: View }>).detail
       this.#watchNoteLinks(view)
+      this.#cleanNoteDocument(view)
       /**
        * SCROLLED FLOW, NOT PAGINATED, and this is what lets the box fit the
        * note.
@@ -1289,6 +1327,27 @@ export class ReaderSession {
     })
   }
 
+  /**
+   * The note's own document gets the same treatment the page does.
+   *
+   * A note is rendered by `FootnoteHandler` into a view the session did not
+   * build, so NONE of what `#bind`'s `load` handler does to a page has ever
+   * reached it — the note has always been the book's raw CSS in a box. That is
+   * mostly right and deliberately left alone: a note should read as the book
+   * wrote it.
+   *
+   * This one is not a matter of taste. The book's dead tooltip drew its empty
+   * box inside the popover as readily as over the page, and a rule that is
+   * wrong on the page does not become right in a note.
+   */
+  #cleanNoteDocument(noteView: View): void {
+    noteView.addEventListener('load', (event) => {
+      if (this.#disposed) return
+      const { doc } = (event as CustomEvent<LoadDetail>).detail
+      suppressEmptyGeneratedContent(doc)
+    })
+  }
+
   /** See `watchNoteLinks` — the order is the fix, and it is asserted there. */
   #watchNoteLinks(noteView: View): void {
     watchNoteLinks(noteView, {
@@ -1340,7 +1399,7 @@ export class ReaderSession {
       return true
     }
     if (!pending) return false
-    this.#footnoteAt = anchorRectInHost(detail.a, this.#host)
+    this.#footnoteAt = anchorRectInHost(detail.a, this.#noteSpace())
     void pending.catch((cause: unknown) => {
       if (this.#disposed) return
       /* FALL BACK TO THE JUMP, DO NOT SWALLOW IT. A note that will not render
@@ -1355,6 +1414,11 @@ export class ReaderSession {
       void view.goTo(detail.href).catch(reportNavigation('goTo', detail.href))
     })
     return true
+  }
+
+  /** See `noteSpace` — exported, because the choice is the whole of it. */
+  #noteSpace(): HTMLElement {
+    return noteSpace(this.#footnoteMount, this.#host)
   }
 
   /** Where notes are rendered. Null puts them back on the host — see the field. */

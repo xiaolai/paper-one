@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Check, Copy, X } from 'lucide-react'
 import { FOOTNOTE, ICON } from '../../core/metrics'
+import { place } from '../../core/placement'
 import { noteText } from './backlink'
 import type { FootnoteRender } from './session'
 import styles from './FootnotePopover.module.css'
@@ -35,6 +36,16 @@ export interface FootnotePopoverProps {
   note: FootnoteRender | null
   /** The element the note is positioned within — the reader's stage. */
   stage: HTMLElement | null
+  /**
+   * The column the words are in, in the stage's own coordinates.
+   *
+   * NOT THE STAGE, for the reason `SelectionTools` gives at the same prop: the
+   * stage is the whole prose grid — gutter, measure, margin and padding — and a
+   * note anchored near the end of a line was free to hang across the margin
+   * where the margin notes are drawn. Null for a fixed-layout book, which fills
+   * the grid and has no measure to be bounded by.
+   */
+  column: { readonly left: number; readonly width: number } | null
   /** Hand the session the box to render into. Called on mount and unmount. */
   onMount: (mount: HTMLElement | null) => void
   /** Put the note on the clipboard. The host owns the failure path — see `Reader`. */
@@ -103,8 +114,16 @@ function heading(type: FootnoteRender['type']): string | null {
   }
 }
 
-export function FootnotePopover({ note, stage, onMount, onCopy, onDismiss }: FootnotePopoverProps) {
+export function FootnotePopover({
+  note,
+  stage,
+  column,
+  onMount,
+  onCopy,
+  onDismiss,
+}: FootnotePopoverProps) {
   const body = useRef<HTMLDivElement | null>(null)
+  const surface = useRef<HTMLDivElement | null>(null)
   /**
    * How tall the note is once it has laid out — the height to CLIP to.
    *
@@ -225,38 +244,110 @@ export function FootnotePopover({ note, stage, onMount, onCopy, onDismiss }: Foo
     }
   }, [note, onDismiss])
 
+  /**
+   * How big the box actually is, once the note inside it has settled.
+   *
+   * MEASURED, NOT DERIVED. `place` needs the surface's size, and this one is
+   * `--footnote-max-w` by a height that is the note's plus chrome — the label
+   * row, two paddings and a gap. Adding those up here would put four numbers
+   * from the stylesheet into the component, and the box would drift the first
+   * time one of them changed. It has a box already; read it.
+   *
+   * THE TWO PASSES ARE THE POINT, and they are the same two `usePlacement`
+   * makes: the box is laid out before it is shown, this reads it, and the
+   * placement follows in the same commit. Both happen before paint.
+   */
+  const [box, setBox] = useState<{ width: number; height: number } | null>(null)
+  useLayoutEffect(() => {
+    if (!note || fit.state === 'measuring') {
+      setBox(null)
+      return
+    }
+    const el = surface.current
+    if (!el) return
+    const rect = el.getBoundingClientRect()
+    setBox((was) =>
+      was && was.width === rect.width && was.height === rect.height
+        ? was
+        : { width: rect.width, height: rect.height },
+    )
+  }, [note, fit])
+
   /* Placed against the REFERENCE, which is what the reader is looking at — the
-     note itself is somewhere else in the book entirely. Below it where there is
-     room, above it where there is not; `at` is null when the anchor's document
-     has gone, and then the note sits in the middle rather than at 0,0. */
+     note itself is somewhere else in the book entirely. `at` is null when the
+     anchor's document has gone. */
   const at = note?.at ?? null
-  const stageHeight = stage?.clientHeight ?? 0
-  const stageWidth = stage?.clientWidth ?? 0
-  const below = at ? at.top + at.height + GAP : 0
-  const fitsBelow = at ? below + FOOTNOTE.maxHeight <= stageHeight : false
+  const stageBox = stage?.getBoundingClientRect()
+  /* Before the stage has a box there is nothing to clamp against, and a very
+     large bound is the honest "no constraint" rather than a guess — the same
+     reading `SelectionTools` takes at the same seam. */
+  const within = column ?? { left: 0, width: stageBox?.width ?? 1e6 }
 
-  /* PARKED, NOT HIDDEN, when there is no note. `display: none` would give the
-     paginator a zero-sized document to columnize at the moment a note renders
-     into it, which is the one thing this container exists to prevent. */
+  /* WHERE IT GOES IS `place`'S DECISION. What used to be here was a `Math.max`
+     of a `Math.min` for the left edge and a `bottom` fallback for the top, and
+     it had two faults the shared routine does not: it clamped to the STAGE, so
+     a note anchored at the end of a line hung across the margin column where
+     margin notes are drawn; and it chose above-or-below against
+     `FOOTNOTE.maxHeight` rather than the box's real height, so a two-line note
+     was thrown above its reference to make room for 320px it did not occupy.
+
+     `container` space: `at` is stage-relative, from `anchorRectInHost`, and the
+     bounds are the column at the stage's origin. The brand is what stops a
+     viewport rect wandering in — it would be numerically valid and wrong by the
+     stage's offset, and nothing else could tell. */
+  const placed =
+    at && box
+      ? place({
+          anchor: { top: at.top, left: at.left, width: at.width, height: at.height, space: 'container' },
+          surface: box,
+          bounds: {
+            top: 0,
+            left: within.left,
+            width: within.width,
+            height: stageBox?.height ?? 1e6,
+            space: 'container',
+          },
+          side: 'bottom',
+          align: 'start',
+          gap: GAP,
+          edge: GAP,
+        })
+      : null
+
+  /* NO ANCHOR, BUT STILL A NOTE. `at` is null when the reference's document has
+     gone out from under it, and the reader asked for this note either way —
+     centred in the column beats not showing it at all, which is what deferring
+     to `place` alone would do. Kept from the arithmetic this replaced, because
+     it was the one thing that arithmetic got right that `place` cannot know. */
+  const centred =
+    !at && box
+      ? {
+          left: within.left + Math.max(0, (within.width - box.width) / 2),
+          top: Math.max(GAP, ((stageBox?.height ?? box.height) - box.height) / 2),
+        }
+      : null
+
+  /* `place` REPORTS how well it did. `detached` means the reference is wholly
+     outside the column — it has been paged past, or it is on a page that is not
+     the one being shown — and placement's contract is to hide the surface then.
+     What would be drawn is a note hanging from nothing, at whatever spot inside
+     the column happened to be closest. */
+  const spot = placed && placed.fit !== 'detached' ? placed : centred
+  const shown = note !== null && spot !== null
+
+  /* PARKED, NOT HIDDEN, whenever it is not shown — with no note, while the note
+     is still measuring, and when there is nowhere to put it. `display: none`
+     would give the paginator a zero-sized document to columnize at the moment a
+     note renders into it, which is the one thing this container exists to
+     prevent; off-screen lays out and does not show. */
   const parked: React.CSSProperties = { left: -99999, top: 0, visibility: 'hidden' }
-  const placed: React.CSSProperties = at
-    ? {
-        left: Math.max(GAP, Math.min(at.left, Math.max(GAP, stageWidth - FOOTNOTE.maxWidth - GAP))),
-        ...(fitsBelow ? { top: below } : { bottom: Math.max(GAP, stageHeight - (at.top - GAP)) }),
-      }
-    : { left: '50%', top: '50%', transform: 'translate(-50%, -50%)' }
-
-  /* IN PLACE BUT NOT YET SHOWN. `visibility` rather than `display`, for the
-     same reason the parked state uses it: the note is rendering into this box
-     right now and needs a real size to columnize into. See `Fit`. */
-  const settling = note !== null && fit.state === 'measuring'
   const label = heading(note?.type ?? null)
-  const shown = note !== null && !settling
 
   return (
     <div
       className={styles.popover}
-      style={note ? { ...placed, ...(settling ? { visibility: 'hidden' } : null) } : parked}
+      ref={surface}
+      style={shown && spot ? { left: spot.left, top: spot.top } : parked}
       {...(shown ? { role: 'dialog', 'aria-label': label ?? 'Note' } : { 'aria-hidden': true })}
     >
       {/* THE LABEL AND THE CONTROLS SHARE A ROW, and the row exists even when

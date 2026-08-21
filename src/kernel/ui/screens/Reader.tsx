@@ -703,6 +703,34 @@ export function Reader({
                     </div>
                   )}
 
+                  {/* The note, over the page it came from. Placed against the
+                      reference rather than the pointer — see `FootnotePopover`.
+
+                      INSIDE THE STAGE, beside the selection popup, and that is
+                      load-bearing rather than tidy. Three things have to agree
+                      about which origin they are measured from: where the
+                      reference is, where the column is, and what `left`/`top`
+                      resolve against. As a SIBLING of the stage the last of
+                      those was the reading column instead — so the note sat off
+                      by the stage's padding and the titlebar's inset, which is
+                      the failure `placement.ts` names in its header:
+                      numerically valid, wrong by exactly a container's offset,
+                      and nothing able to tell. In here the stage is the
+                      popover's offset parent, which is the space the session
+                      measures the reference in and the space `proseColumn`
+                      reports. */}
+                  <FootnotePopover
+                    note={footnote}
+                    stage={stage}
+                    /* Bounded by the WORDS, not by the grid — the same bound the
+                       selection popup takes, and for the same reason: past the
+                       measure is the margin, where the margin notes are drawn. */
+                    column={book.fixedLayout ? null : column}
+                    onMount={book.setFootnoteMount}
+                    onCopy={copyText}
+                    onDismiss={() => onDismissFootnote?.()}
+                  />
+
                   <SelectionTools
                     selection={selection}
                     stage={stage}
@@ -772,16 +800,6 @@ export function Reader({
                     }}
                   />
                 </div>
-
-                {/* The note, over the page it came from. Placed against the
-                    reference rather than the pointer — see `FootnotePopover`. */}
-                <FootnotePopover
-                  note={footnote}
-                  stage={stage}
-                  onMount={book.setFootnoteMount}
-                  onCopy={copyText}
-                  onDismiss={() => onDismissFootnote?.()}
-                />
 
                 {/* The way back from a jump. Above the failure notice and
                     styled apart from it: one is an offer and the other is an
