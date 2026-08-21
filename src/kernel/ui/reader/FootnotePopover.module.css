@@ -36,25 +36,35 @@
 
 /* The mount point for the rendered `foliate-view`. It carries the book's own
    markup, so this sizes it and otherwise stays out of the way. */
+/* The WINDOW onto the note. `FootnotePopover` sets an inline height once it
+   knows how tall the note is; until then this is the full box.
+
+   IT CLIPS, IT DOES NOT SCROLL, and it never resizes what is inside it. The
+   view below is always `--footnote-max-h` tall, so showing a 44px note means
+   showing the top 44px of a 320px view and hiding the rest. Nothing the iframe
+   owns changes size, which is the whole point: three earlier attempts at
+   fitting the box resized the VIEW, and a resized iframe laid out correctly,
+   reported the right geometry, and then would not paint.
+
+   A note taller than the box is not truncated — it is in scrolled flow (see
+   `session.ts`), so its overflow lives inside the view and scrolls there. */
 .body {
   height: var(--footnote-max-h);
   max-height: var(--footnote-max-h);
-  overflow-y: auto;
+  overflow: hidden;
 }
 
-/* The rendered `foliate-view`. It has NO intrinsic size — it is an iframe —
-   so both dimensions are given here, and nothing may set them inline: an
-   inline `height: 100%` against this auto-height parent resolves to zero, and
-   the note renders perfectly into a box of no height. */
-/* The view fills the box. It has NO intrinsic size — it is an iframe — so both
-   dimensions come from here, and nothing may set them inline: an inline
-   `height: 100%` against an auto-height parent resolves to zero, and the note
-   then renders perfectly into a box of no height. */
+/* The rendered `foliate-view`. It has NO intrinsic size — it is an iframe — so
+   both dimensions come from here.
+
+   A FIXED HEIGHT, NOT `100%`. `100%` made the view follow the container, which
+   is exactly the resize that would not repaint; and an inline `height: 100%`
+   against an auto-height parent resolves to zero, which rendered the note
+   perfectly into a box 72px tall. This changes for nothing. */
 .body > * {
   display: block;
   width: 100%;
-  height: 100%;
-  min-height: var(--space-40);
+  height: var(--footnote-max-h);
   border: none;
 }
 

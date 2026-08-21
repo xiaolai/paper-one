@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { FOOTNOTE } from '../../core/metrics'
 import type { FootnoteRender } from './session'
 import styles from './FootnotePopover.module.css'
@@ -42,27 +42,17 @@ export interface FootnotePopoverProps {
 const GAP = 10
 
 /**
- * THE BOX IS A FIXED HEIGHT, and a short note sits in more white than it needs.
+ * How long to keep asking the note how tall it is, and how often.
  *
- * Fitting it to the note was built twice and withdrawn twice, and both attempts
- * are worth recording because the second looked like it had worked.
- *
- * **Paginated.** The measurement was right — `body.scrollHeight` reports 43px
- * for a one-line footnote and the box became 420×115 — and the note vanished,
- * because a paginator reflows its text into a new column when its box shrinks.
- *
- * **Scrolled.** `session.ts` now asks the note's view for `flow="scrolled"`,
- * which removes that reflow and is a real improvement in its own right: a long
- * endnote scrolls inside the box instead of hiding in column two. The box then
- * sized correctly to 420×116 and the DOM agreed — content at y=0, 328×15, in a
- * 386×44 box — and it still did not PAINT. Laid out, measurable, invisible.
- *
- * So the remaining obstacle is not layout and not the flow: it is that
- * resizing the box after the view has rendered leaves the iframe composited
- * against its old size. Sizing it BEFORE the note renders would need the
- * height before the content exists, which is the thing that cannot be known.
- * A tall box showing the note beats a tight one showing nothing.
+ * BY TIMER, NOT BY FRAME. The note lays out after `render` fires, and a whole
+ * second of `requestAnimationFrame` measured an empty document — the popover's
+ * renderer competes with the main view's, and how long that takes is a
+ * property of the machine. Three seconds at 100ms is thirty cheap checks, and
+ * a note that never lays out simply keeps the full box, which is the behaviour
+ * without any of this.
  */
+const MEASURE_EVERY_MS = 100
+const MEASURE_FOR_MS = 3000
 
 /** A label a reader would recognise, or nothing. */
 function heading(type: FootnoteRender['type']): string | null {
@@ -87,12 +77,53 @@ function heading(type: FootnoteRender['type']): string | null {
 
 export function FootnotePopover({ note, stage, onMount, onDismiss }: FootnotePopoverProps) {
   const body = useRef<HTMLDivElement | null>(null)
+  /**
+   * How tall the note is once it has laid out — the height to CLIP to.
+   *
+   * THE BOX CLIPS; IT DOES NOT RESIZE THE NOTE. Three earlier attempts made
+   * the view follow the container and all three failed the same way: the note
+   * laid out correctly at the new size, reported the right geometry — content
+   * at y=0, 328x15, inside 386x44 — and did not paint. Paginated, it also
+   * reflowed into a column nobody could reach.
+   *
+   * The view is a fixed `--footnote-max-h` and stays so; this only says how
+   * much of it to show. Nothing the iframe owns changes size, so there is
+   * nothing to repaint. Capped at the box, because a longer note scrolls
+   * inside the view rather than growing the popover.
+   */
+  const [contentHeight, setContentHeight] = useState<number | null>(null)
   /* Registered once. Every note is appended into this element, and it has to
      be the SAME element every time — see the note on re-parenting above. */
   useEffect(() => {
     onMount(body.current)
     return () => onMount(null)
   }, [onMount])
+
+  useEffect(() => {
+    if (!note) {
+      setContentHeight(null)
+      return
+    }
+    let live = true
+    let waited = 0
+    let timer = 0
+    const tick = () => {
+      if (!live) return
+      const doc = note.view.renderer?.getContents?.()[0]?.doc
+      const height = doc?.body?.scrollHeight ?? 0
+      if (height > 0) {
+        setContentHeight(Math.min(height, FOOTNOTE.maxHeight))
+        return
+      }
+      waited += MEASURE_EVERY_MS
+      if (waited < MEASURE_FOR_MS) timer = window.setTimeout(tick, MEASURE_EVERY_MS)
+    }
+    timer = window.setTimeout(tick, MEASURE_EVERY_MS)
+    return () => {
+      live = false
+      clearTimeout(timer)
+    }
+  }, [note])
 
   /**
    * Esc closes it, and the key is taken before anything else can have it.
@@ -163,7 +194,13 @@ export function FootnotePopover({ note, stage, onMount, onDismiss }: FootnotePop
       {...(note ? { role: 'dialog', 'aria-label': label ?? 'Note' } : { 'aria-hidden': true })}
     >
       {note && label && <div className={styles.label}>{label}</div>}
-      <div className={styles.body} ref={body} />
+      <div
+        className={styles.body}
+        ref={body}
+        /* The full box until measured, and the note's own height after — as a
+           WINDOW onto a view that never changes size. See the state above. */
+        style={contentHeight === null ? undefined : { height: contentHeight }}
+      />
       {note && (
         <button type="button" className={styles.dismiss} onClick={onDismiss}>
           Close

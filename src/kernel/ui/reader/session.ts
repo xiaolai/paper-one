@@ -1176,7 +1176,17 @@ export class ReaderSession {
        * can happen: `flow` is what triggers the paginator to re-render, and
        * `applyLayout` records that anything set after it lands too late.
        */
-      view.renderer?.setAttribute('flow', 'scrolled')
+      const noteRenderer = view.renderer
+      /* NO PAGE MARGIN. The main view gets one from `applyLayout`; this one
+         was given no layout at all, so it kept foliate's default — which put
+         the note's iframe 48px below the top of its container and made every
+         attempt to fit the box show that empty band instead of the note.
+         Set BEFORE `flow`, which is what triggers the re-render: `applyLayout`
+         records that anything after it lands too late. */
+      noteRenderer?.setAttribute('margin', '0px')
+      noteRenderer?.setAttribute('gap', '0px')
+      noteRenderer?.setAttribute('max-column-count', '1')
+      noteRenderer?.setAttribute('flow', 'scrolled')
 
       /* THE STYLESHEET OWNS THE SIZE when there is a mount, and this sets none.
          An inline `height: 100%` here beat `.body > *` and resolved to zero
