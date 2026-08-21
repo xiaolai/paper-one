@@ -104,6 +104,17 @@ describe('the theme wins on a dark page', () => {
     expect(sheet('night')).toMatch(/:root svg text \{[^}]*fill: currentColor !important/)
   })
 
+  it('spares a matted figure, or the matte is deleted where it is needed', () => {
+    /* THE BUG THIS EXISTS FOR, shipped for exactly one commit. `!important`
+       beats non-important whatever the specificity, so
+       `background-color: transparent !important` at (0,3,1) defeated
+       `img[data-paper-matte]` at (0,1,1) — and it only did so on a DARK page,
+       which is the sole place a matte does anything. The feature was inert
+       where it mattered and intact where it did not, which is the shape of a
+       defect nobody notices for a long time. */
+    expect(inkRule(sheet('night'))).toContain(':not([data-paper-matte])')
+  })
+
   it("spares Paper's own painted elements", () => {
     /* The ruler band and the spoken word ARE backgrounds. Swept up by a blanket
        transparent, the reading ruler stops existing in night mode. */

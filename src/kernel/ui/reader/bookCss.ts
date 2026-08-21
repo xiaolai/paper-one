@@ -99,7 +99,16 @@ const DARK_INK = `
  *
  * :root * and not *: the root itself must keep the page colour, and an
  * important transparent background on it would take the theme away entirely.
- * Paper's own two painted elements are excluded by name for the same reason.
+ * Paper's own painted elements are excluded by name for the same reason — the
+ * ruler band, the spoken word, and A MATTED FIGURE, which is painted in the
+ * colour sampled from its own corners.
+ *
+ * THE MATTE EXCLUSION IS NOT DECORATION. Without it this rule silently deletes
+ * the matte on exactly the pages it exists for: important beats non-important
+ * whatever the specificity, so background-color: transparent !important at
+ * (0,3,1) defeats img[data-paper-matte] at (0,1,1) every time. Shipped that way
+ * for one commit, where the feature did nothing on a dark page and everything
+ * on the light pages that never needed it.
  *
  * WHAT THIS COSTS, honestly: a book that colours dialogue by speaker loses
  * that here. Apple takes the same trade and gives the publisher an opt-out by
@@ -111,7 +120,7 @@ const DARK_INK = `
  * STILL MISSING: an image with a baked-in white background is untouched by any
  * of this — background-color does not reach pixels. Readium darkens and
  * inverts behind their own settings; that is the image work, not this. */
-:root *:not(a):not(.paper-ruler-band):not(.paper-spoken-word) {
+:root *:not(a):not(.paper-ruler-band):not(.paper-spoken-word):not([data-paper-matte]) {
   color: inherit !important;
   background-color: transparent !important;
   border-color: currentColor !important;
