@@ -41,6 +41,21 @@ export interface KernelCommandContext {
   faces?: readonly Face[]
   /** Marks the current selection, when there is one. */
   markSelection: (() => void) | null
+  /**
+   * Keeps the place the reader is at, or gives it back. Null when no place can
+   * be pinned down — see `Bookmarking.canBookmark`.
+   */
+  toggleBookmark: (() => void) | null
+  /**
+   * Whether that place is ALREADY kept, so the row can say which of the two
+   * things it does.
+   *
+   * Separate from `toggleBookmark` rather than folded into a nullable pair,
+   * because the two answer different questions: one is "can this be done here",
+   * the other is "which way round is it". A single value cannot distinguish
+   * "nowhere to put one" from "there is not one here yet".
+   */
+  bookmarked: boolean
   openBookPicker: () => void
   /**
    * Import a folder of books.
@@ -281,6 +296,27 @@ export function buildCommands(ctx: KernelCommandContext): Command[] {
     })
   }
 
+  /* Omitted where a place cannot be pinned down — before the renderer has
+   * reported a position, and with no book open. The same rule ⌘D follows for
+   * an absent selection, and for the same reason: a palette row that runs and
+   * changes nothing is worse than one that is not there, because the reader
+   * has already decided by the time they press return. */
+  if (ctx.toggleBookmark) {
+    const toggle = ctx.toggleBookmark
+    commands.push({
+      id: 'book:bookmark',
+      /* Says what pressing it DOES, against what is true right now — the same
+       * wording the footer button carries, so the two surfaces cannot describe
+       * one action two ways. */
+      label: ctx.bookmarked ? 'Remove this bookmark' : 'Bookmark this place',
+      group: 'Book',
+      combo: '⌘B',
+      keywords: 'bookmark place keep return ribbon',
+      on: ctx.bookmarked,
+      run: toggle,
+    })
+  }
+
   /* Half of tagging happens while reading — this is the book that turned out
    * to be about the sea — and the shelf is a screen away. Same editor the
    * shelf opens, as a sheet. */
@@ -409,7 +445,7 @@ export function buildCommands(ctx: KernelCommandContext): Command[] {
  * Rank commands against a query.
  *
  * A prefix match on the label beats a match inside it, which beats a match on
- * the keywords — so typing "not" puts "Open Notes" first rather than whichever
+ * the keywords — so typing "marg" puts "Open Marginalia" first rather than whichever
  * command happens to contain those letters earliest. Returns null for a miss so
  * the caller can drop the row rather than showing every command at rank zero.
  */

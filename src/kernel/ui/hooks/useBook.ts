@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { TocItem } from 'foliate-js/view.js'
-import type { MarkAnchor, SearchHit, SessionNavigator } from '../reader/session'
+import type { BookmarkPlace, MarkAnchor, SearchHit, SessionNavigator } from '../reader/session'
 import type { BookMeta, ReaderPosition } from '../../core/bookMeta'
 import { bookIdFor } from '../../core/marks'
 
@@ -58,6 +58,16 @@ export interface BookState {
    * would be switches wired to nothing.
    */
   readonly fixedLayout: boolean
+  /**
+   * Which way this book's text runs, as rendered.
+   *
+   * Anything positioning itself against the PAGE — rather than against the
+   * window — needs it: the page's leading and trailing edges swap in an RTL
+   * book, so a `inset-inline-end` resolved against the app's own direction
+   * puts the mark on the wrong side of a book it is supposed to belong to.
+   * `'ltr'` until a section has rendered, which is what the vast majority are.
+   */
+  readonly direction: 'ltr' | 'rtl'
   readonly doc: Document | null
   readonly error: string | null
 }
@@ -86,12 +96,22 @@ export interface Book extends BookState {
    */
   goLeft: () => void
   goRight: () => void
+  /**
+   * Where the reader is, as everything a bookmark is made from — null before
+   * the renderer is up, and for a place that cannot be pinned down.
+   *
+   * Takes no anchor: the session holds the relocation whole, and pairing this
+   * hook's copy of the CFI with the session's range is what produced a
+   * bookmark describing two different pages. See `ReaderSession.placeHere`.
+   */
+  placeHere: () => BookmarkPlace | null
   setNavigator: (generation: number, navigator: BookNavigator | null) => void
   /** Renderer callbacks. Each takes the generation it was issued under. */
   setToc: (generation: number, toc: readonly TocItem[]) => void
   setPosition: (generation: number, position: ReaderPosition) => void
   setDoc: (generation: number, doc: Document | null) => void
   setFixedLayout: (generation: number, fixed: boolean) => void
+  setDirection: (generation: number, direction: 'ltr' | 'rtl') => void
   setMeta: (generation: number, meta: BookMeta) => void
   /** The book's jacket, or null when it declares none. Never stored as-is. */
   cover: Blob | null
@@ -104,6 +124,11 @@ const NOWHERE: ReaderPosition = {
   chapterLabel: '',
   chapterHref: '',
   cfi: null,
+  /* Null, not 0 — the name of this constant is the argument. Nowhere is not
+   * the first section; nothing has been rendered yet. See
+   * `ReaderPosition.sectionIndex`. */
+  sectionIndex: null,
+  sectionExact: false,
 }
 
 /**
@@ -135,6 +160,7 @@ export function useBook(): Book {
   const [cover, setCoverState] = useState<Blob | null>(null)
   const [doc, setDocState] = useState<Document | null>(null)
   const [fixedLayout, setFixedLayoutState] = useState(false)
+  const [direction, setDirectionState] = useState<'ltr' | 'rtl'>('ltr')
   const [error, setError] = useState<string | null>(null)
   /**
    * The book's durable identity, resolved from its content.
@@ -169,6 +195,7 @@ export function useBook(): Book {
     setCoverState(null)
     setDocState(null)
     setFixedLayoutState(false)
+    setDirectionState('ltr')
     setError(null)
     setBookId(null)
   }, [])
@@ -246,6 +273,7 @@ export function useBook(): Book {
   const prev = useCallback(() => navigatorRef.current?.prev(), [])
   const goLeft = useCallback(() => navigatorRef.current?.goLeft(), [])
   const goRight = useCallback(() => navigatorRef.current?.goRight(), [])
+  const placeHere = useCallback(() => navigatorRef.current?.placeHere() ?? null, [])
   /* GENERATION-TAGGED like every other renderer callback. It was the only one
    * that was not, so a session being torn down could install ITS navigator over
    * the one belonging to the book that replaced it — and page turns then went to
@@ -274,6 +302,12 @@ export function useBook(): Book {
   const setFixedLayout = useCallback(
     (generation: number, value: boolean) => {
       if (current(generation)) setFixedLayoutState(value)
+    },
+    [current],
+  )
+  const setDirection = useCallback(
+    (generation: number, value: 'ltr' | 'rtl') => {
+      if (current(generation)) setDirectionState(value)
     },
     [current],
   )
@@ -306,6 +340,7 @@ export function useBook(): Book {
       meta,
       doc,
       fixedLayout,
+      direction,
       error,
       open,
       close,
@@ -318,11 +353,13 @@ export function useBook(): Book {
       prev,
       goLeft,
       goRight,
+      placeHere,
       setNavigator,
       setToc,
       setPosition,
       setDoc,
       setFixedLayout,
+      setDirection,
       setMeta,
       cover,
       setCover,
@@ -340,6 +377,7 @@ export function useBook(): Book {
        * a stale `false` made every PDF gesture drop for as long as nothing else
        * in this list happened to change. */
       fixedLayout,
+      direction,
       error,
       open,
       close,
@@ -352,11 +390,13 @@ export function useBook(): Book {
       prev,
       goLeft,
       goRight,
+      placeHere,
       setNavigator,
       setToc,
       setPosition,
       setDoc,
       setFixedLayout,
+      setDirection,
       setMeta,
       cover,
       setCover,

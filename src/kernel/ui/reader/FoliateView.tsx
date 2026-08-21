@@ -89,6 +89,8 @@ export interface FoliateViewProps {
   onPageIntent: (intent: PageIntent) => void
   /** The book cannot reflow, so the controls that assume it can must not show. */
   onFixedLayout: (generation: number, fixed: boolean) => void
+  /** Which way the rendered text runs — see `SessionCallbacks.onDirection`. */
+  onDirection: (generation: number, direction: 'ltr' | 'rtl') => void
 }
 
 interface Settings {
@@ -351,6 +353,7 @@ export function FoliateView({
   onFileDropped,
   onPageIntent,
   onFixedLayout,
+  onDirection,
 }: FoliateViewProps) {
   const hostRef = useRef<HTMLDivElement>(null)
   const sessionRef = useRef<ReaderSession | null>(null)
@@ -384,6 +387,7 @@ export function FoliateView({
     onFileDropped,
     onPageIntent,
     onFixedLayout,
+    onDirection,
   }
   const handlers = useRef(currentHandlers)
 
@@ -439,6 +443,7 @@ export function FoliateView({
       onFileDropped: (file) => handlers.current.onFileDropped(file),
       onPageIntent: (intent) => handlers.current.onPageIntent(intent),
       onFixedLayout: (fixed) => handlers.current.onFixedLayout(gen, fixed),
+      onDirection: (direction) => handlers.current.onDirection(gen, direction),
       getMarks: () => marksRef.current,
       getPalette: () =>
         markPalette(
@@ -556,7 +561,6 @@ export function FoliateView({
     /* `measure` is deliberately NOT a dependency here — see the effect below.
      * It is read through the ref so a settings change carries the current
      * measure without this effect re-running for measure alone. */
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     /* `fontsReady` is in here so the book is re-set once webfonts land. The
      * size a face is given is corrected by that face's x-height, and before its
      * webfont arrives the stack resolves to a fallback whose x-height is

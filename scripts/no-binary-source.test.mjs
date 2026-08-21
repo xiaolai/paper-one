@@ -1,8 +1,9 @@
 import { execFileSync } from 'node:child_process'
-import { readFileSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { dirname, extname, join } from 'node:path'
+import { dirname, extname, join, relative, sep } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { COPY_EXCLUDE } from './verify-without.mjs'
 
 /**
  * NO SOURCE FILE IS SECRETLY BINARY.
@@ -40,12 +41,48 @@ const TEXT = new Set([
   '.css', '.md', '.rs', '.toml', '.yml', '.yaml', '.html', '.svg', '.sh',
 ])
 
-/** Everything git tracks — the tree as it will be cloned, not as it sits. */
+/**
+ * Everything to check: what git tracks where there is a git, and what is on
+ * disk where there is not.
+ *
+ * THERE IS NOT, IN EXACTLY ONE PLACE, and it is a place this check must still
+ * run: `pnpm verify:without <id>` copies the working tree WITHOUT `.git` — see
+ * `verify-without.mjs` for why a copy rather than a worktree — and then runs
+ * the suite over it. `git ls-files` failed there with "not a git repository",
+ * which took the whole file down at collection time and made the deletion
+ * proof impossible to pass.
+ *
+ * The fallback is a WALK, not a skip. Git was never the subject here; it was
+ * the enumeration, chosen because it answers "the tree as it will be cloned"
+ * and so leaves out build output and ignored junk. The copy leaves the same
+ * things out by construction — `COPY_EXCLUDE`, imported rather than restated
+ * so the two cannot drift — so walking it asks the same question of the same
+ * files. A check that stopped running in one of the two trees this repo gates
+ * would be the defect this file was written to catch, wearing a hat.
+ *
+ * AND THE FALLBACK IS NARROW. It is taken only when `.git` is genuinely absent.
+ * A checkout WITH a `.git` whose `git ls-files` fails is a real problem, and it
+ * throws rather than quietly downgrading to the weaker enumeration — which is
+ * how a check goes on reporting green over a question it stopped asking.
+ */
 function tracked() {
-  return execFileSync('git', ['ls-files', '-z'], { cwd: REPO, maxBuffer: 64 * 1024 * 1024 })
-    .toString('utf8')
-    .split('\0')
-    .filter(Boolean)
+  if (existsSync(join(REPO, '.git'))) {
+    return execFileSync('git', ['ls-files', '-z'], { cwd: REPO, maxBuffer: 64 * 1024 * 1024 })
+      .toString('utf8')
+      .split('\0')
+      .filter(Boolean)
+  }
+  const out = []
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (COPY_EXCLUDE.includes(entry.name)) continue
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) walk(full)
+      else if (entry.isFile()) out.push(relative(REPO, full).split(sep).join('/'))
+    }
+  }
+  walk(REPO)
+  return out
 }
 
 describe('source is text', () => {

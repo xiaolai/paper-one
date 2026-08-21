@@ -442,9 +442,11 @@ export type AppDispatch = Dispatch<Action>
  * apology, and the pane OPENED ONTO ONE OF THEM: the first thing Paper showed a
  * reader with a full shelf was a panel saying it was not available.
  *
- * Notes and Cards are deliberately absent from this list. Both are cross-book
- * by design — Notes shows every book's marks — and they are why the library has
- * a side pane at all rather than none.
+ * Marginalia and Cards are deliberately absent. Both are cross-book by design —
+ * Marginalia shows every book's marks, notes and places — and they are why the
+ * library has a side pane at all rather than none. Places were briefly a
+ * book-only panel of their own; folding them into Marginalia is what let them
+ * off this list, and the "This book" chip is how a reader narrows to one.
  *
  * It lives here rather than in the pane registry because the ids are declared
  * here and the reducer below needs the same answer. The registry reads it.

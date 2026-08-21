@@ -1,19 +1,25 @@
 import { describe, expect, it } from 'vitest'
 import {
+  BOOKMARK_TEXT_MAX,
   MARKS_STORAGE_KEY,
+  annotationsIn,
   bookIdFor,
+  bookmarkFrom,
+  bookmarksIn,
+  openingLine,
   compareCfi,
   compareMarks,
   identityParts,
   liveMarks,
   loadMarks,
   marginMarks,
-  marksForBook,
   parseMarks,
   removeMark,
+  sameClass,
   saveMarks,
   updateNote,
   upsertMark,
+  type Annotation,
   type Mark,
   type MarkStorage,
 } from './marks'
@@ -35,6 +41,21 @@ function mark(over: Partial<Mark> = {}): Mark {
     createdAt: 1000,
     ...over,
   }
+}
+
+/**
+ * The same fixture, typed as the class it is.
+ *
+ * `marginMarks` takes `readonly Annotation[]` now — the column is an annotation
+ * surface and its signature says so — and `mark()` answers `Mark`, which is the
+ * wider type. This narrows without a cast by deciding the kind in an expression
+ * the compiler can follow.
+ */
+function annotation(over: Partial<Annotation> = {}): Annotation {
+  /* `Partial<Annotation>`, so a fixture cannot ask for `kind: 'bookmark'` here
+     and silently get a highlight — a test whose meaning changed without its
+     author noticing. */
+  return { ...mark(over), kind: over.kind ?? 'highlight' }
 }
 
 /**
@@ -253,7 +274,7 @@ describe('compareCfi', () => {
 
   it('never throws on an anchor that will not parse', () => {
     /* Marks come out of storage, which is a trust boundary: one bad row must
-     * not take the whole Notes list down. Asserting "does not throw, returns a
+     * not take the whole Marginalia list down. Asserting "does not throw, returns a
      * number" rather than a specific order, because where a malformed CFI sorts
      * is foliate's business and not a promise Paper should pin. */
     for (const bad of ['not a cfi', '', 'epubcfi(', 'epubcfi(/6/4', ' ']) {
@@ -267,7 +288,7 @@ describe('compareMarks', () => {
   it('orders by document position, comparing numbers as numbers', () => {
     /* Lexicographic order is wrong exactly where a book gets long: it walks
      * digit by digit, so chapter 10 sorts between chapter 1 and chapter 2 and
-     * the Notes list stops reading in book order. */
+     * the Marginalia list stops reading in book order. */
     const marks = [
       mark({ id: 'ten', cfi: 'epubcfi(/6/10!/4/2)' }),
       mark({ id: 'four', cfi: 'epubcfi(/6/4!/4/2)' }),
@@ -306,26 +327,37 @@ describe('upsertMark', () => {
   })
 })
 
-describe('marksForBook', () => {
-  it('returns only the named book, in book order', () => {
-    const all = [
-      mark({ id: 'b', cfi: 'epubcfi(/6/8)', bookId: 'book-a' }),
-      mark({ id: 'other', bookId: 'book-b' }),
-      mark({ id: 'a', cfi: 'epubcfi(/6/4)', bookId: 'book-a' }),
-    ]
-    expect(marksForBook(all, 'book-a').map((m) => m.id)).toEqual(['a', 'b'])
+describe('upsertMark is idempotent by id', () => {
+  /* Two rows sharing an id is a state everything downstream assumes cannot
+   * happen: `remove(id)` drops every match and `setNote(id)` rewrites every
+   * one. `dedupeById` resolves it on load by keeping the FIRST — which, when
+   * the duplicate came from a tombstone-then-append, is the tombstone. The
+   * mark is then gone, from a write that looked like an update. */
+  it('replaces a row of the same id rather than tombstoning it and appending a twin', () => {
+    const held = mark({ id: 'same', note: 'first' })
+    const again = mark({ id: 'same', note: 'second', createdAt: 2000 })
+
+    const next = upsertMark([held], again)
+
+    expect(next).toHaveLength(1)
+    expect(next[0]?.note).toBe('second')
+    expect(next[0]?.deletedAt).toBeUndefined()
   })
 
-  it('is empty when no book is open', () => {
-    expect(marksForBook([mark()], null)).toEqual([])
+  it('still supersedes a DIFFERENT mark at the same anchor', () => {
+    const held = mark({ id: 'a' })
+    const other = mark({ id: 'b', createdAt: 2000 })
+    const next = upsertMark([held], other)
+    expect(next.find((m) => m.id === 'a')?.deletedAt).toBeDefined()
+    expect(next.find((m) => m.id === 'b')?.deletedAt).toBeUndefined()
   })
 })
 
 describe('marginMarks', () => {
   it('keeps notes and companion marks, and drops bare highlights', () => {
-    const bare = mark({ id: 'bare' })
-    const noted = mark({ id: 'noted', note: 'why this matters' })
-    const companion = mark({ id: 'companion', kind: 'companion' })
+    const bare = annotation({ id: 'bare' })
+    const noted = annotation({ id: 'noted', note: 'why this matters' })
+    const companion = annotation({ id: 'companion', kind: 'companion' })
 
     expect(marginMarks([bare, noted, companion]).map((m) => m.id)).toEqual([
       'noted',
@@ -336,7 +368,7 @@ describe('marginMarks', () => {
   it('leaves the column collapsed when every mark is a bare highlight', () => {
     // The rule the reader sees: highlighting a line does not open a 250px
     // column to show a dot repeating what the gold fill already says.
-    expect(marginMarks([mark(), mark({ id: 'm2' })])).toEqual([])
+    expect(marginMarks([annotation(), annotation({ id: 'm2' })])).toEqual([])
   })
 })
 
@@ -509,5 +541,181 @@ describe('re-marking a passage keeps what was written about it', () => {
     const here = mark({ id: 'm1', cfi: 'epubcfi(/6/4!/4/2)' })
     const elsewhere = mark({ id: 'm2', cfi: 'epubcfi(/6/8!/4/2)' })
     expect(liveMarks(upsertMark([here], elsewhere))).toHaveLength(2)
+  })
+})
+
+/**
+ * Bookmarks share the record, the file and the merge with annotations, and
+ * share none of their consumers. These are the rules that make the second half
+ * of that true — see `MarkKind` for why the two are one type rather than two.
+ */
+describe('bookmarks and annotations are told apart', () => {
+  const highlight = mark({ id: 'h', kind: 'highlight' })
+  const claim = mark({ id: 'c', kind: 'companion' })
+  const place = mark({ id: 'b', kind: 'bookmark', cfi: 'epubcfi(/6/4!/4/8)' })
+
+  it('splits a mixed list both ways, and nothing falls between them', () => {
+    const all = [highlight, place, claim]
+    expect(annotationsIn(all).map((m) => m.id)).toEqual(['h', 'c'])
+    expect(bookmarksIn(all).map((m) => m.id)).toEqual(['b'])
+    expect(annotationsIn(all).length + bookmarksIn(all).length).toBe(all.length)
+  })
+
+  /* The no-write convention every store's change detection rests on: a filter
+   * that removed nothing must hand back the SAME array, or the store publishes
+   * a change nobody can see and writes the file over itself. */
+  it('returns its input by identity when there is no bookmark to drop', () => {
+    const annotations = [highlight, claim]
+    expect(annotationsIn(annotations)).toBe(annotations)
+  })
+
+  it('orders bookmarks by section first, then by CFI — `compareMarks`', () => {
+    /* BOTH HALVES, and the second is the one that was missing: with every
+     * fixture in a different section the CFI comparison never ran, so the test
+     * named a rule it did not exercise. The same-section pair is deliberately
+     * ordered so that plain string order would get it wrong — `/4/10` sorts
+     * before `/4/4` byte by byte, which is the exact defect `compareCfi`
+     * exists to avoid. */
+    const later = mark({ id: 'b2', kind: 'bookmark', sectionIndex: 3, cfi: 'epubcfi(/6/4!/4/2)' })
+    const earlier = mark({ id: 'b1', kind: 'bookmark', sectionIndex: 1, cfi: 'epubcfi(/6/4!/4/9)' })
+    expect(bookmarksIn([later, earlier]).map((m) => m.id)).toEqual(['b1', 'b2'])
+
+    const tenth = mark({ id: 'b4', kind: 'bookmark', sectionIndex: 1, cfi: 'epubcfi(/6/4!/4/10)' })
+    const fourth = mark({ id: 'b3', kind: 'bookmark', sectionIndex: 1, cfi: 'epubcfi(/6/4!/4/4)' })
+    expect(bookmarksIn([tenth, fourth]).map((m) => m.id)).toEqual(['b3', 'b4'])
+  })
+
+  /* The line replacement respects, and it is NOT `kind === kind`: a reader
+   * marking over the companion's claim replaces it, and always has. */
+  it('puts the companion on the reader’s side of the line, and a bookmark alone on the other', () => {
+    expect(sameClass(highlight, claim)).toBe(true)
+    expect(sameClass(highlight, place)).toBe(false)
+    expect(sameClass(claim, place)).toBe(false)
+  })
+
+  /* THE FAILURE THIS PREVENTS: a bookmark anchors to the visible page, so it
+   * shares an anchor with whatever is highlighted on that page as a matter of
+   * course. Without the class guard the two take turns deleting each other,
+   * silently and with no undo. */
+  it('does not let a bookmark and a highlight at one anchor supersede each other', () => {
+    /* BOTH ROWS LIVE AFTER EACH INSERTION, not merely "the old one was not
+       tombstoned": dropping the INCOMING row entirely would have satisfied that
+       weaker assertion while losing the mark the reader just made. */
+    const kept = upsertMark([highlight], mark({ id: 'b', kind: 'bookmark' }))
+    expect(liveMarks(kept).map((m) => m.id).sort()).toEqual(['b', 'h'])
+
+    const back = upsertMark([place], mark({ id: 'h2', cfi: place.cfi }))
+    expect(liveMarks(back).map((m) => m.id).sort()).toEqual(['b', 'h2'])
+  })
+
+  it('still replaces a bookmark with a bookmark at the same anchor', () => {
+    const replaced = upsertMark([place], mark({ id: 'b2', kind: 'bookmark', cfi: place.cfi }))
+    expect(replaced.find((m) => m.id === 'b')?.deletedAt).toBeDefined()
+  })
+
+  /* A bookmark must never reach the margin, and it no longer CAN: `marginMarks`
+   * takes `readonly Annotation[]`, so handing it one is a compile error rather
+   * than a filtered row — the guarantee moved out of this assertion and into
+   * the signature. What is left to assert is the SECOND barrier, the one that
+   * is still a runtime predicate: `marginMarks` admits a mark for its note or
+   * for being the companion's, and a bookmark is neither. Both halves are
+   * asserted against the predicate itself rather than read off a fixture's
+   * fields, which was the old version's weakness — it checked that the bookmark
+   * builder writes an empty note, which is `bookmarkFrom`'s own test, and never
+   * asked what the margin does with one. */
+  it('would still keep a bookmark out of the margin if one reached the predicate', () => {
+    /* THE BOOKMARK IS ACTUALLY PUT THROUGH IT. Asserting that a bookmark
+       fixture has an empty note is `bookmarkFrom`'s test, not this one, and it
+       never asks the margin anything — which is what the previous version of
+       this did. The cast is the point rather than a shortcut: it stages
+       precisely the thing the type system now forbids, so what is left of the
+       runtime guard can be held to its promise. */
+    expect(marginMarks([place as Annotation])).toEqual([])
+
+    /* And the guard is a real filter rather than one that drops everything:
+       both ways IN are open to what they are for — something the reader wrote,
+       and the companion's claim, which earns its place with or without a note. */
+    expect(marginMarks([annotation({ id: 'n', note: 'said' })]).map((m) => m.id)).toEqual(['n'])
+    expect(marginMarks([annotation({ id: 'c', kind: 'companion' })]).map((m) => m.id)).toEqual(['c'])
+    expect(marginMarks([annotation({ id: 'q', note: '' })])).toEqual([])
+  })
+})
+
+describe('openingLine', () => {
+  it('collapses every run of whitespace to one space and trims the ends', () => {
+    expect(openingLine('  a\n\n b \t c  ')).toBe('a b c')
+  })
+
+  /* A string index is a UTF-16 UNIT, so `slice(0, 140)` can land between the
+   * halves of a surrogate pair and store a lone surrogate — a character that
+   * is not a character, written to disk and sent over the wire. The emoji here
+   * straddles the limit deliberately. */
+  it('never cuts a character in half', () => {
+    const cut = openingLine('x'.repeat(BOOKMARK_TEXT_MAX - 1) + '\u{1F4D6}' + 'tail')
+    expect([...cut]).toHaveLength(BOOKMARK_TEXT_MAX)
+    expect(cut.endsWith('\u{1F4D6}')).toBe(true)
+    // No unpaired surrogate survived the cut.
+    expect(cut).toBe(cut.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/gu, ''))
+  })
+
+  it('is idempotent, so a row normalised on the way in survives a second pass', () => {
+    const once = openingLine('  a \n b  ')
+    expect(openingLine(once)).toBe(once)
+  })
+})
+
+describe('bookmarkFrom', () => {
+  const draft = {
+    bookId: 'book-a',
+    cfi: 'epubcfi(/6/4!/4/2)',
+    sectionIndex: 2,
+    text: 'Call me Ishmael',
+    prefix: 'before',
+    suffix: 'after',
+    chapter: 'Ch. 1',
+  }
+
+  it('makes a bookmark that carries no note and no appearance', () => {
+    const made = bookmarkFrom(draft)
+    expect(made.kind).toBe('bookmark')
+    expect(made.note).toBe('')
+    /* Exactly what a row WITHOUT these fields reads back as — see `readTint`
+     * and `readStyle`. Nothing paints a bookmark, so the honest value is the
+     * one that says nothing. */
+    expect(made.tint).toBe('yellow')
+    expect(made.style).toBe('fill')
+  })
+
+  /* A highlight's text is what the reader selected. A bookmark's is whatever
+   * was on screen — a whole page — and storing that puts a screenful of prose
+   * into `marks.json` and onto the wire for every bookmark. */
+  it('keeps only the opening line of the page it was made on', () => {
+    const long = bookmarkFrom({ ...draft, text: 'x'.repeat(BOOKMARK_TEXT_MAX * 3) })
+    expect(long.text).toHaveLength(BOOKMARK_TEXT_MAX)
+  })
+
+  it('collapses the page’s own layout before spending the budget on it', () => {
+    /* The shape a real capture arrives in — the text is walked out of rendered
+     * markup, so it carries that markup's newlines and indentation. Cutting
+     * first spent a quarter of the allowance on whitespace. */
+    const ragged = bookmarkFrom({ ...draft, text: '\n  y\n + ing \u279a\n   simplify\n ing\n' })
+    expect(ragged.text).toBe('y + ing \u279a simplify ing')
+  })
+
+  it('leaves the anchor, the section and the chapter exactly as given', () => {
+    const made = bookmarkFrom(draft)
+    expect(made.cfi).toBe(draft.cfi)
+    expect(made.sectionIndex).toBe(draft.sectionIndex)
+    expect(made.chapter).toBe(draft.chapter)
+    expect([made.prefix, made.suffix]).toEqual(['before', 'after'])
+  })
+
+  /* THE COMPATIBILITY FAILURE THIS GUARDS: `validMarks` filters rather than
+   * throws, so a validator that did not know the kind would drop every
+   * bookmark on disk on the first load after the upgrade, in silence. */
+  it('survives a round trip through storage', () => {
+    const stored = parseMarks(JSON.stringify([{ ...bookmarkFrom(draft), id: 'b', createdAt: 5 }]))
+    expect(stored).toHaveLength(1)
+    expect(stored[0]?.kind).toBe('bookmark')
   })
 })

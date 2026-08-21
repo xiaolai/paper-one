@@ -560,7 +560,8 @@ describe('the star protocol over two real stacks (WI-C.2)', () => {
             epoch: 'e-fake',
             hubSeq,
             journalFormat: 1,
-            services: { sync: [1, 1] },
+            // Speaks this build's version — a v1 hello is refused now, see SYNC_VERSION.
+            services: { sync: [2, 2] },
           }
         }
         if (service === 'sync.pull') return page

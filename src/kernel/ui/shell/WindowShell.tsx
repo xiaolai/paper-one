@@ -92,7 +92,21 @@ export function WindowShell({
           {titleBar}
           {overlays}
           <div className={styles.shell}>
-            <div className={styles.content}>{children}</div>
+            {/* INERT UNDER THE SHEET, not merely covered by it.
+                The scrim below takes the pointer, and took only the pointer:
+                everything behind it stayed in the focus order, so Tab walked
+                into a screen the reader could not see and Enter acted on it.
+                That cost nothing while the surfaces underneath were readouts
+                and covers; the reader's footer now carries a bookmark toggle,
+                which is the first control ever placed there — and it is lit
+                whenever a pane is open, so it was both reachable and reporting
+                state from behind a scrim.
+                Here rather than on the screens, because `asSheet` is this
+                component's own predicate and a second copy of it elsewhere is
+                two answers to when the sheet is up. */}
+            <div className={styles.content} inert={asSheet && paneOpen}>
+              {children}
+            </div>
 
             {/* The sheet's dismissal target, and the only one it has: at this
                 width the pane covers the rail it would otherwise be closed

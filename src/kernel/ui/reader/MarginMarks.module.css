@@ -76,7 +76,7 @@
 }
 
 /* Two lines, then ellipsis. A margin note is a pointer to the note, not the
- * note itself — the full text is one click away in the Notes panel, and a
+ * note itself — the full text is one click away in the Marginalia panel, and a
  * column of eight-line notes would compete with the prose it annotates. */
 .body {
   display: -webkit-box;

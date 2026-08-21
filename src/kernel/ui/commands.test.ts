@@ -3,8 +3,9 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { buildCommands, filterCommands, score, type Command } from './commands'
 import { DEFAULT_STEP_IDX, READING_STEPS } from '../core/metrics'
-import { PANE_SHORTCUTS } from './panes'
-import { initialState, type AppState } from './state'
+import { PANE_SHORTCUTS, panesFor } from './panes'
+import { resolveAccel } from './accel'
+import { initialState, paneFits, type AppState } from './state'
 
 function context(over: Partial<AppState> = {}) {
   const dispatched: unknown[] = []
@@ -13,6 +14,8 @@ function context(over: Partial<AppState> = {}) {
     dispatch: (action: unknown) => dispatched.push(action),
     hasBook: true,
     markSelection: null,
+    toggleBookmark: null,
+    bookmarked: false,
     openBookPicker: () => {},
     importFolder: () => {},
     importing: false,
@@ -29,22 +32,24 @@ const find = (commands: Command[], id: string) => commands.find((c) => c.id === 
 
 describe('buildCommands', () => {
   it('names the action, not the thing — a pane that is open offers to close', () => {
-    const open = buildCommands(context({ pane: 'notes' }).ctx)
-    expect(find(open, 'pane:notes')?.label).toBe('Close Notes')
-    expect(find(open, 'pane:notes')?.on).toBe(true)
+    const open = buildCommands(context({ pane: 'marginalia' }).ctx)
+    expect(find(open, 'pane:marginalia')?.label).toBe('Close Marginalia')
+    expect(find(open, 'pane:marginalia')?.on).toBe(true)
 
     const shut = buildCommands(context({ pane: null }).ctx)
-    expect(find(shut, 'pane:notes')?.label).toBe('Open Notes')
-    expect(find(shut, 'pane:notes')?.on).toBe(false)
+    expect(find(shut, 'pane:marginalia')?.label).toBe('Open Marginalia')
+    expect(find(shut, 'pane:marginalia')?.on).toBe(false)
   })
 
   it('carries §11 combos, so the palette shows what the handler binds', () => {
-    // On the READER, where every panel exists — see the library case below.
+    /* FROM THE REGISTRY, not from a list written out here. The hand-written
+     * version named four of the five panels that carry a digit and had already
+     * drifted — it did not include Bookmarks, and nothing compared it with
+     * `PANES`. A second copy of a registry is a second opinion about it. */
     const commands = buildCommands(context({ screen: 'reader' }).ctx)
-    expect(find(commands, 'pane:toc')?.combo).toBe('⌘1')
-    expect(find(commands, 'pane:notes')?.combo).toBe('⌘2')
-    expect(find(commands, 'pane:search')?.combo).toBe('⌘3')
-    expect(find(commands, 'pane:stats')?.combo).toBe('⌘5')
+    for (const { combo, pane } of PANE_SHORTCUTS) {
+      expect(find(commands, `pane:${pane}`)?.combo, `pane:${pane}`).toBe(combo)
+    }
     expect(find(commands, 'pane:toggle')?.combo).toBe('⌘\\')
   })
 
@@ -63,15 +68,18 @@ describe('buildCommands', () => {
     expect(find(library, 'pane:companion')).toBeUndefined()
 
     // The cross-book ones stay: they are why the library has a pane at all.
-    expect(find(library, 'pane:notes')).toBeDefined()
+    expect(find(library, 'pane:marginalia')).toBeDefined()
     expect(find(library, 'pane:cards')).toBeDefined()
     expect(find(library, 'pane:settings')).toBeDefined()
   })
 
   it('offers all of them in a book', () => {
+    /* Every kernel panel the reader screen has, from the registry — the list
+     * written out here omitted Reading, so "all of them" was a claim about
+     * five of the eight. */
     const reader = buildCommands(context({ screen: 'reader' }).ctx)
-    for (const id of ['toc', 'search', 'companion', 'notes', 'cards']) {
-      expect(find(reader, `pane:${id}`)).toBeDefined()
+    for (const pane of panesFor('reader')) {
+      expect(find(reader, `pane:${pane.id}`), pane.id).toBeDefined()
     }
   })
 
@@ -93,6 +101,31 @@ describe('buildCommands', () => {
     expect(find(buildCommands(withSelection), 'book:mark')?.combo).toBe('⌘D')
   })
 
+  /* The same rule ⌘D follows for an absent selection: a palette row that runs
+   * and changes nothing is worse than one that is not there, because the reader
+   * has already decided by the time they press return. */
+  it('offers bookmarking only where a place can be pinned down', () => {
+    const { ctx } = context()
+    expect(find(buildCommands(ctx), 'book:bookmark')).toBeUndefined()
+
+    const somewhere = { ...ctx, toggleBookmark: () => {} }
+    expect(find(buildCommands(somewhere), 'book:bookmark')?.combo).toBe('⌘B')
+  })
+
+  /* Says what pressing it DOES, against what is true right now — the same
+   * wording the footer button carries, so one action cannot be described two
+   * ways by two surfaces. */
+  it('names the direction the bookmark toggle would go', () => {
+    const { ctx } = context()
+    const fresh = { ...ctx, toggleBookmark: () => {}, bookmarked: false }
+    expect(find(buildCommands(fresh), 'book:bookmark')?.label).toBe('Bookmark this place')
+    expect(find(buildCommands(fresh), 'book:bookmark')?.on).toBe(false)
+
+    const kept = { ...ctx, toggleBookmark: () => {}, bookmarked: true }
+    expect(find(buildCommands(kept), 'book:bookmark')?.label).toBe('Remove this bookmark')
+    expect(find(buildCommands(kept), 'book:bookmark')?.on).toBe(true)
+  })
+
   it('offers closing the book only when one is open', () => {
     const { ctx } = context()
     expect(find(buildCommands({ ...ctx, hasBook: false }), 'book:close')).toBeUndefined()
@@ -107,8 +140,8 @@ describe('buildCommands', () => {
 
   it('runs the action it advertises', () => {
     const { ctx, dispatched } = context({ pane: null })
-    find(buildCommands(ctx), 'pane:notes')?.run()
-    expect(dispatched).toEqual([{ type: 'openPane', pane: 'notes' }])
+    find(buildCommands(ctx), 'pane:marginalia')?.run()
+    expect(dispatched).toEqual([{ type: 'openPane', pane: 'marginalia' }])
   })
 
   describe('reading size', () => {
@@ -165,7 +198,21 @@ describe('buildCommands', () => {
  * is a row that prints a keystroke which does nothing.
  */
 describe('advertised combos are bound', () => {
-  const app = readFileSync(fileURLToPath(new URL('./App.tsx', import.meta.url)), 'utf8')
+  /**
+   * Everything a bound key could want, so a guard is never what answers.
+   *
+   * The point of the check below is the MAP, not the guards — those have their
+   * own cases further down. A context with anything missing would let a key
+   * pass for the wrong reason: absent, rather than declined.
+   */
+  const anything = {
+    screen: 'reader',
+    pane: null,
+    hasSelection: true,
+    canBookmark: true,
+    onReader: true,
+    hasBook: true,
+  } as const
 
   /**
    * What a printed combo requires the handler to bind.
@@ -183,8 +230,19 @@ describe('advertised combos are bound', () => {
    */
   const KEYS_FOR_COMBO: Record<string, readonly string[]> = {
     '⌘K': ['k'],
-    '⌘\\': ['\\\\'],
+    /* ONE BACKSLASH, which it could not be while this searched App's source:
+       the source spells that key as an escaped pair, so the table had to
+       hold the escaped form in order to find it. That is the search method
+       leaking into what the test claims — the key a keyboard actually
+       reports is a single backslash. */
+    '⌘\\': ['\\'],
     '⌘D': ['d'],
+    '⌘B': ['b'],
+    /* ⌘T was escaping this check for exactly the reason ⌘B was — `editTags`
+     * was null in the fixture, so the command was never built and its combo
+     * never reached the table. Switching every conditional command on is what
+     * surfaced it. */
+    '⌘T': ['t'],
     '⌘L': ['l'],
     '⌘+': ['=', '+'],
     '⌘−': ['-', '_'],
@@ -192,13 +250,40 @@ describe('advertised combos are bound', () => {
   }
 
   it('binds every combo the palette prints', () => {
+    /*
+     * EVERY CONDITIONAL COMMAND SWITCHED ON, and on the READER screen.
+     *
+     * This ran on the library with `toggleBookmark` and `editTags` null, so the
+     * commands that only exist under a condition were never built and their
+     * combos were never examined — ⌘B could have been advertised and bound to
+     * nothing and this would still have passed. The screen matters for the same
+     * reason: three panels do not exist on the library, so ⌘6 was absent too.
+     *
+     * The pane digits are excluded through `PANE_SHORTCUTS` rather than a
+     * `⌘[1-5]` regex. The regex was a second copy of the registry written as a
+     * character range, and it silently stopped covering the registry the moment
+     * a sixth panel arrived: ⌘6 fell through into the table lookup below, which
+     * would have failed for the right reason by luck rather than by design.
+     */
+    const everything = {
+      ...context({ screen: 'reader' }).ctx,
+      markSelection: () => {},
+      toggleBookmark: () => {},
+      editTags: () => {},
+      exportTags: () => {},
+      importTags: () => {},
+    }
+    const digits = new Set(PANE_SHORTCUTS.map((entry) => entry.combo))
     const advertised = new Set(
-      buildCommands({ ...context().ctx, markSelection: () => {} })
+      buildCommands(everything)
         .map((command) => command.combo)
         .filter((combo): combo is string => combo !== undefined)
-        .filter((combo) => !/^⌘[1-5]$/.test(combo)),
+        .filter((combo) => !digits.has(combo)),
     )
     expect(advertised.size).toBeGreaterThan(0)
+    // The commands this test exists for must actually be in the set it checks.
+    expect(advertised.has('⌘B')).toBe(true)
+    expect(advertised.has('⌘D')).toBe(true)
 
     for (const combo of advertised) {
       const keys = KEYS_FOR_COMBO[combo]
@@ -206,9 +291,68 @@ describe('advertised combos are bound', () => {
       // means the palette prints a keystroke this test cannot confirm exists.
       expect(keys, `no expected key for ${combo}`).toBeDefined()
       for (const key of keys ?? []) {
-        expect(app, `${combo} prints, but App binds no '${key}'`).toContain(`'${key}'`)
+        /* THE KEY IS PUT THROUGH THE MAP, not looked for in App's source. The
+           search was the whole weakness: a literal in a comment satisfied it,
+           and so did one in an unreachable branch or behind the wrong
+           modifier. Now the combo the palette prints has to actually produce
+           an action from the key a keyboard reports. */
+        expect(
+          resolveAccel({ key, repeat: false }, anything),
+          `${combo} prints, but '${key}' resolves to nothing`,
+        ).not.toBeNull()
       }
     }
+  })
+
+  /* THE DIGITS, which the check above excludes because they come from the pane
+     registry rather than the command list. Excluded there and unchecked
+     everywhere was the hole: deleting the digit branch entirely left the suite
+     green, because the only other test of it asserted that the PANELS render. */
+  it('binds every panel digit the rail advertises, and toggles the open one', () => {
+    for (const { digit, pane } of PANE_SHORTCUTS) {
+      expect(resolveAccel({ key: digit, repeat: false }, anything), `⌘${digit}`).toEqual({
+        kind: 'openPane',
+        pane,
+      })
+      /* The same key on the panel it opened closes it — the palette row for an
+         open panel says "Close" and carries this combo. */
+      expect(resolveAccel({ key: digit, repeat: false }, { ...anything, pane })).toEqual({
+        kind: 'closePane',
+      })
+    }
+  })
+
+  /* A DIGIT FOR A PANEL THIS SCREEN DOES NOT HAVE does nothing, rather than
+     opening whatever `openPane` would fall back to. */
+  it('leaves a digit unbound on a screen with no such panel', () => {
+    const missing = PANE_SHORTCUTS.find(({ pane }) => !paneFits('library', pane))
+    expect(missing, 'no panel is reader-only any more — this check needs rewriting').toBeDefined()
+    expect(
+      resolveAccel({ key: missing!.digit, repeat: false }, { ...anything, screen: 'library' }),
+    ).toBeNull()
+  })
+
+  /* THE GUARDS, each on its own: a combo swallowed in order to do nothing is
+     worse than one left unbound, because the platform's meaning goes with it. */
+  it('declines a combo whose condition is not met, instead of eating the key', () => {
+    expect(resolveAccel({ key: 'd', repeat: false }, { ...anything, hasSelection: false })).toBeNull()
+    expect(resolveAccel({ key: 'b', repeat: false }, { ...anything, canBookmark: false })).toBeNull()
+    /* Not from the shelf, even with a place to keep: the reader is mounted
+       underneath with a live position, and nothing on screen would show it. */
+    expect(resolveAccel({ key: 'b', repeat: false }, { ...anything, onReader: false })).toBeNull()
+    expect(resolveAccel({ key: 't', repeat: false }, { ...anything, hasBook: false })).toBeNull()
+  })
+
+  /* HOLDING A TOGGLE IS ONE PRESS. Held ⌘B wrote a row and a tombstone to the
+     book's marks file on every repeat, and its final state depended on where
+     the reader let go. The size steps are deliberately exempt — holding ⌘+ to
+     walk up the ramp is a real gesture with a real result at each repeat. */
+  it('ignores an auto-repeat on the toggles and honours it on the size steps', () => {
+    for (const key of ['k', '\\', 't', 'b', ...PANE_SHORTCUTS.map((e) => e.digit)]) {
+      expect(resolveAccel({ key, repeat: true }, anything), `held ⌘${key}`).toBeNull()
+    }
+    expect(resolveAccel({ key: '=', repeat: true }, anything)).toEqual({ kind: 'stepBy', delta: 1 })
+    expect(resolveAccel({ key: '-', repeat: true }, anything)).toEqual({ kind: 'stepBy', delta: -1 })
   })
 
   it('advertises every reading-size key it binds, so none is a secret', () => {
@@ -222,10 +366,19 @@ describe('advertised combos are bound', () => {
 })
 
 describe('PANE_SHORTCUTS', () => {
-  it('binds §11\'s ⌘1…5 to contents, notes, search, cards and stats', () => {
+  it('binds §11\'s ⌘1…5 to contents, marginalia, search, cards and stats', () => {
+    /* FIVE, AND THE NAME SAYS FIVE. It said six and named a Bookmarks panel,
+     * left behind when bookmarks moved into Marginalia — a test whose report
+     * described a panel the app does not have, printed on every green run.
+     *
+     * THE DIGITS ARE NOT THE RAIL'S ORDER. They are the order the panels were
+     * published in, and a digit belongs to a panel rather than to a position —
+     * renumbering to match the rail would move ⌘3 off Search for every reader
+     * who has it in their fingers. ⌘2 stayed with Marginalia through its rename
+     * from Notes for the same reason. */
     expect(PANE_SHORTCUTS.map((s) => [s.digit, s.pane])).toEqual([
       ['1', 'toc'],
-      ['2', 'notes'],
+      ['2', 'marginalia'],
       ['3', 'search'],
       ['4', 'cards'],
       ['5', 'stats'],
@@ -256,18 +409,18 @@ describe('PANE_SHORTCUTS', () => {
 describe('score', () => {
   const command: Command = {
     id: 'x',
-    label: 'Open Notes',
+    label: 'Open Marginalia',
     group: 'Panels',
     keywords: 'pane panel sidebar',
     run: () => {},
   }
 
   it('ranks a label prefix above a match inside the label', () => {
-    expect(score(command, 'open')).toBeLessThan(score({ ...command, label: 'Reopen Notes' }, 'open') ?? Infinity)
+    expect(score(command, 'open')).toBeLessThan(score({ ...command, label: 'Reopen Marginalia' }, 'open') ?? Infinity)
   })
 
   it('ranks a label match above a keyword match', () => {
-    const byLabel = score(command, 'notes')
+    const byLabel = score(command, 'marginalia')
     const byKeyword = score(command, 'sidebar')
     expect(byLabel).not.toBeNull()
     expect(byKeyword).not.toBeNull()
@@ -337,8 +490,8 @@ describe('importing a folder', () => {
 describe('filterCommands', () => {
   it('puts the best match first', () => {
     const commands = buildCommands(context({ pane: null }).ctx)
-    const ranked = filterCommands(commands, 'notes')
-    expect(ranked[0]?.label).toBe('Open Notes')
+    const ranked = filterCommands(commands, 'marginalia')
+    expect(ranked[0]?.label).toBe('Open Marginalia')
   })
 
   it('drops misses entirely', () => {
@@ -385,7 +538,7 @@ describe('the tag archive commands', () => {
 describe('contributed commands', () => {
   it('are appended after the kernel\'s, with a context derived from the same state', () => {
     const seen: unknown[] = []
-    const { ctx, dispatched } = context({ screen: 'library', pane: 'notes' })
+    const { ctx, dispatched } = context({ screen: 'library', pane: 'marginalia' })
     const commands = buildCommands({
       ...ctx,
       contributed: (capability) => {
@@ -395,7 +548,7 @@ describe('contributed commands', () => {
     })
     expect(commands.at(-1)?.id).toBe('example:hello')
     expect(seen).toHaveLength(1)
-    expect(seen[0]).toMatchObject({ screen: 'library', pane: 'notes', hasBook: true })
+    expect(seen[0]).toMatchObject({ screen: 'library', pane: 'marginalia', hasBook: true })
     commands.at(-1)?.run()
     expect(dispatched).toEqual([{ type: 'openPane', pane: 'example:pane' }])
   })

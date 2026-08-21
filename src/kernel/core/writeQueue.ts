@@ -102,7 +102,7 @@ export function writeQueue(): WriteQueue {
         /* ONLY OTHER WHOLE-STATE WRITES ARE SUPERSEDED. Clearing the line
          * outright also threw away appended tasks — and those READ the file and
          * change part of it, so dropping one loses the edit it was carrying. The
-         * two modes share a key whenever a book is edited from Notes and then
+         * two modes share a key whenever a book is edited from Marginalia and then
          * opened, which is not an exotic sequence.
          *
          * The superseded task RESOLVES rather than rejecting. It was skipped

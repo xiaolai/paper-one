@@ -1,6 +1,6 @@
 import { collapse } from 'foliate-js/epubcfi.js'
 import type { Hlc } from './hlc'
-import { compareCfi, compareMarks, removeMark, upsertMark, type Mark } from './marks'
+import { compareCfi, compareMarks, removeMark, sameClass, upsertMark, type Mark } from './marks'
 
 /**
  * Which mark a selection is on.
@@ -88,7 +88,7 @@ export function cfiOverlaps(a: string, b: string): boolean {
  * The mark a selection is on, or null.
  *
  * When a selection overlaps two marks the answer is the FIRST IN `compareMarks`
- * ORDER — the order the Notes list already reads in. The rule this replaced was
+ * ORDER — the order the Marginalia list already reads in. The rule this replaced was
  * "greatest overlap, ties by creation order", and it was withdrawn because it
  * cannot be computed: `view.getCFI` emits CFIs with no character offsets at all
  * for a range that begins and ends at an element boundary, so there is no
@@ -102,8 +102,12 @@ export function cfiOverlaps(a: string, b: string): boolean {
  * two CFIs from different spine items address positions in different documents
  * and are not comparable at all.
  */
-export function findMark(marks: readonly Mark[], passage: Passage): Mark | null {
-  let best: Mark | null = null
+/* GENERIC over the element, so a list of one class answers with that class.
+ * Both callers narrowed their own lists — `useMarking` searches annotations,
+ * `useBookmarking` searches bookmarks — and a `Mark | null` answer threw that
+ * away at the one point it was needed. */
+export function findMark<T extends Mark>(marks: readonly T[], passage: Passage): T | null {
+  let best: T | null = null
   for (const candidate of marks) {
     /* A tombstoned row is not on the page, so no selection can be reaching
      * for it — and superseding one again would stamp a second deletion over
@@ -133,8 +137,23 @@ export function findMark(marks: readonly Mark[], passage: Passage): Mark | null 
  * clearing them all would delete work the reader never asked to lose.
  * `upsertMark` still runs underneath, so the byte-exact rule it documents is
  * kept rather than replaced.
+ *
+ * AND ONLY WITHIN A CLASS — see `sameClass`. Overlap is the whole rule here,
+ * and a bookmark overlaps by construction: it anchors to the visible page, so
+ * it covers every highlight on that page. Without the filter, bookmarking a
+ * page tombstoned a highlight the reader had made on it — and, going the other
+ * way, marking a passage on a bookmarked page took the bookmark off. Both are
+ * silent, and neither has an undo.
+ *
+ * The candidates are narrowed rather than the answer discarded, because the
+ * two are not the same: `findMark` returns the FIRST in document order, so
+ * screening afterwards would let a bookmark it happened to pick first hide the
+ * highlight that actually should have been superseded.
  */
 export function upsertOverlapping(marks: readonly Mark[], mark: Mark, at?: Hlc): Mark[] {
-  const superseded = findMark(marks, mark)
+  const superseded = findMark(
+    marks.filter((candidate) => sameClass(candidate, mark)),
+    mark,
+  )
   return upsertMark(superseded === null ? marks : removeMark(marks, superseded.id, at), mark, at)
 }

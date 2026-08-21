@@ -155,6 +155,20 @@
   color: var(--accent);
 }
 
+/* AN EXCLUSION LOOKS LIKE ONE. `aria-checked="false"` is what an untouched tag
+   reports too, and the two mean opposite things — the tag doing nothing and
+   the tag actively hiding books. Struck through, on the shelf's own reading of
+   the state: the chip row draws an exclusion hollow, the scope rows strike it,
+   and a reader who has hidden a tag and forgotten needs the row to say so
+   before they can think to press it. */
+.menuItem[data-excluded='true'] {
+  color: var(--muted);
+}
+
+.menuItem[data-excluded='true'] .menuLabel {
+  text-decoration: line-through;
+}
+
 /* The primary action, as a mark rather than a phrase — see `.iconOnly`, which
  * has to be composed rather than restated here or `.primary`'s padding wins. */
 .add {
@@ -677,9 +691,22 @@
     var(--shelf-pad-x);
 }
 
-.search {
+/*
+ * The search field — a pill holding an icon and a borderless input, which is
+ * the shape the side pane's search already had and this did not.
+ *
+ * The border, the radius and the height move here from `.search`: the box the
+ * reader sees is this one, so it is the one that carries them AND the focus
+ * ring. A ring on the input instead would be a square-cornered rectangle
+ * inside a pill — see the same note in `SidePane.module.css`, which is where
+ * that was diagnosed.
+ */
+.searchField {
   flex: 1;
   min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
   /* The control ramp's own height, so the field and the three round buttons
      beside it are one row of one size rather than a 32 next to three 34s. */
   height: var(--control-pill);
@@ -692,22 +719,50 @@
   border: 1px solid var(--line-2);
   border-radius: var(--radius-pill);
   background: var(--surface, transparent);
+  color: var(--muted);
+}
+
+/*
+ * LIGHT FOR THE FIELD, NOT FOR THE MENU INSIDE IT.
+ *
+ * The narrow button and the dropdown's own filter field are DOM descendants of
+ * this pill, so a plain `:focus-within` lit the whole search field whenever
+ * either had focus — a ring around a box the reader was not in, beside the ring
+ * the focused control was drawing for itself.
+ *
+ * Stated as "focus is inside me but NOT inside the menu" rather than as
+ * `:has(> input:focus)`, which says the same thing about the good case and
+ * behaves differently in this webview: `:focus` there depends on the window
+ * being key, so the ring vanished in situations `:focus-within` handles.
+ */
+.searchField:focus-within:not(:has(.narrowAnchor :focus-within)) {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  /* The resting border goes while the ring is up — two concentric edges a pixel
+     apart read as a double border rather than as focus. Transparent rather than
+     removed, so the field does not lose a pixel of height and shift the row it
+     shares with the three round buttons. */
+  border-color: transparent;
+}
+
+.search {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
   color: inherit;
   font: inherit;
   font-size: var(--text-ui);
 }
 
-/* The border is dropped by the global input rule in `global.css`, so this is
- * one ring rather than a box inside a box.
- *
- * `--accent`, like every other focus ring in the app. This asked for `--focus`,
- * which does not exist either, so the ring was drawn in `currentColor` — the
- * field's own ink — and was the one focus indicator in Paper that was not the
- * accent. Nothing reported it because the fallback made it look deliberate. */
-.search:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+/* The container shows focus — see `.searchField:focus-within`. Removing this
+   unconditionally is only safe because of that rule, which is why they sit
+   together. */
+.search:focus {
+  outline: none;
 }
+
+
 
 /* A ROW OF THEIR OWN, below the toolbar. They lived inside it, so a book with
    three tags in force pushed the search field and the buttons onto a second
@@ -1044,6 +1099,100 @@
 
 .menuItem {
   composes: menuItem from '../styles/controls.module.css';
+}
+
+/* --- the narrow menu, at the end of the search field ------------------- */
+
+/* Inside the pill, so the control reads as part of the field it narrows rather
+   than as a fourth round button in the toolbar row. */
+.narrowAnchor {
+  flex: 0 0 auto;
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.narrow {
+  display: grid;
+  place-items: center;
+  width: var(--control-xs);
+  height: var(--control-xs);
+  border: none;
+  border-radius: var(--radius-chip);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.narrow:hover {
+  background: var(--wash);
+  color: var(--ink-2);
+}
+
+.narrow:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Lit while the query carries a term this menu writes — the control reports
+   the state as well as offering to change it. */
+.narrow[data-on='true'] {
+  color: var(--accent);
+}
+
+/* The tag's own name takes the room; the count sits at the end and never
+   pushes the name out of the row. */
+.menuLabel {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.menuCount {
+  flex: 0 0 auto;
+  font-size: var(--text-small);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+/* The tag rows scroll; the statuses, Untagged and the filter field above them
+   do not. A shelf can carry hundreds of tags, and a menu that grows with them
+   runs off the bottom of the window — `usePlacement` would then flip it, which
+   only moves the problem to the top. */
+.menuScroll {
+  max-height: var(--menu-scroll-h);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* Matches the panel's own tag filter — same job, same shape. */
+.menuFilter {
+  width: calc(100% - 2 * var(--space-6));
+  height: var(--control-sm);
+  margin: var(--space-2) var(--space-6) var(--space-6);
+  padding: 0 var(--space-8);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-chip);
+  background: var(--surface);
+  font: inherit;
+  font-size: var(--text-small);
+  color: var(--ink);
+}
+
+/* The menu's own focus convention is a wash, not a ring — see `.menuItem` in
+   `controls.module.css`. A 2px accent outline on a 26px field inside a floating
+   card reads as an error state rather than as focus, so the field's existing
+   1px border simply changes colour. */
+.menuFilter:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.menuEmpty {
+  padding: var(--space-8) var(--space-10);
+  font-size: var(--text-small);
+  color: var(--muted);
 }
 
 /* The import report. Per book rather than a spinner — an import of three hundred

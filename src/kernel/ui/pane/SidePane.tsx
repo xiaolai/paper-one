@@ -12,21 +12,22 @@ import {
 import type { IndexedBook } from '../../core/bookIndex'
 import type { PaneContribution, SettingsSection } from '../../core/capability'
 import type { CompanionProvider } from '../../core/companion'
-import { ICON } from '../../core/metrics'
+import { ICON, type Platform } from '../../core/metrics'
 import { PANE_TITLES, renderContribution, shownPane } from '../panes'
 import { defaultPaneFor, paneFits, type AppDispatch, type AppState, type KernelPaneId } from '../state'
 import type { Book } from '../hooks/useBook'
-import type { Mark } from '../../core/marks'
+import type { Annotation } from '../../core/marks'
 import type { MarkFocus } from '../hooks/useMarking'
 import type { CardsView } from '../hooks/useCards'
 import type { MarksView } from '../hooks/useMarks'
+import type { Bookmarking } from '../hooks/useBookmarking'
 import { Companion } from './Companion'
 import { Contents } from './Contents'
 import type { Face } from '../../core/typefaces'
 import { LibraryPanel } from './LibraryPanel'
 import type { TagPrefsStore } from '../hooks/useTagPrefs'
 import { Cards } from './Cards'
-import { Notes } from './Notes'
+import { Marginalia } from './Marginalia'
 import { SearchPanel } from './SearchPanel'
 import { Settings } from './Settings'
 import styles from './SidePane.module.css'
@@ -65,7 +66,7 @@ import styles from './SidePane.module.css'
 const RAIL_ENTRIES = [
   { id: 'toc', Icon: List },
   { id: 'companion', Icon: Sparkles },
-  { id: 'notes', Icon: Highlighter },
+  { id: 'marginalia', Icon: Highlighter },
   { id: 'cards', Icon: Layers },
   { id: 'search', Icon: Search },
   { id: 'stats', Icon: ChartNoAxesColumn },
@@ -102,10 +103,14 @@ export interface SidePaneProps {
   dispatch: AppDispatch
   book: Book
   marks: MarksView
+  /** The open book's places, and the rule for putting one here — see the panel. */
+  bookmarking: Bookmarking
+  /** Which keyboard this reader has — the Marginalia panel teaches ⌘B/Ctrl+B. */
+  platform: Platform
   cards: CardsView
   onGoTo?: (target: string) => void
-  /** Removes a mark from the store AND from the page — see `Notes`. */
-  onDeleteMark: (mark: Mark) => void
+  /** Removes a mark from the store AND from the page — see `Marginalia`. */
+  onDeleteMark: (mark: Annotation) => void
   /** The mark Notes should reveal, if one has been asked for. */
   markFocus: MarkFocus | null
   /**
@@ -118,20 +123,43 @@ export interface SidePaneProps {
    * App supplies it; App is where a real one would arrive.
    */
   companion: CompanionProvider
-  /** The shelf, for the Library panel's counts and scopes. */
+  /**
+   * Everything the Library panel needs, as ONE prop.
+   *
+   * These were eight flat props on a component that does not read a single one
+   * of them — it forwards them, whole, to one panel. Flat, every panel's
+   * dependencies sat in one undifferentiated list of two dozen, so nothing said
+   * which of them belonged together or which panel a new one was for, and
+   * adding a Library prop widened the surface every OTHER caller of this
+   * component has to satisfy. Grouped, the shape says who each one serves and
+   * the Library panel's needs can grow without anything else noticing.
+   *
+   * `books` is the exception that stays outside: Marginalia reads it too, to
+   * name the book a cross-book row came from.
+   */
+  library: {
+    /** Collection-wide tag edits — see `LibraryPanel`. */
+    readonly onRenameTag: (from: string, to: string) => void
+    readonly onRemoveTag: (tag: string) => void
+    /** The reader's decisions about their tags — see `tagPrefs`. */
+    readonly tagPrefs: TagPrefsStore
+    /** The last shelf-wide tag removal and its undo. */
+    readonly lastRemoval: { readonly tag: string; readonly bookIds: readonly string[] } | null
+    readonly onUndoRemoveTag: () => void
+    readonly onAdoptTag: (tag: string) => void
+    readonly onTagBooks: (bookIds: readonly string[], tags: readonly string[]) => void
+  }
+  /** The shelf: the Library panel's counts and scopes, and Marginalia's titles. */
   books: readonly IndexedBook[]
-  /** Collection-wide tag edits, for the Library panel — see `LibraryPanel`. */
-  onRenameTag: (from: string, to: string) => void
-  onRemoveTag: (tag: string) => void
-  /** The reader's decisions about their tags — see `tagPrefs`. */
-  tagPrefs: TagPrefsStore
-  /** The last shelf-wide tag removal and its undo — see `LibraryPanel`. */
-  lastRemoval: { readonly tag: string; readonly bookIds: readonly string[] } | null
-  onUndoRemoveTag: () => void
-  onAdoptTag: (tag: string) => void
-  onTagBooks: (bookIds: readonly string[], tags: readonly string[]) => void
-  /** The faces this machine can offer — passed straight to Settings. */
-  offered: readonly Face[]
+  /** Everything the Settings panel needs, as one prop — same reason as `library`. */
+  settings: {
+    /** The faces this machine can offer. */
+    readonly offered: readonly Face[]
+    /** The contributed settings sections (WI-C.5). */
+    readonly sections: readonly SettingsSection[]
+    /** Capabilities that did not compose — see `Settings.missing`. */
+    readonly missing?: readonly { readonly id: string }[] | undefined
+  }
   /**
    * The panes the composed capabilities contributed. They take the rail
    * AFTER the kernel's, in the composition's order, on the screens each one
@@ -139,10 +167,6 @@ export interface SidePaneProps {
    * them — a contribution carries a label, not an icon.
    */
   contributed: readonly PaneContribution[]
-  /** The contributed settings sections, for the Settings panel (WI-C.5). */
-  contributedSettings: readonly SettingsSection[]
-  /** Capabilities that did not compose — see `Settings.missing`. */
-  missingCapabilities?: readonly { readonly id: string }[] | undefined
 }
 
 export function SidePane({
@@ -150,23 +174,17 @@ export function SidePane({
   dispatch,
   book,
   marks,
+  bookmarking,
+  platform,
   cards,
   onGoTo,
   onDeleteMark,
   markFocus,
   companion,
   books,
-  onRenameTag,
-  onRemoveTag,
-  tagPrefs,
-  lastRemoval,
-  onUndoRemoveTag,
-  onAdoptTag,
-  onTagBooks,
-  offered,
+  library,
+  settings,
   contributed,
-  contributedSettings,
-  missingCapabilities,
 }: SidePaneProps) {
   /* Falls back to the last pane rather than unmounting. The slot stays mounted
    * at zero width and inert while closed, so keeping the panel rendered is what
@@ -210,12 +228,17 @@ export function SidePane({
           />
         )}
 
-        {pane === 'notes' && (
-          <Notes
+        {pane === 'marginalia' && (
+          <Marginalia
             marks={marks}
             cards={cards}
             bookId={book.bookId}
             onDelete={onDeleteMark}
+            onDeleteBookmark={bookmarking.remove}
+            platform={platform}
+            /* The shelf is already here for the Library panel; Marginalia needs
+               it only to name the book a cross-book row came from. */
+            titleOf={(id) => books.find((entry) => entry.bookId === id)?.title}
             focus={markFocus}
             {...(onGoTo ? { onGoTo } : {})}
           />
@@ -229,9 +252,9 @@ export function SidePane({
 
         {pane === 'settings' && (
           <Settings
-            offered={offered}
-            sections={contributedSettings}
-            missing={missingCapabilities}
+            offered={settings.offered}
+            sections={settings.sections}
+            missing={settings.missing}
             theme={state.theme}
             themeFollowsOs={state.themeFollowsOs}
             pageLayout={state.pageLayout}
@@ -276,18 +299,7 @@ export function SidePane({
         )}
 
         {pane === 'library' && (
-          <LibraryPanel
-            books={books}
-            query={state.libraryQuery}
-            dispatch={dispatch}
-            onRenameTag={onRenameTag}
-            onRemoveTag={onRemoveTag}
-            tagPrefs={tagPrefs}
-            lastRemoval={lastRemoval}
-            onUndoRemoveTag={onUndoRemoveTag}
-            onAdoptTag={onAdoptTag}
-            onTagBooks={onTagBooks}
-          />
+          <LibraryPanel books={books} query={state.libraryQuery} dispatch={dispatch} {...library} />
         )}
 
         {/* A contributed pane: the capability's own element, narrowed from
@@ -299,7 +311,21 @@ export function SidePane({
           navigation, not the window's, so it reads better anchored to the
           surface it switches than stacked under the titlebar with it. */}
       <div className={styles.rail}>
-        {railFor(state.screen).map(({ id, label, Icon }) => (
+        {/* ONE ENTRY MODEL FOR BOTH KINDS OF TAB.
+            The kernel's panes and a capability's were two nearly identical
+            blocks, and they had already drifted: `aria-pressed` was added to
+            the first and not the second, so a screen reader walking the rail
+            was told which kernel tab was lit and heard every contributed one as
+            an ordinary button. Adding the attribute to the second copy fixes
+            today's difference and leaves tomorrow's; one list cannot drift.
+            The ICON is all that genuinely differs — a capability's pane has no
+            icon of its own to give, so every one of them wears the same mark. */}
+        {[
+          ...railFor(state.screen).map(({ id, label, Icon }) => ({ id, label, Icon })),
+          ...contributed
+            .filter((entry) => paneFits(state.screen, entry.id, contributed))
+            .map(({ id, label }) => ({ id, label, Icon: Puzzle })),
+        ].map(({ id, label, Icon }) => (
           <button
             key={id}
             type="button"
@@ -315,21 +341,6 @@ export function SidePane({
             <Icon size={ICON.tab} strokeWidth={ICON.stroke} />
           </button>
         ))}
-        {contributed
-          .filter((entry) => paneFits(state.screen, entry.id, contributed))
-          .map(({ id, label }) => (
-            <button
-              key={id}
-              type="button"
-              className={styles.railButton}
-              title={label}
-              aria-label={label}
-              data-on={pane === id}
-              onClick={() => dispatch({ type: 'openPane', pane: id })}
-            >
-              <Puzzle size={ICON.tab} strokeWidth={ICON.stroke} />
-            </button>
-          ))}
       </div>
     </>
   )

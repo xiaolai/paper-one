@@ -679,6 +679,31 @@ mod tests {
         }
     }
 
+    /// How long a test waits for a transfer before calling it hung.
+    ///
+    /// A LIVENESS BOUND, NOT A THROUGHPUT ASSERTION, and the distinction is the
+    /// whole reason it has a name. Nothing in these tests claims that 20 MB
+    /// moves in any particular time; what they assert is that the bytes arrive
+    /// intact, that progress is reported, and that a failure fails cleanly. The
+    /// timeout exists so a transfer that never completes fails the suite in
+    /// bounded time instead of hanging it forever.
+    ///
+    /// It was 30 seconds, written out at nine call sites, and that is a number
+    /// small enough to be a performance assertion by accident. The heaviest of
+    /// these takes six to eleven seconds on an unloaded developer machine — a
+    /// three-to-five-fold margin, which a contended CI runner eats without
+    /// difficulty. Both 20 MB tests duly failed on a machine that was also
+    /// building a second copy of the tree, and passed three times out of three
+    /// once it was quiet.
+    ///
+    /// AND IT MUST EXCEED EVERY PRODUCTION TIMEOUT IT COULD RACE, which is the
+    /// second reason and the one that would have bitten silently. `HEADER_TIMEOUT`
+    /// is thirty seconds. A test bound of thirty seconds awaiting an operation
+    /// that stalls on the header is two timers started together: which one wins
+    /// decides whether the test reports the interruption it is looking for or a
+    /// bare elapsed error, and nothing about the code decides it.
+    const TRANSFER_LIVENESS: Duration = Duration::from_secs(120);
+
     async fn transfer_events(node: &mut TestNode) -> Vec<TransferProgress> {
         let mut out = Vec::new();
         while let Ok(Some(ev)) = timeout(Duration::from_millis(200), node.events.recv()).await {
@@ -711,9 +736,9 @@ mod tests {
         )
         .await
         .unwrap();
-        timeout(Duration::from_secs(30), task)
+        timeout(TRANSFER_LIVENESS, task)
             .await
-            .expect("20 MB within 30s")
+            .expect("20 MB arrived before the liveness bound")
             .unwrap()
             .unwrap();
 
@@ -768,7 +793,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let err = timeout(Duration::from_secs(30), task)
+        let err = timeout(TRANSFER_LIVENESS, task)
             .await
             .unwrap()
             .unwrap()
@@ -788,7 +813,7 @@ mod tests {
         )
         .await
         .unwrap();
-        timeout(Duration::from_secs(30), task)
+        timeout(TRANSFER_LIVENESS, task)
             .await
             .unwrap()
             .unwrap()
@@ -823,7 +848,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let err = timeout(Duration::from_secs(30), task)
+        let err = timeout(TRANSFER_LIVENESS, task)
             .await
             .unwrap()
             .unwrap()
@@ -867,7 +892,7 @@ mod tests {
         std::fs::rename(&folder, trash.join("bk1")).unwrap();
         gate_tx.send(()).unwrap();
 
-        let err = timeout(Duration::from_secs(30), task)
+        let err = timeout(TRANSFER_LIVENESS, task)
             .await
             .unwrap()
             .unwrap()
@@ -1090,7 +1115,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.kind(), "transferBusy");
         gate_tx.send(()).unwrap();
-        timeout(Duration::from_secs(30), task)
+        timeout(TRANSFER_LIVENESS, task)
             .await
             .unwrap()
             .unwrap()
@@ -1104,7 +1129,7 @@ mod tests {
         .await
         .unwrap();
         assert!(second_id > first_id);
-        timeout(Duration::from_secs(30), task)
+        timeout(TRANSFER_LIVENESS, task)
             .await
             .unwrap()
             .unwrap()
@@ -1193,7 +1218,7 @@ mod tests {
             f.write_all(b"POISONED-EXTRA-BYTES").unwrap();
         }
         gate_tx.send(()).unwrap();
-        let err = timeout(Duration::from_secs(30), task)
+        let err = timeout(TRANSFER_LIVENESS, task)
             .await
             .unwrap()
             .unwrap()

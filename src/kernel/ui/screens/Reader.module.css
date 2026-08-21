@@ -369,8 +369,10 @@
 
 .footer {
   flex: 0 0 auto;
+  position: relative;
   height: var(--row-book);
-  padding: 0 var(--space-20);
+  /* The control's lane, reserved on BOTH sides — see `.bookmarkToggle`. */
+  padding: 0 calc(var(--space-20) + var(--control-pill) + var(--space-8));
   display: flex;
   align-items: center;
   justify-content: center;
@@ -378,6 +380,157 @@
   font-size: var(--text-small);
   color: var(--muted);
   transition: opacity var(--motion-chrome);
+}
+
+/* THE CHROME FADES TO NOTHING AND MUST STOP TAKING CLICKS WITH IT.
+ *
+ * The footer was a readout until it carried a control, so its fade could be
+ * pure opacity: there was nothing there to press. A button at `opacity: 0` is
+ * still a button — it takes the pointer, it keeps its place in the tab order,
+ * and it reports a state nobody can see. Faded means gone. */
+.footer[data-visible='false'] {
+  pointer-events: none;
+}
+
+/* The bookmark toggle, out of the centred readout's flow.
+ *
+ * ANCHORED TO THE EDGE rather than laid out beside the chapter and the
+ * percentage, because those two change width constantly — the chapter label is
+ * whatever the book calls this section — and a control that slides along the
+ * footer on every page turn is a control the reader has to look for each time
+ * they want it. */
+/* The readout is centred in the footer and the control is taken out of its
+   flow, so a long chapter label ran underneath the button. The footer reserves
+   the control's lane on both sides — both, so the readout stays centred in what
+   is left rather than being pushed off-centre by a control on one side. */
+.footer > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bookmarkToggle {
+  position: absolute;
+  inset-inline-start: var(--space-20);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-pill);
+  height: var(--control-pill);
+  border: none;
+  border-radius: var(--radius-pill);
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background var(--motion-chrome), color var(--motion-chrome);
+}
+
+/* §07: a control that cannot act says so by looking unavailable, rather than by
+   doing nothing when pressed. Without this the toggle kept full opacity and a
+   pointer cursor while the renderer was still reporting a position. */
+.bookmarkToggle:disabled {
+  opacity: .4;
+  cursor: default;
+}
+
+.bookmarkToggle:hover:not(:disabled) {
+  background: var(--wash);
+  color: var(--ink-2);
+}
+
+.bookmarkToggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: calc(-1 * var(--space-2));
+}
+
+/* On. The same accent the ribbon on the page is drawn in, so the control and
+   the thing it controls are visibly one state and not two. */
+.bookmarkToggle[data-on='true'] {
+  color: var(--accent);
+}
+
+/* --- the ribbon ------------------------------------------------------ */
+
+/*
+ * A bookmark, drawn as one — a ribbon over the top edge of the page, notched
+ * at the foot.
+ *
+ * AT THE TRAILING EDGE, in logical properties, so it hangs at the right of an
+ * English page and at the left of an Arabic one. A ribbon marks the outer
+ * corner of a page in every book that has ever had one, and the outer corner
+ * is not a side.
+ *
+ * IN `--accent`, NOT in the book's own colour, which is the one place this
+ * deliberately parts from the progress rule beside it. That rule is a
+ * signature: §-derived from `bookId`, unpredictable across books and constant
+ * within one. A ribbon is not a signature, it is a STATE — this page is kept —
+ * and a state has to read as on. A hue derived from a hash lands on the page
+ * background often enough that some books would have had an invisible one.
+ */
+/*
+ * A bookmark, drawn as one — a ribbon over the top edge of the page, notched
+ * at the foot.
+ *
+ * AT THE TRAILING CORNER OF THE PAGE, which is not the stage's corner and not
+ * the text column's. Both were tried and both were measured wrong in the
+ * running app: against the stage it drifted out to the window's edge as the
+ * window grew, and inside `.text` it sat 130px out over the margin track —
+ * `.text` spans the whole grid, and carries the bleed as a margin only in
+ * PAGINATED flow, so any constant offset from it is right in one flow and
+ * wrong in the other.
+ *
+ * IN CSS, FROM THE PUBLISHED TRACK VARIABLES, rather than as a number computed
+ * in the component. The arithmetic needs the stage's own padding-box width, and
+ * `100%` on an absolutely positioned child IS that width — measured by the
+ * engine rather than inferred from whichever box `useElementWidth` reports.
+ * Getting that inference wrong is exactly what put the ribbon 24px out on the
+ * previous attempt.
+ *
+ * The stage centres the grid, so from its trailing edge: half the slack, then
+ * the margin track and its gap, brings us to where the words end. The page's
+ * own edge is ONE `--page-margin` beyond them, and once only — that variable is
+ * already published as half of `pageMargins`, which is the white a page carries
+ * on BOTH sides together. `applyLayout` sizes the page as `measure +
+ * pageMargins` and centres it on the measure, so exactly half of it falls on
+ * each side.
+ *
+ * Subtracting it twice was the third wrong answer here, and the one that nearly
+ * survived: the check written to confirm it computed the page's edge with the
+ * same doubled constant, so the measurement agreed with the mistake and
+ * reported a delta of zero. Two things derived from one wrong number are not
+ * two pieces of evidence.
+ *
+ * `max()` because below the width where the tracks fit, grid stops centring and
+ * there is no slack to halve.
+ */
+.ribbon {
+  position: absolute;
+  /* THE STAGE'S BLOCK PADDING, not zero. An absolutely positioned child
+     resolves against the padding BOX, whose top is the stage's border edge —
+     while the grid, and so the page, begins one `--space-12` lower. `top: 0`
+     therefore hung the ribbon 12px above the page it marks. The horizontal
+     offset was measured in the running app and the vertical one was not; this
+     is the half that was never checked. */
+  top: var(--space-12);
+  inset-inline-end: calc(
+    max(
+      0px,
+      (
+          100% -
+            (
+              var(--track-gutter) + var(--track-measure) + var(--track-margin) + 2 *
+                var(--track-gap)
+            )
+        ) / 2
+    ) + var(--track-margin) + var(--track-gap) - var(--page-margin)
+  );
+  z-index: var(--z-chrome);
+  width: var(--space-20);
+  height: var(--space-32);
+  background: var(--accent);
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 78%, 0 100%);
+  pointer-events: none;
 }
 
 /* --- empty state ----------------------------------------------------- */

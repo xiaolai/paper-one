@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { findMark } from '../../core/markMatch'
-import type { Mark, MarkAppearance } from '../../core/marks'
+import type { Annotation, MarkAppearance } from '../../core/marks'
 import type { SelectionSnapshot } from '../reader/session'
 import type { Book } from './useBook'
 import type { MarksView } from './useMarks'
@@ -16,7 +16,7 @@ import type { MarksView } from './useMarks'
  */
 
 /**
- * A request to show one mark in the Notes panel.
+ * A request to show one mark in the Marginalia panel.
  *
  * `edit` distinguishes the two ways a mark is reached: clicking a highlight or
  * a margin note asks to SEE it, while choosing "Note" on a fresh selection asks
@@ -41,7 +41,7 @@ export interface Marking {
   readonly ranges: ReadonlyMap<string, Range>
   onMarkDrawn: (cfi: string, range: Range) => void
   /** The existing mark on the current selection, if that passage is marked. */
-  readonly selected: Mark | null
+  readonly selected: Annotation | null
   /**
    * Mark the selection in the given tint and style. Returns the mark, or null
    * if nothing was selected.
@@ -52,9 +52,9 @@ export interface Marking {
    * reader comparing a rule against a wave cannot compare anything if the first
    * press takes the popup away.
    */
-  mark: (note: string, appearance: MarkAppearance, keep?: boolean) => Mark | null
-  unmark: (target: Mark) => void
-  /** The mark the Notes panel should reveal, if any. */
+  mark: (note: string, appearance: MarkAppearance, keep?: boolean) => Annotation | null
+  unmark: (target: Annotation) => void
+  /** The mark the Marginalia panel should reveal, if any. */
   readonly focus: MarkFocus | null
   /** Ask Notes to show a mark — and to open its editor when `edit`. */
   focusMark: (id: string, edit?: boolean) => void
@@ -144,7 +144,7 @@ export function useMarking(book: Book, marks: MarksView): Marking {
    * back.
    */
   const mark = useCallback(
-    (note: string, appearance: MarkAppearance, keep = false): Mark | null => {
+    (note: string, appearance: MarkAppearance, keep = false): Annotation | null => {
       if (!selection || !bookId) return null
       const created = marks.add({
         bookId,
@@ -198,14 +198,18 @@ export function useMarking(book: Book, marks: MarksView): Marking {
   }, [])
 
   const unmark = useCallback(
-    (target: Mark) => {
-      /* The row always goes. The DRAWING only goes when the mark belongs to the
-       * book on screen: `eraseMark` and the range cache both address the
-       * current renderer, and a CFI is only unique within a section of one
-       * book. Unmarking another book's note — from a list that spans books —
-       * used to erase whatever the current book happened to have at the same
-       * anchor, and drop its cached range with it. */
-      marks.remove(target.id)
+    (target: Annotation) => {
+      /* The row always goes, and it goes from the mark's OWN book — the mark is
+       * passed whole rather than by id so the store never has to work that out
+       * from a list that may have been emptied under it. See `MarksView`.
+       *
+       * The DRAWING only goes when the mark belongs to the book on screen:
+       * `eraseMark` and the range cache both address the current renderer, and
+       * a CFI is only unique within a section of one book. Unmarking another
+       * book's note — from a list that spans books — used to erase whatever the
+       * current book happened to have at the same anchor, and drop its cached
+       * range with it. */
+      marks.remove(target)
       if (target.bookId !== bookId) return
       eraseMark(target)
       forgetRange(target.cfi)

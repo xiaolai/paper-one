@@ -9,10 +9,7 @@ import {
   ArrowDownAZ,
   ArrowDownWideNarrow,
   BookOpen,
-  Check,
-  Circle,
   CircleDashed,
-  CircleDot,
   LibraryBig,
   Undo2,
 } from 'lucide-react'
@@ -28,10 +25,10 @@ import {
   tagLeaf,
   tagTree,
   untaggedCount,
-  type ReadingStatus,
   type TagCount,
   type TagOrder,
 } from '../../core/library'
+import { FILTER_ABOVE, STATUS_ROWS, tagStateIn } from '../libraryFilters'
 import { ICON } from '../../core/metrics'
 import {
   parseQuery,
@@ -98,20 +95,6 @@ import { TagRow, type TagRowState } from './TagRow'
  * empty state does the talking).
  */
 
-interface StatusRow {
-  readonly status: ReadingStatus
-  readonly label: string
-  readonly Icon: typeof Circle
-}
-
-const STATUS_ROWS: readonly StatusRow[] = [
-  { status: 'reading', label: 'Reading', Icon: CircleDot },
-  { status: 'unread', label: 'Unread', Icon: Circle },
-  { status: 'finished', label: 'Finished', Icon: Check },
-]
-
-/** Past this many rows the panel offers a field to narrow the list by name. */
-const FILTER_ABOVE = 12
 
 export interface LibraryPanelProps {
   readonly books: readonly IndexedBook[]
@@ -286,8 +269,10 @@ export function LibraryPanel({
 
   const setQuery = (next: string) => dispatch({ type: 'setLibraryQuery', query: next })
 
-  const stateOf = (tag: string): TagRowState =>
-    excludedTags.has(tagKey(tag)) ? 'excluded' : activeTags.has(tagKey(tag)) ? 'on' : 'off'
+  /* THE SHARED RULE — see `tagStateIn`. This was the original of it and the
+     narrow menu had a second, poorer copy that knew only two of the three
+     states; one function is what stops them disagreeing again. */
+  const stateOf = (tag: string): TagRowState => tagStateIn(parsed, tag, tagKey)
 
   /**
    * One tag row.

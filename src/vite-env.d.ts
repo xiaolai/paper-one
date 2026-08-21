@@ -112,6 +112,29 @@ declare module 'foliate-js/view.js' {
   export interface RelocateDetail {
     readonly fraction: number
     readonly location?: { readonly current: number; readonly total: number }
+    /**
+     * Which spine item the reader is in, and how many there are.
+     *
+     * UNDECLARED HERE FOR AS LONG AS ANYTHING NEEDED IT, which is the whole
+     * reason this entry exists. foliate has emitted `section.current` on every
+     * relocation all along — it is the renderer's own index, the same number
+     * `load` carries — and because this file did not mention it, the session
+     * inferred the current section instead: from the relocation's range where
+     * there was one, and otherwise from whichever section had most recently
+     * rendered. The inference is wrong for a fixed-layout SPREAD, which loads
+     * its left page and then its right and can afterwards display either
+     * without loading again; a bookmark made on one side was filed under the
+     * other, and the toggle that made it could not find it.
+     *
+     * Measured against the running app on 2026-08-20 rather than read out of
+     * upstream's source: `{current: 19, total: 40}` alongside
+     * `epubcfi(/6/40!…)`, whose spine step is the twentieth child — index 19.
+     * The two agree, which is what makes this the value to trust.
+     *
+     * Optional because a renderer is not obliged to send it, and the session
+     * keeps its fallbacks for one that does not.
+     */
+    readonly section?: { readonly current: number; readonly total: number }
     readonly tocItem?: TocItem | null
     readonly pageItem?: { readonly label: string } | null
     readonly cfi?: string

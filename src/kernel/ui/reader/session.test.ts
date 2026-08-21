@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { View } from 'foliate-js/view.js'
-import { ReaderSession, readMeta } from './session'
+import { ReaderSession, directionOf, readMeta } from './session'
 import type { MarkAnchor, MarkPalette, SelectionSnapshot, SessionCallbacks } from './session'
 import { buildFixture, elem, txt } from './wordSnap/domFake.testkit'
 import { fakeDocument, type FakeDocument } from './wordSnap/documentFake.testkit'
@@ -116,7 +116,6 @@ function fakeView(overrides: Partial<Record<'open' | 'init', () => Promise<void>
       view.turns.prev += 1
       return Promise.resolve()
     },
-    // eslint-disable-next-line require-yield
     search: async function* () {
       return
     },
@@ -207,6 +206,7 @@ function callbacks(
     onFileDropped: rec('onFileDropped'),
     onPageIntent: rec('onPageIntent'),
     onFixedLayout: rec('onFixedLayout'),
+    onDirection: rec('onDirection'),
     getMarks: () => marks,
     getPalette: () => PALETTE,
   }
@@ -571,6 +571,13 @@ describe('ReaderSession restore', () => {
       chapterLabel: 'One',
       chapterHref: 'a',
       cfi: AT,
+      /* Null because this relocation carries no range and no section has
+       * been rendered under the fake view — which is exactly the state a
+       * bookmark must refuse to be made in. See `ReaderPosition.sectionIndex`. */
+      sectionIndex: null,
+      /* And said out loud beside it, so the toggle can refuse for the same
+         reason rather than working it out from a null. */
+      sectionExact: false,
     })
   })
 
@@ -584,6 +591,334 @@ describe('ReaderSession restore', () => {
     expect(
       (cb.calls['onRelocate']?.[0]?.[0] as { cfi: unknown }).cfi,
     ).toBeNull()
+  })
+})
+
+/**
+ * Where the reader IS, as a bookmark is made from it.
+ *
+ * The cheap half — the CFI and the section — rides every relocation, because
+ * the ribbon and the toggle read it on every page turn. The expensive half is
+ * `placeHere`, which walks the page's text and is therefore paid once, when
+ * the reader asks for a bookmark rather than on every turn.
+ */
+describe('ReaderSession places', () => {
+  const AT = 'epubcfi(/6/14!/4/2/6,/1:0,/1:12)'
+
+  /**
+   * A relocation's range: a text node belonging to the loaded document, and
+   * just enough of a Range for the session to read a section and a line out of
+   * it.
+   *
+   * `rangeText` falls back to `toString()` for a boundary it cannot walk — see
+   * its own note on declining — so a minimal stand-in exercises the real path
+   * rather than a mocked one.
+   */
+  function pageRange(doc: Document, text: string): Range {
+    const node = { nodeType: 3, ownerDocument: doc, isConnected: true, data: text }
+    return {
+      startContainer: node,
+      endContainer: node,
+      startOffset: 0,
+      endOffset: text.length,
+      toString: () => text,
+    } as unknown as Range
+  }
+
+  const relocated = (cb: ReturnType<typeof callbacks>) =>
+    cb.calls['onRelocate']?.[0]?.[0] as { sectionIndex: number | null }
+
+  async function reading() {
+    const view = fakeView()
+    const cb = callbacks()
+    const session = new ReaderSession(fakeHost(), cb)
+    await session.start('book.epub', deps(view))
+    const doc = fakeDocument().asDocument()
+    return { view, cb, session, doc }
+  }
+
+  /*
+   * Exact, and it has to be: `compareMarks` and `findMark` both key on the
+   * section, so a bookmark filed under the wrong one sorts into the wrong
+   * chapter AND cannot be found again by the toggle that made it.
+   *
+   * THE CASE THAT SEPARATES THE TWO SOURCES is a section boundary in scrolled
+   * flow, where two documents are on screen at once: the section rendered most
+   * recently is the one BELOW, while the position being reported is still in
+   * the one above. Taking the last render would file the bookmark one chapter
+   * on from where the reader is standing. So the two are deliberately made to
+   * disagree here — a test where they agree proves nothing about which was
+   * read.
+   */
+  /*
+   * THE RENDERER'S OWN INDEX WINS, and this is the case the other two sources
+   * cannot get right. A fixed-layout SPREAD loads its left page and then its
+   * right, and can afterwards display either without loading again — so the
+   * last-rendered fallback answers "right" for both, and there is no range to
+   * ask instead. A bookmark on the left page was filed under the right one and
+   * the toggle could not find it.
+   *
+   * `section.current` is published on every relocation and was simply not
+   * declared in `vite-env.d.ts`, which is why the inference existed at all.
+   * Every source is made to disagree here on purpose: a test where they agree
+   * proves nothing about which was read.
+   */
+  it('takes the section the renderer publishes, over the range and the last render', async () => {
+    const { view, cb, doc } = await reading()
+    view.emit('load', { doc, index: 4 })
+    const next = fakeDocument().asDocument()
+    view.emit('load', { doc: next, index: 5 })
+
+    view.emit('relocate', {
+      fraction: 0.5,
+      cfi: AT,
+      section: { current: 2, total: 40 },
+      range: pageRange(doc, 'Call me Ishmael'),
+    })
+
+    expect(relocated(cb).sectionIndex).toBe(2)
+  })
+
+  /* A renderer that publishes no section falls back to the range's own
+   * document — exact at a section boundary in scrolled flow, where two
+   * documents are on screen and the last one RENDERED is the one below. */
+  it('takes the section from the relocation’s own document, not the last rendered', async () => {
+    const { view, cb, doc } = await reading()
+    view.emit('load', { doc, index: 4 })
+    const next = fakeDocument().asDocument()
+    view.emit('load', { doc: next, index: 5 })
+
+    view.emit('relocate', { fraction: 0.5, cfi: AT, range: pageRange(doc, 'Call me Ishmael') })
+
+    expect(relocated(cb).sectionIndex).toBe(4)
+  })
+
+  /* The fallback, and every fixed-layout book takes it: `foliate-fxl` reports
+   * no range at all. */
+  it('falls back to the last rendered section when a relocation carries no range', async () => {
+    const { view, cb, doc } = await reading()
+    view.emit('load', { doc, index: 2 })
+
+    view.emit('relocate', { fraction: 0.5, cfi: AT })
+
+    expect(relocated(cb).sectionIndex).toBe(2)
+  })
+
+  it('builds a place from the page the reader is on', async () => {
+    const { view, session, doc } = await reading()
+    view.emit('load', { doc, index: 4 })
+    view.emit('relocate', {
+      fraction: 0.5,
+      cfi: AT,
+      tocItem: { label: 'Loomings', href: 'a' },
+      range: pageRange(doc, 'Call me Ishmael'),
+    })
+
+    expect(session.placeHere()).toEqual({
+      cfi: AT,
+      sectionIndex: 4,
+      /* From the SAME relocation as the anchor. Read off `ReaderPosition` by
+       * the caller instead, it was a React commit behind — so a bookmark made
+       * while crossing a chapter boundary filed this chapter's anchor under the
+       * previous chapter's name. */
+      chapter: 'Loomings',
+      text: 'Call me Ishmael',
+      prefix: '',
+      suffix: '',
+    })
+  })
+
+  /* A PDF is exactly the kind of book a reader wants to bookmark, and it
+   * reports no range — so there is nothing to read a line out of. The place
+   * still stands; only its remembered text is empty, and the list falls back
+   * to the chapter for those. */
+  it('still makes a place for a book that reports no range', async () => {
+    const { view, session, doc } = await reading()
+    view.emit('load', { doc, index: 0 })
+    view.emit('relocate', { fraction: 0.5, cfi: AT })
+
+    expect(session.placeHere()).toEqual({
+      cfi: AT,
+      sectionIndex: 0,
+      chapter: '',
+      text: '',
+      prefix: '',
+      suffix: '',
+    })
+  })
+
+  /* THE CALLBACK FIRES for every section that loads, which is what keeps the
+     ribbon's direction in step with a book whose sections disagree. What each
+     answer should BE is `directionOf`'s own test, below. */
+  it('reports the rendered direction of each section', async () => {
+    const { view, cb, doc } = await reading()
+    view.emit('load', { doc, index: 0 })
+    expect(cb.calls['onDirection']?.at(-1)).toEqual(['ltr'])
+    view.emit('load', { doc: fakeDocument().asDocument(), index: 1 })
+    expect(cb.calls['onDirection']).toHaveLength(2)
+  })
+
+  /*
+   * WHERE THE LAST RESORT IS WRONG, AND WHERE IT IS NOT.
+   *
+   * With no section and no range on the relocation, `#sectionOf` falls back to
+   * "the section that rendered last". That is the section on screen whenever
+   * ONE section is on screen — and it is a coin toss when two are, because
+   * either can be the one the reader means without anything loading again. A
+   * bookmark taking the coin toss points at a page they never opened, and
+   * nothing afterwards can tell it from a good one.
+   *
+   * ASKED OF WHAT IS DISPLAYED, NOT OF WHAT IS LOADED. Counting live documents
+   * was the first attempt and it is a proxy for the wrong thing: a renderer may
+   * hold a spread's partner page in memory while showing one, and every such
+   * book would then be refused a bookmark over a page nobody can see — a
+   * working feature taken away to fix an edge case. The PDF case below is
+   * exactly that, and it is the reason the count is not the rule.
+   */
+  it('refuses a place while a fixed-layout spread is showing two pages', async () => {
+    const { view, session, doc } = await reading()
+    view.isFixedLayout = true
+    view.renderer.setAttribute('spread', 'auto')
+    view.emit('load', { doc, index: 4 })
+    view.emit('relocate', { fraction: 0.5, cfi: AT })
+
+    expect(session.placeHere()).toBeNull()
+  })
+
+  /* THE SAME FAILURE FOR A REFLOWABLE BOOK, which reaches it a different way:
+     scrolled flow can have the end of one section and the start of the next
+     both on screen, and there the count IS the signal — a scrolled renderer
+     holds live what it is showing. */
+  it('refuses a place while scrolled flow is showing two sections', async () => {
+    const { view, session, doc } = await reading()
+    view.renderer.setAttribute('flow', 'scrolled')
+    view.emit('load', { doc, index: 4 })
+    view.emit('load', { doc: fakeDocument().asDocument(), index: 5 })
+    view.emit('relocate', { fraction: 0.5, cfi: AT })
+
+    expect(session.placeHere()).toBeNull()
+  })
+
+  /* AND A PDF STILL GETS ITS BOOKMARK. One page, no range, no section of its
+     own — the book that needs ⌘B most and has the least to identify itself
+     with. `spread: 'none'` is the renderer's word for a single page; a second
+     document loaded behind it changes nothing, because it is not displayed. */
+  it('still makes a place for a one-page fixed-layout book', async () => {
+    const { view, session, doc } = await reading()
+    view.isFixedLayout = true
+    view.renderer.setAttribute('spread', 'none')
+    view.emit('load', { doc, index: 4 })
+    // The partner page, prefetched and not shown.
+    view.emit('load', { doc: fakeDocument().asDocument(), index: 5 })
+    view.emit('relocate', { fraction: 0.5, cfi: AT })
+
+    expect(session.placeHere()?.sectionIndex).toBe(5)
+  })
+
+  /* A RENDERER THAT ANSWERS NEITHER QUESTION is trusted, which leaves this
+     where it stood before any of it existed: no worse than before for anything
+     already working. Refusing on silence would be guessing in the direction
+     that breaks things. */
+  it('still makes a place from the only rendered section', async () => {
+    const { view, session, doc } = await reading()
+    view.emit('load', { doc, index: 4 })
+    view.emit('relocate', { fraction: 0.5, cfi: AT })
+
+    expect(session.placeHere()?.sectionIndex).toBe(4)
+  })
+
+  /* AND THE FALLBACK STOPS NAMING A DOCUMENT THAT IS GONE. `#renderedIndex`
+     was left pointing at a torn-down section, so dropping the most recently
+     loaded of two named a document nothing could resolve while the other was
+     still on screen — reported as confidently as any other answer. */
+  it('falls back to what is left when the last-rendered section is torn down', async () => {
+    const { view, session, doc } = await reading()
+    const second = fakeDocument()
+    view.emit('load', { doc, index: 4 })
+    view.emit('load', { doc: second.asDocument(), index: 5 })
+    view.emit('relocate', { fraction: 0.5, cfi: AT })
+    expect(session.placeHere()?.sectionIndex).toBe(5)
+
+    // `pagehide` on the section's own window is how a teardown reaches the
+    // session — see `#onTeardown`.
+    second.defaultView?.dispatch('pagehide')
+    view.emit('relocate', { fraction: 0.5, cfi: AT })
+    expect(session.placeHere()?.sectionIndex).toBe(4)
+  })
+
+  /* ONE RELOCATION, TAKEN WHOLE. `placeHere` used to be handed the CFI by its
+   * caller and pair it with whatever range this session had most recently
+   * seen; the host's copy lands a React commit later, so in the window between
+   * two relocations the two described different pages. Here the session has
+   * moved on and the place must describe where it moved TO, in every field. */
+  it('answers for the latest relocation, never a mixture of two', async () => {
+    const { view, session, doc } = await reading()
+    view.emit('load', { doc, index: 1 })
+    view.emit('relocate', {
+      fraction: 0.1,
+      cfi: AT,
+      section: { current: 1, total: 40 },
+      range: pageRange(doc, 'first page'),
+    })
+    const ELSEWHERE = 'epubcfi(/6/20!/4/2/2,/1:0,/1:9)'
+    view.emit('relocate', {
+      fraction: 0.9,
+      cfi: ELSEWHERE,
+      section: { current: 9, total: 40 },
+      tocItem: { label: 'The Chase', href: 'z' },
+      range: pageRange(doc, 'second page'),
+    })
+
+    /* EVERY field from the second relocation, the chapter included — the one
+     * that was still being read off the caller's own render. */
+    expect(session.placeHere()).toEqual({
+      cfi: ELSEWHERE,
+      sectionIndex: 9,
+      chapter: 'The Chase',
+      text: 'second page',
+      prefix: '',
+      suffix: '',
+    })
+  })
+
+  /* Null rather than a degraded answer. A bookmark whose anchor cannot be
+   * resolved is a row in a list that goes nowhere. */
+  it('refuses a place with no anchor, and one with no section', async () => {
+    const { view, session, doc } = await reading()
+    view.emit('load', { doc, index: 1 })
+    view.emit('relocate', { fraction: 0.5, cfi: null })
+    expect(session.placeHere()).toBeNull()
+
+    /* A REAL CFI AND NO SECTION, which is what the second half is FOR. It used
+       to be a session that had never relocated at all — no anchor either — so
+       an implementation that checked only the anchor passed it, and the section
+       half of the rule was never exercised. No `load`, so nothing has rendered;
+       no `section` and no `range` on the detail, so the three sources
+       `#sectionOf` consults are all empty. */
+    const fresh = await reading()
+    fresh.view.emit('relocate', { fraction: 0.5, cfi: 'epubcfi(/6/20!/4/2/2,/1:0,/1:9)' })
+    expect(fresh.session.placeHere()).toBeNull()
+  })
+
+  /* A range whose ends have left the document describes a page that has been
+   * re-rendered since — the same check `publish` makes on a selection. The
+   * place is still good; only its remembered text is not, so the text is
+   * dropped rather than the bookmark. */
+  it('drops the remembered text when the page it came from has been replaced', async () => {
+    const { view, session, doc } = await reading()
+    view.emit('load', { doc, index: 3 })
+    const stale = pageRange(doc, 'Call me Ishmael')
+    ;(stale.startContainer as unknown as { isConnected: boolean }).isConnected = false
+    view.emit('relocate', { fraction: 0.5, cfi: AT, range: stale })
+
+    expect(session.placeHere()).toEqual({
+      cfi: AT,
+      sectionIndex: 3,
+      chapter: '',
+      text: '',
+      prefix: '',
+      suffix: '',
+    })
   })
 })
 
@@ -2555,5 +2890,58 @@ describe('readMeta', () => {
     for (const bad of [42, null, {}, ['a'], undefined]) {
       expect(readMeta({ metadata: { identifier: bad } }).identifier).toBe('')
     }
+  })
+})
+
+/**
+ * Which way a section's text runs.
+ *
+ * THREE SOURCES AND AN ORDER between them, which is the whole of it. The
+ * ribbon positions itself against the PAGE rather than the window — its CSS is
+ * written with `inset-inline-end` — so an RTL book reported as LTR puts it at
+ * the wrong corner of the page it marks, with the arithmetic that finds the
+ * page's edge mirrored along with it.
+ *
+ * Shaped objects rather than a jsdom document: what is under test is which of
+ * the three is believed, and each case here is one of them contradicting
+ * another. A real document would have to be coaxed into these states through
+ * the very cascade this is deciding how to read.
+ */
+describe('directionOf', () => {
+  const asDoc = (over: {
+    computed?: string
+    htmlDir?: string | null
+    bodyDir?: string | null
+    root?: boolean
+  }): Document => {
+    const html =
+      over.root === false
+        ? null
+        : ({ getAttribute: () => over.htmlDir ?? null } as unknown as HTMLElement)
+    return {
+      documentElement: html,
+      body: over.bodyDir === undefined ? null : { getAttribute: () => over.bodyDir },
+      defaultView: over.computed
+        ? { getComputedStyle: () => ({ direction: over.computed }) }
+        : null,
+    } as unknown as Document
+  }
+
+  it('believes what the page COMPUTED to, over what it declared', () => {
+    /* The author's stylesheet has had its say by the time a section renders,
+       and it can overrule the attribute in either direction. */
+    expect(directionOf(asDoc({ computed: 'rtl', htmlDir: 'ltr' }))).toBe('rtl')
+    expect(directionOf(asDoc({ computed: 'ltr', htmlDir: 'rtl' }))).toBe('ltr')
+  })
+
+  it('falls back to the declared direction with no view to compute against', () => {
+    // A section that failed to parse hands back a document with no window.
+    expect(directionOf(asDoc({ htmlDir: 'rtl' }))).toBe('rtl')
+    expect(directionOf(asDoc({ bodyDir: 'rtl' }))).toBe('rtl')
+  })
+
+  it('answers ltr for a document that says nothing, and for one with no root', () => {
+    expect(directionOf(asDoc({}))).toBe('ltr')
+    expect(directionOf(asDoc({ root: false }))).toBe('ltr')
   })
 })

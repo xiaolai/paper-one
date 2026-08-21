@@ -34,7 +34,7 @@ export interface PaneEntry {
 
 export const PANES: readonly PaneEntry[] = [
   { id: 'toc', label: 'Contents', combo: '⌘1' },
-  { id: 'notes', label: 'Notes', combo: '⌘2' },
+  { id: 'marginalia', label: 'Marginalia', combo: '⌘2' },
   { id: 'search', label: 'Search', combo: '⌘3' },
   { id: 'cards', label: 'Cards', combo: '⌘4' },
   { id: 'companion', label: 'Companion' },
@@ -56,8 +56,16 @@ export function panesFor(screen: Screen): readonly PaneEntry[] {
   return PANES.filter((pane) => paneFits(screen, pane.id))
 }
 
-/** §11 binds ⌘1…5 to "Contents, notes, search, cards, stats" — kernel panes
- *  only; a contributed pane gets no digit. */
+/**
+ * §11 binds ⌘1…5 to "Contents, marginalia, search, cards, stats" — kernel
+ * panes only; a contributed pane gets no digit.
+ *
+ * The digits are NOT the rail's order and never were: they are the order the
+ * panels were published in, and the rail groups them by what they are for. A
+ * digit belongs to a panel, not to a position, so renumbering the map to match
+ * the rail would move ⌘3 off Search for readers who have it in their fingers.
+ * ⌘2 stayed with this panel through its rename for the same reason.
+ */
 export const PANE_SHORTCUTS: readonly { combo: string; digit: string; pane: KernelPaneId }[] =
   PANES.filter((pane) => pane.combo).map((pane) => ({
     combo: pane.combo ?? '',

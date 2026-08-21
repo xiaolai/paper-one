@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { buildCommands } from './commands'
 import { offeredFaces } from '../core/typefaces'
 import { presentFaces } from './fontProbe'
-import { PANE_SHORTCUTS } from './panes'
+import { canKeepPlace, resolveAccel } from './accel'
 import { DEFAULT_STEP_IDX, applyMetrics } from '../core/metrics'
 import { importFs as tauriImportFs, pickBooks, pickFolder, readBookAt } from '../core/bookFiles'
 import { positionRecorder, type PositionRecorder } from '../core/positionRecorder'
@@ -11,7 +11,7 @@ import { isTauri, usePlatform, usePrefersDark, usePrefersReducedMotion } from '.
 import { NOT_CONFIGURED } from '../core/companion'
 import { planImport } from '../core/tagArchive'
 import { canArchiveTags, exportTagsToFile, importTagsFromFile } from './tagFiles'
-import { hasOpenLayer, paneFits, useAppState } from './state'
+import { hasOpenLayer, useAppState } from './state'
 import { useTagPrefs } from './hooks/useTagPrefs'
 import type { KernelServices } from '../core/services'
 import type { Composition } from '../core/registry'
@@ -24,6 +24,7 @@ import { useLibrary } from './hooks/useLibrary'
 import { useCards } from './hooks/useCards'
 import { useMarks } from './hooks/useMarks'
 import { useMarking } from './hooks/useMarking'
+import { useBookmarking } from './hooks/useBookmarking'
 import { extensionFor, readOwnedBook, storedBookName } from '../core/bookVault'
 import type { IndexedBook } from '../core/bookIndex'
 import type { IndexFs } from '../core/bookIndex'
@@ -107,13 +108,16 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
   /* The open book lives here, not in the reader: Contents and Companion read
    * from it and they are panels of the side pane now. */
   const book = useBook()
-  /* Marks outlive the open book — the Notes panel browses every book's — so the
+  /* Marks outlive the open book — the Marginalia panel browses every book's — so the
    * store is keyed by book rather than owned by one. Every write to a book's
    * folder goes through the ONE queue the services share — see
    * `createKernelServices` — which is what gives the close something to hold for. */
   const marks = useMarks(services.marks, book.bookId)
   const cards = useCards(services.cards)
   const marking = useMarking(book, marks)
+  /* Beside marking, not inside it. Marking acts on a selection and
+   * bookmarking acts on a place — see `useBookmarking`. */
+  const bookmarking = useBookmarking(book, marks)
   /* Pins, colours, hidden subjects and saved views — the reader's decisions
      ABOUT their tags, as opposed to which books carry them. See `tagPrefs`. */
   const tagPrefs = useTagPrefs(services.storage)
@@ -995,7 +999,11 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
    * neither ⌘T nor the palette offers to tag a book that has no record to
    * write the tag into. FROM `openRow`, which is the same lookup made once
    * above — this ran its own scan of the shelf beside it. */
-  const readingBook = state.screen === 'reader' ? (openRow ?? null) : null
+  /* Whether the reader is actually LOOKING at the book. The reader screen stays
+   * mounted under the library — see `Reader.inert` — so nothing downstream of
+   * it can be trusted to say which screen is on top. */
+  const onReader = state.screen === 'reader'
+  const readingBook = onReader ? (openRow ?? null) : null
   /* Memoized as the one-element list `TagEditor` takes, or a fresh `[book]`
    * inline at the render defeated every books-keyed memo inside it. */
   const readingBooks = useMemo(() => (readingBook ? [readingBook] : []), [readingBook])
@@ -1029,6 +1037,22 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
         markSelection: marking.selection
           ? () => marking.mark('', { tint: state.markTint, style: state.markStyle })
           : null,
+        /* Null where there is no place to keep — the palette then does not
+           offer the row at all, rather than offering one that does nothing.
+           AND ONLY ON THE READER, which is not the same condition. The reader
+           stays MOUNTED under the library so foliate is not torn down and the
+           position survives, so it goes on reporting a perfectly good place
+           the whole time the reader is browsing their shelf — and the palette
+           offered to bookmark a page nobody could see. `editTags` is guarded
+           on the screen for the same reason, three lines up. */
+        /* THE SAME RULE THE KEY USES — see `canKeepPlace`. The palette row and
+           ⌘B are one action, and the row PRINTS ⌘B, so a condition spelled
+           twice is a promise that can come apart: the row offered with the key
+           inert, or the key live with the row missing. */
+        toggleBookmark: canKeepPlace({ onReader, canBookmark: bookmarking.canBookmark })
+          ? bookmarking.toggle
+          : null,
+        bookmarked: onReader && bookmarking.here !== null,
         openBookPicker: addBooks,
         /* The palette is where the folder import lives now that the toolbar
          * carries one action — see `KernelCommandContext`. */
@@ -1038,7 +1062,11 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
         openSwitcher: () => dispatch({ type: 'toggleLayer', layer: 'switcherOpen' }),
         contributed: composition.commands,
       }),
-    [state, dispatch, book, marking, addBooks, addFolder, importing, readingBook, openTags, composition],
+    /* `bookmarking` is READ inside this builder, so it belongs here. It was
+       missing, and the memo only stayed fresh because `book` happens to change
+       on every relocation — a dependency that held by accident and would have
+       stopped holding the moment the hook's inputs changed. */
+    [state, dispatch, book, marking, bookmarking, onReader, addBooks, addFolder, importing, readingBook, openTags, composition],
   )
 
   /* §11's keyboard map. Every combo the design publishes is bound here, and
@@ -1146,86 +1174,56 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
 
       if (!accel) return
 
-      if (event.key === 'k') {
-        event.preventDefault()
-        dispatch({ type: 'toggleLayer', layer: 'paletteOpen' })
-        return
-      }
-      if (event.key === '\\') {
-        event.preventDefault()
-        dispatch({ type: 'togglePane' })
-        return
-      }
-      /* UP ONE LEVEL, the same toggle the titlebar button and the palette entry
-       * do. Bound because the button's tooltip names it, and a tooltip naming a
-       * key nothing binds is the app describing a feature it does not have —
-       * which is the row the library ledger opens with. */
-      if (event.key === 'l') {
-        event.preventDefault()
-        dispatch({
-          type: 'goScreen',
-          screen: state.screen === 'library' ? 'reader' : 'library',
-        })
-        return
-      }
-      if (event.key === 'd') {
-        // Only when there is a selection to mark; otherwise ⌘D stays the
-        // browser's own, rather than being swallowed to do nothing.
-        if (!marking.selection) return
-        event.preventDefault()
-        // The tint and style the selection bar is showing — see `markSelection`.
-        marking.mark('', { tint: state.markTint, style: state.markStyle })
-        return
-      }
-      /* ⌘T: the tags of the book being read — the palette's "Tags for this
-       * book…". Only when there is such a book, on the same reasoning as ⌘D:
-       * a combo swallowed to do nothing is worse than one left unbound. */
-      if (event.key === 't') {
-        if (!readingBook) return
-        event.preventDefault()
-        openTags()
-        return
-      }
-      /* §09's reading sizes, on the combo every reader already knows.
-       *
-       * Both spellings of each key, because the shifted and unshifted forms
-       * arrive as different `key` values: ⌘+ on a US layout is ⌘⇧= and reports
-       * '+', while ⌘= reports '='. Binding one of the pair gives a shortcut
-       * that works or not depending on whether the reader held shift.
-       *
-       * The reducer clamps, so pressing on at either end of the ramp is a
-       * no-op rather than something to guard here. */
-      if (event.key === '=' || event.key === '+') {
-        event.preventDefault()
-        dispatch({ type: 'setStepIdx', idx: state.stepIdx + 1 })
-        return
-      }
-      if (event.key === '-' || event.key === '_') {
-        event.preventDefault()
-        dispatch({ type: 'setStepIdx', idx: state.stepIdx - 1 })
-        return
-      }
-      if (event.key === '0') {
-        event.preventDefault()
-        dispatch({ type: 'setStepIdx', idx: DEFAULT_STEP_IDX })
-        return
-      }
+      /* THE MAP IS A PURE FUNCTION — see `resolveAccel`. What is left here is
+         the dispatching, which is the part that needs an effect. Every guard,
+         every repeat rule and every toggle lives there, where a test can put
+         real keys through it instead of searching this file for a literal. */
+      const action = resolveAccel(event, {
+        screen: state.screen,
+        pane: state.pane,
+        hasSelection: marking.selection !== null,
+        canBookmark: bookmarking.canBookmark,
+        onReader,
+        hasBook: readingBook !== null,
+      })
+      if (!action) return
+      event.preventDefault()
 
-      const shortcut = PANE_SHORTCUTS.find((entry) => entry.digit === event.key)
-      /* NOT ON A SCREEN THAT HAS NO SUCH PANEL. `openPane` falls back rather
-       * than failing, which is right for a palette entry the reader chose by
-       * name — and wrong for a digit: pressing ⌘1 for Contents on the library
-       * and being given Notes is a key that does something else, silently. It
-       * does nothing there instead, which is what an unbound key does. */
-      if (shortcut && paneFits(state.screen, shortcut.pane)) {
-        event.preventDefault()
-        /* A TOGGLE, exactly as the palette row behaves — the row for an open
-         * panel says "Close" and carries this combo, so the combo has to
-         * close it too. Dispatching `openPane` unconditionally made the
-         * shortcut re-open a panel its own advertised label promised to
-         * close: the same command, two behaviours by entry point. */
-        if (state.pane === shortcut.pane) dispatch({ type: 'closePane' })
-        else dispatch({ type: 'openPane', pane: shortcut.pane })
+      switch (action.kind) {
+        case 'togglePalette':
+          dispatch({ type: 'toggleLayer', layer: 'paletteOpen' })
+          return
+        case 'togglePane':
+          dispatch({ type: 'togglePane' })
+          return
+        case 'toggleScreen':
+          dispatch({
+            type: 'goScreen',
+            screen: state.screen === 'library' ? 'reader' : 'library',
+          })
+          return
+        case 'markSelection':
+          // The tint and style the selection bar is showing — see `markSelection`.
+          marking.mark('', { tint: state.markTint, style: state.markStyle })
+          return
+        case 'toggleBookmark':
+          bookmarking.toggle()
+          return
+        case 'editTags':
+          openTags()
+          return
+        case 'stepBy':
+          dispatch({ type: 'setStepIdx', idx: state.stepIdx + action.delta })
+          return
+        case 'resetStep':
+          dispatch({ type: 'setStepIdx', idx: DEFAULT_STEP_IDX })
+          return
+        case 'openPane':
+          dispatch({ type: 'openPane', pane: action.pane })
+          return
+        case 'closePane':
+          dispatch({ type: 'closePane' })
+          return
       }
     }
     window.addEventListener('keydown', onKey)
@@ -1241,8 +1239,21 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
     state.switcherOpen,
     state.tagsOpen,
     state.stepIdx,
+    /* ⌘D MARKS IN THE COLOUR THE BAR IS SHOWING, and these were missing — so
+       the handler went on closing over whichever tint was current when the
+       effect last ran. Change the colour in the mark palette, select a new
+       passage, press ⌘D: it was marked in the PREVIOUS colour, and the button
+       beside it in the new one. Nothing else in this list changes when a tint
+       does, so nothing else was rebuilding the handler. */
+    state.markTint,
+    state.markStyle,
     readingBook,
     openTags,
+    /* The whole object, because ⌘B reads two things off it — whether a place
+       can be kept, and whether it already is — and a handler closed over a
+       stale one would toggle against the previous page. */
+    bookmarking,
+    onReader,
   ])
 
   /* Titlebar metadata comes from the OPEN book, and from nothing else.
@@ -1322,6 +1333,8 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
             dispatch={dispatch}
             book={book}
             marks={marks}
+            bookmarking={bookmarking}
+            platform={platform}
             cards={cards}
             onGoTo={book.goTo}
             onDeleteMark={marking.unmark}
@@ -1331,17 +1344,23 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
                line that changes when there is. */
             companion={NOT_CONFIGURED}
             books={library.books}
-            onRenameTag={library.renameTag}
-            onRemoveTag={library.removeTag}
-            tagPrefs={tagPrefs}
-            lastRemoval={library.lastRemoval}
-            onUndoRemoveTag={library.undoRemoveTag}
-            onAdoptTag={library.adoptTag}
-            onTagBooks={library.tagBooks}
-            offered={offeredHere}
+            /* GROUPED BY THE PANEL THEY SERVE — see `SidePaneProps`. Eight of
+               these were flat props on a component that reads none of them. */
+            library={{
+              onRenameTag: library.renameTag,
+              onRemoveTag: library.removeTag,
+              tagPrefs,
+              lastRemoval: library.lastRemoval,
+              onUndoRemoveTag: library.undoRemoveTag,
+              onAdoptTag: library.adoptTag,
+              onTagBooks: library.tagBooks,
+            }}
+            settings={{
+              offered: offeredHere,
+              sections: composition.settings,
+              missing: composition.failures,
+            }}
             contributed={composition.panes}
-            contributedSettings={composition.settings}
-            missingCapabilities={composition.failures}
           />
         }
         onDismissPane={() => dispatch({ type: 'closePane' })}
@@ -1359,6 +1378,7 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
           book={book}
           marks={marks}
           marking={marking}
+          bookmarking={bookmarking}
           /* Read at every render and consumed once, when the book finishes
              parsing. It is null for the first few milliseconds of an open —
              `bookId` is derived from the file's content — which is why the

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import type { Mark } from '../../core/marks'
+import type { Annotation } from '../../core/marks'
 import { LINE } from '../../core/metrics'
 import { frameBoxInHost, overlaps, rangeRectsInHost, watchGeometry } from './coordinates'
 import styles from './MarginMarks.module.css'
@@ -19,7 +19,7 @@ import styles from './MarginMarks.module.css'
 
 export interface MarginMarksProps {
   /** The marks worth showing here — see `marginMarks`. */
-  marks: readonly Mark[]
+  marks: readonly Annotation[]
   /** Live ranges by CFI, for the marks foliate has actually drawn. */
   ranges: ReadonlyMap<string, Range>
   /** The positioned ancestor these are placed within. */
@@ -36,11 +36,11 @@ export interface MarginMarksProps {
    * does; the position is the one already flowing through the reader.
    */
   position: unknown
-  onSelect: (mark: Mark) => void
+  onSelect: (mark: Annotation) => void
 }
 
 interface Placed {
-  readonly mark: Mark
+  readonly mark: Annotation
   readonly top: number
 }
 
@@ -49,6 +49,10 @@ const GAP = 6
 
 /**
  * Push overlapping notes apart, keeping book order, and keep them in the lane.
+ *
+ * Exported for its own tests. It is the one piece of this file that is pure
+ * geometry — heights in, tops out — and the collisions it resolves are far
+ * cheaper to state as numbers than to reproduce by rendering a page.
  *
  * Two marks on adjacent lines resolve to tops a few pixels apart, and drawn as
  * measured they would sit on top of each other and only the last would be
@@ -66,36 +70,70 @@ const GAP = 6
  *
  *   - Pushing down alone walks a cluster off the bottom of the lane, and the
  *     lane is `overflow: hidden`, so those notes disappear with nothing to say
- *     they exist. The second pass pulls the run back up against the floor of
- *     the lane, which trades exact alignment — already lost the moment two
- *     notes collide — for notes that can still be read and clicked.
+ *     they exist. The second pass pulls the overhanging CLUSTER back up, which
+ *     trades exact alignment — already lost the moment two notes collide — for
+ *     notes that can still be read and clicked. Only that cluster: a note that
+ *     never collided is still on its own line, because nothing that happened
+ *     further down the page has anything to do with where it belongs.
  */
-function stack(placed: Placed[], height: (mark: Mark) => number, lane: number): Placed[] {
-  let floor = -Infinity
+export function stack(placed: Placed[], height: (mark: Annotation) => number, lane: number): Placed[] {
+  /* THE TOP OF THE LANE IS THE FIRST FLOOR, and starting at `-Infinity` said it
+     was not. A mark's own line can sit above the lane — the passage begins on
+     the previous page of a spread, or the note is anchored to a partly scrolled
+     rect — and its measured top comes back negative. Left there, the note is
+     drawn above the lane, which is `overflow: hidden`, so it is invisible and
+     unclickable while still counted as placed and still holding its turn in the
+     order. Zero is the same rule every later note gets from the note above it. */
+  let floor = 0
+  /* `pushed` is what makes a cluster: this note only sits here because the one
+     before it was in the way, so the two move as one body or not at all. */
   const down = placed.map(({ mark, top }) => {
+    const pushed = floor > top
     const settled = Math.max(top, floor)
     floor = settled + height(mark) + GAP
-    return { mark, top: settled }
+    return { mark, top: settled, pushed }
   })
 
-  if (lane <= 0) return down
-  const last = down[down.length - 1]
-  if (!last || last.top + height(last.mark) <= lane) return down
+  if (lane <= 0) return down.map(({ mark, top }) => ({ mark, top }))
 
-  /* The run overhangs the bottom. Pull it back up — but only as far as the top
-   * of the lane, and only if the whole run fits once it is there.
-   *
-   * If it does not fit, the pull is abandoned rather than clamped at zero. A
-   * clamp packs the overflow into the top of the lane, where the notes overlap
-   * and become unreadable — the exact outcome this function exists to prevent,
-   * reintroduced by the fix for the opposite problem. Left alone, the run stays
-   * in order and legible and the lane clips its tail; the notes that fall off
-   * are still listed, in full, in the Notes panel. */
-  const needed = last.top + height(last.mark) - lane
-  const first = down[0]
-  if (!first || first.top - needed < 0) return down
+  /* THE CLUSTERS, and the whole reason for them: the pull used to move every
+     note on the page by the overhang of the last one. Three notes near the top
+     that never collided with anything were dragged away from their own lines
+     because a pair at the bottom of the page ran off the lane — and if those
+     three could not move far enough, the pull was abandoned and the bottom pair
+     stayed off screen. Neither outcome had anything to do with the collision
+     that caused it. A cluster moves; everything that was already where it
+     belonged stays there. */
+  const clusters: { mark: Annotation; top: number }[][] = []
+  for (const note of down) {
+    const run = clusters[clusters.length - 1]
+    if (note.pushed && run) run.push({ mark: note.mark, top: note.top })
+    else clusters.push([{ mark: note.mark, top: note.top }])
+  }
 
-  return down.map(({ mark, top }) => ({ mark, top: top - needed }))
+  /* AND THE PULL IS PARTIAL NOW, where it used to be all or nothing.
+     `ceiling` is the floor of the cluster above — the top of the lane for the
+     first — so a cluster is lifted only as far as the space actually above it.
+     That is what makes a short lift safe where a clamp was not: a clamp moved
+     each note to `max(0, …)` INDEPENDENTLY, which packed the overflow into the
+     top of the lane and made the notes overlap, reintroducing the exact thing
+     this function exists to prevent. A cluster moves rigidly, so its notes keep
+     their order and their gaps whatever distance it travels; stopping short
+     just means the lane still clips a tail, with more of it on screen than
+     before and nothing overlapping. What falls off is listed in full in the
+     Marginalia pane either way. */
+  let ceiling = 0
+  return clusters.flatMap((cluster) => {
+    const first = cluster[0]
+    const last = cluster[cluster.length - 1]
+    if (!first || !last) return cluster
+    const overhang = last.top + height(last.mark) - lane
+    const lift = overhang > 0 ? Math.min(overhang, first.top - ceiling) : 0
+    const moved = lift > 0 ? cluster.map(({ mark, top }) => ({ mark, top: top - lift })) : cluster
+    const settledLast = moved[moved.length - 1]
+    ceiling = settledLast ? settledLast.top + height(settledLast.mark) + GAP : ceiling
+    return moved
+  })
 }
 
 export function MarginMarks({ marks, ranges, stage, doc, position, onSelect }: MarginMarksProps) {
@@ -140,8 +178,14 @@ export function MarginMarks({ marks, ranges, stage, doc, position, onSelect }: M
 
   /* Measure on mount and whenever the inputs change. `position` is in the
    * dependency list without being read: a page turn changes it and nothing
-   * else, which is exactly the signal this needs. */
-  useEffect(() => {
+   * else, which is exactly the signal this needs.
+   *
+   * A LAYOUT EFFECT, for the reason the height pass below already is: a passive
+   * effect runs AFTER the browser has painted, so on every page turn the notes
+   * from the previous page were drawn once at their old positions and were
+   * clickable there for that frame — a note the reader could see and press
+   * which belonged to text no longer on screen. */
+  useLayoutEffect(() => {
     measure()
   }, [measure, position])
 
@@ -149,6 +193,9 @@ export function MarginMarks({ marks, ranges, stage, doc, position, onSelect }: M
    * resizing, the book reflowing, the window changing scale factor. */
   useEffect(() => {
     if (!stage || !doc) return
+    /* Passive, unlike the two above, and deliberately: this only SUBSCRIBES.
+       Every measurement it leads to arrives from an observer callback, which is
+       not in a paint the effect could be ahead of. */
     return watchGeometry(stage, doc, measure)
   }, [stage, doc, measure])
 
@@ -172,7 +219,7 @@ export function MarginMarks({ marks, ranges, stage, doc, position, onSelect }: M
     if (Math.abs(laneHeight - lane) > 0.5) setLane(laneHeight)
   }, [placed, heights, lane])
 
-  const heightOf = (mark: Mark) => heights[mark.id] ?? LINE
+  const heightOf = (mark: Annotation) => heights[mark.id] ?? LINE
   const settled = stack(placed, heightOf, lane)
 
   return (

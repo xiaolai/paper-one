@@ -562,9 +562,9 @@ export async function writeIndex(
 /**
  * Every book's marks, for the one view that needs them all.
  *
- * `pane/Notes.tsx` shows the open book's marks first and every other book's
+ * `pane/Marginalia.tsx` shows the open book's marks first and every other book's
  * after, deliberately — and marks living in book folders means answering that
- * costs one read per book. So it is paid ONLY when the Notes pane is mounted,
+ * costs one read per book. So it is paid ONLY when the Marginalia pane is mounted,
  * which is the moment somebody asked for cross-book notes, rather than at boot
  * where nobody did.
  *
@@ -579,7 +579,7 @@ export async function scanAllMarks(fs: IndexFs): Promise<unknown[]> {
    * in common with the shelf scan and the trust check. Resolving with `[]` for
    * both used to mean this function could not fail, so the caller's `.catch`
    * was unreachable: a read failure arrived as a successful scan of nothing,
-   * which marked the cross-book list as loaded and emptied the Notes pane. */
+   * which marked the cross-book list as loaded and emptied the Marginalia pane. */
   const entries = await listBooksDir(fs)
   /* The same pooled walk the shelf scan uses, for the same reason: one read
    * per book, serial, is a wall of back-to-back IPC waits in front of the one

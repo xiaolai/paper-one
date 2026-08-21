@@ -22,7 +22,24 @@ import type { BookRecord } from '../../../kernel'
 export const SYNC_PROTO = 1
 export const SYNC_JOURNAL_FORMAT = 1
 /** The service version this build speaks: [min, max]. */
-export const SYNC_VERSION: readonly [number, number] = [1, 1]
+/*
+ * BUMPED TO 2 WHEN BOOKMARKS JOINED THE MARKS FILE, and the reason is a silent
+ * data loss rather than a new frame shape.
+ *
+ * A bookmark is a mark record with `kind: 'bookmark'` — no new field, no new
+ * service, nothing a v1 parser would reject. That is exactly the problem. A v1
+ * peer's `validMarks` drops rows whose kind it does not know, and then ACKS the
+ * push; `applyAck` calls `journal.ack(book, 'marks', rev)`, which clears the
+ * sender's outbox. The sender therefore records the bookmark as replicated and
+ * never sends it again, and the bookmark exists on exactly one device with
+ * nothing anywhere saying so.
+ *
+ * So the vocabulary widening is a version: `versionsOverlap([1,1], [2,2])` is
+ * false, and a v1 peer is refused at the hello with a message naming both
+ * versions. Refusing to sync is a bad outcome; syncing and quietly losing a
+ * record is a worse one, and it is the one the reader cannot detect.
+ */
+export const SYNC_VERSION: readonly [number, number] = [2, 2]
 
 /** The service names, and the grant each is gated on. */
 export const SYNC_SERVICES = {

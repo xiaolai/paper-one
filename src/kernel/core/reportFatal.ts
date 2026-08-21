@@ -68,8 +68,8 @@ export function explainFatal(detail: unknown, depth = 0, seen = new Set<unknown>
 
 export function reportFatal(label: string, detail: unknown): void {
   const text = explainFatal(detail)
-  // eslint-disable-next-line no-console -- the console is still the better
-  // channel when devtools happen to be open; the DOM surface is the fallback.
+  // The console is still the better channel when devtools happen to be open;
+  // the DOM surface below is the fallback for when they are not.
   console.error(label, detail)
   const line = document.createElement('div')
   line.textContent = `${label} — ${text}`

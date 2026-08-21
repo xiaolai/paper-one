@@ -37,5 +37,16 @@ jobs:
           workspaces: src-tauri -> target
       - run: pnpm install --frozen-lockfile
       - run: pnpm verify
+      # `sync`, and not by preference: it is the only capability that can be
+      # removed on its own. `peer` is required by `sync`, so `capability:remove
+      # peer` refuses until `sync` goes first — correctly, and loudly.
+      #
+      # This named `example` for months after the capability called `example`
+      # was deleted (19bac0e, "Delete the capability that existed to be
+      # deleted"). `capability:remove` refused an id the manifest does not
+      # declare, so the step failed on every push and the deletion proof proved
+      # nothing the whole time. `verify-without.test.mjs` now asserts that this
+      # argument names a capability the manifest declares AND that nothing
+      # requires it, so the next rename fails in the suite instead of here.
       - name: Deletion is an operation (temp checkout)
-        run: pnpm verify:without example
+        run: pnpm verify:without sync

@@ -1,5 +1,5 @@
 import { useCallback, useLayoutEffect, useMemo, useState, type CSSProperties } from 'react'
-import { ChevronLeft, ChevronRight, Library, Plus } from 'lucide-react'
+import { Bookmark, ChevronLeft, ChevronRight, Library, Plus } from 'lucide-react'
 import type { Platform } from '../../core/metrics'
 import {
   ICON,
@@ -21,6 +21,7 @@ import { hasDictionary, lookUp } from '../lookUp'
 import { marginMarks, type MarkAppearance } from '../../core/marks'
 import type { MarksView } from '../hooks/useMarks'
 import type { Marking } from '../hooks/useMarking'
+import type { Bookmarking } from '../hooks/useBookmarking'
 import { hasOpenLayer } from '../state'
 import type { AppDispatch, AppState } from '../state'
 import type { Book } from '../hooks/useBook'
@@ -40,6 +41,8 @@ export interface ReaderProps {
   book: Book
   marks: MarksView
   marking: Marking
+  /** Keeping a place, and telling whether this one is kept — see the hook. */
+  bookmarking: Bookmarking
   /**
    * Where the open book was last left, or null to start at the beginning.
    *
@@ -103,6 +106,7 @@ export function Reader({
   book,
   marks,
   marking,
+  bookmarking,
   lastLocation,
   reducedMotion,
   onAddBooks,
@@ -173,6 +177,32 @@ export function Reader({
   /* Derived from the book, not drawn at random — see `bookAccent`. Null with no
    * book open, which is also what stops the rule rendering. */
   const accent = bookAccent(book.bookId, state.theme === 'night')
+
+  /* WHERE THE WORDS ARE. The selection bar has always needed it so the popup
+   * cannot hang across the margin and cover the notes drawn there; the ribbon
+   * needs the same answer to sit at the page's corner rather than the window's.
+   * Two callers, one locator — see `proseColumn`.
+   *
+   * NOT MEMOISED, and that is the honest form. It was `useMemo(…, [available,
+   * grid])`, and `grid` is built fresh by `proseGrid` on every render — so the
+   * dependency never matched and the memo recomputed every time while looking
+   * as though it did not. `proseColumn` is four additions; the memo bought
+   * nothing and hid that it bought nothing. */
+  const column = proseColumn(available, grid)
+
+  /* Whether the chrome is showing, as one value — it decides the footer's
+     opacity AND whether the control in it can be pressed or focused, and those
+     must never be able to disagree. */
+  const chromeShown = state.chromeOn || state.pane !== null
+  /* Says which of the two things pressing it does, exactly as the palette row
+     does. A toggle labelled with its subject rather than its action leaves the
+     reader to guess which state they are looking at. */
+  /* ONE ANSWER TO "IS THIS PAGE KEPT". The ribbon, the label, the lit state,
+     `aria-pressed` and the icon's fill all asked separately, two of them by
+     truthiness and two by an explicit null check — five spellings of one
+     question that can drift apart one at a time. */
+  const bookmarked = bookmarking.here !== null
+  const bookmarkLabel = bookmarked ? 'Remove this bookmark' : 'Bookmark this place'
 
   const gridVars = {
     '--stage-pad-x': `${STAGE_PADDING_X}px`,
@@ -368,7 +398,7 @@ export function Reader({
   const showInNotes = useCallback(
     (id: string | null, editing = false) => {
       if (id) marking.focusMark(id, editing)
-      dispatch({ type: 'openPane', pane: 'notes' })
+      dispatch({ type: 'openPane', pane: 'marginalia' })
     },
     [marking, dispatch],
   )
@@ -430,6 +460,35 @@ export function Reader({
                     </div>
                   )}
 
+                  {/* The page is kept.
+                      A SIBLING OF THE PROGRESS RULE, on the stage — see
+                      `ribbonInset` for why neither the stage's own edge nor the
+                      text column's names the page's corner, and what each got
+                      wrong.
+
+                      NOT A CONTROL. The toggle is in the footer and ⌘B is
+                      bound; a ribbon that could also be clicked would be a
+                      third way to do one thing, sitting over the text, where a
+                      mis-click removes something the reader meant to keep. It
+                      reports. */}
+                  {bookmarked && !book.fixedLayout && (
+                    <div
+                      className={styles.ribbon}
+                      /* THE BOOK'S DIRECTION, NOT THE APP'S. `ribbonInset` is
+                         written with `inset-inline-end`, which resolves against
+                         whatever direction the element inherits — the shell's,
+                         which is always LTR. In a right-to-left book the page's
+                         trailing edge is on the LEFT, so the ribbon sat at the
+                         wrong corner of the page it marks, and the arithmetic
+                         that finds the page's edge was mirrored with it. Set
+                         here rather than on the stage: this is the only thing
+                         on the stage that positions itself against the PAGE
+                         rather than the window. */
+                      dir={book.direction}
+                      aria-hidden="true"
+                    />
+                  )}
+
                   <div className={styles.gutter}>
                     <ReadingRuler
                       state={state}
@@ -477,6 +536,7 @@ export function Reader({
                       onFileDropped={book.open}
                       onPageIntent={onPageIntent}
                       onFixedLayout={book.setFixedLayout}
+                      onDirection={book.setDirection}
                       /* NO `onMarkActivated`. Clicking a mark used to open
                          Notes on it; it SELECTS the passage now — see
                          `show-annotation` in `session` — so the selection tools
@@ -573,7 +633,7 @@ export function Reader({
                        margin and cover the notes drawn there. A fixed-layout
                        page fills the grid and has no measure, so it keeps the
                        stage — see `column`. */
-                    column={book.fixedLayout ? null : proseColumn(available, grid)}
+                    column={book.fixedLayout ? null : column}
                     marked={selected}
                     position={book.position}
                     appearance={appearance}
@@ -591,7 +651,7 @@ export function Reader({
                       mark(selected?.note ?? '', next, keep)
                     }}
                     onNote={() => {
-                      /* The note itself is written in the Notes panel, where
+                      /* The note itself is written in the Marginalia panel, where
                          there is room for it. Marking first is what gives it an
                          anchor — and the editor for THAT mark opens with the
                          panel, rather than leaving the reader to find the row
@@ -654,8 +714,49 @@ export function Reader({
 
                 <div
                   className={styles.footer}
-                  style={{ opacity: state.chromeOn || state.pane ? 1 : 0 }}
+                  style={{ opacity: chromeShown ? 1 : 0 }}
+                  /* The fade has to take the button's clicks with it — see the
+                     rule this selects. A readout could fade on opacity alone;
+                     a control cannot. */
+                  data-visible={chromeShown}
+                  /* AND ITS FOCUS. `pointer-events: none` stops the mouse and
+                     nothing else: a button at `opacity: 0` stays in the tab
+                     order, so Tab walked into an invisible control that
+                     reported a state nobody could see and acted when pressed.
+                     `inert` is what removes a subtree from focus as well as
+                     from hit-testing. */
+                  inert={!chromeShown}
                 >
+                  {/* §11's ⌘B, as something to press. The palette carries the
+                      same action and the same label rule; this is the one a
+                      reader finds without knowing the app. */}
+                  <button
+                    type="button"
+                    className={styles.bookmarkToggle}
+                    data-on={bookmarked}
+                    /* Disabled rather than absent, unlike the chevrons beside
+                       the page: those are missing where they would describe a
+                       page that is not there, and this is a control that WILL
+                       work in a moment — the renderer has simply not reported
+                       a position yet. A control that disappears for a second
+                       on every book open is worse than one that is briefly
+                       unavailable. */
+                    disabled={!bookmarking.canBookmark}
+                    title={bookmarkLabel}
+                    aria-label={bookmarkLabel}
+                    aria-pressed={bookmarked}
+                    onClick={() => bookmarking.toggle()}
+                  >
+                    <Bookmark
+                      size={ICON.control}
+                      strokeWidth={ICON.stroke}
+                      /* Filled when it is on. A bookmark outline and a bookmark
+                         fill are the same glyph saying two different things,
+                         which is what a toggle needs — and `aria-pressed` says
+                         it again for anyone not looking at the colour. */
+                      fill={bookmarked ? 'currentColor' : 'none'}
+                    />
+                  </button>
                   <span>{book.position.chapterLabel}</span>
                   {book.position.chapterLabel && <span>·</span>}
                   <span style={{ fontVariantNumeric: 'tabular-nums' }}>

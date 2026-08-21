@@ -27,6 +27,43 @@ export interface ReaderPosition {
    * "no position" and "the start of the book" as different things.
    */
   readonly cfi: string | null
+  /**
+   * Which spine item the reader is in, or null when that cannot be told yet.
+   *
+   * THE COMPANION TO `cfi`, and useless without it. A mark records its section
+   * at creation because resolving one out of a CFI needs foliate's parser, and
+   * `compareMarks` and `findMark` both key on it — so a bookmark made from
+   * this position has to carry the same number, from the same moment, or it
+   * sorts into the wrong chapter and the toggle that should find it does not.
+   *
+   * Derived from the relocation's own range where there is one, and only from
+   * the last-rendered section otherwise. The distinction matters at a section
+   * boundary in scrolled flow, where two documents are on screen at once: the
+   * last one RENDERED is the one below, while the position being reported can
+   * still be in the one above. Taking the range's own document is exact; the
+   * fallback is for a renderer that reports no range, which is every
+   * fixed-layout book.
+   *
+   * Null rather than 0, because 0 is a real section. A place that cannot say
+   * which section it is in cannot be bookmarked, and saying so is better than
+   * filing every such place under the first chapter.
+   */
+  readonly sectionIndex: number | null
+  /**
+   * Whether `sectionIndex` came from a source that KNOWS, or is a best guess.
+   *
+   * IT CAN BE A GUESS, and the two callers want different things from one.
+   * This readout wants "roughly where", where a neighbouring page beats
+   * nothing. A BOOKMARK cannot take a guess: it is a durable anchor that syncs,
+   * and one naming the wrong page of a fixed-layout spread takes the reader
+   * somewhere they never were, indistinguishable afterwards from a good one.
+   *
+   * Published so the toggle and the footer button can agree with
+   * `ReaderSession.placeHere`, which refuses a guess. Without it the two
+   * disagreed on exactly the books where it matters: the button offered
+   * itself, and pressing it did nothing.
+   */
+  readonly sectionExact: boolean
 }
 
 export interface BookMeta {

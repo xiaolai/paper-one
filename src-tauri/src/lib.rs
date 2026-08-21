@@ -109,6 +109,16 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 /// Written out rather than pulled in as a dependency: this is the only URL this
 /// application builds, and a crate for twelve lines is a supply chain for
 /// twelve lines.
+///
+/// MACOS-ONLY, because its one caller is. `look_up` builds a `dict://` URL
+/// inside a `#[cfg(target_os = "macos")]` block — every other platform takes
+/// the branch that says it has no system dictionary — so on iOS, Android,
+/// Windows and Linux this function compiled with nothing calling it and earned
+/// a `dead_code` warning in each. The gate here is not a silencer: it states
+/// the same platform scope the caller already has, so the two cannot drift, and
+/// a future caller on another platform fails to compile rather than quietly
+/// widening what this is for.
+#[cfg(target_os = "macos")]
 fn percent_encode(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for byte in text.as_bytes() {

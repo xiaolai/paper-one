@@ -287,12 +287,16 @@ describe('the pane follows the screen', () => {
   const at = (over: Partial<AppState>) => ({ ...initialState, ...over })
 
   it('knows which panels need a book', () => {
+    /* `bookmarks` is here and `notes` is not, which is the one pairing worth
+     * stating: bookmarks are read per book and there is no cross-book read to
+     * show, so the panel could only ever say 'open a book first'. Notes
+     * browses every book's marks, which is why it stays. */
     for (const pane of ['toc', 'search', 'companion'] as const) {
       expect(paneFits('reader', pane)).toBe(true)
       expect(paneFits('library', pane)).toBe(false)
     }
     // Cross-book by design, and the reason the library has a pane at all.
-    for (const pane of ['notes', 'cards', 'stats', 'library', 'settings'] as const) {
+    for (const pane of ['marginalia', 'cards', 'stats', 'library', 'settings'] as const) {
       expect(paneFits('library', pane)).toBe(true)
     }
   })
@@ -302,7 +306,7 @@ describe('the pane follows the screen', () => {
    * worse, followed the reader into their first book as `lastPane`. */
   it('knows which panels need the shelf', () => {
     expect(paneFits('reader', 'library')).toBe(false)
-    for (const pane of ['notes', 'cards', 'stats', 'settings'] as const) {
+    for (const pane of ['marginalia', 'cards', 'stats', 'settings'] as const) {
       expect(paneFits('reader', pane)).toBe(true)
     }
   })
@@ -327,11 +331,11 @@ describe('the pane follows the screen', () => {
      * `companion` this test only ever passed because the fallback happened to
      * be Notes. Setting it is what makes this test "leave alone" rather than
      * "fall back to the same answer by luck". */
-    const next = reducer(at({ screen: 'reader', pane: 'notes', lastPane: 'notes' }), {
+    const next = reducer(at({ screen: 'reader', pane: 'marginalia', lastPane: 'marginalia' }), {
       type: 'goScreen',
       screen: 'library',
     })
-    expect(next.pane).toBe('notes')
+    expect(next.pane).toBe('marginalia')
   })
 
   /* `lastPane` is what the toggle reopens, and leaving it alone is how going to
@@ -554,7 +558,7 @@ describe('a launch restores what the reader chose', () => {
     /* Session facts are not persisted, and the ORDER in `bootState` is what
        guarantees it: a hand-edited file naming a screen or a panel must not put
        the reader somewhere they never left. */
-    const withSession = { ...stored, screen: 'reader', pane: 'notes' } as never
+    const withSession = { ...stored, screen: 'reader', pane: 'marginalia' } as never
     const state = bootState('', withSession)
     expect(state.screen).toBe('library')
     expect(state.pane).toBe(initialState.pane)
@@ -594,7 +598,7 @@ describe('contributed panes', () => {
     expect(opened.lastPane).toBe('example:pane')
     const shelfOnly = reducer(at({ screen: 'reader', pane: null }), { type: 'openPane', pane: 'sync:status' }, contributed)
     expect(shelfOnly.pane).toBe('companion')
-    const nobody = reducer(at({ screen: 'library', pane: 'notes' }), { type: 'openPane', pane: 'gone:pane' }, contributed)
+    const nobody = reducer(at({ screen: 'library', pane: 'marginalia' }), { type: 'openPane', pane: 'gone:pane' }, contributed)
     expect(nobody.pane).toBe('library')
   })
 
