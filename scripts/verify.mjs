@@ -27,6 +27,17 @@ const CARGO = ['--manifest-path', 'src-tauri/Cargo.toml']
 export const STEPS = Object.freeze([
   { name: 'architecture:check', cmd: 'pnpm', args: ['architecture:check'] },
   { name: 'compositions:check', cmd: 'pnpm', args: ['compositions:check'] },
+  { name: 'css:check', cmd: 'pnpm', args: ['css:check'] },
+  { name: 'directives:check', cmd: 'pnpm', args: ['directives:check'] },
+  /* THE LEDGER DESCRIBES CODE THAT EXISTS. `docs/feature-ledger.md` is read to
+   * decide what to build next, which makes a stale row worse than no row: a
+   * feature listed Absent when it ships is work about to be redone. Re-audited
+   * 2026-08-21, eleven rows had drifted and nine understated the app, while
+   * every path in the file still named `lib/…` — a directory the kernel carve
+   * emptied months earlier. The State column needs a human; the Where column
+   * is a claim about the filesystem, and this is the filesystem answering.
+   * See scripts/lib/ledger.mjs. */
+  { name: 'features:check', cmd: 'pnpm', args: ['features:check'] },
   { name: 'boundaries', cmd: 'pnpm', args: ['boundaries'] },
   // The two K.4 gates that guard the gates: every boundary rule still
   // rejects the edge it owns, and every test file still belongs to exactly
@@ -74,11 +85,14 @@ export function runSteps(steps, run, log = (line) => process.stdout.write(`${lin
 
 /** Run one step as a child process in `cwd`, inheriting the terminal (or
  *  discarding stdout for a `quiet` step, whose output is a JSON blob). */
-export function spawnStep(step, cwd = REPO_ROOT) {
+export function spawnStep(step, cwd = REPO_ROOT, extraEnv = undefined) {
   const result = spawnSync(step.cmd, step.args, {
     cwd,
     stdio: step.quiet ? ['inherit', 'ignore', 'inherit'] : 'inherit',
-    env: process.env,
+    /* `extraEnv` is how `verify:without` tells the gates inside its copy which
+       capability it has just deleted — see `DELETED_ENV`. Nothing sets it on
+       the real tree, which is exactly the distinction the gates need. */
+    env: extraEnv ? { ...process.env, ...extraEnv } : process.env,
   })
   if (result.error) {
     process.stderr.write(`verify: could not start ${step.cmd}: ${result.error.message}\n`)

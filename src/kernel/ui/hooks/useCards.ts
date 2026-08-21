@@ -15,7 +15,7 @@ export interface CardsView {
    * False once a write has failed, true again once one succeeds.
    *
    * Its own flag rather than the marks store's. Card writes failing used to be
-   * swallowed on the reasoning that the Notes panel's notice covered them — but
+   * swallowed on the reasoning that the Marginalia panel's notice covered them — but
    * that notice only changes when a MARK is written, so a reader could make a
    * dozen cards, watch them appear, and lose every one on reload with nothing
    * anywhere having said so.

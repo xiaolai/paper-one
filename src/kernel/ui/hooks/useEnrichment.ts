@@ -222,7 +222,6 @@ export function useEnrichment(deps: EnrichmentDeps): EnrichmentProgress {
     // `books` is deliberately absent: `pending` is derived from it and is the
     // only part of it this effect reacts to, and the loop reads the rest
     // through `live`. Listed, every write the pass makes would restart it.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fs, reading, importing, pending === 0])
 
   return { pending }

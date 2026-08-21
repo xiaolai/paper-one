@@ -14,10 +14,19 @@ import { STEPS, parseArgs, runSteps, spawnStep } from './verify.mjs'
 const SCRIPT = fileURLToPath(new URL('./verify.mjs', import.meta.url))
 
 describe('the steps', () => {
-  it('are the plan\'s, in order: manifest, compositions, boundaries (and its selftest, the test-project check and the test ledger), types, coverage, build, then Cargo', () => {
+  it('are the plan\'s, in order: manifest, compositions, dead CSS, inert directives, the feature ledger, boundaries (and its selftest, the test-project check and the test ledger), types, coverage, build, then Cargo', () => {
+    /* THE CHEAP STATIC CHECKS COME FIRST, before the ones that spend a minute
+       compiling — `css:check` and `directives:check` are a walk of `src` and
+       answer in milliseconds, so failing there costs the reader nothing. Both
+       were added after three orphaned CSS rules and seven suppression comments
+       for a linter this repo has never had were found by hand; a class found
+       twice by hand is a class that needs a check rather than a third fix. */
     expect(STEPS.map((s) => s.name)).toEqual([
       'architecture:check',
       'compositions:check',
+      'css:check',
+      'directives:check',
+      'features:check',
       'boundaries',
       'boundaries:selftest',
       'test:projects',

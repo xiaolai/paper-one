@@ -88,7 +88,7 @@ export function cfiOverlaps(a: string, b: string): boolean {
  * The mark a selection is on, or null.
  *
  * When a selection overlaps two marks the answer is the FIRST IN `compareMarks`
- * ORDER — the order the Notes list already reads in. The rule this replaced was
+ * ORDER — the order the Marginalia list already reads in. The rule this replaced was
  * "greatest overlap, ties by creation order", and it was withdrawn because it
  * cannot be computed: `view.getCFI` emits CFIs with no character offsets at all
  * for a range that begins and ends at an element boundary, so there is no

@@ -30,6 +30,9 @@
     "prebuild": "node scripts/sync-pdfjs-assets.mjs",
     "architecture:check": "node scripts/architecture-check.mjs",
     "compositions:check": "node scripts/check-compositions.mjs",
+    "css:check": "node scripts/check-dead-css.mjs",
+    "directives:check": "node scripts/check-inert-directives.mjs",
+    "features:check": "node scripts/check-feature-ledger.mjs",
     "capability:remove": "node scripts/capability-remove.mjs",
     "verify": "node scripts/verify.mjs",
     "verify:without": "node scripts/verify-without.mjs"

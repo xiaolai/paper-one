@@ -114,7 +114,7 @@ describe('findMark', () => {
      *                    the selection against `early`'s 2
      *
      * `compareMarks` order answers `early`, because it starts at character 0.
-     * That comparator is the one the Notes list already reads in, is total over
+     * That comparator is the one the Marginalia list already reads in, is total over
      * CFIs that carry no offsets at all, and needs nothing measured. */
     const marks = [
       mark({ id: 'wide', cfi: 'epubcfi(/6/4!/4/2,/1:8,/1:30)', createdAt: 50 }),
@@ -271,7 +271,7 @@ describe('upsertOverlapping', () => {
      * written before this rule existed. The tie-break resolves `outer`, so
      * that is the row this mark supersedes; `inner` then goes by the older
      * byte-exact rule, which has not been given up. Keeping it would leave two
-     * rows at one anchor, which foliate draws twice and the Notes list shows
+     * rows at one anchor, which foliate draws twice and the Marginalia list shows
      * twice — exactly what `upsertMark` exists to prevent. */
     const outer = mark({ id: 'outer', cfi: 'epubcfi(/6/4!/4/2,/1:0,/1:20)', createdAt: 10 })
     const inner = mark({ id: 'inner', cfi: 'epubcfi(/6/4!/4/2,/1:5,/1:12)', createdAt: 20 })

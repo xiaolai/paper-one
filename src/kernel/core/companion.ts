@@ -77,7 +77,6 @@ export interface CompanionProvider {
 export const NOT_CONFIGURED: CompanionProvider = {
   name: 'No model configured',
   configured: false,
-  // eslint-disable-next-line require-yield
   async *ask() {
     throw new Error(
       'The companion has no provider. Check `configured` before calling ask().',
