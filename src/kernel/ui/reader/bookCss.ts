@@ -56,6 +56,80 @@ interface BookColours {
    just a story about where some hex values came from. `markTints.test.ts` holds
    the three properties they were derived to have, and checks that `tokens.css`
    still agrees with this table. */
+/**
+ * Is this page colour dark enough that the book's own ink will not read on it?
+ *
+ * Rec. 601 luma, which is the same weighting the corpus scan used to find that
+ * 860 of 1,957 books declare a text colour below this line. The threshold is
+ * generous on purpose: it decides whether to TAKE OVER the book's colours, and
+ * doing that to a page that did not need it is the more damaging mistake.
+ */
+const DARK_INK = `
+ 
+/* THE READER'S INK WINS ON A DARK PAGE, WHEREVER THE BOOK SPEAKS.
+ *
+ * Paper sets colour on html and reaches everything else by INHERITANCE —
+ * and inheritance is consulted only where the cascade produced no value at
+ * all. So any colour the book declares anywhere beats it. Measured over 1,957
+ * books: 1,400 (71.5%) declare a text colour somewhere and 860 (43.9%) declare
+ * one dark enough to vanish here. A reader choosing a dark theme and getting
+ * black text is a control being overruled, which this sheet refuses everywhere
+ * else.
+ *
+ * color: inherit !important, NOT color: <ink> !important, and that is
+ * the whole trick — taken from Readium CSS, which has had it for years. The
+ * value stays in ONE place, on the root, and every element is forced back onto
+ * the chain the book broke. A rule naming the ink instead reaches only the
+ * elements it selects: an earlier draft of this forced the marked prose
+ * containers and a nested <span style="color:#000"> stayed black, because
+ * forcing a parent only makes the child inherit and the child's own
+ * declaration beats inheritance. The identical rule the defect is made of.
+ *
+ * FOUR PARTS, none of them optional:
+ *
+ *  - :not(a) — links keep their own colour, or every link in the book
+ *    dissolves into the body text.
+ *  - background-color: transparent — the half the defect's own description
+ *    missed. A callout with background: #fff is a white slab on a dark page
+ *    however right its text colour is.
+ *  - border-color: currentColor — a rule or table border hard-coded black
+ *    is invisible here otherwise.
+ *  - svg text { fill } — SVG text takes fill, not color, so a colour rule
+ *    never touches it however broad.
+ *
+ * :root * and not *: the root itself must keep the page colour, and an
+ * important transparent background on it would take the theme away entirely.
+ * Paper's own two painted elements are excluded by name for the same reason.
+ *
+ * WHAT THIS COSTS, honestly: a book that colours dialogue by speaker loses
+ * that here. Apple takes the same trade and gives the publisher an opt-out by
+ * name — "if you do not specify class=ibooks-dark-theme-use-custom-text-color,
+ * Apple Books uses white text when a reader selects a dark theme". Paper's
+ * equivalent is the fidelity setting, and until it exists the reader's theme
+ * wins, which is the same default Apple ships.
+ *
+ * STILL MISSING: an image with a baked-in white background is untouched by any
+ * of this — background-color does not reach pixels. Readium darkens and
+ * inverts behind their own settings; that is the image work, not this. */
+:root *:not(a):not(.paper-ruler-band):not(.paper-spoken-word) {
+  color: inherit !important;
+  background-color: transparent !important;
+  border-color: currentColor !important;
+}
+
+:root svg text {
+  fill: currentColor !important;
+  stroke: none !important;
+}
+`
+
+export function isDark(hex: string): boolean {
+  const n = Number.parseInt(hex.replace('#', ''), 16)
+  if (!Number.isFinite(n)) return false
+  const [r, g, b] = [(n >> 16) & 255, (n >> 8) & 255, n & 255]
+  return (r * 299 + g * 587 + b * 114) / 1000 < 90
+}
+
 export const BOOK_COLOURS: Record<Theme, BookColours> = {
   paper: { ink: '#17191B', surface: '#FFFFFF', accent: '#1B3A6B', mark: '#FAE8AF', markRule: '#D5B75A', markGreen: '#CAF7CA', markGreenRule: '#88CE8A', markPurple: '#E9CCFF', markPurpleRule: '#D1A4F3', amber: '#9E5A16', band: '#F2F3F1' },
   slate: { ink: '#1C2022', surface: '#DFE1DE', accent: '#23456F', mark: '#FCE4A8', markRule: '#B79A3B', markGreen: '#C5F5C7', markGreenRule: '#6CB06E', markPurple: '#E6C4FF', markPurpleRule: '#B388D4', amber: '#8A4C11', band: '#CBCFCA' },
@@ -270,6 +344,12 @@ export function bookCss({
   const letter = spacingAt('letter', spacing.letter)
   const word = spacingAt('word', spacing.word)
   const para = spacingAt('paragraph', spacing.paragraph)
+  /* IS THE PAGE DARK? Asked of the colour rather than of the theme's NAME.
+     `theme === 'night'` was the test, in one place, and the moment a second
+     place needed the same answer it became a fact stored twice — the next dark
+     theme would have set `color-scheme` correctly and left every book's own
+     black text unforced, which is a defect nothing would report. */
+  const darkPage = isDark(c.surface)
 
   return `
 @namespace epub "http://www.idpf.org/2007/ops";
@@ -279,7 +359,7 @@ export function bookCss({
 ${hostFontFaces()}
 
 html {
-  color-scheme: ${theme === 'night' ? 'dark' : 'light'};
+  color-scheme: ${darkPage ? 'dark' : 'light'};
   color: ${c.ink};
   background: ${c.surface};
   /* THE BASE, ON THE ROOT, AND THIS IS WHERE IT HAS TO BE.
@@ -578,6 +658,28 @@ blockquote {
   background: color-mix(in srgb, ${c.accent} 24%, transparent);
 }
 
+/* A <font> TAG IS FURNITURE FROM 1997, AND IT OUTRANKS THE READER.
+ *
+ * 114 books ship them, 308,899 of them between them — an affected book is
+ * saturated, averaging over two thousand. They carry size= (205,416), color=
+ * (102,602) and face= (21,085), and every one of those is a PRESENTATIONAL
+ * HINT: a declared value on the element, so it beats anything the reader's
+ * settings reach it by, which is inheritance.
+ *
+ * A hint loses to any author rule, so this one line is the whole fix, and it
+ * is deliberately UNMARKED so a book with real CSS for these elements still
+ * wins. Measured before writing it: 24 books style the font element in CSS,
+ * 114 use the tag, and ZERO do both — so nothing in the library is affected
+ * by which of the two wins here.
+ *
+ * <center> IS LEFT ALONE. 1,666 books contain one, almost always exactly one —
+ * a title page, a dedication. That is the book composing, and markProse
+ * already exists to tell composition from a converter's default. */
+font {
+  font: inherit;
+  color: inherit;
+}
+${darkPage ? DARK_INK : ''}
 /* Footnote and endnote links are targets for the popover, not destinations. */
 a[epub|type~="noteref"] {
   vertical-align: super;
