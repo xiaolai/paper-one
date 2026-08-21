@@ -286,14 +286,17 @@ html {
    *
    * rem resolves against the ROOT, never against body — so a size declared
    * only on body leaves every rem in the book pinned to the browser's
-   * 16px, whatever the reader does with the control. Measured across 400 books
-   * in this library: 128 of the 372 that ship any CSS size text in rem, and
-   * they carry 11,584 such declarations between them. A THIRD OF THE LIBRARY
+   * 16px, whatever the reader does with the control. Measured across the whole
+   * library: 618 of the 1,831 books that ship any CSS size text in rem, and
+   * they carry 52,361 such declarations between them. A THIRD OF THE LIBRARY
    * had text the size setting could not move — chapter titles, drop caps,
    * whole paragraphs — while the prose beside it scaled.
    *
-   * NO BOOK CONTESTS THIS. Not one of those 372 sets a font-size on html, so
-   * claiming the root takes nothing away from any author.
+   * ALMOST NO BOOK CONTESTS THIS: 4 of the 1,831 set a font-size on html, and
+   * the mark below is what decides those four. Read from a 400-book sample
+   * first, where the count was 0 and the mark looked like belt-and-braces; the
+   * full library says otherwise, which is the whole reason the sample was
+   * re-run over all 1,960.
    *
    * !important because the BASE IS THE READER'S, and 12 of those books mark
    * their own font-size important. Forcing the base is safe in a way that
