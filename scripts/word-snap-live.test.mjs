@@ -14,6 +14,25 @@ import { CHECKS, assertRan, buildDomSnippet } from './word-snap-live.mjs'
  * The guards on WI-12's live lane — and they live HERE, in the lane that
  * always runs, on purpose.
  *
+ * EXCEPT THAT ONE SUITE BELOW DOES NOT ALWAYS RUN, and the sentence above was
+ * read as though it did. `describe.skipIf(noConfig)` gates the first suite on
+ * `.claude/tdd-guardian/config.json`, which `.gitignore` excludes — so those
+ * three cases collect on a developer's machine and are skipped on every clean
+ * checkout. Written into `tests/ledger.json` by a `--write` run on a machine
+ * that had the file, they then read as GONE to CI, to a fresh clone, and to
+ * `verify:without`'s temp copy. That is what turned `main` red on 2026-08-21,
+ * eight steps into `pnpm verify`, with no code change behind it.
+ *
+ * **The ledger is now written as a CLEAN CHECKOUT sees it**, so those three
+ * are absent from it. A machine that has the config collects three more than
+ * the ledger records, and additions are free and silent by design — so it is
+ * green in both places, and a genuine deletion is still caught in both.
+ *
+ * The rule that generalises, and it is not only about this file: **anything
+ * conditional on an untracked path must not reach the ledger.** If these
+ * guards should genuinely always run, the fix is to stop gating them on a file
+ * the repository does not contain — not to re-record them.
+ *
  * The live lane needs a running app, a WebKit bridge and a human. A guard
  * against a silently empty live run is worthless if it only runs in the lane
  * being guarded: that is the same class of defect as `actool` and

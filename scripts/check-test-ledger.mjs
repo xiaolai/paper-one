@@ -45,6 +45,19 @@ import { isProcessEntry } from './lib/entry.mjs'
  * skipped by `describe.skipIf`, a name built from a template, or a file no
  * project collects.
  *
+ * WRITE FROM A CLEAN CHECKOUT, and this is not a style note. The ledger
+ * records what Vitest COLLECTS, and collection can depend on files the
+ * repository does not contain: `word-snap-live.test.mjs` gates a suite on
+ * `.claude/tdd-guardian/config.json`, which is gitignored. A `--write` run on
+ * a machine holding that file records three tests no clean checkout can
+ * collect, and every clean checkout then reports them GONE — which is exactly
+ * how `main` went red on 2026-08-21 with no code change behind it.
+ *
+ * The asymmetry is what makes the cure work: extra tests on a developer's
+ * machine are ADDITIONS, which are free and silent. So a ledger written
+ * without the machine-local files is green everywhere, and one written with
+ * them is red everywhere else.
+ *
  * Findings one per line, then a summary; exit 0 when clean, 1 on a finding,
  * 2 on a usage error or when Vitest itself could not answer.
  */
