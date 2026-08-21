@@ -256,7 +256,14 @@ export function SidePane({
         )}
 
         {pane === 'cards' && (
-          <Cards cards={cards} bookId={book.bookId} {...(onGoTo ? { onGoTo } : {})} />
+          <Cards
+            cards={cards}
+            bookId={book.bookId}
+            /* THE SAME `books` LIST, THE SAME QUESTION as Marginalia asks two
+               panels up. One source, so the two cannot answer differently. */
+            onShelf={(id) => books.some((entry) => entry.bookId === id)}
+            {...(onGoTo ? { onGoTo } : {})}
+          />
         )}
 
         {pane === 'search' && <SearchPanel book={book} />}

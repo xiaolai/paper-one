@@ -84,6 +84,10 @@ export interface Book extends BookState {
   eraseMark: (anchor: MarkAnchor) => void
   /** Clear the book's own text selection. */
   deselect: () => void
+  /** Dismiss the footnote popover — the session holds its view. */
+  closeFootnote: () => void
+  /** Register the box notes render into — see the session. */
+  setFootnoteMount: (mount: HTMLElement | null) => void
   /** Turn the page. The only way through a fixed-layout book. */
   next: () => void
   prev: () => void
@@ -269,6 +273,23 @@ export function useBook(): Book {
   const drawMark = useCallback((anchor: MarkAnchor) => navigatorRef.current?.drawMark(anchor), [])
   const eraseMark = useCallback((anchor: MarkAnchor) => navigatorRef.current?.eraseMark(anchor), [])
   const deselect = useCallback(() => navigatorRef.current?.deselect(), [])
+  const closeFootnote = useCallback(() => navigatorRef.current?.closeFootnote(), [])
+  /**
+   * The box notes render into, remembered across books.
+   *
+   * HELD HERE AND RE-APPLIED, not merely forwarded. The popover registers on
+   * mount, which is BEFORE any book has finished parsing — so there is no
+   * navigator yet and a straight forward was a no-op that silently never
+   * happened. The note then rendered into the session's fallback, off-screen,
+   * and the popover showed an empty box: the extraction had worked and nobody
+   * could see it. Same shape as `lastLocation`, which is read once when the
+   * book is ready rather than when the host happens to know it.
+   */
+  const footnoteMountRef = useRef<HTMLElement | null>(null)
+  const setFootnoteMount = useCallback((mount: HTMLElement | null) => {
+    footnoteMountRef.current = mount
+    navigatorRef.current?.setFootnoteMount(mount)
+  }, [])
   const next = useCallback(() => navigatorRef.current?.next(), [])
   const prev = useCallback(() => navigatorRef.current?.prev(), [])
   const goLeft = useCallback(() => navigatorRef.current?.goLeft(), [])
@@ -279,7 +300,12 @@ export function useBook(): Book {
    * the one belonging to the book that replaced it — and page turns then went to
    * a renderer for a book nobody was looking at. */
   const setNavigator = useCallback((generation: number, navigator: BookNavigator | null) => {
-    if (current(generation)) navigatorRef.current = navigator
+    if (!current(generation)) return
+    navigatorRef.current = navigator
+    /* The mount the host registered before this session existed. Every new
+       book gets a fresh navigator, so without this the popover would work
+       for exactly no books — see `setFootnoteMount`. */
+    if (navigator && footnoteMountRef.current) navigator.setFootnoteMount(footnoteMountRef.current)
   }, [])
   const setToc = useCallback(
     (generation: number, value: readonly TocItem[]) => {
@@ -349,6 +375,8 @@ export function useBook(): Book {
       drawMark,
       eraseMark,
       deselect,
+      closeFootnote,
+      setFootnoteMount,
       next,
       prev,
       goLeft,
@@ -386,6 +414,8 @@ export function useBook(): Book {
       drawMark,
       eraseMark,
       deselect,
+      closeFootnote,
+      setFootnoteMount,
       next,
       prev,
       goLeft,

@@ -657,6 +657,20 @@ export const LIST_COL = { thumb: 22, progress: 104, when: 82, percent: 30 } as c
 export const SHEET = { max: 640, inset: 48, top: 96, maxHeight: 560 } as const
 
 /**
+ * The footnote popover's bounds.
+ *
+ * NARROWER THAN THE SHEET, on purpose. The palette is a surface the reader is
+ * working IN; a note is something they glance at and dismiss, and it sits over
+ * the text it came from. A note as wide as the palette would cover the page it
+ * is annotating, which defeats showing it in place at all.
+ *
+ * `maxHeight` is where it starts scrolling rather than growing. An endnote can
+ * be a paragraph or it can be half a page of citations, and the second must not
+ * push the popover off the window.
+ */
+export const FOOTNOTE = { maxWidth: 420, maxHeight: 320 } as const
+
+/**
  * A menu's narrowest. Wide enough that "Remove from library" — the longest
  * thing any menu in the app says — does not wrap, which is what actually
  * decides it.
@@ -976,6 +990,8 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
     '--sheet-inset': px(SHEET.inset),
     '--sheet-top': px(SHEET.top),
     '--sheet-max-h': px(SHEET.maxHeight),
+    '--footnote-max-w': px(FOOTNOTE.maxWidth),
+    '--footnote-max-h': px(FOOTNOTE.maxHeight),
     '--menu-min-w': px(MENU_MIN_W),
     '--menu-scroll-h': px(MENU_SCROLL_H),
     '--tag-editor-w': px(TAG_EDITOR_W),

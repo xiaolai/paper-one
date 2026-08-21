@@ -63,7 +63,7 @@ export interface JumpsView {
    * Five call sites each remembering to push is five places for the sixth to
    * forget.
    */
-  jumpTo: (target: JumpTarget) => void
+  jumpTo: (target: JumpTarget) => boolean
   /**
    * Record a departure THE CALLER IS NOT PERFORMING.
    *
@@ -114,9 +114,12 @@ export function useJumps({ placeHere, navigate }: JumpsDeps): JumpsView {
     (target: JumpTarget) => {
       /* NAVIGATE FIRST, then move the stack. The host can refuse, and a stack
          that recorded a departure the reader never made is worse than one that
-         missed a jump: ⌘[ would take them somewhere they had not been. */
-      if (!navigate(target)) return
+         missed a jump: ⌘[ would take them somewhere they had not been.
+         The boolean is what lets the host show a way back only when there is
+         one — a "back to…" line after a refused jump would be a lie. */
+      if (!navigate(target)) return false
       branch()
+      return true
     },
     [branch, navigate],
   )

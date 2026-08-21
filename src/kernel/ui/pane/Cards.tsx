@@ -23,10 +23,24 @@ const FILTERS: readonly Filter[] = ['All', ...CARD_KINDS]
 export interface CardsProps {
   cards: CardsView
   bookId: string | null
+  /**
+   * Whether a book is on the shelf, and so can be opened at all.
+   *
+   * THE SAME RULE MARGINALIA USES, and it is here because leaving it out was
+   * the visible half of one defect. That panel narrowed its guard from "not
+   * the open book" to "not on the shelf" when the jump stack landed; this one
+   * kept the old test, so a mark from another book was reachable and a card
+   * from that same book was a dead control. Two panels of one shape, two
+   * behaviours.
+   *
+   * Absent, every card outside the open book stays disabled — which is what
+   * this panel did before there was anywhere to come back to.
+   */
+  onShelf?: ((bookId: string) => boolean) | undefined
   onGoTo?: (target: JumpTarget) => void
 }
 
-export function Cards({ cards, bookId, onGoTo }: CardsProps) {
+export function Cards({ cards, bookId, onShelf, onGoTo }: CardsProps) {
   const [filter, setFilter] = useState<Filter>('All')
 
   const shown = useMemo(
@@ -91,10 +105,15 @@ export function Cards({ cards, bookId, onGoTo }: CardsProps) {
           <button
             type="button"
             className={styles.noteJump}
-            /* A card made in another book has nowhere to jump to until that
-               book is open, and a card made from nothing has no anchor at all. */
-            disabled={card.bookId !== bookId || !card.cfi || !onGoTo}
-            onClick={() => card.cfi && onGoTo?.(card.cfi)}
+            /* TWO REASONS A CARD CANNOT BE FOLLOWED, and only one of them
+               narrowed. A card made from nothing has no anchor and never will
+               — §15's line between a card and a mark is precisely that a card
+               need not come from a passage. But "another book" is no longer a
+               reason: the host opens that book at the anchor and ⌘[ brings the
+               reader home, exactly as it does for a mark. What remains is a
+               book that has LEFT the shelf, which cannot be opened at all. */
+            disabled={!card.cfi || !onGoTo || !(card.bookId === bookId || (onShelf?.(card.bookId) ?? false))}
+            onClick={() => card.cfi && onGoTo?.({ bookId: card.bookId, cfi: card.cfi })}
           >
             <span className={styles.noteBody}>{card.body}</span>
           </button>

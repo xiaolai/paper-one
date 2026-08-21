@@ -7,7 +7,7 @@ import { useFontsReady } from '../fontProbe'
 import { isPdf } from '../../core/formats'
 import { bookCss, markPalette } from './bookCss'
 import { balanceRects } from './markGeometry'
-import { ReaderSession, type MarkAnchor, type SelectionSnapshot } from './session'
+import { ReaderSession, type FootnoteRender, type MarkAnchor, type SelectionSnapshot } from './session'
 import type { PageIntent } from './wheelPaging'
 
 export interface FoliateViewProps {
@@ -91,6 +91,8 @@ export interface FoliateViewProps {
   onLink: (detail: LinkDetail, event: Event) => void
   /** A link whose scheme leaves the book. See `ExternalLinkDetail`. */
   onExternalLink: (detail: ExternalLinkDetail, event: Event) => void
+  /** A footnote was followed and rendered, or the note should close. */
+  onFootnote: (note: FootnoteRender | null) => void
   onFileDropped: (file: File) => void
   /** A wheel gesture asked for another page — see `wheelPaging`. */
   onPageIntent: (intent: PageIntent) => void
@@ -359,6 +361,7 @@ export function FoliateView({
   onMarkDrawn,
   onLink,
   onExternalLink,
+  onFootnote,
   onFileDropped,
   onPageIntent,
   onFixedLayout,
@@ -395,6 +398,7 @@ export function FoliateView({
     onMarkDrawn,
     onLink,
     onExternalLink,
+    onFootnote,
     onFileDropped,
     onPageIntent,
     onFixedLayout,
@@ -453,6 +457,7 @@ export function FoliateView({
       onMarkDrawn: (cfi, range) => handlers.current.onMarkDrawn(cfi, range),
       onLink: (detail, event) => handlers.current.onLink(detail, event),
       onExternalLink: (detail, event) => handlers.current.onExternalLink(detail, event),
+      onFootnote: (note) => handlers.current.onFootnote(note),
       onFileDropped: (file) => handlers.current.onFileDropped(file),
       onPageIntent: (intent) => handlers.current.onPageIntent(intent),
       onFixedLayout: (fixed) => handlers.current.onFixedLayout(gen, fixed),

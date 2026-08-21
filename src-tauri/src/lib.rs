@@ -251,6 +251,57 @@ fn open_external(url: String) -> Result<(), String> {
     }
 }
 
+/// Make tao apply the traffic-light position it is already holding.
+///
+/// THERE ARE TWO IMPLEMENTATIONS OF `trafficLightPosition` AND THEY DO NOT
+/// AGREE. The config value in `tauri.conf.json` goes to tao's `WindowBuilder`,
+/// where `set_traffic_light_inset` **only stores it** (tao-0.35.0
+/// `platform_impl/macos/window.rs`); it is applied from `drawRect:` in
+/// `view.rs`, and nowhere else. The other path — `WebviewWindowBuilder`, which
+/// goes to wry's `WryWebViewParent` — applies immediately and again on every
+/// draw. Nothing in Tauri maps the config value onto the webview attributes,
+/// so the two never meet: the main window takes the first path, and any window
+/// built in Rust takes the second.
+///
+/// A WKWebView covers the tao view, so its `drawRect:` does not run at first
+/// paint. The buttons stay where AppKit put them until something marks the view
+/// dirty — which a resize does, and which is why the misplacement appears to
+/// heal itself the moment the reader touches the window edge.
+///
+/// So this marks the content view dirty once, and tao applies its own stored
+/// value one display cycle later.
+///
+/// DELIBERATELY NOT A SECOND COPY OF THE GEOMETRY. Setting the position here
+/// as well would put the buttons in one place on the first frame and in tao's
+/// place on every redraw after it, and the two disagreeing would show only as
+/// a flicker — the hardest kind of wrong to attribute. One owner of the maths,
+/// which is tao; this only asks it to run.
+///
+/// `docs/traffic-lights.md` owns the measured mapping. Do not restate it here.
+#[cfg(target_os = "macos")]
+fn nudge_traffic_lights(window: &tauri::WebviewWindow) {
+    use objc2_app_kit::NSWindow;
+
+    let Ok(handle) = window.ns_window() else {
+        /* No window handle is not a thing to fail a launch over: the reader
+         * gets buttons in AppKit's default place, which is where they were
+         * before this existed. */
+        log::warn!(
+            "traffic lights: no ns_window handle; leaving the buttons where AppKit put them"
+        );
+        return;
+    };
+    // SAFETY: `ns_window()` returns the `NSWindow` this webview lives in, and
+    // it outlives this call — we neither retain it nor keep the reference.
+    unsafe {
+        let ns_window = &*(handle as *const NSWindow);
+        match ns_window.contentView() {
+            Some(view) => view.setNeedsDisplay(true),
+            None => log::warn!("traffic lights: the window has no content view yet"),
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let mut builder = tauri::Builder::default()
@@ -309,6 +360,13 @@ pub fn run() {
 
             #[cfg(feature = "desktop")]
             setup_tray(app.handle())?;
+
+            /* The traffic lights, which tao will not place until something
+             * asks its view to draw — see `nudge_traffic_lights`. */
+            #[cfg(target_os = "macos")]
+            if let Some(main) = tauri::Manager::get_webview_window(app, "main") {
+                nudge_traffic_lights(&main);
+            }
 
             Ok(())
         });

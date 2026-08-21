@@ -8,6 +8,12 @@ import type {
   TocItem,
   View,
 } from 'foliate-js/view.js'
+import {
+  FootnoteHandler,
+  type FootnoteRenderDetail,
+  type FootnoteType,
+} from 'foliate-js/footnotes.js'
+import { rangeBoxInHost, type HostRect } from './coordinates'
 import { markProse } from './markProse'
 import {
   ANNOTATION_KINDS,
@@ -184,6 +190,45 @@ export interface MarkPainters {
   readonly wave: unknown
 }
 
+/**
+ * A note, extracted and ready to show.
+ *
+ * THE ELEMENT, NOT ITS TEXT. `FootnoteHandler` renders the note into a real
+ * `foliate-view`, so it arrives with the book's own markup, its own styles and
+ * its links intact — a note carrying emphasis, a nested citation or a table
+ * survives, where `textContent` would flatten all three. The host mounts it.
+ *
+ * `at` is where the REFERENCE was, in host coordinates, because that is what a
+ * popover is placed against — not the note, which is somewhere else entirely.
+ */
+/**
+ * Where a reference sits, in the host's coordinates.
+ *
+ * A RANGE AROUND THE ELEMENT, because `coordinates` speaks ranges and a
+ * superscript marker is usually one character — `getBoundingClientRect` on the
+ * `<a>` would work and would be a second way of crossing the same iframe
+ * boundary, which is how two answers to one question begin. Null when the
+ * anchor's document has gone, which is what a section re-render does.
+ */
+function anchorRectInHost(a: Element, host: HTMLElement): HostRect | null {
+  const doc = a.ownerDocument
+  if (!doc) return null
+  try {
+    const range = doc.createRange()
+    range.selectNode(a)
+    return rangeBoxInHost(range, host)
+  } catch {
+    return null
+  }
+}
+
+export interface FootnoteRender {
+  readonly view: View
+  readonly href: string
+  readonly type: FootnoteType
+  readonly at: HostRect | null
+}
+
 export interface SessionCallbacks {
   /**
    * A link inside the book was followed, BEFORE foliate acts on it.
@@ -199,6 +244,15 @@ export interface SessionCallbacks {
    * touching the mark store.
    */
   onLink: (detail: LinkDetail, event: Event) => void
+  /**
+   * A footnote was followed, and here is the note.
+   *
+   * Null means the popover should close — a page turn, a new section, or the
+   * session going away. The host decides where to put it and how it is
+   * dismissed; the session decides only what it contains, which is the same
+   * line `onLink` draws.
+   */
+  onFootnote: (note: FootnoteRender | null) => void
   /**
    * A link whose scheme leaves the book. Same contract, and the same reason
    * for existing at all: unhandled, foliate hands the raw href to
@@ -324,6 +378,19 @@ export interface SessionNavigator {
   eraseMark: (anchor: MarkAnchor) => void
   /** Clear the book's selection — after acting on it, per §07. */
   deselect: () => void
+  /**
+   * Dismiss the note popover and release the view it was rendered in.
+   *
+   * ON THE NAVIGATOR because the SESSION owns that view — `FootnoteHandler`
+   * builds a real `foliate-view` per note, and a host that merely stopped
+   * rendering it would leave an iframe alive with nobody looking at it.
+   */
+  closeFootnote: () => void
+  /**
+   * Register the box notes render into. See `ReaderSession.setFootnoteMount` —
+   * it must be one element that never moves.
+   */
+  setFootnoteMount: (mount: HTMLElement | null) => void
   /**
    * §11's ← and →.
    *
@@ -562,6 +629,24 @@ export class ReaderSession {
   readonly #selectors = new Map<number, (range: Range) => void>()
   /** A book this session synthesised, which `View.close()` will not release. */
   #prepared: Destroyable | null = null
+  /**
+   * Upstream's footnote detection. One per session, because it holds only the
+   * `detectFootnotes` switch and its listeners.
+   */
+  readonly #footnotes = new FootnoteHandler()
+  /** The rendered note's view, so it can be released on dismiss. */
+  #footnoteView: HTMLElement | null = null
+  /** Where the reference was, captured before the note resolves. */
+  #footnoteAt: HostRect | null = null
+  /**
+   * The box a note is rendered into, owned by the host.
+   *
+   * IT MAY NEVER MOVE. A `foliate-view` holds an iframe and re-parenting an
+   * iframe reloads it — which discarded the extracted note and restored the
+   * whole chapter, with nothing raised. So the host registers one container up
+   * front and every note is appended into it in place.
+   */
+  #footnoteMount: HTMLElement | null = null
   readonly #host: HTMLElement
   readonly #cb: SessionCallbacks
 
@@ -667,6 +752,7 @@ export class ReaderSession {
    * document and position of the one that replaced it.
    */
   #bind(view: View): void {
+    this.#watchFootnotes()
     view.addEventListener('load', (event) => {
       if (this.#disposed) return
       const { doc, index } = (event as CustomEvent<LoadDetail>).detail
@@ -705,6 +791,11 @@ export class ReaderSession {
         }
       })
 
+      /* A NEW SECTION CLOSES THE NOTE. The popover is placed against a
+         reference that has just been replaced, so leaving it up would leave it
+         pointing at whatever now occupies those coordinates. */
+      this.closeFootnote()
+
       this.#redrawWhenFontsLand(doc)
       ensureLang(doc, view)
       this.#cb.onDirection(directionOf(doc))
@@ -717,10 +808,18 @@ export class ReaderSession {
     })
 
     /* Every link in the book, before foliate navigates — see `LinkDetail`.
-     * Cancelable, so the host decides; the session only carries it across. */
+     * Cancelable, so the host decides; the session only carries it across.
+     *
+     * A FOOTNOTE IS OFFERED TO THE HANDLER FIRST, and if it takes the link it
+     * calls `preventDefault()` in this same turn, which is what stops foliate
+     * navigating. Anything it declines falls through to the host unchanged and
+     * goes on navigating exactly as it always has — the fallback is what
+     * happens when nothing is written, not something written. */
     view.addEventListener('link', (event) => {
       if (this.#disposed) return
-      this.#cb.onLink((event as CustomEvent<LinkDetail>).detail, event)
+      const detail = (event as CustomEvent<LinkDetail>).detail
+      const taken = this.#openFootnote(view, detail, event)
+      if (!taken) this.#cb.onLink(detail, event)
     })
 
     view.addEventListener('external-link', (event) => {
@@ -969,6 +1068,8 @@ export class ReaderSession {
       drawMark: (anchor) => attachMark(view, anchor, { report: true }),
       eraseMark: (anchor) => attachMark(view, anchor, { remove: true, report: true }),
       deselect: () => view.deselect(),
+      closeFootnote: () => this.closeFootnote(),
+      setFootnoteMount: (mount) => this.setFootnoteMount(mount),
       next: () => void view.next()?.catch?.(reportNavigation('next')),
       prev: () => void view.prev()?.catch?.(reportNavigation('prev')),
       goLeft: () => void view.goLeft()?.catch?.(reportNavigation('goLeft')),
@@ -981,6 +1082,135 @@ export class ReaderSession {
     // Settings go on BEFORE the first paint, so the reader never flashes
     // foliate's defaults on the way to the configured layout.
     deps.applySettings(view)
+  }
+
+  /**
+   * Offer a link to the footnote handler; true when it took it.
+   *
+   * SYNCHRONOUS ANSWER, ASYNCHRONOUS NOTE. `handle` returns a promise when it
+   * took the link and `undefined` when it did not, and it has already called
+   * `preventDefault()` by then — so the caller knows immediately whether
+   * foliate will navigate, without waiting for the note to render.
+   */
+  /**
+   * Listen once for what the handler renders.
+   *
+   * ON THE HANDLER, NOT PER CLICK. `FootnoteHandler` is an `EventTarget` and
+   * one listener serves every note; attaching per click would leak one for
+   * each footnote the reader ever followed.
+   */
+  #watchFootnotes(): void {
+    /**
+     * ATTACH THE VIEW BEFORE IT RENDERS. This is what `before-render` is for,
+     * and ignoring it is not a missing nicety — it is a crash.
+     *
+     * `#showFragment` builds a detached `<foliate-view>`, opens the book in it,
+     * emits this, and only then calls `goTo`. A detached element has no layout,
+     * so the paginator's `columnize` reads `doc.documentElement` off a document
+     * that is not there and throws `null is not an object` — which escapes the
+     * handler's own promise chain and reaches the app's error boundary. The
+     * reader loses the book because a footnote was clicked.
+     *
+     * Off-screen rather than hidden: `visibility: hidden` still lays out, and
+     * the paginator needs a real size to column into. It is moved into the
+     * popover when `render` says the note is ready.
+     */
+    this.#footnotes.addEventListener('before-render', (event) => {
+      if (this.#disposed) return
+      const { view } = (event as CustomEvent<{ view: View }>).detail
+      /* THE STYLESHEET OWNS THE SIZE when there is a mount, and this sets none.
+         An inline `height: 100%` here beat `.body > *` and resolved to zero
+         against an auto-height parent, so the note rendered correctly into a
+         box nobody could see — extraction working, popover 72px tall.
+         Only the FALLBACK is sized here, because there is no stylesheet rule
+         for a view parked on the host and the paginator cannot columnize a box
+         with no dimensions. */
+      const mount = this.#footnoteMount
+      if (!mount) {
+        view.style.cssText = [
+          'position:absolute',
+          'left:-99999px',
+          'top:0',
+          'width:400px',
+          'height:320px',
+        ].join(';')
+      }
+      ;(mount ?? this.#host).appendChild(view)
+      /* Held now, so a note that never finishes rendering is still released —
+         `closeFootnote` and the next `render` both look here. */
+      this.#footnoteView?.remove()
+      this.#footnoteView = view
+    })
+
+    this.#footnotes.addEventListener('render', (event) => {
+      if (this.#disposed) return
+      const detail = (event as CustomEvent<FootnoteRenderDetail>).detail
+      /* `before-render` already attached this one and released the last. */
+      this.#footnoteView = detail.view
+      this.#cb.onFootnote({
+        view: detail.view,
+        href: detail.href,
+        type: detail.type,
+        at: this.#footnoteAt,
+      })
+    })
+  }
+
+  #openFootnote(view: View, detail: LinkDetail, event: Event): boolean {
+    const book = view.book
+    if (!book) return false
+    /* PDF IS NOT IN SCOPE and needs no branch to say so: `makePdf`'s adapter
+       has no `epub:type`, no ARIA role and no superscript, so the detection
+       declines it on its own rules. A format check here would be a second
+       answer to a question already answered. */
+    /* A SYNCHRONOUS THROW IS POSSIBLE, and it would land in foliate's own
+       event dispatch. `handle` calls `book.resolveHref(href)` BEFORE wrapping
+       it — `Promise.resolve(book.resolveHref(href))` evaluates the call first
+       — so a backend without that method throws rather than rejecting, and the
+       throw escapes into `#handleLinks`. Caught here and treated as a note
+       that would not open, which is the same outcome by a different route. */
+    let pending: Promise<void> | undefined
+    try {
+      pending = this.#footnotes.handle(book, event)
+    } catch (cause) {
+      console.warn('Paper: that note could not be resolved', detail.href, cause)
+      /* `preventDefault` may already have been called, so foliate will not
+         navigate — this has to, or the link does nothing at all. */
+      this.#cb.onLink(detail, event)
+      void view.goTo(detail.href).catch(reportNavigation('goTo', detail.href))
+      return true
+    }
+    if (!pending) return false
+    this.#footnoteAt = anchorRectInHost(detail.a, this.#host)
+    void pending.catch((cause: unknown) => {
+      if (this.#disposed) return
+      /* FALL BACK TO THE JUMP, DO NOT SWALLOW IT. A note that will not render
+         in place is still a place in the book, and the reader asked to go
+         there. `preventDefault` has already stopped foliate navigating, so
+         this navigates instead — and tells the host first, so the origin is
+         recorded from where the reader still is and `⌘[` brings them back.
+         A control that silently does nothing is what this whole item deletes. */
+      console.warn('Paper: that note could not be shown in place', detail.href, cause)
+      this.#cb.onFootnote(null)
+      this.#cb.onLink(detail, event)
+      void view.goTo(detail.href).catch(reportNavigation('goTo', detail.href))
+    })
+    return true
+  }
+
+  /** Where notes are rendered. Null puts them back on the host — see the field. */
+  setFootnoteMount(mount: HTMLElement | null): void {
+    this.#footnoteMount = mount
+  }
+
+  /** Close whatever note is open, and let go of the view it was rendered in. */
+  closeFootnote(): void {
+    if (this.#footnoteView) {
+      this.#footnoteView.remove()
+      this.#footnoteView = null
+    }
+    this.#footnoteAt = null
+    if (!this.#disposed) this.#cb.onFootnote(null)
   }
 
   /**

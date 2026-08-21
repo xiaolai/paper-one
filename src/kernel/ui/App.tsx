@@ -31,6 +31,7 @@ import { useBookmarking } from './hooks/useBookmarking'
 import { useJumps, type JumpTarget } from './hooks/useJumps'
 import { locationToOpen, overrideSpent, type Place } from '../core/jumpStack'
 import type { ExternalLinkDetail } from 'foliate-js/view.js'
+import type { FootnoteRender } from './reader/session'
 import { extensionFor, readOwnedBook, storedBookName } from '../core/bookVault'
 import type { IndexedBook } from '../core/bookIndex'
 import type { IndexFs } from '../core/bookIndex'
@@ -1207,6 +1208,53 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
   const jumps = useJumps({ placeHere, navigate: goToJump })
 
   /**
+   * "← Back to Loomings" — the line that tells a reader the key is worth
+   * pressing.
+   *
+   * A JUMP IS THE ONLY THING THAT CAN BE INVISIBLE. Every other way of moving
+   * through a book is something the reader did to the page in front of them;
+   * a jump replaces it, and without a word the reader has no reason to think
+   * anything is recoverable. ⌘[ existed for an afternoon before this and was
+   * a key nobody had been told about.
+   *
+   * NAMED BY CHAPTER, NOT BY PAGE. The plan's sketch said "back to p. 148" and
+   * a page number is the one thing an EPUB does not have — foliate only offers
+   * one where the book ships a page list, which most do not. The chapter is
+   * what the reader just left and what they would say themselves.
+   *
+   * Set only when a jump ACTUALLY happened: `jumpTo` returns false for a
+   * refused one, and offering a way back from a jump that did not occur is a
+   * worse lie than saying nothing.
+   */
+  const [returnTo, setReturnTo] = useState<string | null>(null)
+
+  /**
+   * The note showing in place, or null.
+   *
+   * The SESSION decides what a note contains and renders it; this only decides
+   * that one is up. Dismissing goes back through the session, because it holds
+   * the view the note was rendered into and a host that merely stopped drawing
+   * it would leave an iframe alive behind the page.
+   */
+  const [footnote, setFootnote] = useState<FootnoteRender | null>(null)
+
+  const jumpTo = useCallback(
+    (target: JumpTarget) => {
+      /* Read BEFORE the jump — this is where the reader is leaving from. */
+      const leaving = book.position.chapterLabel
+      if (jumps.jumpTo(target) && leaving) setReturnTo(leaving)
+    },
+    [jumps, book.position.chapterLabel],
+  )
+
+  /* Spent by using it, so the line does not linger over a place the reader has
+     already gone back to. */
+  const goBackFromHint = useCallback(() => {
+    setReturnTo(null)
+    jumps.back()
+  }, [jumps])
+
+  /**
    * A link inside the book. Record the departure and let foliate navigate.
    *
    * NOT `jumpTo`. foliate navigates this one itself — `#handleLinks` calls
@@ -1581,7 +1629,7 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
             bookmarking={bookmarking}
             platform={platform}
             cards={cards}
-            onGoTo={jumps.jumpTo}
+            onGoTo={jumpTo}
             onDeleteMark={marking.unmark}
             markFocus={marking.focus}
             /* The one place the app decides what the companion is. There is no
@@ -1628,6 +1676,12 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
              parsing. It is null for the first few milliseconds of an open —
              `bookId` is derived from the file's content — which is why the
              reader takes it through a ref rather than at mount. */
+          footnote={footnote}
+          onFootnote={setFootnote}
+          onDismissFootnote={book.closeFootnote}
+          returnTo={returnTo}
+          onReturn={goBackFromHint}
+          onReturnDone={() => setReturnTo(null)}
           onLink={onBookLink}
           onExternalLink={onBookExternalLink}
           lastLocation={lastLocation}

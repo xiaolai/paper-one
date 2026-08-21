@@ -254,6 +254,16 @@ declare module 'foliate-js/view.js' {
     setStyles?: (css: string) => void
     next(): Promise<void>
     prev(): Promise<void>
+    /**
+     * The sections currently rendered, with their live documents.
+     *
+     * THE ONLY WAY IN. Both renderers call `attachShadow({ mode: 'closed' })`,
+     * so an embedder cannot reach the iframe from the DOM side at all — this
+     * is the whole public surface for reading what is on screen. `session.ts`
+     * has used it since the beginning; it was simply never declared, so every
+     * caller reached it through a cast.
+     */
+    getContents(): { index: number; doc: Document; overlayer?: unknown }[]
   }
 
   export interface InitOptions {
@@ -317,6 +327,70 @@ declare module 'foliate-js/view.js' {
   export class ResponseError extends Error {}
   export class NotFoundError extends Error {}
   export class UnsupportedTypeError extends Error {}
+}
+
+/**
+ * Upstream's footnote detection, which is the hard half of a note popover and
+ * is already installed.
+ *
+ * `bookCss.ts` styles exactly ONE of the three reference types this
+ * recognises. The rest — the other `epub:type` values, the ARIA roles, and the
+ * superscript heuristic that catches the majority of real books, which declare
+ * nothing at all — is written here and would otherwise be written again.
+ *
+ * MIT, and it ships in the fork Paper pins. Nothing on npm called `foliate-js`
+ * is the author's; see `docs/foliate-fork.md`.
+ */
+declare module 'foliate-js/footnotes.js' {
+  import type { Book, View } from 'foliate-js/view.js'
+
+  /**
+   * What the reference pointed at, as `getReferencedType` classifies it, or
+   * null when the target declares nothing. Used for the popover's label.
+   */
+  export type FootnoteType =
+    | 'biblioentry'
+    | 'definition'
+    | 'endnote'
+    | 'footnote'
+    | 'note'
+    | null
+
+  /**
+   * `render` — the note has been extracted into `view`, which the embedder
+   * mounts. `hidden` is true for an `aside` the book meant to keep out of the
+   * flow, which is the ordinary EPUB 3 footnote.
+   */
+  export interface FootnoteRenderDetail {
+    /** A real `foliate-view` — `document.createElement('foliate-view')`. Typed
+     *  as one because the embedder needs `renderer.getContents()` to measure
+     *  the note; the paginator's shadow root is closed, so there is no way in
+     *  from the DOM side. */
+    readonly view: View
+    readonly href: string
+    readonly type: FootnoteType
+    readonly hidden: boolean
+    readonly target: Element | null
+  }
+
+  export class FootnoteHandler extends EventTarget {
+    /**
+     * Whether to trust the superscript heuristic as well as the declared
+     * types. On by default upstream, and left on: most books in the wild
+     * declare nothing, and the heuristic is what makes those work.
+     */
+    detectFootnotes: boolean
+    /**
+     * Take a `link` event, or decline it.
+     *
+     * CALLS `preventDefault()` SYNCHRONOUSLY when it takes one, which is what
+     * stops foliate navigating — `#emit` reads the return of `dispatchEvent`
+     * in the same turn. Returns a promise when it took the link and
+     * `undefined` when it did not, which is how the caller tells the two
+     * apart without waiting.
+     */
+    handle(book: Book, event: Event): Promise<void> | undefined
+  }
 }
 
 declare module 'foliate-js/overlayer.js' {

@@ -1,6 +1,9 @@
-import { useCallback, useLayoutEffect, useMemo, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useState, type CSSProperties } from 'react'
 import { Bookmark, ChevronLeft, ChevronRight, Library, Plus } from 'lucide-react'
 import type { ExternalLinkDetail, LinkDetail } from 'foliate-js/view.js'
+import { comboFor } from '../panes'
+import { FootnotePopover } from '../reader/FootnotePopover'
+import type { FootnoteRender } from '../reader/session'
 import type { Platform } from '../../core/metrics'
 import {
   ICON,
@@ -35,6 +38,16 @@ import { SelectionTools } from '../reader/SelectionTools'
 import styles from './Reader.module.css'
 
 
+/**
+ * How long the return line stays.
+ *
+ * Long enough to read a chapter name and decide, short enough that it is gone
+ * before it becomes furniture. It is an offer, not a status: the stack keeps
+ * the place whether or not the reader takes it, and ⌘[ works long after this
+ * has faded.
+ */
+const RETURN_HINT_MS = 6000
+
 export interface ReaderProps {
   state: AppState
   dispatch: AppDispatch
@@ -55,6 +68,23 @@ export interface ReaderProps {
   onLink: (detail: LinkDetail, event: Event) => void
   /** A link whose scheme leaves the book. See `ExternalLinkDetail`. */
   onExternalLink: (detail: ExternalLinkDetail, event: Event) => void
+  /** The note to show in place, or null. See `FootnotePopover`. */
+  footnote?: FootnoteRender | null
+  /** The session's own close — it holds the view the note was rendered in. */
+  onFootnote: (note: FootnoteRender | null) => void
+  onDismissFootnote?: () => void
+  /**
+   * Where a jump just left from, or null — the "← Back to Loomings" line.
+   *
+   * A jump is the only movement in this app that can be invisible: everything
+   * else is something the reader did to the page in front of them, and a jump
+   * replaces it. Without a word, nothing suggests the move is undoable.
+   */
+  returnTo?: string | null
+  /** Go back there. The same thing ⌘[ does. */
+  onReturn?: () => void
+  /** The line has faded on its own; forget it. */
+  onReturnDone?: () => void
   /**
    * Where the open book was last left, or null to start at the beginning.
    *
@@ -119,6 +149,12 @@ export function Reader({
   marks,
   marking,
   bookmarking,
+  returnTo = null,
+  onReturn,
+  onReturnDone,
+  footnote = null,
+  onFootnote,
+  onDismissFootnote,
   onLink,
   onExternalLink,
   lastLocation,
@@ -147,6 +183,24 @@ export function Reader({
    * gets out of the way.
    */
   const [notice, setNotice] = useState<string | null>(null)
+
+  /**
+   * The return line fades on its own after a few seconds.
+   *
+   * NOT `notice`, which is amber and waits to be dismissed. That channel is
+   * for an action that did not work, and this is the opposite — a thing that
+   * worked, offering to be undone. Sharing it would have made every successful
+   * jump look like a failure and demanded a click to clear.
+   *
+   * Restarts on each new jump, so jumping twice quickly leaves one line
+   * showing the most recent departure rather than two racing timers where the
+   * first clears the second's message.
+   */
+  useEffect(() => {
+    if (!returnTo || !onReturnDone) return
+    const timer = setTimeout(onReturnDone, RETURN_HINT_MS)
+    return () => clearTimeout(timer)
+  }, [returnTo, onReturnDone])
 
   const { selection, setSelection, ranges, onMarkDrawn, selected, mark, unmark } = marking
 
@@ -549,6 +603,7 @@ export function Reader({
                       onMarkDrawn={onMarkDrawn}
                       onLink={onLink}
                       onExternalLink={onExternalLink}
+                      onFootnote={onFootnote}
                       onFileDropped={book.open}
                       onPageIntent={onPageIntent}
                       onFixedLayout={book.setFixedLayout}
@@ -711,6 +766,28 @@ export function Reader({
                     }}
                   />
                 </div>
+
+                {/* The note, over the page it came from. Placed against the
+                    reference rather than the pointer — see `FootnotePopover`. */}
+                <FootnotePopover
+                  note={footnote}
+                  stage={stage}
+                  onMount={book.setFootnoteMount}
+                  onDismiss={() => onDismissFootnote?.()}
+                />
+
+                {/* The way back from a jump. Above the failure notice and
+                    styled apart from it: one is an offer and the other is an
+                    apology, and a reader should not have to read them to tell
+                    which. */}
+                {returnTo && onReturn && (
+                  <div className={styles.returnHint} role="status">
+                    <button type="button" className={styles.returnHintGo} onClick={onReturn}>
+                      ← Back to {returnTo}
+                    </button>
+                    <span className={styles.returnHintKey}>{comboFor('⌘[', platform)}</span>
+                  </div>
+                )}
 
                 {/* §11: say what happened. It sits over the footer rather than
                     displacing the text, and it dismisses itself — the reader

@@ -1,0 +1,75 @@
+/* The note popover.
+   Positioned against the REFERENCE by `FootnotePopover`, which computes the
+   offsets — this file owns only what it looks like. */
+
+.popover {
+  position: absolute;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  box-sizing: border-box;
+  /* WIDTH AS WELL AS MAX-WIDTH. The note is an iframe with no intrinsic
+     width, so an absolutely positioned box shrinks to its chrome — measured at
+     106px, which is a popover the size of its own Close button. */
+  width: var(--footnote-max-w);
+  max-width: var(--footnote-max-w);
+  padding: var(--space-12) var(--space-16);
+  border: 1px solid var(--line-2);
+  /* `--shadow-pop` and `--radius-card` are the command palette's, which is the
+     nearest thing in the app: a surface that appears over the reading and goes
+     away again. Taken rather than matched by eye — `tokens.test.ts` refuses a
+     raw value in any property that has a scale, and it is right to. */
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  box-shadow: var(--shadow-pop);
+}
+
+/* What the book called it, when it said. Absent for a book that declared
+   nothing, which is most of them — see `heading`. */
+.label {
+  color: var(--muted);
+  font-size: var(--text-small);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+}
+
+/* The mount point for the rendered `foliate-view`. It carries the book's own
+   markup, so this sizes it and otherwise stays out of the way. */
+.body {
+  height: var(--footnote-max-h);
+  max-height: var(--footnote-max-h);
+  overflow-y: auto;
+}
+
+/* The rendered `foliate-view`. It has NO intrinsic size — it is an iframe —
+   so both dimensions are given here, and nothing may set them inline: an
+   inline `height: 100%` against this auto-height parent resolves to zero, and
+   the note renders perfectly into a box of no height. */
+/* The view fills the box. It has NO intrinsic size — it is an iframe — so both
+   dimensions come from here, and nothing may set them inline: an inline
+   `height: 100%` against an auto-height parent resolves to zero, and the note
+   then renders perfectly into a box of no height. */
+.body > * {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: var(--space-40);
+  border: none;
+}
+
+.dismiss {
+  align-self: flex-end;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: var(--text-small);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.dismiss:hover {
+  color: var(--ink);
+}

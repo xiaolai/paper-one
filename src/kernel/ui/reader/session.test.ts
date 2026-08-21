@@ -34,6 +34,8 @@ interface FakeView extends View {
    * entire contract of `link` and `external-link`.
    */
   emit: (type: string, detail: unknown, cancelable?: boolean) => CustomEvent
+  /** Every `goTo` target, so a fallback navigation can be asserted. */
+  navigations: string[]
   /** Every addAnnotation call, so the drawing contract can be asserted. */
   annotations: { value: string; kind: string; remove: boolean }[]
   deselected: number
@@ -73,6 +75,7 @@ type ViewCalls = Pick<
 
 function fakeView(overrides: Partial<Record<'open' | 'init', () => Promise<void>>> = {}): FakeView {
   const listeners: Record<string, ((e: unknown) => void)[]> = {}
+  const navigations: string[] = []
   const view: ViewCalls & Omit<FakeView, keyof View> & Record<string, unknown> = {
     style: {} as CSSStyleDeclaration,
     closed: 0,
@@ -80,13 +83,21 @@ function fakeView(overrides: Partial<Record<'open' | 'init', () => Promise<void>
     turns: { next: 0, prev: 0, left: 0, right: 0 },
     initCalls: [],
     listeners,
-    book: { toc: [{ label: 'One', href: 'a.xhtml' }], metadata: { title: 'T', author: 'A' } },
+    book: {
+      toc: [{ label: 'One', href: 'a.xhtml' }],
+      metadata: { title: 'T', author: 'A' },
+      /* `FootnoteHandler` asks the BOOK to resolve a note's href, and calls it
+         before wrapping the result — so a backend without this throws into
+         foliate's event dispatch rather than rejecting. See `#openFootnote`. */
+      resolveHref: (href: string) => ({ index: 0, anchor: () => null, href }),
+    },
     /* Settable, because the wheel gate reads it: a PDF is fixed-layout and
      * cannot scroll whatever `flow` says. */
     isFixedLayout: false,
     addEventListener: (type: string, fn: (e: unknown) => void) => {
       ;(listeners[type] ??= []).push(fn)
     },
+    navigations,
     emit: (type: string, detail: unknown, cancelable = false) => {
       /* A REAL EVENT, not `{ detail }`. The object literal was enough for every
          listener that only reads `detail`, and it silently cannot express the
@@ -104,7 +115,10 @@ function fakeView(overrides: Partial<Record<'open' | 'init', () => Promise<void>
       view.initCalls.push(options?.lastLocation ?? null)
       return (overrides.init ?? (() => Promise.resolve()))()
     },
-    goTo: () => Promise.resolve(),
+    goTo: (target: string) => {
+      navigations.push(target)
+      return Promise.resolve()
+    },
     next: () => {
       view.turns.next += 1
       return Promise.resolve()
@@ -206,6 +220,7 @@ function callbacks(
   const cb: SessionCallbacks = {
     onLink: rec('onLink'),
     onExternalLink: rec('onExternalLink'),
+    onFootnote: rec('onFootnote'),
     onToc: rec('onToc'),
     onRelocate: rec('onRelocate'),
     onDocument: rec('onDocument'),
@@ -944,6 +959,29 @@ describe('ReaderSession places', () => {
  * neither is the session's business — it carries the event across and lets the
  * host decide.
  */
+/**
+ * `getComputedStyle` AS A BARE GLOBAL, which this project runs without.
+ *
+ * `footnotes.js`'s superscript heuristic calls `getComputedStyle(el)` directly
+ * rather than through the element's own `defaultView`, so it needs the browser
+ * global. These suites run in the `node` environment — the project opts into
+ * jsdom per file, and this one has never needed it — so the global is absent
+ * and every link would throw before reaching the assertion.
+ *
+ * Stubbed rather than switched to jsdom: the session's link path is being
+ * checked here, not layout, and jsdom would cost every suite in this 133-case
+ * file its start-up for one function. Returning nothing useful is correct — a
+ * fake anchor has no computed style, and `isSuper` falls through to the
+ * `matches('sup')` answer the fake does give.
+ */
+const realComputedStyle = globalThis.getComputedStyle
+beforeEach(() => {
+  globalThis.getComputedStyle = (() => ({ verticalAlign: '' })) as unknown as typeof globalThis.getComputedStyle
+})
+afterEach(() => {
+  globalThis.getComputedStyle = realComputedStyle
+})
+
 describe('ReaderSession link events', () => {
   const linked = async () => {
     const view = fakeView()
@@ -953,7 +991,29 @@ describe('ReaderSession link events', () => {
     return { view, cb, session }
   }
 
-  const anchorEl = () => ({ getAttribute: () => '#note-1' }) as unknown as HTMLAnchorElement
+  /**
+   * An anchor complete enough for the footnote detection to inspect.
+   *
+   * It grew when the session started offering every link to `FootnoteHandler`
+   * first. That reads `epub:type`, the ARIA role, `matches('sup')`, the
+   * computed `vertical-align`, the element's children and its parent — so a
+   * stub with only `getAttribute` threw `el.matches is not a function` and
+   * took three passing tests down with it. `super: true` makes the superscript
+   * heuristic fire, which is how a book that declares nothing is recognised.
+   */
+  const anchorEl = (over: { type?: string; role?: string; super?: boolean } = {}) =>
+    ({
+      getAttribute: (name: string) => (name === 'role' ? (over.role ?? null) : '#note-1'),
+      getAttributeNS: () => over.type ?? null,
+      matches: (selector: string) => (over.super === true ? selector === 'sup' : false),
+      children: [] as unknown as HTMLCollection,
+      /* A PARENT, because `maybe()` calls `isSuper(a.parentElement)` with no
+         null guard — an anchor at the root of its document would throw inside
+         `footnotes.js`. Latent upstream, since a real book's anchor always has
+         one; not latent for a fake. */
+      parentElement: { matches: () => false } as unknown as HTMLElement,
+      ownerDocument: null,
+    }) as unknown as HTMLAnchorElement
 
   it('hands an internal link to the host, with the href foliate already resolved', async () => {
     const { view, cb } = await linked()
@@ -995,6 +1055,63 @@ describe('ReaderSession link events', () => {
     expect(cb.calls['onExternalLink']?.map(([detail]) => detail)).toEqual([
       { a: expect.anything(), href_: 'https://example.org/x' },
     ])
+  })
+
+  it('takes a link the book DECLARES a note, and stops foliate navigating', async () => {
+    /* `epub:type="noteref"` is the declared case, and the one `bookCss` has
+       been styling all along while nothing handled the click. */
+    const { view, cb } = await linked()
+    const event = view.emit('link', { a: anchorEl({ type: 'noteref' }), href: 'notes.xhtml#n1' }, true)
+    expect(event.defaultPrevented).toBe(true)
+    /* NOT handed to the host as an ordinary link: the note is the session's to
+       render, and `onLink` is what records a jump for something that navigates. */
+    expect(cb.calls['onLink']).toBeUndefined()
+  })
+
+  it('takes an undeclared superscript, which is how most real books mark a note', () => {
+    /* The heuristic half. Books that declare nothing are the majority, and
+       without this the feature would work only on the ones that need it least. */
+    const a = anchorEl({ super: true })
+    const view = fakeView()
+    const cb = callbacks()
+    const session = new ReaderSession(fakeHost(), cb)
+    return session.start('book.epub', deps(view)).then(() => {
+      const event = view.emit('link', { a, href: 'notes.xhtml#n2' }, true)
+      expect(event.defaultPrevented).toBe(true)
+    })
+  })
+
+  it('declines a backlink, so a note pointing home is followed rather than shown', async () => {
+    const { view } = await linked()
+    const event = view.emit(
+      'link',
+      { a: anchorEl({ type: 'backlink', super: true }), href: 'ch01.xhtml#ref' },
+      true,
+    )
+    expect(event.defaultPrevented).toBe(false)
+  })
+
+  it('falls back to the JUMP when the note cannot be shown, rather than swallowing it', async () => {
+    /* THE RULE THE PLAN TURNS ON: "fall back to the jump, do not swallow it".
+       A note that will not render is still a place in the book and the reader
+       asked to go there. `preventDefault` has already stopped foliate, so the
+       session navigates itself — and tells the host FIRST, so the jump stack
+       records the origin from where the reader still is and ⌘[ comes back. */
+    const view = fakeView()
+    // A book that cannot resolve anything: the throw path, which is the one a
+    // real backend without `resolveHref` would take.
+    ;(view.book as unknown as { resolveHref: unknown }).resolveHref = undefined
+    const cb = callbacks()
+    const session = new ReaderSession(fakeHost(), cb)
+    await session.start('book.epub', deps(view))
+
+    const event = view.emit('link', { a: anchorEl({ type: 'noteref' }), href: 'notes.xhtml#n9' }, true)
+
+    // The host was told, so the origin is on the stack.
+    expect(cb.calls['onLink']?.length).toBe(1)
+    // And it navigated rather than doing nothing.
+    expect(view.navigations).toContain('notes.xhtml#n9')
+    expect(event.defaultPrevented).toBe(true)
   })
 
   it('says nothing after disposal', async () => {

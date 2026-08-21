@@ -43,7 +43,14 @@ export const TABLE_HEADER = '| Capability | State | Where | How to confirm |'
  * the WHOLE ledger, and `checkLedger` must stay honest over a fragment.
  */
 export const EXTERNAL = Object.freeze(
-  new Map([['paginator.js', 'foliate-js fork (github:xiaolai/foliate-js), not this repo']]),
+  new Map([
+    ['paginator.js', 'foliate-js fork (github:xiaolai/foliate-js), not this repo'],
+    /* The footnote detection the popover is built on — `epub:type`, the ARIA
+       roles and the superscript heuristic. Upstream's, MIT, and shipped in the
+       fork Paper pins; named in the ledger because it is where that behaviour
+       actually lives, and a Where cell pointing at `src/` would be a lie. */
+    ['foliate-js/footnotes.js', 'foliate-js fork, not this repo'],
+  ]),
 )
 
 /**

@@ -136,6 +136,23 @@ describe('a navigation the host refuses', () => {
     expect(jumps().canBack).toBe(false)
   })
 
+  it('reports the refusal, so the host does not offer a way back from a jump that did not happen', () => {
+    /* THE RETURN LINE DEPENDS ON THIS. `App` shows "← Back to <chapter>" only
+       when `jumpTo` returns true; offering a way back from a jump that never
+       occurred is a worse lie than saying nothing at all. */
+    const { jumps, refuseNext } = mount(at('a'))
+    let accepted: boolean | undefined
+    act(() => {
+      accepted = jumps().jumpTo('fine')
+    })
+    expect(accepted).toBe(true)
+    refuseNext()
+    act(() => {
+      accepted = jumps().jumpTo('refused')
+    })
+    expect(accepted).toBe(false)
+  })
+
   it('does not pop a back entry for a move that did not happen', () => {
     const { jumps, standAt, refuseNext } = mount(at('a'))
     act(() => jumps().jumpTo('x'))

@@ -67,6 +67,23 @@ tauri-plugin-peer = { path = "crates/tauri-plugin-peer" }
 # cannot, for the reason on the `tauri` line above. `ios` and `android`
 # forward to the plugin's features of the same name so one flag reaches both
 # crates (WI-5.9 checks that features, registration and the manifest agree).
+# macOS ONLY, and for ONE call — see `nudge_traffic_lights` in lib.rs.
+#
+# `trafficLightPosition` in tauri.conf.json reaches tao's window state and is
+# applied only from tao's `drawRect:` (tao-0.35.0 `view.rs`); the setter itself
+# merely stores it (`window.rs` `set_traffic_light_inset`). A WKWebView covers
+# the tao view, so that `drawRect:` does not run at first paint and the buttons
+# sit where AppKit put them until something marks the view dirty — a resize,
+# usually, which is why the misplacement looks like it "fixes itself".
+#
+# NOT A NEW SUPPLY CHAIN: both crates are already in the tree beneath tao and
+# wry, so this declares what is there rather than adding to it. `objc2-app-kit`
+# rather than raw `msg_send!` because this is unsafe FFI and a typed
+# `contentView()` is worth more than the byte it saves.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSView", "NSResponder"] }
+
 [features]
 default = ["desktop"]
 desktop = [
