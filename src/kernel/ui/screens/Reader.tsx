@@ -319,28 +319,34 @@ export function Reader({
   }, [book])
 
   /**
-   * Put something on the clipboard and take the selection down.
+   * Put something on the clipboard.
    *
-   * ONE PATH FOR BOTH WAYS OF COPYING, because the failure handling is the
-   * whole of it and it is easy to get wrong twice: clipboard access can be
-   * absent or refused, and the popup dismisses itself either way — so a copy
-   * that did not happen looks exactly like one that did, until the reader
-   * pastes nothing.
+   * ONE PATH FOR EVERY WAY OF COPYING, because the failure handling is the
+   * whole of it and it is easy to get wrong three times over: clipboard access
+   * can be absent or refused, and the control that asked for the copy carries
+   * on either way — so a copy that did not happen looks exactly like one that
+   * did, until the reader pastes nothing. Three callers now — the selection
+   * popup's two, and the note popover's copy.
    */
+  const copyText = useCallback((text: string) => {
+    const clipboard = navigator.clipboard
+    if (text && clipboard) {
+      void clipboard.writeText(text).catch((cause: unknown) => {
+        console.error('Paper: could not copy', cause)
+        setNotice('That could not be copied to the clipboard.')
+      })
+    } else if (text) {
+      setNotice('This device has no clipboard available.')
+    }
+  }, [])
+
+  /** Copy a passage, and take the selection down with it — the popup's way. */
   const copyToClipboard = useCallback(
     (text: string) => {
-      const clipboard = navigator.clipboard
-      if (text && clipboard) {
-        void clipboard.writeText(text).catch((cause: unknown) => {
-          console.error('Paper: could not copy the selection', cause)
-          setNotice('That could not be copied to the clipboard.')
-        })
-      } else if (text) {
-        setNotice('This device has no clipboard available.')
-      }
+      copyText(text)
       clearSelection()
     },
-    [clearSelection],
+    [copyText, clearSelection],
   )
 
   /**
@@ -773,6 +779,7 @@ export function Reader({
                   note={footnote}
                   stage={stage}
                   onMount={book.setFootnoteMount}
+                  onCopy={copyText}
                   onDismiss={() => onDismissFootnote?.()}
                 />
 

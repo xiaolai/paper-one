@@ -14,6 +14,7 @@ import {
   type FootnoteType,
 } from 'foliate-js/footnotes.js'
 import { rangeBoxInHost, type HostRect } from './coordinates'
+import { isBacklink } from './backlink'
 import { markProse } from './markProse'
 import {
   ANNOTATION_KINDS,
@@ -252,6 +253,64 @@ export function releaseNoteView(view: Pick<View, 'close' | 'remove'>): void {
     console.warn('Paper: a note view would not close cleanly', cause)
   }
   view.remove()
+}
+
+/** What a link inside a note needs, to move the reader instead of the note. */
+export interface NoteLinkHost {
+  /** Tell the host where the reader is leaving from, so `⌘[` can come back. */
+  readonly onLink: (detail: LinkDetail, event: Event) => void
+  /** A scheme that leaves the book. The host cancels and routes it. */
+  readonly onExternalLink: (detail: ExternalLinkDetail, event: Event) => void
+  /** Take the note down. */
+  readonly close: () => void
+  /** Move the READER — the main view, not the note's. */
+  readonly goTo: (href: string) => void
+}
+
+/**
+ * A link CLICKED INSIDE A NOTE moves the reader, not the note.
+ *
+ * A note is a whole `foliate-view`, so foliate wires its document up the same
+ * way it wires the book's: unhandled, the note's own `link` event ends in
+ * `noteView.goTo(href)` — and the note view navigates ITSELF. Clicking the `↩`
+ * at the end of an endnote LOADED THE WHOLE CHAPTER INTO THE NOTE BOX,
+ * measured at 90px tall, with the reader still on the page they started from.
+ * That is the other half of "no back to reference anchor": the control is right
+ * there in the note, and it did the opposite of what it says.
+ *
+ * So: cancel, take the note down, and send the reader there.
+ *
+ * EXPORTED FOR THE ORDER, as `releaseNoteView` is, and for the same reason —
+ * the order is the whole of it and cannot be checked from outside the class.
+ * `onLink` comes BEFORE `goTo` so the origin is recorded from where the reader
+ * still is; `close` comes before both so the note is not sitting over the page
+ * it is sending them to. These suites run without a DOM, so a stand-in through
+ * this seam is the only way to prove any of that.
+ *
+ * PER NOTE VIEW, NOT ONCE. Unlike the footnote handler's own events, each note
+ * is a new element and there is nowhere else to put this. The view is closed
+ * and dropped when the note goes, so the listeners go with it.
+ */
+export function watchNoteLinks(
+  noteView: Pick<View, 'addEventListener'>,
+  host: NoteLinkHost,
+): void {
+  noteView.addEventListener('link', (event) => {
+    /* The note view must not navigate itself. This is the fix; the rest is
+       where the reader goes instead. */
+    event.preventDefault()
+    const detail = (event as CustomEvent<LinkDetail>).detail
+    host.close()
+    host.onLink(detail, event)
+    host.goTo(detail.href)
+  })
+  noteView.addEventListener('external-link', (event) => {
+    /* THE HOST DECIDES, as it does for the book — it cancels and hands the href
+       to the platform's browser through a route Paper chose. Left alone,
+       foliate calls `globalThis.open` with the book's own string, and a note is
+       no more trustworthy than a page. */
+    host.onExternalLink((event as CustomEvent<ExternalLinkDetail>).detail, event)
+  })
 }
 
 export interface FootnoteRender {
@@ -1156,6 +1215,7 @@ export class ReaderSession {
     this.#footnotes.addEventListener('before-render', (event) => {
       if (this.#disposed) return
       const { view } = (event as CustomEvent<{ view: View }>).detail
+      this.#watchNoteLinks(view)
       /**
        * SCROLLED FLOW, NOT PAGINATED, and this is what lets the box fit the
        * note.
@@ -1229,9 +1289,35 @@ export class ReaderSession {
     })
   }
 
+  /** See `watchNoteLinks` — the order is the fix, and it is asserted there. */
+  #watchNoteLinks(noteView: View): void {
+    watchNoteLinks(noteView, {
+      onLink: (detail, event) => {
+        if (!this.#disposed) this.#cb.onLink(detail, event)
+      },
+      onExternalLink: (detail, event) => {
+        if (!this.#disposed) this.#cb.onExternalLink(detail, event)
+      },
+      close: () => this.closeFootnote(),
+      goTo: (href) => {
+        const reader = this.#view
+        if (this.#disposed || !reader) return
+        void reader.goTo(href).catch(reportNavigation('goTo', href))
+      },
+    })
+  }
+
   #openFootnote(view: View, detail: LinkDetail, event: Event): boolean {
     const book = view.book
     if (!book) return false
+    /* A LINK OUT OF A NOTE IS NOT A LINK INTO ONE — see `isBacklink`, which
+       carries the whole rationale. Left to foliate, the `*` at the head of a
+       footnote opened a popover containing that same `*` and nothing else
+       (measured: 22px tall), and took away the only thing a backlink is for.
+       Declining hands it back to the ordinary link path, so it navigates to
+       the reference and `⌘[` comes back — which is what it should always have
+       done. */
+    if (isBacklink(detail.a)) return false
     /* PDF IS NOT IN SCOPE and needs no branch to say so: `makePdf`'s adapter
        has no `epub:type`, no ARIA role and no superscript, so the detection
        declines it on its own rules. A format check here would be a second

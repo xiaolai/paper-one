@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { View } from 'foliate-js/view.js'
-import { ReaderSession, directionOf, readMeta, releaseNoteView } from './session'
+import { ReaderSession, directionOf, readMeta, releaseNoteView, watchNoteLinks } from './session'
 import type { MarkAnchor, MarkPalette, SelectionSnapshot, SessionCallbacks } from './session'
 import { buildFixture, elem, txt } from './wordSnap/domFake.testkit'
 import { fakeDocument, type FakeDocument } from './wordSnap/documentFake.testkit'
@@ -1015,6 +1015,63 @@ describe('releaseNoteView', () => {
   })
 })
 
+/**
+ * A link inside a NOTE moves the reader, not the note.
+ *
+ * Unhandled, foliate ends the note's own `link` event in `noteView.goTo(href)`
+ * — so the `↩` at the end of an endnote loaded the whole chapter into a 90px
+ * box while the reader stayed where they were. Measured in the app before the
+ * fix, against *What's Our Problem?*.
+ */
+describe('watchNoteLinks', () => {
+  /** A note view that hands its listeners straight back, with no DOM. */
+  const noteView = () => {
+    const on: Record<string, (event: Event) => void> = {}
+    return {
+      view: {
+        addEventListener: (name: string, fn: (event: Event) => void) => {
+          on[name] = fn
+        },
+      },
+      fire: (name: string, detail: unknown) => {
+        const event = { preventDefault: () => order.push('preventDefault'), detail } as never
+        on[name]?.(event)
+        return event
+      },
+    }
+  }
+  let order: string[] = []
+  beforeEach(() => {
+    order = []
+  })
+
+  const host = () => ({
+    onLink: () => order.push('onLink'),
+    onExternalLink: () => order.push('onExternalLink'),
+    close: () => order.push('close'),
+    goTo: (href: string) => order.push(`goTo:${href}`),
+  })
+
+  it('cancels the note view, closes the note, then moves the reader', () => {
+    const note = noteView()
+    watchNoteLinks(note.view, host())
+    note.fire('link', { href: 'ch01.xhtml#ref' })
+    /* `preventDefault` first, or the note navigates itself; `onLink` before
+       `goTo`, or the origin is recorded from where the reader has already
+       arrived and ⌘[ leads nowhere. */
+    expect(order).toEqual(['preventDefault', 'close', 'onLink', 'goTo:ch01.xhtml#ref'])
+  })
+
+  it('hands an external link to the host, and does not navigate the book', () => {
+    const note = noteView()
+    watchNoteLinks(note.view, host())
+    note.fire('external-link', { href_: 'https://example.org/x' })
+    /* NOT cancelled here — the host cancels, as it does for the book, and
+       decides where the href goes. Nothing moves the reader. */
+    expect(order).toEqual(['onExternalLink'])
+  })
+})
+
 describe('ReaderSession link events', () => {
   const linked = async () => {
     const view = fakeView()
@@ -1034,7 +1091,9 @@ describe('ReaderSession link events', () => {
    * took three passing tests down with it. `super: true` makes the superscript
    * heuristic fire, which is how a book that declares nothing is recognised.
    */
-  const anchorEl = (over: { type?: string; role?: string; super?: boolean } = {}) =>
+  const anchorEl = (
+    over: { type?: string; role?: string; super?: boolean; inNote?: string } = {},
+  ) =>
     ({
       getAttribute: (name: string) => (name === 'role' ? (over.role ?? null) : '#note-1'),
       getAttributeNS: () => over.type ?? null,
@@ -1043,8 +1102,20 @@ describe('ReaderSession link events', () => {
       /* A PARENT, because `maybe()` calls `isSuper(a.parentElement)` with no
          null guard — an anchor at the root of its document would throw inside
          `footnotes.js`. Latent upstream, since a real book's anchor always has
-         one; not latent for a fake. */
-      parentElement: { matches: () => false } as unknown as HTMLElement,
+         one; not latent for a fake.
+
+         IT ANSWERS THE ANCESTRY QUESTIONS TOO. `isBacklink` walks up from the
+         anchor looking for the container that says "the thing you are inside is
+         the note", so a parent that only knew `matches` threw
+         `getAttributeNS is not a function` and took six passing tests with it.
+         `inNote` makes this parent that container; the chain ends here either
+         way, which is an anchor in ordinary prose. */
+      parentElement: {
+        getAttributeNS: () => over.inNote ?? null,
+        getAttribute: () => null,
+        matches: () => false,
+        parentElement: null,
+      } as unknown as HTMLElement,
       ownerDocument: null,
     }) as unknown as HTMLAnchorElement
 
@@ -1122,6 +1193,23 @@ describe('ReaderSession link events', () => {
       true,
     )
     expect(event.defaultPrevented).toBe(false)
+  })
+
+  it('declines the mark inside a note, though the book calls that a noteref too', async () => {
+    /* THE CASE UPSTREAM MISSES, and it is not exotic — it is what *What's Our
+       Problem?* ships on every footnote it has. `isFootnoteReference` tests for
+       a backlink only in its `maybe()` branch, so an anchor that says `noteref`
+       goes down `yes` unexamined, and the `*` at the head of a footnote opened
+       a popover holding that same `*` and nothing else. Declining sends it to
+       the host, which navigates to the reference and records the origin. */
+    const { view, cb } = await linked()
+    const event = view.emit(
+      'link',
+      { a: anchorEl({ type: 'noteref', inNote: 'footnote' }), href: 'ch01.xhtml#ref' },
+      true,
+    )
+    expect(event.defaultPrevented).toBe(false)
+    expect(cb.calls['onLink']?.length).toBe(1)
   })
 
   it('falls back to the JUMP when the note cannot be shown, rather than swallowing it', async () => {

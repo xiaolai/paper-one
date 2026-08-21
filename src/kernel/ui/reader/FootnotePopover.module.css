@@ -25,6 +25,20 @@
   box-shadow: var(--shadow-pop);
 }
 
+/* What the book called it on the left, what can be done with it on the right.
+   ONE ROW, and it exists even when the book declared no type: the controls
+   belong at the top of the box whether or not there is a label beside them,
+   and a row that appears and disappears with the label would move them. */
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-8);
+  /* The height of a control, so the row does not collapse around a label that
+     is shorter than the buttons in it. */
+  min-height: var(--control-sm);
+}
+
 /* What the book called it, when it said. Absent for a book that declared
    nothing, which is most of them — see `heading`. */
 .label {
@@ -34,10 +48,49 @@
   text-transform: uppercase;
 }
 
-/* The mount point for the rendered `foliate-view`. It carries the book's own
-   markup, so this sizes it and otherwise stays out of the way. */
+/* PUSHED RIGHT BY ITS OWN MARGIN, not only by `justify-content`. With no label
+   the row has one child, and `space-between` would leave it on the left. */
+.tools {
+  display: flex;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+
+/* The same control the selection popup uses — see `SelectionTools.module.css`.
+   Matched by taking its shape rather than by eye: these two are the app's only
+   surfaces that appear over the page and go away again, and a reader meets
+   them within seconds of each other. */
+.tool {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: var(--control-sm);
+  height: var(--control-sm);
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-control);
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  transition:
+    background var(--motion-popover),
+    color var(--motion-popover);
+}
+
+.tool:hover,
+.tool:focus-visible {
+  background: var(--wash);
+  color: var(--ink);
+}
+
+.tool:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: calc(-1 * var(--space-2));
+}
+
 /* The WINDOW onto the note. `FootnotePopover` sets an inline height once it
-   knows how tall the note is; until then this is the full box.
+   knows how tall the note is; until then this is the full box, and the popover
+   is invisible so that full box is never painted — see `Fit`.
 
    IT CLIPS, IT DOES NOT SCROLL, and it never resizes what is inside it. The
    view below is always `--footnote-max-h` tall, so showing a 44px note means
@@ -66,20 +119,4 @@
   width: 100%;
   height: var(--footnote-max-h);
   border: none;
-}
-
-.dismiss {
-  align-self: flex-end;
-  border: none;
-  background: none;
-  padding: 0;
-  color: var(--muted);
-  font-family: inherit;
-  font-size: var(--text-small);
-  text-decoration: underline;
-  cursor: pointer;
-}
-
-.dismiss:hover {
-  color: var(--ink);
 }

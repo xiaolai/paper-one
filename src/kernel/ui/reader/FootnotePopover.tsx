@@ -1,5 +1,7 @@
-import { useEffect, useRef, useState } from 'react'
-import { FOOTNOTE } from '../../core/metrics'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Check, Copy, X } from 'lucide-react'
+import { FOOTNOTE, ICON } from '../../core/metrics'
+import { noteText } from './backlink'
 import type { FootnoteRender } from './session'
 import styles from './FootnotePopover.module.css'
 
@@ -35,6 +37,8 @@ export interface FootnotePopoverProps {
   stage: HTMLElement | null
   /** Hand the session the box to render into. Called on mount and unmount. */
   onMount: (mount: HTMLElement | null) => void
+  /** Put the note on the clipboard. The host owns the failure path — see `Reader`. */
+  onCopy: (text: string) => void
   onDismiss: () => void
 }
 
@@ -48,11 +52,35 @@ const GAP = 10
  * second of `requestAnimationFrame` measured an empty document — the popover's
  * renderer competes with the main view's, and how long that takes is a
  * property of the machine. Three seconds at 100ms is thirty cheap checks, and
- * a note that never lays out simply keeps the full box, which is the behaviour
+ * a note that never lays out is shown at the full box, which is the behaviour
  * without any of this.
  */
 const MEASURE_EVERY_MS = 100
 const MEASURE_FOR_MS = 3000
+
+/** How long the copy button says it worked before going back to offering it. */
+const COPIED_FOR_MS = 1400
+
+/**
+ * What the box knows about its own height.
+ *
+ * THE POPOVER IS NOT SHOWN WHILE THIS IS `measuring`, and that is the whole
+ * point of naming the state. The stylesheet's height is the full 320px box, the
+ * measurement lands 100ms later at the note's real height, and painting both in
+ * turn is a panel that appears at full size and then snaps shut — which reads
+ * as a glitch rather than as a note. Held invisible until it is settled, it
+ * appears once, at the size it will keep.
+ *
+ * `unmeasured` is the honest third case rather than a silent fallback to
+ * `fitted`: a note whose document never laid out is SHOWN, at the full box,
+ * because a note the reader cannot see is worse than one in too much white.
+ */
+type Fit =
+  | { readonly state: 'measuring' }
+  | { readonly state: 'fitted'; readonly height: number }
+  | { readonly state: 'unmeasured' }
+
+const MEASURING: Fit = { state: 'measuring' }
 
 /** A label a reader would recognise, or nothing. */
 function heading(type: FootnoteRender['type']): string | null {
@@ -75,7 +103,7 @@ function heading(type: FootnoteRender['type']): string | null {
   }
 }
 
-export function FootnotePopover({ note, stage, onMount, onDismiss }: FootnotePopoverProps) {
+export function FootnotePopover({ note, stage, onMount, onCopy, onDismiss }: FootnotePopoverProps) {
   const body = useRef<HTMLDivElement | null>(null)
   /**
    * How tall the note is once it has laid out — the height to CLIP to.
@@ -91,7 +119,8 @@ export function FootnotePopover({ note, stage, onMount, onDismiss }: FootnotePop
    * nothing to repaint. Capped at the box, because a longer note scrolls
    * inside the view rather than growing the popover.
    */
-  const [contentHeight, setContentHeight] = useState<number | null>(null)
+  const [fit, setFit] = useState<Fit>(MEASURING)
+  const [copied, setCopied] = useState(false)
   /* Registered once. Every note is appended into this element, and it has to
      be the SAME element every time — see the note on re-parenting above. */
   useEffect(() => {
@@ -101,9 +130,10 @@ export function FootnotePopover({ note, stage, onMount, onDismiss }: FootnotePop
 
   useEffect(() => {
     if (!note) {
-      setContentHeight(null)
+      setFit(MEASURING)
       return
     }
+    setFit(MEASURING)
     let live = true
     let waited = 0
     let timer = 0
@@ -112,18 +142,49 @@ export function FootnotePopover({ note, stage, onMount, onDismiss }: FootnotePop
       const doc = note.view.renderer?.getContents?.()[0]?.doc
       const height = doc?.body?.scrollHeight ?? 0
       if (height > 0) {
-        setContentHeight(Math.min(height, FOOTNOTE.maxHeight))
+        setFit({ state: 'fitted', height: Math.min(height, FOOTNOTE.maxHeight) })
         return
       }
       waited += MEASURE_EVERY_MS
       if (waited < MEASURE_FOR_MS) timer = window.setTimeout(tick, MEASURE_EVERY_MS)
+      /* GIVING UP IS A STATE, NOT A TIMEOUT THAT LEAVES NOTHING BEHIND. The
+         box is invisible until this settles, so a run that simply stopped
+         would hide the note for good. */
+      else setFit({ state: 'unmeasured' })
     }
-    timer = window.setTimeout(tick, MEASURE_EVERY_MS)
+    /* The first check costs nothing and a note that is already laid out is
+       shown in this frame rather than in the next tenth of a second. */
+    tick()
     return () => {
       live = false
       clearTimeout(timer)
     }
   }, [note])
+
+  /* The confirmation goes away on its own, and with the note when it closes —
+     a tick still showing over the next note would be claiming that one was
+     copied too. */
+  useEffect(() => {
+    if (!copied) return
+    const timer = window.setTimeout(() => setCopied(false), COPIED_FOR_MS)
+    return () => clearTimeout(timer)
+  }, [copied])
+  useEffect(() => setCopied(false), [note])
+
+  /**
+   * Copy the note.
+   *
+   * READ FROM THE RENDERED DOCUMENT, not from anything held alongside it. The
+   * note in the box is what `FootnoteHandler` extracted, and it is the only
+   * copy of it there is — `FootnoteRender` carries the view, not the text.
+   */
+  const copy = useCallback(() => {
+    const doc = note?.view.renderer?.getContents?.()[0]?.doc
+    const text = doc?.body ? noteText(doc.body) : ''
+    if (!text) return
+    onCopy(text)
+    setCopied(true)
+  }, [note, onCopy])
 
   /**
    * Esc closes it, and the key is taken before anything else can have it.
@@ -185,27 +246,58 @@ export function FootnotePopover({ note, stage, onMount, onDismiss }: FootnotePop
       }
     : { left: '50%', top: '50%', transform: 'translate(-50%, -50%)' }
 
+  /* IN PLACE BUT NOT YET SHOWN. `visibility` rather than `display`, for the
+     same reason the parked state uses it: the note is rendering into this box
+     right now and needs a real size to columnize into. See `Fit`. */
+  const settling = note !== null && fit.state === 'measuring'
   const label = heading(note?.type ?? null)
+  const shown = note !== null && !settling
 
   return (
     <div
       className={styles.popover}
-      style={note ? placed : parked}
-      {...(note ? { role: 'dialog', 'aria-label': label ?? 'Note' } : { 'aria-hidden': true })}
+      style={note ? { ...placed, ...(settling ? { visibility: 'hidden' } : null) } : parked}
+      {...(shown ? { role: 'dialog', 'aria-label': label ?? 'Note' } : { 'aria-hidden': true })}
     >
-      {note && label && <div className={styles.label}>{label}</div>}
+      {/* THE LABEL AND THE CONTROLS SHARE A ROW, and the row exists even when
+          the book declared no type — the controls belong at the top right of
+          the box whether or not there is anything to their left. */}
+      {note && (
+        <div className={styles.head}>
+          {label && <span className={styles.label}>{label}</span>}
+          <div className={styles.tools}>
+            <button
+              type="button"
+              className={styles.tool}
+              onClick={copy}
+              title={copied ? 'Copied' : 'Copy'}
+              aria-label="Copy this note"
+            >
+              {copied ? (
+                <Check size={ICON.control} strokeWidth={ICON.stroke} />
+              ) : (
+                <Copy size={ICON.control} strokeWidth={ICON.stroke} />
+              )}
+            </button>
+            <button
+              type="button"
+              className={styles.tool}
+              onClick={onDismiss}
+              title="Close"
+              aria-label="Close this note"
+            >
+              <X size={ICON.control} strokeWidth={ICON.stroke} />
+            </button>
+          </div>
+        </div>
+      )}
       <div
         className={styles.body}
         ref={body}
         /* The full box until measured, and the note's own height after — as a
-           WINDOW onto a view that never changes size. See the state above. */
-        style={contentHeight === null ? undefined : { height: contentHeight }}
+           WINDOW onto a view that never changes size. See `Fit`. */
+        style={fit.state === 'fitted' ? { height: fit.height } : undefined}
       />
-      {note && (
-        <button type="button" className={styles.dismiss} onClick={onDismiss}>
-          Close
-        </button>
-      )}
     </div>
   )
 }
