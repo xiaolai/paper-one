@@ -22,6 +22,7 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage && node scripts/check-coverage.mjs",
     "test:projects": "node scripts/check-test-projects.mjs",
+    "corpus": "node scripts/scan-corpus.mjs",
     "test:ledger": "node scripts/check-test-ledger.mjs",
     "boundaries": "node scripts/check-boundaries.mjs",
     "boundaries:selftest": "node scripts/check-boundaries.selftest.mjs",
