@@ -222,6 +222,38 @@ function anchorRectInHost(a: Element, host: HTMLElement): HostRect | null {
   }
 }
 
+/**
+ * Let go of a note's view — CLOSE IT BEFORE DETACHING IT.
+ *
+ * `remove()` alone throws, and the throw reaches the app's error boundary: the
+ * paginator keeps a `ResizeObserver` on its container and the inner view keeps
+ * one on `doc.body`, so detaching fires them with a size of zero, `render`
+ * runs against a document that is no longer there, and `columnize` reads
+ * `doc.documentElement` off null. **Closing a footnote took the book down.**
+ *
+ * `close()` is what unobserves — it calls `renderer.destroy()`, which does
+ * `#observer.unobserve` on both. It does NOT destroy the book, which matters
+ * because a note's view shares one with the reader: `Loader.destroy`, the call
+ * that would revoke every shared object URL, is reachable only through
+ * `Book.destroy`, and nothing here calls that.
+ *
+ * EXPORTED FOR THE ORDER. The order is the whole of the fix and it cannot be
+ * checked from outside the class — these suites run without a DOM, so no real
+ * view can be built. A stand-in through this seam can prove `close` precedes
+ * `remove`, which is the thing that was wrong.
+ *
+ * Guarded, because a teardown that throws must not stop the popover closing:
+ * the reader asked for it to go away, and that has to happen either way.
+ */
+export function releaseNoteView(view: Pick<View, 'close' | 'remove'>): void {
+  try {
+    view.close()
+  } catch (cause) {
+    console.warn('Paper: a note view would not close cleanly', cause)
+  }
+  view.remove()
+}
+
 export interface FootnoteRender {
   readonly view: View
   readonly href: string
@@ -634,8 +666,14 @@ export class ReaderSession {
    * `detectFootnotes` switch and its listeners.
    */
   readonly #footnotes = new FootnoteHandler()
-  /** The rendered note's view, so it can be released on dismiss. */
-  #footnoteView: HTMLElement | null = null
+  /**
+   * The rendered note's view, so it can be released on dismiss.
+   *
+   * Typed as `View`, not `HTMLElement`: releasing it means calling `close()`
+   * to unobserve the paginator before detaching, and a bare element type hides
+   * that method — which is how it came to be detached without being closed.
+   */
+  #footnoteView: View | null = null
   /** Where the reference was, captured before the note resolves. */
   #footnoteAt: HostRect | null = null
   /**
@@ -1118,6 +1156,28 @@ export class ReaderSession {
     this.#footnotes.addEventListener('before-render', (event) => {
       if (this.#disposed) return
       const { view } = (event as CustomEvent<{ view: View }>).detail
+      /**
+       * SCROLLED FLOW, NOT PAGINATED, and this is what lets the box fit the
+       * note.
+       *
+       * The popover's view is a paginator like the reader's, which COLUMNIZES
+       * into whatever box it is given — so a box sized to the note's content
+       * simply reflows the text into a second column that is off-view. Sizing
+       * the box was built against a paginated note and withdrawn for exactly
+       * that: the measurement was right (43px for a one-line footnote, box
+       * 420×115) and the note disappeared.
+       *
+       * A note is not a page and should never have been paginated. In scrolled
+       * flow the content is one continuous column, `body.scrollHeight` means
+       * what it says, and a long endnote scrolls inside the box instead of
+       * hiding in column two.
+       *
+       * SET BEFORE `goTo`, which is why `before-render` is the only place this
+       * can happen: `flow` is what triggers the paginator to re-render, and
+       * `applyLayout` records that anything set after it lands too late.
+       */
+      view.renderer?.setAttribute('flow', 'scrolled')
+
       /* THE STYLESHEET OWNS THE SIZE when there is a mount, and this sets none.
          An inline `height: 100%` here beat `.body > *` and resolved to zero
          against an auto-height parent, so the note rendered correctly into a
@@ -1136,9 +1196,12 @@ export class ReaderSession {
         ].join(';')
       }
       ;(mount ?? this.#host).appendChild(view)
-      /* Held now, so a note that never finishes rendering is still released —
+      /* The one being replaced is CLOSED, not just detached — see
+         `#releaseFootnoteView`. Opening a second note while the first is up
+         would otherwise throw for exactly the reason dismissing one did.
+         Held after, so a note that never finishes rendering is still released:
          `closeFootnote` and the next `render` both look here. */
-      this.#footnoteView?.remove()
+      this.#releaseFootnoteView()
       this.#footnoteView = view
     })
 
@@ -1204,11 +1267,15 @@ export class ReaderSession {
   }
 
   /** Close whatever note is open, and let go of the view it was rendered in. */
+  /** See `releaseNoteView` — the order is the fix. */
+  #releaseFootnoteView(): void {
+    const view = this.#footnoteView
+    this.#footnoteView = null
+    if (view) releaseNoteView(view)
+  }
+
   closeFootnote(): void {
-    if (this.#footnoteView) {
-      this.#footnoteView.remove()
-      this.#footnoteView = null
-    }
+    this.#releaseFootnoteView()
     this.#footnoteAt = null
     if (!this.#disposed) this.#cb.onFootnote(null)
   }

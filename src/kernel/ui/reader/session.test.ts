@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { View } from 'foliate-js/view.js'
-import { ReaderSession, directionOf, readMeta } from './session'
+import { ReaderSession, directionOf, readMeta, releaseNoteView } from './session'
 import type { MarkAnchor, MarkPalette, SelectionSnapshot, SessionCallbacks } from './session'
 import { buildFixture, elem, txt } from './wordSnap/domFake.testkit'
 import { fakeDocument, type FakeDocument } from './wordSnap/documentFake.testkit'
@@ -980,6 +980,39 @@ beforeEach(() => {
 })
 afterEach(() => {
   globalThis.getComputedStyle = realComputedStyle
+})
+
+/**
+ * Letting go of a note's view.
+ *
+ * The order is the whole of it: `remove()` without `close()` leaves the
+ * paginator's ResizeObserver on a container that has just gone to zero, and
+ * the re-render it triggers reads `documentElement` off a document that is no
+ * longer there. Closing a footnote took the book down with it.
+ */
+describe('releaseNoteView', () => {
+  it('closes before it detaches', () => {
+    const order: string[] = []
+    releaseNoteView({
+      close: () => order.push('close'),
+      remove: () => order.push('remove'),
+    } as never)
+    expect(order).toEqual(['close', 'remove'])
+  })
+
+  it('still detaches when closing throws', () => {
+    /* A teardown that fails must not leave the note on screen. The reader
+       asked for it to go away, and that has to happen either way. */
+    const order: string[] = []
+    releaseNoteView({
+      close: () => {
+        order.push('close')
+        throw new Error('renderer already gone')
+      },
+      remove: () => order.push('remove'),
+    } as never)
+    expect(order).toEqual(['close', 'remove'])
+  })
 })
 
 describe('ReaderSession link events', () => {

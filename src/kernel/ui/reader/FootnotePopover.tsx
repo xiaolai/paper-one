@@ -44,17 +44,24 @@ const GAP = 10
 /**
  * THE BOX IS A FIXED HEIGHT, and a short note sits in more white than it needs.
  *
- * Sizing it to the note was built and withdrawn, and the reason is worth
- * keeping. The measurement works — `body.scrollHeight` inside the rendered
- * note reports 43px for a one-line footnote, and the box duly became 420x115.
- * The note then disappeared: the note is laid out by a PAGINATOR, and
- * shrinking its container re-columnizes it, so the text moved into a column
- * that was now off-view. A tight box showing nothing is worse than a tall box
- * showing the note.
+ * Fitting it to the note was built twice and withdrawn twice, and both attempts
+ * are worth recording because the second looked like it had worked.
  *
- * Doing it properly means rendering the note in scrolled flow rather than
- * paginated, which is a change to how the popover's view is created and not a
- * measurement at all.
+ * **Paginated.** The measurement was right — `body.scrollHeight` reports 43px
+ * for a one-line footnote and the box became 420×115 — and the note vanished,
+ * because a paginator reflows its text into a new column when its box shrinks.
+ *
+ * **Scrolled.** `session.ts` now asks the note's view for `flow="scrolled"`,
+ * which removes that reflow and is a real improvement in its own right: a long
+ * endnote scrolls inside the box instead of hiding in column two. The box then
+ * sized correctly to 420×116 and the DOM agreed — content at y=0, 328×15, in a
+ * 386×44 box — and it still did not PAINT. Laid out, measurable, invisible.
+ *
+ * So the remaining obstacle is not layout and not the flow: it is that
+ * resizing the box after the view has rendered leaves the iframe composited
+ * against its old size. Sizing it BEFORE the note renders would need the
+ * height before the content exists, which is the thing that cannot be known.
+ * A tall box showing the note beats a tight one showing nothing.
  */
 
 /** A label a reader would recognise, or nothing. */
