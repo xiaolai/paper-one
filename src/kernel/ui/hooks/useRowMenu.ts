@@ -92,8 +92,22 @@ export function useRowMenu(
   useEffect(() => {
     if (!open) return
     const close = () => closeRef.current()
+    /* ALL THREE MENU-ITEM ROLES, plus an explicit opt-in.
+     *
+     * `menuitem` alone was the whole query, so a menu whose rows are radios or
+     * checkboxes — a filter menu, where every row reports a state — had an item
+     * list of length zero and the walk below returned before it did anything.
+     * The reader was told "menu" and given a trigger they could not leave.
+     *
+     * `data-menu-item` is for the row that cannot wear one of the roles: a
+     * menu's own filter field has to stay a `search` input to be announced as
+     * one, and putting a menu role on it would take that away. */
     const items = () =>
-      Array.from(menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])
+      Array.from(
+        menuRef.current?.querySelectorAll<HTMLElement>(
+          '[role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [data-menu-item]',
+        ) ?? [],
+      )
     const onPointer = (event: PointerEvent) => {
       const target = event.target as Node
       if (menuRef.current?.contains(target) || moreRef.current?.contains(target)) return
@@ -119,14 +133,19 @@ export function useRowMenu(
       const list = items()
       if (list.length === 0) return
       const at = list.findIndex((item) => item === document.activeElement)
+      /* HOME AND END BELONG TO A TEXT FIELD while the reader is in one — they
+       * move the caret, and taking them to jump the menu would break typing in
+       * a filter field to save a jump the arrows already do. The arrows do not
+       * conflict: in a single-line field they only park the caret at an end. */
+      const typing = document.activeElement instanceof HTMLInputElement
       const to =
         event.key === 'ArrowDown'
           ? (at + 1) % list.length
           : event.key === 'ArrowUp'
             ? (at - 1 + list.length) % list.length
-            : event.key === 'Home'
+            : event.key === 'Home' && !typing
               ? 0
-              : event.key === 'End'
+              : event.key === 'End' && !typing
                 ? list.length - 1
                 : null
       if (to === null) return
@@ -168,10 +187,32 @@ export function useRowMenu(
         items()[0]?.focus({ preventScroll: true })
       }, 0)
     }
+    /*
+     * WAS FOCUS INSIDE, RECORDED WHILE THE MENU IS STILL THERE TO ASK.
+     *
+     * The cleanup below cannot ask. It is a PASSIVE effect, and React detaches
+     * the ref of an unmounted node before passive cleanups run — every caller
+     * renders the menu as `{open && <div ref={menuRef}…>}`, so by then
+     * `menuRef.current` is null and `null?.contains(…)` is undefined. The
+     * containment test was therefore false every single time, for all four
+     * menus that ask for this, and focus fell to `<body>`: a keyboard reader
+     * closing a menu with Escape was returned to the top of the window instead
+     * of to the control they opened it from.
+     *
+     * `focusin` because it bubbles — `focus` does not — and every way focus can
+     * arrive fires it: the move-into-the-menu below, a walk between items, and
+     * a click that takes it away again.
+     */
+    let wasInside = false
+    const onFocusIn = () => {
+      wasInside = menuRef.current?.contains(document.activeElement) ?? false
+    }
+    document.addEventListener('focusin', onFocusIn)
     document.addEventListener('pointerdown', onPointer)
     document.addEventListener('keydown', onKey)
     return () => {
       if (focusTimer !== undefined) window.clearTimeout(focusTimer)
+      document.removeEventListener('focusin', onFocusIn)
       document.removeEventListener('pointerdown', onPointer)
       document.removeEventListener('keydown', onKey)
       /* Focus goes back where it came from — the control that opened the
@@ -179,7 +220,7 @@ export function useRowMenu(
        * user means starting over from the top of the window. Only if focus
        * is still INSIDE the menu: a pointer user who clicked elsewhere has
        * already put it where they meant it. */
-      if (menu && menuRef.current?.contains(document.activeElement)) {
+      if (menu && wasInside) {
         moreRef.current?.focus({ preventScroll: true })
       }
       /* ALSO ON CLEANUP — which is unmount, or `open` flipping false. A

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
-import { COPY_EXCLUDE, COPY_STEPS, copyTree, digestTree, parseArgs, verifyWithout } from './verify-without.mjs'
+import { COPY_EXCLUDE, COPY_STEPS, DELETED_ENV, copyTree, digestTree, parseArgs, verifyWithout } from './verify-without.mjs'
 
 /**
  * `pnpm verify:without <id>` — the mechanics: the copy leaves out what it
@@ -134,6 +134,24 @@ describe('verifyWithout', () => {
     expect(existsSync(dir)).toBe(true)
   })
 
+  /* THE MARKER REACHES EVERY CHILD — see `DELETED_ENV`. Without it a gate
+     inside the copy has no way to know it is in the copy, and the tell it used
+     instead was the absence of `.git`, which is also true of any source archive
+     or plain `cp -r`. A gate excusing a real defect there would report green
+     over the thing it exists to catch. Asserted for every step rather than for
+     one, because a gate added later is exactly the one that would be missed. */
+  it('tells every gate in the copy which capability it deleted', () => {
+    const src = source()
+    const seen = []
+    verifyWithout('example', {
+      source: src,
+      run: (step, _cwd, env) => (seen.push([step.name, env?.[DELETED_ENV]]), 0),
+      log: () => {},
+    })
+    expect(seen.length).toBeGreaterThan(0)
+    for (const [name, id] of seen) expect(id, `${name} was not told`).toBe('example')
+  })
+
   it("returns the first failing step's code and stops there", () => {
     const src = source()
     const ran = []
@@ -186,14 +204,109 @@ describe('the workflow names a capability that can actually be removed', () => {
   const WORKFLOW = fileURLToPath(new URL('../.github/workflows/verify.yml', import.meta.url))
   const MANIFEST = fileURLToPath(new URL('../capabilities.manifest.json', import.meta.url))
 
-  /** Every `pnpm verify:without <id>` the workflow runs. */
-  const named = () => [
-    ...readFileSync(WORKFLOW, 'utf8').matchAll(/verify:without\s+([A-Za-z0-9._-]+)/g),
-  ].map((m) => m[1])
+  /**
+   * Every `pnpm verify:without <id>` the workflow actually RUNS.
+   *
+   * Read from `run:` lines rather than from the file's raw text. A regex over
+   * the whole document is satisfied by a commented-out step, a line in a
+   * `name:`, or a paragraph of documentation — so the workflow could stop
+   * running the deletion proof entirely and this check would go on passing on
+   * the strength of the sentence explaining why it used to.
+   *
+   * A line-oriented read rather than a YAML parse: the repo has no YAML
+   * dependency, and what has to be excluded here is a COMMENT, which is a
+   * property of the line. A step disabled by `if:` would still slip through;
+   * that is a narrower hole than the one this closes, and worth stating rather
+   * than implying.
+   */
+  const namedIn = (file) => {
+    const lines = readFileSync(file, 'utf8').split('\n')
+    const found = []
+    for (const [at, line] of lines.entries()) {
+      if (/^\s*#/.test(line)) continue
+      if (!/^\s*(-\s*)?run:/.test(line)) continue
+      const ids = [...line.matchAll(/verify:without\s+([A-Za-z0-9._-]+)/g)].map((m) => m[1])
+      if (ids.length === 0) continue
+      /* AND THE STEP HAS TO BE ONE THAT ACTUALLY RUNS.
+       *
+       * A step can be switched off without being deleted: `if: false`, or any
+       * condition that is constant, leaves the `run:` line sitting there
+       * looking exactly like a live one. Reading only `run:` lines closed the
+       * comment hole and left this one — the proof could be disabled in a way
+       * that reads as deliberate to a human and as running to this check.
+       *
+       * The step's own block is where an `if:` lives, so it is looked for
+       * between this line and the next `- name:`/`- uses:`/`- run:` above and
+       * below. Anything statically false disqualifies the step; a genuine
+       * expression (`if: github.ref == …`) is left alone, because a step that
+       * runs on some pushes still runs the proof. */
+      const indent = line.search(/\S/)
+      let from = at
+      while (from > 0 && !/^\s*-\s/.test(lines[from])) from -= 1
+      let to = at + 1
+      while (to < lines.length && !/^\s*-\s/.test(lines[to]) && !(lines[to].trim() && lines[to].search(/\S/) < indent - 2)) to += 1
+      const step = lines.slice(from, to).join('\n')
+      /* `-\s*` because the guard can be the step's FIRST key, where YAML
+         writes it as `- if: false` — without it the one shape this is
+         written to catch was the one it missed. */
+      const guard = /^\s*(?:-\s*)?if:\s*(.+)$/m.exec(step)
+      /* A TRAILING COMMENT IS STILL `false`. `if: false # disabled while we
+         investigate` is the shape a switched-off step actually takes in the
+         wild — nobody turns one off without saying why — and requiring the
+         value to be the bare word meant the one spelling this is written to
+         catch was the one it read as live. YAML ends a plain scalar at ` #`. */
+      const value = guard ? guard[1].replace(/\s+#.*$/, '').trim() : ''
+      const off = /^(false|'false'|"false"|\$\{\{\s*false\s*\}\})$/.test(value)
+      if (off) continue
+      found.push(...ids)
+    }
+    return found
+  }
+
+  const named = () => namedIn(WORKFLOW)
 
   it('runs the deletion proof at all', () => {
     // A regex that matches nothing passes every assertion below it.
     expect(named().length).toBeGreaterThan(0)
+  })
+
+  /* THE SCANNER IS HELD TO ITS OWN CLAIM. Every shape it says it ignores is
+     put in front of it here, against a workflow written for the purpose — the
+     real file cannot demonstrate a case it must not contain. Without this the
+     three exclusions are assertions in a comment. */
+  it('ignores a commented, documented, or switched-off proof', () => {
+    const dir = mkdtempSync(path.join(realpathSync(tmpdir()), 'wf-'))
+    roots.push(dir)
+    const scan = (yaml) => {
+      const file = path.join(dir, 'verify.yml')
+      writeFileSync(file, yaml)
+      return namedIn(file)
+    }
+
+    expect(scan('jobs:\n  a:\n    steps:\n      - run: pnpm verify:without sync\n')).toEqual(['sync'])
+    expect(scan('jobs:\n  a:\n    steps:\n      # - run: pnpm verify:without sync\n')).toEqual([])
+    expect(scan('jobs:\n  a:\n    steps:\n      - name: pnpm verify:without sync\n')).toEqual([])
+    expect(
+      scan('jobs:\n  a:\n    steps:\n      - if: false\n        run: pnpm verify:without sync\n'),
+    ).toEqual([])
+    /* WITH THE REASON WRITTEN BESIDE IT, which is how a step is actually
+       switched off — and the spelling the first version of this check read as
+       a live step, because it required the value to be the bare word. */
+    expect(
+      scan(
+        'jobs:\n  a:\n    steps:\n      - if: false # disabled while we investigate\n        run: pnpm verify:without sync\n',
+      ),
+    ).toEqual([])
+    expect(
+      scan("jobs:\n  a:\n    steps:\n      - if: 'false'\n        run: pnpm verify:without sync\n"),
+    ).toEqual([])
+    /* A REAL CONDITION IS NOT A DISABLED STEP. A proof that runs on pushes to
+       main and not on a draft PR is still a proof that runs. */
+    expect(
+      scan(
+        'jobs:\n  a:\n    steps:\n      - if: github.ref == \'refs/heads/main\'\n        run: pnpm verify:without sync\n',
+      ),
+    ).toEqual(['sync'])
   })
 
   /**
@@ -202,12 +315,19 @@ describe('the workflow names a capability that can actually be removed', () => {
    * It has to be asked, because the two look identical from inside once the
    * removal has run: a workflow naming a capability the manifest does not
    * declare is the `example` defect above in a checkout, and is simply the
-   * proof doing its job in the copy. `verify-without` copies the tree WITHOUT
-   * `.git` — deliberately, see the module header — and every checkout has one,
-   * so its absence is the copy identifying itself. `no-binary-source.test.mjs`
-   * turns on the same fact, for the same reason.
+   * proof doing its job in the copy.
+   *
+   * THE COPY SAYS SO OUTRIGHT — `verifyWithout` puts the id it deleted in the
+   * child's environment, and nothing on the real tree sets it. The tell used to
+   * be the ABSENCE of `.git`, which the copy does have in common with the real
+   * repository's opposite — but so does a source archive, a `cp -r` of a
+   * checkout, and anything unpacked from a tarball. In any of those, a stale
+   * workflow reference would have been excused for a reason that has nothing to
+   * do with this script, and the gate would report green over the exact defect
+   * it exists to catch. Absence of a file is not evidence of intent; a name the
+   * deleter wrote down is.
    */
-  const isCheckout = () => existsSync(fileURLToPath(new URL('../.git', import.meta.url)))
+  const deleted = () => process.env[DELETED_ENV]
 
   it('names only ids the manifest declares, and only ones nothing requires', () => {
     const manifest = JSON.parse(readFileSync(MANIFEST, 'utf8'))
@@ -223,7 +343,10 @@ describe('the workflow names a capability that can actually be removed', () => {
          * missing because `capability:remove` has just taken it out, which is
          * the point; asserted, not skipped, by requiring the removal to be
          * complete — the directory has to be gone too. */
-        expect(isCheckout(), `verify:without ${id} — the manifest declares ${ids.join(', ')}`).toBe(false)
+        expect(
+          deleted(),
+          `verify:without ${id} — the manifest declares ${ids.join(', ')}`,
+        ).toBe(id)
         const dir = fileURLToPath(new URL(`../src/capabilities/${id}`, import.meta.url))
         expect(existsSync(dir), `${id} left the manifest but its sources are still here`).toBe(false)
         continue

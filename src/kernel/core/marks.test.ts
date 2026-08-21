@@ -51,8 +51,11 @@ function mark(over: Partial<Mark> = {}): Mark {
  * wider type. This narrows without a cast by deciding the kind in an expression
  * the compiler can follow.
  */
-function annotation(over: Partial<Mark> = {}): Annotation {
-  return { ...mark(over), kind: over.kind === 'companion' ? 'companion' : 'highlight' }
+function annotation(over: Partial<Annotation> = {}): Annotation {
+  /* `Partial<Annotation>`, so a fixture cannot ask for `kind: 'bookmark'` here
+     and silently get a highlight — a test whose meaning changed without its
+     author noticing. */
+  return { ...mark(over), kind: over.kind ?? 'highlight' }
 }
 
 /**
@@ -271,7 +274,7 @@ describe('compareCfi', () => {
 
   it('never throws on an anchor that will not parse', () => {
     /* Marks come out of storage, which is a trust boundary: one bad row must
-     * not take the whole Notes list down. Asserting "does not throw, returns a
+     * not take the whole Marginalia list down. Asserting "does not throw, returns a
      * number" rather than a specific order, because where a malformed CFI sorts
      * is foliate's business and not a promise Paper should pin. */
     for (const bad of ['not a cfi', '', 'epubcfi(', 'epubcfi(/6/4', ' ']) {
@@ -285,7 +288,7 @@ describe('compareMarks', () => {
   it('orders by document position, comparing numbers as numbers', () => {
     /* Lexicographic order is wrong exactly where a book gets long: it walks
      * digit by digit, so chapter 10 sorts between chapter 1 and chapter 2 and
-     * the Notes list stops reading in book order. */
+     * the Marginalia list stops reading in book order. */
     const marks = [
       mark({ id: 'ten', cfi: 'epubcfi(/6/10!/4/2)' }),
       mark({ id: 'four', cfi: 'epubcfi(/6/4!/4/2)' }),
@@ -595,11 +598,14 @@ describe('bookmarks and annotations are told apart', () => {
    * course. Without the class guard the two take turns deleting each other,
    * silently and with no undo. */
   it('does not let a bookmark and a highlight at one anchor supersede each other', () => {
+    /* BOTH ROWS LIVE AFTER EACH INSERTION, not merely "the old one was not
+       tombstoned": dropping the INCOMING row entirely would have satisfied that
+       weaker assertion while losing the mark the reader just made. */
     const kept = upsertMark([highlight], mark({ id: 'b', kind: 'bookmark' }))
-    expect(kept.find((m) => m.id === 'h')?.deletedAt).toBeUndefined()
+    expect(liveMarks(kept).map((m) => m.id).sort()).toEqual(['b', 'h'])
 
     const back = upsertMark([place], mark({ id: 'h2', cfi: place.cfi }))
-    expect(back.find((m) => m.id === 'b')?.deletedAt).toBeUndefined()
+    expect(liveMarks(back).map((m) => m.id).sort()).toEqual(['b', 'h2'])
   })
 
   it('still replaces a bookmark with a bookmark at the same anchor', () => {
@@ -610,12 +616,28 @@ describe('bookmarks and annotations are told apart', () => {
   /* A bookmark must never reach the margin, and it no longer CAN: `marginMarks`
    * takes `readonly Annotation[]`, so handing it one is a compile error rather
    * than a filtered row — the guarantee moved out of this assertion and into
-   * the signature. What is asserted here instead is the part that can still
-   * regress: a bookmark carries no note, so even if one did reach the column's
-   * predicate it would not earn a place in it. */
-  it('gives a bookmark nothing that would earn it a place in the margin', () => {
-    expect(place.note).toBe('')
-    expect(marginMarks([annotation({ id: 'c', kind: 'companion' })])).toHaveLength(1)
+   * the signature. What is left to assert is the SECOND barrier, the one that
+   * is still a runtime predicate: `marginMarks` admits a mark for its note or
+   * for being the companion's, and a bookmark is neither. Both halves are
+   * asserted against the predicate itself rather than read off a fixture's
+   * fields, which was the old version's weakness — it checked that the bookmark
+   * builder writes an empty note, which is `bookmarkFrom`'s own test, and never
+   * asked what the margin does with one. */
+  it('would still keep a bookmark out of the margin if one reached the predicate', () => {
+    /* THE BOOKMARK IS ACTUALLY PUT THROUGH IT. Asserting that a bookmark
+       fixture has an empty note is `bookmarkFrom`'s test, not this one, and it
+       never asks the margin anything — which is what the previous version of
+       this did. The cast is the point rather than a shortcut: it stages
+       precisely the thing the type system now forbids, so what is left of the
+       runtime guard can be held to its promise. */
+    expect(marginMarks([place as Annotation])).toEqual([])
+
+    /* And the guard is a real filter rather than one that drops everything:
+       both ways IN are open to what they are for — something the reader wrote,
+       and the companion's claim, which earns its place with or without a note. */
+    expect(marginMarks([annotation({ id: 'n', note: 'said' })]).map((m) => m.id)).toEqual(['n'])
+    expect(marginMarks([annotation({ id: 'c', kind: 'companion' })]).map((m) => m.id)).toEqual(['c'])
+    expect(marginMarks([annotation({ id: 'q', note: '' })])).toEqual([])
   })
 })
 

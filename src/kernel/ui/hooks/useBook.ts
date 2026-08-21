@@ -58,6 +58,16 @@ export interface BookState {
    * would be switches wired to nothing.
    */
   readonly fixedLayout: boolean
+  /**
+   * Which way this book's text runs, as rendered.
+   *
+   * Anything positioning itself against the PAGE — rather than against the
+   * window — needs it: the page's leading and trailing edges swap in an RTL
+   * book, so a `inset-inline-end` resolved against the app's own direction
+   * puts the mark on the wrong side of a book it is supposed to belong to.
+   * `'ltr'` until a section has rendered, which is what the vast majority are.
+   */
+  readonly direction: 'ltr' | 'rtl'
   readonly doc: Document | null
   readonly error: string | null
 }
@@ -101,6 +111,7 @@ export interface Book extends BookState {
   setPosition: (generation: number, position: ReaderPosition) => void
   setDoc: (generation: number, doc: Document | null) => void
   setFixedLayout: (generation: number, fixed: boolean) => void
+  setDirection: (generation: number, direction: 'ltr' | 'rtl') => void
   setMeta: (generation: number, meta: BookMeta) => void
   /** The book's jacket, or null when it declares none. Never stored as-is. */
   cover: Blob | null
@@ -117,6 +128,7 @@ const NOWHERE: ReaderPosition = {
    * the first section; nothing has been rendered yet. See
    * `ReaderPosition.sectionIndex`. */
   sectionIndex: null,
+  sectionExact: false,
 }
 
 /**
@@ -148,6 +160,7 @@ export function useBook(): Book {
   const [cover, setCoverState] = useState<Blob | null>(null)
   const [doc, setDocState] = useState<Document | null>(null)
   const [fixedLayout, setFixedLayoutState] = useState(false)
+  const [direction, setDirectionState] = useState<'ltr' | 'rtl'>('ltr')
   const [error, setError] = useState<string | null>(null)
   /**
    * The book's durable identity, resolved from its content.
@@ -182,6 +195,7 @@ export function useBook(): Book {
     setCoverState(null)
     setDocState(null)
     setFixedLayoutState(false)
+    setDirectionState('ltr')
     setError(null)
     setBookId(null)
   }, [])
@@ -291,6 +305,12 @@ export function useBook(): Book {
     },
     [current],
   )
+  const setDirection = useCallback(
+    (generation: number, value: 'ltr' | 'rtl') => {
+      if (current(generation)) setDirectionState(value)
+    },
+    [current],
+  )
   const setCover = useCallback(
     (generation: number, value: Blob | null) => {
       if (current(generation)) setCoverState(value)
@@ -320,6 +340,7 @@ export function useBook(): Book {
       meta,
       doc,
       fixedLayout,
+      direction,
       error,
       open,
       close,
@@ -338,6 +359,7 @@ export function useBook(): Book {
       setPosition,
       setDoc,
       setFixedLayout,
+      setDirection,
       setMeta,
       cover,
       setCover,
@@ -355,6 +377,7 @@ export function useBook(): Book {
        * a stale `false` made every PDF gesture drop for as long as nothing else
        * in this list happened to change. */
       fixedLayout,
+      direction,
       error,
       open,
       close,
@@ -373,6 +396,7 @@ export function useBook(): Book {
       setPosition,
       setDoc,
       setFixedLayout,
+      setDirection,
       setMeta,
       cover,
       setCover,

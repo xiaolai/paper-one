@@ -98,7 +98,7 @@ function matches(mark: Mark, filter: KindFilter): boolean {
      * chip means, and "notes" meaning "anything with writing on it" is the
      * whole rule. */
     case 'Notes':
-      return mark.note !== ''
+      return isAnnotation(mark) && mark.note !== ''
     case 'Marks':
       return mark.kind === 'highlight'
     case 'Bookmarks':
@@ -133,8 +133,16 @@ function NoteEditor({ initial, onCommit, onDone }: NoteEditorProps) {
    * truth at teardown.
    */
   const draft = useRef(initial)
-  /** What is already stored, so an unchanged note is not written again. */
-  const stored = useRef(initial)
+  /**
+   * What is already stored, so an unchanged note is not written again.
+   *
+   * TRIMMED, because what it is compared against is. `save` trims the draft and
+   * then tested it against the untrimmed stored value, so a note that happens
+   * to be stored with a leading space differed from itself: opening it and
+   * closing it again rewrote it — a new HLC stamp, a write, and a row that
+   * looks edited to every replica, for a note nobody touched.
+   */
+  const stored = useRef(initial.trim())
   const commit = useRef(onCommit)
   commit.current = onCommit
 
@@ -253,6 +261,9 @@ function PlaceRow({
   const chapter = bookmark.chapter || 'Somewhere in this book'
   return (
     <>
+      {/* NO BOOK LINE HERE. The row wrapper above draws it for every mark that
+          is not from the open one, place rows included — drawing a second here
+          printed the title twice on every cross-book bookmark. */}
       <button
         type="button"
         className={styles.noteJump}
@@ -305,6 +316,17 @@ export interface MarginaliaProps {
   /** Injected so a test can assert an age without waiting for one to pass. */
   now?: number
   /**
+   * The title of a book, by id.
+   *
+   * A CROSS-BOOK LIST HAS TO SAY WHICH BOOK. A row carries a chapter and a
+   * line, and neither identifies the work: two books with a chapter called
+   * "Introduction" produce two rows that look the same, and a row from a book
+   * that is not open cannot be jumped to either — so the reader is shown
+   * something they can neither place nor reach. Shown only on rows OUTSIDE the
+   * open book; inside it, the book is the one they are reading.
+   */
+  titleOf?: ((bookId: string) => string | undefined) | undefined
+  /**
    * The mark to reveal, from a click on the page or on a margin note.
    *
    * Opening the panel is not showing the mark: the list holds every mark in
@@ -327,6 +349,7 @@ export function Marginalia({
   focus,
   onGoTo,
   now: injectedNow,
+  titleOf,
 }: MarginaliaProps) {
   const [filter, setFilter] = useState<KindFilter>('All')
   /* ALL BOOKS BY DEFAULT, which is what this panel has always shown. Narrowing
@@ -366,11 +389,21 @@ export function Marginalia({
    * is section-then-CFI and works across both classes; it is only meaningful
    * WITHIN one book, which is why the grouping happens first.
    */
+  /**
+   * Everything the CHOSEN SCOPE covers, before the kind filter.
+   *
+   * One collection, because the rows and the counts both need it and both were
+   * computing it: two spellings of "is this in scope" that can drift, and when
+   * they do the total under the title disagrees with the list under the total.
+   */
+  const inScope = useMemo(
+    () =>
+      everything.filter((mark) => scope === 'All books' || !bookId || mark.bookId === bookId),
+    [everything, scope, bookId],
+  )
+
   const shown = useMemo(() => {
-    const kept = everything.filter(
-      (mark) =>
-        matches(mark, filter) && (scope === 'All books' || !bookId || mark.bookId === bookId),
-    )
+    const kept = inScope.filter((mark) => matches(mark, filter))
     const byBook = new Map<string, Mark[]>()
     for (const mark of kept) {
       const group = byBook.get(mark.bookId)
@@ -382,7 +415,7 @@ export function Marginalia({
     )
     // Each group is an array built here, so sorting it mutates nothing shared.
     return books.flatMap((id) => (byBook.get(id) ?? []).sort(compareMarks))
-  }, [everything, filter, scope, bookId])
+  }, [inScope, filter, bookId])
 
   /* Reveal whatever was asked for.
    *
@@ -404,22 +437,25 @@ export function Marginalia({
     return () => cancelAnimationFrame(frame)
     // `filter` is deliberately absent: this reacts to a focus request, not to
     // the reader changing the filter themselves afterwards.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focus, everything])
 
   /* Counted from what exists rather than written as prose: the fixture said
    * "1,204 highlights · 318 notes" under a list of three. Counted over the
    * SCOPE the reader chose, so the number and the list below it agree. */
-  const counted = useMemo(() => {
-    const inScope = everything.filter(
-      (mark) => scope === 'All books' || !bookId || mark.bookId === bookId,
-    )
-    return {
-      marks: inScope.filter((mark) => !isBookmark(mark)).length,
-      notes: inScope.filter((mark) => mark.note !== '').length,
+  const counted = useMemo(
+    () => ({
+      marks: inScope.filter(isAnnotation).length,
+      /* ASKS THE CLASS FIRST. A bookmark's note is empty by construction and is
+         canonicalised to empty on the way out of storage — but this counted
+         anything with a note, so a row that arrived with one before that
+         canonicalisation existed would have been counted as a piece of
+         writing. Two guards for one invariant, deliberately: the store's is
+         the fix and this is the surface refusing to depend on it. */
+      notes: inScope.filter((mark) => isAnnotation(mark) && mark.note !== '').length,
       places: inScope.filter(isBookmark).length,
-    }
-  }, [everything, scope, bookId])
+    }),
+    [inScope],
+  )
 
   if (everything.length === 0) {
     return (
@@ -437,7 +473,7 @@ export function Marginalia({
   return (
     <div className={styles.panel}>
       <div className={styles.panelMeta}>
-        <span style={{ flex: 1 }}>
+        <span className={styles.countRow}>
           {counted.marks} {counted.marks === 1 ? 'mark' : 'marks'} · {counted.notes}{' '}
           {counted.notes === 1 ? 'note' : 'notes'} · {counted.places}{' '}
           {counted.places === 1 ? 'bookmark' : 'bookmarks'}
@@ -511,6 +547,20 @@ export function Marginalia({
           data-tint={isBookmark(mark) ? undefined : mark.tint}
           data-focused={mark.id === focus?.id}
         >
+          {/* THE WORK, on rows that are not from the open book. Above whatever
+              the row goes on to say about the place inside it.
+
+              ALWAYS SOMETHING, never nothing. Showing it only when a title
+              could be found meant the rows that need it most — a book removed
+              from the shelf, or one whose record has not loaded — were the ones
+              that silently went back to looking like the open book's. Those
+              rows cannot be jumped to either, so the reader would be left with
+              a note they can neither place nor reach and no sign anything was
+              missing. A book with no title still says it is another book. */}
+          {mark.bookId !== bookId && (
+            <div className={styles.placeBook}>{titleOf?.(mark.bookId) || 'Another book'}</div>
+          )}
+
           {/* THE ANNOTATION IS TESTED FIRST, and that order is load-bearing
               rather than stylistic. `Bookmark` is `Mark & { kind: 'bookmark' }`
               — an intersection, not a member of a union — so the ELSE branch of
@@ -541,7 +591,9 @@ export function Marginalia({
           {editing === mark.id ? (
             <NoteEditor
               initial={mark.note}
-              onCommit={(value) => marks.setNote(mark.id, value)}
+              /* THE MARK, not its id — this list is cross-book, and a note
+                 edited on another book's row was written to the open one. */
+              onCommit={(value) => marks.setNote(mark, value)}
               onDone={() => setEditing(null)}
             />
           ) : (
@@ -556,7 +608,7 @@ export function Marginalia({
 
           <div className={styles.noteSource}>
             <span>{mark.chapter || 'Unknown chapter'}</span>
-            <span style={{ display: 'flex', gap: 2 }}>
+            <span className={styles.rowActions}>
               {/* Notes stay raw; cards are made. This is the only place the
                   one becomes the other, which is what keeps the distinction
                   §15 draws visible rather than nominal. */}

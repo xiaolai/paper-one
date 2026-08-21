@@ -1,6 +1,7 @@
 import { createElement } from 'react'
 import { describe, expect, it } from 'vitest'
 import type { PaneContribution } from '../core/capability'
+import { KERNEL_PANE_IDS } from '../core/uiTypes'
 import { PANES, PANE_SHORTCUTS, PANE_TITLES, renderContribution, shownPane } from './panes'
 
 /**
@@ -51,6 +52,16 @@ describe('the kernel registry keeps its shortcuts', () => {
       'cards',
       'stats',
     ])
-    expect(PANES.every((pane) => pane.id in PANE_TITLES)).toBe(true)
+    /* AGAINST THE ID REGISTRY, not against `PANE_TITLES` — that map is built
+       BY `Object.fromEntries(PANES.map(…))`, so asking whether every pane is a
+       key of it is asking whether every pane is in a list made of the panes.
+       It was true by construction and could not fail; a kernel pane left out
+       of `PANES` altogether — the omission worth catching — passed it happily.
+       `KERNEL_PANE_IDS` is declared by hand in `uiTypes`, so the two really can
+       disagree, and `PANE_TITLES` is typed `Record<KernelPaneId, string>` on
+       the promise that they do not. */
+    const listed = PANES.map((pane) => pane.id).sort()
+    expect(listed).toEqual([...KERNEL_PANE_IDS].sort())
+    expect(Object.keys(PANE_TITLES).sort()).toEqual(listed)
   })
 })

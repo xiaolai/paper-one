@@ -4,7 +4,8 @@ import { describe, expect, it } from 'vitest'
 import { buildCommands, filterCommands, score, type Command } from './commands'
 import { DEFAULT_STEP_IDX, READING_STEPS } from '../core/metrics'
 import { PANE_SHORTCUTS, panesFor } from './panes'
-import { initialState, type AppState } from './state'
+import { resolveAccel } from './accel'
+import { initialState, paneFits, type AppState } from './state'
 
 function context(over: Partial<AppState> = {}) {
   const dispatched: unknown[] = []
@@ -197,7 +198,21 @@ describe('buildCommands', () => {
  * is a row that prints a keystroke which does nothing.
  */
 describe('advertised combos are bound', () => {
-  const app = readFileSync(fileURLToPath(new URL('./App.tsx', import.meta.url)), 'utf8')
+  /**
+   * Everything a bound key could want, so a guard is never what answers.
+   *
+   * The point of the check below is the MAP, not the guards — those have their
+   * own cases further down. A context with anything missing would let a key
+   * pass for the wrong reason: absent, rather than declined.
+   */
+  const anything = {
+    screen: 'reader',
+    pane: null,
+    hasSelection: true,
+    canBookmark: true,
+    onReader: true,
+    hasBook: true,
+  } as const
 
   /**
    * What a printed combo requires the handler to bind.
@@ -215,7 +230,12 @@ describe('advertised combos are bound', () => {
    */
   const KEYS_FOR_COMBO: Record<string, readonly string[]> = {
     '⌘K': ['k'],
-    '⌘\\': ['\\\\'],
+    /* ONE BACKSLASH, which it could not be while this searched App's source:
+       the source spells that key as an escaped pair, so the table had to
+       hold the escaped form in order to find it. That is the search method
+       leaking into what the test claims — the key a keyboard actually
+       reports is a single backslash. */
+    '⌘\\': ['\\'],
     '⌘D': ['d'],
     '⌘B': ['b'],
     /* ⌘T was escaping this check for exactly the reason ⌘B was — `editTags`
@@ -271,9 +291,68 @@ describe('advertised combos are bound', () => {
       // means the palette prints a keystroke this test cannot confirm exists.
       expect(keys, `no expected key for ${combo}`).toBeDefined()
       for (const key of keys ?? []) {
-        expect(app, `${combo} prints, but App binds no '${key}'`).toContain(`'${key}'`)
+        /* THE KEY IS PUT THROUGH THE MAP, not looked for in App's source. The
+           search was the whole weakness: a literal in a comment satisfied it,
+           and so did one in an unreachable branch or behind the wrong
+           modifier. Now the combo the palette prints has to actually produce
+           an action from the key a keyboard reports. */
+        expect(
+          resolveAccel({ key, repeat: false }, anything),
+          `${combo} prints, but '${key}' resolves to nothing`,
+        ).not.toBeNull()
       }
     }
+  })
+
+  /* THE DIGITS, which the check above excludes because they come from the pane
+     registry rather than the command list. Excluded there and unchecked
+     everywhere was the hole: deleting the digit branch entirely left the suite
+     green, because the only other test of it asserted that the PANELS render. */
+  it('binds every panel digit the rail advertises, and toggles the open one', () => {
+    for (const { digit, pane } of PANE_SHORTCUTS) {
+      expect(resolveAccel({ key: digit, repeat: false }, anything), `⌘${digit}`).toEqual({
+        kind: 'openPane',
+        pane,
+      })
+      /* The same key on the panel it opened closes it — the palette row for an
+         open panel says "Close" and carries this combo. */
+      expect(resolveAccel({ key: digit, repeat: false }, { ...anything, pane })).toEqual({
+        kind: 'closePane',
+      })
+    }
+  })
+
+  /* A DIGIT FOR A PANEL THIS SCREEN DOES NOT HAVE does nothing, rather than
+     opening whatever `openPane` would fall back to. */
+  it('leaves a digit unbound on a screen with no such panel', () => {
+    const missing = PANE_SHORTCUTS.find(({ pane }) => !paneFits('library', pane))
+    expect(missing, 'no panel is reader-only any more — this check needs rewriting').toBeDefined()
+    expect(
+      resolveAccel({ key: missing!.digit, repeat: false }, { ...anything, screen: 'library' }),
+    ).toBeNull()
+  })
+
+  /* THE GUARDS, each on its own: a combo swallowed in order to do nothing is
+     worse than one left unbound, because the platform's meaning goes with it. */
+  it('declines a combo whose condition is not met, instead of eating the key', () => {
+    expect(resolveAccel({ key: 'd', repeat: false }, { ...anything, hasSelection: false })).toBeNull()
+    expect(resolveAccel({ key: 'b', repeat: false }, { ...anything, canBookmark: false })).toBeNull()
+    /* Not from the shelf, even with a place to keep: the reader is mounted
+       underneath with a live position, and nothing on screen would show it. */
+    expect(resolveAccel({ key: 'b', repeat: false }, { ...anything, onReader: false })).toBeNull()
+    expect(resolveAccel({ key: 't', repeat: false }, { ...anything, hasBook: false })).toBeNull()
+  })
+
+  /* HOLDING A TOGGLE IS ONE PRESS. Held ⌘B wrote a row and a tombstone to the
+     book's marks file on every repeat, and its final state depended on where
+     the reader let go. The size steps are deliberately exempt — holding ⌘+ to
+     walk up the ramp is a real gesture with a real result at each repeat. */
+  it('ignores an auto-repeat on the toggles and honours it on the size steps', () => {
+    for (const key of ['k', '\\', 't', 'b', ...PANE_SHORTCUTS.map((e) => e.digit)]) {
+      expect(resolveAccel({ key, repeat: true }, anything), `held ⌘${key}`).toBeNull()
+    }
+    expect(resolveAccel({ key: '=', repeat: true }, anything)).toEqual({ kind: 'stepBy', delta: 1 })
+    expect(resolveAccel({ key: '-', repeat: true }, anything)).toEqual({ kind: 'stepBy', delta: -1 })
   })
 
   it('advertises every reading-size key it binds, so none is a secret', () => {
@@ -287,8 +366,12 @@ describe('advertised combos are bound', () => {
 })
 
 describe('PANE_SHORTCUTS', () => {
-  it('binds §11\'s ⌘1…6 to contents, notes, search, cards, stats and bookmarks', () => {
-    /* THE DIGITS ARE NOT THE RAIL'S ORDER. They are the order the panels were
+  it('binds §11\'s ⌘1…5 to contents, marginalia, search, cards and stats', () => {
+    /* FIVE, AND THE NAME SAYS FIVE. It said six and named a Bookmarks panel,
+     * left behind when bookmarks moved into Marginalia — a test whose report
+     * described a panel the app does not have, printed on every green run.
+     *
+     * THE DIGITS ARE NOT THE RAIL'S ORDER. They are the order the panels were
      * published in, and a digit belongs to a panel rather than to a position —
      * renumbering to match the rail would move ⌘3 off Search for every reader
      * who has it in their fingers. ⌘2 stayed with Marginalia through its rename

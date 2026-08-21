@@ -61,7 +61,7 @@ export interface Bookmarking {
 
 export function useBookmarking(book: Book, marks: MarksView): Bookmarking {
   const { bookId, position, placeHere } = book
-  const { cfi, sectionIndex } = position
+  const { cfi, sectionIndex, sectionExact } = position
   const all = marks.bookmarks
 
   /**
@@ -96,24 +96,54 @@ export function useBookmarking(book: Book, marks: MarksView): Bookmarking {
     [all, cfi, sectionIndex, bookId],
   )
 
-  const canBookmark = cfi !== null && sectionIndex !== null && bookId !== null && marks.ready
+  /*
+   * TWO DIFFERENT QUESTIONS, and collapsing them into one took a feature away.
+   *
+   * MAKING one needs a section that is KNOWN rather than guessed — the bar
+   * `placeHere` holds a bookmark to. Without that agreement the two surfaces
+   * disagreed on exactly the books where the distinction exists: a fixed-layout
+   * spread publishes a section from whichever page rendered last, so the footer
+   * button offered itself, ⌘B was live, and pressing either did nothing,
+   * because the session then refused to hand over a place.
+   *
+   * REMOVING one needs only that a bookmark is standing here. It already
+   * exists; its section was settled when it was made, and nothing about the
+   * renderer's present confidence changes that. Requiring `sectionExact` for
+   * both is the same collapse in the other direction — it hid the button, and
+   * ⌘B with it, over a ribbon the reader could see and now had no way to take
+   * off. A control that cannot undo what it just did is worse than one that
+   * refuses to act in the first place.
+   */
+  const somewhere = cfi !== null && sectionIndex !== null && bookId !== null && marks.ready
+  const canBookmark = somewhere && (sectionExact || here !== null)
 
   const toggle = useCallback(() => {
     if (!bookId) return
-    /* Taking one off comes first, and does not consult the renderer at all.
-     * The reader can see the ribbon, so the bookmark is there to be removed
-     * whatever `placeHere` would say about the current moment — and asking
-     * would make the remove fail exactly when a section is mid-render, which
-     * is the one time the reader is most likely to press the key twice. */
-    if (here) {
-      marks.remove(here.id)
+    /*
+     * ONE SNAPSHOT DECIDES BOTH HALVES.
+     *
+     * This asked `here` — a render-time value — whether to remove, and only
+     * then asked the session where it was in order to create. Those two are
+     * read at different moments, so between a relocation and React committing
+     * it the toggle could remove the PREVIOUS page's bookmark while the reader
+     * was looking at the next one. The removal branch even said it was
+     * deliberate, on the grounds that the reader can see the ribbon — but the
+     * ribbon is drawn from the same stale value, so that argument justified
+     * acting on stale information rather than avoiding it.
+     *
+     * `placeHere()` is the renderer's own answer, and the bookmark to remove is
+     * whichever one overlaps THAT place. `here` remains the fallback for the
+     * moment the session cannot pin a place down at all: a visible ribbon must
+     * stay removable even then, which is the true half of the old comment.
+     */
+    const place = placeHere()
+    const standing = place
+      ? findMark(all, { cfi: place.cfi, sectionIndex: place.sectionIndex, bookId })
+      : here
+    if (standing) {
+      marks.remove(standing)
       return
     }
-    /* TAKEN WHOLE FROM THE SESSION, anchor included — this hook's `cfi` is a
-     * React commit behind the renderer's, and pairing the two produced a
-     * bookmark whose anchor and whose section described different pages. See
-     * `ReaderSession.placeHere`. */
-    const place = placeHere()
     if (!place) return
     marks.add(
       bookmarkFrom({
@@ -131,9 +161,12 @@ export function useBookmarking(book: Book, marks: MarksView): Bookmarking {
         chapter: place.chapter,
       }),
     )
-  }, [bookId, here, marks, placeHere])
+  }, [bookId, here, all, marks, placeHere])
 
-  const remove = useCallback((bookmark: Bookmark) => marks.remove(bookmark.id), [marks])
+  /* ITS OWN BOOK. Marginalia lists every book's bookmarks, and this is what
+     its rows delete through — routed by the open book it silently did nothing
+     for every row that came from elsewhere. */
+  const remove = useCallback((bookmark: Bookmark) => marks.remove(bookmark), [marks])
 
   return useMemo<Bookmarking>(
     () => ({ here, canBookmark, toggle, remove }),

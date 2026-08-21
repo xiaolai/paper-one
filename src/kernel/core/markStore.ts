@@ -5,6 +5,7 @@ import { upsertOverlapping } from './markMatch'
 import {
   annotationsIn,
   bookmarksIn,
+  isBookmark,
   liveMarks,
   mergeMarks,
   removeMark,
@@ -39,7 +40,7 @@ import type { WriteQueue } from './writeQueue'
  *
  * `useMarks` used to hold all of this in `useState`; it is an adapter over
  * `getSnapshot`/`subscribe` now, so a change made through any caller — the
- * reader, the Notes pane, a service answering a peer — reaches every
+ * reader, the Marginalia pane, a service answering a peer — reaches every
  * subscriber exactly once. Every mutator returns a promise that settles when
  * the write is on disk, or with the write's error.
  */
@@ -50,7 +51,7 @@ const EMPTY: readonly Annotation[] = []
 const NO_BOOKMARKS: readonly Bookmark[] = []
 
 export interface MarkSnapshot {
-  /** Every LIVE ANNOTATION, across every book — what the Notes panel browses.
+  /** Every LIVE ANNOTATION, across every book — what the Marginalia panel browses.
    *  Empty until `loadAll` has run, because it costs a read per book.
    *  Tombstoned rows stay in the files and in the store's own working lists
    *  (a merge needs them); no snapshot ever shows one. */
@@ -93,7 +94,7 @@ export interface MarkSnapshot {
    *
    * Without it, "this book has no bookmarks" and "this book's marks have not
    * arrived" are the same empty list, and every consumer has to guess. The
-   * Bookmarks panel guessed wrong in the honest direction — it announced "No
+   * bookmarks list guessed wrong in the honest direction — it announced "No
    * bookmarks in this book" over a book with several, for as long as the read
    * took — and the toggle guessed wrong in the harmful one: with the list
    * still empty, ⌘B on an already-bookmarked page reads as "not bookmarked"
@@ -134,7 +135,7 @@ export interface MarkStore {
   /**
    * Read every book's marks into `all`.
    *
-   * Called by the Notes pane when it mounts. Marks live in book folders, so
+   * Called by the Marginalia pane when it mounts. Marks live in book folders, so
    * answering "every book's marks" costs one read per book — paid at the moment
    * somebody asks for cross-book notes rather than at boot, where nobody did.
    * A failed scan leaves `all` empty rather than pretending it ran.
@@ -221,6 +222,23 @@ export function createMarkStore({
   let failed = false
   /** Which `open` is the current one, so a read that lands late is discarded. */
   let generation = 0
+  /**
+   * How many times each book's rows have changed in memory, by book id.
+   *
+   * `loadAll` READS THE DISK OUTSIDE THE WRITE QUEUE, and it must: it scans
+   * every book's folder, and there is no one key to serialise that against —
+   * taking every folder's lock would deadlock against a write already holding
+   * one. So instead of preventing the overlap it is DETECTED. A write landing
+   * mid-scan bumps its book's count here; a scan that started before it holds
+   * rows that predate it, and those rows are dropped rather than published over
+   * the newer truth already in memory.
+   *
+   * Per book rather than one global counter, so a write to one book does not
+   * throw away a scan of forty others. Counting rather than flagging, so two
+   * scans in flight at once each compare against their own starting point.
+   */
+  const writeGen = new Map<string, number>()
+  const noteWrite = (bookId: string) => writeGen.set(bookId, (writeGen.get(bookId) ?? 0) + 1)
 
   const listeners = new Set<() => void>()
   let snapshot: MarkSnapshot = {
@@ -245,16 +263,48 @@ export function createMarkStore({
    * their re-render decisions on. Keyed by source identity because the working
    * lists are replaced rather than mutated, so identity is a sound key.
    */
-  let cache: {
+  interface Projection {
     source: readonly Mark[]
     annotations: readonly Annotation[]
     bookmarks: readonly Bookmark[]
-  } | null = null
-  let allCache: {
-    source: readonly Mark[]
-    annotations: readonly Annotation[]
-    bookmarks: readonly Bookmark[]
-  } | null = null
+  }
+  let cache: Projection | null = null
+  let allCache: Projection | null = null
+
+  /**
+   * One source list, split and cached — or the cached answer, unchanged.
+   *
+   * BOTH PROJECTIONS ARE THIS, and they were written out twice with one line
+   * different between them. The identity contract below is the part that
+   * matters and the part a second copy quietly stops honouring: a subscriber
+   * hangs its re-render on these arrays being the same object when nothing
+   * moved.
+   *
+   * `place` is where the two genuinely differ, so it is the parameter rather
+   * than the reason for a second copy. The per-book list sorts; the cross-book
+   * one cannot, because `compareMarks` orders by section and CFI and both are
+   * only meaningful WITHIN one book — two CFIs from different books address
+   * positions in different documents, so sorting across them produces an order
+   * that means nothing and changes as an unrelated book's bookmarks move.
+   * Marginalia groups by book and sorts inside each group, which is where that
+   * comparator belongs; the cross-book projection hands over scan order.
+   */
+  const project = (
+    held: readonly Mark[],
+    prior: Projection | null,
+    place: (live: readonly Mark[]) => Bookmark[],
+  ): Projection => {
+    if (prior && prior.source === held) return prior
+    const live = liveMarks(held)
+    const places = place(live)
+    return {
+      source: held,
+      annotations: annotationsIn(live),
+      /* One shared empty list when there are none: a sort cannot return its
+       * input by identity, and most books have no bookmarks at all. */
+      bookmarks: places.length > 0 ? places : NO_BOOKMARKS,
+    }
+  }
 
   const publish = () => {
     /* FILTERED TO LIVE AT THE ONE DOOR a subscriber reads through. The
@@ -265,28 +315,8 @@ export function createMarkStore({
      * lists hold both, because they are one file and one merge, and no
      * subscriber is ever handed the two mixed. See `MarkSnapshot.bookmarks`. */
     const ready = openId !== null && loaded.bookId === openId
-    const held = ready ? loaded.marks : EMPTY
-    if (!cache || cache.source !== held) {
-      const live = liveMarks(held)
-      const places = bookmarksIn(live)
-      cache = {
-        source: held,
-        annotations: annotationsIn(live),
-        /* One shared empty list when there are none, because `bookmarksIn`
-         * filters AND sorts and so cannot return its input by identity — and
-         * most books have no bookmarks at all. */
-        bookmarks: places.length > 0 ? places : NO_BOOKMARKS,
-      }
-    }
-    if (!allCache || allCache.source !== all) {
-      const live = liveMarks(all)
-      const places = bookmarksIn(live)
-      allCache = {
-        source: all,
-        annotations: annotationsIn(live),
-        bookmarks: places.length > 0 ? places : NO_BOOKMARKS,
-      }
-    }
+    cache = project(ready ? loaded.marks : EMPTY, cache, bookmarksIn)
+    allCache = project(all, allCache, (live) => live.filter(isBookmark))
     snapshot = {
       all: allCache.annotations,
       allBookmarks: allCache.bookmarks,
@@ -303,7 +333,7 @@ export function createMarkStore({
    * Write a change to one book's marks file — the only thing that writes one.
    *
    * Named for the case it was added for, which is a mark belonging to a book
-   * that is NOT open: Notes lists every book's marks, so a reader can edit or
+   * that is NOT open: Marginalia lists every book's marks, so a reader can edit or
    * delete one from a book they are not reading. Reads that book's file,
    * changes it, writes it back, on the same per-book queue as everything else.
    * `all` is updated so the row stays changed, and the open book's list when
@@ -382,6 +412,7 @@ export function createMarkStore({
         const nextAll = [...next, ...all.filter((mark) => mark.bookId !== targetId)]
         if (!sameMarks(nextAll, all)) {
           all = nextAll
+          noteWrite(targetId)
           changed = true
         }
         /* AND THE OPEN BOOK'S OWN LIST, when this is that book. It is, every
@@ -427,6 +458,7 @@ export function createMarkStore({
       if (next !== loaded.marks) {
         loaded = { bookId: targetId, marks: next }
         all = [...next, ...all.filter((mark) => mark.bookId !== targetId)]
+        noteWrite(targetId)
         publish()
       }
     }
@@ -506,9 +538,24 @@ export function createMarkStore({
 
   const loadAll: MarkStore['loadAll'] = () => {
     if (!fs) return Promise.resolve()
+    /* WHERE EVERY BOOK STOOD WHEN THE SCAN STARTED — see `writeGen`. Anything
+       that moves between here and the result landing is newer than the scan. */
+    const before = new Map(writeGen)
     return scanAllMarks(fs)
       .then((raw) => {
-        all = validMarks(raw)
+        const scanned = validMarks(raw)
+        const stale = new Set(
+          [...writeGen.keys()].filter((bookId) => writeGen.get(bookId) !== before.get(bookId)),
+        )
+        all =
+          stale.size === 0
+            ? scanned
+            : [
+                ...scanned.filter((mark) => !stale.has(mark.bookId)),
+                /* Memory wins for exactly the books that moved. It holds the
+                   write's own result for them, which the scan predates. */
+                ...all.filter((mark) => stale.has(mark.bookId)),
+              ]
         publish()
       })
       .catch(() => {

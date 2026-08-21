@@ -16,6 +16,7 @@ import {
   LayoutGrid,
   List,
   Plus,
+  Search,
   Sparkles,
   Tag,
   Trash2,
@@ -39,6 +40,7 @@ import { BookCell, type SelectMode } from './BookCell'
 import { BookRow } from './BookRow'
 import { TagEditor } from './TagEditor'
 import editorStyles from './TagEditor.module.css'
+import { NarrowMenu } from './NarrowMenu'
 import { ToolbarMenu, type ToolbarOption } from './ToolbarMenu'
 import styles from './Library.module.css'
 
@@ -221,9 +223,12 @@ export function Library({
      being looked at right now, neither survives a launch, and splitting the
      two across two homes would be one of them for no reason. */
   const [layout, setLayout] = useState<LibraryLayout>('grid')
-  /* One menu left on this toolbar, so this is a boolean rather than a union of
-     which one is open — the view became a toggle and has nothing to open. */
-  const [sortOpen, setSortOpen] = useState(false)
+  /* WHICH ONE IS OPEN, not two booleans. This was a boolean when the sort menu
+     was the only thing on the toolbar that opened — the comment here said as
+     much, and said what would bring the union back. The narrow menu brought it
+     back: with a flag each, both could be open at once, overlapping, with two
+     click-outside handlers deciding between them. */
+  const [openMenu, setOpenMenu] = useState<'sort' | 'narrow' | null>(null)
   /* Read ONCE per render, not per row. `relativeTime` needs a now to measure
      from, and a hundred rows each calling `Date.now()` would be a hundred
      slightly different nows — so two books opened in the same second could
@@ -598,14 +603,36 @@ export function Library({
 
       {books.length > 0 && (
         <div className={styles.filters}>
-          <input
-            type="search"
-            className={styles.search}
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search — or tag:Name, is:reading to narrow"
-            aria-label="Search the library"
-          />
+          {/* THE FIELD IS THE CONTROL, and the input inside it is borderless —
+              the same shape the side pane's search has, which this did not
+              share. It was a bare bordered input with no icon at all, so the
+              two search fields in the app looked like two different kinds of
+              thing. */}
+          <div className={styles.searchField}>
+            <Search size={ICON.inline} strokeWidth={ICON.stroke} aria-hidden="true" />
+            <input
+              type="search"
+              className={styles.search}
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search — or tag:Name, is:reading to narrow"
+              aria-label="Search the library"
+            />
+            {/* The query language, as a control. See `NarrowMenu` — it writes
+                the same `tag:`/`is:` terms the Library panel's rows do, through
+                the same helpers, so either surface can undo the other's. */}
+            <NarrowMenu
+              query={query}
+              setQuery={setQuery}
+              tags={shelfTags}
+              open={openMenu === 'narrow'}
+              /* IDENTITY-AWARE. Both adapters used to clear the union
+                 unconditionally, so when focus moved straight from one menu to
+                 the other the outgoing `useRowMenu`'s cleanup erased the state
+                 the incoming one had just set. A menu may only close itself. */
+              setOpen={(on) => setOpenMenu((was) => (on ? 'narrow' : was === 'narrow' ? null : was))}
+            />
+          </div>
           {/* ONE ROW, and the whole of it. Searching, choosing a view, choosing
               an order and adding a book are the four things this screen does;
               they belong on one line rather than spread over a header and a
@@ -637,8 +664,8 @@ export function Library({
             value={order}
             options={ORDERS}
             onChange={setOrder}
-            open={sortOpen}
-            setOpen={setSortOpen}
+            open={openMenu === 'sort'}
+            setOpen={(on) => setOpenMenu((was) => (on ? 'sort' : was === 'sort' ? null : was))}
           />
           {/* ONE ACTION, because there was only ever one intent. "Add books"
               and "Add folder" sat at equal weight and made the reader classify

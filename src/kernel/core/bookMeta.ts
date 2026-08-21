@@ -49,6 +49,21 @@ export interface ReaderPosition {
    * filing every such place under the first chapter.
    */
   readonly sectionIndex: number | null
+  /**
+   * Whether `sectionIndex` came from a source that KNOWS, or is a best guess.
+   *
+   * IT CAN BE A GUESS, and the two callers want different things from one.
+   * This readout wants "roughly where", where a neighbouring page beats
+   * nothing. A BOOKMARK cannot take a guess: it is a durable anchor that syncs,
+   * and one naming the wrong page of a fixed-layout spread takes the reader
+   * somewhere they never were, indistinguishable afterwards from a good one.
+   *
+   * Published so the toggle and the footer button can agree with
+   * `ReaderSession.placeHere`, which refuses a guess. Without it the two
+   * disagreed on exactly the books where it matters: the button offered
+   * itself, and pressing it did nothing.
+   */
+  readonly sectionExact: boolean
 }
 
 export interface BookMeta {

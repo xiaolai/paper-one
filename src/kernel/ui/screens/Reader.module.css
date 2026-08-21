@@ -371,7 +371,8 @@
   flex: 0 0 auto;
   position: relative;
   height: var(--row-book);
-  padding: 0 var(--space-20);
+  /* The control's lane, reserved on BOTH sides — see `.bookmarkToggle`. */
+  padding: 0 calc(var(--space-20) + var(--control-pill) + var(--space-8));
   display: flex;
   align-items: center;
   justify-content: center;
@@ -398,6 +399,17 @@
  * whatever the book calls this section — and a control that slides along the
  * footer on every page turn is a control the reader has to look for each time
  * they want it. */
+/* The readout is centred in the footer and the control is taken out of its
+   flow, so a long chapter label ran underneath the button. The footer reserves
+   the control's lane on both sides — both, so the readout stays centred in what
+   is left rather than being pushed off-centre by a control on one side. */
+.footer > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .bookmarkToggle {
   position: absolute;
   inset-inline-start: var(--space-20);
@@ -494,7 +506,13 @@
  */
 .ribbon {
   position: absolute;
-  top: 0;
+  /* THE STAGE'S BLOCK PADDING, not zero. An absolutely positioned child
+     resolves against the padding BOX, whose top is the stage's border edge —
+     while the grid, and so the page, begins one `--space-12` lower. `top: 0`
+     therefore hung the ribbon 12px above the page it marks. The horizontal
+     offset was measured in the running app and the vertical one was not; this
+     is the half that was never checked. */
+  top: var(--space-12);
   inset-inline-end: calc(
     max(
       0px,

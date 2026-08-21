@@ -530,6 +530,18 @@
  * Companion, Excerpt, Idea. A chapter is a title, and titles set in caps stop
  * being readable as titles: "LOOMINGS" is a label about the row, and "Loomings"
  * is the name of the place. */
+/* The work a cross-book row belongs to — smaller and quieter than the chapter,
+   because it is context rather than the thing the reader is scanning for. */
+.placeBook {
+  display: block;
+  padding-bottom: var(--space-2);
+  font-size: var(--text-caption);
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .placeChapter {
   display: block;
   font-size: var(--text-small);
@@ -802,21 +814,7 @@
 /* The background parse, while there is one. `.scopeHint`'s shape — it is the
    same kind of thing, a quiet fact rather than a control — with a rule above
    it, because it is a note ABOUT the list rather than another row in it. */
-.enriching {
-  composes: scopeHint;
-  align-items: flex-start;
-  margin-block-start: var(--space-8);
-  padding-block-start: var(--space-14);
-  border-block-start: 1px solid var(--line);
-  line-height: 1.5;
-}
 
-.enriching svg {
-  /* The icon sits on the first line's cap height rather than centred against
-     two wrapped lines, which is where a leading icon belongs. */
-  flex: 0 0 auto;
-  margin-block-start: var(--space-2);
-}
 
 /* --- settings -------------------------------------------------------- */
 
@@ -1021,25 +1019,6 @@
   line-height: 1.6;
   color: var(--muted);
   text-wrap: pretty;
-}
-
-/* An empty state that can do something about being empty. */
-.emptyAction {
-  margin-top: var(--space-16);
-  padding: var(--space-8) var(--space-14);
-  border: 1px solid var(--line-2);
-  border-radius: var(--radius-control);
-  background: var(--surface);
-  color: var(--ink);
-  font-family: inherit;
-  font-size: var(--text-ui);
-  cursor: pointer;
-  transition: background var(--motion-chrome), border-color var(--motion-chrome);
-}
-
-.emptyAction:hover {
-  background: var(--wash);
-  border-color: var(--line-3);
 }
 
 /* §07's disabled rule now lives in global.css. It never belonged here: CSS
@@ -1379,4 +1358,19 @@
   padding: var(--space-6) var(--space-10) var(--space-10);
   font-size: var(--text-small);
   color: var(--amber);
+}
+
+/* The counts line in Marginalia's header, taking the space the controls beside
+   it do not. Was `style={{ flex: 1 }}` — one declaration, and the only reason
+   it was inline is that it is one. */
+.countRow {
+  flex: 1;
+}
+
+/* The buttons on a note's source line. `--space-2` rather than a bare `2`,
+   which is the same number said in the scale everything else is said in — a
+   literal here is a value nothing can retune. */
+.rowActions {
+  display: flex;
+  gap: var(--space-2);
 }

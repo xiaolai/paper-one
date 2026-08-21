@@ -663,6 +663,19 @@ export const SHEET = { max: 640, inset: 48, top: 96, maxHeight: 560 } as const
  */
 export const MENU_MIN_W = 190
 
+/**
+ * The tallest a SCROLLING region inside a menu may be.
+ *
+ * The shelf's narrow menu lists every tag, and a shelf can carry hundreds — a
+ * menu that grows with them runs off the bottom of the window. `usePlacement`
+ * would then flip it, which only moves the same problem to the top.
+ *
+ * Roughly nine rows at `--row-compact`, which is enough that the list reads as
+ * a list rather than a peephole, and short enough to leave the statuses and the
+ * filter field above it on screen at the window heights this app is used at.
+ */
+export const MENU_SCROLL_H = 320
+
 /* A `PANE_MENU_W = 220` lived here — a menu sized for the face picker inside
  * the pane — published as `--pane-menu-w` and consumed by nothing: the picker
  * sizes itself. A constant with no consumer is a claim the code does not
@@ -964,6 +977,7 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
     '--sheet-top': px(SHEET.top),
     '--sheet-max-h': px(SHEET.maxHeight),
     '--menu-min-w': px(MENU_MIN_W),
+    '--menu-scroll-h': px(MENU_SCROLL_H),
     '--tag-editor-w': px(TAG_EDITOR_W),
     '--toc-indent': px(TOC_INDENT),
     '--mark-swatch': px(MARK_SWATCH),

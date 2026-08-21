@@ -120,6 +120,23 @@ export function digestTree(dir) {
  * The whole proof for `id`: `{ code, dir }`. `run(step, cwd)` runs one step
  * (default: a child process); `log` receives the narrative.
  */
+/**
+ * The name of the capability this proof has just deleted, in the child's env.
+ *
+ * A GATE INSIDE THE COPY CANNOT OTHERWISE TELL WHERE IT IS. The two trees look
+ * identical from within once the removal has run: a workflow naming a
+ * capability the manifest does not declare is a real defect in a checkout and
+ * is simply the proof doing its job here. The tell used to be the absence of
+ * `.git` — true of the copy, and true of any source archive or plain `cp -r` of
+ * a checkout, where a gate would then excuse a stale reference for a reason
+ * that has nothing to do with this script. This says it outright.
+ *
+ * A gate must still check that the removal is COMPLETE — the directory gone,
+ * not merely the manifest entry — because this variable says which id was
+ * removed, not that the tree is in a state worth passing.
+ */
+export const DELETED_ENV = 'PAPER_VERIFY_WITHOUT'
+
 export function verifyWithout(id, { source = REPO_ROOT, keep = false, run = spawnStep, log = (l) => process.stdout.write(`${l}\n`) } = {}) {
   const dir = copyTree(source)
   log(`verify-without: copied ${source} → ${dir} (node_modules linked)`)
@@ -145,7 +162,8 @@ export function verifyWithout(id, { source = REPO_ROOT, keep = false, run = spaw
         },
         ...COPY_STEPS,
       ],
-      (step) => (step.local ? step.local() : run(step, dir)),
+      /* `env` carries the deleted id into every child — see `DELETED_ENV`. */
+      (step) => (step.local ? step.local() : run(step, dir, { [DELETED_ENV]: id })),
       log,
     )
   } finally {

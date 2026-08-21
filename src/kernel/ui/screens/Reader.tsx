@@ -178,11 +178,17 @@ export function Reader({
    * book open, which is also what stops the rule rendering. */
   const accent = bookAccent(book.bookId, state.theme === 'night')
 
-  /* WHERE THE WORDS ARE, computed once. The selection bar has always needed it
-   * so the popup cannot hang across the margin and cover the notes drawn there;
-   * the ribbon needs the same answer to sit at the page's corner rather than
-   * the window's. Two callers, one locator — see `proseColumn`. */
-  const column = useMemo(() => proseColumn(available, grid), [available, grid])
+  /* WHERE THE WORDS ARE. The selection bar has always needed it so the popup
+   * cannot hang across the margin and cover the notes drawn there; the ribbon
+   * needs the same answer to sit at the page's corner rather than the window's.
+   * Two callers, one locator — see `proseColumn`.
+   *
+   * NOT MEMOISED, and that is the honest form. It was `useMemo(…, [available,
+   * grid])`, and `grid` is built fresh by `proseGrid` on every render — so the
+   * dependency never matched and the memo recomputed every time while looking
+   * as though it did not. `proseColumn` is four additions; the memo bought
+   * nothing and hid that it bought nothing. */
+  const column = proseColumn(available, grid)
 
   /* Whether the chrome is showing, as one value — it decides the footer's
      opacity AND whether the control in it can be pressed or focused, and those
@@ -191,7 +197,12 @@ export function Reader({
   /* Says which of the two things pressing it does, exactly as the palette row
      does. A toggle labelled with its subject rather than its action leaves the
      reader to guess which state they are looking at. */
-  const bookmarkLabel = bookmarking.here ? 'Remove this bookmark' : 'Bookmark this place'
+  /* ONE ANSWER TO "IS THIS PAGE KEPT". The ribbon, the label, the lit state,
+     `aria-pressed` and the icon's fill all asked separately, two of them by
+     truthiness and two by an explicit null check — five spellings of one
+     question that can drift apart one at a time. */
+  const bookmarked = bookmarking.here !== null
+  const bookmarkLabel = bookmarked ? 'Remove this bookmark' : 'Bookmark this place'
 
   const gridVars = {
     '--stage-pad-x': `${STAGE_PADDING_X}px`,
@@ -460,8 +471,22 @@ export function Reader({
                       third way to do one thing, sitting over the text, where a
                       mis-click removes something the reader meant to keep. It
                       reports. */}
-                  {bookmarking.here && !book.fixedLayout && (
-                    <div className={styles.ribbon} aria-hidden="true" />
+                  {bookmarked && !book.fixedLayout && (
+                    <div
+                      className={styles.ribbon}
+                      /* THE BOOK'S DIRECTION, NOT THE APP'S. `ribbonInset` is
+                         written with `inset-inline-end`, which resolves against
+                         whatever direction the element inherits — the shell's,
+                         which is always LTR. In a right-to-left book the page's
+                         trailing edge is on the LEFT, so the ribbon sat at the
+                         wrong corner of the page it marks, and the arithmetic
+                         that finds the page's edge was mirrored with it. Set
+                         here rather than on the stage: this is the only thing
+                         on the stage that positions itself against the PAGE
+                         rather than the window. */
+                      dir={book.direction}
+                      aria-hidden="true"
+                    />
                   )}
 
                   <div className={styles.gutter}>
@@ -511,6 +536,7 @@ export function Reader({
                       onFileDropped={book.open}
                       onPageIntent={onPageIntent}
                       onFixedLayout={book.setFixedLayout}
+                      onDirection={book.setDirection}
                       /* NO `onMarkActivated`. Clicking a mark used to open
                          Notes on it; it SELECTS the passage now — see
                          `show-annotation` in `session` — so the selection tools
@@ -625,7 +651,7 @@ export function Reader({
                       mark(selected?.note ?? '', next, keep)
                     }}
                     onNote={() => {
-                      /* The note itself is written in the Notes panel, where
+                      /* The note itself is written in the Marginalia panel, where
                          there is room for it. Marking first is what gives it an
                          anchor — and the editor for THAT mark opens with the
                          panel, rather than leaving the reader to find the row
@@ -707,7 +733,7 @@ export function Reader({
                   <button
                     type="button"
                     className={styles.bookmarkToggle}
-                    data-on={bookmarking.here !== null}
+                    data-on={bookmarked}
                     /* Disabled rather than absent, unlike the chevrons beside
                        the page: those are missing where they would describe a
                        page that is not there, and this is a control that WILL
@@ -718,7 +744,7 @@ export function Reader({
                     disabled={!bookmarking.canBookmark}
                     title={bookmarkLabel}
                     aria-label={bookmarkLabel}
-                    aria-pressed={bookmarking.here !== null}
+                    aria-pressed={bookmarked}
                     onClick={() => bookmarking.toggle()}
                   >
                     <Bookmark
@@ -728,7 +754,7 @@ export function Reader({
                          fill are the same glyph saying two different things,
                          which is what a toggle needs — and `aria-pressed` says
                          it again for anyone not looking at the colour. */
-                      fill={bookmarking.here !== null ? 'currentColor' : 'none'}
+                      fill={bookmarked ? 'currentColor' : 'none'}
                     />
                   </button>
                   <span>{book.position.chapterLabel}</span>

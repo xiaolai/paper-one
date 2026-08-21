@@ -29,7 +29,7 @@ import { hlcOf, isHlc, laterHlc, type Hlc } from './hlc'
  * that could be written against a passage: §01 gives marks two of them and
  * draws them differently, your own highlight a gold fill and the companion's an
  * amber underline, and they were one type rather than two because everything
- * else about them — anchor, note, lifecycle, the Notes list — is identical.
+ * else about them — anchor, note, lifecycle, the Marginalia list — is identical.
  *
  * A bookmark broke that reading, and it is worth being plain about how rather
  * than quietly widening the union. A bookmark is not a third author; it is a
@@ -38,7 +38,7 @@ import { hlcOf, isHlc, laterHlc, type Hlc } from './hlc'
  * stamps, and carrying them so exactly that a separate record would have been
  * the same eleven fields under another name. What it does not have is a
  * drawing: nothing paints it into the text, so `tint` and `style` mean nothing
- * on one, and it never reaches a painter, the margin or the Notes list.
+ * on one, and it never reaches a painter, the margin or the Marginalia list.
  *
  * PROVENANCE IS NOW DERIVED, not stored: the companion's is the one kind that
  * is not the reader's. That is the same information as before, asked as a
@@ -49,16 +49,28 @@ import { hlcOf, isHlc, laterHlc, type Hlc } from './hlc'
  * downstream filters on this, and nothing downstream can be handed a bookmark
  * by accident.
  */
-export const MARK_KINDS = ['highlight', 'companion', 'bookmark'] as const
+/**
+ * The two CLASSES, each as its own list — and `MARK_KINDS` built from them.
+ *
+ * Membership, not exclusion. `AnnotationKind` was `Exclude<MarkKind,'bookmark'>`
+ * and `isAnnotation` was `kind !== 'bookmark'`, which means every kind added in
+ * future is drawable BY DEFAULT: a second undrawable kind would be handed
+ * straight to the painters, the margin and selection resolution without anyone
+ * choosing that. Adding a kind now means putting it in one of these two lists,
+ * which is a decision rather than an omission.
+ */
+export const ANNOTATION_KINDS = ['highlight', 'companion'] as const
+export const BOOKMARK_KINDS = ['bookmark'] as const
+
+export const MARK_KINDS = [...ANNOTATION_KINDS, ...BOOKMARK_KINDS] as const
 export type MarkKind = (typeof MARK_KINDS)[number]
 
 /**
  * A kind that can be DRAWN — everything a painter, the margin column, the
- * Notes list and a selection may legitimately be handed.
+ * Marginalia list and a selection may legitimately be handed.
  *
- * Derived by subtraction rather than written out, so it cannot be forgotten
- * when a kind is added: a new drawable kind joins automatically, and a new
- * undrawable one has to be excluded here deliberately.
+ * Derived from the registry above rather than by subtraction, so a kind that is
+ * added without being classified does not quietly become drawable.
  *
  * This exists because the runtime split at `MarkSnapshot` was the ONLY thing
  * keeping a bookmark away from the painter. Nothing reached it — `getMarks`
@@ -69,7 +81,7 @@ export type MarkKind = (typeof MARK_KINDS)[number]
  * bookmark drawn as a highlight is a gold band over a page the reader never
  * marked.
  */
-export type AnnotationKind = Exclude<MarkKind, 'bookmark'>
+export type AnnotationKind = (typeof ANNOTATION_KINDS)[number]
 
 /**
  * Which of the three tints the reader chose for a mark.
@@ -157,7 +169,7 @@ export interface Mark {
    * section and resolved to find out where it belongs.
    */
   readonly sectionIndex: number
-  /** The marked words, for the Notes list and the margin. */
+  /** The marked words, for the Marginalia list and the margin. */
   readonly text: string
   /**
    * The text immediately before and after the mark — see `markContext`.
@@ -193,7 +205,7 @@ export interface Mark {
    */
   readonly tint: MarkTint
   readonly style: MarkStyle
-  /** TOC label at the time of marking, for "Ch. 1" in the Notes list. */
+  /** TOC label at the time of marking, for "Ch. 1" in the Marginalia list. */
   readonly chapter: string
   readonly createdAt: number
   /* ---- The ledger's stamps (phase 6). Optional: a mark written before the
@@ -333,7 +345,7 @@ export async function bookIdFor(source: File | string): Promise<string> {
 }
 
 /**
- * Sort by CFI, so the Notes list reads in book order rather than in the order
+ * Sort by CFI, so the Marginalia list reads in book order rather than in the order
  * the reader happened to make the marks.
  *
  * The comparison is foliate-js's own `epubcfi.compare`, not one written here.
@@ -378,7 +390,7 @@ export function compareMarks(a: Mark, b: Mark): number {
  *
  * So the catch is not load-bearing today — it is a boundary guard for a
  * comparator that is exported and sorts data coming out of storage, where one
- * bad row must never take the whole Notes list down with it. Equal, so the
+ * bad row must never take the whole Marginalia list down with it. Equal, so the
  * pair falls through to creation time, which is what an unorderable pair has
  * always done here.
  */
@@ -422,7 +434,7 @@ export function liveMarks(marks: readonly Mark[]): readonly Mark[] {
  * two views of it in the code.
  */
 export type Annotation = Mark & { readonly kind: AnnotationKind }
-export type Bookmark = Mark & { readonly kind: 'bookmark' }
+export type Bookmark = Mark & { readonly kind: (typeof BOOKMARK_KINDS)[number] }
 
 /**
  * Which side of the line a record is on.
@@ -433,11 +445,11 @@ export type Bookmark = Mark & { readonly kind: 'bookmark' }
  * exactly one implementation.
  */
 export function isBookmark(mark: Mark): mark is Bookmark {
-  return mark.kind === 'bookmark'
+  return (BOOKMARK_KINDS as readonly string[]).includes(mark.kind)
 }
 
 export function isAnnotation(mark: Mark): mark is Annotation {
-  return mark.kind !== 'bookmark'
+  return (ANNOTATION_KINDS as readonly string[]).includes(mark.kind)
 }
 
 /**
@@ -482,7 +494,7 @@ export function annotationsIn(marks: readonly Mark[]): readonly Annotation[] {
  * expects to find their own bookmarks in.
  *
  * SORTED HERE, unlike `annotationsIn`, because there is nowhere else it could
- * happen: the Notes list sorts its own rows after filtering across books, and
+ * happen: the Marginalia list sorts its own rows after filtering across books, and
  * the bookmark list has no such step to hang a sort on. `compareMarks` is the
  * same ordering, section first and then CFI — see its note on why the two
  * cannot be compared the other way round.
@@ -566,7 +578,7 @@ export function marginMarks(marks: readonly Annotation[]): Annotation[] {
  * anchor.
  *
  * Re-highlighting an already-highlighted passage should not stack two marks at
- * one anchor: foliate would draw both, and the Notes list would show the
+ * one anchor: foliate would draw both, and the Marginalia list would show the
  * passage twice. Replacing keeps the newer note and colour.
  *
  * The replaced row is TOMBSTONED, not dropped — a replace is a removal of the
@@ -661,7 +673,7 @@ export function newMarkId(): string {
  * means `createMark({ kind: 'highlight', … })` IS an `Annotation` to the
  * compiler, with no cast anywhere to say so.
  */
-export function createMark<T extends NewMark>(draft: T): T & { id: string; createdAt: number } {
+export function createMark<T extends NewMark>(draft: T): Mark & Pick<T, 'kind'> {
   return { ...draft, id: newMarkId(), createdAt: Date.now() }
 }
 
@@ -694,7 +706,22 @@ export const BOOKMARK_TEXT_MAX = 140
  * points, so the cut can only fall between them.
  */
 export function openingLine(text: string): string {
-  return [...text.replace(/\s+/gu, ' ').trim()].slice(0, BOOKMARK_TEXT_MAX).join('')
+  const flat = text.replace(/\s+/gu, ' ').trim()
+  /* BY GRAPHEME where the platform has a segmenter, by code point where it does
+   * not. Code points fixed the lone-surrogate half of this — an emoji no longer
+   * loses one of its two units — and they do not fix the rest of it: a flag is
+   * two regional indicators, a family emoji is several joined by ZWJ, and an
+   * accented letter can be a base plus a combining mark. Cutting between any of
+   * those leaves a character the reader never wrote. `Intl.Segmenter` is in
+   * every engine this ships on; the spread stays as the floor rather than as a
+   * second answer, because it is strictly better than a `slice`. */
+  const units =
+    typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function'
+      ? [...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(flat)].map(
+          (part) => part.segment,
+        )
+      : [...flat]
+  return units.slice(0, BOOKMARK_TEXT_MAX).join('')
 }
 
 /** Where a bookmark goes, and what was on the page there. */
@@ -762,7 +789,7 @@ function isMark(value: unknown): value is StoredMark {
    *
    *   empty id       React keys collide, and `remove(id)` deletes both marks
    *   empty cfi      nothing to resolve, so the mark can never be drawn — it
-   *                  sits in the Notes list forever pointing at nothing
+   *                  sits in the Marginalia list forever pointing at nothing
    *   bad index      a fractional or negative sectionIndex matches no section,
    *                  so `drawSection` never offers the mark to an overlay
    *   bad createdAt  NaN/Infinity sorts unpredictably, scrambling the order of
@@ -844,6 +871,20 @@ function readStyle(value: unknown): MarkStyle {
  * The other direction is left alone: a companion mark carries whatever it
  * carries, because the painter ignores it entirely and draws amber regardless.
  */
+/**
+ * The note a mark of this KIND may actually carry — empty, for a bookmark.
+ *
+ * The same door and the same reasoning as `styleForKind`: a guarantee the store
+ * does not keep is decoration. `bookmarkFrom` writes an empty note and says
+ * why, but that only governs bookmarks THIS build makes. A row hand-edited on
+ * disk, or arriving from a peer, is whatever it is — and Marginalia's Notes
+ * filter is `note !== ''`, so a bookmark carrying one is listed and counted as
+ * a piece of writing. It is read back as what a bookmark can be.
+ */
+function noteForKind(note: string, kind: MarkKind): string {
+  return kind === 'bookmark' ? '' : note
+}
+
 function styleForKind(style: MarkStyle, kind: MarkKind): MarkStyle {
   if (kind === 'companion') return style
   return READER_STYLES.includes(style) ? style : 'underline'
@@ -897,6 +938,7 @@ export function validMarks(parsed: unknown): Mark[] {
         prefix: readContext(row.prefix),
         suffix: readContext(row.suffix),
         tint: readTint(row.tint),
+        note: noteForKind(rest.note, row.kind),
         style: styleForKind(readStyle(row.style), row.kind),
         ...(updated !== undefined ? { updatedAt: updated } : {}),
         ...(tombstone !== undefined ? { deletedAt: tombstone } : {}),

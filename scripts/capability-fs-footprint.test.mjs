@@ -246,11 +246,34 @@ describe('the capability fs/storage footprint (WI-10.1)', () => {
        it still bites in the real tree where both capabilities are here.
        Absent: it must contribute nothing, which is what makes the removal
        complete rather than merely started. */
+    /* A CAPABILITY MAY ONLY BE ABSENT IF THE MANIFEST SAYS SO.
+     *
+     * The absent branch below asserts that a removed capability contributes no
+     * entries — and on its own that is a TAUTOLOGY: `productionSources()` walks
+     * the directory, so a directory that is not there contributes nothing no
+     * matter what the code in it used to do. Deleting `src/capabilities/sync`
+     * while leaving it declared would therefore have turned the exact-footprint
+     * gate into a check that passes by having nothing to check.
+     *
+     * The manifest is what makes the absence mean something: `capability:remove`
+     * takes the entry out of `capabilities.manifest.json` in the same operation
+     * that deletes the sources, so declared-but-missing is not a removal, it is
+     * a broken tree. */
+    const declared = new Set(
+      JSON.parse(readFileSync(path.join(REPO_ROOT, 'capabilities.manifest.json'), 'utf8'))
+        .capabilities.map((entry) => entry.ts ?? entry.id),
+    )
     for (const id of REVIEWED_CAPABILITIES) {
       const mine = actual.filter((entry) => ownerOfEntry(entry) === id)
       const reviewed = REVIEWED_FOOTPRINT.filter((entry) => ownerOfEntry(entry) === id)
-      if (present(id)) expect(mine, `${id} is in the tree`).toEqual(reviewed)
-      else expect(mine, `${id} was removed — it must leave no footprint`).toEqual([])
+      if (present(id)) {
+        expect(mine, `${id} is in the tree`).toEqual(reviewed)
+        continue
+      }
+      expect(declared.has(id), `${id}'s sources are gone but the manifest still declares it`).toBe(
+        false,
+      )
+      expect(mine, `${id} was removed — it must leave no footprint`).toEqual([])
     }
 
     /* And nothing from a capability the allowlist has never seen. A new

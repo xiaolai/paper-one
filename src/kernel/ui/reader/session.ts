@@ -7,7 +7,14 @@ import type {
   View,
 } from 'foliate-js/view.js'
 import { markProse } from './markProse'
-import { MARK_STYLES, MARK_TINTS, type AnnotationKind, type MarkStyle, type MarkTint } from '../../core/marks'
+import {
+  ANNOTATION_KINDS,
+  MARK_STYLES,
+  MARK_TINTS,
+  type AnnotationKind,
+  type MarkStyle,
+  type MarkTint,
+} from '../../core/marks'
 import type { BookMeta, ReaderPosition } from '../../core/bookMeta'
 import { coverFrom } from '../../core/coverArt'
 import { deferSnap } from './wordSnap/deferredSnap'
@@ -251,6 +258,16 @@ export interface SessionCallbacks {
    * always fixed-layout, and an EPUB declaring `pre-paginated` is too.
    */
   onFixedLayout: (fixed: boolean) => void
+  /**
+   * Which way the book's text runs, once a section has rendered.
+   *
+   * READ OFF THE RENDERED DOCUMENT rather than off the book's metadata, and
+   * that is the reliable half: what matters to anything positioning itself
+   * against the page is the direction the page is ACTUALLY laid out in, which
+   * is the author's stylesheet and `dir` attribute having had their say. A
+   * declared `page-progression-direction` can disagree with both.
+   */
+  onDirection: (direction: 'ltr' | 'rtl') => void
 }
 
 /**
@@ -449,6 +466,19 @@ export class ReaderSession {
   #renderedIndex: number | null = null
 
   /**
+   * Every section currently rendered — not just the last one.
+   *
+   * `#renderedIndex` says which loaded MOST RECENTLY, and that is the same
+   * thing as "the one on screen" only when there is one. `#sections` cannot
+   * answer this: it is filled on `create-overlay`, which is annotation
+   * plumbing, and a book with nothing to draw never fills it at all. This is
+   * filled on `load` and emptied by the same teardown, so its size is the
+   * count of live documents — which is what tells a single page apart from a
+   * spread, and a scrolled flow showing one section apart from one showing two.
+   */
+  readonly #rendered = new Set<number>()
+
+  /**
    * The last relocation, as ONE value: where it was, which section, and the
    * range it covered.
    *
@@ -475,6 +505,8 @@ export class ReaderSession {
   #relocated: {
     cfi: string | null
     sectionIndex: number | null
+    /** Whether the section came from a source that KNOWS — see `#sectionOf`. */
+    sectionExact: boolean
     chapter: string
     range: Range | null
   } | null = null
@@ -633,10 +665,27 @@ export class ReaderSession {
        * and accomplishes nothing after the first few. */
       this.#indexOf.set(doc, index)
       this.#renderedIndex = index
-      this.#onTeardown(doc, () => this.#sections.delete(index))
+      this.#rendered.add(index)
+      this.#onTeardown(doc, () => {
+        this.#sections.delete(index)
+        this.#rendered.delete(index)
+        /* AND `#renderedIndex` STOPS NAMING A DOCUMENT THAT IS GONE.
+         *
+         * It was left pointing at the torn-down section, so after the most
+         * recently loaded of two was dropped it named a document nothing could
+         * resolve while the other was still on screen — a fallback section for
+         * a page the reader is not on, reported as confidently as any other.
+         * The remaining insertion order is the next best answer, and null when
+         * there is nothing left is the honest one. */
+        if (this.#renderedIndex === index) {
+          const remaining = [...this.#rendered]
+          this.#renderedIndex = remaining[remaining.length - 1] ?? null
+        }
+      })
 
       this.#redrawWhenFontsLand(doc)
       ensureLang(doc, view)
+      this.#cb.onDirection(directionOf(doc))
       /* AFTER the book's own stylesheet has applied, which by this point it
          has: the mark records what the BOOK asked for, and reading it before
          the author's rules landed would mark centred paragraphs as prose. */
@@ -665,8 +714,16 @@ export class ReaderSession {
       const detail = (event as CustomEvent<DrawAnnotationDetail>).detail
       const painters = this.#painters
       if (!painters) return
-      if (detail.annotation?.value && detail.range) {
-        this.#cb.onMarkDrawn(detail.annotation.value, detail.range)
+      /* REPORTED AFTER THE PAINT, not before it. This fired as soon as the
+       * event arrived, so a painter that threw — or a kind the whitelist below
+       * refuses — still registered a live Range in the margin's cache. The
+       * margin then measured and drew a control beside a highlight that is not
+       * on the page. `drawn` is called at the end of each branch that actually
+       * paints. */
+      const drawn = () => {
+        if (detail.annotation?.value && detail.range) {
+          this.#cb.onMarkDrawn(detail.annotation.value, detail.range)
+        }
       }
       const palette = this.#cb.getPalette()
       /* The book document travels with the draw options so the highlight
@@ -704,8 +761,23 @@ export class ReaderSession {
        * `annotationFor` put on it, and reading the store from in here would be
        * a second answer to "what does this mark look like", resolved at a
        * different moment from the first. */
-      if (detail.annotation?.kind === 'companion') {
+      /* WHAT MAY BE DRAWN, ASKED AS A WHITELIST. The next branch treats
+       * everything that is not the companion's as a reader's highlight, which
+       * classifies by exclusion — so a `bookmark` arriving here would be
+       * painted as a gold band over a passage the reader never marked. The
+       * compile-time split makes that unreachable today: `getMarks` hands over
+       * annotations and `MarkAnchor.kind` is `AnnotationKind`. This is the same
+       * defensiveness the comment below asks for, applied to the field that
+       * decides which painter runs rather than only to the ones that decide
+       * what colour it is — foliate round-trips this object untyped, so the
+       * value arriving here is not the value the type system saw. */
+      const kind = detail.annotation?.kind
+      if (typeof kind === 'string' && !(ANNOTATION_KINDS as readonly string[]).includes(kind)) {
+        return
+      }
+      if (kind === 'companion') {
         detail.draw(painters.wave, { color: palette.companion })
+        drawn()
         return
       }
 
@@ -724,6 +796,7 @@ export class ReaderSession {
       } else {
         detail.draw(painters[style], { color: palette.rule[tint] })
       }
+      drawn()
     })
 
     /**
@@ -767,13 +840,20 @@ export class ReaderSession {
       if (this.#disposed) return
       const detail = (event as CustomEvent<RelocateDetail>).detail
       const cfi = detail.cfi ?? null
-      const sectionIndex = this.#sectionOf(detail)
+      const section = this.#sectionOf(detail)
+      const sectionIndex = section.index
       const chapterLabel = detail.tocItem?.label ?? ''
       /* Held as one value for `placeHere`, which is the only thing that reads
        * the page's text — and reads it on demand rather than here. Captured
        * together so a bookmark cannot pair one page's anchor with another
        * page's section. See the field. */
-      this.#relocated = { cfi, sectionIndex, chapter: chapterLabel, range: detail.range ?? null }
+      this.#relocated = {
+        cfi,
+        sectionIndex,
+        sectionExact: section.exact,
+        chapter: chapterLabel,
+        range: detail.range ?? null,
+      }
       this.#cb.onRelocate({
         fraction: detail.fraction,
         chapterLabel,
@@ -782,6 +862,7 @@ export class ReaderSession {
         // to do with it. It is what `lastLocation` below is given back.
         cfi,
         sectionIndex,
+        sectionExact: section.exact,
       })
     })
   }
@@ -964,21 +1045,67 @@ export class ReaderSession {
    * Null when none of the three can answer, which is before the first section
    * has loaded — and null rather than 0, because 0 is a real section.
    */
-  #sectionOf(detail: Pick<RelocateDetail, 'section' | 'range'>): number | null {
+  #sectionOf(detail: Pick<RelocateDetail, 'section' | 'range'>): {
+    index: number | null
+    exact: boolean
+  } {
     const published = detail.section?.current
     if (typeof published === 'number' && Number.isInteger(published) && published >= 0) {
-      return published
+      return { index: published, exact: true }
+    }
+    /*
+     * THE LAST-RENDERED SECTION, AND WHETHER IT CAN BE TRUSTED.
+     *
+     * It is the last resort and the only one that can be wrong — but not always
+     * wrong, and the difference decides whether a whole class of book can be
+     * bookmarked at all. The case it gets wrong is a SPREAD: two pages shown
+     * side by side, loaded one after the other, and afterwards either can be
+     * the one the reader means without anything loading again. One page shown,
+     * and "the section that rendered last" is the section on screen.
+     *
+     * ASKED OF WHAT IS DISPLAYED, not of what is loaded, and that distinction
+     * is the whole of this. Counting live documents was the first attempt and
+     * it is a proxy for the wrong thing: a renderer is free to hold a spread's
+     * partner page in memory while showing one — prefetching, or keeping the
+     * page just turned away from — and every such book would have been refused
+     * a bookmark on the strength of a document nobody could see. That is a
+     * working feature taken away to fix an edge case, which is the worse trade
+     * by far. `spread` is the renderer's own answer to "am I showing two".
+     *
+     * AND AN UNKNOWN RENDERER IS TRUSTED, deliberately. A renderer that does
+     * not publish the attribute leaves this exactly where it was before any of
+     * this existed — no worse than today for anything already working, and the
+     * defect is caught wherever the renderer will say. Refusing on silence
+     * would be guessing in the direction that breaks things.
+     *
+     * Labelled rather than dropped, because the two callers want different
+     * things from it. The position readout wants "roughly where", where the
+     * neighbouring page beats nothing. `placeHere` records a durable, syncable
+     * anchor, and a bookmark naming the wrong page of a spread is a row that
+     * takes the reader somewhere they never were — indistinguishable,
+     * afterwards, from a good one.
+     */
+    const guess = {
+      index: this.#renderedIndex,
+      /* Nothing rendered is nothing to be exact ABOUT — without this the
+         position published before the first section loads carried a null
+         index beside a confident `true`, which is two fields disagreeing. */
+      exact: this.#renderedIndex !== null && !this.#showingTwoSections(),
     }
     const range = detail.range
-    if (!range) return this.#renderedIndex
+    if (!range) return guess
     const node = range.startContainer
     /* A Document's own `ownerDocument` is null — it does not have an owner, it
      * IS one. A range anchored at the document node is not the ordinary case,
      * but it costs one comparison to not read null out of it and fall through
      * to a section the reader is not in. */
     const doc = node.nodeType === DOCUMENT_NODE ? (node as Document) : node.ownerDocument
-    if (!doc) return this.#renderedIndex
-    return this.#indexOf.get(doc) ?? this.#renderedIndex
+    if (!doc) return guess
+    const known = this.#indexOf.get(doc)
+    /* Keyed by document and populated on `load`, so this is the same number the
+       selection path stamps onto a mark — exact even at a section boundary in
+       scrolled flow, where two documents are on screen at once. */
+    return known === undefined ? guess : { index: known, exact: true }
   }
 
   /**
@@ -1013,7 +1140,11 @@ export class ReaderSession {
    */
   placeHere(): BookmarkPlace | null {
     const at = this.#relocated
-    if (!at || !at.cfi || at.sectionIndex === null) return null
+    /* AND NOT ON A GUESSED SECTION — see `#sectionOf`. A bookmark is a durable
+       record that syncs; one carrying the wrong page of a spread is a row that
+       takes the reader somewhere they never were, and nothing downstream can
+       tell it from a good one. Refusing is visible: the toggle goes quiet. */
+    if (!at || !at.cfi || at.sectionIndex === null || !at.sectionExact) return null
     /* A range whose ends have left the document describes a page that has been
      * re-rendered since — the same check `publish` makes on a selection, for
      * the same reason. The place is still good; only its remembered text is
@@ -1365,6 +1496,38 @@ export class ReaderSession {
    * separate decisions turn on it: whether a wheel event is the platform's, and
    * whether arriving at a new page backwards should open its foot.
    */
+  /**
+   * Whether more than one SECTION is on screen at once.
+   *
+   * The question `#sectionOf`'s last resort turns on, and there are exactly two
+   * ways for the answer to be yes — one per renderer:
+   *
+   *   - **A fixed-layout spread.** Two pages side by side, and `spread` is the
+   *     pre-paginated renderer's own word for it. Asked of the attribute rather
+   *     than of how many documents are loaded, because a renderer is free to
+   *     hold a spread's partner in memory while showing one page; counting
+   *     loads would refuse a bookmark on the strength of a page nobody can see,
+   *     which takes a working feature away to fix an edge case.
+   *
+   *   - **Scrolled flow at a section boundary**, where a reflowable book has
+   *     the end of one section and the start of the next both visible. Here
+   *     the count IS the signal: a paginated renderer shows one section at a
+   *     time, and a scrolled one holds live only what it is showing.
+   *
+   * A renderer that answers neither leaves this exactly where it was before
+   * any of it existed. Silence must not cost a working bookmark.
+   */
+  #showingTwoSections(): boolean {
+    const view = this.#view
+    if (!view) return false
+    if (view.isFixedLayout) {
+      // `'none'` is the attribute's own word for a single page.
+      const spread = view.renderer?.getAttribute('spread')
+      return spread !== null && spread !== undefined && spread !== 'none'
+    }
+    return view.renderer?.getAttribute('flow') === 'scrolled' && this.#rendered.size > 1
+  }
+
   #scrollsByPage(): boolean {
     const view = this.#view
     return view?.isFixedLayout === true && view.renderer?.getAttribute('zoom') === 'fit-width'
@@ -1629,6 +1792,7 @@ export class ReaderSession {
     } finally {
       this.#unwatch.clear()
       this.#sections.clear()
+      this.#rendered.clear()
       this.#painters = null
       const prepared = this.#prepared
       this.#prepared = null
@@ -1874,6 +2038,21 @@ function message(cause: unknown, fallback: string): string {
  * a quotation in another one, a bilingual edition — is the authority, and
  * overwriting it would hyphenate French by English rules.
  */
+/**
+ * Which way this section's text runs.
+ *
+ * The COMPUTED value, so an author's stylesheet counts as much as a `dir`
+ * attribute; falls back to the attribute where there is no view to compute
+ * against, which is what a section that failed to parse hands back.
+ */
+export function directionOf(doc: Document): 'ltr' | 'rtl' {
+  const html = doc.documentElement as HTMLElement | null
+  if (!html) return 'ltr'
+  const computed = doc.defaultView?.getComputedStyle(html).direction
+  const declared = computed || html.getAttribute('dir') || doc.body?.getAttribute('dir')
+  return declared === 'rtl' ? 'rtl' : 'ltr'
+}
+
 function ensureLang(doc: Document, view: { book?: { metadata?: unknown } }): void {
   /* A document need not have a root element — a section that failed to parse
      hands back an empty one, and this runs on every section that loads. */
