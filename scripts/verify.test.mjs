@@ -14,7 +14,7 @@ import { STEPS, parseArgs, runSteps, spawnStep } from './verify.mjs'
 const SCRIPT = fileURLToPath(new URL('./verify.mjs', import.meta.url))
 
 describe('the steps', () => {
-  it('are the plan\'s, in order: manifest, compositions, dead CSS, inert directives, the feature ledger, boundaries (and the test-project check and the test ledger), types, coverage, build, then Cargo', () => {
+  it('are the plan\'s, in order: manifest, compositions, dead CSS, inert directives, the feature ledger, boundaries (and the test-project check and the test ledger), types, coverage, build, the CLI bundle, then Cargo', () => {
     /* THE CHEAP STATIC CHECKS COME FIRST, before the ones that spend a minute
        compiling — `css:check` and `directives:check` are a walk of `src` and
        answer in milliseconds, so failing there costs the reader nothing. Both
@@ -33,6 +33,7 @@ describe('the steps', () => {
       'typecheck',
       'test:coverage',
       'build',
+      'build:cli',
       'cargo metadata --locked',
       'cargo fmt --check',
       'cargo clippy -D warnings',
@@ -52,6 +53,9 @@ describe('the steps', () => {
        luck rather than like a deleted flag. See the note beside the step. */
     expect(STEPS.find((s) => s.name === 'cargo test --workspace').args.slice(-2)).toEqual(['--', '--test-threads=1'])
     expect(STEPS.find((s) => s.name === 'build').args).toEqual(['build'])
+    /* The CLI's bundle is gitignored, so no other step here would notice it
+     * stop compiling — and `bin/paper.mjs` is what `sync-scenario.sh` runs. */
+    expect(STEPS.find((s) => s.name === 'build:cli').args).toEqual(['build:cli'])
   })
 })
 
@@ -96,7 +100,7 @@ describe('spawnStep', () => {
 describe('parseArgs', () => {
   it('selects steps with --from and --only, lists with --list, refuses the rest', () => {
     expect(parseArgs([]).steps.map((s) => s.name)).toEqual(STEPS.map((s) => s.name))
-    expect(parseArgs(['--from', 'build']).steps.map((s) => s.name)).toEqual(['build', 'cargo metadata --locked', 'cargo fmt --check', 'cargo clippy -D warnings', 'cargo test --workspace'])
+    expect(parseArgs(['--from', 'build']).steps.map((s) => s.name)).toEqual(['build', 'build:cli', 'cargo metadata --locked', 'cargo fmt --check', 'cargo clippy -D warnings', 'cargo test --workspace'])
     expect(parseArgs(['--only', 'boundaries']).steps.map((s) => s.name)).toEqual(['boundaries'])
     expect(parseArgs(['--from', 'build', '--only', 'cargo fmt --check']).steps.map((s) => s.name)).toEqual(['cargo fmt --check'])
     expect(parseArgs(['--list'])).toEqual({ list: true })

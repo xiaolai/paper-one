@@ -126,8 +126,11 @@
   padding: 0 var(--space-12);
   /* THE LABEL IS ONE LINE. A button in a row beside a title that truncates
      will be squeezed by it, and a flex item's default `min-width: auto` lets
-     it shrink until its own words wrap — which is what "Remove download"
-     did next to a long book title: a two-line button in a one-line row. The
+     it shrink until its own words wrap — which is what the Storage pane's
+     eviction button did next to a long book title, when it was still called
+     "Remove download": a two-line button in a one-line row. The label is one
+     word now, which does not repeal the rule — the next long one would do it
+     again. The
      row's slack belongs to the label (`paper-cap-grow`); the action keeps its
      width. */
   flex: 0 0 auto;

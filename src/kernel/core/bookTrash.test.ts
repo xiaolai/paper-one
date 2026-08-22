@@ -46,7 +46,7 @@ describe('restoreBook', () => {
   it('puts a book back with everything it owned', async () => {
     const fs = fakeFs(shelved())
     await trashBook(fs, 'book_a')
-    expect(await restoreBook(fs, 'book_a')).toBe(true)
+    expect(await restoreBook(fs, 'book_a')).toEqual({ state: 'restored' })
     expect(new TextDecoder().decode(fs.store.get(`${folderOf('book_a')}/book.json`)!)).toContain(
       'Sea',
     )
@@ -61,7 +61,20 @@ describe('restoreBook', () => {
   })
 
   it('reports nothing to restore when the trash is empty', async () => {
-    expect(await restoreBook(fakeFs(), 'book_a')).toBe(false)
+    expect(await restoreBook(fakeFs(), 'book_a')).toEqual({ state: 'absent' })
+  })
+
+  /* AN UNREADABLE TRASH IS NOT AN EMPTY ONE, and this is the distinction the
+   * boolean could not carry: both used to answer `false`, so a restore that
+   * could not even LOOK reported "there was nothing to restore" and the
+   * caller had no way to tell, retry, or say so. */
+  it('throws rather than reporting an empty trash when it cannot be read', async () => {
+    const fs = fakeFs(shelved())
+    await trashBook(fs, 'book_a')
+    fs.readDir = async () => {
+      throw new Error('EIO')
+    }
+    await expect(restoreBook(fs, 'book_a')).rejects.toThrow(/EIO/)
   })
 })
 
@@ -125,7 +138,10 @@ describe('restoring onto a folder that is already there', () => {
     for (const [k, v] of Object.entries(withContentOnly())) {
       fs.store.set(k, new TextEncoder().encode(v))
     }
-    expect(await restoreBook(fs, 'book_a')).toBe(true)
+    /* PARTIAL, and it used to report plain success. The live `content.epub`
+     * wins, so that name stays in the trash — the reader is told the book is
+     * back, and half of it is ageing towards the sweep. */
+    expect(await restoreBook(fs, 'book_a')).toEqual({ state: 'partial', held: ['content.epub'] })
     expect(new TextDecoder().decode(fs.store.get(`${folderOf('book_a')}/book.json`)!)).toContain(
       'Sea',
     )
@@ -185,7 +201,7 @@ describe('restoring when something is in the way', () => {
     await trashBook(fs, 'book_a')
     // A live marks file, which is the collision that would cost the reader work.
     fs.store.set(`${folderOf('book_a')}/marks.json`, new TextEncoder().encode('[]'))
-    expect(await restoreBook(fs, 'book_a')).toBe(true)
+    expect(await restoreBook(fs, 'book_a')).toEqual({ state: 'partial', held: ['marks.json'] })
     expect(fs.store.has(`${trashOf('book_a')}/marks.json`)).toBe(true)
     // The record still came back — one collision does not stop the rest.
     expect(fs.store.has(`${folderOf('book_a')}/book.json`)).toBe(true)
@@ -230,7 +246,9 @@ describe('restoring when something is in the way', () => {
       if (from.endsWith('marks.json')) throw new Error('locked')
       return rename(from, to)
     }
-    expect(await restoreBook(fs, 'book_a')).toBe(true)
+    /* A rename that FAILED, not a collision — and it is named too, so the
+     * caller can say which part of the book stayed behind. */
+    expect(await restoreBook(fs, 'book_a')).toEqual({ state: 'partial', held: ['marks.json'] })
     expect(fs.store.has(`${trashOf('book_a')}/marks.json`)).toBe(true)
   })
 })
@@ -254,7 +272,7 @@ describe('finishing a restore that could not finish before', () => {
     // The live file goes away — a failed write cleaned up, say — and a later
     // add tries again.
     fs.store.delete(`${folderOf('book_a')}/marks.json`)
-    expect(await restoreBook(fs, 'book_a')).toBe(true)
+    expect(await restoreBook(fs, 'book_a')).toEqual({ state: 'restored' })
     expect(new TextDecoder().decode(fs.store.get(`${folderOf('book_a')}/marks.json`)!)).toContain(
       'x',
     )
@@ -263,7 +281,7 @@ describe('finishing a restore that could not finish before', () => {
 
   it('is a no-op when there is nothing in the trash', async () => {
     const fs = fakeFs(shelved())
-    expect(await restoreBook(fs, 'book_a')).toBe(false)
+    expect(await restoreBook(fs, 'book_a')).toEqual({ state: 'absent' })
     expect(fs.store.has(`${folderOf('book_a')}/book.json`)).toBe(true)
   })
 })

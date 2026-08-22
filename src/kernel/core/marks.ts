@@ -656,6 +656,31 @@ export function updateNote(
     : marks
 }
 
+/**
+ * Recolour a LIVE mark, stamping the edit.
+ *
+ * The twin of `updateNote`, and every rule it states holds here for the same
+ * reasons: a tombstoned row is left alone (resurrection is the merge's
+ * decision, never an edit's side effect), a change to the colour it already
+ * has returns the input BY IDENTITY so nothing is written, and the stamp is
+ * what makes the edit merge as newer on a peer.
+ *
+ * The colour IS part of the annotation — a reader who puts agreements in
+ * green and questions in purple has said something about each passage — which
+ * is why this exists as its own mutator rather than the tint being read from
+ * whatever the toggle holds at draw time.
+ */
+export function setTint(
+  marks: readonly Mark[],
+  id: string,
+  tint: MarkTint,
+  at: Hlc = hlcOf(Date.now()),
+): readonly Mark[] {
+  return marks.some((mark) => mark.id === id && mark.deletedAt === undefined && mark.tint !== tint)
+    ? marks.map((mark) => (mark.id === id && mark.deletedAt === undefined ? { ...mark, tint, updatedAt: at } : mark))
+    : marks
+}
+
 /** Identity. `randomUUID` needs a secure context, which a file:// build is not. */
 export function newMarkId(): string {
   const uuid = globalThis.crypto?.randomUUID
@@ -686,6 +711,26 @@ export function createMark<T extends NewMark>(draft: T): Mark & Pick<T, 'kind'> 
  * `marks.json` for every bookmark, and onto the wire for every sync. What the
  * list needs is enough to recognise the place by, which is the opening line.
  */
+/**
+ * The bounds a MARK's own fields carry, and the reason they exist at all.
+ *
+ * A mark is persisted and then read back — by `mark.list`, by the sync feed,
+ * by every peer that pulls the book. Neither the marked text nor the note had
+ * any bound, so a single request near the envelope's 4 MiB payload limit was
+ * accepted, COMMITTED, and only then produced a response too large to send:
+ * the caller saw an error over a mutation that had already happened, and
+ * every later list of that book's marks failed the same way. A bound that
+ * refuses before the write is the difference.
+ *
+ * Generous on purpose. A highlight is a passage, not a word — a dense page is
+ * around three thousand characters — and a note is a reader's own writing,
+ * which nothing should cut short at a paragraph. These are far past where
+ * anyone writing in earnest will meet them, and far below the wire limit even
+ * when a book carries hundreds of marks.
+ */
+export const MAX_MARK_TEXT = 8_000
+export const MAX_MARK_NOTE = 8_000
+
 export const BOOKMARK_TEXT_MAX = 140
 
 /**

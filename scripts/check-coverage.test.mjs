@@ -223,9 +223,19 @@ describe('loadCoverageOptions', () => {
     await expect(loadCoverageOptions(join(root, 'nowhere'))).rejects.toThrow(/no such file/)
   })
 
-  it('reads this repository: the four source areas and glob thresholds on the pure core', async () => {
+  it('reads this repository: the six source areas and glob thresholds on the pure core', async () => {
     const options = await loadCoverageOptions(REPO_ROOT)
-    expect(options.include).toEqual(['src/kernel/**', 'src/capabilities/**', 'src/app/**', 'scripts/**'])
+    /* `src/hosts/**` and `src/cli/**` joined in phase 11: a Node host and the
+     * `paper` CLI are source, and an area not listed here is measured by
+     * nothing while the run stays green. */
+    expect(options.include).toEqual([
+      'src/kernel/**',
+      'src/capabilities/**',
+      'src/hosts/**',
+      'src/cli/**',
+      'src/app/**',
+      'scripts/**',
+    ])
     expect(Object.keys(options.thresholds)).toEqual(
       expect.arrayContaining(['lines', 'statements', 'functions', 'branches', 'src/kernel/core/**', 'scripts/lib/**']),
     )

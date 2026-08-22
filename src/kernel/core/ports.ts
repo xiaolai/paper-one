@@ -1,9 +1,15 @@
-import { CONTENT_EXTENSIONS } from './bookVault'
-import { BOOKS_DIR } from './bookFolder'
+import { CONTENT_EXTENSIONS, type ContentExtension } from './bookVault'
 
 /**
- * The kernel's PORTS — the four places it calls OUT, each owned here and each
- * with a default that stands in for nobody.
+ * The kernel's PORTS — the places it calls OUT, each owned here.
+ *
+ * There were four, all with defaults that stand in for nobody. Phase 11 added
+ * three more — `device`, `shelf` and sizes — and those have NULL defaults,
+ * which is a different contract and a deliberate one: there is no sensible
+ * answer an unbound device or shelf port could give, and a stub returning an
+ * empty peer list would be a lie the caller could not detect. A count in this
+ * comment would go stale again, so it says what kind of thing they are
+ * instead.
  *
  * The kernel imports nothing from a capability (`.dependency-cruiser.cjs`,
  * `no-kernel-to-capabilities`). Where it has to call into one — a sync journal
@@ -85,37 +91,147 @@ export async function recorded<T>(
 }
 
 /* ------------------------------------------------------------------------ */
-/* ContentBlobPort                                                           */
+/* DevicePort · ShelfPort · SizePort — the service table's three outward     */
+/* nouns (phase 11)                                                          */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * Three of the service table's nouns are not the kernel's to answer for, and
+ * they arrive the way every other outward call does: as a port with a default
+ * that stands in for nobody, bound by whoever can implement it.
+ *
+ *   `device` — pairing state lives in `peers.rs`; the peer capability binds it
+ *   `shelf`  — the ROLE, its endpoint, and the journal's head and epoch; the
+ *              sync capability binds it
+ *   sizes    — bytes on disk, which no filesystem seam the kernel owns can
+ *              measure and no webview can; a HOST binds it
+ *
+ * UNBOUND IS NOT AN ERROR, it is the offline case, and it is answered rather
+ * than guessed: `device.*` and `shelf.sync`/`shelf.verify` refuse
+ * `unsupported` by name, and `shelf.status` reports `null` for the fields the
+ * port would have filled while still counting the books. "No devices" and
+ * "this host cannot see devices" are very different facts, and a CLI that
+ * conflated them would report a paired phone as forgotten.
+ */
+
+/**
+ * What a device IS on this network.
+ *
+ * The two words the Rust, the TypeScript and the docs already use — and the
+ * only two `role.rs` can produce. Typed as `string` here, so a row carrying
+ * anything at all type-checked, and a service could answer with a role no
+ * consumer has a branch for.
+ */
+export type DeviceRole = 'shelf' | 'satchel'
+
+/** One paired peer, as `device.list` answers. */
+export interface DeviceRow {
+  readonly id: string
+  readonly name: string
+  readonly platform: string
+  readonly role: DeviceRole
+  readonly grants: readonly string[]
+  readonly pairedAt: number
+  readonly lastSeenAt: number
+}
+
+export interface DevicePort {
+  list(): Promise<readonly DeviceRow[]>
+  /** Replace a peer's grants. Answers with the peer as it now stands. */
+  grant(id: string, grants: readonly string[]): Promise<DeviceRow>
+  /** Revoke a pairing and close any open session. False when no such peer. */
+  forget(id: string): Promise<boolean>
+}
+
+/** What this device is, as far as the transport and the ledger can say. */
+export interface ShelfFacts {
+  /** What this device is, or null with no transport composed. */
+  readonly role: DeviceRole | null
+  readonly endpointId: string | null
+  /** The journal's head — `hubSeq` in a hello. Null with no journal. */
+  readonly journalSeq: number | null
+  /** Published only when the journal is ready; null while it builds. */
+  readonly epoch: string | null
+}
+
+export interface ShelfPort {
+  facts(): Promise<ShelfFacts>
+  /** Ask the scheduler to sync now. */
+  sync(): Promise<{ readonly started: boolean; readonly detail: string | null }>
+  /**
+   * An integrity pass over the index and the journal.
+   *
+   * `findings` are FAULTS and decide `ok`; `notes` are true facts that are
+   * not faults — rows waiting to push, say, which is the ordinary state of a
+   * device that has not synced yet. Counting one of those as a fault makes
+   * `ok` false for a healthy shelf, which is the fastest way to teach
+   * somebody to ignore the answer.
+   */
+  verify(signal?: AbortSignal): Promise<{ readonly ok: boolean; readonly findings: readonly string[]; readonly notes: readonly string[] }>
+}
+
+/**
+ * What only the HOST can measure.
+ *
+ * Neither `IndexFs` nor `VaultFs` has a `stat`, deliberately — the kernel has
+ * never needed one, and widening the seam for two fields would change every
+ * adapter and every fake in the tree. A host that can measure binds this; one
+ * that cannot leaves the fields null, which is the same shape the sync
+ * protocol's own content answer already uses for a serving side that cannot
+ * hash.
+ */
+export interface SizePort {
+  /** Bytes of a book's stored content file, or null when there is none. */
+  contentBytes(bookId: string): Promise<number | null>
+  /** Bytes the whole library occupies, or null when nobody can say. */
+  libraryBytes(): Promise<number | null>
+  /**
+   * Bytes at one path inside the data root, or null when it cannot be
+   * measured.
+   *
+   * Published because a caller sometimes has a PATH rather than a book — the
+   * cover cache measures `books/<folder>/cover.jpg`, and read the whole file
+   * to take its `.length` before this existed. A cover arrives from a peer, so
+   * its size is not this device's decision to make in memory.
+   */
+  bytesAt(path: string): Promise<number | null>
+}
+
+/* ------------------------------------------------------------------------ */
+/* Blob names and folders                                                    */
+/*                                                                           */
+/* `ContentBlobPort` and `contentBlobPort` LIVED HERE AND ARE GONE.          */
+/*                                                                           */
+/* They were a kernel-owned port for resolving where a blob may be written,  */
+/* with a default that joined a validated folder and a closed name under an  */
+/* absolute root — deferred in phase 5 until a consumer existed, and no      */
+/* consumer ever arrived. The transfers that ship resolve their own paths in */
+/* Rust (`tauri-plugin-peer`'s `BlobTarget`), with symlink and TOCTOU        */
+/* protections this never had, so the TypeScript copy was not a smaller      */
+/* version of the shipping rule — it was a different, weaker one, published  */
+/* from the kernel's public entry with a test suite that read as coverage of */
+/* the real thing.                                                           */
+/*                                                                           */
+/* What is KEPT is the policy the two sides genuinely share, and which the   */
+/* kernel really does enforce: what a folder may be called, and what a blob  */
+/* may be named. `book.add` checks the first; `removeBlob` checks the        */
+/* second; `check-blob-parity.test.mjs` holds both against the Rust.         */
 /* ------------------------------------------------------------------------ */
 
 /**
  * The names a blob may land under. CLOSED: a book's bytes, under one of the
- * extensions the vault stores (`CONTENT_EXTENSIONS`, checked at the call), or
- * its jacket. Nothing else in a book's folder is a blob anybody outside the
- * kernel writes.
- */
-export type ContentBlobName = `content.${string}` | 'cover.jpg'
-
-/**
- * Where a blob that arrives from OUTSIDE the kernel — a peer plugin landing a
- * book's bytes — may be written. Absolute paths, because the writer is not
- * this webview and has no `BaseDirectory` to be relative to.
+ * extensions the vault stores, or its jacket. Nothing else in a book's folder
+ * is a blob anybody outside the kernel writes.
  *
- * Narrow on purpose: a folder name and a name from a closed set, validated,
- * joined under the root. It cannot be handed a path.
+ * CLOSED IN THE TYPE, not only in a comment. This was ``content.${string}``,
+ * which is not a closed set at all — it accepts `content.exe`, and
+ * `content.../book.json` besides, so every compile-time use of the word
+ * "closed" here was decoration and only the runtime check meant anything.
+ * `CONTENT_EXTENSIONS` is a literal tuple now, so the compiler enforces the
+ * same set at the call sites that `REMOVABLE_BLOB_NAMES` enforces at the
+ * boundary, and adding a format makes it legal in both at once.
  */
-export interface ContentBlobPort {
-  /** The data root every target sits under. Absolute. */
-  root(): string
-  /**
-   * The absolute path for `name` in the folder named `folder`.
-   *
-   * `folder` is a book's folder name — `safeId(bookId)`, so `[A-Za-z0-9_]` —
-   * not a book id and not a path. Throws on anything else, and on a name
-   * outside the closed set.
-   */
-  target(folder: string, name: ContentBlobName): string
-}
+export type ContentBlobName = `content.${ContentExtension}` | 'cover.jpg'
 
 /** What a book's folder is called: `safeId` output, bounded. */
 export const BLOB_FOLDER = /^[A-Za-z0-9_]{1,80}$/
@@ -137,38 +253,24 @@ export type RemovableBlobName = ContentBlobName | 'cover.webp'
 export const REMOVABLE_BLOB_NAMES: ReadonlySet<string> = new Set([...BLOB_NAMES, 'cover.webp'])
 
 /**
- * The default port, over the app's data root.
+ * Just the BOOK'S BYTES — every name content may be stored under, and nothing
+ * else.
  *
- * `root` is a string rather than resolved here because the kernel cannot
- * resolve it synchronously and must not resolve it wrongly: in a debug build
- * the Rust side may be pointed at `PAPER_TEST_DATA_DIR`, and TypeScript
- * asking `appDataDir()` on its own would disagree with it. The composition
- * root asks Rust (`paper_data_root`) once and hands the answer here.
+ * `content.evict` offers a whole list of names to delete rather than the ones
+ * a listing happened to return, because the listing happens outside the book's
+ * write lane and a landing queued behind it would otherwise survive the
+ * eviction. It offered `REMOVABLE_BLOB_NAMES`, which also holds `cover.jpg`
+ * and the legacy `cover.webp` — so evicting a book's bytes silently destroyed
+ * its jacket too, and the satchel had to fetch it again over the wire.
+ *
+ * The cover has its own eviction: the cover cache's LRU, which is the thing
+ * that knows how many jackets this device can afford. This set is what
+ * `content.evict` means by "content".
  */
-export function contentBlobPort(root: string): ContentBlobPort {
-  /* ABSOLUTE, as the contract says: the root is Rust's answer for the data
-   * directory, and a relative or blank one would silently anchor every
-   * target to whatever the working directory happens to be. Stripping the
-   * trailing separators must also not strip the answer to nothing — a root
-   * of "/" would have. */
-  if (typeof root !== 'string' || (!root.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(root))) {
-    throw new Error('ContentBlobPort: root must be an absolute path')
-  }
-  const base = root.replace(/[\\/]+$/, '')
-  if (base === '') throw new Error('ContentBlobPort: root must name a directory, not the filesystem root')
-  return {
-    root: () => base,
-    target: (folder, name) => {
-      if (!BLOB_FOLDER.test(folder)) {
-        throw new Error(`ContentBlobPort: ${JSON.stringify(folder)} is not a book folder name`)
-      }
-      if (!BLOB_NAMES.has(name)) {
-        throw new Error(`ContentBlobPort: ${JSON.stringify(name)} is not a blob the kernel accepts`)
-      }
-      return `${base}/${BOOKS_DIR}/${folder}/${name}`
-    },
-  }
-}
+export const CONTENT_BLOB_NAMES: readonly RemovableBlobName[] = CONTENT_EXTENSIONS.map(
+  (ext) => `content.${ext}` as RemovableBlobName,
+)
+
 
 /* ------------------------------------------------------------------------ */
 /* Diagnostics                                                               */

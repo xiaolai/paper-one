@@ -4,6 +4,7 @@
 //! a method here, and everything here is testable with two nodes in one
 //! process (`RelayMode::Disabled`, no discovery, scratch data roots).
 
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -42,11 +43,41 @@ impl Discovery {
     };
 }
 
+/// THE UDP PORT THE APP'S ENDPOINT BINDS, and the reason it is fixed at all.
+///
+/// iroh binds an ephemeral port by default, so the port changes on every
+/// launch. That is invisible while address discovery works — a peer re-learns
+/// the address through mDNS or n0's DNS every time. It is fatal when discovery
+/// does NOT work, because the only thing left is the address hints stored at
+/// the last successful session, and those carry the OLD port.
+///
+/// Measured on two Macs behind a TUN proxy (2026-08-22): the satchel was bound
+/// to 54370 while the shelf still had 56827 recorded for it, from two days
+/// earlier. Every direct dial went to a dead port, hole punching could not run
+/// because the proxy's varying egress makes the mapping look endpoint-
+/// dependent to QUIC Address Discovery, and the two machines — on ONE LAN —
+/// had not held a session for thirty-nine hours.
+///
+/// A fixed port makes a stored LAN address stay TRUE across restarts, which is
+/// what lets two machines on the same network reach each other with no
+/// discovery, no relay and no hole punching at all. It is also what most
+/// peer-to-peer software on a desktop already does.
+///
+/// Not registered with IANA and not meant to be: high in the dynamic range,
+/// clear of this repository's other pinned port (31415, the MCP bridge).
+pub const APP_BIND_PORT: u16 = 47821;
+
 pub struct NodeConfig {
     pub root: PathBuf,
     pub role: Role,
     pub relay_mode: RelayMode,
     pub discovery: Discovery,
+    /// The UDP port to bind, or `None` for an ephemeral one.
+    ///
+    /// `None` IS RIGHT FOR TESTS and wrong for the app: the suites here run
+    /// two nodes in one process, and a fixed port would make the second one
+    /// fail to bind — or, worse, quietly take the first one's traffic.
+    pub bind_port: Option<u16>,
     pub sink: EventSink,
     /// How long the shelf waits for `peer_pair_confirm` after showing the
     /// SAS before it refuses on its own.
@@ -65,6 +96,7 @@ impl NodeConfig {
                 n0_dns: true,
                 mdns: cfg!(not(target_os = "ios")),
             },
+            bind_port: Some(APP_BIND_PORT),
             sink,
             confirm_timeout: pairing::CONFIRM_TIMEOUT,
         }
@@ -128,29 +160,105 @@ impl Node {
         let secret = identity::load_or_create(&config.root)?;
         let peers = PeerStore::load(&config.root)?;
 
-        let mut builder = if config.discovery.n0_dns {
-            Endpoint::builder(presets::N0)
-        } else {
-            Endpoint::builder(presets::Minimal)
+        // Rebuilt rather than cloned because `bind()` consumes the builder, and
+        // the fixed port needs a second attempt when it is already taken.
+        // Captured by value so the closure stays `Fn` and can run twice; the
+        // fallback below is the second call.
+        let relay_mode = config.relay_mode.clone();
+        let n0_dns = config.discovery.n0_dns;
+        let build = |port: Option<u16>| {
+            let mut builder = if n0_dns {
+                Endpoint::builder(presets::N0)
+            } else {
+                Endpoint::builder(presets::Minimal)
+            };
+            builder = builder
+                .secret_key(secret.clone())
+                .alpns(vec![PAIR_ALPN.to_vec(), PEER_ALPN.to_vec()])
+                .relay_mode(relay_mode.clone());
+            match port {
+                // v4 only: `bind_addr` replaces the unspecified bind for THAT
+                // family, so v6 keeps its ephemeral one and a machine with no
+                // IPv4 is not left without an endpoint.
+                Some(port) => builder
+                    .bind_addr(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port))
+                    // Unreachable for a literal `0.0.0.0:PORT`, and mapped
+                    // rather than unwrapped anyway: a panic here would take
+                    // the whole app down for a bind address it chose itself.
+                    .map_err(|err| {
+                        Error::Io(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            format!("peer: bad bind address: {err}"),
+                        ))
+                    }),
+                None => Ok(builder),
+            }
         };
-        builder = builder
-            .secret_key(secret)
-            .alpns(vec![PAIR_ALPN.to_vec(), PEER_ALPN.to_vec()])
-            .relay_mode(config.relay_mode);
-        let endpoint = builder.bind().await?;
+
+        // FALLS BACK RATHER THAN FAILING. A fixed port is a large gain and a
+        // small risk — a second Paper on this machine, or a socket the kernel
+        // has not released — and an app with no peer transport at all is a
+        // worse outcome than one whose stored addresses go stale again. The
+        // warning is the signal; silence here would hide a permanently
+        // undiscoverable node behind a working-looking app.
+        let endpoint = match config.bind_port {
+            Some(port) => match build(Some(port))?.bind().await {
+                Ok(endpoint) => endpoint,
+                Err(err) => {
+                    log::warn!(
+                        "peer: UDP port {port} unavailable ({err}); falling back to an ephemeral port, \
+                         so a peer that cannot reach discovery will not find this node"
+                    );
+                    build(None)?.bind().await?
+                }
+            },
+            None => build(None)?.bind().await?,
+        };
         if config.discovery.mdns {
             // Added after the bind, not through the builder, so a network
             // that refuses multicast (Android without a MulticastLock,
             // plan III.2.7) costs LAN discovery and nothing else — never
             // the endpoint.
             match iroh_mdns_address_lookup::MdnsAddressLookup::builder().build(endpoint.id()) {
-                Ok(mdns) => {
-                    if let Ok(services) = endpoint.address_lookup() {
+                Ok(mdns) => match endpoint.address_lookup() {
+                    Ok(services) => {
                         services.add(mdns);
+                        log::info!("peer: mDNS address lookup registered");
                     }
-                }
+                    // NOT SWALLOWED. This arm used to be an `if let Ok(..)`
+                    // with no else, so an endpoint that refused its address
+                    // lookup lost LAN discovery in total silence — the app
+                    // looked healthy, published nothing, and was findable
+                    // only through a relay. A LAN with no iroh service on it
+                    // is exactly what that looks like from outside.
+                    Err(err) => {
+                        log::warn!("peer: address lookup unavailable, no LAN discovery: {err}")
+                    }
+                },
                 Err(err) => log::warn!("mDNS address lookup unavailable: {err}"),
             }
+        }
+
+        // WHAT THIS ENDPOINT BELIEVES ABOUT ITSELF, once discovery has had a
+        // moment to run. The addresses here are what a pairing URL carries and
+        // what mDNS publishes, so an empty list is the difference between a
+        // peer that can be reached and one that cannot — and it is invisible
+        // from every other signal the app produces.
+        {
+            let endpoint = endpoint.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                let addr = endpoint.addr();
+                let ips: Vec<String> = addr.ip_addrs().map(|a| a.to_string()).collect();
+                let relays: Vec<String> = addr.relay_urls().map(|r| r.to_string()).collect();
+                if ips.is_empty() {
+                    log::warn!(
+                        "peer: endpoint reports NO direct addresses; pairing URLs and mDNS will carry none (relays: {relays:?})"
+                    );
+                } else {
+                    log::info!("peer: direct addresses {ips:?} relays {relays:?}");
+                }
+            });
         }
 
         let node = Arc::new(Node {
@@ -338,6 +446,7 @@ pub(crate) mod testkit {
                 role,
                 relay_mode: RelayMode::Disabled,
                 discovery: Discovery::NONE,
+                bind_port: None,
                 sink,
                 confirm_timeout,
             })
@@ -381,11 +490,29 @@ pub(crate) mod testkit {
                 .unwrap();
         }
 
-        /// The next event, within two seconds.
+        /// The next event. The deadline is a BACKSTOP against a hang, not an
+        /// assertion of speed — the same reasoning `next_event_where` below
+        /// already carries, and the same thirty seconds.
+        ///
+        /// It was two seconds, and it flaked exactly as its sibling had: a
+        /// full `cargo test --workspace` puts every crate's tests on the same
+        /// cores, and this machine reached a load average above forty during
+        /// one. Two seconds then measures the scheduler rather than the peer
+        /// node, and the failure it reports is about the host, not the code.
+        ///
+        /// Raised rather than removed, because the point of the bound is that
+        /// a genuinely wedged node fails the run instead of hanging it. Thirty
+        /// seconds is still far below any real hang and far above any real
+        /// event, which is what a backstop should be.
+        ///
+        /// FIXED IN BOTH HELPERS AT ONCE. The sibling was raised on its own
+        /// when its test flaked; leaving this one at two seconds meant the
+        /// same defect waiting in the next test to use it, which is what
+        /// happened.
         pub async fn next_event(&mut self) -> PeerEvent {
-            tokio::time::timeout(Duration::from_secs(2), self.events.recv())
+            tokio::time::timeout(Duration::from_secs(30), self.events.recv())
                 .await
-                .expect("an event within 2s")
+                .expect("an event within 30s")
                 .expect("event channel open")
         }
 
@@ -428,6 +555,7 @@ mod tests {
             role: Role::Shelf,
             relay_mode: RelayMode::Disabled,
             discovery: Discovery::NONE,
+            bind_port: None,
             sink: null_sink(),
             confirm_timeout: Duration::from_secs(1),
         };
@@ -455,6 +583,7 @@ mod tests {
             role: Role::Shelf,
             relay_mode: RelayMode::Disabled,
             discovery: Discovery::NONE,
+            bind_port: None,
             sink: null_sink(),
             confirm_timeout: Duration::from_secs(1),
         };

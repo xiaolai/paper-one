@@ -7,6 +7,8 @@
   "references": [
     { "path": "./tsconfig.kernel.json" },
     { "path": "./tsconfig.capabilities.json" },
+    { "path": "./tsconfig.hosts.json" },
+    { "path": "./tsconfig.cli.json" },
     { "path": "./tsconfig.app.json" },
     { "path": "./tsconfig.test.json" },
     { "path": "./tsconfig.node.json" }

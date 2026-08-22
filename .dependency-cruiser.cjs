@@ -43,6 +43,8 @@ const COMPOSITION_ROOTS = ['^src/app/composition\\.(desktop|ios|android)\\.ts$',
 /** The kernel's two entries: the React-free public one every capability may
  *  import, and the UI one only a composition root may. */
 const KERNEL_PUBLIC_ENTRY = '^src/kernel/index\\.ts$'
+/** The kernel's TEST-ONLY entry — see `kernel-testkit-in-tests-only`. */
+const KERNEL_TESTKIT_ENTRY = '^src/kernel/testkit\\.ts$'
 const KERNEL_UI_ENTRY = '^src/kernel/ui/index\\.ts$'
 
 /** The kernel's storage adapters: the only modules that touch the fs plugin.
@@ -75,6 +77,37 @@ const PEER_WIRE = '^src/capabilities/peer/lib/wire\\.ts$'
  *  anything outside that directory may import. */
 const CAPABILITY_INDEX = '^src/capabilities/[^/]+/index\\.tsx?$'
 
+/**
+ * The CLI, and the hosts under it — the SECOND composition of this system
+ * (phase 11).
+ *
+ * `src/cli/` is `paper`: a process that builds `KernelServices` over
+ * `src/hosts/node/` and reaches services either in-process or over the peer
+ * capability's envelope. That last clause is what puts it here rather than
+ * under the ordinary rule: it composes a capability, which is the one thing
+ * `capability-index-only-from-composition` reserves for a composition root.
+ * It is a directory rather than one file because a CLI is not one file.
+ *
+ * `src/hosts/` is NOT part of that allowance. A host is a SEAM — an
+ * implementation of `IndexFs`/`FileSystem` for a runtime that is not the
+ * webview — and a seam that composed a capability would be a composition
+ * root wearing a filesystem's name. Hosts get the leaf rule below and
+ * nothing else.
+ *
+ * It is NOT added to `COMPOSITION_ROOTS`, deliberately: that constant carries
+ * the kernel's UI entry with it, and a CLI has no React and must not gain a
+ * path to any. `kernel-public-entry-only` therefore still applies here — the
+ * CLI and the hosts may import `src/kernel/index.ts` and nothing else of the
+ * kernel — and so does `capability-only-via-index`: reaching PAST a
+ * capability's index is refused here exactly as it is everywhere else.
+ *
+ * The allowance is closed at the other end by `hosts-and-cli-are-leaves`
+ * below: nothing under `src/kernel/` or `src/capabilities/` may import these,
+ * so a capability cannot reach an undeclared capability by way of the CLI.
+ */
+const CLI_ROOT = ['^src/cli/']
+const CLI_AND_HOSTS = [...CLI_ROOT, '^src/hosts/']
+
 /** @type {import('dependency-cruiser').IConfiguration} */
 module.exports = {
   forbidden: [
@@ -105,7 +138,19 @@ module.exports = {
         'src/kernel/index.ts — for a capability, a test under src/app/, anything. The composition ' +
         'roots are judged by composition-root-kernel-entries instead, which adds the UI entry.',
       from: { path: '^src/', pathNot: ['^src/kernel/', ...COMPOSITION_ROOTS] },
-      to: { path: '^src/kernel/', pathNot: KERNEL_PUBLIC_ENTRY },
+      to: { path: '^src/kernel/', pathNot: [KERNEL_PUBLIC_ENTRY, KERNEL_TESTKIT_ENTRY] },
+    },
+    {
+      name: 'kernel-testkit-in-tests-only',
+      severity: 'error',
+      comment:
+        "src/kernel/testkit.ts holds `fakeFs`, a deliberately behaviour-divergent stand-in for a " +
+        'filesystem — its readDir decides a name is a directory by whether it contains a dot, and ' +
+        'its exists is a prefix match. Only a test or another testkit may import it. It used to be ' +
+        're-exported from the production entry, where the boundary rules could not tell it apart ' +
+        'from `createKernelServices`, because it came through the one door everything may use.',
+      from: { pathNot: ['\\.test\\.(ts|tsx|mjs)$', '\\.testkit\\.(ts|tsx)$'] },
+      to: { path: '^src/kernel/testkit\\.ts$' },
     },
     {
       name: 'composition-root-kernel-entries',
@@ -151,8 +196,23 @@ module.exports = {
         'requires check sees only the direct A->B edge, not A->shared->B. Forbidding the intermediary ' +
         'edge closes the barrel. src/main.tsx and the composition roots are the allowed non-capability ' +
         'importers.',
-      from: { path: '^src/', pathNot: [...COMPOSITION_ROOTS, '^src/capabilities/', '^src/kernel/'] },
+      from: { path: '^src/', pathNot: [...COMPOSITION_ROOTS, ...CLI_ROOT, '^src/capabilities/', '^src/kernel/'] },
       to: { path: CAPABILITY_INDEX },
+    },
+    {
+      name: 'hosts-and-cli-are-leaves',
+      severity: 'error',
+      comment:
+        'Nothing under src/kernel/ or src/capabilities/ imports src/hosts/ or src/cli/. Two reasons, and ' +
+        'both are load-bearing. First, those directories carry Node types and node: builtins, and a kernel ' +
+        'or capability module that reached one would break the browser and mobile builds that have neither. ' +
+        'Second, src/cli/ is allowed to import a capability index (see CLI_AND_HOSTS); without this rule a ' +
+        'capability could reach an UNDECLARED capability through it, and capability-requires-declared judges ' +
+        'only direct capability-to-capability edges. Forbidding the inward edge is what keeps the allowance ' +
+        'from being a back door. Tests are not exempt: a capability test that reached the CLI would be the ' +
+        'same edge.',
+      from: { path: ['^src/kernel/', '^src/capabilities/'] },
+      to: { path: CLI_AND_HOSTS },
     },
     {
       name: 'no-capability-to-composition-root',

@@ -8,9 +8,10 @@ import { isProcessEntry } from './lib/entry.mjs'
  * the manifest, the compositions, the boundaries (and the check that every
  * test file is in exactly one project), the types, the tests with their
  * coverage floors — which is where the boundary selftest's own cases run, see
- * the note beside `boundaries` below — the
- * literal desktop build (which asserts its own bundle), then Cargo — the
- * lockfile, formatting, clippy, tests — for the whole workspace.
+ * the note beside `boundaries` below — the literal desktop build (which
+ * asserts its own bundle), the CLI's bundle (which asserts its own output),
+ * then Cargo — the lockfile, formatting, clippy, tests — for the whole
+ * workspace.
  *
  * Sequential, with a header per step and a stop at the first failure, whose
  * exit code becomes this script's. There is no "continue past a red step":
@@ -67,6 +68,14 @@ export const STEPS = Object.freeze([
   { name: 'typecheck', cmd: 'pnpm', args: ['typecheck'] },
   { name: 'test:coverage', cmd: 'pnpm', args: ['test:coverage'] },
   { name: 'build', cmd: 'pnpm', args: ['build'] },
+  /* THE CLI IS A SECOND BUILD, and it is gitignored — so nothing else in this
+   * list would notice it stop compiling. `bin/paper.mjs` is what
+   * `scripts/sync-scenario.sh` runs and what `package.json`'s `bin` points at;
+   * a `paper` that no longer builds is discovered by whoever next reaches for
+   * it, at the worst moment, unless it is discovered here. The build asserts
+   * its own output size, because a bundler that wrote nothing exits 0 exactly
+   * like one that wrote everything. */
+  { name: 'build:cli', cmd: 'pnpm', args: ['build:cli'] },
   { name: 'cargo metadata --locked', cmd: 'cargo', args: ['metadata', '--locked', '--format-version', '1', ...CARGO], quiet: true },
   { name: 'cargo fmt --check', cmd: 'cargo', args: ['fmt', ...CARGO, '--all', '--', '--check'] },
   { name: 'cargo clippy -D warnings', cmd: 'cargo', args: ['clippy', ...CARGO, '--workspace', '--all-targets', '--', '-D', 'warnings'] },

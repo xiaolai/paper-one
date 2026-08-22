@@ -33,6 +33,7 @@ function journalOver(
   extra: {
     cards?: readonly CardRow[]
     fsyncEvery?: number
+    compactEvery?: number
     onQuarantine?: (info: { moved: string; reason: string }) => void
   } = {},
 ) {
@@ -42,6 +43,7 @@ function journalOver(
     clock: testClock(),
     fsync: (path) => fs.fsync(path),
     ...(extra.fsyncEvery === undefined ? {} : { fsyncEvery: extra.fsyncEvery }),
+    ...(extra.compactEvery === undefined ? {} : { compactEvery: extra.compactEvery }),
     ...(extra.cards === undefined ? {} : { cards: () => extra.cards ?? [] }),
     ...(extra.onQuarantine === undefined ? {} : { onQuarantine: extra.onQuarantine }),
   })
@@ -276,6 +278,72 @@ describe('the unclean-shutdown verify pass', () => {
     expect(commits[1]!.digest).toBe(await recordDigest(moved))
   })
 
+  /**
+   * THE KEY THAT CRASHED IS THE ONE THAT MUST BE VERIFIED.
+   *
+   * `recoverDangling` closed an unfinished bracket with a commit carrying no
+   * digest, and the verify pass then skipped that key — it looks at the last
+   * commit and a digestless one has nothing to compare. So the surface where
+   * a crash landed between the write and its commit was the single surface
+   * the unclean-shutdown check could not see, on that open and on every open
+   * after, because the digestless head persists.
+   */
+  it('stamps the recovery commit with the folder, so the crashed key is verifiable', async () => {
+    const fs = crashableFs()
+    const journal = journalOver(fs)
+    await journal.open()
+    fs.store.set('books/book_a/book.json', new TextEncoder().encode(JSON.stringify(REC)))
+    /* A begin with no commit: the crash-between-the-two shape. */
+    await journal.begin('book:a', 'record')
+    await journal.close()
+
+    const reopened = journalOver(fs)
+    await reopened.open()
+    const recovery = reopened.entries().filter((e) => e.kind === 'commit').at(-1)
+    expect(recovery).toMatchObject({ book: 'book:a', what: 'record' })
+    expect(recovery!.digest).toBe(await recordDigest(REC))
+    await reopened.close()
+
+    /* And the verify pass can now use it: the folder moves under a dirty
+     * journal, and the next open re-commits rather than skipping the key. */
+    const moved = { ...REC, finished: true }
+    const third = journalOver(fs)
+    await third.open()
+    fs.store.set('books/book_a/book.json', new TextEncoder().encode(JSON.stringify(moved)))
+    /* Not closed — dirty, as after a crash. */
+    const fourth = journalOver(fs)
+    await fourth.open()
+    expect(fourth.entries().filter((e) => e.kind === 'commit').at(-1)!.digest).toBe(await recordDigest(moved))
+  })
+
+  /**
+   * THE SURFACES THAT ARE NOT DOCUMENTS were outside this check entirely.
+   *
+   * `cover`, `content` and `removed` had no digest at all, so a commit on any
+   * of them carried none and the verify pass never looked — while these are
+   * exactly the surfaces where a crash between the file operation and the
+   * commit is most likely: an import writes bytes, an eviction deletes them.
+   */
+  it('catches content that vanished between its write and the crash', async () => {
+    const fs = crashableFs()
+    const journal = journalOver(fs)
+    await journal.open()
+    fs.store.set('books/book_a/book.json', new TextEncoder().encode(JSON.stringify(REC)))
+    fs.store.set('books/book_a/content.epub', new TextEncoder().encode('bytes'))
+    const token = await journal.begin('book:a', 'content')
+    await journal.commit(token)
+    const committed = journal.entries().filter((e) => e.kind === 'commit').at(-1)
+    expect(committed!.digest).toBe('content:content.epub')
+
+    /* The bytes go, and the journal was never closed. */
+    fs.store.delete('books/book_a/content.epub')
+    const reopened = journalOver(fs)
+    await reopened.open()
+    const after = reopened.entries().filter((e) => e.kind === 'commit').at(-1)
+    expect(after!.digest).toBe('content:none')
+    expect(after!.rev).toBeGreaterThan(committed!.rev!)
+  })
+
   it('re-commits nothing when the digests agree, and nothing after a CLEAN close', async () => {
     const fs = crashableFs()
     const journal = journalOver(fs)
@@ -472,8 +540,32 @@ describe('isValidJsonPrefix — proving a torn tail is a real truncation (#9)', 
       'tru3', // a wrong literal
       '{1:2}', // a non-string key
       `"a${String.fromCharCode(1)}b"`, // a raw control character in a string
+      /* JSON'S NUMBER GRAMMAR, which the scanner used to approximate as
+       * "some digits, maybe a dot, maybe an exponent". Every one of these is
+       * a corrupt last line — the reader's most recent write — and reading it
+       * as a torn tail discarded it without a word instead of quarantining
+       * it. The closing bracket is what makes each impossible rather than
+       * merely unfinished. */
+      '[-]', // a sign with no number
+      '[01]', // a leading zero
+      '[1.]', // a fraction with no digits
+      '[1e]', // an exponent with no digits
+      '[1e+]', // a signed exponent with no digits
+      '[-.5]', // no integer part
+      '{"seq":01}',
+      '{"seq":1.}',
     ]) {
       expect(isValidJsonPrefix(s), s).toBe(false)
+    }
+  })
+
+  /* THE SAME SHAPES AT END OF INPUT ARE PREFIXES, and must stay accepted —
+   * this is the distinction the whole function draws, and tightening the
+   * grammar is exactly the change that could collapse it into "reject
+   * everything unusual" and quarantine every genuine torn tail. */
+  it('still accepts an unfinished number, which is what a torn tail looks like', () => {
+    for (const s of ['[-', '[0', '[1', '[12', '[1.', '[1.5', '[1e', '[1e+', '[1e-', '[1e5', '{"seq":-']) {
+      expect(isValidJsonPrefix(s), s).toBe(true)
     }
   })
 })
@@ -1006,5 +1098,435 @@ describe('recovering from a corrupt journal', () => {
     await journal.open()
     expect(seen).toEqual([])
     await journal.close()
+  })
+})
+
+/**
+ * A READ THAT FAILS IS NOT A FILE THAT IS ABSENT.
+ *
+ * Both paths below used to catch every error and carry on as though the
+ * journal were empty. That is the most expensive confusion in this file: the
+ * append fallback rewrites the file IN PLACE from what it just read, so one
+ * failed read replaced the entire journal with a single line, and `open`
+ * succeeded on a failed read with an empty outbox — silently withdrawing
+ * every unsent local commit from the feed.
+ *
+ * `exists()` is what separates them, rather than an errno: the error shape
+ * differs between the Node host and the webview's fs plugin, so matching a
+ * code would be right on one and quietly wrong on the other.
+ */
+describe('a failing read is not an absent file', () => {
+  it('never overwrites an existing journal when the append fallback cannot read it', async () => {
+    const fs = crashableFs()
+    /* No `appendFile`, so the read-modify-write fallback is the path taken. */
+    const noAppend = { ...fs, appendFile: undefined } as unknown as CrashableFs
+    const journal = journalOver(noAppend)
+    await journal.open()
+    const token = await journal.begin('a-book', 'record')
+    await journal.commit(token, 'one')
+    const before = journalLines(fs, JOURNAL_PATH)
+    expect(before.length).toBeGreaterThan(0)
+
+    /* The file is there; reading it fails. */
+    noAppend.readFile = async () => {
+      throw new Error('EIO: simulated transient read failure')
+    }
+    /* `begin` appends too, so the refusal can surface at either half — what
+     * matters is that it surfaces rather than being absorbed. */
+    await expect(
+      (async () => {
+        const second = await journal.begin('b-book', 'record')
+        await journal.commit(second, 'two')
+      })(),
+    ).rejects.toThrow(/EIO/)
+
+    /* THE ORIGINAL LINES ARE STILL THERE. Before the fix this file held one
+     * line — the new one — and everything else was gone. */
+    expect(journalLines(fs, JOURNAL_PATH)).toEqual(before)
+  })
+
+  it('refuses to open when the journal is present but unreadable', async () => {
+    const fs = crashableFs()
+    const first = journalOver(fs)
+    await first.open()
+    const token = await first.begin('a-book', 'record')
+    await first.commit(token, 'one')
+    await first.close()
+
+    const broken = { ...fs } as unknown as CrashableFs
+    broken.readFile = async (path: string) => {
+      if (path === JOURNAL_PATH) throw new Error('EIO: simulated transient read failure')
+      return fs.readFile(path)
+    }
+    await expect(journalOver(broken).open()).rejects.toThrow(/EIO/)
+  })
+})
+
+/**
+ * AN AMBIGUOUS APPEND STOPS THE JOURNAL, rather than renumbering over itself.
+ *
+ * `appendLine` writes bytes and then fsyncs; the caller's `absorb` runs only
+ * after it returns. So a throw from either half skips the absorb while the
+ * bytes may already be down, `nextSeq` and the per-key revs describe a shorter
+ * journal than the file, and the next allocation reuses numbers the file
+ * already holds. A retry then appends a DUPLICATE seq — which the loader reads
+ * as corruption, not as a crash artefact, and quarantines the whole journal on
+ * the next open.
+ *
+ * Poisoning until reopen is the honest answer, because neither half can be
+ * disambiguated from here: a failed write may have written some bytes, and a
+ * failed fsync follows a write that certainly reached the page cache.
+ */
+describe('an append that fails ambiguously', () => {
+  it('refuses further use until reopened, instead of reusing a seq the file may hold', async () => {
+    const fs = crashableFs()
+    /* The durability barrier is injectable, so the ambiguous half — bytes
+     * written, fsync refused — can be produced exactly. */
+    let barrierFails = false
+    const journal = createJournal({
+      fs,
+      queue: writeQueue(),
+      clock: testClock(),
+      fsync: async (path: string) => {
+        if (barrierFails) throw new Error('EIO: the durability barrier refused')
+        await fs.fsync(path)
+      },
+    })
+    await journal.open()
+    const first = await journal.begin('a-book', 'record')
+    await journal.commit(first, 'one')
+    const before = journalLines(fs, JOURNAL_PATH).length
+
+    /* THE FAILURE IS ON A COMMIT, which is where the reuse actually is.
+     *
+     * `seq` is allocated with `nextSeq++` BEFORE the append, so a failed
+     * append never hands the same seq out twice — asserting unique seqs would
+     * have passed with or without the fix. The per-key REVISION is different:
+     * `nextRev` reads state that only `absorb` advances, and `absorb` runs
+     * after the append returns. A commit whose append fails therefore leaves
+     * `lastRev` where it was, and the next commit for that key allocates the
+     * same revision over a line the file may already hold. */
+    const doomed = await journal.begin('b-book', 'record')
+    /* Armed between the two halves, so the bracket opens normally and the
+     * COMMIT is what fails — `begin` appends too, and tripping it there would
+     * exercise a different path. */
+    barrierFails = true
+    await expect(journal.commit(doomed, 'two')).rejects.toThrow()
+
+    /* Every later use refuses, rather than allocating over the file. */
+    await expect(journal.begin('c-book', 'record')).rejects.toThrow(/reopened/)
+    expect(() => journal.outbox()).toThrow(/reopened/)
+    expect(() => journal.feed(0, Number.MAX_SAFE_INTEGER)).toThrow(/reopened/)
+
+    /* And a fresh open re-derives from the file, which is the way back. */
+    barrierFails = false
+    const reopened = journalOver(fs)
+    await reopened.open()
+    const token = await reopened.begin('c-book', 'record')
+    await reopened.commit(token, 'three')
+    const lines = journalLines(fs, JOURNAL_PATH) as { seq: number; kind: string; book: string; rev?: number }[]
+    expect(lines.length).toBeGreaterThan(before)
+
+    /* PER-KEY REVISIONS STRICTLY INCREASE — the invariant the loader enforces
+     * and the one a reused rev would break. Checked per key, because revisions
+     * are per key and a global sort would hide the collision. */
+    const byKey = new Map<string, number[]>()
+    for (const line of lines) {
+      if (line.kind !== 'commit' || line.rev === undefined) continue
+      const held = byKey.get(line.book) ?? []
+      held.push(line.rev)
+      byKey.set(line.book, held)
+    }
+    for (const [book, revs] of byKey) {
+      expect(new Set(revs).size, `duplicate revision for ${book}: ${revs.join(', ')}`).toBe(revs.length)
+      expect(revs, `revisions for ${book} are not increasing`).toEqual([...revs].sort((a, b) => a - b))
+    }
+
+    /* And the reopen did not quarantine — a duplicate rev would have. */
+    expect(reopened.state()).toBe('ready')
+  })
+})
+
+/**
+ * `recover: false` — the mode `paper` opens a DIRTY journal in.
+ *
+ * The CLI may append to a journal whose flag is up, because the flag is up on
+ * any library whose app has run and refusing on it would disable journalling
+ * outright. What it must not do is perform the app's recovery: that pass walks
+ * every book and raises revs, and it is the app's job on the app's schedule.
+ *
+ * The promise that makes it safe is that declining the pass is NOT the same as
+ * declaring the shelf sound — so `close()` has to leave the flag exactly as it
+ * found it. Untested, that promise is just a comment.
+ */
+describe('opening a dirty journal without recovering', () => {
+  it('appends, and leaves the dirty flag up for the app that still owes the pass', async () => {
+    const fs = crashableFs()
+    /* A first lifetime that ends UNCLEANLY, so the flag is up. */
+    const first = journalOver(fs)
+    await first.open()
+    const token = await first.begin('a-book', 'record')
+    await first.commit(token, 'one')
+    expect(await fs.exists(JOURNAL_DIRTY_PATH)).toBe(true)
+    /* No `close()` — this is the crash shape the flag exists to record. */
+
+    const before = journalLines(fs, JOURNAL_PATH).length
+    const cli = createJournal({ fs, queue: writeQueue(), clock: testClock(), recover: false })
+    await cli.open()
+    const mine = await cli.begin('b-book', 'record')
+    await cli.commit(mine, 'two')
+    await cli.close()
+
+    /* The write landed... */
+    expect(journalLines(fs, JOURNAL_PATH).length).toBeGreaterThan(before)
+    /* ...and the flag is STILL UP, so the app's next open still recovers.
+     * Clearing it here would advertise a clean shutdown nobody performed and
+     * the owed verify pass would never run. */
+    expect(await fs.exists(JOURNAL_DIRTY_PATH)).toBe(true)
+  })
+
+  it('still clears the flag on a clean journal, so the CLI does not disable itself', async () => {
+    const fs = crashableFs()
+    const first = journalOver(fs)
+    await first.open()
+    await first.close()
+    expect(await fs.exists(JOURNAL_DIRTY_PATH)).toBe(false)
+
+    const cli = journalOver(fs)
+    await cli.open()
+    const token = await cli.begin('a-book', 'record')
+    await cli.commit(token, 'one')
+    await cli.close()
+    expect(await fs.exists(JOURNAL_DIRTY_PATH)).toBe(false)
+  })
+})
+
+/**
+ * A COUNTER PAST THE SAFE RANGE CANNOT BE INCREMENTED.
+ *
+ * `Number.isInteger(2 ** 53)` is true, and `2 ** 53 === 2 ** 53 + 1`. A `seq`
+ * loaded at or beyond that stops advancing, so `nextSeq++` yields the same
+ * number forever and every later append carries a duplicate — which this
+ * loader reads as corruption and quarantines. A real journal never approaches
+ * it; a hand-edited or garbled one names it in a single character, and the
+ * validator accepted it because it only asked for an integer.
+ */
+describe('counters past the safe range', () => {
+  /* The same builders the load-validation suite uses, so the only thing that
+   * differs between the two cases below is the number. */
+  const at = makeHlc(1, 0, DEV)
+  const seqLine = (seq: number): string =>
+    `${JSON.stringify({ seq, kind: 'begin', epoch: 'e1', book: 'book:a', what: 'record', at, origin: 'local' })}\n`
+  const load = async (text: string) => {
+    const fs = crashableFs()
+    fs.store.set(JOURNAL_PATH, new TextEncoder().encode(text))
+    const journal = journalOver(fs)
+    await journal.open()
+    return journal
+  }
+
+  it('refuses a seq that cannot be incremented', async () => {
+    const journal = await load(seqLine(2 ** 53))
+    expect(journal.entries().some((one) => one.seq === 2 ** 53)).toBe(false)
+  })
+
+  /* THE CONTROL. Without it the case above passes whenever the line fails to
+   * load for ANY reason — a malformed stamp, a rejected epoch — which is how
+   * a first draft of this test passed while proving nothing. */
+  it('still accepts an ordinary seq written the same way', async () => {
+    const journal = await load(seqLine(7))
+    expect(journal.entries().some((one) => one.seq === 7)).toBe(true)
+  })
+})
+
+/**
+ * A COMMIT'S `begin` REFERENCE, CHECKED AGAINST THE JOURNAL AND NOT ONLY
+ * AGAINST ITSELF.
+ *
+ * Per-line validation can only ask `begin < seq`. That accepted a commit
+ * pointing at a begin on another book, another surface, another origin, or at
+ * one an earlier commit had already closed — and `absorb` clears a bracket by
+ * matching the seq WITHIN the key, so a misdirected reference leaves the real
+ * begin dangling for good. A key with a permanently dangling begin is read as
+ * an unfinished write on every single open.
+ */
+describe('a commit that references a begin it does not own', () => {
+  /** Write two complete brackets on two books, then bend the second commit. */
+  async function withBentReference(
+    fs: CrashableFs,
+    bend: (rows: Record<string, unknown>[]) => void,
+  ): Promise<void> {
+    const journal = journalOver(fs)
+    await journal.open()
+    const a = await journal.begin('book:a', 'record')
+    await journal.commit(a)
+    const b = await journal.begin('book:b', 'record')
+    await journal.commit(b)
+    await journal.close()
+    const rows = journalLines(fs, JOURNAL_PATH) as Record<string, unknown>[]
+    bend(rows)
+    fs.store.set(JOURNAL_PATH, new TextEncoder().encode(rows.map((r) => JSON.stringify(r)).join('\n') + '\n'))
+  }
+
+  /** The reason the journal was quarantined on the next open, if it was. */
+  async function reasonFor(bend: (rows: Record<string, unknown>[]) => void): Promise<string | null> {
+    const fs = crashableFs()
+    await withBentReference(fs, bend)
+    const seen: { moved: string; reason: string }[] = []
+    const journal = journalOver(fs, { onQuarantine: (info) => seen.push(info) })
+    await journal.open()
+    await journal.close()
+    return seen[0]?.reason ?? null
+  }
+
+  /** Where in `rows` the commits are, so a bend names one rather than an index. */
+  const commitsOf = (rows: Record<string, unknown>[]): Record<string, unknown>[] =>
+    rows.filter((row) => row['kind'] === 'commit')
+
+  it('quarantines a reference to another book’s begin', async () => {
+    expect(
+      await reasonFor((rows) => {
+        /* The second bracket's BEGIN is moved to the other book, so its
+         * commit now points at a begin belonging to a different key — and to
+         * one nothing else has closed, which is what separates this from the
+         * already-settled case below. */
+        const begins = rows.filter((row) => row['kind'] === 'begin')
+        begins[1]!['book'] = begins[0]!['book']
+      }),
+    ).toMatch(/different book or surface/)
+  })
+
+  it('quarantines a reference an earlier commit already closed', async () => {
+    expect(
+      await reasonFor((rows) => {
+        const commits = commitsOf(rows)
+        const second = commits[1]!
+        /* Same book as the first bracket, and the first commit closed it. */
+        second['book'] = commits[0]!['book']
+        second['begin'] = commits[0]!['begin']
+      }),
+    ).toMatch(/already closed/)
+  })
+
+  it('quarantines a reference whose begin disagrees about origin', async () => {
+    expect(
+      await reasonFor((rows) => {
+        const begins = rows.filter((row) => row['kind'] === 'begin')
+        begins[1]!['origin'] = 'remote'
+      }),
+    ).toMatch(/different epoch or origin/)
+  })
+
+  /* AND THE SHAPE THAT IS LEGITIMATE. `compact` keeps a settled bracket's
+   * commit and drops its begin, so a compacted journal holds commits whose
+   * begins are gone — a rule demanding the begin be present would refuse to
+   * open every compacted journal there is. */
+  it('opens a journal whose begins were compacted away', async () => {
+    const fs = crashableFs()
+    await withBentReference(fs, (rows) => {
+      for (let index = rows.length - 1; index >= 0; index -= 1) {
+        if (rows[index]!['kind'] === 'begin') rows.splice(index, 1)
+      }
+    })
+    const seen: { moved: string; reason: string }[] = []
+    const journal = journalOver(fs, { onQuarantine: (info) => seen.push(info) })
+    await journal.open()
+    expect(seen).toHaveLength(0)
+    expect(journal.state()).toBe('ready')
+    await journal.close()
+  })
+})
+
+/**
+ * THE FILE MUST STOP GROWING BY ITSELF.
+ *
+ * `compact()` existed and nothing in the app ever called it, so a journal grew
+ * for the life of the library: every open read and split the whole file, every
+ * entry stayed in memory, and `feed` rescanned all of it on every sync pass.
+ * A shelf edited daily for a year is a file nobody ever asked to keep.
+ *
+ * The reason this is safe to do automatically is that `feed` ALREADY coalesces
+ * to the last commit per key, and compaction keeps exactly that plus the last
+ * ack and any dangling begin. The lines it drops are lines `feed` would have
+ * discarded anyway — so a peer asking for changes since any seq gets the same
+ * answer before and after, which the last test here asserts rather than
+ * assumes.
+ */
+describe('the journal compacts itself', () => {
+  const REC = { bookId: 'book:a', title: 'Moby-Dick', author: 'Melville', addedAt: 50 }
+
+  /** `n` complete brackets on one book, through the real recorder. */
+  async function churn(journal: ReturnType<typeof journalOver>, n: number): Promise<void> {
+    for (let index = 0; index < n; index += 1) {
+      const token = await journal.begin('book:a', 'record')
+      await journal.commit(token, `digest-${index}`)
+    }
+  }
+
+  it('shortens the file once it has outgrown what it would keep', async () => {
+    const fs = crashableFs()
+    const journal = journalOver(fs, { compactEvery: 40 })
+    await journal.open()
+    fs.store.set('books/book_a/book.json', new TextEncoder().encode(JSON.stringify(REC)))
+    await churn(journal, 60)
+    /* One key, so compaction leaves a handful of lines rather than 120. */
+    expect(journal.entries().length).toBeLessThan(40)
+    expect(journalLines(fs, JOURNAL_PATH).length).toBe(journal.entries().length)
+    await journal.close()
+  })
+
+  it('leaves a shelf with more surfaces than the floor alone, rather than churning', async () => {
+    /* THE HALF THAT MAKES AN AUTOMATIC TRIGGER SAFE. A floor on its own means
+     * a library with more surfaces than the floor compacts on every append and
+     * removes almost nothing — a whole-file rewrite per edit. */
+    const fs = crashableFs()
+    const journal = journalOver(fs, { compactEvery: 4 })
+    await journal.open()
+    for (let index = 0; index < 20; index += 1) {
+      const token = await journal.begin(`book:${index}`, 'record')
+      await journal.commit(token, `d${index}`)
+    }
+    /* Twenty keys, one bracket each: nothing is superseded, so nothing is
+     * dropped even though the floor was passed long ago. */
+    expect(journal.entries().filter((e) => e.kind === 'commit')).toHaveLength(20)
+    await journal.close()
+  })
+
+  it('answers a peer identically before and after compacting', async () => {
+    const before = crashableFs()
+    const uncompacted = journalOver(before, { compactEvery: 1_000_000 })
+    await uncompacted.open()
+    before.store.set('books/book_a/book.json', new TextEncoder().encode(JSON.stringify(REC)))
+    await churn(uncompacted, 30)
+    const wide = uncompacted.feed(0, uncompacted.head())
+    const pushable = uncompacted.outbox()
+    expect(uncompacted.entries().length).toBeGreaterThan(50)
+
+    await uncompacted.compact()
+    expect(uncompacted.entries().length).toBeLessThan(10)
+    /* The same feed and the same outbox — the dropped lines were superseded
+     * commits, which `feed` coalesced away in any case. */
+    expect(uncompacted.feed(0, uncompacted.head())).toEqual(wide)
+    expect(uncompacted.outbox()).toEqual(pushable)
+    await uncompacted.close()
+  })
+
+  it('reopens a compacted journal without seeing corruption', async () => {
+    const fs = crashableFs()
+    const journal = journalOver(fs, { compactEvery: 20 })
+    await journal.open()
+    fs.store.set('books/book_a/book.json', new TextEncoder().encode(JSON.stringify(REC)))
+    await churn(journal, 40)
+    const head = journal.head()
+    await journal.close()
+
+    const seen: { moved: string; reason: string }[] = []
+    const reopened = journalOver(fs, { compactEvery: 20, onQuarantine: (info) => seen.push(info) })
+    await reopened.open()
+    expect(seen).toHaveLength(0)
+    expect(reopened.state()).toBe('ready')
+    /* Seqs are preserved, so a peer's `since` still means what it meant. */
+    expect(reopened.head()).toBe(head)
+    await reopened.close()
   })
 })

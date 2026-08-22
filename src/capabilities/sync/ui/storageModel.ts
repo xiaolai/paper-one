@@ -32,11 +32,34 @@ export interface DownloadRow {
 }
 
 export interface StorageSnapshot {
+  /**
+   * The downloads to SHOW — at most `MAX_SHOWN`, largest first.
+   *
+   * Every download was published and every one rendered into the DOM. A
+   * reader who has pulled a few hundred books down to a satchel then paid for
+   * a few hundred rows every time Settings opened, and again on every shelf
+   * write while it was open — for a list nobody scrolls to the end of. The
+   * ones worth showing are the ones taking the most space, which is the
+   * question this pane answers.
+   */
   readonly downloads: readonly DownloadRow[]
+  /** How many there are in total, so the pane can say what it is not showing. */
+  readonly downloadCount: number
   readonly coverBytes: number
   readonly coverCapMB: number
   readonly status: SyncStatus
   readonly busy: string | null
+  /**
+   * What went wrong the last time this model was asked to do something, or
+   * `null`.
+   *
+   * The pane used to discard every rejection with `void`: an eviction that
+   * failed, a cap that would not persist and a refresh that could not read
+   * the folder all left the UI exactly as it was, so the reader pressed the
+   * button, saw the row stay, and had no way to learn why. Published here so
+   * the pane can say so, and cleared at the start of the next attempt.
+   */
+  readonly failure: string | null
 }
 
 export interface StorageModel {
@@ -48,20 +71,67 @@ export interface StorageModel {
   dispose(): void
 }
 
+/**
+ * The range a cover cache cap may take, in whole megabytes.
+ *
+ * A cap under one megabyte holds no cover at all, and one large enough to
+ * overflow the byte total it is compared against stops eviction entirely —
+ * both are typos rather than intentions, and both are silent.
+ */
+/**
+ * How many download rows the pane will render.
+ *
+ * A bound, not a page: this is a storage summary, and a reader reclaiming
+ * space wants the biggest few — not an alphabetical walk through four hundred
+ * books. `downloadCount` carries the total so the pane can say plainly that
+ * there are more.
+ */
+export const MAX_SHOWN = 50
+
+export const COVER_CAP_MIN_MB = 1
+export const COVER_CAP_MAX_MB = 100_000
+
 /* ------------------------------------------------- the downloads ledger */
 
+/**
+ * The recorded size of every download, by book id.
+ *
+ * ABSENT IS AN EMPTY LEDGER; UNREADABLE IS NOT, and the difference costs
+ * entries rather than merely a display. Every failure used to answer `{}` —
+ * and `recordDownloadSize` is a read-modify-write that would then persist
+ * that empty object over the whole ledger, so one transient read error
+ * silently erased every download this device had recorded. The pane also
+ * stops offering to reclaim any of them, permanently.
+ *
+ * A row that is not a non-negative finite number is dropped INDIVIDUALLY: a
+ * hand-edited or half-written entry must not cost the entries beside it, and
+ * a NaN or negative size poisons the total the pane reports. A document that
+ * is not an object at all is not a ledger and reads as empty.
+ */
 export async function readDownloadSizes(fs: IndexFs): Promise<Readonly<Record<string, number>>> {
+  let raw: Uint8Array
   try {
-    const parsed: unknown = JSON.parse(new TextDecoder().decode(await fs.readFile(DOWNLOADS_INDEX_PATH)))
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {}
-    const out: Record<string, number> = {}
-    for (const [book, size] of Object.entries(parsed as Record<string, unknown>)) {
-      if (typeof size === 'number' && Number.isFinite(size) && size >= 0) out[book] = size
-    }
-    return out
-  } catch {
+    raw = await fs.readFile(DOWNLOADS_INDEX_PATH)
+  } catch (cause) {
+    if (await fs.exists(DOWNLOADS_INDEX_PATH)) throw cause
     return {}
   }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(raw))
+  } catch {
+    /* Bytes that are not JSON at all are not a ledger to preserve. */
+    return {}
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {}
+  /* NULL-PROTOTYPE: the keys are book ids, and a book id can come off the
+   * wire. `{}` inherits `Object.prototype`, so a book named `__proto__`
+   * would run the legacy setter rather than becoming an entry. */
+  const out: Record<string, number> = Object.create(null) as Record<string, number>
+  for (const [book, size] of Object.entries(parsed as Record<string, unknown>)) {
+    if (typeof size === 'number' && Number.isSafeInteger(size) && size >= 0) out[book] = size
+  }
+  return out
 }
 
 /* ONE writer at a time: record and drop are each a read-modify-write over
@@ -105,10 +175,12 @@ export function createStorageModel({ services, coverCache, status, removeDownloa
   const { library, settings, fs } = services
   let snapshot: StorageSnapshot = {
     downloads: [],
+    downloadCount: 0,
     coverBytes: 0,
     coverCapMB: settings.get(COVER_CAP_SETTING),
     status: status.getSnapshot(),
     busy: null,
+    failure: null,
   }
   const listeners = new Set<() => void>()
   const publish = (next: Partial<StorageSnapshot>) => {
@@ -124,7 +196,7 @@ export function createStorageModel({ services, coverCache, status, removeDownloa
    * two thousand imported books that listed all two thousand, every one with
    * a size of "—" because the ledger only records what a peer actually sent.
    *
-   * It was not merely noise. Each row carries a Remove download button, and
+   * It was not merely noise. Each row carries an Evict button, and
    * that button reaches `ledger.removeDownload`, which calls `removeBlob` on
    * the book's own content file. So the pane offered to delete the bytes of
    * books the reader had imported themselves, under a word that promises the
@@ -135,7 +207,9 @@ export function createStorageModel({ services, coverCache, status, removeDownloa
    * record that it ever was a download, and the alternative is guessing —
    * which is what produced the button above.
    */
-  const collect = async (): Promise<Pick<StorageSnapshot, 'downloads' | 'coverBytes' | 'coverCapMB' | 'status'>> => {
+  const collect = async (): Promise<
+    Pick<StorageSnapshot, 'downloads' | 'downloadCount' | 'coverBytes' | 'coverCapMB' | 'status'>
+  > => {
     const sizes = fs ? await readDownloadSizes(fs) : {}
     const downloads = library
       .getSnapshot()
@@ -145,7 +219,20 @@ export function createStorageModel({ services, coverCache, status, removeDownloa
         return [{ book: row.bookId, title: row.title || row.bookId, size }]
       })
     const coverBytes = coverCache ? await coverCache.totalBytes() : 0
-    return { downloads, coverBytes, coverCapMB: settings.get(COVER_CAP_SETTING), status: status.getSnapshot() }
+    /* BIGGEST FIRST, then bounded. Sorting before the cut is what makes the
+     * cut answer the pane's question — "what is taking the space" — rather
+     * than showing whichever fifty the shelf happened to list first. Ties are
+     * broken by book id so two reads of an unchanged library agree. */
+    const shown = [...downloads]
+      .sort((a, b) => b.size - a.size || (a.book < b.book ? -1 : a.book > b.book ? 1 : 0))
+      .slice(0, MAX_SHOWN)
+    return {
+      downloads: shown,
+      downloadCount: downloads.length,
+      coverBytes,
+      coverCapMB: settings.get(COVER_CAP_SETTING),
+      status: status.getSnapshot(),
+    }
   }
 
   /* AT MOST ONE READ IN FLIGHT, and at most one waiting behind it. `refresh`
@@ -226,20 +313,43 @@ export function createStorageModel({ services, coverCache, status, removeDownloa
     refresh,
     removeDownload: async (book) => {
       if (!removeDownload) return
-      publish({ busy: book })
+      publish({ busy: book, failure: null })
       try {
         /* The action OWNS the ledger delete AND its size row — dropping the
          * row here too was a second delete of the same entry. */
         await removeDownload(book)
+      } catch (cause) {
+        /* SAID, not swallowed. The row stays where it is either way; the
+         * difference is whether the reader knows the eviction did not
+         * happen. */
+        publish({ failure: cause instanceof Error ? cause.message : String(cause) })
       } finally {
         publish({ busy: null })
         await refresh()
       }
     },
     setCoverCapMB: async (mb) => {
-      if (!(Number.isFinite(mb) && mb > 0)) return
-      settings.set(COVER_CAP_SETTING, mb)
-      if (coverCache) await coverCache.evict()
+      /* BOUNDED AT BOTH ENDS, and rounded.
+       *
+       * `> 0` alone accepted 0.5 (a cap under a megabyte, which evicts
+       * everything) and 1e308 (a cap that overflows the byte arithmetic it
+       * feeds, so eviction stops happening at all). A cover cache is a number
+       * of whole megabytes between one and a sane ceiling, and a value outside
+       * that is a typo rather than an intention. */
+      if (!Number.isFinite(mb)) return
+      /* THE RANGE IS CHECKED BEFORE THE ROUNDING, not after. Rounding first
+       * turns 0.5 into 1 — a value below the minimum silently becoming the
+       * minimum, which answers a question the caller did not ask. Out of
+       * range is refused; in range is rounded to whole megabytes. */
+      if (mb < COVER_CAP_MIN_MB || mb > COVER_CAP_MAX_MB) return
+      const wanted = Math.round(mb)
+      publish({ failure: null })
+      try {
+        settings.set(COVER_CAP_SETTING, wanted)
+        if (coverCache) await coverCache.evict()
+      } catch (cause) {
+        publish({ failure: cause instanceof Error ? cause.message : String(cause) })
+      }
       await refresh()
     },
     dispose: () => {

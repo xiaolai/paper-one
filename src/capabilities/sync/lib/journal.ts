@@ -60,7 +60,6 @@
 
 import {
   BOOKS_DIR,
-  MUTATION_KINDS,
   PRESENCE_KEY,
   readPresence,
   PRESENCE_PATH,
@@ -69,9 +68,7 @@ import {
   hlcOf,
   notePresence,
   parseRecord,
-  readBook,
   readMarks,
-  recordPath,
   validMarks,
   type Card,
   type Hlc,
@@ -81,68 +78,54 @@ import {
   type MutationToken,
   type WriteQueue,
 } from '../../../kernel'
-import { isHlc } from './clock'
+import { createDigests } from './journalDigests'
+import { scanJournal } from './journalScan'
+import { createJournalIndex, nextRev, type KeyState } from './journalIndex'
 import { cardsDigest, marksDigest, recordDigest } from './merge'
 
 /** The directory the journal, its meta, its dirty flag and the presence
  *  register all live in — fsynced whenever an ENTRY in it is created,
  *  renamed or removed, so the directory slot survives power loss too. */
-/**
- * The journal on disk contradicts itself — not a crash artefact.
+
+/* THE ENTRY, ITS VOCABULARY AND ITS PARSER moved to `journalEntry.ts`.
  *
- * A crash leaves a PREFIX of a valid journal, and a prefix satisfies every
- * load-time invariant; `loadLines` handles that case separately and silently.
- * This is the other thing: an epoch that changes mid-file, a rev that
- * regresses, a seq that goes backwards. Its own type because `open` recovers
- * from exactly this and must not swallow an unreadable disk or a newer format
- * along with it.
- */
-export class JournalCorruption extends Error {
-  constructor(message: string) {
-    super(message)
-    this.name = 'JournalCorruption'
-  }
-}
+ * That module is the TRUST BOUNDARY — `journal.jsonl` is a file anything could
+ * have written — and it depends on nothing else here, which is what let
+ * `journalScan.ts` read it without importing this file and creating a cycle.
+ * The gate caught that cycle the first time the scanner was split out, which
+ * is exactly what it is for.
+ *
+ * Re-exported so every existing importer keeps one door. */
+export {
+  JOURNAL_DIRTY_PATH,
+  JOURNAL_FORMAT,
+  JOURNAL_KEY,
+  JOURNAL_META_PATH,
+  JOURNAL_PATH,
+  JournalCorruption,
+  SYNC_DIR,
+  canonicalBook,
+  entryOf,
+  isValidJsonPrefix,
+  keyOf,
+} from './journalEntry'
+export type { JournalEntry, JournalMeta, JournalOrigin, JournalState } from './journalEntry'
 
-export const SYNC_DIR = 'sync'
-export const JOURNAL_PATH = 'sync/journal.jsonl'
-export const JOURNAL_META_PATH = 'sync/journal.meta.json'
-export const JOURNAL_DIRTY_PATH = 'sync/journal.dirty'
-export const JOURNAL_FORMAT = 1
-/** The one write-queue key every journal mutation is serialised on. */
-export const JOURNAL_KEY = 'sync:journal'
-
-export type JournalOrigin = 'local' | 'remote'
-export type JournalState = 'building' | 'ready'
-
-export interface JournalEntry {
-  readonly seq: number
-  readonly kind: 'begin' | 'commit' | 'acked'
-  readonly epoch: string
-  readonly book: string
-  readonly what: MutationKind
-  readonly at: Hlc
-  /** On commits and acks. */
-  readonly rev?: number
-  /**
-   * On a runtime commit: the `seq` of the begin this commit settles. A
-   * commit must clear ONLY its own bracket — brackets on one key can
-   * overlap (cards are not serialised by the book queue), and a commit that
-   * swept every dangling begin for the key silently un-announced a write
-   * still in flight. Absent on baseline/verify commits, which follow no
-   * begin; those clear the key whole, the pre-token behaviour.
-   */
-  readonly begin?: number
-  readonly origin: JournalOrigin
-  readonly digest?: string
-}
-
-interface JournalMeta {
-  readonly epoch: string
-  readonly nextSeq: number
-  readonly journalFormat: number
-  readonly state: JournalState
-}
+import {
+  JOURNAL_DIRTY_PATH,
+  JOURNAL_FORMAT,
+  JOURNAL_KEY,
+  JOURNAL_META_PATH,
+  JOURNAL_PATH,
+  JournalCorruption,
+  SYNC_DIR,
+  canonicalBook,
+  keyOf,
+  type JournalEntry,
+  type JournalMeta,
+  type JournalOrigin,
+  type JournalState,
+} from './journalEntry'
 
 /** The filesystem the journal needs: the kernel's, plus a real append when
  *  the platform has one. Without `appendFile` the fallback reads and
@@ -163,6 +146,20 @@ export interface JournalOptions {
   /** During bootstrap, fsync every N records. Injectable for the kill test. */
   readonly fsyncEvery?: number
   /**
+   * How many entries the file may hold before it is compacted in place.
+   *
+   * `compact()` existed and nothing ever called it, so the journal grew for
+   * the life of the library: every open read and split the whole file, every
+   * entry stayed in memory, and `feed` rescanned all of it. A shelf edited
+   * daily for a year is a file nobody ever asked to keep.
+   *
+   * The threshold is a FLOOR, not the rule — the rule is below in
+   * `overgrown`, which also requires the file to be several times what
+   * compaction would leave. A library with more surfaces than this number
+   * must not compact on every append to no effect.
+   */
+  readonly compactEvery?: number
+  /**
    * The canonical card rows, tombstones included, for the cards baseline
    * and the verify pass — `services.cards.stored` at composition (WI-10.4),
    * so the journal holds no raw flat-store handle. Absent: no cards.
@@ -177,6 +174,39 @@ export interface JournalOptions {
    * different things to a peer.
    */
   readonly onQuarantine?: (info: { readonly moved: string; readonly reason: string }) => void
+  /**
+   * Run the unclean-shutdown verify pass when the dirty flag was up. Default
+   * true, which is what the app wants and what recovery means.
+   *
+   * FALSE IS FOR A PROCESS THAT IS NOT THE LIBRARY'S OWNER — `paper`, which
+   * wants to append one commit and leave. That pass walks every book, reads
+   * every record and RAISES REVS where it finds a discrepancy; it is the
+   * app's job, on the app's schedule, and not something a `paper book add`
+   * should do to a sixteen-gigabyte shelf on its way past.
+   *
+   * Declining it is not the same as declaring the shelf sound, so the dirty
+   * flag is RETAINED exactly as it is when the pass runs and cannot finish —
+   * the recovery stays owed, and the next app start still performs it.
+   */
+  readonly recover?: boolean
+  /**
+   * The queue key a surface's writes actually run on.
+   *
+   * `markRemote` fences the remote expectation by queueing on this key, so it
+   * MUST be the key the kernel's own writers use or the fence orders nothing.
+   * It defaulted to the raw book id, and the library's writers queue on
+   * `folderOf(bookId)` — `books/<safeId>` — so the two were different keys
+   * even with no aliasing in play: the fence ran on an empty lane while a
+   * local write sat queued on another, and that local write then consumed the
+   * remote expectation and journalled itself `remote`. A local edit marked
+   * remote is dropped from the outbox and never pushed.
+   *
+   * Cards are their own surface with their own key, which is why the kind is
+   * passed too. Default keeps the old behaviour for the suites that give the
+   * journal a private queue, where ordering against kernel writers is not in
+   * question.
+   */
+  readonly lane?: (book: string, what: MutationKind) => string
 }
 
 export interface JournalKeyRef {
@@ -244,202 +274,6 @@ export interface Journal extends MutationRecorder {
   subscribe(listener: () => void): () => void
 }
 
-/* Derived from the kernel's own tuple — a kind added there is valid here
- * the same day, not after someone remembers this copy. */
-const KNOWN_KINDS: ReadonlySet<string> = new Set(MUTATION_KINDS)
-
-const keyOf = (book: string, what: MutationKind): string => `${what}\u0000${book}`
-
-/**
- * The book a `(book, what)` is journaled under. Cards are ONE cross-book
- * surface and their canonical book is `''` — the same key the bootstrap
- * baseline uses. The kernel's card writer records under `''` too; this is
- * the belt for any other caller and for lines written before the rule, so
- * one surface can never split into unrelated rev and outbox streams again.
- */
-const canonicalBook = (book: string, what: MutationKind): string => (what === 'cards' ? '' : book)
-
-interface KeyState {
-  lastCommit?: JournalEntry
-  lastLocalCommit?: JournalEntry
-  lastRev: number
-  lastAckedRev: number
-  lastAcked?: JournalEntry
-  /** Begins with no commit yet, in seq order. */
-  dangling: JournalEntry[]
-}
-
-/**
- * Validate one PARSED line into an entry — the schema half only. The JSON
- * half stays with the loader, because the two failures mean different
- * things: bytes that do not parse can be a torn append (tolerable at the
- * tail), while a COMPLETE line that is not an entry is corruption wherever
- * it sits, the tail included.
- */
-function entryOf(raw: unknown): JournalEntry | null {
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
-  const e = raw as Record<string, unknown>
-  if (typeof e['seq'] !== 'number' || !Number.isInteger(e['seq']) || e['seq'] < 1) return null
-  if (e['kind'] !== 'begin' && e['kind'] !== 'commit' && e['kind'] !== 'acked') return null
-  if (typeof e['epoch'] !== 'string' || e['epoch'] === '') return null
-  if (typeof e['book'] !== 'string') return null
-  if (typeof e['what'] !== 'string' || !KNOWN_KINDS.has(e['what'])) return null
-  if (!isHlc(e['at'])) return null
-  if (e['origin'] !== 'local' && e['origin'] !== 'remote') return null
-  const needsRev = e['kind'] === 'commit' || e['kind'] === 'acked'
-  if (needsRev && (typeof e['rev'] !== 'number' || !Number.isInteger(e['rev']) || e['rev'] < 1)) return null
-  /* AN INVALID OPTIONAL FIELD IS CORRUPTION, NOT A FIELD TO DROP. A `rev` on a
-   * begin, or a non-string / non-commit `digest`, means the line was written
-   * by something that did not understand the schema — silently discarding it
-   * (the old behaviour) let a garbled line load as a valid entry with its
-   * telltale field quietly gone. */
-  if (!needsRev && e['rev'] !== undefined) return null
-  if (e['digest'] !== undefined && (typeof e['digest'] !== 'string' || e['kind'] !== 'commit')) return null
-  const beginRef = e['begin']
-  if (
-    beginRef !== undefined &&
-    (e['kind'] !== 'commit' || typeof beginRef !== 'number' || !Number.isInteger(beginRef) || beginRef < 1 || beginRef >= (e['seq'] as number))
-  ) {
-    return null
-  }
-  return {
-    seq: e['seq'],
-    kind: e['kind'],
-    epoch: e['epoch'],
-    book: canonicalBook(e['book'], e['what'] as MutationKind),
-    what: e['what'] as MutationKind,
-    at: e['at'],
-    ...(needsRev ? { rev: e['rev'] as number } : {}),
-    ...(beginRef === undefined ? {} : { begin: beginRef as number }),
-    origin: e['origin'],
-    ...(typeof e['digest'] === 'string' ? { digest: e['digest'] } : {}),
-  }
-}
-
-/**
- * Whether `s` is a strict prefix of some syntactically valid JSON text — the
- * exact shape a crash mid-append leaves of a serialised entry. Arbitrary
- * corruption sitting where the last line should be is NOT such a prefix, and
- * tolerating it as a torn tail would silently erase a line the disk holds.
- *
- * A compact hand-scanner over the JSON grammar rather than a dependency:
- * running out of input mid-value is a valid prefix; a structurally impossible
- * byte, or a complete value with trailing junk, is not.
- */
-export function isValidJsonPrefix(s: string): boolean {
-  const n = s.length
-  if (n === 0) return false
-
-  const skipWs = (i: number): number => {
-    while (i < n && (s[i] === ' ' || s[i] === '\t' || s[i] === '\n' || s[i] === '\r')) i++
-    return i
-  }
-  /* Each scanner returns the index AFTER a complete token, `n` when the input
-   * ran out mid-token (a valid prefix), or -1 for a structural violation. */
-  const scanString = (i: number): number => {
-    i++
-    while (i < n) {
-      const c = s[i]!
-      if (c === '\\') {
-        if (i + 1 >= n) return n
-        const e = s[i + 1]!
-        if ('"\\/bfnrt'.includes(e)) {
-          i += 2
-          continue
-        }
-        if (e === 'u') {
-          for (let k = 0; k < 4; k++) {
-            if (i + 2 + k >= n) return n
-            if (!/[0-9a-fA-F]/.test(s[i + 2 + k]!)) return -1
-          }
-          i += 6
-          continue
-        }
-        return -1
-      }
-      if (c === '"') return i + 1
-      if (c.charCodeAt(0) < 0x20) return -1
-      i++
-    }
-    return n
-  }
-  const scanLiteral = (i: number, word: string): number => {
-    for (let k = 0; k < word.length; k++) {
-      if (i + k >= n) return n
-      if (s[i + k] !== word[k]) return -1
-    }
-    return i + word.length
-  }
-  const scanNumber = (i: number): number => {
-    const start = i
-    if (s[i] === '-') i++
-    while (i < n && s[i]! >= '0' && s[i]! <= '9') i++
-    if (i < n && s[i] === '.') {
-      i++
-      while (i < n && s[i]! >= '0' && s[i]! <= '9') i++
-    }
-    if (i < n && (s[i] === 'e' || s[i] === 'E')) {
-      i++
-      if (i < n && (s[i] === '+' || s[i] === '-')) i++
-      while (i < n && s[i]! >= '0' && s[i]! <= '9') i++
-    }
-    return i === start ? -1 : i
-  }
-  const scanValue = (i0: number): number => {
-    const i = skipWs(i0)
-    if (i >= n) return n
-    const c = s[i]!
-    if (c === '"') return scanString(i)
-    if (c === '{') return scanObject(i)
-    if (c === '[') return scanArray(i)
-    if (c === 't') return scanLiteral(i, 'true')
-    if (c === 'f') return scanLiteral(i, 'false')
-    if (c === 'n') return scanLiteral(i, 'null')
-    if (c === '-' || (c >= '0' && c <= '9')) return scanNumber(i)
-    return -1
-  }
-  function scanObject(i0: number): number {
-    let i = skipWs(i0 + 1)
-    if (i >= n) return n
-    if (s[i] === '}') return i + 1
-    for (;;) {
-      i = skipWs(i)
-      if (i >= n) return n
-      if (s[i] !== '"') return -1
-      const afterKey = scanString(i)
-      if (afterKey === -1 || afterKey >= n) return afterKey
-      i = skipWs(afterKey)
-      if (i >= n) return n
-      if (s[i] !== ':') return -1
-      const afterVal = scanValue(i + 1)
-      if (afterVal === -1 || afterVal >= n) return afterVal
-      i = skipWs(afterVal)
-      if (i >= n) return n
-      if (s[i] === '}') return i + 1
-      if (s[i] !== ',') return -1
-      i++
-    }
-  }
-  function scanArray(i0: number): number {
-    let i = skipWs(i0 + 1)
-    if (i >= n) return n
-    if (s[i] === ']') return i + 1
-    for (;;) {
-      const afterVal = scanValue(i)
-      if (afterVal === -1 || afterVal >= n) return afterVal
-      i = skipWs(afterVal)
-      if (i >= n) return n
-      if (s[i] === ']') return i + 1
-      if (s[i] !== ',') return -1
-      i++
-    }
-  }
-
-  const end = scanValue(0)
-  if (end === -1) return false
-  return skipWs(end) >= n
-}
-
 /** A token the kernel hands back to `commit` — carries the begin's identity. */
 interface JournalToken extends MutationToken {
   readonly seq: number
@@ -452,13 +286,17 @@ export function createJournal({
   clock,
   fsync = async () => {},
   fsyncEvery = 100,
+  compactEvery = 2_000,
   cards = () => [],
   onQuarantine,
+  recover = true,
+  lane = (book) => book,
 }: JournalOptions): Journal {
   let meta: JournalMeta | null = null
   let nextSeq = 1
-  let all: JournalEntry[] = []
-  const byKey = new Map<string, KeyState>()
+  const index = createJournalIndex()
+  /** Every entry, in seq order — the index's list, read here. */
+  const all = (): readonly JournalEntry[] => index.entries()
   /** One-shot remote expectations: key → the armed tickets, oldest first.
    *  A begin consumes the oldest; a clear removes exactly its own. */
   const expectedRemote = new Map<string, number[]>()
@@ -487,44 +325,23 @@ export function createJournal({
     }
   }
 
-  const keyState = (book: string, what: MutationKind): KeyState => {
-    const key = keyOf(book, what)
-    let held = byKey.get(key)
-    if (!held) {
-      held = { lastRev: 0, lastAckedRev: 0, dangling: [] }
-      byKey.set(key, held)
-    }
-    return held
-  }
+  /**
+   * The next revision for a key — past the last commit AND past the last ack.
+   *
+   * `lastRev + 1` alone was wrong wherever an ack sits ahead of the surviving
+   * commits, which loading explicitly permits: `compact` keeps the last acked
+   * entry, so a journal can carry `lastAckedRev` above any commit still in the
+   * file. A new local commit allocated at `lastRev + 1` then landed at or
+   * below the ack, and `outbox` skips exactly that (`local.rev <= lastAckedRev`)
+   * — so the edit was journalled, looked committed, and was never offered to
+   * a peer again. Silent, and permanent for that key.
+   */
 
-  const absorb = (entry: JournalEntry): void => {
-    all.push(entry)
-    const state = keyState(entry.book, entry.what)
-    if (entry.kind === 'begin') {
-      state.dangling.push(entry)
-    } else if (entry.kind === 'commit') {
-      state.lastCommit = entry
-      if (entry.origin === 'local') state.lastLocalCommit = entry
-      state.lastRev = Math.max(state.lastRev, entry.rev!)
-      /* ONLY ITS OWN BRACKET. Brackets on one key can overlap, and a commit
-       * that swept the key's every dangling begin dropped a write still in
-       * flight from the crash record. A commit with no begin ref (baseline,
-       * verify, a legacy line) still clears whole — those commit the key's
-       * observed state, not one bracket. */
-      state.dangling =
-        entry.begin === undefined ? [] : state.dangling.filter((begin) => begin.seq !== entry.begin)
-    } else {
-      /* NOT validated against the key's commit revs, deliberately: crash
-       * recovery renumbers revisions (a dropped tail, legacy cards lines),
-       * so an ack honestly ahead of the surviving commits is a state the
-       * crash suite REQUIRES loading — the outbox's CAS is what keeps a
-       * live ack honest. */
-      if (entry.rev! >= state.lastAckedRev) {
-        state.lastAckedRev = entry.rev!
-        state.lastAcked = entry
-      }
-    }
-  }
+  /* THE INDEX IS ITS OWN MODULE (`journalIndex.ts`). What it holds and the
+   * invariants it keeps are stated there; here it is a collaborator, so this
+   * file is about the FILE and the index is about what the file says. */
+  const keyState = (book: string, what: MutationKind): KeyState => index.keyState(keyOf(book, what))
+  const absorb = (entry: JournalEntry): void => index.absorb(entry, keyOf(entry.book, entry.what))
 
   /* ------------------------------------------------------------ file io */
 
@@ -536,6 +353,52 @@ export function createJournal({
 
   const encode = (entry: JournalEntry): Uint8Array => new TextEncoder().encode(`${JSON.stringify(entry)}\n`)
 
+  /**
+   * Set when an append failed in a way that leaves the FILE and the in-memory
+   * state possibly disagreeing — and cleared only by a fresh `open()`.
+   *
+   * `appendLine` writes the bytes and then fsyncs. Callers do their `absorb`
+   * AFTER it returns, so a throw from either half skips the absorb while the
+   * bytes may already be on disk. The in-memory `nextSeq` and per-key revs
+   * then describe a journal that is one line shorter than the real one, and
+   * the next allocation reuses numbers already written. A retried commit
+   * appends a duplicate seq — which the loader treats as corruption, not as a
+   * crash artefact, and quarantines the whole journal on the next open.
+   *
+   * Neither half can be made unambiguous from here: a failed `appendFile` may
+   * have written some bytes, and a failed `fsync` follows a write that
+   * certainly landed in the page cache. So the honest response is to stop
+   * using state that may be wrong. `open()` re-reads the file and re-derives
+   * everything, which is the only way back — and it is the same recovery a
+   * crash gets.
+   */
+  let poisoned: Error | null = null
+
+  /**
+   * A failure that happened BEFORE any byte was written.
+   *
+   * Only an append that may have reached disk leaves the file and memory
+   * possibly disagreeing. The fallback's read of the existing journal happens
+   * first and writes nothing, so failing there is an ordinary error — poisoning
+   * on it would close the journal over a transient read with no ambiguity to
+   * resolve, which is availability spent for nothing.
+   */
+  class AppendNotAttempted extends Error {
+    constructor(readonly cause: unknown) {
+      super(cause instanceof Error ? cause.message : String(cause))
+      this.name = 'AppendNotAttempted'
+    }
+  }
+
+  /** Refuse anything that would read or extend state the file may contradict. */
+  const refuseIfPoisoned = (): void => {
+    if (poisoned) {
+      throw new JournalCorruption(
+        `journal: an append failed and the file may disagree with memory, so this journal is closed until it is reopened (${poisoned.message})`,
+      )
+    }
+  }
+
   const appendLine = async (entry: JournalEntry, sync: boolean): Promise<void> => {
     const bytes = encode(entry)
     const creating = !journalFileExists
@@ -545,7 +408,19 @@ export function createJournal({
       let held: Uint8Array = new Uint8Array(0)
       try {
         held = await fs.readFile(JOURNAL_PATH)
-      } catch {
+      } catch (cause) {
+        /* ABSENT IS THE ONLY FORGIVABLE FAILURE HERE, and it used to catch
+         * every one of them. This fallback rewrites the file IN PLACE from
+         * `held`, so a transient read error — a lock, an EIO, a permission
+         * that changed — meant appending one line to an empty buffer and
+         * writing that over the whole journal. Every prior entry gone, no
+         * error raised, and the next open sees a one-line journal it has no
+         * reason to distrust.
+         *
+         * `exists()` is the portable way to ask: the error SHAPE differs
+         * between the Node host and the webview's fs plugin, so matching on
+         * `ENOENT` would be right on one and silent on the other. */
+        if (await fs.exists(JOURNAL_PATH)) throw new AppendNotAttempted(cause)
         /* first line */
       }
       const joined = new Uint8Array(held.length + bytes.length)
@@ -562,6 +437,24 @@ export function createJournal({
     /* The append that CREATED the file added a directory entry: fsync the
      * directory so a crash cannot lose the slot even after the bytes fsynced. */
     if (creating) await fsyncDir()
+  }
+
+  /**
+   * `appendLine`, with the one thing every caller needs: a failure here means
+   * the caller's `absorb` will not run, so the journal must stop rather than
+   * carry on allocating numbers the file may already hold.
+   */
+  const appendOrPoison = async (entry: JournalEntry, sync: boolean): Promise<void> => {
+    refuseIfPoisoned()
+    try {
+      await appendLine(entry, sync)
+    } catch (cause) {
+      /* Nothing was written, so nothing is ambiguous: raise the real cause and
+       * leave the journal usable. */
+      if (cause instanceof AppendNotAttempted) throw cause.cause
+      poisoned = cause instanceof Error ? cause : new Error(String(cause))
+      throw cause
+    }
   }
 
   const writeMeta = async (value: JournalMeta): Promise<void> => {
@@ -590,7 +483,9 @@ export function createJournal({
     if (typeof parsed !== 'object' || parsed === null) return null
     const m = parsed as Record<string, unknown>
     if (typeof m['epoch'] !== 'string' || m['epoch'] === '') return null
-    if (typeof m['nextSeq'] !== 'number' || !Number.isInteger(m['nextSeq']) || m['nextSeq'] < 1) return null
+    /* Safe, for the same reason `seq` is: a `nextSeq` at 2^53 stops
+     * advancing when incremented and every append repeats it. */
+    if (typeof m['nextSeq'] !== 'number' || !Number.isSafeInteger(m['nextSeq']) || m['nextSeq'] < 1) return null
     if (m['journalFormat'] !== JOURNAL_FORMAT) {
       throw new Error(`journal: unknown journalFormat ${String(m['journalFormat'])}`)
     }
@@ -601,96 +496,37 @@ export function createJournal({
   /* ------------------------------------------------------------- load */
 
   const loadLines = async (): Promise<void> => {
-    all = []
-    byKey.clear()
+    index.clear()
     let text: string
     try {
       text = new TextDecoder().decode(await fs.readFile(JOURNAL_PATH))
-    } catch {
+    } catch (cause) {
+      /* Only a journal that is NOT THERE loads as empty. Treating every read
+       * failure as absence let `open()` succeed on a transient error with an
+       * empty journal, an empty outbox and a `nextSeq` derived from meta
+       * alone — so unsent local commits silently stopped being offered to
+       * peers, and the next append began renumbering over entries still on
+       * disk. Failing the open instead leaves the file untouched and lets the
+       * next start try again. */
+      if (await fs.exists(JOURNAL_PATH)) throw cause
       return
     }
     /* The file was there to read, so its directory slot is already durable —
      * the next append is not a create and owes the directory no fsync. */
     journalFileExists = true
-    let torn = false
-    let repaired = false
-    const lines = text.split('\n')
-    /* The load-time invariants (#4): one epoch — the same one `meta` names —
-     * strictly-increasing seq, strictly-increasing commit and ack revs per
-     * key. A journal violating them is not a crash artefact — a crash leaves
-     * a PREFIX, and a prefix of a valid journal holds all three — it is
-     * corruption, and deriving `nextSeq` from it would serve a feed that
-     * disagrees with itself. */
-    let lastSeq = 0
-    let epoch: string | null = null
-    const commitRev = new Map<string, number>()
-    const ackedRev = new Map<string, number>()
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i]!
-      if (line === '') continue
-      let raw: unknown
-      try {
-        raw = JSON.parse(line)
-      } catch {
-        /* INCOMPLETE JSON, LAST LINE ONLY, AND ONLY A REAL PREFIX. A crash
-         * mid-append truncates the tail into a strict byte-prefix of a
-         * serialised entry; bytes that do not parse with valid lines AFTER
-         * them, or bytes that are not even a valid JSON prefix, are
-         * corruption — tolerating either would serve a feed with a hole in
-         * it, or erase a line the disk actually holds. */
-        const isTail = lines.slice(i + 1).every((rest) => rest === '')
-        if (!isTail) throw new JournalCorruption(`journal: malformed line ${i + 1} is not the tail`)
-        if (!isValidJsonPrefix(line)) {
-          throw new JournalCorruption(`journal: malformed last line ${i + 1} is not a valid entry prefix`)
-        }
-        torn = true
-        break
-      }
-      let entry = entryOf(raw)
-      if (entry === null) {
-        /* COMPLETE JSON that is not an entry. A torn append cannot leave
-         * this — a byte prefix of `{...}` either fails to parse or IS the
-         * whole line — so it is corruption wherever it sits, tail included. */
-        throw new JournalCorruption(`journal: line ${i + 1} is complete but not a journal entry`)
-      }
-      if (entry.seq <= lastSeq) {
-        throw new JournalCorruption(`journal: seq ${entry.seq} at line ${i + 1} does not increase past ${lastSeq}`)
-      }
-      lastSeq = entry.seq
-      if (epoch === null) epoch = entry.epoch
-      else if (entry.epoch !== epoch) {
-        throw new JournalCorruption(`journal: line ${i + 1} names a second epoch`)
-      }
-      const key = keyOf(entry.book, entry.what)
-      if (entry.kind === 'commit') {
-        const prev = commitRev.get(key) ?? 0
-        if (entry.rev! <= prev) {
-          /* CARDS ARE ONE STREAM MADE OF MANY. A legacy journal recorded
-           * cards under the caller's book id; canonicalising them to `''`
-           * here collapses those streams onto one, and their once-separate
-           * revs now collide. Renumber onto a monotone tail rather than
-           * refuse to open, and rewrite so the migration is paid once. Every
-           * other key colliding is genuine corruption. */
-          if (entry.what !== 'cards') {
-            throw new JournalCorruption(`journal: commit rev ${entry.rev} at line ${i + 1} regresses its key`)
-          }
-          entry = { ...entry, rev: prev + 1 }
-          repaired = true
-        }
-        commitRev.set(key, entry.rev!)
-      } else if (entry.kind === 'acked') {
-        const prev = ackedRev.get(key) ?? 0
-        if (entry.rev! <= prev) {
-          if (entry.what !== 'cards') {
-            throw new JournalCorruption(`journal: ack rev ${entry.rev} at line ${i + 1} regresses its key`)
-          }
-          entry = { ...entry, rev: prev + 1 }
-          repaired = true
-        }
-        ackedRev.set(key, entry.rev!)
-      }
-      absorb(entry)
-    }
+    /* THE WHOLE OF WHAT THE TEXT HAS TO SATISFY lives in `journalScan.ts`,
+     * as a pure function of the string: the torn-tail rule, the load-time
+     * invariants, the begin/commit pairing, the legacy rev renumbering. It
+     * left this closure so that every one of them is reachable from a test
+     * that writes a string rather than through a filesystem fake and an open.
+     *
+     * What stays here is what genuinely needs the journal: absorbing the
+     * result into the index, and rewriting the file when the scan repaired
+     * something. */
+    const scanned = scanJournal(text)
+    for (const entry of scanned.entries) absorb(entry)
+    const { epoch, torn, repaired } = scanned
+
     /* THE JOURNAL AND ITS META MUST NAME ONE EPOCH (#4). The loader proves
      * the lines agree with each other; this proves they agree with the meta
      * file, whose epoch is what `begin`/`commit` stamp and what a peer trusts
@@ -710,7 +546,7 @@ export function createJournal({
        * (`syncJournal.crash.test.ts`), which is exactly what it is for.
        * Entries re-serialise byte-identically (one field order, stated at
        * `parseEntry`), so this is the valid prefix, atomically. */
-      const clean = all.map((entry) => JSON.stringify(entry)).join('\n')
+      const clean = all().map((entry) => JSON.stringify(entry)).join('\n')
       await atomicWrite(fs, JOURNAL_PATH, new TextEncoder().encode(clean.length ? `${clean}\n` : ''))
       await fsync(JOURNAL_PATH)
       await fsyncDir()
@@ -722,8 +558,24 @@ export function createJournal({
      * committed NOW with a fresh seq — the write it announced may or may not
      * have landed, which is exactly what the digest verify pass then squares
      * with the folder. */
-    for (const state of byKey.values()) {
+    for (const state of index.states()) {
       for (const begin of [...state.dangling]) {
+        /* THE FOLDER AS IT ACTUALLY IS, stamped onto the recovery commit.
+         *
+         * This committed with no digest at all, so the key it recovered was
+         * then SKIPPED by the verify pass — and skipped on every later open
+         * too, since the digestless head persists. A crash between a write and
+         * its commit left exactly one key unverifiable: the one that crashed.
+         *
+         * A read that fails is not an absence: verification stays incomplete
+         * so the dirty flag survives `close` and the next open tries again,
+         * rather than a clean close certifying a folder nobody could read. */
+        let digest: string | undefined
+        try {
+          digest = (await digestOf(begin.book, begin.what)) ?? undefined
+        } catch {
+          verifyIncomplete = true
+        }
         const entry: JournalEntry = {
           seq: nextSeq++,
           kind: 'commit',
@@ -731,67 +583,36 @@ export function createJournal({
           book: begin.book,
           what: begin.what,
           at: clock(),
-          rev: state.lastRev + 1,
+          rev: nextRev(state),
           begin: begin.seq,
           origin: begin.origin,
+          ...(digest === undefined ? {} : { digest }),
         }
-        await appendLine(entry, true)
+        await appendOrPoison(entry, true)
         absorb(entry)
       }
     }
   }
 
-  /* `book` here is what the kernel handed `begin` — a book ID, from which
-   * `readBook`/`readMarks` derive the folder the same way every kernel writer
-   * does. `null` is a genuine ABSENCE — a surface with no digest to compute,
-   * or a record that is gone — which the verify pass reads as "cannot
-   * compare, do not re-commit". An ERROR (a file present but unreadable, a
-   * hash that threw) is NOT an absence and is THROWN (#10): verify must not
-   * pass by turning a failed read into a matching-looking null. */
-  const digestOf = async (book: string, what: MutationKind): Promise<string | null> => {
-    if (what === 'record') {
-      const record = await readBook(fs, book)
-      if (record !== null) return recordDigest(record)
-      /* `readBook` answers null for GONE and for BROKEN alike. Present but
-       * unreadable is a torn/half-written folder the verify pass must keep
-       * chasing, not a book that is simply not there. */
-      if (await fs.exists(recordPath(book))) {
-        throw new Error(`journal: book.json for ${book} is present but could not be read`)
-      }
-      return null
-    }
-    if (what === 'marks') {
-      // `readMarks`: absent is `[]`, unreadable THROWS — which propagates as
-      // the error it is rather than reading as "no marks".
-      return marksDigest(validMarks(await readMarks(fs, book)))
-    }
-    if (what === 'cards') {
-      return cardsDigest(cards())
-    }
-    return null
-  }
-
-  /* Best-effort digest for a COMMIT (#6): the kernel writers pass none, so
-   * one is computed from the just-written folder — that is what lets the
-   * verify pass detect a durable commit paired with a lost data write. A
-   * read that fails here must NOT fail the write, so it commits without a
-   * digest — and a digest-less commit is honestly OUTSIDE the verify pass's
-   * reach (it compares stored digests): the cost of one unreadable
-   * post-write read is one commit the unclean-shutdown check cannot judge,
-   * not a failed write. */
-  const digestForCommit = async (book: string, what: MutationKind): Promise<string | undefined> => {
-    try {
-      return (await digestOf(book, what)) ?? undefined
-    } catch {
-      return undefined
-    }
-  }
+  /* THE DIGESTS ARE THEIR OWN MODULE (`journalDigests.ts`). They depend on
+   * the filesystem and the card snapshot and on none of this closure's
+   * mutable state, so separating them is what makes their one rule —
+   * absence is `null`, a failed read THROWS — reachable from a test. */
+  const digests = createDigests({ fs, cards })
+  const digestOf = digests.of
+  const digestForCommit = digests.forCommit
 
   const verifyAfterUncleanShutdown = async (): Promise<void> => {
     /* Bounded: one digest per (book, what) whose last commit CARRIES a
      * digest — a commit without one has nothing to be compared against. */
-    for (const state of byKey.values()) {
-      const last = state.lastCommit
+    for (const state of index.states()) {
+      /* THE LAST COMMIT THAT CAN BE COMPARED, not merely the last one. A
+       * digestless head — a recovery commit whose folder could not be read, a
+       * line from before digests existed — used to make the whole key
+       * invisible here. The digest below is still the newest STATEMENT about
+       * this surface, so comparing the folder against it is the same check,
+       * one entry further back. */
+      const last = state.lastDigested
       if (!last || last.digest === undefined) continue
       let current: string | null
       try {
@@ -814,7 +635,7 @@ export function createJournal({
            * loss, so verification stays incomplete instead — the dirty flag
            * survives `close` and every later open keeps retrying until the
            * folder is resolved. */
-          const removed = byKey.get(keyOf(last.book, 'removed'))?.lastCommit
+          const removed = keyState(last.book, 'removed').lastCommit
           let explained = false
           if (removed && removed.seq > last.seq) {
             try {
@@ -835,11 +656,11 @@ export function createJournal({
         book: last.book,
         what: last.what,
         at: clock(),
-        rev: state.lastRev + 1,
+        rev: nextRev(state),
         origin: 'local',
         digest: current,
       }
-      await appendLine(entry, true)
+      await appendOrPoison(entry, true)
       absorb(entry)
     }
   }
@@ -863,52 +684,70 @@ export function createJournal({
       book,
       what,
       at,
-      rev: state.lastRev + 1,
+      rev: nextRev(state),
       origin: 'local',
       ...(digest === undefined ? {} : { digest }),
     }
     pending.count += 1
     const sync = pending.count % fsyncEvery === 0
-    await appendLine(entry, sync)
+    await appendOrPoison(entry, sync)
     absorb(entry)
   }
 
   const bootstrap = async (): Promise<void> => {
     /* The epoch: kept from a `building` meta (a resumed build), adopted from
      * existing lines when the meta was lost, minted fresh otherwise. */
-    const epoch = meta?.epoch ?? (all.length ? all[all.length - 1]!.epoch : clock())
+    const epoch = meta?.epoch ?? (all().length ? all()[all().length - 1]!.epoch : clock())
     if (meta?.state !== 'building') {
       await writeMeta({ epoch, nextSeq, journalFormat: JOURNAL_FORMAT, state: 'building' })
     }
     const pending = { count: 0 }
 
     /* Live folders: one record commit each, marks where a file exists. */
+    /* ABSENT AND UNREADABLE ARE NOT THE SAME ANSWER — the rule `readMarks`
+     * states in `bookFolder.ts`, undone here at the call site.
+     *
+     * Every read below used to collapse into "nothing there", and this pass
+     * writes `state: 'ready'` when it finishes. So one transient failure —
+     * a directory that would not list, a record that would not read — built a
+     * baseline permanently missing those books and then declared it
+     * authoritative. Peers pull that baseline. Nothing later notices, because
+     * a book absent from the feed is indistinguishable from a book that was
+     * never there.
+     *
+     * Meta is already `building` at this point and only becomes `ready` at the
+     * end, so THROWING is the whole recovery: the next open sees `building`
+     * and bootstraps again. A library that genuinely has no books directory is
+     * still empty, which is the truth rather than a guess. */
     let folders: { name: string; isDirectory: boolean }[] = []
-    try {
+    if (await fs.exists(BOOKS_DIR)) {
       folders = await fs.readDir(BOOKS_DIR)
-    } catch {
-      folders = []
     }
     for (const folder of folders) {
       if (!folder.isDirectory) continue
-      let record = null
-      try {
-        record = parseRecord(new TextDecoder().decode(await fs.readFile(`${BOOKS_DIR}/${folder.name}/book.json`)))
-      } catch {
-        continue
-      }
+      const recordPath = `${BOOKS_DIR}/${folder.name}/book.json`
+      /* A folder with no record is not a book to the feed; a record that is
+       * THERE and will not read is a failure, and is raised. */
+      if (!(await fs.exists(recordPath))) continue
+      const record = parseRecord(new TextDecoder().decode(await fs.readFile(recordPath)))
       if (!record) continue
       const book = record.bookId ?? folder.name
       const at = hlcOf(record.addedAt)
       await emitBaseline(epoch, book, 'record', at, await recordDigest(record), pending)
-      try {
-        const marks = validMarks(await readMarks(fs, book))
-        if (marks.length) {
-          const newest = marks.reduce((held, mark) => Math.max(held, mark.createdAt), 0)
-          await emitBaseline(epoch, book, 'marks', hlcOf(newest), await marksDigest(marks), pending)
-        }
-      } catch {
-        /* Marks that will not read are that book's problem, not the build's. */
+      /* NOT CAUGHT. `readMarks` already answers `[]` for a book with no marks
+       * and throws only when a marks file is present and will not read or
+       * parse — so catching here converted exactly the failures it was
+       * written to surface back into "this book has no marks", and then
+       * published that to every peer as the baseline.
+       *
+       * The cost is that one unreadable marks file keeps the bootstrap
+       * incomplete rather than finishing without it. That is the loud
+       * failure, and the right one: a baseline that understates a book's
+       * marks is a baseline peers will merge. */
+      const marks = validMarks(await readMarks(fs, book))
+      if (marks.length) {
+        const newest = marks.reduce((held, mark) => Math.max(held, mark.createdAt), 0)
+        await emitBaseline(epoch, book, 'marks', hlcOf(newest), await marksDigest(marks), pending)
       }
     }
 
@@ -1001,21 +840,36 @@ export function createJournal({
         const moved = `${SYNC_DIR}/journal.corrupt-${clock()}.jsonl`
         await fs.rename(JOURNAL_PATH, moved)
         await fs.remove(JOURNAL_META_PATH).catch(() => {})
-        all = []
-        byKey.clear()
+        index.clear()
         journalFileExists = false
         meta = null
         onQuarantine?.({ moved, reason: cause.message })
       }
-      nextSeq = Math.max(meta?.nextSeq ?? 1, all.length === 0 ? 1 : all[all.length - 1]!.seq + 1)
+      /* THE WAY BACK from a poisoned journal, and the only one: the file has
+       * just been re-read and every counter re-derived from it, so whatever
+       * the failed append did or did not write is now accounted for. */
+      poisoned = null
+      nextSeq = Math.max(meta?.nextSeq ?? 1, all().length === 0 ? 1 : all()[all().length - 1]!.seq + 1)
       const wasDirty = await fs.exists(JOURNAL_DIRTY_PATH)
       if (meta === null || meta.state === 'building') {
         await bootstrap()
       }
       await recoverDangling()
       if (wasDirty) {
-        await verifyAfterUncleanShutdown()
+        if (recover) {
+          await verifyAfterUncleanShutdown()
+        } else {
+          /* The same state an interrupted pass leaves, and for the same
+           * reason: verification has NOT happened, so `close` must not clear
+           * the flag and advertise a clean shelf. */
+          verifyIncomplete = true
+        }
       }
+      /* AND THE ACCUMULATED CASE. A journal that grew across sessions before
+       * this existed — or across a session that never committed enough in one
+       * run to trip the check — is shortened once, here, where the file has
+       * just been read and every counter re-derived from it. */
+      await compactIfOvergrown()
       /* The flag goes up AFTER recovery, so a crash DURING recovery is
        * simply the next open's unclean shutdown again. Creating it adds a
        * directory entry, so the directory is fsynced too (#8). */
@@ -1037,7 +891,7 @@ export function createJournal({
        * was never squared — so the next open must run recovery again, which
        * only the flag's presence triggers. Removing it changes a directory
        * entry, so the directory is fsynced (#8). */
-      const dangling = [...byKey.values()].some((state) => state.dangling.length > 0)
+      const dangling = [...index.states()].some((state) => state.dangling.length > 0)
       if (!dangling && !verifyIncomplete) {
         await fs.remove(JOURNAL_DIRTY_PATH)
         await fsyncDir()
@@ -1069,7 +923,7 @@ export function createJournal({
           at: clock(),
           origin,
         }
-        await appendLine(entry, true)
+        await appendOrPoison(entry, true)
         absorb(entry)
         token = { book, what, seq: entry.seq, origin }
       })
@@ -1102,14 +956,18 @@ export function createJournal({
         book: mine.book,
         what: mine.what,
         at: clock(),
-        rev: state.lastRev + 1,
+        rev: nextRev(state),
         begin: mine.seq,
         origin: mine.origin,
         ...(measured === undefined ? {} : { digest: measured }),
       }
-      await appendLine(entry, true)
+      await appendOrPoison(entry, true)
       absorb(entry)
       if (entry.origin === 'local') notifyLocalCommit()
+      /* THE HOUSEKEEPING, on the lane the write already holds. A commit is
+       * the last line of a bracket, so this is the point where the file is
+       * consistent and nothing is half-written. */
+      await compactIfOvergrown()
     })
 
   const expectRemote = (rawBook: string, what: MutationKind): number => {
@@ -1144,9 +1002,13 @@ export function createJournal({
      * (In tests that give the journal a private queue the fence degrades to
      * inline arming — ordering only matters on the SHARED queue the
      * composition wires.) */
+    refuseIfPoisoned()
     const armed = keys.map(({ book, what }) => ({ book, what, ticket: null as number | null }))
     const fences = armed.map((slot) =>
-      queue.append(slot.book, async () => {
+      /* ON THE SURFACE'S OWN LANE, not the raw id — see `JournalOptions.lane`.
+       * Queueing on the id fenced an empty lane while the writes it was meant
+       * to order sat on `books/<safeId>`. */
+      queue.append(lane(slot.book, slot.what), async () => {
         slot.ticket = expectRemote(slot.book, slot.what)
       }),
     )
@@ -1161,8 +1023,13 @@ export function createJournal({
   }
 
   const feed: Journal['feed'] = (since, until) => {
+    /* A feed built from state the file may contradict UNDER-reports: the peer
+     * receives a prefix and believes it has everything, and nothing later
+     * disagrees. Refusing is loud, and the scheduler already reports a failed
+     * pass as degraded. */
+    refuseIfPoisoned()
     const last = new Map<string, JournalEntry>()
-    for (const entry of all) {
+    for (const entry of all()) {
       if (entry.kind !== 'commit') continue
       if (entry.seq <= since || entry.seq > until) continue
       last.set(keyOf(entry.book, entry.what), entry)
@@ -1171,8 +1038,11 @@ export function createJournal({
   }
 
   const outbox: Journal['outbox'] = () => {
+    /* Same reasoning as `feed`: silently offering less than is on disk is how
+     * an edit stops being pushed without anyone learning it stopped. */
+    refuseIfPoisoned()
     const out: OutboxEntry[] = []
-    for (const state of byKey.values()) {
+    for (const state of index.states()) {
       const local = state.lastLocalCommit
       if (!local || local.rev! <= state.lastAckedRev) continue
       out.push({ book: local.book, what: local.what, rev: local.rev!, seq: local.seq })
@@ -1185,6 +1055,9 @@ export function createJournal({
     const book = canonicalBook(rawBook, what)
     return queue
       .append(JOURNAL_KEY, async () => {
+      /* A journal whose file may disagree with memory must not extend it:
+       * `ack` allocates from that state too. */
+      refuseIfPoisoned()
         if (!opened) throw new Error('journal: ack before open')
         const state = keyState(book, what)
         /* CAS ON THE EXACT REV — the deadlock-and-staleness fix from §2.4.
@@ -1203,18 +1076,34 @@ export function createJournal({
           rev,
           origin: 'local',
         }
-        await appendLine(entry, true)
+        await appendOrPoison(entry, true)
         absorb(entry)
         done = true
       })
       .then(() => done)
   }
 
-  const compact: Journal['compact'] = () =>
-    queue.append(JOURNAL_KEY, async () => {
+  /**
+   * Whether the file is worth rewriting: past the floor AND several times
+   * what compaction would leave.
+   *
+   * The second half is what makes an automatic trigger safe. A library with
+   * more surfaces than the floor would otherwise compact on every append and
+   * remove almost nothing — paying a whole-file rewrite per edit to save a
+   * line. Requiring a four-to-one reduction means every compaction that runs
+   * discards at least three quarters of the file, so the cost is amortised
+   * however large the shelf is.
+   */
+  const overgrown = (): boolean => all().length >= Math.max(compactEvery, index.size() * 4)
+
+  /** Compact, ALREADY ON THE JOURNAL LANE. Never call this off it. */
+  const compactInPlace = async (): Promise<void> => {
+      /* A journal whose file may disagree with memory must not extend it:
+       * `compact` allocates from that state too. */
+      refuseIfPoisoned()
       if (!opened) throw new Error('journal: compact before open')
       const keep: JournalEntry[] = []
-      for (const state of byKey.values()) {
+      for (const state of index.states()) {
         if (state.lastCommit) keep.push(state.lastCommit)
         /* AND the last LOCAL commit when a remote one landed after it: the
          * outbox is rebuilt from these lines on reopen, and keeping only
@@ -1231,11 +1120,33 @@ export function createJournal({
       await atomicWrite(fs, JOURNAL_PATH, new TextEncoder().encode(text.length ? `${text}\n` : ''))
       await fsync(JOURNAL_PATH)
       await fsyncDir() // the compaction rename changed a directory entry (#8)
-      all = []
-      byKey.clear()
+      index.clear()
       for (const entry of keep) absorb(entry)
       await writeMeta({ epoch: meta!.epoch, nextSeq, journalFormat: JOURNAL_FORMAT, state: meta!.state })
-    })
+  }
+
+  /* THE QUEUED CALL. `compactInPlace` runs on the journal lane, so the public
+   * entry takes the lane and the automatic trigger — which is always already
+   * inside a lane task — calls the body. Queueing from inside a lane task
+   * would wait for a task that cannot start until this one returns. */
+  const compact: Journal['compact'] = () => queue.append(JOURNAL_KEY, compactInPlace)
+
+  /**
+   * Compact if the file has outgrown its keep set. ON THE LANE ONLY.
+   *
+   * A failure here must not fail the write that triggered it: the entry is
+   * already durable, and a journal that refuses an edit because it could not
+   * tidy itself has turned housekeeping into data loss. The file simply stays
+   * long and the next append tries again.
+   */
+  const compactIfOvergrown = async (): Promise<void> => {
+    if (!overgrown()) return
+    try {
+      await compactInPlace()
+    } catch {
+      /* Left long on purpose — see above. */
+    }
+  }
 
   return {
     open,
@@ -1251,8 +1162,8 @@ export function createJournal({
     outbox,
     ack,
     compact,
-    head: () => (all.length === 0 ? 0 : all[all.length - 1]!.seq),
-    entries: () => [...all],
+    head: () => (all().length === 0 ? 0 : all()[all().length - 1]!.seq),
+    entries: () => [...all()],
     subscribe: (listener) => {
       listeners.add(listener)
       return () => {

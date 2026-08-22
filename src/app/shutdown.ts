@@ -1,0 +1,137 @@
+import type { Diagnostics } from '../kernel'
+
+/**
+ * THE CROSS-LANGUAGE QUIT HANDSHAKE (phase 11).
+ *
+ * macOS does not fire a window close for ⌘Q, the Quit menu item or an
+ * AppleScript quit — Tauri's `RunEvent::ExitRequested` is not raised for any of
+ * them ([tauri#9198]) — so the shell asks first: it emits `paper://shutdown`,
+ * waits for `paper://shutdown-done`, and exits when it arrives or when its own
+ * grace period runs out. Without an answer the app quits anyway, with the
+ * journal left dirty and the next launch re-verifying the whole shelf. That is
+ * invisible from the UI, which is why it went unnoticed.
+ *
+ * EXTRACTED FROM `main.tsx` SO IT CAN BE TESTED. It lived inline in a
+ * three-hundred-line boot function that reads `document`, mounts a React root
+ * and imports a native module — so none of its ordering, none of its bounding
+ * and none of its failure paths had ever been executed by a test, and two of
+ * the defects the comments below record were found by running the app.
+ *
+ * Everything it touches arrives as an argument. The only thing the caller
+ * supplies that this file could have imported itself is the Tauri event
+ * module, and that is the point: importing it here would put a native
+ * dependency in the one place that has to run without one.
+ */
+
+export interface ShutdownDeps {
+  /** Subscribe to a shell event. Resolves with the unsubscribe. */
+  readonly listen: (event: string, handler: () => void) => Promise<() => void>
+  /** Tell the shell the teardown is done. */
+  readonly emit: (event: string) => Promise<void>
+  /** Hand the write queue everything still held in the UI (`flushBeforeClose`). */
+  readonly flush: () => void
+  /** Wait for the write queue. */
+  readonly drain: () => Promise<void>
+  /** End the capabilities' lifetime — unbinds the recorder, closes the journal. */
+  readonly abort: () => void
+  /** Resolve once the journal has finished closing. */
+  readonly journalClosed: () => Promise<void>
+  /** The composition's lifetime, so the listener is released with it. */
+  readonly signal: AbortSignal
+  /** How long to wait for the queue. Under the shell's own grace. */
+  readonly graceMs: number
+  readonly diagnostics: Diagnostics
+}
+
+export const SHUTDOWN_EVENT = 'paper://shutdown'
+export const SHUTDOWN_DONE_EVENT = 'paper://shutdown-done'
+
+/**
+ * Arm the handshake. Resolves once the listener is registered.
+ *
+ * ARM THIS BEFORE THE SLOW PART OF BOOT, not after it. It used to sit below
+ * `composeCapabilities`, so a quit arriving during storage loading, migration,
+ * the shelf scan or composition reached no handler at all: the shell deferred
+ * the exit, waited out its entire grace period, and quit anyway with the
+ * journal dirty — the exact state this exists to prevent, during the window
+ * most likely to be slow.
+ */
+export async function armShutdown(deps: ShutdownDeps): Promise<void> {
+  const stop = await deps.listen(SHUTDOWN_EVENT, () => void runTeardown(deps))
+  /* THE UNLISTEN IS KEPT AND TIED TO THE LIFETIME. Discarding it left a native
+   * registration behind on every reload — StrictMode alone mounts twice in
+   * development — so a quit reached several handlers, each aborting a lifetime
+   * and answering `shutdown-done`, and the FIRST answer released the quit
+   * while the others were still tearing down. */
+  if (deps.signal.aborted) {
+    stop()
+    return
+  }
+  deps.signal.addEventListener('abort', () => stop(), { once: true })
+}
+
+/**
+ * `armShutdown`, with the failure reported rather than thrown.
+ *
+ * For the boot path, which cannot await this — arming it must not delay the
+ * first frame — and must not let it become an unhandled rejection either.
+ * Failing to arm means every quit leaves the journal dirty, so it is said out
+ * loud.
+ */
+export function armShutdownInBackground(deps: ShutdownDeps): void {
+  void armShutdown(deps).catch((error: unknown) => {
+    deps.diagnostics.warn('shutdown.handshake-unavailable', {
+      message: error instanceof Error ? error.message : String(error),
+    })
+  })
+}
+
+/**
+ * What happens when the shell asks.
+ *
+ * THE ORDER IS THE WHOLE THING, and it is the same order the window-close path
+ * uses:
+ *
+ *   1. `flush` — a queue can only drain what it has been GIVEN, and the thing
+ *      most likely to be lost is the thing not yet handed over: a note being
+ *      typed, a reading position still inside its throttle.
+ *   2. `drain`, BOUNDED — a wedged queue must delay a quit, never prevent one.
+ *   3. `abort` LAST of the three: aborting unbinds the recorder and closes the
+ *      journal, so anything drained after it would reach disk with no journal
+ *      entry — unreplicable, which is the defect this phase existed to remove.
+ *   4. `journalClosed` — the flag must come down before the process exits, or
+ *      the next launch reads a crash that did not happen.
+ *
+ * An earlier version ran only steps 3 and 4, which flushed the journal and
+ * nothing else: `App` covers the window close, and a macOS quit does not fire
+ * one, so the quit path silently skipped both halves of the UI's own flush.
+ */
+async function runTeardown(deps: ShutdownDeps): Promise<void> {
+  try {
+    deps.flush()
+    await Promise.race([deps.drain(), wait(deps.graceMs)])
+    deps.abort()
+    await deps.journalClosed()
+  } catch (error) {
+    /* CAUGHT AND SAID, not left to escape.
+     *
+     * This ran as `void runTeardown(…)` from an event listener, so a teardown
+     * that threw — a capability's dispose, a journal that would not close —
+     * produced an UNHANDLED REJECTION on the way out of the app. The `finally`
+     * below still released the quit, so nothing looked wrong; what was lost is
+     * the only report that a shutdown did not finish, at the one moment it
+     * matters, on the path where the reader's last edit lives.
+     *
+     * Found by testing the four failure paths, each of which raised one. */
+    deps.diagnostics.warn('shutdown.teardown-failed', {
+      message: error instanceof Error ? error.message : String(error),
+    })
+  } finally {
+    /* ALWAYS ANSWERED. A teardown that threw must still release the quit —
+     * otherwise a bug in one capability makes the app take the shell's whole
+     * grace period to close, every time, for everybody. */
+    await deps.emit(SHUTDOWN_DONE_EVENT).catch(() => {})
+  }
+}
+
+const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))

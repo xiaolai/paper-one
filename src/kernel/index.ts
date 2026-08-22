@@ -47,22 +47,79 @@ export type {
   SettingsSection,
 } from './core/capability'
 export {
-  CAPABILITY_ID,
   CapabilityError,
   KERNEL_DEFAULT_PANE,
   RESERVED_ID,
   composeCapabilities,
+  isCapabilityId,
   kernelApi,
   registrationOrder,
   resolvePaneId,
 } from './core/registry'
-export type { CapabilityErrorCode, Composition, Contributions } from './core/registry'
+export type { CapabilityErrorCode, Composition, CompositionOptions, Contributions } from './core/registry'
+
+/* THE SERVICE TABLE — the one declaration the router registration, the client
+ * stubs, the CLI's commands and `docs/service-table.md` are all derived from
+ * (phase 11). Public because all four consumers sit outside the kernel. */
+export {
+  GRANT_FAMILIES,
+  SERVICE_GRANTS,
+  SERVICE_NAMES,
+  SERVICE_NOUNS,
+  SERVICE_TABLE,
+  SERVICE_VERBS,
+  flagFields,
+  grantCovers,
+  positionalFields,
+  readServices,
+  readingGrant,
+  serviceClients,
+  serviceDescriptor,
+  servicesOn,
+  writeServices,
+} from './core/serviceTable'
+export type {
+  FieldType,
+  GrantFamily,
+  ServiceDescriptor,
+  ServiceField,
+  ServiceGrant,
+  ServiceKind,
+  ServiceName,
+  ServiceNoun,
+  ServiceOutput,
+  ServiceVerb,
+} from './core/serviceTable'
+
+/* The table's HANDLERS, and the ports the three nouns the kernel cannot
+ * answer for arrive through. `buildServices` is what a composition root hands
+ * to `serveServices`, and what an in-process caller runs directly — one set
+ * of handlers, three ways of reaching them. */
+export { buildReadServices, buildServices, handlerFor } from './core/services/handlers'
+export type { DevicePort, DeviceRow, ServiceEnvironment, ShelfFacts, ShelfPort, SizePort } from './core/services/environment'
+export { SERVICE_ERRORS, isRefusal, refuse } from './core/services/refusals'
+export type { Refusal, ServiceErrorCode } from './core/services/refusals'
+export { PAGE_BYTES, PAGE_ROWS, pages } from './core/services/paging'
+export type {
+  BookDetail,
+  BookRow,
+  CardRow,
+  ContentLocation,
+  EmptiedRow,
+  MarkRow,
+  RemovedRow,
+  RestoredRow,
+  ShelfStatus,
+  TagChange,
+  TagCountRow,
+  TrashRow,
+} from './core/services/rows'
 
 /* The ports, and their defaults. */
-export { MUTATION_KINDS, NOOP_DIAGNOSTICS, NOOP_RECORDER, contentBlobPort, defineSetting, recorded, BLOB_FOLDER } from './core/ports'
+export { MUTATION_KINDS, NOOP_DIAGNOSTICS, NOOP_RECORDER, defineSetting, recorded, BLOB_FOLDER } from './core/ports'
 export type {
   ContentBlobName,
-  ContentBlobPort,
+  DeviceRole,
   Diagnostics,
   MutationKind,
   MutationRecorder,
@@ -75,6 +132,10 @@ export type {
 export { createDiagnostics, defaultDiagnostics, redact } from './core/diagnostics'
 export type { DiagnosticsOptions, Sink } from './core/diagnostics'
 export { CAPABILITY_UI, type CapabilityUiClass } from './core/capabilityUi'
+/* The first half of a shutdown: hand over what memory holds, so the queue has
+ * something to drain. The composition root needs it for the QUIT path, which
+ * is not the window-close path `App` already covers — see `beforeClose.ts`. */
+export { flushBeforeClose, onBeforeClose } from './core/beforeClose'
 export { KERNEL_SETTINGS, SETTINGS_STORAGE_KEY, SETTINGS_VERSION, carryLegacySettings, createSettingsStore, keepValues } from './core/settings'
 export type { KernelPreferences, SettingsEnvelope, SettingsMigration, SettingsStoreOptions } from './core/settings'
 
@@ -85,6 +146,8 @@ export type { KernelPreferences, SettingsEnvelope, SettingsMigration, SettingsSt
 export {
   BOOKS_DIR,
   DEVICE_LOCAL_FIELDS,
+  MAX_RECORD_FIELD,
+  MAX_RECORD_POSITION,
   TRASH_DIR,
   atomicWrite,
   folderOf,
@@ -98,9 +161,29 @@ export {
   tagsFromClock,
   trashOf,
 } from './core/bookFolder'
-export { CONTENT_EXTENSIONS } from './core/bookVault'
+export { CONTENT_EXTENSIONS, isContentExtension, isKnownExtension } from './core/bookVault'
 export type { BookRecord, TagClock, TagClockEntry } from './core/bookFolder'
-export type { IndexFs, IndexedBook } from './core/bookIndex'
+export { INDEX_FILE, loadShelf, parseIndex, scanBooks, writeIndex } from './core/bookIndex'
+export type { IndexFs, IndexedBook, ShelfSource } from './core/bookIndex'
+/* The FLAT STORE's seam and its opener. Public since phase 11: a host outside
+ * the webview has to build the same two filesystems the app builds — the
+ * library's `IndexFs` and this one — and `main.tsx` is not a place a second
+ * host can import from. `appStorage.ts` is the app's implementation of the
+ * same interface, and stays where it is. */
+export { STORE_FILE, openFileStore } from './core/fileStore'
+export type { FileStore, FileStoreOptions, FileSystem } from './core/fileStore'
+/* `fakeFs` LIVED HERE AND HAS MOVED to `src/kernel/testkit.ts`.
+ *
+ * It is a deliberately behaviour-divergent stand-in for a filesystem, and
+ * exporting it from the PRODUCTION entry put it in the supported API and in
+ * the generated declarations beside `createKernelServices`. Tree-shaking meant
+ * it cost a build nothing — a fact about bundle size, not about whether
+ * somebody can import it — and the boundary rules could not tell the
+ * difference, because it arrived through the one door everything may use.
+ *
+ * The test entry is refused to production code by name
+ * (`kernel-testkit-in-tests-only`), which is the distinction this file could
+ * not express. */
 /* Standing aside between books, for a long background pass — see `breath`.
  * Public because sync's contentHash backfill is one of the two passes that
  * need it, and the other is the kernel's own enrichment. */
@@ -138,7 +221,7 @@ export type { Presence, PresenceEntry, PresenceState } from './core/presence'
 export { FORMATS, formatOf, isFormat, sniffFormat } from './core/formats'
 export type { Format } from './core/formats'
 export type { TrashFs } from './core/bookTrash'
-export type { VaultFs } from './core/bookVault'
+export type { ContentExtension, KnownExtension, VaultFs } from './core/bookVault'
 
 /* The vocabulary. */
 export { createMark, liveMarks, markStamp, mergeMarks, validMarks } from './core/marks'

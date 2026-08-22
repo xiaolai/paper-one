@@ -236,11 +236,28 @@ describe('the constants the ledger and this check share', () => {
  * the guard's actual claim — "this document describes code that exists" — can
  * be made.
  */
-describe.skipIf(!existsSync(LEDGER_FILE))('the committed ledger', () => {
-  /* Skipped, not failed, when a tree has no ledger — a source archive, or a
-   * copy made without docs. The real tree always has the file, so the skip
-   * never hides anything `pnpm verify` would not catch. */
-  const markdown = readFileSync(LEDGER_FILE, 'utf8')
+/**
+ * UNCONDITIONAL, and it used to be `describe.skipIf(!existsSync(LEDGER_FILE))`.
+ *
+ * The reasoning was that a tree without the ledger — a source archive, a copy
+ * made without docs — should skip rather than fail. But the file is COMMITTED,
+ * so the condition is true in every real checkout, and the gate was buying a
+ * theoretical case at a real cost: three names in `tests/ledger.json` that are
+ * collected only where the file exists. That ledger cannot hold a conditional
+ * name, because "gone" and "not collected here" are the same observation to
+ * it — the exact hazard its own header warns about, sitting in it.
+ *
+ * A tree genuinely missing the file now FAILS here, by name, which is the
+ * better answer anyway: a ledger check that quietly does not run is
+ * indistinguishable from one that passed.
+ */
+describe('the committed ledger', () => {
+  const markdown = existsSync(LEDGER_FILE)
+    ? readFileSync(LEDGER_FILE, 'utf8')
+    : /* Not thrown at module scope: a throw there takes the whole FILE down,
+       * including the suites below that have nothing to do with this one. An
+       * empty document fails the "makes real claims" assertion by name. */
+        ''
   /* Honours DELETED_ENV for the same reason the shell does: this suite runs
    * inside `verify:without`'s copy, where one capability's directory is gone
    * on purpose. */

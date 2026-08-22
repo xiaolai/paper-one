@@ -1,13 +1,15 @@
 /**
- * The grant rule, once — shared by the port's cached check and the fake
- * wire, and matching the plugin's (`peers.rs`): a grant is covered by its
- * exact spelling, or by `<prefix>:*` where the prefix is everything before
- * the first colon. A bare `*` covers nothing, and `sync:*` does not cover
- * `sync` itself — a wildcard names a family, not a word.
+ * The grant rule, as this capability's modules reach it.
+ *
+ * THE RULE ITSELF MOVED to the kernel in phase 11 (`serviceTable.ts`), beside
+ * the grants it governs, when the CLI's in-process caller became its third
+ * consumer — after the port's cached check and the fake wire, and alongside
+ * the plugin's own copy in `peers.rs`. Three hand-kept copies of a rule that
+ * decides what a peer may do is three chances for one of them to be wrong,
+ * and the wrong one would be wrong silently in the permissive direction.
+ *
+ * This file stays as the re-export so nothing under `peer/` changed its
+ * imports, and so a reader who comes looking for the rule here finds where it
+ * went rather than an absence.
  */
-export function grantCovers(grants: readonly string[], grant: string): boolean {
-  if (grants.includes(grant)) return true
-  const colon = grant.indexOf(':')
-  if (colon <= 0) return false
-  return grants.includes(`${grant.slice(0, colon)}:*`)
-}
+export { grantCovers } from '../../../kernel'

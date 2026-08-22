@@ -17,7 +17,8 @@
  */
 
 import type { VaultFs } from './bookVault'
-import { folderOf, readMarks, trashOf, writeMarks } from './bookFolder'
+import { folderOf, parseRecord, readMarks, trashOf, writeMarks } from './bookFolder'
+import type { BookRecord } from './bookFolder'
 
 
 /**
@@ -141,70 +142,161 @@ export async function trashBook(fs: TrashFs, bookId: string): Promise<boolean> {
  * written are the current ones; the record and marks in the trash are the ones
  * with nothing to replace them.
  */
-export async function restoreBook(fs: TrashFs, bookId: string): Promise<boolean> {
-  try {
-    if (!(await fs.exists(trashOf(bookId)))) return false
-    const entries = await fs.readDir(trashOf(bookId))
-    await fs.mkdir(folderOf(bookId))
-    let allMoved = true
-    for (const entry of entries) {
-      // The stamp belongs to the trash and is not part of the book.
-      if (entry.name === '.removed') continue
-      /* Nor is a copy held aside mid-removal. A crash between displacing one and
-       * finishing the move leaves it behind, and restoring it would put
-       * `content.epub.displaced` into the live folder — a file the shelf cannot
-       * read and the sweep does not recognise. It stays in the trash and ages
-       * out with everything else there. */
-      if (entry.name.endsWith('.displaced')) continue
-      const to = `${folderOf(bookId)}/${entry.name}`
-      /* A NAME ALREADY LIVE WINS, and the trashed one STAYS WHERE IT IS.
-       *
-       * An earlier version deleted a collided `content.<ext>` on the reasoning
-       * that the folder is named by a hash of those bytes, so the two must be
-       * the same book. THAT IS NOT TRUE, and this codebase says so a few files
-       * away: above 64MB `bookIdFor` samples rather than hashes whole, and the
-       * comment on `INTERIOR_PROBES` states plainly that identity there is
-       * approximate. Deleting a file on a premise the code documents as
-       * approximate is how a scanned book disappears.
-       *
-       * So nothing is deleted. What could not move keeps its stamp, ages out on
-       * the ordinary fortnight, and can be recovered by hand until it does. The
-       * cost is carrying a duplicate copy for that fortnight, which is the right
-       * side to be wrong on. */
-      if (await fs.exists(to)) {
-        allMoved = false
-        continue
-      }
-      try {
-        await fs.rename(`${trashOf(bookId)}/${entry.name}`, to)
-      } catch {
-        /* SWALLOWED AND REMEMBERED, not swallowed and forgotten. Catching the
-         * failure and then emptying the trash anyway deleted the entry that had
-         * just failed to move — a restore that loses the thing it was restoring,
-         * which is worse than not restoring at all. */
-        allMoved = false
-      }
+/**
+ * How a restore went.
+ *
+ * THREE ANSWERS, NOT TWO, and a failure is a FOURTH thing — it is thrown.
+ *
+ * This returned a boolean and wrapped everything in `catch { return false }`,
+ * so three unrelated situations arrived at the caller identically: there was
+ * nothing in the trash, the disk could not be read, and the trash entry was
+ * found but half of it could not be moved. The first is an ordinary answer,
+ * the second is a fault the caller must not paper over, and the third is a
+ * partial restore that used to be reported as a complete one — the reader is
+ * told their book is back while its `book.json` is still in the trash, ageing
+ * towards the sweep that deletes it.
+ */
+export type RestoreOutcome =
+  /** Everything the trash held for this book is back in its folder. */
+  | { readonly state: 'restored' }
+  /** The entry was there; these names could not be moved and REMAIN in the
+   *  trash, re-stamped for a fresh fortnight. */
+  | { readonly state: 'partial'; readonly held: readonly string[] }
+  /** There is no trash entry for this book. Nothing to do, and not a fault. */
+  | { readonly state: 'absent' }
+
+export async function restoreBook(fs: TrashFs, bookId: string): Promise<RestoreOutcome> {
+  if (!(await fs.exists(trashOf(bookId)))) return { state: 'absent' }
+  const entries = await fs.readDir(trashOf(bookId))
+  await fs.mkdir(folderOf(bookId))
+  const held: string[] = []
+  for (const entry of entries) {
+    // The stamp belongs to the trash and is not part of the book.
+    if (entry.name === '.removed') continue
+    /* Nor is a copy held aside mid-removal. A crash between displacing one and
+     * finishing the move leaves it behind, and restoring it would put
+     * `content.epub.displaced` into the live folder — a file the shelf cannot
+     * read and the sweep does not recognise. It stays in the trash and ages
+     * out with everything else there. */
+    if (entry.name.endsWith('.displaced')) continue
+    const to = `${folderOf(bookId)}/${entry.name}`
+    /* A NAME ALREADY LIVE WINS, and the trashed one STAYS WHERE IT IS.
+     *
+     * An earlier version deleted a collided `content.<ext>` on the reasoning
+     * that the folder is named by a hash of those bytes, so the two must be
+     * the same book. THAT IS NOT TRUE, and this codebase says so a few files
+     * away: above 64MB `bookIdFor` samples rather than hashes whole, and the
+     * comment on `INTERIOR_PROBES` states plainly that identity there is
+     * approximate. Deleting a file on a premise the code documents as
+     * approximate is how a scanned book disappears.
+     *
+     * So nothing is deleted. What could not move keeps its stamp, ages out on
+     * the ordinary fortnight, and can be recovered by hand until it does. The
+     * cost is carrying a duplicate copy for that fortnight, which is the right
+     * side to be wrong on. */
+    if (await fs.exists(to)) {
+      held.push(entry.name)
+      continue
     }
-    /* The trash entry goes LAST, and ONLY when it is empty of the book. Anything
-     * still in there keeps its stamp and therefore its age, so `emptyExpired`
-     * clears it on the ordinary schedule rather than never — removing the stamp
-     * early is what would strand it, because that sweep keeps whatever it cannot
-     * age. */
-    if (allMoved) {
-      await fs.removeDir(trashOf(bookId)).catch(() => {})
-    } else {
-      /* RE-STAMPED, so what could not move gets a fresh fortnight rather than
-       * the remainder of the old one. A restore attempted a day before expiry
-       * otherwise reported success and then let the sweep delete the very files
-       * it had failed to bring back. */
-      await fs
-        .writeFile(`${trashOf(bookId)}/.removed`, new TextEncoder().encode(String(Date.now())))
-        .catch(() => {})
+    try {
+      await fs.rename(`${trashOf(bookId)}/${entry.name}`, to)
+    } catch {
+      /* SWALLOWED AND REMEMBERED, not swallowed and forgotten. Catching the
+       * failure and then emptying the trash anyway deleted the entry that had
+       * just failed to move — a restore that loses the thing it was restoring,
+       * which is worse than not restoring at all. The name goes into the
+       * outcome, so the caller can say WHICH part of the book stayed behind
+       * rather than reporting a clean success over half a book. */
+      held.push(entry.name)
     }
-    return true
-  } catch {
-    return false
   }
+  /* The trash entry goes LAST, and ONLY when it is empty of the book. Anything
+   * still in there keeps its stamp and therefore its age, so `emptyExpired`
+   * clears it on the ordinary schedule rather than never — removing the stamp
+   * early is what would strand it, because that sweep keeps whatever it cannot
+   * age. */
+  if (held.length === 0) {
+    await fs.removeDir(trashOf(bookId)).catch(() => {})
+  } else {
+    /* RE-STAMPED, so what could not move gets a fresh fortnight rather than
+     * the remainder of the old one. A restore attempted a day before expiry
+     * otherwise reported success and then let the sweep delete the very files
+     * it had failed to bring back. */
+    await fs
+      .writeFile(`${trashOf(bookId)}/.removed`, new TextEncoder().encode(String(Date.now())))
+      .catch(() => {})
+  }
+  return held.length === 0 ? { state: 'restored' } : { state: 'partial', held }
+}
+
+
+/**
+ * What is in the trash, and when each entry ages out.
+ *
+ * The folder name is `safeId(bookId)` and is NOT reversible, so the id and
+ * the title come from the record that travelled with the folder — a book is
+ * self-contained, which is exactly what makes a trash entry describable at
+ * all. An entry whose record will not read still appears, named by its
+ * folder: it is a directory holding a reader's work, and a listing that
+ * silently omitted it would make it unrecoverable through any surface.
+ *
+ * `removedAt` is null for an entry with no readable stamp, and `expiresAt` is
+ * null with it — the sweep LEAVES such an entry rather than deleting it, so
+ * saying it expires would be a lie.
+ */
+export interface TrashedBook {
+  /** The directory under `trash/`. */
+  readonly folder: string
+  /** The id from the record, or the folder name when there is no record. */
+  readonly bookId: string
+  readonly title: string
+  readonly author: string
+  readonly removedAt: number | null
+  readonly expiresAt: number | null
+}
+
+export async function listTrash(fs: TrashFs, signal?: AbortSignal): Promise<TrashedBook[]> {
+  /* ABSENT AND UNREADABLE ARE NOT THE SAME ANSWER — the rule this file's own
+   * `readMarks` neighbour records, and the one a bare `catch` here broke. No
+   * trash directory is an empty trash: it is made on the first removal, and a
+   * library that has never removed a book has none. A directory that EXISTS
+   * and will not read is a failure, and reporting it as "empty" would let
+   * `trash.empty --count 0` succeed over a trash full of the reader's work. */
+  if (!(await fs.exists('trash'))) return []
+  const entries = await fs.readDir('trash')
+  const rows: TrashedBook[] = []
+  for (const entry of entries) {
+    /* THE CALLER'S CANCELLATION REACHES THE SCAN. This read two files per
+     * entry and nothing stopped it: a timeout, a cancel frame or a closed
+     * session left the whole trash being read for an answer nobody was
+     * waiting for. Checked per entry, so the work stops within one folder
+     * rather than at the end. */
+    if (signal?.aborted === true) break
+    if (!entry.isDirectory) continue
+    const at = `trash/${entry.name}`
+    let record: BookRecord | null = null
+    try {
+      record = parseRecord(new TextDecoder().decode(await fs.readFile(`${at}/book.json`)))
+    } catch {
+      record = null
+    }
+    let removedAt: number | null = null
+    try {
+      const stamp = Number(new TextDecoder().decode(await fs.readFile(`${at}/.removed`)))
+      if (Number.isFinite(stamp)) removedAt = stamp
+    } catch {
+      removedAt = null
+    }
+    rows.push({
+      folder: entry.name,
+      bookId: record?.bookId ?? entry.name,
+      title: record?.title ?? '',
+      author: record?.author ?? '',
+      removedAt,
+      expiresAt: removedAt === null ? null : removedAt + TRASH_DAYS * DAY_MS,
+    })
+  }
+  return rows
 }
 
 

@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  isCapabilityId,
   CapabilityError,
   KERNEL_DEFAULT_PANE,
   composeCapabilities,
@@ -226,6 +227,95 @@ describe('namespacing (ADR decision 5)', () => {
     composition.dispose()
     expect(unserved).toBe(true)
     unbind.dispose()
+  })
+
+  /* THE KERNEL'S OWN SERVICES, served beside the capabilities' (phase 11).
+   *
+   * A caller must not be able to tell which side of the kernel/capability
+   * line a service came from: one map, one router registration, one grant
+   * check. And they are handed in BEFORE anything starts, because a name
+   * collision has to be refused before a capability has run — which is the
+   * whole reason `checkNamespaces` sees them at all. */
+  it('serves the kernel’s own services alongside the capabilities’', async () => {
+    const services = createKernelServices({ fs: null, storage: null })
+    const servedNames: string[] = []
+    const unbind = services.bindServiceHost((list) => {
+      servedNames.push(...list.map((one) => one.name))
+      return { dispose: () => {} }
+    })
+    const composition = await composeCapabilities(
+      [cap('sync', { services: [service('sync.push')] })],
+      kernelApi(services),
+      new AbortController().signal,
+      { services: [service('book.list', 'book:read'), service('shelf.status', 'shelf:read')] },
+    )
+    /* The kernel's first, then the capabilities' — one map, in that order. */
+    expect(servedNames).toEqual(['book.list', 'shelf.status', 'sync.push'])
+    expect([...composition.services.keys()]).toEqual(['book.list', 'shelf.status', 'sync.push'])
+    composition.dispose()
+    unbind.dispose()
+  })
+
+  it('serves exactly the capabilities’ services when the kernel contributes none', async () => {
+    const services = createKernelServices({ fs: null, storage: null })
+    const servedNames: string[] = []
+    const unbind = services.bindServiceHost((list) => {
+      servedNames.push(...list.map((one) => one.name))
+      return { dispose: () => {} }
+    })
+    const composition = await composeCapabilities(
+      [cap('sync', { services: [service('sync.push')] })],
+      kernelApi(services),
+      new AbortController().signal,
+    )
+    expect(servedNames).toEqual(['sync.push'])
+    composition.dispose()
+    unbind.dispose()
+  })
+
+  it('refuses a kernel service the capabilities already claim, before anything starts', async () => {
+    const events: string[] = []
+    const error = await rejection(
+      composeCapabilities(
+        [cap('sync', { services: [service('sync.push')] }, events)],
+        api(),
+        new AbortController().signal,
+        { services: [service('sync.push')] },
+      ),
+    )
+    expect(error.code).toBe('duplicate-contribution')
+    /* BEFORE ANYTHING STARTED. A collision found after the capabilities have
+     * run is a collision found after their side effects. */
+    expect(events).toEqual([])
+  })
+
+  it('refuses the kernel declaring one service twice', async () => {
+    const error = await rejection(
+      composeCapabilities([], api(), new AbortController().signal, {
+        services: [service('book.list', 'book:read'), service('book.list', 'book:read')],
+      }),
+    )
+    expect(error.code).toBe('duplicate-contribution')
+    expect(error.capability).toBeNull()
+  })
+
+  /* The satchel side of the same table. `ClientContribution` called itself
+   * "a stub shape until a consumer lands"; these are what `paper --shelf`
+   * calls on a shelf, and they cannot be a capability's because a
+   * capability's client name must carry its own prefix. */
+  it('carries the kernel’s client stubs, and refuses a duplicate among them', async () => {
+    const composition = await composeCapabilities([], api(), new AbortController().signal, {
+      clients: [{ name: 'book.list' }, { name: 'shelf.status' }],
+    })
+    expect(composition.clients.map((one) => one.name)).toEqual(['book.list', 'shelf.status'])
+    composition.dispose()
+
+    const error = await rejection(
+      composeCapabilities([], api(), new AbortController().signal, {
+        clients: [{ name: 'book.list' }, { name: 'book.list' }],
+      }),
+    )
+    expect(error.code).toBe('duplicate-contribution')
   })
 
   it('refuses a pane id outside the owner\'s prefix', async () => {
@@ -1074,5 +1164,19 @@ describe('the platform compositions', () => {
     expect(undeclared, `settings sections with no declared order: ${undeclared.join(', ')}`).toEqual([])
     expect(new Set(orders).size, `two sections claim the same order: ${orders.join(', ')}`).toBe(orders.length)
     composition.dispose()
+  })
+})
+
+/* A `RegExp` is mutable, so exporting the validator's own pattern let any
+ * consumer widen what counts as a capability id — from outside the kernel,
+ * with no trace at the call site. A function closing over a private pattern
+ * cannot be redefined that way. */
+describe('capability id validation is not reachable from outside', () => {
+  it('accepts well-formed ids and refuses the shapes that matter', () => {
+    expect(isCapabilityId('sync')).toBe(true)
+    expect(isCapabilityId('peer-2')).toBe(true)
+    for (const bad of ['', 'Sync', '2fast', 'a/b', 'a.b', 'a b', '-a', 'a_b', null, 42]) {
+      expect(isCapabilityId(bad as unknown)).toBe(false)
+    }
   })
 })

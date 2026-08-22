@@ -9,9 +9,11 @@ import {
   readMarks,
   readPresence,
   recordPath,
+  isContentExtension,
   validMarks,
   writePresence,
   type BookRecord,
+  type ContentBlobName,
   type KernelServices,
   type Mark,
   type RemoteRow,
@@ -165,8 +167,29 @@ export const blobFolderOf = (bookId: string): string => folderOf(bookId).slice(B
  * The cross-device FETCH still requests `format` alone, because that is the
  * only content-naming field that travels; on an honest import the two agree.
  */
-const contentBlobName = (record: { readonly format?: string | undefined; readonly ext?: string | undefined }): `content.${string}` =>
-  `content.${record.ext ?? record.format ?? 'bin'}`
+const contentBlobName = (record: {
+  readonly format?: string | undefined
+  readonly ext?: string | undefined
+}): ContentBlobName => {
+  /* VALIDATED, not merely concatenated.
+   *
+   * Both fields are strings read off a record — which may have been
+   * hand-edited, or replicated from a peer — so `content.${record.ext}` could
+   * name anything at all. The kernel's remove primitive refused it at runtime,
+   * which meant a garbled `ext` turned an ordinary eviction into a thrown
+   * error rather than a no-op; and the type said `content.${string}`, so
+   * nothing complained at compile time either.
+   *
+   * `bin` is the fallback because it is what the VAULT would have named the
+   * file: `extensionFor` stores anything it does not recognise as
+   * `content.bin`, so a record whose `ext` is junk describes a file that is
+   * either `content.bin` or is not there — and naming a file that is not there
+   * removes nothing, which is the right answer for a record nobody can read. */
+  for (const candidate of [record.ext, record.format]) {
+    if (candidate !== undefined && isContentExtension(candidate)) return `content.${candidate}`
+  }
+  return 'content.bin'
+}
 
 export function createLedger({
   services,
