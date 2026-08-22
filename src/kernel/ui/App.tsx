@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { buildCommands } from './commands'
-import { LOOK_UP_SETTING } from '../core/gloss'
 import { offeredFaces } from '../core/typefaces'
 import { presentFaces } from './fontProbe'
 import { canKeepPlace, resolveAccel } from './accel'
@@ -126,7 +125,7 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
   const workLine = services.workLine()
   const download = useSyncExternalStore(workLine.subscribe, workLine.line, workLine.line)
   const lookUpMode = useMemo(
-    () => services.settings.get(LOOK_UP_SETTING),
+    () => services.lookUp(),
     /* `settingsSnapshot` is the dependency that matters: the store hands back
        a new object on every change, which is what re-reads the value. */
     [services.settings, settingsSnapshot],

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { LOOK_UP_SETTING, createSettingsStore } from '../../../kernel'
+import { createKernelServices, scopeSettings } from '../../../kernel'
 import { ROUTE_SETTING, TOOLS_SETTING } from '../lib/settings'
 import type { InferencePort, Probe, Route } from '../../inference'
 import { createRoutesModel, resolveRoute, rowFor, voiceRows } from './routesModel'
@@ -163,11 +163,20 @@ describe('the routes store', () => {
     return { port, signedIn }
   }
 
-  const store = () => createSettingsStore({ storage: null })
+  /**
+   * THE REAL GUARD. `scopeSettings` confines this capability to `companion.`
+   * at every door, and the look-up mode is `kernel.lookUp` — so a store handed
+   * in raw makes this whole suite pass over a pane that throws on its first
+   * render. It did: both phase-15 panes read it through the scoped handle.
+   */
+  function wiring() {
+    const services = createKernelServices({ fs: null, storage: null, initialBooks: [] })
+    return { settings: scopeSettings(services.settings, 'companion'), kernel: services }
+  }
 
   it('is empty and loading until the first probe resolves', async () => {
     const { port } = portWith(probeOf())
-    const model = createRoutesModel({ port, settings: store() })
+    const model = createRoutesModel({ port, ...wiring() })
     expect(model.getSnapshot().loading).toBe(true)
     await model.refresh()
     expect(model.getSnapshot().loading).toBe(false)
@@ -177,9 +186,9 @@ describe('the routes store', () => {
   /* THE STABLE REFERENCE. Two reads with nothing changed in between must be
      the SAME object, and a change must produce a different one. */
   it('returns one snapshot object until something changes', async () => {
-    const settings = store()
+    const { settings, kernel } = wiring()
     const { port } = portWith(probeOf(route({ id: 'local', kind: 'local', installed: true })))
-    const model = createRoutesModel({ port, settings })
+    const model = createRoutesModel({ port, settings, kernel })
     await model.refresh()
     const before = model.getSnapshot()
     expect(model.getSnapshot()).toBe(before)
@@ -194,9 +203,9 @@ describe('the routes store', () => {
   })
 
   it('notifies subscribers and stops on unsubscribe', async () => {
-    const settings = store()
+    const { settings, kernel } = wiring()
     const { port } = portWith(probeOf())
-    const model = createRoutesModel({ port, settings })
+    const model = createRoutesModel({ port, settings, kernel })
     let seen = 0
     const stop = model.subscribe(() => void (seen += 1))
     await model.refresh()
@@ -212,7 +221,7 @@ describe('the routes store', () => {
     const { port } = portWith(async () => {
       throw new Error('the daemon is not there')
     })
-    const model = createRoutesModel({ port, settings: store() })
+    const model = createRoutesModel({ port, ...wiring() })
     await expect(model.refresh()).resolves.toBeUndefined()
     expect(model.getSnapshot().rows).toEqual([])
     expect(model.getSnapshot().loading).toBe(false)
@@ -225,7 +234,7 @@ describe('the routes store', () => {
   it('does not notify after dispose', async () => {
     let release: (probe: Probe) => void = () => {}
     const { port } = portWith(() => new Promise<Probe>((resolve) => void (release = resolve)))
-    const model = createRoutesModel({ port, settings: store() })
+    const model = createRoutesModel({ port, ...wiring() })
     let seen = 0
     model.subscribe(() => void (seen += 1))
     const inFlight = model.refresh()
@@ -236,9 +245,9 @@ describe('the routes store', () => {
   })
 
   it('writes the chosen route, and signs in through the port', async () => {
-    const settings = store()
+    const { settings, kernel } = wiring()
     const { port, signedIn } = portWith(probeOf(route({ id: 'codex', kind: 'agent' })))
-    const model = createRoutesModel({ port, settings })
+    const model = createRoutesModel({ port, settings, kernel })
     await model.refresh()
     model.use('codex')
     expect(settings.get(ROUTE_SETTING)).toBe('codex')
@@ -247,10 +256,24 @@ describe('the routes store', () => {
     model.dispose()
   })
 
+  /* THE REGRESSION, NAMED. `getSnapshot` is the `useSyncExternalStore` read
+     that runs on mount, and it resolves the look-up label. Reading that
+     through `settings` throws `namespace` under the real guard, which is what
+     `Settings → Local models` and this pane both did in the running app. */
+  it('builds a snapshot without touching the kernel namespace', async () => {
+    const { settings, kernel } = wiring()
+    const { port } = portWith(probeOf(route({ id: 'local:m', kind: 'local', installed: true })))
+    const model = createRoutesModel({ port, settings, kernel })
+    await model.refresh()
+    expect(() => model.getSnapshot()).not.toThrow()
+    expect(model.getSnapshot().lookUp).not.toBeNull()
+    model.dispose()
+  })
+
   it('sets tools through the settings store, not its own field', () => {
-    const settings = store()
+    const { settings, kernel } = wiring()
     const { port } = portWith(probeOf())
-    const model = createRoutesModel({ port, settings })
+    const model = createRoutesModel({ port, settings, kernel })
     model.setTools(true)
     expect(settings.get(TOOLS_SETTING)).toBe(true)
     model.dispose()
@@ -259,14 +282,14 @@ describe('the routes store', () => {
   /* The cycle is over what is AVAILABLE, so a machine with one option cannot
      be cycled into a mode that does nothing. */
   it('cycles Look up only when there is more than one mode', () => {
-    const settings = store()
+    const { settings, kernel } = wiring()
     const { port } = portWith(probeOf())
-    const model = createRoutesModel({ port, settings })
-    const before = settings.get(LOOK_UP_SETTING)
+    const model = createRoutesModel({ port, settings, kernel })
+    const before = kernel.lookUp()
     model.cycleLookUp(false, false)
-    expect(settings.get(LOOK_UP_SETTING)).toBe(before)
+    expect(kernel.lookUp()).toBe(before)
     model.cycleLookUp(true, true)
-    expect(settings.get(LOOK_UP_SETTING)).not.toBe(before)
+    expect(kernel.lookUp()).not.toBe(before)
     model.dispose()
   })
 })

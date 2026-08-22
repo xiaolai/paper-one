@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { IndexedBook } from './bookIndex'
 import { NOT_CONFIGURED, type CompanionProvider } from './companion'
 import { fakeFs } from './fakeFs.testkit'
-import { NO_GLOSS, type GlossProvider } from './gloss'
+import { LOOK_UP_MODES, NO_GLOSS, type GlossProvider } from './gloss'
 import { NO_WORK_LINE, type MutationKind, type MutationRecorder, type MutationToken, type WorkLine } from './ports'
 import { createKernelServices } from './services'
 
@@ -485,5 +485,59 @@ describe('the companion, gloss and work-line ports', () => {
     expect(() => services.bindGloss({ available: true, gloss: async () => 'y' })).toThrow(/already bound/)
     services.bindWorkLine({ line: () => null, subscribe: () => () => {} })
     expect(() => services.bindWorkLine({ line: () => null, subscribe: () => () => {} })).toThrow(/already bound/)
+  })
+})
+
+/**
+ * `Look up`, WHICH THE KERNEL OWNS AND TWO CAPABILITIES DRAW.
+ *
+ * The setting is `kernel.lookUp` on purpose — `ui/lookUp.ts` acts on it — but
+ * `scopeSettings` confines a capability to its own namespace at every door,
+ * `services.settings` included. So the two panes that draw the control cannot
+ * reach the value through a store at all, and reading it through one threw
+ * `namespace` on their first render. This accessor is the seam; these cases
+ * are what say it behaves.
+ */
+describe('the look-up mode', () => {
+  it('defaults to the system dictionary, which is what makes the no-regression rule true', () => {
+    expect(servicesWith(spyRecorder().recorder).lookUp()).toBe('system')
+  })
+
+  it('does nothing when only one mode is available', () => {
+    const services = servicesWith(spyRecorder().recorder)
+    /* A dictionary and no gloss: one mode, so the control is not offered and
+       pressing it must not move to a mode that would fail when used. */
+    services.cycleLookUp(true, false)
+    expect(services.lookUp()).toBe('system')
+    /* Neither: no modes at all. */
+    services.cycleLookUp(false, false)
+    expect(services.lookUp()).toBe('system')
+  })
+
+  it('cycles the whole set when both halves are there, and wraps', () => {
+    const services = servicesWith(spyRecorder().recorder)
+    const seen = [services.lookUp()]
+    for (let i = 0; i < LOOK_UP_MODES.length; i++) {
+      services.cycleLookUp(true, true)
+      seen.push(services.lookUp())
+    }
+    /* Every mode visited, and back where it started — a cycle, not a walk off
+       the end of the list. */
+    expect(new Set(seen.slice(0, LOOK_UP_MODES.length))).toEqual(new Set(LOOK_UP_MODES))
+    expect(seen[seen.length - 1]).toBe(seen[0])
+  })
+
+  /* A STORED PREFERENCE OUTLIVES THE THING IT NAMES. A reader who chose
+     `gloss` and then removed the model has a setting pointing at nothing;
+     cycling from there must land on what EXISTS rather than on the next entry
+     of a list that no longer applies. */
+  it('cycles from what is available when the stored choice is not', () => {
+    const services = servicesWith(spyRecorder().recorder)
+    services.cycleLookUp(true, true)
+    services.cycleLookUp(true, true)
+    const chosen = services.lookUp()
+    /* The model is gone: only the system dictionary is offerable now. */
+    services.cycleLookUp(true, false)
+    expect(services.lookUp()).toBe(chosen)
   })
 })

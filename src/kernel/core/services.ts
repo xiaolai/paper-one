@@ -6,7 +6,7 @@ import { createLibrary, type Library } from './libraryStore'
 import { createMarkStore, type MarkStore } from './markStore'
 import { folderOf } from './bookFolder'
 import { NOT_CONFIGURED, type CompanionProvider } from './companion'
-import { NO_GLOSS, type GlossProvider } from './gloss'
+import { LOOK_UP_SETTING, NO_GLOSS, availableModes, effectiveMode, type GlossProvider, type LookUpMode } from './gloss'
 import { NO_WORK_LINE, NOOP_DIAGNOSTICS, NOOP_RECORDER, REMOVABLE_BLOB_NAMES, recorded, type DevicePort, type Diagnostics, type MutationKind, type MutationRecorder, type MutationToken, type RemovableBlobName, type SettingsStore, type ShelfPort, type SizePort, type WorkLine } from './ports'
 import { carryLegacySettings, createSettingsStore, type SettingsMigration } from './settings'
 import { writeQueue, type WriteQueue } from './writeQueue'
@@ -164,6 +164,31 @@ export interface KernelServices {
   workLine(): WorkLine
   /** The gloss provider — `NO_GLOSS` until one is bound. */
   gloss(): GlossProvider
+  /**
+   * The reader's `Look up` preference, and the one way to cycle it.
+   *
+   * HERE RATHER THAN IN THE SETTINGS STORE, and the reason is an invariant
+   * that would otherwise be broken by the only two callers there are.
+   * `LOOK_UP_SETTING` is `kernel.lookUp` on purpose — `ui/lookUp.ts` acts on
+   * it and that file is the kernel's — but a capability's settings handle is
+   * confined to its own `<id>.` namespace by `scopeSettings`, at every door
+   * including `services.settings`. So `inference` and `companion`, which both
+   * DRAW the row, cannot reach the value through the store at all: the read
+   * throws `namespace` the moment their pane mounts.
+   *
+   * An accessor is the seam that satisfies both: the kernel keeps ownership
+   * of the question, and a capability that draws the control asks rather than
+   * reaches. It also collapses a duplicated algorithm — the cycle was written
+   * out twice, identically, in two capability stores.
+   *
+   * `hasDictionary` and `hasGloss` are the CALLER's answers, because only the
+   * caller knows: the platform's dictionary is `ui/lookUp.ts`'s question and
+   * whether a text model is installed is the controller's. A cycle with one
+   * or no available mode does nothing, so a control that would be inert is
+   * simply not offered.
+   */
+  lookUp(): LookUpMode
+  cycleLookUp(hasDictionary: boolean, hasGloss: boolean): void
   /**
    * Serve a composed set of services through the bound host, once every
    * capability has started (so a delegating handler's target is ready). The
@@ -417,6 +442,14 @@ export function createKernelServices({
     companion: () => companionSlot.get(),
     bindGloss: (next) => glossSlot.bind(next),
     gloss: () => glossSlot.get(),
+    lookUp: () => settings.get(LOOK_UP_SETTING),
+    cycleLookUp: (hasDictionary, hasGloss) => {
+      const modes = availableModes(hasDictionary, hasGloss)
+      if (modes.length <= 1) return
+      const current = effectiveMode(settings.get(LOOK_UP_SETTING), modes)
+      const index = current === null ? -1 : modes.indexOf(current)
+      settings.set(LOOK_UP_SETTING, modes[(index + 1) % modes.length] as LookUpMode)
+    },
     bindWorkLine: (next) => workLineSlot.bind(next),
     workLine: () => workLineSlot.get(),
     serveServices: async (list) => (await serviceHostSlot.get()(list)) ?? NOOP_DISPOSABLE,

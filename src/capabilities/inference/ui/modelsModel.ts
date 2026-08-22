@@ -1,4 +1,4 @@
-import type { SettingsStore } from '../../../kernel'
+import type { KernelServices, SettingsStore } from '../../../kernel'
 import { LOOK_UP_LABELS, availableModes, effectiveMode, type LookUpMode } from '../../../kernel'
 import type { Controller, InferenceSnapshot, RuntimeState } from '../lib/controller'
 import { mintRequestId, type InferencePlugin } from '../lib/plugin'
@@ -11,7 +11,7 @@ import { mintRequestId, type InferencePlugin } from '../lib/plugin'
  * actually tells them.
  */
 export const TEST_VOICE_LINE = 'This is the voice Paper will read aloud with, once reading aloud arrives.'
-import { KEEP_LOADED_SETTING, LOOK_UP_SETTING } from '../lib/settings'
+import { KEEP_LOADED_SETTING } from '../lib/settings'
 
 /**
  * The Local models section's decisions — no React, so they can be tested.
@@ -185,9 +185,18 @@ export interface ModelsModelOptions {
   readonly controller: Controller
   readonly plugin: InferencePlugin
   readonly settings: SettingsStore
+  /**
+   * The kernel's own view of `Look up`.
+   *
+   * NOT `settings`, and this is not a style choice: `LOOK_UP_SETTING` is
+   * `kernel.lookUp`, and `scopeSettings` confines this capability's settings
+   * handle to `inference.` at every door. Reading it through `settings` threw
+   * `namespace` on the pane's first render — see `KernelServices.lookUp`.
+   */
+  readonly kernel: Pick<KernelServices, 'lookUp' | 'cycleLookUp'>
 }
 
-export function createModelsModel({ controller, plugin, settings }: ModelsModelOptions): ModelsModel {
+export function createModelsModel({ controller, plugin, settings, kernel }: ModelsModelOptions): ModelsModel {
   const listeners = new Set<() => void>()
   let modelsDir: string | null = null
   let residentBytes: number | null = null
@@ -226,7 +235,7 @@ export function createModelsModel({ controller, plugin, settings }: ModelsModelO
         const base = controller.getSnapshot()
         cached = {
           ...base,
-          lookUp: settings.get(LOOK_UP_SETTING),
+          lookUp: kernel.lookUp(),
           keepLoaded: settings.get(KEEP_LOADED_SETTING),
           modelsDir,
           residentBytes,
@@ -256,13 +265,9 @@ export function createModelsModel({ controller, plugin, settings }: ModelsModelO
     install: (model) => controller.install(model),
     cancelInstall: () => controller.cancelInstall(),
     uninstall: (model) => controller.uninstall(model),
-    cycleLookUp: (hasDictionary) => {
-      const modes = availableModes(hasDictionary, controller.textModel() !== null)
-      if (modes.length <= 1) return
-      const current = effectiveMode(settings.get(LOOK_UP_SETTING), modes)
-      const index = current === null ? -1 : modes.indexOf(current)
-      settings.set(LOOK_UP_SETTING, modes[(index + 1) % modes.length] as LookUpMode)
-    },
+    /* The kernel owns the cycle; this file owns only the answer to "is there
+       a gloss on this machine", which is the controller's to give. */
+    cycleLookUp: (hasDictionary) => kernel.cycleLookUp(hasDictionary, controller.textModel() !== null),
     setKeepLoaded: (value) => settings.set(KEEP_LOADED_SETTING, value),
 
     testVoice: async () => {

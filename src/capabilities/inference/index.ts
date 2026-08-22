@@ -178,7 +178,7 @@ export const inference: Capability = {
     })
     myRunning = { plugin, controller, gloss }
     running = myRunning
-    myModels = createModelsModel({ controller, plugin, settings: api.settings })
+    myModels = createModelsModel({ controller, plugin, settings: api.settings, kernel: api.services })
     modelsModel = myModels
 
     /* Read what is on disk, unawaited: `start` must not block the composition

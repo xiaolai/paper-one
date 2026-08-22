@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { LOOK_UP_SETTING, createSettingsStore } from '../../../kernel'
+import { createKernelServices, scopeSettings } from '../../../kernel'
 import type { Controller, InferenceSnapshot, RuntimeState } from '../lib/controller'
 import type { InferencePlugin, ModelRow } from '../lib/plugin'
 import { KEEP_LOADED_SETTING } from '../lib/settings'
@@ -224,11 +224,28 @@ describe('the models store', () => {
       ...over,
     }) as InferencePlugin
 
-  const store = () => createSettingsStore({ storage: null })
+  /**
+   * THE REAL GUARD, and this is the whole reason these tests exist in this
+   * shape.
+   *
+   * `scopeSettings` confines a capability to its own `<id>.` namespace at
+   * every door. Handing the store in raw — which is what an earlier version
+   * of this suite did — makes every assertion here pass over a pane that
+   * throws `namespace` on its first render in the running app, which is
+   * exactly what happened: `getSnapshot` read `kernel.lookUp` through this
+   * handle and `Settings → Local models` was an uncaught error.
+   *
+   * `kernel` is the real `KernelServices`, so the look-up accessor under test
+   * is the one that ships.
+   */
+  function wiring() {
+    const services = createKernelServices({ fs: null, storage: null, initialBooks: [] })
+    return { settings: scopeSettings(services.settings, 'inference'), kernel: services }
+  }
 
   it('folds the settings and the plugin readings into the controller snapshot', async () => {
     const { controller } = fakeController({ models: [model({ id: 'a', installed: true })] })
-    const models = createModelsModel({ controller, plugin: fakePlugin(), settings: store() })
+    const models = createModelsModel({ controller, plugin: fakePlugin(), ...wiring() })
     await models.refresh()
     const snap = models.getSnapshot()
     expect(snap.models).toHaveLength(1)
@@ -252,7 +269,7 @@ describe('the models store', () => {
         throw new Error('daemon is down')
       },
     })
-    const models = createModelsModel({ controller, plugin, settings: store() })
+    const models = createModelsModel({ controller, plugin, ...wiring() })
     await expect(models.refresh()).resolves.toBeUndefined()
     expect(models.getSnapshot().modelsDir).toBeNull()
     expect(models.getSnapshot().residentBytes).toBeNull()
@@ -262,7 +279,7 @@ describe('the models store', () => {
 
   it('keeps one snapshot object until something changes', async () => {
     const { controller } = fakeController()
-    const models = createModelsModel({ controller, plugin: fakePlugin(), settings: store() })
+    const models = createModelsModel({ controller, plugin: fakePlugin(), ...wiring() })
     await models.refresh()
     const before = models.getSnapshot()
     expect(models.getSnapshot()).toBe(before)
@@ -275,7 +292,7 @@ describe('the models store', () => {
 
   it('notifies subscribers, and stops on unsubscribe', async () => {
     const { controller, notify } = fakeController()
-    const models = createModelsModel({ controller, plugin: fakePlugin(), settings: store() })
+    const models = createModelsModel({ controller, plugin: fakePlugin(), ...wiring() })
     let seen = 0
     const stop = models.subscribe(() => void (seen += 1))
     notify()
@@ -288,7 +305,7 @@ describe('the models store', () => {
 
   it('does not notify after dispose', async () => {
     const { controller, notify } = fakeController()
-    const models = createModelsModel({ controller, plugin: fakePlugin(), settings: store() })
+    const models = createModelsModel({ controller, plugin: fakePlugin(), ...wiring() })
     let seen = 0
     models.subscribe(() => void (seen += 1))
     models.dispose()
@@ -298,7 +315,7 @@ describe('the models store', () => {
 
   it('passes install, cancel and uninstall straight through to the controller', async () => {
     const { controller, calls } = fakeController()
-    const models = createModelsModel({ controller, plugin: fakePlugin(), settings: store() })
+    const models = createModelsModel({ controller, plugin: fakePlugin(), ...wiring() })
     await models.install('a')
     models.cancelInstall()
     await models.uninstall('a')
@@ -306,12 +323,24 @@ describe('the models store', () => {
     models.dispose()
   })
 
-  it('writes keepLoaded through the settings store', () => {
-    const settings = store()
+  it('writes keepLoaded through its OWN namespace, which the guard allows', () => {
+    const { settings, kernel } = wiring()
     const { controller } = fakeController()
-    const models = createModelsModel({ controller, plugin: fakePlugin(), settings })
+    const models = createModelsModel({ controller, plugin: fakePlugin(), settings, kernel })
     models.setKeepLoaded(true)
     expect(settings.get(KEEP_LOADED_SETTING)).toBe(true)
+    models.dispose()
+  })
+
+  /* THE REGRESSION, NAMED. `getSnapshot` is what `useSyncExternalStore` calls
+     on mount, and it reads the look-up mode. Reading it through `settings`
+     throws `namespace` — under the real guard, this test is what says so. */
+  it('reads the look-up mode without touching the kernel namespace', () => {
+    const { settings, kernel } = wiring()
+    const { controller } = fakeController()
+    const models = createModelsModel({ controller, plugin: fakePlugin(), settings, kernel })
+    expect(() => models.getSnapshot()).not.toThrow()
+    expect(models.getSnapshot().lookUp).toBe(kernel.lookUp())
     models.dispose()
   })
 
@@ -320,7 +349,7 @@ describe('the models store', () => {
      nothing when pressed. */
   it('reveals the models folder through the plugin, not a path it built itself', async () => {
     const { controller } = fakeController()
-    const models = createModelsModel({ controller, plugin: fakePlugin(), settings: store() })
+    const models = createModelsModel({ controller, plugin: fakePlugin(), ...wiring() })
     await expect(models.reveal()).resolves.toBe('/models')
     models.dispose()
   })
@@ -331,25 +360,27 @@ describe('the models store', () => {
      throw where the reader pressed Stop. */
   it('stops a voice test that never started, without throwing', () => {
     const { controller } = fakeController()
-    const models = createModelsModel({ controller, plugin: fakePlugin(), settings: store() })
+    const models = createModelsModel({ controller, plugin: fakePlugin(), ...wiring() })
     expect(() => models.stopVoice()).not.toThrow()
     expect(models.getSnapshot().voiceTest).toBe('idle')
     models.dispose()
   })
 
   it('cycles Look up only when more than one mode is available', () => {
-    const settings = store()
+    const { settings, kernel } = wiring()
     const { controller } = fakeController()
-    const models = createModelsModel({ controller, plugin: fakePlugin(), settings })
-    const before = settings.get(LOOK_UP_SETTING)
+    const models = createModelsModel({ controller, plugin: fakePlugin(), settings, kernel })
+    const before = kernel.lookUp()
+    /* No dictionary and no model: one mode at most, so pressing does nothing
+       rather than cycling into a mode that would fail when used. */
     models.cycleLookUp(false)
-    expect(settings.get(LOOK_UP_SETTING)).toBe(before)
+    expect(kernel.lookUp()).toBe(before)
     models.dispose()
 
     const withModel = fakeController({ models: [model({ id: 'a', installed: true })] })
-    const second = createModelsModel({ controller: withModel.controller, plugin: fakePlugin(), settings })
+    const second = createModelsModel({ controller: withModel.controller, plugin: fakePlugin(), settings, kernel })
     second.cycleLookUp(true)
-    expect(settings.get(LOOK_UP_SETTING)).not.toBe(before)
+    expect(kernel.lookUp()).not.toBe(before)
     second.dispose()
   })
 })

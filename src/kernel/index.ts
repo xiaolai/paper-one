@@ -55,6 +55,13 @@ export {
   kernelApi,
   registrationOrder,
   resolvePaneId,
+  /* THE CAPABILITY SETTINGS CONTRACT, exported so a capability's own tests can
+   * hold themselves to it. A store built by hand in a test is a guard that can
+   * drift from the real one — and it did: both phase-15 panes read
+   * `kernel.lookUp` through their scoped handle and threw `namespace` on their
+   * first render, while every unit test passed because each had been handed an
+   * UNSCOPED store. */
+  scopeSettings,
 } from './core/registry'
 export type { CapabilityErrorCode, Composition, CompositionOptions, Contributions } from './core/registry'
 

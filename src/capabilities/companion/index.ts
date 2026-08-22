@@ -96,7 +96,7 @@ export const companion: Capability = {
     provider = myProvider
     unbindCompanion = api.services.bindCompanion(myProvider)
 
-    myRoutes = createRoutesModel({ port, settings: api.settings })
+    myRoutes = createRoutesModel({ port, settings: api.settings, kernel: api.services })
     routesModel = myRoutes
 
     api.diagnostics.info('companion.started', { wired: true })

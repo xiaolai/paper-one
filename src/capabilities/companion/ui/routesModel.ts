@@ -1,7 +1,6 @@
 import type { SettingsStore } from '../../../kernel'
-import { LOOK_UP_LABELS, availableModes, effectiveMode, type LookUpMode } from '../../../kernel'
+import { LOOK_UP_LABELS, type KernelServices } from '../../../kernel'
 import type { InferencePort, Probe, Route } from '../../inference'
-import { LOOK_UP_SETTING } from '../../inference'
 import { ROUTE_SETTING, TOOLS_SETTING } from '../lib/settings'
 
 /**
@@ -138,6 +137,14 @@ export interface RoutesModel {
 export interface RoutesModelOptions {
   readonly port: InferencePort
   readonly settings: SettingsStore
+  /**
+   * The kernel's own view of `Look up` — see `KernelServices.lookUp`.
+   *
+   * `LOOK_UP_SETTING` is `kernel.lookUp` and this capability's settings
+   * handle is confined to `companion.`, so the value is unreachable through
+   * `settings` and the read threw on the pane's first render.
+   */
+  readonly kernel: Pick<KernelServices, 'lookUp' | 'cycleLookUp'>
 }
 
 const EMPTY: RoutesSnapshot = {
@@ -150,7 +157,7 @@ const EMPTY: RoutesSnapshot = {
   loading: true,
 }
 
-export function createRoutesModel({ port, settings }: RoutesModelOptions): RoutesModel {
+export function createRoutesModel({ port, settings, kernel }: RoutesModelOptions): RoutesModel {
   const listeners = new Set<() => void>()
   let probe: Probe | null = null
   let cached: RoutesSnapshot | null = EMPTY
@@ -176,7 +183,7 @@ export function createRoutesModel({ port, settings }: RoutesModelOptions): Route
       /* `hasDictionary` is the reader UI's answer and is not known here, so
        * the row's label is resolved at render. `null` means "no control", and
        * the pane draws nothing. */
-      lookUp: hasGloss ? LOOK_UP_LABELS[settings.get(LOOK_UP_SETTING)] : null,
+      lookUp: hasGloss ? LOOK_UP_LABELS[kernel.lookUp()] : null,
       tools: settings.get(TOOLS_SETTING),
       voices: voiceRows(probe.routes, inUse),
       loading: false,
@@ -206,13 +213,9 @@ export function createRoutesModel({ port, settings }: RoutesModelOptions): Route
     },
     use: (id) => settings.set(ROUTE_SETTING, id),
     signIn: (id) => port.signIn(id),
-    cycleLookUp: (hasDictionary, hasGloss) => {
-      const modes = availableModes(hasDictionary, hasGloss)
-      if (modes.length <= 1) return
-      const current = effectiveMode(settings.get(LOOK_UP_SETTING), modes)
-      const index = current === null ? -1 : modes.indexOf(current)
-      settings.set(LOOK_UP_SETTING, modes[(index + 1) % modes.length] as LookUpMode)
-    },
+    /* One cycle, in the kernel — this was written out here and in
+       `inference`'s store, identically, which is one algorithm in two files. */
+    cycleLookUp: (hasDictionary, hasGloss) => kernel.cycleLookUp(hasDictionary, hasGloss),
     setTools: (value) => settings.set(TOOLS_SETTING, value),
     dispose: () => {
       disposed = true
