@@ -149,14 +149,42 @@ export function compare(recorded, current) {
   return recorded.filter((name) => !live.has(name))
 }
 
+/**
+ * A suite that says, in its own name, that it may not be collected here.
+ *
+ * THE RULE ABOVE WAS DOCUMENTED AND ENFORCED BY NOTHING, and it broke twice.
+ * `0596b95` removed three such entries and wrote the paragraph explaining why;
+ * `c4fe205` put them straight back, because a `--write` on a machine holding
+ * `.claude/tdd-guardian/config.json` records them without comment. The second
+ * occurrence is what makes this a mechanism rather than a mistake: a rule that
+ * only a prose paragraph defends is a rule the next `--write` will break.
+ *
+ * The convention it keys on already existed — `word-snap-live.test.mjs` names
+ * its own condition, "the live lane (skipped when this checkout has no
+ * .claude/tdd-guardian/config.json)". A suite that declares itself conditional
+ * is a suite the ledger must not record, and that is now checkable rather than
+ * merely written down.
+ */
+export const CONDITIONAL = /\(skipped when this checkout has no /
+
+/** The recorded names that declare themselves conditional — always a finding. */
+export function conditional(names) {
+  return names.filter((name) => CONDITIONAL.test(name))
+}
+
 export function writeLedger(root, tests) {
-  const body = { note: 'Regenerate with `pnpm test:ledger --write`. See scripts/check-test-ledger.mjs.', tests }
+  /* DROPPED ON THE WAY IN, so a `--write` from a developer's machine produces
+     the same ledger a clean checkout would. This is the half that stops the
+     regression rather than reporting it. */
+  const keep = tests.filter((name) => !CONDITIONAL.test(name))
+  const body = { note: 'Regenerate with `pnpm test:ledger --write`. See scripts/check-test-ledger.mjs.', tests: keep }
   const file = path.join(root, LEDGER)
   // The directory may not exist — in a fresh worktree, or the first time this
   // runs anywhere. Failing there would make the guard's own bootstrap its first
   // and least useful error.
   mkdirSync(path.dirname(file), { recursive: true })
   writeFileSync(file, `${JSON.stringify(body, null, 2)}\n`)
+  return tests.length - keep.length
 }
 
 function toPosix(p) {
@@ -174,15 +202,30 @@ function main(argv) {
   const gone = compare(recorded, current)
 
   if (args.write) {
-    writeLedger(args.root, current)
-    const added = current.length - (recorded.length - gone.length)
+    const skipped = writeLedger(args.root, current)
+    const kept = current.length - skipped
+    const added = kept - (recorded.length - gone.length)
+    const note = skipped > 0 ? `, ${skipped} conditional not recorded` : ''
     process.stdout.write(
-      `check-test-ledger: wrote ${current.length} tests (${added} added, ${gone.length} removed)\n`,
+      `check-test-ledger: wrote ${kept} tests (${added} added, ${gone.length} removed${note})\n`,
     )
     return 0
   }
 
-  const lines = gone.map((name) => `GONE ${name}`)
+  /* CHECKED EVERYWHERE, not only where it bites. A conditional entry is
+     invisible on the machine that recorded it and fatal on every other, so
+     reporting it only where it fails would leave the person who can fix it as
+     the one person who never sees it. */
+  const conditionals = conditional(recorded)
+  const lines = conditionals.map((name) => `CONDITIONAL ${name}`)
+  if (conditionals.length > 0) {
+    lines.push('')
+    lines.push('These names say they are skipped unless a gitignored file is present,')
+    lines.push('so a clean checkout reports them GONE. Re-run `pnpm test:ledger --write`,')
+    lines.push('which now drops them, and commit the ledger.')
+    lines.push('')
+  }
+  lines.push(...gone.map((name) => `GONE ${name}`))
   if (gone.length > 0) {
     lines.push('')
     lines.push('These tests are in the ledger and Vitest no longer collects them.')
@@ -190,10 +233,10 @@ function main(argv) {
     lines.push('ledger with the change, so the removal is visible in the diff.')
   }
   lines.push(
-    `check-test-ledger: ${current.length} tests collected, ${recorded.length} recorded, ${gone.length} gone`,
+    `check-test-ledger: ${current.length} tests collected, ${recorded.length} recorded, ${gone.length} gone, ${conditionals.length} conditional`,
   )
   process.stdout.write(`${lines.join('\n')}\n`)
-  return gone.length > 0 ? 1 : 0
+  return gone.length > 0 || conditionals.length > 0 ? 1 : 0
 }
 
 if (isProcessEntry(import.meta)) {

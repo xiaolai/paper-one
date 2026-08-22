@@ -1,8 +1,9 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { LEDGER, compare, parseArgs, readLedger, writeLedger } from './check-test-ledger.mjs'
+import { LEDGER, compare, conditional, parseArgs, readLedger, writeLedger } from './check-test-ledger.mjs'
 
 /**
  * The ledger guard, tested on everything except the part that shells out.
@@ -117,5 +118,45 @@ describe('the command line', () => {
   it('refuses --root without a directory, and --root twice', () => {
     expect(parseArgs(['--root']).error).toMatch(/needs a directory/)
     expect(parseArgs(['--root', 'a', '--root', 'b']).error).toMatch(/twice/)
+  })
+})
+
+/**
+ * THE RULE THAT WAS DOCUMENTED AND ENFORCED BY NOTHING.
+ *
+ * `0596b95` removed three conditional entries and wrote the paragraph
+ * explaining why a clean checkout cannot collect them. `c4fe205` put them
+ * straight back — not deliberately, but because `--write` on a machine holding
+ * `.claude/tdd-guardian/config.json` records them without comment, and the
+ * machine that records them is the one machine where nothing goes red. It
+ * surfaced on the next fresh worktree, eight steps into `pnpm verify`.
+ *
+ * Two occurrences of one shape is a mechanism, not a mistake.
+ */
+describe('a suite that declares itself conditional', () => {
+  const NAME =
+    'scripts/word-snap-live.test.mjs > the live lane (skipped when this checkout has no .claude/tdd-guardian/config.json) > does not claim to contribute coverage'
+
+  it('is recognised by the convention the suite already used', () => {
+    expect(conditional([NAME, 'a > b > c'])).toEqual([NAME])
+  })
+
+  it('is dropped on the way into the ledger, not merely reported', () => {
+    /* The half that stops the regression: a `--write` from a developer's
+       machine has to produce the ledger a clean checkout would. */
+    const root = mkdtempSync(join(tmpdir(), 'paper-ledger-'))
+    const skipped = writeLedger(root, [NAME, 'a > b > c'])
+    expect(skipped).toBe(1)
+    const written = JSON.parse(readFileSync(join(root, LEDGER), 'utf8'))
+    expect(written.tests).toEqual(['a > b > c'])
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  it('is a finding wherever it is found, not only where it fails', () => {
+    /* Reported only on the checkout that cannot collect it, the one person who
+       could fix it — whoever ran `--write` — is the one person who never sees
+       it. `compare` stays about removals; this is its own question. */
+    expect(compare([NAME], [NAME])).toEqual([])
+    expect(conditional([NAME])).toHaveLength(1)
   })
 })
