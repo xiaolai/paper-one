@@ -4,10 +4,12 @@
 // so it needs a document even where the assertion is about a declaration.
 import { describe, expect, it } from 'vitest'
 import {
+  CODE_PANEL_PAD,
   FIGURE_HEIGHTS,
   FIGURE_WIDTHS,
   MINIMUM_SIZES,
   PARAGRAPH_INDENT,
+  READING_RATIOS,
   stepAt,
 } from '../../core/metrics'
 import {
@@ -265,6 +267,142 @@ describe('the tiers WI-14.4 assigns', () => {
        landed in that sheet at once, and one `!important` among them makes the
        tier meaningless without changing anything a reader can see. */
     expect(strip(bookSheets()[0])).not.toContain('!important')
+  })
+})
+
+/**
+ * THE HOUSE RATIOS — 80% for a footnote, 90% for everything that is not running
+ * text. Paper set none of these, so a quotation, a table, a list and a code
+ * block all inherited 100% and read, next to a paragraph, like more paragraph.
+ */
+describe('the house font ratios', () => {
+  const before = () => strip(bookSheets()[0])
+
+  it('sets a quotation, a table, a list and a code block at 90%', () => {
+    const css = before()
+    const at = css.indexOf('\nblockquote, table, ul, ol, pre {')
+    expect(at, 'the 90% rule is gone').toBeGreaterThan(-1)
+    expect(css.slice(at, css.indexOf('}', at))).toContain('font-size: 0.9em')
+  })
+
+  it('sets inline code at 90% of the line it sits in', () => {
+    const css = before()
+    const at = css.indexOf('\ncode, kbd, samp {')
+    expect(at, 'the inline code rule is gone').toBeGreaterThan(-1)
+    expect(css.slice(at, css.indexOf('}', at))).toContain(`font-size: ${READING_RATIOS.code}em`)
+  })
+
+  /**
+   * THE PANEL IS THE CONTEXT'S HEIGHT, AND THE ARITHMETIC IS EASY TO GET
+   * BACKWARDS.
+   *
+   * A background on an inline element paints the CONTENT AREA, which scales
+   * with the font size — so code at nine tenths paints a box nine tenths as
+   * tall as the text around it. Half the shortfall above and half below puts it
+   * back. But inside an element whose `font-size` is `0.9em`, `1em` is 0.9 of
+   * the CONTEXT for every other property, so a plain `0.05em` would be 0.045 of
+   * the context and the panel would still be short. Every length in that rule
+   * is divided by the ratio for exactly this reason.
+   */
+  it('pads the code panel in the CONTEXT’s em, not the code’s', () => {
+    const css = before()
+    const at = css.indexOf('padding-block:')
+    expect(at, 'the code panel padding is gone').toBeGreaterThan(-1)
+    const written = /padding-block:\s*([\d.]+)em/.exec(css.slice(at))?.[1]
+    expect(written, 'the padding is not in em').toBeDefined()
+    /* What it comes to once the element's own 0.9em is applied. */
+    const inContext = Number(written) * READING_RATIOS.code
+    expect(inContext).toBeCloseTo(CODE_PANEL_PAD, 4)
+    /* And that is half the shortfall, so the box returns to the context's. */
+    expect(READING_RATIOS.code + inContext * 2).toBeCloseTo(1, 4)
+  })
+
+  it('derives every ratio from one constant rather than repeating a literal', () => {
+    /* `code` needs its ratio TWICE — once to shrink the text and once to divide
+       the padding back out — and two literals that must stay reciprocal is a
+       drift waiting to happen. */
+    const css = before() + strip(bookSheets()[1]) + strip(noteSheets()[1])
+    expect(READING_RATIOS.code + CODE_PANEL_PAD * 2).toBeCloseTo(1, 4)
+    expect(css).toContain(`font-size: ${READING_RATIOS.block}em`)
+    expect(css).toContain(`font-size: ${READING_RATIOS.footnote}em`)
+    expect(css).toContain(`font-size: ${READING_RATIOS.footnote}rem`)
+  })
+
+  /**
+   * THE TRAP, AND IT FAILS SILENTLY. `em` is a share of the PARENT, so every one
+   * of these nested inside another compounds: a list inside a list is 81%, and
+   * inside a quotation as well it is 73%. Books nest all of them — sub-lists are
+   * ordinary and a quotation containing a list is ordinary — so the reset is
+   * not a corner case, it is the common case.
+   */
+  it('takes the ninety per cent ONCE, however deeply these nest', () => {
+    const css = before()
+    expect(css).toContain(':is(blockquote, table, ul, ol, pre) :is(blockquote, table, ul, ol, pre)')
+    const at = css.indexOf(':is(blockquote, table, ul, ol, pre) :is(')
+    expect(css.slice(at, css.indexOf('}', at))).toContain('font-size: 1em')
+  })
+
+  it('does not shrink code twice inside a pre', () => {
+    /* The block rule has already taken the nine tenths; `<pre><code>` is the
+       spec's own idiom for a code block, so this is the ordinary shape. */
+    const css = before()
+    const at = css.indexOf('\npre code, pre kbd, pre samp {')
+    expect(at, 'the pre-code reset is gone').toBeGreaterThan(-1)
+    expect(css.slice(at, css.indexOf('}', at))).toContain('font-size: 1em')
+  })
+
+  it('sets a footnote at 80%, marker and note alike', () => {
+    const css = before() + strip(bookSheets()[1]) + strip(noteSheets()[1])
+    const marker = css.indexOf('a[epub|type~="noteref"]')
+    expect(marker, 'the noteref rule is gone').toBeGreaterThan(-1)
+    expect(css.slice(marker, css.indexOf('}', marker))).toContain('font-size: 0.8em')
+    const note = css.indexOf('--paper-note-prose')
+    expect(note, 'the note rule is gone').toBeGreaterThan(-1)
+    expect(css.slice(note, css.indexOf('}', note))).toContain('font-size: 0.8rem')
+  })
+})
+
+/**
+ * THE CODE PANEL, AND THE RULE THAT NEARLY DELETED IT.
+ *
+ * WI-14.6 lost a whole release to this exact interaction: a blanket
+ * `background-color: transparent !important` on a dark page beats any unmarked
+ * background whatever its specificity, so the matte was inert on precisely the
+ * pages it existed for and intact on the ones that never needed it.
+ */
+describe('the panel behind code', () => {
+  it('mixes the panel from the reader’s ink rather than naming a grey', () => {
+    /* A literal light grey is right on four themes and a bright slab on the
+       fifth, which is the defect WI-14.1 exists to remove. */
+    const css = strip(bookSheets()[0])
+    const at = css.indexOf('\npre, code, kbd, samp {\n  background:')
+    expect(at, 'the code panel is gone').toBeGreaterThan(-1)
+    expect(css.slice(at, css.indexOf('}', at))).toContain('var(--paper-ink)')
+  })
+
+  it('exempts code from the dark page’s blanket clear', () => {
+    /* At (0,0,1) the panel cannot outrank the clear at (0,4,1), so the clear
+       has to stop MATCHING rather than be beaten — the same answer the matte
+       arrived at, by the same route. */
+    const css = strip(bookSheets()[1])
+    const at = css.indexOf('background-color: transparent')
+    expect(at, 'the blanket clear is gone').toBeGreaterThan(-1)
+    const selector = css.slice(css.lastIndexOf('\n', css.lastIndexOf('{', at)), at)
+    for (const tag of ['pre', 'code', 'kbd', 'samp']) {
+      expect(selector, `${tag} is not exempt from the clear`).toContain(`:not(${tag})`)
+    }
+  })
+
+  it('repaints the panel on a dark page, marked', () => {
+    /* With the clear out of the way the thing left to beat is a publisher
+       background, and a light grey `pre` from the book is the slab this
+       prevents. */
+    const css = strip(bookSheets()[1])
+    const at = css.indexOf(':is(pre, code, kbd, samp)')
+    expect(at, 'the dark-page panel is gone').toBeGreaterThan(-1)
+    const rule = css.slice(at, css.indexOf('}', at))
+    expect(rule).toContain('!important')
+    expect(css.slice(0, at)).toContain('--paper-dark-page')
   })
 })
 

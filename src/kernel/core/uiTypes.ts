@@ -257,9 +257,19 @@ export type TableFit = (typeof TABLE_FITS)[number]
  * Books set notes smaller than the prose — measured, `.footnote` is 70% and
  * `.footnote2` is 75% on one real book — and on the PAGE that is right: a note
  * at the foot of a page is subordinate to the text it annotates, and the
- * reduction is how print says so. In a popover there is no prose beside it, the
- * reason for the reduction is absent, and all it costs is legibility. `prose`
- * is the default for that reason; `publisher` hands the book its own back.
+ * reduction is how print says so.
+ *
+ * `paper` IS 80% OF THE READER'S BASE, not 100%. It was 100% on the argument
+ * that a popover has no prose beside it, so the reason for the reduction is
+ * absent there and all it costs is legibility. That argument is overruled
+ * deliberately: a footnote reads as a footnote, and the house ratio for one is
+ * four fifths — the same ratio the superscript marker takes. What the setting
+ * still buys is the choice, because 70% of a base the reader has since enlarged
+ * is a different thing from 80% of it.
+ *
+ * NAMED FOR WHOSE IT IS, not for what it matches. The state was labelled "Match
+ * the prose" while it meant 100%, and at 80% that label would simply be false —
+ * a control that misdescribes its own state is worse than one with a dull name.
  */
 export const NOTE_SIZES = ['prose', 'publisher'] as const
 export type NoteSize = (typeof NOTE_SIZES)[number]

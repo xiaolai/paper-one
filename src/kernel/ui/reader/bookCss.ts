@@ -2,9 +2,11 @@ import type { MarkTint } from '../../core/marks'
 import type { MarkPalette } from './session'
 import type { Align, ReadingStyle, SpacingIndices, Theme, Typeface } from '../state'
 import {
+  CODE_PANEL_PAD,
   DEFAULT_READING_STYLE,
   FIGURE_HEIGHTS,
   MOTION,
+  READING_RATIOS,
   FIGURE_WIDTHS,
   MINIMUM_SIZES,
   PARAGRAPH_INDENT,
@@ -217,8 +219,30 @@ ${ROOT_WHEN_DARK} *:not(a) {
    from clearing a background and nothing else. Folded into the rule above, the
    exclusion also took color and border-color away from a matted figure —
    which is not what "keep your own background" means. */
-${ROOT_WHEN_DARK} *:not(a):not(.paper-ruler-band):not(.paper-spoken-word):not([data-paper-matte]) {
+${ROOT_WHEN_DARK} *:not(a):not(.paper-ruler-band):not(.paper-spoken-word):not([data-paper-matte]):not(pre):not(code):not(kbd):not(samp) {
   background-color: transparent !important;
+}
+
+/* PAPER'S CODE PANEL, REPAINTED ON A DARK PAGE, and both halves are needed.
+ *
+ * The blanket rule above clears every background on a dark page, which is what
+ * stops a publisher callout being a white slab — and it would have taken the
+ * code panel with it, on exactly the theme where a code block most needs to be
+ * told apart from the prose. The matte lost a whole release to this same
+ * interaction: important beats non-important whatever the specificity, so the
+ * unmarked panel in the other sheet never stood a chance.
+ *
+ * The exclusion above is why this rule can win at all — at (0,0,1) it cannot
+ * outrank the blanket clear at (0,4,1), so the clear has to stop matching
+ * rather than be beaten. MARKED, because with the clear out of the way the
+ * thing left to beat is a publisher background, and a light grey pre from the
+ * book is the slab this is here to prevent. */
+${ROOT_WHEN_DARK} :is(pre, code, kbd, samp) {
+  background: color-mix(in srgb, var(--paper-ink) 6%, transparent) !important;
+}
+
+${ROOT_WHEN_DARK} :is(pre code, pre kbd, pre samp) {
+  background: none !important;
 }
 
 ${ROOT_WHEN_DARK} svg text {
@@ -861,10 +885,105 @@ ${when('--paper-quote-tint')}blockquote {
   border-radius: 3px; /* constant: enough that the corner is not hard, as the ruler band is */
 }
 
+/* NINE TENTHS OF THE PROSE, FOR EVERYTHING THAT IS NOT RUNNING TEXT.
+ *
+ * A quotation, a table, a list, a code block: print sets all of them a little
+ * smaller than the prose they sit among, and Paper set none of them at all —
+ * they inherited 100% and looked, next to a paragraph, like more paragraph.
+ *
+ * IN THIS TIER AND UNMARKED, so a book that states a size for any of them wins
+ * outright. That is what makes this a default rather than a house style forced
+ * on the library: these are new, nothing measured them against the corpus the
+ * way WI-14.0 measured the link and heading rules, and the conservative side of
+ * an unmeasured rule is the side where the book decides. */
+blockquote, table, ul, ol, pre {
+  font-size: ${READING_RATIOS.block}em;
+}
+
+/* AND NINE TENTHS ONCE, NOT 81% AND THEN 73%.
+ *
+ * em is a share of the PARENT, so every one of these nested inside another
+ * compounds — a list inside a list inside a quotation is 0.9 x 0.9 x 0.9, and
+ * the third level is barely readable. Books nest all of them: sub-lists are
+ * ordinary, a quotation containing a list is ordinary, and a table of code is
+ * not rare either.
+ *
+ * ONE RULE FOR EVERY COMBINATION, which is what :is() buys — sixteen
+ * descendant pairs written out would be sixteen chances to miss one, and the
+ * one missed is invisible until a book nests exactly that way. */
+:is(blockquote, table, ul, ol, pre) :is(blockquote, table, ul, ol, pre) {
+  font-size: 1em;
+}
+
+/* CODE TRACKS ITS CONTEXT, which is why it is em and separate from the block
+ * rule above. Inline code in a heading should be a heading's size reduced, not
+ * the prose's — 0.9rem inside an <h1> is a tiny word in a large line. */
+code, kbd, samp {
+  font-size: ${READING_RATIOS.code}em;
+}
+
+/* Inside a pre the block rule has already taken the nine tenths. */
+pre code, pre kbd, pre samp {
+  font-size: 1em;
+}
+
 /* CODE. The face is one property; what a line too long for the measure does is
  * the other, and it is the same question a wide table asks below. */
 pre, code, kbd, samp {
   font-family: var(--paper-code-family);
+}
+
+/* A PANEL BEHIND CODE, IN THE READER'S OWN INK RATHER THAN IN GREY.
+ *
+ * A literal light grey is right on four themes and wrong on the fifth: on Night
+ * it is a bright slab on a dark page, which is the exact defect WI-14.1 exists
+ * to remove. Mixed from the ink at 6% it is a light grey on a light page and a
+ * faint lift on a dark one, and it re-values itself when a theme does.
+ *
+ * See the dark-page rule for the other half of this: the blanket
+ * background-color: transparent clears every background on a dark page, and
+ * would have deleted this one exactly where it is hardest to draw. */
+pre, code, kbd, samp {
+  background: color-mix(in srgb, var(--paper-ink) 6%, transparent);
+  border-radius: 3px; /* constant: enough that the corner is not hard, as the ruler band is */
+}
+
+/* THE PANEL IS THE CONTEXT'S HEIGHT, NOT THE CODE'S.
+ *
+ * A background on an inline element paints the CONTENT AREA, which scales with
+ * the font size — so code at nine tenths paints a box nine tenths as tall as
+ * the text around it, and a panel visibly shorter than its own line reads as a
+ * mistake rather than as emphasis. Half the shortfall above and half below puts
+ * it back.
+ *
+ * AND EVERY LENGTH HERE IS DIVIDED BY THE RATIO, which is the part that is easy
+ * to get backwards. Inside an element whose font-size is 0.9em, 1em is 0.9 of
+ * the CONTEXT for every other property — so a padding of 0.05em written plainly
+ * would be 0.045 of the context, and the panel would still be short. Dividing
+ * by the same ratio expresses the value in the context's em, which is the one
+ * the eye is comparing against.
+ *
+ * VERTICAL PADDING ON AN INLINE ELEMENT DOES NOT GROW THE LINE BOX — it
+ * overflows into the lines above and below. At Paper's leading, which is never
+ * tighter than 1.579 of the size, a panel of about one em has a quarter of an
+ * em of clearance either side and cannot collide. A book that sets its own
+ * tighter leading can, which is one more reason this rule is unmarked and in
+ * the tier a book wins. */
+code, kbd, samp {
+  padding-block: ${(CODE_PANEL_PAD / READING_RATIOS.code).toFixed(5)}em;
+  padding-inline: ${(0.3 / READING_RATIOS.code).toFixed(5)}em;
+}
+
+pre {
+  padding: calc(var(--paper-line) * 0.5);
+}
+
+/* A CODE INSIDE A PRE IS NOT A SECOND PANEL. <pre><code> is the spec's own
+   idiom for a code block, and painting both draws a darker rectangle inside a
+   lighter one with a ring of padding between them. */
+pre code, pre kbd, pre samp {
+  background: none;
+  padding: 0;
 }
 
 /* SCROLL IS THE DEFAULT AND WRAP IS THE CHOICE, because scrolling alters
@@ -1292,7 +1411,7 @@ ${when('--paper-figure-scale')}svg[data-paper-figure] {
  * PROLOGUE, and the note there about what happens when it is not. */
 a[epub|type~="noteref"] {
   vertical-align: super;
-  font-size: 0.75em; /* constant: three quarters of its own context, the printer own reference size */
+  font-size: ${READING_RATIOS.footnote}em;
   border-bottom: none;
 }
 `.trim()
@@ -1361,7 +1480,7 @@ export function bookSheets(): BookSheets {
  * unmarked and an audit caught it.
  */
 const NOTE_CSS = `
-${when('--paper-note-prose')}body > * { font-size: 1rem !important; }
+${when('--paper-note-prose')}body > * { font-size: ${READING_RATIOS.footnote}rem !important; }
 `
 
 /**

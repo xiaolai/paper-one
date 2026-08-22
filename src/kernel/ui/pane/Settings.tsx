@@ -201,7 +201,7 @@ const STYLE_LABELS = {
   codeWrap: { scroll: 'Scroll', wrap: 'Wrap' },
   figureFrame: { none: 'None', hairline: 'Hairline', shadow: 'Shadow' },
   wideTables: { scroll: 'Scroll', shrink: 'Shrink to fit' },
-  noteSize: { prose: 'Match the prose', publisher: "Publisher's" },
+  noteSize: { prose: "Paper's", publisher: "Publisher's" },
   fidelity: { paper: "Paper's", publisher: "Publisher's" },
 } as const
 

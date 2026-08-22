@@ -1184,6 +1184,48 @@ export const MINIMUM_SIZES: SpacingScale = { steps: [0, 11, 12, 14], def: 0, uni
  */
 export const PARAGRAPH_INDENT = 1.5
 
+/**
+ * THE HOUSE RATIOS — what is set smaller than the running prose, and by how
+ * much.
+ *
+ * NAMED RATHER THAN WRITTEN INTO THE SHEET, because `code` needs its ratio
+ * TWICE and the two uses must agree. Inside an element with
+ * `font-size: 0.9em`, `1em` is 0.9 of the context for every other property —
+ * so padding written as `0.05em` there is 0.045 of the context, and expressing
+ * a context-relative value means dividing by the same 0.9. Two literals that
+ * have to stay reciprocal is a drift waiting to happen; one constant and an
+ * interpolation cannot drift.
+ *
+ * `block` AND `code` ARE EQUAL AND ARE NOT THE SAME DECISION. A quotation set
+ * at nine tenths is a typographic convention about blocks that are not running
+ * text; inline code at nine tenths is about a monospace face looking larger
+ * than a serif at the same size. They agree today; nothing says they must.
+ */
+export const READING_RATIOS = {
+  /** `blockquote`, `table`, `ul`, `ol`, `pre` — a block that is not prose. */
+  block: 0.9,
+  /** `code`, `kbd`, `samp` — a share of the line they sit in, not of the prose. */
+  code: 0.9,
+  /** The noteref marker, and the note's own text in the popover. */
+  footnote: 0.8,
+} as const
+
+/**
+ * The padding that puts an inline panel back on the context's own line box.
+ *
+ * WHY IT IS NOT SIMPLY 0.05em. The panel behind inline code paints the content
+ * area, which scales with the font size — so code at nine tenths paints a box
+ * nine tenths as tall as the text around it, and a background that is visibly
+ * shorter than its line reads as a mistake rather than as emphasis. Half the
+ * shortfall above and half below restores it: `(1 - 0.9) / 2` of the CONTEXT's
+ * em, which inside the element is that number divided by the ratio again.
+ *
+ * EXACT IN FONT-SIZE TERMS, and within about a per cent in painted ones: a
+ * browser's content area is roughly 1.15x the font size rather than exactly 1x,
+ * and that factor belongs to the font rather than to the stylesheet, so no
+ * value written here can close the last of the gap.
+ */
+export const CODE_PANEL_PAD = (1 - READING_RATIOS.code) / 2
 
 /**
  * What Paper rendered before WI-14.4, spelled as the settings that describe it.
