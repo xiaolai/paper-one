@@ -5,7 +5,9 @@ import { hlcOf, type Hlc } from './hlc'
 import { createLibrary, type Library } from './libraryStore'
 import { createMarkStore, type MarkStore } from './markStore'
 import { folderOf } from './bookFolder'
-import { NOOP_DIAGNOSTICS, NOOP_RECORDER, REMOVABLE_BLOB_NAMES, recorded, type DevicePort, type Diagnostics, type MutationKind, type MutationRecorder, type MutationToken, type RemovableBlobName, type SettingsStore, type ShelfPort, type SizePort } from './ports'
+import { NOT_CONFIGURED, type CompanionProvider } from './companion'
+import { NO_GLOSS, type GlossProvider } from './gloss'
+import { NO_WORK_LINE, NOOP_DIAGNOSTICS, NOOP_RECORDER, REMOVABLE_BLOB_NAMES, recorded, type DevicePort, type Diagnostics, type MutationKind, type MutationRecorder, type MutationToken, type RemovableBlobName, type SettingsStore, type ShelfPort, type SizePort, type WorkLine } from './ports'
 import { carryLegacySettings, createSettingsStore, type SettingsMigration } from './settings'
 import { writeQueue, type WriteQueue } from './writeQueue'
 
@@ -126,6 +128,42 @@ export interface KernelServices {
    */
   bindSizePort(port: SizePort): Disposable
   sizes(): SizePort | null
+  /**
+   * Bind the COMPANION provider — `companion`, at composition, and only
+   * `companion`. Same late-bound, once-at-a-time rule and the same restoring
+   * disposer as `bindRecorder`.
+   *
+   * The kernel holds this from birth so that one bind reaches every holder:
+   * `companion.ts` shipped `NOT_CONFIGURED` as a hardcoded const, which is
+   * why wiring a provider used to mean editing the kernel. Until bound, the
+   * default is `NOT_CONFIGURED` and the panel says what is missing.
+   */
+  bindCompanion(provider: CompanionProvider): Disposable
+  /** The companion provider — `NOT_CONFIGURED` until one is bound. */
+  companion(): CompanionProvider
+  /**
+   * Bind the GLOSS provider — `inference`, at composition, and only
+   * `inference`.
+   *
+   * SEPARATE FROM THE COMPANION ON PURPOSE (F8). The two features fail
+   * separately because they are two features: with `companion` absent, failed,
+   * or set to an agent, the gloss still works. And because only `inference`
+   * binds this, there is no code path from a selection to an agent session —
+   * a property of the wiring rather than a rule someone has to remember.
+   */
+  bindGloss(provider: GlossProvider): Disposable
+  /**
+   * Bind the WORK LINE — the library status bar's third rung (WI-15.12).
+   *
+   * Same late-bound, once-at-a-time rule and the same restoring disposer as
+   * `bindRecorder`. Until bound the default reports nothing, and the bar is
+   * exactly the two-rung ladder it has always been.
+   */
+  bindWorkLine(work: WorkLine): Disposable
+  /** The work line — `NO_WORK_LINE` until one is bound. */
+  workLine(): WorkLine
+  /** The gloss provider — `NO_GLOSS` until one is bound. */
+  gloss(): GlossProvider
   /**
    * Serve a composed set of services through the bound host, once every
    * capability has started (so a delegating handler's target is ready). The
@@ -288,6 +326,12 @@ export function createKernelServices({
   const deviceSlot = exclusiveSlot<DevicePort | null>('bindDevicePort: the device port is already bound', null)
   const shelfSlot = exclusiveSlot<ShelfPort | null>('bindShelfPort: the shelf port is already bound', null)
   const sizeSlot = exclusiveSlot<SizePort | null>('bindSizePort: the size port is already bound', null)
+  /* The two provider ports (WI-15.4, WI-15.13). Held from birth for the same
+   * reason the recorder is: a capability implementing one can only arrive
+   * after construction, and the holders must not have to know that. */
+  const companionSlot = exclusiveSlot<CompanionProvider>('bindCompanion: the companion port is already bound', NOT_CONFIGURED)
+  const glossSlot = exclusiveSlot<GlossProvider>('bindGloss: the gloss port is already bound', NO_GLOSS)
+  const workLineSlot = exclusiveSlot<WorkLine>('bindWorkLine: the work line port is already bound', NO_WORK_LINE)
 
   const writes = writeQueue()
   const library = createLibrary({ fs, queue: writes, initial: initialBooks, recorder: recorderPort, clock: clockPort })
@@ -366,6 +410,15 @@ export function createKernelServices({
     shelf: () => shelfSlot.get(),
     bindSizePort: (next) => sizeSlot.bind(next),
     sizes: () => sizeSlot.get(),
+    bindCompanion: (next) => companionSlot.bind(next),
+    /* Resolved per call, never captured: a pane that read the provider once
+     * at mount would still be showing "no model configured" after the reader
+     * installed one. */
+    companion: () => companionSlot.get(),
+    bindGloss: (next) => glossSlot.bind(next),
+    gloss: () => glossSlot.get(),
+    bindWorkLine: (next) => workLineSlot.bind(next),
+    workLine: () => workLineSlot.get(),
     serveServices: async (list) => (await serviceHostSlot.get()(list)) ?? NOOP_DISPOSABLE,
     drain: async () => {
       await writes.idle()

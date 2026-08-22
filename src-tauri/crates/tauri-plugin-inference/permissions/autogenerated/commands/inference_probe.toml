@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-inference-probe"
+description = "Enables the inference_probe command without any pre-configured scope."
+commands.allow = ["inference_probe"]
+
+[[permission]]
+identifier = "deny-inference-probe"
+description = "Denies the inference_probe command without any pre-configured scope."
+commands.deny = ["inference_probe"]

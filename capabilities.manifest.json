@@ -5,16 +5,51 @@
       "id": "peer",
       "requires": [],
       "ts": "peer",
-      "platforms": ["desktop", "ios", "android"],
+      "platforms": [
+        "desktop",
+        "ios",
+        "android"
+      ],
       "crate": "tauri-plugin-peer",
       "plugin": "peer",
-      "permissions": ["peer:default"]
+      "permissions": [
+        "peer:default"
+      ]
     },
     {
       "id": "sync",
-      "requires": ["peer"],
+      "requires": [
+        "peer"
+      ],
       "ts": "sync",
-      "platforms": ["desktop", "ios", "android"]
+      "platforms": [
+        "desktop",
+        "ios",
+        "android"
+      ]
+    },
+    {
+      "id": "inference",
+      "requires": [],
+      "ts": "inference",
+      "platforms": [
+        "desktop"
+      ],
+      "crate": "tauri-plugin-inference",
+      "plugin": "inference",
+      "permissions": [
+        "inference:default"
+      ]
+    },
+    {
+      "id": "companion",
+      "requires": [
+        "inference"
+      ],
+      "ts": "companion",
+      "platforms": [
+        "desktop"
+      ]
     }
   ]
 }

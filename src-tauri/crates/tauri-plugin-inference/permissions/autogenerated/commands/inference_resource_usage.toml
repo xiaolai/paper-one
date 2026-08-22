@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-inference-resource-usage"
+description = "Enables the inference_resource_usage command without any pre-configured scope."
+commands.allow = ["inference_resource_usage"]
+
+[[permission]]
+identifier = "deny-inference-resource-usage"
+description = "Denies the inference_resource_usage command without any pre-configured scope."
+commands.deny = ["inference_resource_usage"]

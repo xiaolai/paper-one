@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-inference-status"
+description = "Enables the inference_status command without any pre-configured scope."
+commands.allow = ["inference_status"]
+
+[[permission]]
+identifier = "deny-inference-status"
+description = "Denies the inference_status command without any pre-configured scope."
+commands.deny = ["inference_status"]

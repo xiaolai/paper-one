@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import type { IndexedBook } from './bookIndex'
+import { NOT_CONFIGURED, type CompanionProvider } from './companion'
 import { fakeFs } from './fakeFs.testkit'
-import type { MutationKind, MutationRecorder, MutationToken } from './ports'
+import { NO_GLOSS, type GlossProvider } from './gloss'
+import { NO_WORK_LINE, type MutationKind, type MutationRecorder, type MutationToken, type WorkLine } from './ports'
 import { createKernelServices } from './services'
 
 /**
@@ -371,5 +373,117 @@ describe('removeBlob', () => {
     }
     expect(w.fs.store.has('books/book_x/book.json')).toBe(true)
     expect(w.spy.kinds).toEqual([])
+  })
+})
+
+/**
+ * THE THREE PORTS PHASE 15 ADDED, at rest and after a bind.
+ *
+ * Each is late-bound by a capability that may not be installed, so the DEFAULT
+ * is the state most readers are in and is the one a test is most likely to
+ * skip. Two of the three defaults refuse rather than answer, and a refusal
+ * nobody calls is a refusal nobody has read: `NOT_CONFIGURED.ask` is an async
+ * generator, so its throw does not happen until the first `next()` — a caller
+ * that merely invoked it and dropped the result would see no error at all.
+ *
+ * The accessors are resolved PER CALL rather than captured, which is what lets
+ * a reader install a model without restarting, and the disposer restores the
+ * previous provider rather than the default — the same contract `bindRecorder`
+ * has, for the same reason: a torn-down capability must not leave the kernel
+ * pointing at it.
+ */
+describe('the companion, gloss and work-line ports', () => {
+  const fake = (name: string): CompanionProvider => ({
+    name,
+    configured: true,
+    async *ask() {
+      return []
+    },
+  })
+
+  it('defaults to a companion that says it is not configured', () => {
+    const services = servicesWith(spyRecorder().recorder)
+    expect(services.companion()).toBe(NOT_CONFIGURED)
+    expect(services.companion().configured).toBe(false)
+    expect(services.companion().name).toBe('No model configured')
+  })
+
+  it('refuses to ask when nothing is bound, and refuses on ITERATION', async () => {
+    /* The generator is created without complaint; the throw is on the first
+       `next()`. A test that only called `ask()` would pass over a provider
+       that never refuses at all. */
+    const services = servicesWith(spyRecorder().recorder)
+    const stream = services
+      .companion()
+      .ask('q', { bookTitle: 'X', chapterLabel: 'One', selection: null, passages: [] }, new AbortController().signal)
+    await expect(stream.next()).rejects.toThrow(/no provider/i)
+  })
+
+  it('binds a companion and restores the previous one on dispose', async () => {
+    const services = servicesWith(spyRecorder().recorder)
+    const unbind = services.bindCompanion(fake('Local'))
+    expect(services.companion().name).toBe('Local')
+    unbind.dispose()
+    expect(services.companion()).toBe(NOT_CONFIGURED)
+  })
+
+  it('defaults to a gloss that is unavailable and refuses', async () => {
+    const services = servicesWith(spyRecorder().recorder)
+    expect(services.gloss()).toBe(NO_GLOSS)
+    expect(services.gloss().available).toBe(false)
+    await expect(services.gloss().gloss('word', { sentence: 'a word here', bookTitle: 'X' }, new AbortController().signal)).rejects.toThrow(/no gloss provider/i)
+  })
+
+  it('binds a gloss and restores it on dispose', async () => {
+    const services = servicesWith(spyRecorder().recorder)
+    const provider: GlossProvider = { available: true, gloss: async () => 'a meaning' }
+    const unbind = services.bindGloss(provider)
+    expect(services.gloss().available).toBe(true)
+    await expect(services.gloss().gloss('w', { sentence: 's', bookTitle: 'X' }, new AbortController().signal)).resolves.toBe('a meaning')
+    unbind.dispose()
+    expect(services.gloss()).toBe(NO_GLOSS)
+  })
+
+  /* AT REST THE BAR IS WHAT IT ALWAYS WAS. `line()` is null and `subscribe`
+     hands back a working unsubscribe rather than undefined — a store that
+     returned nothing there would throw inside `useSyncExternalStore`'s
+     cleanup, on unmount, in a build nobody had bound a work line in. */
+  it('defaults to a work line that reports nothing and notifies nobody', () => {
+    const services = servicesWith(spyRecorder().recorder)
+    expect(services.workLine()).toBe(NO_WORK_LINE)
+    expect(services.workLine().line()).toBeNull()
+    const stop = services.workLine().subscribe(() => {})
+    expect(typeof stop).toBe('function')
+    expect(() => stop()).not.toThrow()
+  })
+
+  it('binds a work line and restores it on dispose', () => {
+    const services = servicesWith(spyRecorder().recorder)
+    const listeners: (() => void)[] = []
+    const work: WorkLine = {
+      line: () => 'Importing 3 books',
+      subscribe: (listener) => {
+        listeners.push(listener)
+        return () => listeners.splice(listeners.indexOf(listener), 1)
+      },
+    }
+    const unbind = services.bindWorkLine(work)
+    expect(services.workLine().line()).toBe('Importing 3 books')
+    const stop = services.workLine().subscribe(() => {})
+    expect(listeners).toHaveLength(1)
+    stop()
+    expect(listeners).toHaveLength(0)
+    unbind.dispose()
+    expect(services.workLine().line()).toBeNull()
+  })
+
+  it('refuses a second bind on each of the three, by name', () => {
+    const services = servicesWith(spyRecorder().recorder)
+    services.bindCompanion(fake('one'))
+    expect(() => services.bindCompanion(fake('two'))).toThrow(/already bound/)
+    services.bindGloss({ available: true, gloss: async () => 'x' })
+    expect(() => services.bindGloss({ available: true, gloss: async () => 'y' })).toThrow(/already bound/)
+    services.bindWorkLine({ line: () => null, subscribe: () => () => {} })
+    expect(() => services.bindWorkLine({ line: () => null, subscribe: () => () => {} })).toThrow(/already bound/)
   })
 })

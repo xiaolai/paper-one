@@ -79,6 +79,11 @@ dist/
 # scripts/sync-pdfjs-assets.mjs on predev/prebuild. A copy of a dependency,
 # not authored content. Outside public/ on purpose — see vite.config.ts.
 vendor/pdfjs/
+# The inference runtime, staged by scripts/sync-inference-runtime.mjs and
+# verified against the pinned digests in that file. Four platforms of compiled
+# artifact is not a thing to keep in git history; the DIGEST TABLE is what is
+# committed and reviewed.
+vendor/inference/
 
 # Development book fixtures. The EPUB regenerates with
 # scripts/make-sample-epub.py; the PDF with `cupsfilter some.txt > sample.pdf`.

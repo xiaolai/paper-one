@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-inference-remove-model"
+description = "Enables the inference_remove_model command without any pre-configured scope."
+commands.allow = ["inference_remove_model"]
+
+[[permission]]
+identifier = "deny-inference-remove-model"
+description = "Denies the inference_remove_model command without any pre-configured scope."
+commands.deny = ["inference_remove_model"]

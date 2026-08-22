@@ -39,12 +39,39 @@ export interface Citation {
  * one, which is the same speculative shape the header now warns about. The
  * thread's types belong with the thread. */
 
+/**
+ * One passage of the book, with where it came from.
+ *
+ * THE MODEL NEVER SEES `cfi` OR `label`. A provider numbers these, sends the
+ * text under `[1]`, `[2]`, and maps the model's `[n]` back through the table
+ * it built. A model handed the word "CFI" emits a syntactically plausible one
+ * that points at nothing — in exactly the register §13's citation rule exists
+ * to prevent — so it is never asked for one.
+ */
+export interface AskPassage {
+  readonly text: string
+  /** The anchor, navigable through the same `goTo` a search hit uses. */
+  readonly cfi: string
+  /** What a citation chip shows — "¶2 · line 6" in the design. */
+  readonly label: string
+}
+
 /** What the companion is allowed to see. It is grounded in this book only. */
 export interface AskContext {
   readonly bookTitle: string
   readonly chapterLabel: string
   /** The passage the reader selected, when the question is about one. */
   readonly selection: string | null
+  /**
+   * The book text the answer may be grounded in, in reading order.
+   *
+   * SUPPLIED BY THE CALLER, because assembling it means reading the rendered
+   * view and that is the reader UI's business — the provider owns the
+   * numbering, the prompt and the mapping back, which are the parts that must
+   * be identical on every route. Empty is legal and means the provider has
+   * nothing to cite, which it must say rather than answer around.
+   */
+  readonly passages: readonly AskPassage[]
 }
 
 export interface CompanionProvider {

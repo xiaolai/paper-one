@@ -41,7 +41,10 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "resources": ["../THIRD-PARTY-NOTICES.md"],
+    "resources": {
+      "../THIRD-PARTY-NOTICES.md": "THIRD-PARTY-NOTICES.md",
+      "../vendor/inference/current/": "runtime/"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/64x64.png",

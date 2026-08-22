@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-inference-add-endpoint"
+description = "Enables the inference_add_endpoint command without any pre-configured scope."
+commands.allow = ["inference_add_endpoint"]
+
+[[permission]]
+identifier = "deny-inference-add-endpoint"
+description = "Denies the inference_add_endpoint command without any pre-configured scope."
+commands.deny = ["inference_add_endpoint"]

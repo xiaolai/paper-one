@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-agent-sign-in"
+description = "Enables the agent_sign_in command without any pre-configured scope."
+commands.allow = ["agent_sign_in"]
+
+[[permission]]
+identifier = "deny-agent-sign-in"
+description = "Denies the agent_sign_in command without any pre-configured scope."
+commands.deny = ["agent_sign_in"]

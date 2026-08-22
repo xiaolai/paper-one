@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-agent-ask"
+description = "Enables the agent_ask command without any pre-configured scope."
+commands.allow = ["agent_ask"]
+
+[[permission]]
+identifier = "deny-agent-ask"
+description = "Denies the agent_ask command without any pre-configured scope."
+commands.deny = ["agent_ask"]

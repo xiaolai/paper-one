@@ -57,6 +57,12 @@ tauri-plugin-persisted-scope = { version = "2", optional = true }
 tauri-plugin-mcp-bridge = { version = "0.12", optional = true }
 # The peer transport, on every platform (crates/tauri-plugin-peer).
 tauri-plugin-peer = { path = "crates/tauri-plugin-peer" }
+# The local inference runtime (crates/tauri-plugin-inference). DESKTOP ONLY and
+# therefore optional: `lemond` ships for macOS, Windows and Linux and there is
+# no mobile build of it, so a phone has nothing for this plugin to supervise.
+# Gating it here — rather than only at the `.plugin()` call — is what keeps its
+# rustls provider from being compiled for iOS and Android at all.
+tauri-plugin-inference = { path = "crates/tauri-plugin-inference", optional = true }
 
 # One feature per platform, and the platform set is closed: `desktop` (the
 # default), `ios`, `android`. A mobile check runs with `--no-default-features
@@ -89,6 +95,7 @@ default = ["desktop"]
 desktop = [
     "dep:tauri-plugin-mcp-bridge",
     "dep:tauri-plugin-persisted-scope",
+    "dep:tauri-plugin-inference",
     "tauri/tray-icon",
 ]
 ios = ["tauri-plugin-peer/ios"]

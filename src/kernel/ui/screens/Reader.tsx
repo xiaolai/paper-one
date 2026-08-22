@@ -21,7 +21,9 @@ import {
 } from '../../core/metrics'
 import { bookAccent } from '../../core/bookAccent'
 import { citation, type Source } from '../../core/citation'
-import { hasDictionary, lookUp } from '../lookUp'
+import { decideLookUp, hasDictionary, isLookUpTerm, lookUp } from '../lookUp'
+import { NO_GLOSS, type GlossProvider, type LookUpMode } from '../../core/gloss'
+import { sentenceAround, useGloss } from '../hooks/useGloss'
 import { marginMarks, type MarkAppearance } from '../../core/marks'
 import type { MarksView } from '../hooks/useMarks'
 import type { Marking } from '../hooks/useMarking'
@@ -54,6 +56,17 @@ export interface ReaderProps {
   dispatch: AppDispatch
   platform: Platform
   book: Book
+  /**
+   * The gloss provider — `NO_GLOSS` until `inference` binds one (WI-15.13).
+   *
+   * A prop rather than a constant reached for inside this file, for the same
+   * reason `SidePane` takes the companion as one: a seam that exists in the
+   * types and nowhere in the wiring cannot be substituted for, including in a
+   * test.
+   */
+  gloss?: GlossProvider
+  /** The reader's stored `Look up` preference. */
+  lookUpMode?: LookUpMode
   marks: MarksView
   marking: Marking
   /** Keeping a place, and telling whether this one is kept — see the hook. */
@@ -147,6 +160,8 @@ export function Reader({
   dispatch,
   platform,
   book,
+  gloss: glossProvider = NO_GLOSS,
+  lookUpMode = 'system',
   marks,
   marking,
   bookmarking,
@@ -204,6 +219,20 @@ export function Reader({
   }, [returnTo, onReturnDone])
 
   const { selection, setSelection, ranges, onMarkDrawn, selected, mark, unmark } = marking
+
+  /* WHAT `Look up` DOES, decided once per render from the three things that
+     decide it: the platform's dictionary, whether a gloss is bound, and the
+     reader's preference. `decideLookUp` is the rule; this is where it lands. */
+  const gloss = useGloss(glossProvider)
+  const lookUpAction = decideLookUp(hasDictionary(platform), glossProvider.available, lookUpMode)
+  const askGloss = (term: string): void => {
+    if (!selection) return
+    gloss.ask(
+      term,
+      sentenceAround(selection.prefix, selection.text, selection.suffix),
+      book.meta?.title ?? '',
+    )
+  }
 
   /** What the next mark takes, as one value, so nothing has to pair them up. */
   const appearance = useMemo<MarkAppearance>(
@@ -799,19 +828,34 @@ export function Reader({
                       copyToClipboard(citation(selection.text, sourceFor(selection.sectionIndex)))
                     }}
                     onLookUp={
-                      hasDictionary(platform)
-                        ? () => {
+                      /* WHAT `Look up` DOES, by platform and by what is
+                         installed (WI-15.13). `decideLookUp` is the rule and
+                         it lives in `lookUp.ts` with a test; this is the
+                         wiring.
+
+                         NO REGRESSION: with no gloss bound this is
+                         `hasDictionary(platform) ? system : null`, byte for
+                         byte the behaviour that shipped — the control is
+                         absent off macOS and hands to Dictionary.app on it. */
+                      lookUpAction === 'none'
+                        ? null
+                        : () => {
                             const term = selection?.text ?? ''
+                            if (!isLookUpTerm(term)) return
                             /* The selection is NOT consumed. A lookup is a
                                question about the passage, not something done to
                                it — and the reader's next act is usually to mark
                                the word they have just understood. */
-                            void lookUp(term).catch((cause: unknown) => {
-                              console.error('Paper: could not look that up', cause)
-                              setNotice('That could not be looked up.')
-                            })
+                            if (lookUpAction === 'system' || lookUpAction === 'both') {
+                              void lookUp(term).catch((cause: unknown) => {
+                                console.error('Paper: could not look that up', cause)
+                                setNotice('That could not be looked up.')
+                              })
+                            }
+                            if (lookUpAction === 'gloss' || lookUpAction === 'both') {
+                              askGloss(term)
+                            }
                           }
-                        : null
                     }
                     onRemove={() => {
                       if (selected) unmark(selected)
@@ -819,6 +863,40 @@ export function Reader({
                     }}
                   />
                 </div>
+
+                {/* THE GLOSS (WI-15.13), under the selection popup.
+                    AMBER, ALWAYS. It is machine-written text appearing in the
+                    reader, and `marks.ts` reserves the companion kind, its
+                    amber tint and the wave style for exactly this. A
+                    definition from Apple's dictionary is authoritative and a
+                    gloss from a 4B model is not; the reader must be able to
+                    tell without being told, which is what the mark is for.
+
+                    It is DISMISSED rather than consumed with the selection:
+                    the reader's next act after understanding a word is
+                    usually to mark it, so taking the selection down would
+                    make them select it again. */}
+                {gloss.state.kind !== 'idle' && (
+                  <div className={styles.gloss} data-kind="companion" role="status">
+                    <span className={styles.glossTerm}>{gloss.state.term}</span>
+                    <span className={styles.glossBody}>
+                      {gloss.state.kind === 'asking'
+                        ? 'Looking…'
+                        : gloss.state.kind === 'ready'
+                          ? gloss.state.text
+                          : gloss.state.reason}
+                    </span>
+                    <button
+                      type="button"
+                      className={styles.glossClose}
+                      onClick={() => gloss.dismiss()}
+                      aria-label="Dismiss"
+                      title="Dismiss"
+                    >
+                      ×
+                    </button>
+                  </div>
+                )}
 
                 {/* The way back from a jump. Above the failure notice and
                     styled apart from it: one is an offer and the other is an

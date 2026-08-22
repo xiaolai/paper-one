@@ -254,12 +254,106 @@
 
 /* --- companion ------------------------------------------------------- */
 
-/* The conversation styles are gone: a thread, message bubbles, citation rows,
- * an ask field and its reply metadata, none of which had any `styles.*`
- * consumer. They were written for a companion UI that this build deliberately
- * does not ship — see `core/companion.ts` — and kept a shape guessed at in
- * advance alive in the stylesheet, which is exactly what makes the eventual
- * real thread harder to write rather than easier. */
+/* THE THREAD. These styles were deleted once, and the note that replaced them
+ * was right at the time: they described a companion UI the build deliberately
+ * did not ship, and keeping a guessed-at shape alive in the stylesheet is what
+ * makes the eventual real thread harder to write rather than easier.
+ *
+ * They are back because the thread is (phase 15, WI-15.4), and every rule
+ * below has a `styles.*` consumer in `Companion.tsx` — which `css:check` is
+ * what holds true. Nothing here is speculative: there is no rule for a shape
+ * the thread does not currently render. */
+
+.thread {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 var(--space-16) var(--space-12);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+}
+
+.turn {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  font-size: var(--text-body);
+  line-height: var(--leading-body);
+}
+
+/* The reader's own words are quiet chrome; they are not a claim about the
+ * book and carry no provenance. */
+.turn[data-role='reader'] .turnBody {
+  color: var(--muted);
+}
+
+/* EVERYTHING THE COMPANION PRODUCED IS AMBER, EVERYWHERE, FOREVER. The tint
+ * is the provenance mark, and it is the same amber the companion's marks and
+ * cards carry — one meaning, one colour, wherever machine-written text
+ * appears in the reader. */
+.turn[data-role='companion'] .turnBody {
+  padding: var(--space-10) var(--space-12);
+  border: 1px solid var(--amber-line);
+  border-radius: var(--radius-md);
+  background: var(--amber-bg);
+  white-space: pre-wrap;
+}
+
+/* The answer is still arriving. A caret rather than a spinner: the vocabulary
+ * has no spinner, and a blinking caret is what a stream of text already means.
+ *
+ * DRAWN AS A CHARACTER, not as a sized box. A box needs a width and a height,
+ * and the only honest values for those are `0.5em`/`1em` — the text's own
+ * size, which is exactly what a glyph gives for free. It also means the caret
+ * tracks the reader's font size without a second rule. */
+.caret::before {
+  content: '▌';
+  color: var(--amber);
+  animation: companion-caret 1s steps(2, start) infinite;
+}
+
+@keyframes companion-caret {
+  50% { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .caret::before { animation: none; }
+}
+
+.citations {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-6);
+}
+
+/* §13: every claim cites a location and LINKS to it. The chip is the link. */
+.citation {
+  padding: var(--space-2) var(--space-8);
+  border: 1px solid var(--amber-line);
+  border-radius: var(--radius-pill);
+  background: none;
+  color: var(--amber);
+  font-family: inherit;
+  font-size: var(--text-caption);
+  cursor: pointer;
+}
+
+.citation:hover:not(:disabled) {
+  background: var(--amber-bg);
+}
+
+.citation:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+/* A failed answer says what happened, in the reader's words, and does NOT
+ * wear the amber: nothing was produced, so there is no provenance to mark. */
+.turnFailure {
+  font-size: var(--text-caption);
+  color: var(--muted);
+}
 
 .companionHead {
   flex: 0 0 auto;

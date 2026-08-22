@@ -136,6 +136,13 @@ export { CAPABILITY_UI, type CapabilityUiClass } from './core/capabilityUi'
  * something to drain. The composition root needs it for the QUIT path, which
  * is not the window-close path `App` already covers — see `beforeClose.ts`. */
 export { flushBeforeClose, onBeforeClose } from './core/beforeClose'
+/* The companion and the gloss (phase 15). The types a capability implements
+ * to bind `KernelServices.bindCompanion` / `bindGloss`, and the constants a
+ * settings pane renders the Look up cycle from. */
+export { NOT_CONFIGURED, NOT_CONFIGURED_REASON } from './core/companion'
+export type { AskContext, AskPassage, Citation, CompanionProvider } from './core/companion'
+export { LOOK_UP_LABELS, LOOK_UP_MODES, LOOK_UP_SETTING, NO_GLOSS, availableModes, effectiveMode, isLookUpMode } from './core/gloss'
+export type { GlossContext, GlossProvider, LookUpMode } from './core/gloss'
 export { KERNEL_SETTINGS, SETTINGS_STORAGE_KEY, SETTINGS_VERSION, carryLegacySettings, createSettingsStore, keepValues } from './core/settings'
 export type { KernelPreferences, SettingsEnvelope, SettingsMigration, SettingsStoreOptions } from './core/settings'
 

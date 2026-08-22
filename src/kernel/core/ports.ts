@@ -3,13 +3,22 @@ import { CONTENT_EXTENSIONS, type ContentExtension } from './bookVault'
 /**
  * The kernel's PORTS — the places it calls OUT, each owned here.
  *
- * There were four, all with defaults that stand in for nobody. Phase 11 added
- * three more — `device`, `shelf` and sizes — and those have NULL defaults,
- * which is a different contract and a deliberate one: there is no sensible
- * answer an unbound device or shelf port could give, and a stub returning an
- * empty peer list would be a lie the caller could not detect. A count in this
- * comment would go stale again, so it says what kind of thing they are
- * instead.
+ * NO COUNT IN THIS SENTENCE, deliberately. It said "the four places" over a
+ * file that had grown past four, which is the same defect `SidePane`'s header
+ * records: three separate comments said "seven" over a rail of eight, and a
+ * count in a sentence has no way to notice a port being added. The list below
+ * is the list.
+ *
+ * TWO KINDS OF DEFAULT, and the difference is deliberate. The original ports
+ * default to a stub that stands in for nobody. Phase 11's — `device`, `shelf`
+ * and sizes — default to NULL, because there is no sensible answer an unbound
+ * device or shelf port could give and a stub returning an empty peer list
+ * would be a lie the caller could not detect.
+ *
+ * `CompanionProvider` and `GlossProvider` are ports too and live in their own
+ * files (`companion.ts`, `gloss.ts`) — they carry enough of their own
+ * reasoning to be worth a file each, and `services.ts` binds them the same way
+ * it binds these.
  *
  * The kernel imports nothing from a capability (`.dependency-cruiser.cjs`,
  * `no-kernel-to-capabilities`). Where it has to call into one — a sync journal
@@ -299,6 +308,44 @@ export const NOOP_DIAGNOSTICS: Diagnostics = {
   info: () => {},
   warn: () => {},
   error: () => {},
+}
+
+/* ------------------------------------------------------------------------ */
+/* WorkLine                                                                  */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * ONE LINE saying what a capability is doing that the reader asked for.
+ *
+ * The library's status bar has a single work slot and a strict priority
+ * ladder — the reader's own import first, then the app's background parse —
+ * and `Library.tsx` is emphatic that the two "cannot be shown at once and
+ * they must not be given a second line: a status bar that grows is a status
+ * bar that moves the shelf". This port is how a capability reaches that slot
+ * without the kernel importing it.
+ *
+ * WHAT BELONGS HERE, and the test is the import line's own stated grounds:
+ * the reader asked for it, it reports a count, **and it stops**. A model
+ * download qualifies. A standing "AI is ready" does not — readiness is not
+ * work, it would be the first thing ever to hold that slot at rest, and it
+ * would have to outrank an import the reader just asked for.
+ *
+ * A STRING, not a count pair: the bar draws a fact and does not compute one,
+ * which is the same rule that keeps a progress bar out of the settings pane.
+ * `null` means nothing is happening, and at rest the bar is byte-for-byte
+ * what it was before any of this existed.
+ */
+export interface WorkLine {
+  /** The line to show, or null. */
+  line(): string | null
+  /** `useSyncExternalStore`'s half — called when the line may have changed. */
+  subscribe(listener: () => void): () => void
+}
+
+/** The default: nothing is ever doing anything, and nothing ever notifies. */
+export const NO_WORK_LINE: WorkLine = {
+  line: () => null,
+  subscribe: () => () => {},
 }
 
 /* ------------------------------------------------------------------------ */

@@ -345,6 +345,25 @@ pub fn run() {
         builder = builder.plugin(tauri_plugin_persisted_scope::init());
     }
 
+    /* The local inference runtime (crates/tauri-plugin-inference). Its
+     * commands are granted by `inference:default` in capabilities/default.json.
+     *
+     * DESKTOP ONLY, and it is the platform that decides rather than a
+     * preference: `lemond` ships for macOS, Windows and Linux and there is no
+     * mobile build of it, so a phone has nothing for this plugin to supervise.
+     * Not compiling it there also keeps its TLS provider off the mobile
+     * targets — see the crate's Cargo.toml, where `tauri-plugin-peer` makes
+     * the opposite choice for the opposite reason.
+     *
+     * It launches NOTHING at boot. WI-15.3's F2: a runtime that has not been
+     * downloaded is `Absent`, which is a normal state and not a failed start —
+     * if it were a failure it would take the Codex and Claude routes down with
+     * it on every first launch, and those need no download at all. */
+    #[cfg(feature = "desktop")]
+    {
+        builder = builder.plugin(tauri_plugin_inference::init());
+    }
+
     builder = builder
         // The peer transport, every platform. Its commands are granted by
         // `peer:default` in capabilities/default.json.

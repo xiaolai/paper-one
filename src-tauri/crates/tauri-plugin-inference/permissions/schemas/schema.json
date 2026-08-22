@@ -1,0 +1,534 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PermissionFile",
+  "description": "Permission file that can define a default permission, a set of permissions or a list of inlined permissions.",
+  "type": "object",
+  "properties": {
+    "default": {
+      "description": "The default permission set for the plugin",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/DefaultPermission"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "set": {
+      "description": "A list of permissions sets defined",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/PermissionSet"
+      }
+    },
+    "permission": {
+      "description": "A list of inlined permissions",
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/Permission"
+      }
+    }
+  },
+  "definitions": {
+    "DefaultPermission": {
+      "description": "The default permission set of the plugin.\n\nWorks similarly to a permission with the \"default\" identifier.",
+      "type": "object",
+      "required": [
+        "permissions"
+      ],
+      "properties": {
+        "version": {
+          "description": "The version of the permission.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 1.0
+        },
+        "description": {
+          "description": "Human-readable description of what the permission does. Tauri convention is to use `<h4>` headings in markdown content for Tauri documentation generation purposes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "permissions": {
+          "description": "All permissions this set contains.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "PermissionSet": {
+      "description": "A set of direct permissions grouped together under a new name.",
+      "type": "object",
+      "required": [
+        "description",
+        "identifier",
+        "permissions"
+      ],
+      "properties": {
+        "identifier": {
+          "description": "A unique identifier for the permission.",
+          "type": "string"
+        },
+        "description": {
+          "description": "Human-readable description of what the permission does.",
+          "type": "string"
+        },
+        "permissions": {
+          "description": "All permissions this set contains.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PermissionKind"
+          }
+        }
+      }
+    },
+    "Permission": {
+      "description": "Descriptions of explicit privileges of commands.\n\nIt can enable commands to be accessible in the frontend of the application.\n\nIf the scope is defined it can be used to fine grain control the access of individual or multiple commands.",
+      "type": "object",
+      "required": [
+        "identifier"
+      ],
+      "properties": {
+        "version": {
+          "description": "The version of the permission.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 1.0
+        },
+        "identifier": {
+          "description": "A unique identifier for the permission.",
+          "type": "string"
+        },
+        "description": {
+          "description": "Human-readable description of what the permission does. Tauri internal convention is to use `<h4>` headings in markdown content for Tauri documentation generation purposes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "commands": {
+          "description": "Allowed or denied commands when using this permission.",
+          "default": {
+            "allow": [],
+            "deny": []
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/Commands"
+            }
+          ]
+        },
+        "scope": {
+          "description": "Allowed or denied scoped when using this permission.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/Scopes"
+            }
+          ]
+        },
+        "platforms": {
+          "description": "Target platforms this permission applies. By default all platforms are affected by this permission.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/Target"
+          }
+        }
+      }
+    },
+    "Commands": {
+      "description": "Allowed and denied commands inside a permission.\n\nIf two commands clash inside of `allow` and `deny`, it should be denied by default.",
+      "type": "object",
+      "properties": {
+        "allow": {
+          "description": "Allowed command.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "deny": {
+          "description": "Denied command, which takes priority.",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "Scopes": {
+      "description": "An argument for fine grained behavior control of Tauri commands.\n\nIt can be of any serde serializable type and is used to allow or prevent certain actions inside a Tauri command. The configured scope is passed to the command and will be enforced by the command implementation.\n\n## Example\n\n```json { \"allow\": [{ \"path\": \"$HOME/**\" }], \"deny\": [{ \"path\": \"$HOME/secret.txt\" }] } ```",
+      "type": "object",
+      "properties": {
+        "allow": {
+          "description": "Data that defines what is allowed by the scope.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/Value"
+          }
+        },
+        "deny": {
+          "description": "Data that defines what is denied by the scope. This should be prioritized by validation logic.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/Value"
+          }
+        }
+      }
+    },
+    "Value": {
+      "description": "All supported ACL values.",
+      "anyOf": [
+        {
+          "description": "Represents a null JSON value.",
+          "type": "null"
+        },
+        {
+          "description": "Represents a [`bool`].",
+          "type": "boolean"
+        },
+        {
+          "description": "Represents a valid ACL [`Number`].",
+          "allOf": [
+            {
+              "$ref": "#/definitions/Number"
+            }
+          ]
+        },
+        {
+          "description": "Represents a [`String`].",
+          "type": "string"
+        },
+        {
+          "description": "Represents a list of other [`Value`]s.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Value"
+          }
+        },
+        {
+          "description": "Represents a map of [`String`] keys to [`Value`]s.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/Value"
+          }
+        }
+      ]
+    },
+    "Number": {
+      "description": "A valid ACL number.",
+      "anyOf": [
+        {
+          "description": "Represents an [`i64`].",
+          "type": "integer",
+          "format": "int64"
+        },
+        {
+          "description": "Represents a [`f64`].",
+          "type": "number",
+          "format": "double"
+        }
+      ]
+    },
+    "Target": {
+      "description": "Platform target.",
+      "oneOf": [
+        {
+          "description": "MacOS.",
+          "type": "string",
+          "enum": [
+            "macOS"
+          ]
+        },
+        {
+          "description": "Windows.",
+          "type": "string",
+          "enum": [
+            "windows"
+          ]
+        },
+        {
+          "description": "Linux.",
+          "type": "string",
+          "enum": [
+            "linux"
+          ]
+        },
+        {
+          "description": "Android.",
+          "type": "string",
+          "enum": [
+            "android"
+          ]
+        },
+        {
+          "description": "iOS.",
+          "type": "string",
+          "enum": [
+            "iOS"
+          ]
+        }
+      ]
+    },
+    "PermissionKind": {
+      "type": "string",
+      "oneOf": [
+        {
+          "description": "Enables the agent_ask command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-agent-ask",
+          "markdownDescription": "Enables the agent_ask command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the agent_ask command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-agent-ask",
+          "markdownDescription": "Denies the agent_ask command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the agent_sign_in command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-agent-sign-in",
+          "markdownDescription": "Enables the agent_sign_in command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the agent_sign_in command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-agent-sign-in",
+          "markdownDescription": "Denies the agent_sign_in command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the inference_add_endpoint command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-inference-add-endpoint",
+          "markdownDescription": "Enables the inference_add_endpoint command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the inference_add_endpoint command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-inference-add-endpoint",
+          "markdownDescription": "Denies the inference_add_endpoint command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the inference_cancel command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-inference-cancel",
+          "markdownDescription": "Enables the inference_cancel command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the inference_cancel command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-inference-cancel",
+          "markdownDescription": "Denies the inference_cancel command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the inference_endpoints command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-inference-endpoints",
+          "markdownDescription": "Enables the inference_endpoints command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the inference_endpoints command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-inference-endpoints",
+          "markdownDescription": "Denies the inference_endpoints command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the inference_generate command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-inference-generate",
+          "markdownDescription": "Enables the inference_generate command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the inference_generate command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-inference-generate",
+          "markdownDescription": "Denies the inference_generate command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the inference_gloss command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-inference-gloss",
+          "markdownDescription": "Enables the inference_gloss command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the inference_gloss command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-inference-gloss",
+          "markdownDescription": "Denies the inference_gloss command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the inference_install_model command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-inference-install-model",
+          "markdownDescription": "Enables the inference_install_model command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the inference_install_model command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-inference-install-model",
+          "markdownDescription": "Denies the inference_install_model command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the inference_models command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-inference-models",
+          "markdownDescription": "Enables the inference_models command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the inference_models command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-inference-models",
+          "markdownDescription": "Denies the inference_models command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the inference_probe command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-inference-probe",
+          "markdownDescription": "Enables the inference_probe command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the inference_probe command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-inference-probe",
+          "markdownDescription": "Denies the inference_probe command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the inference_remove_endpoint command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-inference-remove-endpoint",
+          "markdownDescription": "Enables the inference_remove_endpoint command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the inference_remove_endpoint command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-inference-remove-endpoint",
+          "markdownDescription": "Denies the inference_remove_endpoint command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the inference_remove_model command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-inference-remove-model",
+          "markdownDescription": "Enables the inference_remove_model command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the inference_remove_model command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-inference-remove-model",
+          "markdownDescription": "Denies the inference_remove_model command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the inference_resource_usage command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-inference-resource-usage",
+          "markdownDescription": "Enables the inference_resource_usage command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the inference_resource_usage command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-inference-resource-usage",
+          "markdownDescription": "Denies the inference_resource_usage command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the inference_reveal_models_dir command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-inference-reveal-models-dir",
+          "markdownDescription": "Enables the inference_reveal_models_dir command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the inference_reveal_models_dir command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-inference-reveal-models-dir",
+          "markdownDescription": "Denies the inference_reveal_models_dir command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the inference_set_endpoint_key command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-inference-set-endpoint-key",
+          "markdownDescription": "Enables the inference_set_endpoint_key command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the inference_set_endpoint_key command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-inference-set-endpoint-key",
+          "markdownDescription": "Denies the inference_set_endpoint_key command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the inference_speak command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-inference-speak",
+          "markdownDescription": "Enables the inference_speak command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the inference_speak command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-inference-speak",
+          "markdownDescription": "Denies the inference_speak command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the inference_start command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-inference-start",
+          "markdownDescription": "Enables the inference_start command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the inference_start command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-inference-start",
+          "markdownDescription": "Denies the inference_start command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the inference_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-inference-status",
+          "markdownDescription": "Enables the inference_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the inference_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-inference-status",
+          "markdownDescription": "Denies the inference_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the inference_stop command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-inference-stop",
+          "markdownDescription": "Enables the inference_stop command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the inference_stop command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-inference-stop",
+          "markdownDescription": "Denies the inference_stop command without any pre-configured scope."
+        },
+        {
+          "description": "The commands a Paper webview needs from the inference plugin: the runtime's\nstatus, start and stop; the model catalogue with install, remove, reveal and\nresource usage; generation and the gloss; speech; the route probe; cloud\nendpoint registration with a write-only key; one tool-free agent turn; and\ncancellation for any streaming request.\n\nNO GENERAL RUNNER IS AMONG THEM. No command takes a URL, a path, a host or an\nargv: a caller names a model id that must resolve in models.manifest.json, or\na route id the probe minted. The bearer token, the loopback port and the cloud\nAPI keys never cross to the webview, and there is deliberately no command that\nreads a stored key back.\n\n#### This default permission set includes:\n\n- `allow-inference-status`\n- `allow-inference-start`\n- `allow-inference-stop`\n- `allow-inference-models`\n- `allow-inference-install-model`\n- `allow-inference-remove-model`\n- `allow-inference-resource-usage`\n- `allow-inference-reveal-models-dir`\n- `allow-inference-generate`\n- `allow-inference-gloss`\n- `allow-inference-speak`\n- `allow-inference-probe`\n- `allow-inference-endpoints`\n- `allow-inference-add-endpoint`\n- `allow-inference-remove-endpoint`\n- `allow-inference-set-endpoint-key`\n- `allow-agent-ask`\n- `allow-agent-sign-in`\n- `allow-inference-cancel`",
+          "type": "string",
+          "const": "default",
+          "markdownDescription": "The commands a Paper webview needs from the inference plugin: the runtime's\nstatus, start and stop; the model catalogue with install, remove, reveal and\nresource usage; generation and the gloss; speech; the route probe; cloud\nendpoint registration with a write-only key; one tool-free agent turn; and\ncancellation for any streaming request.\n\nNO GENERAL RUNNER IS AMONG THEM. No command takes a URL, a path, a host or an\nargv: a caller names a model id that must resolve in models.manifest.json, or\na route id the probe minted. The bearer token, the loopback port and the cloud\nAPI keys never cross to the webview, and there is deliberately no command that\nreads a stored key back.\n\n#### This default permission set includes:\n\n- `allow-inference-status`\n- `allow-inference-start`\n- `allow-inference-stop`\n- `allow-inference-models`\n- `allow-inference-install-model`\n- `allow-inference-remove-model`\n- `allow-inference-resource-usage`\n- `allow-inference-reveal-models-dir`\n- `allow-inference-generate`\n- `allow-inference-gloss`\n- `allow-inference-speak`\n- `allow-inference-probe`\n- `allow-inference-endpoints`\n- `allow-inference-add-endpoint`\n- `allow-inference-remove-endpoint`\n- `allow-inference-set-endpoint-key`\n- `allow-agent-ask`\n- `allow-agent-sign-in`\n- `allow-inference-cancel`"
+        }
+      ]
+    }
+  }
+}

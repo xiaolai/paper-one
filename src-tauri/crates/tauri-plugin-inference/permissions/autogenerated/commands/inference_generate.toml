@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-inference-generate"
+description = "Enables the inference_generate command without any pre-configured scope."
+commands.allow = ["inference_generate"]
+
+[[permission]]
+identifier = "deny-inference-generate"
+description = "Denies the inference_generate command without any pre-configured scope."
+commands.deny = ["inference_generate"]
