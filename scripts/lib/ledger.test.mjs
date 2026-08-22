@@ -8,6 +8,7 @@ import {
   EXTERNAL,
   STATES,
   TABLE_HEADER,
+  TABLE_HEADERS,
   checkLedger,
   formatFinding,
   formatSummary,
@@ -36,6 +37,35 @@ const SEP = '|---|---|---|---|'
 const table = (...rows) => [TABLE_HEADER, SEP, ...rows].join('\n')
 /** A tree where only these paths exist. */
 const treeOf = (...paths) => (rel) => paths.includes(rel)
+
+/**
+ * THE SECOND HEADER IS SCANNED, and this is what says so.
+ *
+ * `docs/library-ledger.md` writes "Note" where `docs/feature-ledger.md` writes
+ * "How to confirm". Matching only the first is why the library ledger went
+ * unchecked for nine phases: the gate ran, found its one table shape, and
+ * reported zero findings over a file it had never opened a row of.
+ */
+describe('the table headers', () => {
+  it('scans both shapes the two ledgers write', () => {
+    const rowOf = (header) =>
+      parseRows([header, SEP, '| A | Shipped | `core/a.ts` | x |'].join('\n')).rows
+    for (const header of TABLE_HEADERS) {
+      expect(rowOf(header).map((r) => r.where), header).toEqual(['`core/a.ts`'])
+    }
+  })
+
+  it('scans nothing under a header with a third name for that column', () => {
+    /* Not a loosened pattern: an unrecognised table is INVISIBLE, which shows
+       up as its rows never being checked rather than as half of them being. */
+    expect(parseRows(['| Capability | State | Where | Why |', SEP, '| A | Shipped | `core/a.ts` | x |'].join('\n')).rows)
+      .toEqual([])
+  })
+
+  it('keeps TABLE_HEADER as the first of them, which fixtures build with', () => {
+    expect(TABLE_HEADER).toBe(TABLE_HEADERS[0])
+  })
+})
 
 describe('splitRow', () => {
   it('takes the cells between the outer pipes', () => {

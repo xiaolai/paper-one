@@ -12,7 +12,7 @@ This book is the adversary. It probes for each route out and writes what it
 found into its own DOM, where the host can read the verdict back.
 
 It is NOT a passing test on its own. It is the fixture; the assertion is
-`src/lib/rendererIsolation.test.ts` for the static half, and reading
+`src/kernel/core/rendererIsolation.test.ts` for the static half, and reading
 `#paper-isolation-verdict` out of the running app for the live half.
 
 Deliberately not written into `public/`. Everything there is bundled into the

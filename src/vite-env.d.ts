@@ -23,7 +23,7 @@
 /**
  * The CFI parser, imported by the marks store to ORDER anchors.
  *
- * Pure string work, no DOM — which is what lets `lib/marks.ts` use it and still
+ * Pure string work, no DOM — which is what lets `core/marks.ts` use it and still
  * be unit-tested without a browser environment. Declared narrowly: only the
  * comparison is used, and widening this invites the rest of the reader engine
  * into a module that is deliberately engine-agnostic.
@@ -39,7 +39,7 @@ declare module 'foliate-js/epubcfi.js' {
    * One end of a CFI as a CFI of its own — the start, or the end with `toEnd`.
    *
    * A range CFI carries both its ends in one string, and comparing two RANGES
-   * needs them separately: `lib/markMatch.ts` asks whether a mark and a
+   * needs them separately: `core/markMatch.ts` asks whether a mark and a
    * selection cover any of the same text, which is a question about four
    * points. Given a CFI that is already a single point, both ends are itself.
    *
@@ -472,7 +472,7 @@ declare module 'foliate-js/overlayer.js' {
    * `range.getClientRects()`, so it shares the text's coordinate space for
    * free. Anything anchored to text belongs here; host-side chrome (the
    * selection popup, the margin marks) does not, and needs the rect
-   * translation in `src/reader/coordinates.ts`.
+   * translation in `ui/reader/coordinates.ts`.
    *
    * It lives in the view's shadow tree in the HOST document, BESIDE the
    * iframe — not inside the book, which this comment used to claim. The

@@ -15,13 +15,18 @@ import { CASES, LEGAL_TREE, caseFailure, runAll, runCli } from './check-boundari
 /**
  * ONE CRUISE PER CASE PER `pnpm verify`, not two.
  *
- * The 27 cases used to run twice: once through this file's
- * `it.concurrent.each`, and again through the selftest's own `main` as
- * `verify.mjs` step 7. `boundaries:selftest` is gone from `STEPS`, and this is
- * now the only place they run — kept over the standalone runner because
- * `test:ledger` names TESTS: 27 cases behind a script leave the ledger, and a
- * deleted case then disappears exactly the way the twelve `pageTurn` tests
- * did. The two asserted the same two conditions, so nothing narrowed.
+ * `CASES` used to run twice: once through this file's `it.concurrent.each`,
+ * and again through the selftest's own `main`, which was `verify.mjs` step 7.
+ * `boundaries:selftest` is gone from `STEPS`, and this is now the only place
+ * they run — kept over the standalone runner because `test:ledger` names
+ * TESTS: cases behind a script leave the ledger, and a deleted case then
+ * disappears exactly the way the twelve `pageTurn` tests did. The two
+ * asserted the same two conditions, so nothing narrowed.
+ *
+ * THE COUNT IS DELIBERATELY NOT WRITTEN HERE. It was "27" in four comments
+ * while the list held 28, and phase 11 took it to 35 without any of them
+ * moving — a number in prose that nothing checks is the same defect the
+ * feature ledger's path check exists for. `CASES.length` is the answer.
  *
  * `runAll` rather than `it.concurrent`: the cap is `defaultWidth()`, an
  * explicit `min(6, availableParallelism())` that this repository chose, where
@@ -36,8 +41,10 @@ describe('every illegal edge is rejected by the rule that owns it', () => {
   beforeAll(async () => {
     results = await runAll(CASES)
     /* 300s, not the 120s a single case used to get: this hook now runs all of
-       them, and the whole set measured ~21.6s at this cap on an idle machine.
-       The margin is for a loaded one. */
+       them. The whole set measures ~3.9s at this cap on an idle machine
+       (2026-08-23, 35 cases, three runs within 200ms of each other); the
+       21.6s this note used to quote predates both the current cap and the
+       current list. The margin is for a loaded machine, not for the set. */
   }, 300_000)
 
   it.each(CASES.map((c) => [c.name, c]))('%s', (_name, testCase) => {

@@ -31,26 +31,35 @@ export const STEPS = Object.freeze([
   { name: 'compositions:check', cmd: 'pnpm', args: ['compositions:check'] },
   { name: 'css:check', cmd: 'pnpm', args: ['css:check'] },
   { name: 'directives:check', cmd: 'pnpm', args: ['directives:check'] },
-  /* THE LEDGER DESCRIBES CODE THAT EXISTS. `docs/feature-ledger.md` is read to
-   * decide what to build next, which makes a stale row worse than no row: a
-   * feature listed Absent when it ships is work about to be redone. Re-audited
-   * 2026-08-21, eleven rows had drifted and nine understated the app, while
-   * every path in the file still named `lib/…` — a directory the kernel carve
-   * emptied months earlier. The State column needs a human; the Where column
-   * is a claim about the filesystem, and this is the filesystem answering.
-   * See scripts/lib/ledger.mjs. */
+  /* THE LEDGERS DESCRIBE CODE THAT EXISTS. `docs/feature-ledger.md` and
+   * `docs/library-ledger.md` are read to decide what to build next, which
+   * makes a stale row worse than no row: a feature listed Absent when it ships
+   * is work about to be redone. Re-audited 2026-08-21, eleven rows of the
+   * first had drifted and nine understated the app, while every path in it
+   * still named `lib/…` — a directory the kernel carve emptied months earlier.
+   *
+   * BOTH, since 2026-08-23, and the second is the argument for the first being
+   * too narrow: `library-ledger.md` was outside this gate, and went from phase
+   * 5 to phase 14 with eighteen understating rows and every path naming that
+   * same dead directory. The check ran green throughout, over one file, under
+   * a name that reads as though it covered the subject.
+   *
+   * The State column needs a human; the Where column is a claim about the
+   * filesystem, and this is the filesystem answering. See
+   * scripts/lib/ledger.mjs. */
   { name: 'features:check', cmd: 'pnpm', args: ['features:check'] },
   { name: 'boundaries', cmd: 'pnpm', args: ['boundaries'] },
   /* `boundaries:selftest` IS NOT A STEP, AND THE CASES DID NOT STOP RUNNING.
    *
-   * It ran the same 27 cases `check-boundaries.test.mjs` runs under
-   * `test:coverage` below — the same `CASES`, through the same `runCase`,
+   * It ran the same `CASES` that `check-boundaries.test.mjs` runs under
+   * `test:coverage` below — the same list, through the same `runCase`,
    * asserting the same two conditions (`missing` empty, `unexpected` empty;
    * neither side had a third). So every `pnpm verify` cruised those fixture
-   * trees TWICE, for one gate's worth of signal, at 21.6s a pass.
+   * trees TWICE, for one gate's worth of signal, at 21.6s a pass when this
+   * was decided.
    *
    * The vitest run is the one kept, and the deciding argument is `test:ledger`:
-   * it names TESTS. Twenty-seven cases behind a standalone script are not in
+   * it names TESTS. Cases behind a standalone script are not in
    * `tests/ledger.json`, so deleting one is invisible — which is precisely the
    * defect that ledger was bought for, after twelve `pageTurn` tests vanished
    * behind a rising count. Independence, the argument for keeping this step,

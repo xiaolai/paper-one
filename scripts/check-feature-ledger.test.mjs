@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { LEDGER, makeExists, parseArgs, run } from './check-feature-ledger.mjs'
+import { LEDGER, LEDGERS, makeExists, parseArgs, run } from './check-feature-ledger.mjs'
 
 /**
  * The shell around `scripts/lib/ledger.mjs`: how it is invoked, how it asks
@@ -71,6 +71,43 @@ describe('run', () => {
     const result = run(scratch())
     expect(result.skipped).toContain(LEDGER)
     expect(result.findings).toEqual([])
+  })
+
+  /**
+   * BOTH LEDGERS, and this is the assertion that the second one is covered.
+   *
+   * `docs/library-ledger.md` sat outside this gate from phase 5 to phase 14
+   * and went eighteen rows and every path stale inside it. Checking one file
+   * while the summary says "features-check" is a gate answering a narrower
+   * question than its name — so the list is pinned here rather than left to
+   * whoever next reads the script.
+   */
+  it('checks every ledger in LEDGERS, and each passes over the real repository', () => {
+    expect(LEDGERS).toContain('docs/feature-ledger.md')
+    expect(LEDGERS).toContain('docs/library-ledger.md')
+    for (const ledger of LEDGERS) {
+      const result = run(REPO_ROOT, process.env, ledger)
+      expect(result.skipped, ledger).toBeUndefined()
+      expect(result.findings.map((f) => `${ledger}: ${f.code} ${f.where} ${f.message}`), ledger).toEqual([])
+      /* Each one makes real claims — a ledger the parser silently matched
+         nothing in would report zero findings and mean nothing by it. */
+      expect(result.summary.claims, ledger).toBeGreaterThan(20)
+    }
+  })
+
+  it('reads the ledger it is given, not always the default', () => {
+    const root = scratch()
+    mkdirSync(path.join(root, 'docs'), { recursive: true })
+    writeFileSync(
+      path.join(root, 'docs/library-ledger.md'),
+      ['| Capability | State | Where | Note |', '|---|---|---|---|', '| A | Shipped | `core/gone.ts` | x |'].join('\n'),
+    )
+    /* The default ledger is absent here, so asking for it skips... */
+    expect(run(root).skipped).toContain(LEDGER)
+    /* ...while the one that IS here is read, header and all. */
+    const named = run(root, process.env, 'docs/library-ledger.md')
+    expect(named.skipped).toBeUndefined()
+    expect(named.findings.map((f) => f.code)).toEqual(['LEDGER_PATH_MISSING'])
   })
 
   it('reports against the tree it was pointed at, not this one', () => {

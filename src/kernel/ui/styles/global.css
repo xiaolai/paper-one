@@ -67,7 +67,7 @@ button {
  * The contract they belong to is documented once, on `Overlayer` in
  * `src/vite-env.d.ts`. The short version: the overlay paints OVER the glyphs,
  * so the blend mode — not the alpha — is what decides whether a mark is a
- * highlighter or a film. `src/reader/markBlend.test.ts` holds these values to
+ * highlighter or a film. `ui/reader/markBlend.test.ts` holds these values to
  * it.
  */
 :root {

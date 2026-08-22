@@ -40,7 +40,7 @@ describe('the steps', () => {
       'cargo test --workspace',
     ])
     /* THE SELFTEST STEP IS GONE ON PURPOSE, and this pins it so putting it
-       back is a deliberate act rather than a reflex. Its 27 cases run under
+       back is a deliberate act rather than a reflex. Its cases run under
        `test:coverage` via `check-boundaries.test.mjs`, which is what puts them
        in `tests/ledger.json`; as a step they ran a second time for no extra
        signal. Re-adding it here restores the duplicate cruise. */

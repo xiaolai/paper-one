@@ -2,11 +2,12 @@ import { describe, expect, it } from 'vitest'
 import { formatOf, isFormat, isPdf, sniffFormat, titleFromSource } from './formats'
 
 /**
- * The routing decision, which lives in `lib/formats.ts` rather than in
- * `reader/pdf.ts` — importing the latter pulls in pdf.js, which touches browser
- * globals (DOMMatrix) the moment it loads and cannot be imported in this
- * environment at all. The rest of `pdf.ts` needs a real PDF and a worker, so it
- * is verified against the running app instead, per the project's e2e note.
+ * The routing decision, which lives in `core/formats.ts` rather than in
+ * `ui/reader/makePdf.ts` — importing the latter pulls in pdf.js, which touches
+ * browser globals (DOMMatrix) the moment it loads and cannot be imported in
+ * this environment at all. The rest of `makePdf.ts` needs a real PDF and a
+ * worker, so it is verified against the running app instead, per the project's
+ * e2e note.
  *
  * This much is worth pinning because getting it wrong is silent in the worst
  * way: a PDF sent to foliate is rejected as an unsupported type, and an EPUB

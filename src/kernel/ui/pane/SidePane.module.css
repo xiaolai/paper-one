@@ -257,7 +257,7 @@
 /* The conversation styles are gone: a thread, message bubbles, citation rows,
  * an ask field and its reply metadata, none of which had any `styles.*`
  * consumer. They were written for a companion UI that this build deliberately
- * does not ship — see `lib/companion.ts` — and kept a shape guessed at in
+ * does not ship — see `core/companion.ts` — and kept a shape guessed at in
  * advance alive in the stylesheet, which is exactly what makes the eventual
  * real thread harder to write rather than easier. */
 

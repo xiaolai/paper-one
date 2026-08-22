@@ -4,7 +4,7 @@
  * `Intl.Segmenter` is backed by ICU, and **Node and WebKit do not agree**.
  * Measured in this repository: the segment record's `isWordLike` flag is `true`
  * for `3.14`, `1,000` and `42` under Node's ICU and `false` for all three under
- * the WKWebView the app ships on. `src/reader/wordSnap/classify.ts`
+ * the WKWebView the app ships on. `src/kernel/ui/reader/wordSnap/classify.ts`
  * deliberately never reads that flag, so this divergence is already
  * neutralised — but it proves the class is real, and a macOS upgrade can shift
  * WebKit's segmentation again. A Node-only green is not evidence about the

@@ -19,6 +19,18 @@ const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
 const USAGE = 'usage: node scripts/check-feature-ledger.mjs [--root <dir>]'
 export const LEDGER = 'docs/feature-ledger.md'
 
+/**
+ * Every ledger whose `Where` column is checked.
+ *
+ * `docs/library-ledger.md` was outside this gate until 2026-08-23, and the
+ * consequence is the argument for the list: it went from phase 5 to phase 14
+ * with every path naming `lib/…`, a directory the kernel carve had emptied,
+ * and eighteen rows understating the app — the same drift, in the same shape,
+ * that this check was written for after the main ledger showed it. A gate that
+ * covers one of two files answers a narrower question than its name suggests.
+ */
+export const LEDGERS = Object.freeze([LEDGER, 'docs/library-ledger.md'])
+
 export function parseArgs(argv, cwd) {
   let root
   for (let i = 0; i < argv.length; i++) {
@@ -59,15 +71,15 @@ export function makeExists(root) {
   }
 }
 
-export function run(root, env = process.env) {
+export function run(root, env = process.env, ledger = LEDGER) {
   let markdown
   try {
-    markdown = readFileSync(path.join(root, LEDGER), 'utf8')
+    markdown = readFileSync(path.join(root, ledger), 'utf8')
   } catch (cause) {
     if (cause && cause.code === 'ENOENT') {
       /* A tree with no ledger is not a failing ledger. Skipping says so, and
        * says it out loud, rather than reporting zero findings over nothing. */
-      return { skipped: `${LEDGER} is not in this tree`, findings: [], notes: [] }
+      return { skipped: `${ledger} is not in this tree`, findings: [], notes: [] }
     }
     throw cause
   }
@@ -82,14 +94,24 @@ function main(argv) {
     process.stderr.write(`features-check: ${args.error}\n${USAGE}\n`)
     return 2
   }
-  const { findings, notes, summary, skipped } = run(args.root)
-  if (skipped !== undefined) {
-    process.stdout.write(`features-check: skipped — ${skipped}\n`)
-    return 0
+  /* EVERY LEDGER, AND THE EXIT IS THE WORST OF THEM. Stopping at the first
+   * file with findings would hide the second one's behind the first one's,
+   * which is how a gate teaches people to fix one thing and re-run. */
+  let failed = 0
+  const lines = []
+  for (const ledger of LEDGERS) {
+    const { findings, notes, summary, skipped } = run(args.root, process.env, ledger)
+    if (skipped !== undefined) {
+      lines.push(`features-check: skipped — ${skipped}`)
+      continue
+    }
+    lines.push(...findings.map((f) => `${ledger}: ${formatFinding(f)}`))
+    lines.push(...notes.map((note) => `${ledger} ${note}`))
+    lines.push(`${ledger} — ${formatSummary(summary)}`)
+    failed += findings.length
   }
-  const lines = [...findings.map(formatFinding), ...notes, formatSummary(summary)]
   process.stdout.write(`${lines.join('\n')}\n`)
-  return findings.length > 0 ? 1 : 0
+  return failed > 0 ? 1 : 0
 }
 
 if (isProcessEntry(import.meta)) {

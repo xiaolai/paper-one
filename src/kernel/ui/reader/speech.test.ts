@@ -4,11 +4,16 @@ import { Speaker, wordLengthAt } from './speech'
 /**
  * `collectText` and `rangeAt` are NOT unit-tested here, deliberately.
  *
- * Both need a real Document, and this suite runs without a DOM environment.
- * Adding one means adding a dependency and re-resolving the lockfile — which
- * is what the Linux build is currently blocked on, under pnpm's release-age
- * policy — for a test that would assert against jsdom's approximation of
- * WebKit's layout rather than against WebKit.
+ * Both need a real Document, and this file runs under the default `node`
+ * environment. THE REASON IS NO LONGER COST: jsdom is a devDependency, and
+ * files in this tree already opt in with `// @vitest-environment jsdom`, so
+ * adding it here is one line. The note used to say a DOM meant a new
+ * dependency and a lockfile re-resolution blocked under pnpm's release-age
+ * policy; that was true when it was written and is not true now.
+ *
+ * What survives, and is the whole argument: a jsdom test here would assert
+ * against jsdom's APPROXIMATION of WebKit's layout rather than against WebKit,
+ * and layout is precisely what these two get wrong.
  *
  * They are verified instead against the running app through the MCP bridge, on
  * the actual engine the reader ships on, per the project's own end-to-end note.

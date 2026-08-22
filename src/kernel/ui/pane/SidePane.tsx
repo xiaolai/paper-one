@@ -50,7 +50,7 @@ import styles from './SidePane.module.css'
 /**
  * The rail's icons, by panel.
  *
- * Only the icons. Ids and labels come from `lib/panes`, which the palette and
+ * Only the icons. Ids and labels come from `ui/panes`, which the palette and
  * the titlebar read too — this file used to carry its own copy of all three,
  * under a comment about registries that drift. Typed as a total Record, so
  * adding a panel without an icon fails to compile rather than rendering a rail

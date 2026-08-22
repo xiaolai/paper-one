@@ -1647,7 +1647,7 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
             onDeleteMark={marking.unmark}
             markFocus={marking.focus}
             /* The one place the app decides what the companion is. There is no
-               provider in this build — see `lib/companion` — and this is the
+               provider in this build — see `core/companion` — and this is the
                line that changes when there is. */
             companion={NOT_CONFIGURED}
             books={library.books}

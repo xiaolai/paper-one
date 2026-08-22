@@ -27,8 +27,24 @@
 /** The five states the ledger's own legend defines. */
 export const STATES = Object.freeze(['Shipped', 'Partial', 'Stub', 'Absent', 'Unknown'])
 
-/** The header that marks a Part 1 inventory table. Nothing else is scanned. */
-export const TABLE_HEADER = '| Capability | State | Where | How to confirm |'
+/**
+ * The headers that mark an inventory table. Nothing else is scanned.
+ *
+ * TWO, because two ledgers write one shape with two names for the last column:
+ * `docs/feature-ledger.md` says "How to confirm", `docs/library-ledger.md` says
+ * "Note". Matching only the first is how the library ledger went eighteen rows
+ * and every path stale without this check ever looking at it — the gate existed
+ * and simply did not cover the file. A list rather than a loosened pattern, so
+ * a table with a THIRD name for that column is a table nobody scanned and is
+ * discovered by its rows never being checked, not by them being half-checked.
+ */
+export const TABLE_HEADERS = Object.freeze([
+  '| Capability | State | Where | How to confirm |',
+  '| Capability | State | Where | Note |',
+])
+
+/** The primary header, and what test fixtures build with. */
+export const TABLE_HEADER = TABLE_HEADERS[0]
 
 /**
  * Paths named in a `Where` cell that are deliberately NOT in this repository.
@@ -111,7 +127,7 @@ export function parseRows(markdown) {
   const rows = []
   const findings = []
   for (let i = 0; i < lines.length; i++) {
-    if (lines[i].trim() !== TABLE_HEADER) continue
+    if (!TABLE_HEADERS.includes(lines[i].trim())) continue
     for (let j = i + 1; j < lines.length; j++) {
       const line = lines[j]
       if (!line.trim().startsWith('|')) break

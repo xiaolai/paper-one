@@ -121,7 +121,7 @@ export interface SettingsProps {
   scrollbarOn: boolean
   progressLineOn: boolean
   side: Side
-  /** Index into §09's seven reading steps — see `lib/metrics`. */
+  /** Index into §09's seven reading steps — see `core/metrics`. */
   stepIdx: number
   typeface: Typeface
   /** The faces this machine can offer — see `offeredFaces`. */

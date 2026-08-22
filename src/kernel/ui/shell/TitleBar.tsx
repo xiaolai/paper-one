@@ -31,7 +31,7 @@ const LIGHTS = ['var(--tl-red)', 'var(--tl-amber)', 'var(--tl-green)'] as const
  * Two panels of the eight, chosen here — but their LABELS come from the shared
  * registry, not from a third copy of them. The name is `TITLEBAR_PANES` rather
  * than `PANE_SHORTCUTS`, which is what this was called: that name already
- * means §11's ⌘1…5 map in `lib/panes`, and two different things under one name
+ * means §11's ⌘1…5 map in `ui/panes`, and two different things under one name
  * in one codebase is a trap for whoever greps for it next.
  */
 const TITLEBAR_PANES: readonly { key: KernelPaneId; Icon: typeof ListTree }[] = [
