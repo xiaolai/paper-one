@@ -1211,21 +1211,54 @@ export const READING_RATIOS = {
 } as const
 
 /**
+ * How tall a font paints an inline box, as a multiple of its font size.
+ *
+ * MEASURED, NOT DERIVED, because CSS cannot expose it. A background on an
+ * inline element paints the CONTENT AREA, whose height is the font's ascent
+ * plus descent — a property of the face, not of the stylesheet. Read off the
+ * running app with Literata at 21px: a plain span measures 31px, so 1.476.
+ *
+ * AND THE TARGET IS QUANTISED, which is why no single number can be exactly
+ * right. Swept across all fourteen reading sizes in the running app, the plain
+ * span's painted height comes back as a WHOLE number of pixels every time — 23,
+ * 24, 25, 27, 28, 30, 31, 33 — while the code panel beside it is fractional. So
+ * the thing being matched moves in 1px steps and the ratio it implies wanders
+ * between 1.44 and 1.53 depending on where the rounding falls. There is no
+ * value of this constant that lands on 100% at every step.
+ *
+ * IT IS AN ASSUMPTION IN A SECOND WAY TOO. A reader who sets the code face to
+ * the bundled mono is comparing two faces with different metrics, and the
+ * parity below is approximate again. The alternative was leaving the panel
+ * visibly short at every size, so this is the better of two imperfect numbers
+ * rather than a correct one.
+ */
+export const CONTENT_AREA = 1.476
+
+/**
  * The padding that puts an inline panel back on the context's own line box.
  *
- * WHY IT IS NOT SIMPLY 0.05em. The panel behind inline code paints the content
- * area, which scales with the font size — so code at nine tenths paints a box
- * nine tenths as tall as the text around it, and a background that is visibly
- * shorter than its line reads as a mistake rather than as emphasis. Half the
- * shortfall above and half below restores it: `(1 - 0.9) / 2` of the CONTEXT's
- * em, which inside the element is that number divided by the ratio again.
+ * WHY IT IS NOT SIMPLY HALF THE SHORTFALL. The panel behind inline code paints
+ * the content area, which scales with the font size — so code at nine tenths
+ * paints a box nine tenths as tall as the text around it, and a background
+ * visibly shorter than its line reads as a mistake rather than as emphasis.
  *
- * EXACT IN FONT-SIZE TERMS, and within about a per cent in painted ones: a
- * browser's content area is roughly 1.15x the font size rather than exactly 1x,
- * and that factor belongs to the font rather than to the stylesheet, so no
- * value written here can close the last of the gap.
+ * Half the shortfall is `(1 - 0.9) / 2` of the context's em, and that is the
+ * right answer in FONT-SIZE terms and the wrong one in painted terms: what is
+ * short is the content area, which is `CONTENT_AREA` times the font size. So
+ * the compensation carries the same factor.
+ *
+ * MEASURED ACROSS THE WHOLE RAMP rather than at one size, because one size is
+ * how the first version of this came to claim parity it did not have. With the
+ * factor carried, the panel measures 96.5% to 102.0% of the surrounding text
+ * across the fourteen reading steps, averaging 99.3%, and lands on 100.3% at
+ * the default. Without it — a flat half-tenth — it was 94.5% at that same
+ * default and short at every step rather than straddling.
+ *
+ * The per-size ideal wanders between 0.066 and 0.112 and averages 0.088; this
+ * comes to 0.082. The gap between the two is a tenth of a pixel and the spread
+ * around either is pixel snapping, not a better answer waiting to be found.
  */
-export const CODE_PANEL_PAD = (1 - READING_RATIOS.code) / 2
+export const CODE_PANEL_PAD = ((1 - READING_RATIOS.code) / 2) * CONTENT_AREA
 
 /**
  * What Paper rendered before WI-14.4, spelled as the settings that describe it.

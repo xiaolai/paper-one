@@ -5,6 +5,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   CODE_PANEL_PAD,
+  CONTENT_AREA,
   FIGURE_HEIGHTS,
   FIGURE_WIDTHS,
   MINIMUM_SIZES,
@@ -313,8 +314,18 @@ describe('the house font ratios', () => {
     /* What it comes to once the element's own 0.9em is applied. */
     const inContext = Number(written) * READING_RATIOS.code
     expect(inContext).toBeCloseTo(CODE_PANEL_PAD, 4)
-    /* And that is half the shortfall, so the box returns to the context's. */
-    expect(READING_RATIOS.code + inContext * 2).toBeCloseTo(1, 4)
+    /**
+     * AND THE PANEL COMES BACK TO THE CONTEXT'S PAINTED HEIGHT.
+     *
+     * Not to its font size — half of one tenth is the right answer to the wrong
+     * question. What is short is the CONTENT AREA, which is `CONTENT_AREA`
+     * times the font size, so the compensation carries the same factor. At a
+     * flat 0.05 this asserted parity in font-size terms and the panel still
+     * measured 97.1% of the surrounding text in the running app.
+     */
+    const contextBox = CONTENT_AREA
+    const codeBox = READING_RATIOS.code * CONTENT_AREA + inContext * 2
+    expect(codeBox / contextBox).toBeCloseTo(1, 4)
   })
 
   it('derives every ratio from one constant rather than repeating a literal', () => {
@@ -322,7 +333,7 @@ describe('the house font ratios', () => {
        the padding back out — and two literals that must stay reciprocal is a
        drift waiting to happen. */
     const css = before() + strip(bookSheets()[1]) + strip(noteSheets()[1])
-    expect(READING_RATIOS.code + CODE_PANEL_PAD * 2).toBeCloseTo(1, 4)
+    expect(READING_RATIOS.code * CONTENT_AREA + CODE_PANEL_PAD * 2).toBeCloseTo(CONTENT_AREA, 4)
     expect(css).toContain(`font-size: ${READING_RATIOS.block}em`)
     expect(css).toContain(`font-size: ${READING_RATIOS.footnote}em`)
     expect(css).toContain(`font-size: ${READING_RATIOS.footnote}rem`)

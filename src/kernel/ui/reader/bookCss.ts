@@ -956,6 +956,15 @@ pre, code, kbd, samp {
  * mistake rather than as emphasis. Half the shortfall above and half below puts
  * it back.
  *
+ * AND THE SHORTFALL IS MEASURED IN PAINTED HEIGHT, NOT IN FONT SIZE. Half of
+ * one tenth is the right answer to the wrong question: what is short is the
+ * content area, which is CONTENT_AREA times the font size rather than one times
+ * it. Swept across the fourteen reading steps in the running app, carrying the
+ * factor puts the panel at 96.5% to 102.0% of the surrounding text and 100.3%
+ * at the default; a flat half-tenth left it at 94.5% there and short at every
+ * step. The residual spread is the browser snapping the text's own painted box
+ * to whole pixels, so no fixed value closes it — see CONTENT_AREA.
+ *
  * AND EVERY LENGTH HERE IS DIVIDED BY THE RATIO, which is the part that is easy
  * to get backwards. Inside an element whose font-size is 0.9em, 1em is 0.9 of
  * the CONTEXT for every other property — so a padding of 0.05em written plainly
