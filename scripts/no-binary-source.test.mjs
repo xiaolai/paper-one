@@ -64,10 +64,20 @@ const TEXT = new Set([
  * A checkout WITH a `.git` whose `git ls-files` fails is a real problem, and it
  * throws rather than quietly downgrading to the weaker enumeration — which is
  * how a check goes on reporting green over a question it stopped asking.
+ *
+ * UNTRACKED FILES ARE INCLUDED, and leaving them out cost a bad commit.
+ *
+ * `git ls-files` alone answers "what git tracks", so a NEW file was invisible
+ * to this check until it was committed — and `pnpm verify` ran green over a
+ * whole phase of new source with a literal NUL byte sitting in one of them.
+ * The gate found it on the first run AFTER the commit, which is the one moment
+ * it is least useful. `--others --exclude-standard` adds what is on disk and
+ * not ignored, which is the same question the walk below asks of the copy:
+ * the tree as it will be cloned, build output and ignored junk left out.
  */
 function tracked() {
   if (existsSync(join(REPO, '.git'))) {
-    return execFileSync('git', ['ls-files', '-z'], { cwd: REPO, maxBuffer: 64 * 1024 * 1024 })
+    return execFileSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], { cwd: REPO, maxBuffer: 64 * 1024 * 1024 })
       .toString('utf8')
       .split('\0')
       .filter(Boolean)

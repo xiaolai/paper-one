@@ -3,8 +3,12 @@ import { createRoot } from 'react-dom/client'
 
 /* Fonts are bundled, never fetched. The design handoff is explicit: the
  * prototypes load these from a CDN for previewing only, and the app embeds
- * them. Literata is the default reading face (design system §14); the other
- * five reading faces are added with the typeface picker. */
+ * them. Literata is the default reading face (design system §14); the picker
+ * offers the other two BUNDLED faces (Instrument Sans, IBM Plex Mono) plus
+ * whatever the machine already has, probed at runtime. Crimson Pro is imported
+ * for the app's own chrome rather than as a reading face, which is why the
+ * count here and `typefaces.ts`'s `BUNDLED` differ by one — a count that
+ * disagreed with the file it described said "five". */
 import '@fontsource-variable/instrument-sans'
 import '@fontsource-variable/crimson-pro'
 import '@fontsource-variable/literata'
@@ -24,7 +28,7 @@ import '@fontsource/ibm-plex-mono/500.css'
  * dependency-cruiser the specifier maps to the desktop file
  * (`tsconfig.base.json` `paths`): all three export the same shape.
  * `.dependency-cruiser.cjs` holds this file to exactly these imports. */
-import { composeCapabilities, createKernelServices, defaultDiagnostics, kernelApi } from './kernel'
+import { buildServices, composeCapabilities, flushBeforeClose, createKernelServices, defaultDiagnostics, kernelApi, serviceClients } from './kernel'
 import {
   App,
   countingFs,
@@ -44,7 +48,20 @@ import {
   watchFs,
   type IndexedBook,
 } from './kernel/ui'
+/* NAMED DIRECTLY, where every other capability arrives through the virtual
+ * composition module. The quit handshake has to await a specific async tail
+ * — the sync journal's close — and `Composition.dispose()` is synchronous by
+ * design, so there is no generic seam to wait on. `journalClosed()` resolves
+ * at once when sync was never composed, so a build without it is unaffected;
+ * the day a second capability owes an async tail, this should become a
+ * property of `Composition` instead of a second import here. */
+import { journalClosed } from './capabilities/sync'
+import { armShutdownInBackground } from './app/shutdown'
 import { capabilities } from 'virtual:paper-composition'
+
+/** Bounded like `App`'s close handler, and under the shell's 5 s grace: a
+ *  wedged queue must delay a quit, never prevent one. */
+const DRAIN_GRACE_MS = 2000
 
 installFatalHandlers()
 
@@ -160,7 +177,22 @@ async function boot(root: HTMLElement): Promise<void> {
    *
    * Deliberately not awaited. A slow or failing sweep must not delay the window,
    * and `emptyExpired` errs towards keeping anything it cannot age. */
-  if (fs) void emptyExpired(fs).catch(() => [])
+  if (fs) {
+    /* REPORTED, not swallowed twice. `emptyExpired` already turns filesystem
+     * failures into `[]` — that is its documented erring-towards-keeping — so
+     * a `.catch(() => [])` on top could only ever hide something it did NOT
+     * expect: a programming error inside the sweep, silently, at boot, on a
+     * path nobody watches. */
+    void emptyExpired(fs).catch((error: unknown) => {
+      /* `defaultDiagnostics`, not `services.diagnostics`: the sweep starts
+       * BEFORE the services exist, so reaching for them here would be a
+       * temporal-dead-zone error thrown inside a catch on the boot path —
+       * a worse failure than the one being reported. */
+      defaultDiagnostics().warn('trash.sweep-failed', {
+        message: error instanceof Error ? error.message : String(error),
+      })
+    })
+  }
 
   moment('everything before the first render', { ms: Math.round(performance.now() - bootFrom) })
   reportFs('filesystem, up to the first render')
@@ -175,6 +207,12 @@ async function boot(root: HTMLElement): Promise<void> {
     fs,
     storage,
     initialBooks,
+    /* SO THE KERNEL KNOWS WHICH EMPTY THIS IS. The catch above opens the
+     * window on `[]` rather than not opening — the right trade — but every
+     * consumer downstream then counted zero books and could not tell that
+     * from a library with none. `shelf.status` reported `books: 0` to a peer
+     * asking whether this device was healthy. */
+    shelfRead: !shelfUnread,
     diagnostics: defaultDiagnostics(),
   })
 
@@ -186,7 +224,61 @@ async function boot(root: HTMLElement): Promise<void> {
    * fatal handlers. `composition.failures` is what did not compose, and the
    * settings pane says so. */
   const lifetime = new AbortController()
-  const composition = await composeCapabilities(capabilities, kernelApi(services), lifetime.signal)
+  /* THE SERVICE TABLE, served alongside the capabilities' own services
+   * (phase 11). One map, one router registration, one grant check — a caller
+   * must not be able to tell which side of the kernel/capability line a
+   * service came from. The handlers read their three outward ports
+   * (`device`, `shelf`, sizes) at CALL time, so building them here, before
+   * any capability has started, is not too early: `peer.start` and
+   * `sync.start` bind theirs on the way past. */
+  /* ARMED BEFORE THE SLOW PART, not after it.
+   *
+   * This used to sit below `composeCapabilities`, so a quit arriving during
+   * storage loading, migration, the shelf scan or composition reached no
+   * handler at all: the shell deferred the exit, waited out its whole grace
+   * period, and quit anyway with the journal left dirty — the exact state the
+   * handshake exists to prevent, during the window most likely to be slow.
+   *
+   * Everything it needs already exists here: `lifetime` and `services` are
+   * built above, and `journalClosed()` resolves at once when no journal has
+   * been opened yet, which is precisely the startup case.
+   *
+   * THE HANDSHAKE ITSELF LIVES IN `app/shutdown.ts`, where it can be tested:
+   * its ordering, its bounding and its failure paths are the parts that go
+   * wrong, and inline in this function nothing could reach them. What is left
+   * here is the one thing that genuinely belongs to a composition root —
+   * naming the real Tauri event module.
+   *
+   * THE REAL MODULE, not `window.__TAURI__`. The first version read the
+   * global, and `withGlobalTauri` is FALSE in this app — so it found nothing,
+   * returned, and the quit handshake timed out for five seconds every time
+   * while looking like it had been wired. A silent capability check written
+   * into the fix for a silent failure. */
+  armShutdownInBackground({
+    listen: async (event, handler) => {
+      const { listen } = await import('@tauri-apps/api/event')
+      return listen(event, () => handler())
+    },
+    emit: async (event) => {
+      const { emit } = await import('@tauri-apps/api/event')
+      await emit(event)
+    },
+    flush: flushBeforeClose,
+    drain: () => services.drain(),
+    abort: () => lifetime.abort(),
+    journalClosed,
+    signal: lifetime.signal,
+    graceMs: DRAIN_GRACE_MS,
+    diagnostics: services.diagnostics,
+  })
+
+  const composition = await composeCapabilities(capabilities, kernelApi(services), lifetime.signal, {
+    services: buildServices({ services }),
+    /* The satchel side of the same table, declared: what this composition may
+     * CALL on a shelf, as opposed to what it answers. Derived, so it cannot
+     * name a service that does not exist. */
+    clients: serviceClients(),
+  })
 
   /* THE LIFETIME ENDS WITH THE PAGE, which nothing used to do.
    *
@@ -204,6 +296,19 @@ async function boot(root: HTMLElement): Promise<void> {
    * both no-op after the first. */
   window.addEventListener('pagehide', () => lifetime.abort(), { once: true })
 
+  /* AND THE SAME TEARDOWN ON QUIT, which `pagehide` does not cover.
+   *
+   * Quitting destroys the webview; the platform does not guarantee `pagehide`
+   * first, and even when it fires, nothing holds the process open for the
+   * async tail — so `journal.close()` never finished and `journal.dirty` was
+   * never cleared. Measured on a real library: it survived every ordinary
+   * quit, which made every launch treat the last one as a crash and re-verify
+   * the whole shelf.
+   *
+   * `lib.rs` defers the first exit request and waits for the answer below,
+   * bounded, so a teardown that hangs delays the quit rather than preventing
+   * it. Failing to reach the shell is not fatal here: this is a best-effort
+   * flush, and the unclean path still works exactly as it does today. */
   createRoot(root).render(
     <StrictMode>
       <App services={services} fs={fs} shelfUnread={shelfUnread} composition={composition} />
@@ -220,9 +325,18 @@ async function boot(root: HTMLElement): Promise<void> {
   watchFs()
 }
 
-/** A legacy library value that is not a list is not a library. */
-function asRows(value: unknown): [] {
-  return (Array.isArray(value) ? value : []) as []
+/**
+ * A legacy library value that is not a list is not a library.
+ *
+ * The cast used to be `as []` over an unchecked array, which claims the
+ * EMPTY-tuple type — so `[null, validRow]` satisfied the outer check and every
+ * element was then treated as a row it might not be. Each entry is checked to
+ * be a non-null object, and anything else is dropped: a legacy file is one a
+ * reader may have hand-edited, so a single bad row must not cost the rest.
+ */
+function asRows(value: unknown): readonly Record<string, unknown>[] {
+  if (!Array.isArray(value)) return []
+  return value.filter((one): one is Record<string, unknown> => typeof one === 'object' && one !== null)
 }
 
 function readJson(raw: string | null, fallback: unknown): unknown {

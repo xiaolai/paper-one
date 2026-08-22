@@ -7,7 +7,7 @@ import { fakeFs, jsonAt, type FakeFs } from './fakeFs.testkit'
 import { hlcOf } from './hlc'
 import type { Mark } from './marks'
 import type { MarkStorage } from './marks'
-import { NOOP_RECORDER, contentBlobPort, type MutationRecorder, type MutationToken } from './ports'
+import { BLOB_FOLDER, NOOP_RECORDER, type MutationRecorder, type MutationToken } from './ports'
 import { createKernelServices, type KernelServices } from './services'
 import { BRIGHTNESS } from './metrics'
 import { KERNEL_SETTINGS, SETTINGS_STORAGE_KEY, createSettingsStore } from './settings'
@@ -640,30 +640,51 @@ describe('every writer is bracketed by the recorder, begin before the write and 
   })
 })
 
-describe('ContentBlobPort', () => {
-  const port = contentBlobPort('/data/paper/')
-
-  it('joins a folder name and a closed blob name under the root', () => {
-    expect(port.root()).toBe('/data/paper')
-    expect(port.target('book_abc', 'content.epub')).toBe('/data/paper/books/book_abc/content.epub')
-    expect(port.target('book_abc', 'cover.jpg')).toBe('/data/paper/books/book_abc/cover.jpg')
-    expect(port.target('book_abc', 'content.pdf')).toBe('/data/paper/books/book_abc/content.pdf')
-  })
-
-  it('refuses a folder that is not a book folder name', () => {
-    for (const bad of ['..', '../x', 'a/b', '/etc', '', 'book:abc', 'x'.repeat(81), 'a b', 'a\\b']) {
-      expect(() => port.target(bad, 'content.epub'), bad).toThrow()
+/**
+ * `BLOB_FOLDER` — WHAT A BOOK'S FOLDER MAY BE CALLED.
+ *
+ * These cases lived in a suite for `contentBlobPort`, a port the kernel
+ * published and nothing ever used; the transfers that ship resolve their paths
+ * in Rust. The port is gone — and these cases are NOT, because they are the
+ * strongest thing holding this pattern to its shape: the parity check beside
+ * it compares the regex's SOURCE TEXT against the Rust ("contains `80`"), so
+ * `{1,800}` would satisfy it, and `book.add` refuses an id by this pattern
+ * alone.
+ *
+ * `safeId` maps everything outside `[A-Za-z0-9]` to `_`, so a legal folder is
+ * exactly that alphabet plus the underscore, bounded — a longer one is past
+ * what the blob contract allows and, on some filesystems, past the component
+ * limit, so the book's content operations would refuse it later or the folder
+ * would not be creatable at all.
+ */
+describe('BLOB_FOLDER', () => {
+  it('accepts a folder name `safeId` can actually produce', () => {
+    for (const good of ['book_abc', 'a', 'A_1', '_', 'x'.repeat(80)]) {
+      expect(BLOB_FOLDER.test(good), good).toBe(true)
     }
   })
 
-  it('refuses a name outside the closed set', () => {
-    for (const bad of ['content.exe', 'content.', 'cover.png', 'book.json', 'marks.json', '../content.epub']) {
-      expect(() => port.target('book_abc', bad as 'cover.jpg'), bad).toThrow()
+  it('refuses anything that is not one', () => {
+    for (const bad of ['..', '../x', 'a/b', '/etc', '', 'book:abc', 'x'.repeat(81), 'a b', 'a\\b', 'a.b', 'a-b', 'né']) {
+      expect(BLOB_FOLDER.test(bad), bad).toBe(false)
     }
   })
 
-  it('refuses an empty root', () => {
-    expect(() => contentBlobPort('')).toThrow()
+  /* ANCHORED AT BOTH ENDS. An unanchored pattern matches the legal part of an
+   * illegal name, which is exactly how a traversal gets through a check that
+   * looks right. */
+  it('is anchored, so a legal prefix does not make an illegal name legal', () => {
+    expect(BLOB_FOLDER.test('book_abc/../../etc')).toBe(false)
+    expect(BLOB_FOLDER.test('\nbook_abc')).toBe(false)
+    expect(BLOB_FOLDER.test('book_abc\n')).toBe(false)
+  })
+
+  /* NOT STICKY OR GLOBAL: `lastIndex` on a shared regex makes alternate calls
+   * with the same input answer differently. */
+  it('answers the same for the same name twice', () => {
+    expect(BLOB_FOLDER.test('book_abc')).toBe(BLOB_FOLDER.test('book_abc'))
+    expect(BLOB_FOLDER.global).toBe(false)
+    expect(BLOB_FOLDER.sticky).toBe(false)
   })
 })
 

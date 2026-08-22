@@ -9,11 +9,13 @@ import {
   liveMarks,
   mergeMarks,
   removeMark,
+  setTint as setTintIn,
   updateNote as updateNoteIn,
   validMarks,
   type Annotation,
   type Bookmark,
   type Mark,
+  type MarkTint,
 } from './marks'
 import { NOOP_RECORDER, recorded, type MutationRecorder } from './ports'
 import type { WriteQueue } from './writeQueue'
@@ -156,6 +158,12 @@ export interface MarkStore {
   remove(id: string, bookId?: string): Promise<void>
   updateNote(id: string, note: string, bookId?: string): Promise<void>
   /**
+   * Recolour a mark. The twin of `updateNote`, routed the same way and
+   * stamped the same way — a mark none of the store's lists know is a
+   * rejection, not a silent no-op.
+   */
+  setTint(id: string, tint: MarkTint, bookId?: string): Promise<void>
+  /**
    * Carry marks written under a superseded book id onto this one.
    *
    * With marks in book folders this MOVES a file rather than rewriting rows: the
@@ -188,6 +196,17 @@ export interface MarkStoreOptions {
    * the sync capability injects its real HLC at composition.
    */
   readonly clock?: () => Hlc
+  /**
+   * The lane a book's folder writes run on.
+   *
+   * `folderOf` alone is folder-correct but NOT rekey-aware: when a book is
+   * rekeyed the library follows the rename chain to keep the old and new ids
+   * on one lane, and marks queued on the bare folder name took a different
+   * one — so a marks write could run beside the move it was supposed to be
+   * ordered against. The library publishes the resolver; the default keeps
+   * the plain folder for suites that build a store without one.
+   */
+  readonly lane?: (bookId: string) => string
 }
 
 /** Two lists say the same marks in the same order. Serialised, because that is what is stored. */
@@ -202,6 +221,7 @@ export function createMarkStore({
   queue,
   recorder = NOOP_RECORDER,
   clock = () => hlcOf(Date.now()),
+  lane = folderOf,
 }: MarkStoreOptions): MarkStore {
   /* THE OPEN BOOK'S MARKS ONLY, held here.
    *
@@ -362,7 +382,7 @@ export function createMarkStore({
        * one id (`book:abc` and its folder name `book_abc`) name one directory.
        * Keyed by the id as spelled, a marks write and the removal trashing the
        * same folder could run beside each other. */
-      .append(folderOf(targetId), async () => {
+      .append(lane(targetId), async () => {
         /* `writeMarks` creates the folder it writes into, so a change landing
          * after a removal puts a marks-only directory back where the book had
          * been. Checked before — and, because a removal can land between the
@@ -529,7 +549,7 @@ export function createMarkStore({
      * one id (`book:abc` and its folder name `book_abc`) name one directory.
      * Keyed by the id as spelled, a marks write and the removal trashing the
      * same folder could run beside each other. */
-    await queue.append(folderOf(bookId), async () => {
+    await queue.append(lane(bookId), async () => {
       // LIVE only — a read model, like every other. The file keeps its rows.
       marks = liveMarks(validMarks(await readMarks(target, bookId)))
     })
@@ -580,6 +600,9 @@ export function createMarkStore({
 
   const updateNote: MarkStore['updateNote'] = (id, note, bookId) =>
     applyToMark(id, bookId, (prev) => updateNoteIn(prev, id, note, clock()))
+
+  const setTint: MarkStore['setTint'] = (id, tint, bookId) =>
+    applyToMark(id, bookId, (prev) => setTintIn(prev, id, tint, clock()))
 
   const rekey: MarkStore['rekey'] = async (from, to) => {
     if (!fs || from === to) return
@@ -659,6 +682,7 @@ export function createMarkStore({
     add,
     remove,
     updateNote,
+    setTint,
     rekey,
     mergeRemote,
   }

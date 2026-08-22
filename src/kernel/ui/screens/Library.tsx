@@ -126,7 +126,7 @@ export interface LibraryProps {
   onQueryChange: (query: string | ((prev: string) => string)) => void
   /**
    * Actions the composed capabilities contributed for one book — Download,
-   * Remove download… (WI-C.3/C.5). Rendered by the book's menu, filtered
+   * Evict… (WI-C.3/C.5). Rendered by the book's menu, filtered
    * per row by each action's `when`.
    */
   bookActions: readonly BookAction[]

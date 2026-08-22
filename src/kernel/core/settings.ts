@@ -147,9 +147,20 @@ export function createSettingsStore({ storage, migrate = keepValues }: SettingsS
   }
 
   return {
-    get: (setting) => {
+    get: <T,>(setting: Setting<T>): T => {
       if (!(setting.key in values)) return setting.fallback
-      const parsed = setting.parse(values[setting.key])
+      /* `get` PROMISES NEVER TO FAIL, and `parse` is arbitrary code supplied
+       * by whoever defined the setting — one that threw on a hand-edited or
+       * migrated value took down every reader of it, including the boot path
+       * that has no handler. A parser that cannot make sense of what is
+       * stored is answering the same thing as one that returns `undefined`:
+       * "not a value I recognise", which is what the fallback is for. */
+      let parsed: T | undefined
+      try {
+        parsed = setting.parse(values[setting.key])
+      } catch {
+        return setting.fallback
+      }
       return parsed === undefined ? setting.fallback : parsed
     },
     set: (setting, value) => {

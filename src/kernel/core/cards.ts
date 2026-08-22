@@ -20,6 +20,17 @@
 
 import { hlcOf, isHlc, laterHlc, type Hlc } from './hlc'
 
+/**
+ * The bound a CARD's body carries.
+ *
+ * Same reason as a mark's text (`marks.ts`): the body is persisted, read back
+ * by `card.list` and carried by the sync feed, and without a bound a request
+ * near the envelope's payload limit committed first and failed to answer
+ * afterwards. A card is a note to yourself, so the bound is generous — well
+ * past an essay, well below the wire.
+ */
+export const MAX_CARD_TEXT = 16_000
+
 export const CARD_KINDS = ['Idea', 'Claim', 'Recall', 'Synthesis', 'Excerpt'] as const
 export type CardKind = (typeof CARD_KINDS)[number]
 

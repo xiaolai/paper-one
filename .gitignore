@@ -93,3 +93,7 @@ public/*.epub
 # `coverage-summary.json`, `lcov.info` and the HTML report. Rebuilt on every
 # run; `scripts/check-coverage.mjs` reads the summary and refuses an empty one.
 coverage/
+
+# The bundled `paper` CLI — `pnpm build:cli` writes it; the source is
+# `src/cli/`.
+/bin/

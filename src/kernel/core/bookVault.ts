@@ -84,15 +84,10 @@ export const tauriVaultFs: VaultFs = {
  * the PDF adapter are handed the original filename separately and route on
  * that.
  */
-export const KNOWN_EXTENSIONS: readonly string[] = [
-  'epub',
-  'pdf',
-  'mobi',
-  'azw3',
-  'cbz',
-  'fb2',
-  'fbz',
-]
+export const KNOWN_EXTENSIONS = ['epub', 'pdf', 'mobi', 'azw3', 'cbz', 'fb2', 'fbz'] as const
+
+/** One of the formats above, as a type. */
+export type KnownExtension = (typeof KNOWN_EXTENSIONS)[number]
 
 /**
  * What a stored `content.*` can be called — the known list, plus the fallback.
@@ -102,14 +97,36 @@ export const KNOWN_EXTENSIONS: readonly string[] = [
  * other made every book of that format look contentless: the row went disabled,
  * with the bytes sitting right there beside the record.
  */
-export const CONTENT_EXTENSIONS: readonly string[] = [...KNOWN_EXTENSIONS, 'bin']
+export const CONTENT_EXTENSIONS = [...KNOWN_EXTENSIONS, 'bin'] as const
+
+/**
+ * What a stored content file's extension may be, as a TYPE.
+ *
+ * `readonly string[]` made the list a runtime fact and nothing more, so
+ * `ContentBlobName` could only be spelled ``content.${string}`` — a "closed
+ * set" that accepts `content.exe`, and `content.../book.json` besides. Derived
+ * from the literal tuple, the compiler enforces at the call sites what the
+ * runtime check enforces at the boundary, and a format added above becomes
+ * legal everywhere at once rather than after somebody remembers each copy.
+ */
+export type ContentExtension = (typeof CONTENT_EXTENSIONS)[number]
+
+/** Whether `value` is a format the vault stores under its own name. */
+export function isKnownExtension(value: string): value is KnownExtension {
+  return (KNOWN_EXTENSIONS as readonly string[]).includes(value)
+}
+
+/** Whether `value` is a name a stored content file may carry. */
+export function isContentExtension(value: string): value is ContentExtension {
+  return (CONTENT_EXTENSIONS as readonly string[]).includes(value)
+}
 
 /** The extension to store a book under, from the name it arrived with. */
-export function extensionFor(name: string): string {
+export function extensionFor(name: string): ContentExtension {
   const last = name.lastIndexOf('.')
   if (last < 0) return 'bin'
   const ext = name.slice(last + 1).toLowerCase()
-  return KNOWN_EXTENSIONS.includes(ext) ? ext : 'bin'
+  return isKnownExtension(ext) ? ext : 'bin'
 }
 
 

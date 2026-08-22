@@ -32,6 +32,15 @@ import { isProcessEntry } from './lib/entry.mjs'
  * that used to let `src/main.tsx` reach kernel internals now expects the
  * refusal (WI-5.6 removed the exemption).
  *
+ * Phase 11 added the SECOND COMPOSITION, `src/cli/` over `src/hosts/`, with
+ * the allowance pinned in the legal tree and four refusals beside it: the
+ * inward edge from a capability or the kernel (`hosts-and-cli-are-leaves`,
+ * which is what stops the allowance being a back door to an undeclared
+ * capability), the CLI reaching past a capability's index, the CLI reaching
+ * a kernel internal, and the CLI reaching the kernel's UI entry — because
+ * the CLI is deliberately NOT a composition root and must not acquire a path
+ * to React.
+ *
  * `scripts/check-boundaries.test.mjs` runs the same cases under Vitest; this
  * file is the standalone runner. Exit 0 when every case behaves, 1 otherwise.
  */
@@ -53,6 +62,10 @@ export const LEGAL_TREE = {
     { id: 'peer', ts: 'peer', platforms: ['desktop'] },
   ]),
   'src/kernel/index.ts': "export { kernelThing } from './core/thing.ts'\nexport type { KernelType } from './core/thing.ts'\n",
+  /* The kernel's TEST-ONLY entry. Legal for a test to import, refused to
+   * anything else — see `kernel-testkit-in-tests-only`. */
+  'src/kernel/testkit.ts': "export { fake } from './core/fake.testkit.ts'\n",
+  'src/kernel/core/fake.testkit.ts': 'export const fake = () => null\n',
   'src/kernel/ui/index.ts': "export { App } from './App.ts'\n",
   'src/kernel/ui/App.ts': "import { other } from '../core/other.ts'\nexport const App = () => other\n",
   'src/kernel/core/thing.ts': 'export const kernelThing = 1\nexport type KernelType = { n: number }\n',
@@ -85,6 +98,16 @@ export const LEGAL_TREE = {
     "import { App } from './kernel/ui/index.ts'\n" +
     "import { composition } from './app/composition.desktop.ts'\n" +
     'void kernelThing\nvoid App\nvoid composition\n',
+  /* THE SECOND COMPOSITION (phase 11): the CLI may import a capability's
+   * index and the kernel's public entry, and a host under it may import the
+   * public entry. In the legal tree so the allowance is PINNED — if the rule
+   * ever over-matches, the clean case fails rather than something subtler. */
+  'src/hosts/node/fs.ts': "import { kernelThing } from '../../kernel/index.ts'\nexport const nodeFs = kernelThing\n",
+  'src/cli/paper.ts':
+    "import { kernelThing } from '../kernel/index.ts'\n" +
+    "import { nodeFs } from '../hosts/node/fs.ts'\n" +
+    "import { betaPort } from '../capabilities/beta/index.ts'\n" +
+    'export const cli = { kernelThing, nodeFs, betaPort }\n',
 }
 
 /**
@@ -145,6 +168,24 @@ export const CASES = [
     from: 'src/capabilities/alpha/index.ts',
     to: 'src/kernel/core/other.ts',
     expect: ['kernel-public-entry-only'],
+  },
+  {
+    /**
+     * THE TEST-ONLY ENTRY IS NOT THE PUBLIC ONE.
+     *
+     * `fakeFs` used to be re-exported from `src/kernel/index.ts`, where these
+     * rules could not tell it apart from `createKernelServices` — it arrived
+     * through the one door everything may use. A separate entry makes the
+     * difference nameable.
+     */
+    name: 'production code -> the kernel testkit entry',
+    files: {
+      'src/cli/paper.ts':
+        LEGAL_TREE['src/cli/paper.ts'] + "import { fake } from '../kernel/testkit.ts'\nvoid fake\n",
+    },
+    from: 'src/cli/paper.ts',
+    to: 'src/kernel/testkit.ts',
+    expect: ['kernel-testkit-in-tests-only'],
   },
   {
     name: 'kernel test -> capability test double',
@@ -330,6 +371,62 @@ export const CASES = [
     from: 'src/app/composition.contract.test.ts',
     to: 'src/kernel/ui/index.ts',
     expect: ['kernel-public-entry-only'],
+  },
+  {
+    name: 'a capability -> the CLI (the laundered path to an undeclared capability)',
+    files: {
+      'src/capabilities/gamma/index.ts': "import { cli } from '../../cli/paper.ts'\nexport const gamma = cli\n",
+    },
+    from: 'src/capabilities/gamma/index.ts',
+    to: 'src/cli/paper.ts',
+    expect: ['hosts-and-cli-are-leaves'],
+  },
+  {
+    name: 'the kernel -> a host (node: builtins in a browser build)',
+    files: {
+      'src/kernel/core/thing.ts':
+        "import { nodeFs } from '../../hosts/node/fs.ts'\nexport const kernelThing = nodeFs\nexport type KernelType = { n: number }\n",
+    },
+    from: 'src/kernel/core/thing.ts',
+    to: 'src/hosts/node/fs.ts',
+    expect: ['hosts-and-cli-are-leaves'],
+  },
+  {
+    name: "the CLI -> a capability's internal file (the allowance does not reach past an index)",
+    files: {
+      'src/cli/paper.ts':
+        LEGAL_TREE['src/cli/paper.ts'] + "import { betaInternal } from '../capabilities/beta/lib/internal.ts'\nvoid betaInternal\n",
+    },
+    from: 'src/cli/paper.ts',
+    to: 'src/capabilities/beta/lib/internal.ts',
+    expect: ['capability-only-via-index'],
+  },
+  {
+    name: 'the CLI -> a kernel internal (the allowance is not a composition root)',
+    files: {
+      'src/cli/paper.ts': LEGAL_TREE['src/cli/paper.ts'] + "import { other } from '../kernel/core/other.ts'\nvoid other\n",
+    },
+    from: 'src/cli/paper.ts',
+    to: 'src/kernel/core/other.ts',
+    expect: ['kernel-public-entry-only'],
+  },
+  {
+    name: 'the CLI -> the kernel UI entry (a CLI has no React and must not gain a path to one)',
+    files: {
+      'src/cli/paper.ts': LEGAL_TREE['src/cli/paper.ts'] + "import { App } from '../kernel/ui/index.ts'\nvoid App\n",
+    },
+    from: 'src/cli/paper.ts',
+    to: 'src/kernel/ui/index.ts',
+    expect: ['kernel-public-entry-only'],
+  },
+  {
+    name: 'a host -> a capability index (only the CLI composes; a host is a seam)',
+    files: {
+      'src/hosts/node/fs.ts': LEGAL_TREE['src/hosts/node/fs.ts'] + "import { gamma } from '../../capabilities/gamma/index.ts'\nvoid gamma\n",
+    },
+    from: 'src/hosts/node/fs.ts',
+    to: 'src/capabilities/gamma/index.ts',
+    expect: ['capability-index-only-from-composition'],
   },
   {
     name: 'an import that does not resolve',

@@ -242,6 +242,9 @@ pub fn run() {
             #[cfg(feature = "desktop")]
             setup_tray(app.handle())?;
 
+            #[cfg(all(feature = "desktop", target_os = "macos"))]
+            shutdown::install_quit_item(app.handle())?;
+
             Ok(())
         });
 
@@ -262,7 +265,158 @@ pub fn run() {
         );
     }
 
+    // THE WEBVIEW IS GIVEN TIME TO CLOSE THE JOURNAL BEFORE THE PROCESS DIES.
+    //
+    // Teardown lives in TypeScript (`main.tsx`), hangs off `pagehide`, and
+    // ends in an async `journal.close()` that drains a write queue, writes the
+    // journal meta and removes `journal.dirty`. Quitting destroys the webview,
+    // and nothing held the process open for that tail — so the close never
+    // finished and the flag was never cleared. MEASURED on a real library: it
+    // survived every ordinary `quit app "Paper"`, which made every subsequent
+    // launch treat the last one as a crash and re-verify all 1 960 books, and
+    // made `paper` refuse to journal on a machine the app had ever run.
+    //
+    // So the first exit request is DEFERRED: tell the webview, wait for it to
+    // say it is done, then exit for real.
+    //
+    // BOUNDED, and exits anyway on timeout. A teardown that hangs must not
+    // make the app unquittable — the failure this repair is allowed to cause
+    // is "the flag stayed up", exactly today's behaviour, and never "the
+    // reader cannot close their book app".
     builder
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // ONLY the quit path is logged. A `match` over every RunEvent
+            // was what established which event a macOS quit produces — the
+            // answer was "none that can be deferred, unless the Quit item is
+            // ours" — but `MainEventsCleared` arrives on every loop tick, so
+            // leaving it in would write a log line several times a second.
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = &event {
+                log::info!(
+                    "shutdown: exit requested (code {code:?}, started {})",
+                    shutdown::started()
+                );
+                // NOT gated on `code.is_none()`. That was the first version and
+                // it never fired: macOS quits — ⌘Q, the app menu, an AppleScript
+                // `quit` — arrive with a code, so the one branch that mattered
+                // was the one being skipped, and the app exited in under three
+                // seconds having deferred nothing.
+                //
+                // `started()` alone is what prevents recursion: the first
+                // request defers and sets it, and the `app.exit(0)` below comes
+                // back through here and passes straight out.
+                if !shutdown::started() {
+                    shutdown::begin();
+                    api.prevent_exit();
+                    let app = app.clone();
+                    // A plain OS thread, not the async runtime: the whole wait
+                    // is one blocking `recv_timeout`, and this adds no
+                    // dependency the app crate did not already have.
+                    std::thread::spawn(move || {
+                        shutdown::run(&app);
+                        app.exit(0);
+                    });
+                }
+            }
+        });
+}
+
+/// The quit handshake with the webview.
+mod shutdown {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::time::Duration;
+    use tauri::{AppHandle, Emitter, Listener, Runtime};
+
+    /// How long the webview gets. A journal close is a queue drain and three
+    /// small writes; this is generous by an order of magnitude, and the app
+    /// quits regardless when it lapses.
+    const GRACE: Duration = Duration::from_secs(5);
+
+    /// The event the webview listens for, and the one it answers with.
+    pub const ASK: &str = "paper://shutdown";
+    pub const DONE: &str = "paper://shutdown-done";
+
+    /// Our own Quit item's id.
+    pub const QUIT_ID: &str = "paper-quit";
+
+    static STARTED: AtomicBool = AtomicBool::new(false);
+
+    /// Replace macOS's predefined Quit with one that goes through
+    /// `AppHandle::exit`.
+    ///
+    /// THE PREDEFINED ITEM CANNOT BE INTERCEPTED. It calls AppKit's terminate
+    /// straight through, and the only thing the run loop then reports is
+    /// `RunEvent::Exit` — measured, by logging every event and quitting from
+    /// the menu. `Exit` cannot be deferred, so there is no moment at which the
+    /// webview could be asked to close the journal, and the dirty flag
+    /// survived every quit. Upstream tracks this as tauri#9198 and #7586.
+    ///
+    /// `AppHandle::exit` DOES emit `ExitRequested`, which is deferrable. So
+    /// the menu keeps its shape, its position and its ⌘Q, and only the thing
+    /// it calls changes.
+    #[cfg(target_os = "macos")]
+    pub fn install_quit_item<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+        use tauri::menu::{Menu, MenuItem, MenuItemKind};
+
+        let menu = Menu::default(app)?;
+        let Some(MenuItemKind::Submenu(app_menu)) = menu.items()?.into_iter().next() else {
+            log::warn!("shutdown: no application submenu; leaving the default Quit in place");
+            return Ok(());
+        };
+        // Removed by KIND rather than by id: the predefined item's id is
+        // Tauri's to choose and not ours to hard-code.
+        for item in app_menu.items()? {
+            if let MenuItemKind::Predefined(predefined) = &item {
+                if predefined.text().unwrap_or_default().starts_with("Quit") {
+                    app_menu.remove(&item)?;
+                }
+            }
+        }
+        let quit = MenuItem::with_id(app, QUIT_ID, "Quit Paper", true, Some("CmdOrCtrl+Q"))?;
+        app_menu.append(&quit)?;
+        app.set_menu(menu)?;
+        app.on_menu_event(|app, event| {
+            if event.id() == QUIT_ID {
+                // Straight to `exit`, which the run loop reports as
+                // `ExitRequested` and the handler there defers.
+                app.exit(0);
+            }
+        });
+        Ok(())
+    }
+
+    pub fn started() -> bool {
+        STARTED.load(Ordering::SeqCst)
+    }
+
+    pub fn begin() {
+        STARTED.store(true, Ordering::SeqCst);
+    }
+
+    pub fn run<R: Runtime>(app: &AppHandle<R>) {
+        let (tx, rx) = mpsc::channel::<()>();
+        // LISTENED FOR BEFORE THE ASK, or a webview that answers immediately
+        // answers into nothing and the quit waits out the whole grace period.
+        let id = app.listen(DONE, move |_| {
+            let _ = tx.send(());
+        });
+        if app.emit(ASK, ()).is_err() {
+            // No webview to ask — nothing to wait for.
+            app.unlisten(id);
+            return;
+        }
+        match rx.recv_timeout(GRACE) {
+            Ok(()) => log::info!("shutdown: the webview finished its teardown"),
+            Err(mpsc::RecvTimeoutError::Timeout) => log::warn!(
+                "shutdown: the webview did not finish within {}s; quitting anyway, so the sync journal may be left dirty",
+                GRACE.as_secs()
+            ),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                log::warn!("shutdown: the teardown channel closed without an answer")
+            }
+        }
+        app.unlisten(id);
+    }
 }

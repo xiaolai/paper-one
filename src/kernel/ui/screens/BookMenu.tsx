@@ -1,9 +1,17 @@
-import { BookCheck, CheckSquare, Square, Tag, Trash2 } from 'lucide-react'
+import type { ReactElement } from 'react'
+import { BookCheck, CheckSquare, CircleMinus, Download, Square, Tag, Trash2 } from 'lucide-react'
 import type { ReadingStatus } from '../../core/library'
 import type { IndexedBook } from '../../core/bookIndex'
-import type { BookAction } from '../../core/capability'
+import type { ActionIcon, BookAction } from '../../core/capability'
 import { TRASH_KEPT_FOR } from '../../core/bookTrash'
 import { ICON } from '../../core/metrics'
+
+/** Every `ActionIcon`, drawn once. `Record` over the union, so a name added
+ *  to `ACTION_ICONS` without artwork here does not compile. */
+const ACTION_ICON: Record<ActionIcon, ReactElement> = {
+  download: <Download size={ICON.control} strokeWidth={ICON.stroke} />,
+  'circle-minus': <CircleMinus size={ICON.control} strokeWidth={ICON.stroke} />,
+}
 
 /**
  * The things that can be done to a book, wherever it is shown.
@@ -40,7 +48,7 @@ export interface BookMenuProps {
   readonly itemClass: string
   /**
    * Actions the composed capabilities contributed (WI-C.3) — Download,
-   * Remove download… Filtered HERE by each action's `when` against this
+   * Evict… Filtered HERE by each action's `when` against this
    * book, so both surfaces (cell and row) apply one rule. Rendered between
    * the kernel's ordinary items and the remove, which stays last: the one
    * destructive thing keeps its distance.
@@ -123,8 +131,14 @@ export function BookMenu({
         )}
         {selected ? 'Deselect' : 'Select'}
       </button>
-      {/* A capability's actions on this book. No icon: a contribution
-          carries a label, not artwork, and a wrong icon says more than none. */}
+      {/* A capability's actions on this book, drawn like every other row.
+          They used to carry no icon at all, on the reasoning that a
+          contribution supplies a label and not artwork — but the result was a
+          menu whose last rows had no icon and whose labels did not line up
+          with the ones above. The capability supplies the icon now, because
+          it is the only side that knows what its action means; a contribution
+          that supplies none gets an icon-sized gap so the column still
+          reads straight. */}
       {offered.map((action) => (
         <button
           key={action.id}
@@ -136,6 +150,11 @@ export function BookMenu({
             void action.run(book.bookId)
           }}
         >
+          {action.icon ? (
+            ACTION_ICON[action.icon]
+          ) : (
+            <span aria-hidden="true" style={{ display: 'inline-block', width: ICON.control }} />
+          )}
           {action.label}
         </button>
       ))}

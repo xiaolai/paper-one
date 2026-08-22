@@ -260,10 +260,36 @@ fn welcome(role: Role) -> Value {
     json!({ "kind": "welcome", "role": role })
 }
 
+/// `198.18.0.0/15` — RFC 2544's benchmarking range, which never appears on a
+/// real network and is what a TUN proxy hands back for its synthesised
+/// "fake IP" DNS answers.
+///
+/// A peer that records one of these has recorded the proxy's placeholder, not
+/// an endpoint: dialling it can only ever time out, and it does so ahead of
+/// the addresses that might have worked, because hints are tried in the order
+/// they are given. Observed in this app's own peer store, stored beside two
+/// perfectly good LAN addresses.
+///
+/// Deliberately NOT filtered: `100.64.0.0/10`. It looks equally synthetic and
+/// is not — a tailnet lives there, and dropping it would remove a route that
+/// genuinely carries traffic on this fleet.
+fn is_synthetic(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            (a == 198 && (b == 18 || b == 19)) || v4.is_unspecified() || v4.is_loopback()
+        }
+        std::net::IpAddr::V6(v6) => v6.is_unspecified() || v6.is_loopback(),
+    }
+}
+
 fn endpoint_addr(id: EndpointId, hints: &[String]) -> EndpointAddr {
     let mut addr = EndpointAddr::new(id);
     for hint in hints {
-        if let Ok(ip) = hint.parse() {
+        if let Ok(ip) = hint.parse::<std::net::SocketAddr>() {
+            if is_synthetic(ip.ip()) {
+                continue;
+            }
             addr = addr.with_ip_addr(ip);
         } else if let Ok(relay) = hint.parse() {
             addr = addr.with_relay_url(relay);
@@ -555,6 +581,48 @@ impl Node {
 
 #[cfg(test)]
 mod tests {
+
+    /// A proxy's synthesised address is not an endpoint, and dialling one can
+    /// only time out — ahead of the addresses that would have worked, since
+    /// hints are tried in order. Both of these were in this app's real peer
+    /// store, recorded beside two good LAN addresses.
+    #[test]
+    fn synthetic_proxy_addresses_are_not_dialled() {
+        use std::net::IpAddr;
+        for fake in ["198.18.0.1", "198.19.255.255", "0.0.0.0", "127.0.0.1"] {
+            assert!(
+                is_synthetic(fake.parse::<IpAddr>().unwrap()),
+                "{fake} should be refused as a dial hint"
+            );
+        }
+        // A tailnet address looks equally synthetic and carries real traffic
+        // on this fleet; dropping it would remove a working route.
+        for real in ["192.168.1.16", "100.64.0.1", "10.0.0.4", "203.0.113.9"] {
+            assert!(
+                !is_synthetic(real.parse::<IpAddr>().unwrap()),
+                "{real} is routable and must still be dialled"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hint_list_keeps_its_good_addresses_and_drops_the_fake_one() {
+        let id = iroh::SecretKey::generate().public();
+        let addr = endpoint_addr(
+            id,
+            &[
+                "198.18.0.1:57886".to_string(),
+                "192.168.1.8:47821".to_string(),
+            ],
+        );
+        let kept: Vec<_> = addr.ip_addrs().collect();
+        assert_eq!(
+            kept.len(),
+            1,
+            "exactly the routable hint survives: {kept:?}"
+        );
+        assert_eq!(kept[0].to_string(), "192.168.1.8:47821");
+    }
     use super::*;
     use crate::node::testkit::TestNode;
     use crate::role::Role;
@@ -771,7 +839,17 @@ mod tests {
         assert!(
             matches!(ev, PeerEvent::SessionClosed(c) if c.reason == "frame-too-large" && c.session_id == shelf_sid)
         );
-        assert!(started.elapsed() < Duration::from_secs(2));
+        /* PROMPTLY, and "promptly" means "not by the idle timeout".
+         *
+         * The property is that an oversized frame closes the session AT ONCE
+         * rather than leaving it to expire — the idle timeout is sixty
+         * seconds (`BLOB_IDLE_TIMEOUT_MS`), so anything an order of magnitude
+         * below that proves the same thing. The bound was two seconds, which
+         * also measured the scheduler: a full `cargo test --workspace` on a
+         * loaded machine can lose that much to contention, and the failure
+         * would be about the host rather than the close path. Ten still
+         * separates the two behaviours by six times over. */
+        assert!(started.elapsed() < Duration::from_secs(10));
         let ev = satchel
             .next_event_where(|e| matches!(e, PeerEvent::SessionClosed(_)))
             .await;

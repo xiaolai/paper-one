@@ -1,8 +1,12 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { describe, expect, it } from 'vitest'
-import { LEDGER, compare, parseArgs, readLedger, writeLedger } from './check-test-ledger.mjs'
+import { afterEach, describe, expect, it } from 'vitest'
+import { fileURLToPath } from 'node:url'
+import { LEDGER, compare, conditionalSuites, parseArgs, readLedger, writeLedger } from './check-test-ledger.mjs'
+
+const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
 
 /**
  * The ledger guard, tested on everything except the part that shells out.
@@ -69,11 +73,19 @@ describe('the ledger on disk', () => {
     expect(readLedger(root)).toEqual(tests)
   })
 
-  /* The first run in a checkout that has no ledger yet must not read as
-   * "everything was deleted" — that would make the guard's own introduction
-   * its loudest false positive. */
-  it('reads an absent ledger as empty rather than as a catastrophe', () => {
-    expect(readLedger(dir())).toEqual([])
+  /* ABSENT IS NOT EMPTY, and telling them apart is the guard.
+   *
+   * This returned `[]` for a missing file, so `rm tests/ledger.json` made
+   * every recorded name unrecorded, reported nothing, and exited 0 — the
+   * check disabled by one deletion while still saying "pass". `null` lets the
+   * caller allow absence only where it is legitimate: `--write`, which is how
+   * a first ledger is created.
+   *
+   * The original worry stands and is still met: a checkout with no ledger
+   * does not read as "everything was deleted". It reads as "no ledger", and
+   * `--write` is the answer. */
+  it('reports an absent ledger as absent, not as empty', () => {
+    expect(readLedger(dir())).toBeNull()
   })
 
   /* But a ledger that is present and unreadable is NOT empty. Swallowing that
@@ -117,5 +129,316 @@ describe('the command line', () => {
   it('refuses --root without a directory, and --root twice', () => {
     expect(parseArgs(['--root']).error).toMatch(/needs a directory/)
     expect(parseArgs(['--root', 'a', '--root', 'b']).error).toMatch(/twice/)
+  })
+})
+
+/* Two tests in one file may share a full name — nothing forbids it and
+ * copy-paste produces it. A `Set` collapsed them, so deleting ONE of a
+ * duplicated pair left the name still "live" and the removal went unreported:
+ * the exact disappearance this guard exists to catch, hidden by the shape of
+ * the check. */
+describe('duplicate names', () => {
+  it('reports one gone when two were recorded and one remains', () => {
+    expect(compare(['a > x', 'a > x'], ['a > x'])).toEqual(['a > x'])
+  })
+
+  it('reports none gone while both remain', () => {
+    expect(compare(['a > x', 'a > x'], ['a > x', 'a > x'])).toEqual([])
+  })
+
+  it('reports both gone when neither remains', () => {
+    expect(compare(['a > x', 'a > x'], [])).toEqual(['a > x', 'a > x'])
+  })
+})
+
+/* `--root --write` swallowed the flag as the path, so the run went against a
+ * directory named `--write`: no tests found, everything reported gone, and
+ * the `--write` never happened. */
+describe('--root will not eat an option', () => {
+  it('refuses an option where a directory belongs', () => {
+    expect(parseArgs(['--root', '--write']).error).toMatch(/not --write/)
+  })
+})
+
+/**
+ * THE CLI, END TO END, AGAINST A REAL VITEST PROJECT.
+ *
+ * Everything above tests the pure pieces — `compare`, `parseArgs`, the ledger
+ * file. What none of them reach is the part that actually runs: a subprocess
+ * that collects names, the exit codes the gate is read by, and `--write`. Those
+ * were exercised only incidentally by `pnpm verify` using them, so a change to
+ * the adapter would have been noticed by the whole suite going strange rather
+ * than by anything here.
+ *
+ * A fixture project of two tiny files, so the run is a second rather than the
+ * minutes a collection of this repository takes.
+ */
+describe('the CLI against a real project', () => {
+  const made = []
+
+  afterEach(() => {
+    while (made.length > 0) rmSync(made.pop(), { recursive: true, force: true })
+  })
+
+  /** A minimal Vitest project with the given test files. */
+  function project(files) {
+    const root = mkdtempSync(path.join(tmpdir(), 'paper-ledger-'))
+    made.push(root)
+    writeFileSync(path.join(root, 'vitest.config.mjs'), `export default { test: { include: ['*.test.mjs'] } }\n`)
+    /* The fixture resolves `vitest` through this repository's own install
+     * rather than needing one of its own. */
+    writeFileSync(
+      path.join(root, 'package.json'),
+      JSON.stringify({ name: 'ledger-fixture', private: true, type: 'module' }),
+    )
+    mkdirSync(path.join(root, 'node_modules'), { recursive: true })
+    symlinkSync(path.join(REPO_ROOT, 'node_modules', 'vitest'), path.join(root, 'node_modules', 'vitest'), 'dir')
+    for (const [name, source] of Object.entries(files)) writeFileSync(path.join(root, name), source)
+    return root
+  }
+
+  const suite = (names) =>
+    `import { afterEach, describe, expect, it } from 'vitest'\n` +
+    `describe('s', () => {\n${names.map((n) => `  it('${n}', () => { expect(1).toBe(1) })\n`).join('')}})\n`
+
+  const runCli = (root, args = []) =>
+    spawnSync(process.execPath, [path.join(REPO_ROOT, 'scripts/check-test-ledger.mjs'), '--root', root, ...args], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      timeout: 120_000,
+    })
+
+  it('writes a ledger, then passes against it', () => {
+    const root = project({ 'a.test.mjs': suite(['one', 'two']) })
+    const wrote = runCli(root, ['--write'])
+    expect(wrote.status, wrote.stderr).toBe(0)
+    expect(wrote.stdout).toMatch(/wrote 2 tests/)
+
+    const checked = runCli(root)
+    expect(checked.status, checked.stderr).toBe(0)
+  })
+
+  /* THE WHOLE POINT: a deleted test is named, and the exit is non-zero even
+   * though the file still has tests in it and the total could have risen. */
+  it('exits non-zero and names a test that disappeared', () => {
+    const root = project({ 'a.test.mjs': suite(['one', 'two']) })
+    expect(runCli(root, ['--write']).status).toBe(0)
+    /* One removed, two added — a RISING count over a real deletion, which is
+     * the exact shape every other signal misses. */
+    writeFileSync(path.join(root, 'a.test.mjs'), suite(['one', 'three', 'four']))
+    const checked = runCli(root)
+    expect(checked.status).toBe(1)
+    /* The report goes to STDOUT — it is the gate's answer, not a fault. */
+    expect(checked.stdout).toContain('GONE')
+    expect(checked.stdout).toContain('> two')
+    expect(checked.stdout).not.toContain('GONE s > three')
+  })
+
+  it('refuses to check when there is no ledger, rather than starting one', () => {
+    const root = project({ 'a.test.mjs': suite(['one']) })
+    const checked = runCli(root)
+    expect(checked.status).toBe(2)
+    expect(checked.stderr).toMatch(/is missing/)
+    expect(existsSync(path.join(root, 'tests/ledger.json'))).toBe(false)
+  })
+
+  /**
+   * A COLLECTION THAT FAILS IS NOT AN EMPTY ONE.
+   *
+   * A file that will not parse makes Vitest exit non-zero. Reading that as
+   * "no tests" would report every recorded name as deleted — a wall of false
+   * findings — or, on `--write`, record an empty ledger over a real one.
+   */
+  it('fails loudly when collection itself fails', () => {
+    const root = project({ 'a.test.mjs': suite(['one']) })
+    expect(runCli(root, ['--write']).status).toBe(0)
+    writeFileSync(path.join(root, 'a.test.mjs'), 'this is not javascript {{{\n')
+    const checked = runCli(root)
+    expect(checked.status).toBe(2)
+    expect(JSON.parse(readFileSync(path.join(root, 'tests/ledger.json'), 'utf8')).tests).toHaveLength(1)
+  })
+
+  /**
+   * AND `--write` REFUSES A CONDITIONAL NAME.
+   *
+   * A `describe.skipIf` suite is collected on some machines and not others,
+   * and this ledger cannot hold such a name: "gone" and "not collected here"
+   * are the same observation to it. The header said so; nothing enforced it,
+   * and a real instance was sitting in the committed ledger.
+   */
+  it('refuses to record a name from a conditional suite', () => {
+    const root = project({
+      'a.test.mjs':
+        `import { afterEach, describe, expect, it } from 'vitest'\n` +
+        `import { existsSync } from 'node:fs'\n` +
+        `describe.skipIf(!existsSync('package.json'))('gated', () => {\n` +
+        `  it('runs here and not there', () => { expect(1).toBe(1) })\n` +
+        `})\n` +
+        `describe('plain', () => { it('always', () => { expect(1).toBe(1) }) })\n`,
+    })
+    const wrote = runCli(root, ['--write'])
+    expect(wrote.status).toBe(2)
+    expect(wrote.stderr).toMatch(/CONDITIONAL suite/)
+    expect(wrote.stderr).toContain('gated > runs here and not there')
+    /* Nothing was written — a partial ledger would be worse than none. */
+    expect(existsSync(path.join(root, 'tests/ledger.json'))).toBe(false)
+  })
+})
+
+describe('finding a conditional suite in a source file', () => {
+  /**
+   * THE CONDITION'S PARENTHESES ARE BALANCED.
+   *
+   * The first version matched `[^)]*` for the condition, which ends inside
+   * `existsSync(FILE)` — so a suite gated on any CALL was invisible, which is
+   * the shape most real gates take. A three-name conditional suite was in the
+   * committed ledger while the guard reported nothing.
+   */
+  it('reads a title past a condition that calls something', () => {
+    expect(conditionalSuites(`describe.skipIf(!existsSync(LEDGER_FILE))('the committed ledger', () => {})`)).toEqual([
+      'the committed ledger',
+    ])
+    expect(conditionalSuites(`describe.skipIf(a(b(c())))('deep', () => {})`)).toEqual(['deep'])
+  })
+
+  it('reads both forms, on describe and on it', () => {
+    expect(conditionalSuites(`it.runIf(x)('one', () => {})`)).toEqual(['one'])
+    expect(conditionalSuites(`describe.runIf(x)("two", () => {})`)).toEqual(['two'])
+    expect(conditionalSuites(`test.skipIf(x)(\`three\`, () => {})`)).toEqual(['three'])
+  })
+
+  it('says nothing about an ordinary suite', () => {
+    expect(conditionalSuites(`describe('plain', () => { it.skip('one', () => {}) })`)).toEqual([])
+  })
+
+  /**
+   * A `describe.skipIf` INSIDE A STRING IS NOT A CALL.
+   *
+   * It is test data, and this very file contains several. Scanning the raw
+   * text refused them — a false positive on the one guard whose whole value is
+   * being believed, and the first `--write` after the guard landed was
+   * rejected by the guard's own fixtures.
+   */
+  /**
+   * COMMENTS ARE SKIPPED BEFORE STRINGS, and the ordering is the whole
+   * correctness of it.
+   *
+   * Prose is full of apostrophes — "the guard's", "this file's" — and a
+   * scanner that reads one as an opening quote swallows everything to the next
+   * apostrophe, which then covers or uncovers arbitrary code downstream. The
+   * first version did exactly that, and reported a call inside a string as
+   * real because a comment two hundred lines earlier had shifted its idea of
+   * where the strings were.
+   */
+  it('is not confused by an apostrophe in a comment', () => {
+    const source = [
+      "// the guard's own prose, with this file's apostrophes in it",
+      "const fixture = \"describe.skipIf(x)('not a call', () => {})\"",
+      "describe.skipIf(y)('a real one', () => {})",
+    ].join('\n')
+    expect(conditionalSuites(source)).toEqual(['a real one'])
+  })
+
+  it('is not confused by an apostrophe in a block comment either', () => {
+    const source = [
+      '/* the guard\'s prose */',
+      "describe.skipIf(y)('a real one', () => {})",
+    ].join('\n')
+    expect(conditionalSuites(source)).toEqual(['a real one'])
+  })
+
+  it('ignores one written inside a string literal', () => {
+    const data = ['const fixture = "describe.skipIf(x)(\'not a call\', () => {})"', ''].join('\n')
+    expect(conditionalSuites(data)).toEqual([])
+    /* And a REAL one on the next line is still found, so this is not simply
+     * refusing everything. */
+    expect(conditionalSuites(`${data}\ndescribe.skipIf(y)('a real one', () => {})`)).toEqual(['a real one'])
+  })
+
+  /**
+   * A TEMPLATED TITLE IS READ, AND THEN REFUSED — not silently missed.
+   *
+   * The source says `` `a ${'${name}'} b` `` and the collected name says `a Moby-Dick b`;
+   * comparing them finds nothing. A guard that merely failed to match here
+   * would report success over exactly the case it exists for, so the
+   * unresolvable title is reported instead.
+   */
+  it('reads an interpolated title so it can be refused rather than missed', () => {
+    expect(conditionalSuites('describe.skipIf(x)(`a ${name} b`, () => {})')).toEqual(['a ${name} b'])
+  })
+})
+
+/**
+ * AN UNRECORDED TEST IS COUNTED, not charged for.
+ *
+ * Additions are free on purpose — a guard that made adding a test a chore
+ * would be routed around within a week — and that leaves one real gap: a test
+ * added in a green commit and never recorded can be DELETED later with nothing
+ * to report, because it was never in the ledger to go missing from.
+ *
+ * Refusing additions would close the gap and break the thing the ratchet is
+ * for. Counting them closes it differently: the same treatment deletion gets,
+ * which is to be made legible rather than prevented.
+ */
+describe('tests that are not in the ledger', () => {
+  const made = []
+  afterEach(() => {
+    while (made.length > 0) rmSync(made.pop(), { recursive: true, force: true })
+  })
+
+  function project(files) {
+    const root = mkdtempSync(path.join(tmpdir(), 'paper-ledger-add-'))
+    made.push(root)
+    writeFileSync(path.join(root, 'vitest.config.mjs'), `export default { test: { include: ['*.test.mjs'] } }\n`)
+    writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'f', private: true, type: 'module' }))
+    mkdirSync(path.join(root, 'node_modules'), { recursive: true })
+    symlinkSync(path.join(REPO_ROOT, 'node_modules', 'vitest'), path.join(root, 'node_modules', 'vitest'), 'dir')
+    for (const [name, source] of Object.entries(files)) writeFileSync(path.join(root, name), source)
+    return root
+  }
+
+  const suite = (names) =>
+    `import { describe, expect, it } from 'vitest'\n` +
+    `describe('s', () => {\n${names.map((n) => `  it('${n}', () => { expect(1).toBe(1) })\n`).join('')}})\n`
+
+  const runCli = (root, args = []) =>
+    spawnSync(process.execPath, [path.join(REPO_ROOT, 'scripts/check-test-ledger.mjs'), '--root', root, ...args], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      timeout: 120_000,
+    })
+
+  it('says how many are unrecorded, and still passes', () => {
+    const root = project({ 'a.test.mjs': suite(['one']) })
+    expect(runCli(root, ['--write']).status).toBe(0)
+    writeFileSync(path.join(root, 'a.test.mjs'), suite(['one', 'two', 'three']))
+
+    const checked = runCli(root)
+    /* STILL GREEN — the ratchet never blocks growth. */
+    expect(checked.status).toBe(0)
+    expect(checked.stdout).toContain('2 unrecorded')
+    expect(checked.stdout).toMatch(/2 collected test\(s\) are not in the ledger/)
+  })
+
+  it('says nothing when the ledger is complete', () => {
+    const root = project({ 'a.test.mjs': suite(['one', 'two']) })
+    expect(runCli(root, ['--write']).status).toBe(0)
+    const checked = runCli(root)
+    expect(checked.stdout).toContain('0 unrecorded')
+    expect(checked.stdout).not.toMatch(/are not in the ledger/)
+  })
+
+  /* AND THE COUNT IS RIGHT WHEN BOTH HAPPEN AT ONCE — a removal and an
+   * addition in the same change is the shape that hid the original incident:
+   * the file went from 15 tests to 17 while losing 12. */
+  it('counts additions and removals separately in one change', () => {
+    const root = project({ 'a.test.mjs': suite(['one', 'two']) })
+    expect(runCli(root, ['--write']).status).toBe(0)
+    writeFileSync(path.join(root, 'a.test.mjs'), suite(['one', 'three', 'four', 'five']))
+
+    const checked = runCli(root)
+    expect(checked.status).toBe(1)
+    expect(checked.stdout).toContain('> two')
+    expect(checked.stdout).toContain('1 gone, 3 unrecorded')
   })
 })

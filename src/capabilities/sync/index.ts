@@ -1,11 +1,16 @@
 import { createElement } from 'react'
 import {
+  INDEX_FILE,
   defineSetting,
+  parseIndex,
   restThenBreathe,
+  scanBooks,
   type Capability,
   type CapabilityContext,
   type Disposable,
+  type IndexedBook,
   type KernelApi,
+  type KernelServices,
   type ServiceContext,
   type ServiceContribution,
   type ServiceHandler,
@@ -15,7 +20,7 @@ import { peerPort, registerSyncNow, type PeerPort } from '../peer'
 import { createClock, ensureDeviceId, isHlc, type Hlc } from './lib/clock'
 import { createBackfill } from './lib/backfill'
 import { createCoverCache, type CoverCache } from './lib/coverCache'
-import { createJournal, type Journal } from './lib/journal'
+import { JOURNAL_DIRTY_PATH, createJournal, type Journal } from './lib/journal'
 import { createLedger, type Ledger, type SyncChannel } from './lib/ledger'
 import { SYNC_SERVICES, parseContentAnswer, type SyncRole } from './lib/protocol'
 import { bindRole, bindScheduler, currentRole, syncNow, syncStatus, unbindRole, unbindScheduler } from './lib/runtime'
@@ -164,6 +169,142 @@ const BACKFILL_IDLE_CEILING_MS = 3_000
 
 /* -------------------------------------------------------------- capability */
 
+/**
+ * `shelf.verify` — one integrity pass over the index and the journal.
+ *
+ * Three questions, each of which has bitten this project and each of which is
+ * silent until somebody asks:
+ *
+ *   1. DANGLING BEGINS. A `begin` with no `commit` is what a crash between
+ *      the two leaves, and what an unbind landing mid-bracket leaves. The
+ *      journal's own launch recovery squares them at open; between opens they
+ *      accumulate silently, and the count is the only sign.
+ *   2. THE INDEX AGAINST THE FOLDERS. `index.json` is a cache and `book.json`
+ *      is explicitly allowed to be newer, so a write that failed after the
+ *      record landed leaves a cache that AGREES about folders and is wrong
+ *      about contents. A count mismatch is the cheap, sound half of that.
+ *   3. THE OUTBOX. Rows this device still owes a peer. Not a fault — but a
+ *      number that never falls is a sync that is not happening, and nothing
+ *      else in the app says so.
+ *
+ * REPORTS, never repairs. A verify that fixed what it found would make the
+ * finding unobservable, and the repairs here are exactly the ones that must
+ * be a human's decision.
+ */
+/**
+ * The fields of a shelf row the SHELF reads — what `index.json` being "stale"
+ * actually costs a reader: a wrong title on the shelf, a tag that will not
+ * filter, a progress bar in the wrong place, a book that says it will open
+ * and cannot.
+ *
+ * A subset rather than the whole row, deliberately. The scan derives some
+ * fields afresh every time and the cache carries what it was written with, so
+ * comparing everything would report differences that mean nothing and teach a
+ * reader to ignore the answer.
+ */
+function summarise(row: IndexedBook): string {
+  return JSON.stringify([
+    row.title,
+    row.author,
+    [...(row.tags ?? [])].sort(),
+    row.finished === true,
+    row.progress ?? 0,
+    row.hasContent === true,
+  ])
+}
+
+async function integrityPass(
+  journal: Journal,
+  fs: ReturnType<() => KernelApi['services']['fs']>,
+  /* The caller's cancellation, honoured at the two points where this pass
+   * becomes expensive: the journal walk and the shelf scan. A verify runs over
+   * the whole library, so a caller that timed out, cancelled, disconnected or
+   * lost its grant used to leave the work running with nobody waiting. */
+  signal?: AbortSignal,
+): Promise<{ ok: boolean; findings: readonly string[]; notes: readonly string[] }> {
+  const findings: string[] = []
+  const notes: string[] = []
+  const stop = (): boolean => signal?.aborted === true
+
+  /* BY SEQUENCE, and a commit clears only its OWN begin.
+   *
+   * Brackets on one key can overlap — cards are not serialised by the book
+   * queue — and the journal itself is careful about this: a runtime commit
+   * carries the `seq` of the begin it settles, and only a baseline or verify
+   * commit (which follows no begin) clears the key whole. Tracking one open
+   * begin per key made a commit for the inner bracket hide a genuinely
+   * dangling outer one, which is precisely the entry this pass exists to
+   * find. */
+  const open = new Map<string, Set<number>>()
+  for (const entry of journal.entries()) {
+    /* Cheap per entry, and a journal can hold tens of thousands. */
+    if (stop()) return { ok: false, findings: ['cancelled'], notes }
+    const key = `${entry.what}\u0000${entry.book}`
+    if (entry.kind === 'begin') {
+      const held = open.get(key) ?? new Set<number>()
+      held.add(entry.seq)
+      open.set(key, held)
+      continue
+    }
+    if (entry.kind !== 'commit') continue
+    if (entry.begin === undefined) open.delete(key)
+    else open.get(key)?.delete(entry.begin)
+  }
+  const dangling = [...open.values()].reduce((total, one) => total + one.size, 0)
+  if (dangling > 0) {
+    findings.push(`${dangling} journal ${dangling === 1 ? 'bracket has' : 'brackets have'} a begin with no commit`)
+  }
+
+  /* A NOTE, NOT A FINDING. Rows waiting to push are the ordinary state of a
+   * device that has not synced yet; counting them as an integrity fault made
+   * `ok` false for a perfectly healthy shelf, which is the fastest way to
+   * teach somebody to ignore the answer. */
+  const owed = journal.outbox().length
+  if (owed > 0) notes.push(`${owed} ${owed === 1 ? 'row is' : 'rows are'} still waiting to push`)
+
+  if (fs) {
+    try {
+      /* BY CONTENT, not by count and not by id alone.
+       *
+       * `book.json` is explicitly allowed to be NEWER than `index.json` — the
+       * index is a cache — so a write that failed between the two leaves a
+       * cache with the right ids and stale fields, and nothing later notices:
+       * `loadShelf` trusts a cache whose folder listing still agrees. That is
+       * the failure this pass exists for, and a count or an id set cannot see
+       * it. Comparing the fields the shelf actually reads can. */
+      if (stop()) return { ok: false, findings: ['cancelled'], notes }
+      const scanned = await scanBooks(fs)
+      const onDisk = new Map(scanned.map((one) => [one.bookId, one] as const))
+      const cached = parseIndex(new TextDecoder().decode(await fs.readFile(INDEX_FILE)))
+      if (cached === null) findings.push('index.json is missing or will not parse')
+      else {
+        const indexed = new Map(cached.map((one) => [one.bookId, one] as const))
+        /* A DUPLICATE ROW IS A FAULT, and a map alone would hide it: an
+         * `index.json` holding one book twice has the right ids and the wrong
+         * contents. */
+        if (indexed.size !== cached.length) {
+          findings.push(`index.json holds ${cached.length - indexed.size} duplicate row(s)`)
+        }
+        const missing = [...onDisk.keys()].filter((id) => !indexed.has(id))
+        const extra = [...indexed.keys()].filter((id) => !onDisk.has(id))
+        if (missing.length > 0) findings.push(`index.json is missing ${missing.length} book(s) the folders hold, e.g. ${missing[0]}`)
+        if (extra.length > 0) findings.push(`index.json holds ${extra.length} book(s) with no folder, e.g. ${extra[0]}`)
+        const stale = [...onDisk.entries()].filter(([id, row]) => {
+          const held = indexed.get(id)
+          return held !== undefined && summarise(held) !== summarise(row)
+        })
+        if (stale.length > 0) {
+          findings.push(`index.json is behind the record for ${stale.length} book(s), e.g. ${stale[0]?.[0] ?? ''}`)
+        }
+      }
+    } catch (error) {
+      findings.push(`the library could not be scanned: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  return { ok: findings.length === 0, findings, notes }
+}
+
 export const sync: Capability = {
   id: 'sync',
   requires: ['peer'],
@@ -191,6 +332,7 @@ export const sync: Capability = {
     {
       id: 'sync:download',
       label: 'Download',
+      icon: 'download',
       /* A satchel's metadata-only row. The kernel's open path still refuses
        * a book with no bytes (`canOpen`); tap-to-open-fetches is C.6 polish
        * — this action is the honest seam today. */
@@ -201,8 +343,25 @@ export const sync: Capability = {
         }),
     },
     {
-      id: 'sync:remove-download',
-      label: 'Remove download',
+      /* EVICT, not "Remove download" (phase 11).
+       *
+       * The service table publishes `remove` with a contract — RECOVERABLE,
+       * to the trash — and deleting this device's copy of some bytes is not
+       * that act: the book stays on the shelf and every other device keeps
+       * its copy. Two different verbs wearing one word is how a reader comes
+       * to believe a menu item does something it does not.
+       *
+       * The cover cache already said `evict`, and `content.evict` and
+       * `paper content evict` say it now. One concept, one word, in all four
+       * places it is written down. */
+      id: 'sync:evict',
+      label: 'Evict',
+      /* DELIBERATELY NOT A BIN. `Trash2` is the shelf's Remove, and the whole
+       * reason this verb is called Evict is that the two acts are different:
+       * Remove is recoverable and reaches every device, Evict frees this
+       * device's bytes and the book stays put. Giving them one icon would
+       * undo in artwork exactly what the label was renamed to prevent. */
+      icon: 'circle-minus',
       when: (book) => runningRole() === 'satchel' && book.hasContent === true,
       run: (bookId) =>
         removeDownloadAction(bookId).catch(() => {
@@ -235,6 +394,7 @@ export const sync: Capability = {
     let myStorageModel: StorageModel | null = null
     let unbindClock: Disposable | null = null
     let unbindRecorder: Disposable | null = null
+    let unbindShelfPort: Disposable | null = null
     let closeJournal: (() => void) | null = null
     let unserve: (() => void) | null = null
     let scheduler: SyncScheduler | null = null
@@ -262,6 +422,7 @@ export const sync: Capability = {
         if (scheduler !== null) unbindScheduler(scheduler)
       })
       step('syncNow', () => unregisterSyncNow?.())
+      step('shelf-port', () => unbindShelfPort?.dispose())
       step('serve', () => unserve?.())
       step('backfill', () => {
         if (backfillTimer !== null) clearTimeout(backfillTimer)
@@ -344,6 +505,12 @@ export const sync: Capability = {
          * covers a journal append still in flight. A private queue here
          * silently exempted exactly the writes durability exists for. */
         queue: services.writes,
+        /* THE LANE EACH SURFACE ACTUALLY WRITES ON, so `markRemote`'s fence
+         * orders against the kernel's own writers. `library.lane` is the
+         * folder-and-rekey-aware resolver every record, mark and move write
+         * uses; cards are a separate surface on their own key, which is the
+         * empty string the card store queues under. */
+        lane: (book, what) => (what === 'cards' ? '' : services.library.lane(book)),
         clock: () => clock.now(),
         /* NOT swallowed: the fsync hook is the journal's durability
          * barrier, and a barrier that reports success on failure is no
@@ -413,6 +580,10 @@ export const sync: Capability = {
       const coverCache = createCoverCache({
         fs,
         settings,
+        /* The host's size port where the host has one — `paper` does, the
+         * webview does not. Read at CALL time like the other outward ports,
+         * because it is bound after the services are built. */
+        bytesAt: async (path) => (await services.sizes()?.bytesAt(path)) ?? null,
         lookup: async (book) => {
           try {
             return await withShelf(async (channel) => {
@@ -444,6 +615,35 @@ export const sync: Capability = {
         removeDownload: (book) => removeDownloadAction(book),
       })
       storageModel = myStorageModel
+
+      /* THE `shelf` NOUN of the service table (phase 11) — the ROLE, its
+       * endpoint, and the journal's head and epoch. Bound here because this
+       * is the one place all four are in hand at once, and late-bound
+       * because the kernel imports nothing from a capability. Unbound (a
+       * browser tab, the CLI beside the app), `shelf.status` still counts
+       * the books and says `null` for these; `shelf.sync` and `shelf.verify`
+       * refuse `unsupported` by name, because there is nothing partial to
+       * give — a sync that did not happen must not answer "started". */
+      unbindShelfPort = services.bindShelfPort({
+        facts: async () => ({
+          role,
+          endpointId: await port
+            .status()
+            .then((one) => one.endpointId)
+            .catch(() => null),
+          journalSeq: openJournal.head(),
+          epoch: openJournal.epoch(),
+        }),
+        sync: async () => {
+          /* A SHELF has no scheduler — it answers satchels, it does not dial
+           * them — so "sync now" there is a request with nobody to make it
+           * of, and saying so beats returning `started: true` for nothing. */
+          if (role !== 'satchel') return { started: false, detail: 'a shelf answers satchels; it does not dial them' }
+          syncNow()
+          return { started: true, detail: null }
+        },
+        verify: async (signal) => integrityPass(openJournal, services.fs, signal),
+      })
 
       if (role === 'shelf') {
         /* The composed services are served centrally by the peer host once
@@ -548,3 +748,187 @@ function runningRole(): SyncRole | null {
 export { useSync } from './ui/useSync'
 export { syncStatus } from './lib/runtime'
 export type { SyncStatus } from './lib/status'
+
+/**
+ * THE JOURNAL WITHOUT THE TRANSPORT — this capability's second and much
+ * smaller composition, for a process that owns the library but has no peer
+ * plugin (phase 11, WI-11.7).
+ *
+ * WHAT IT IS FOR. `paper` writes to the same folders the app does, and until
+ * this existed those writes were invisible to sync: the CLI composed the
+ * kernel's storage and nothing else, so `bindRecorder` was never called and
+ * every mutation went to disk without a journal entry. Replication is a
+ * journal feed. A change the journal never saw cannot travel, in either
+ * direction, however long anyone waits — measured on two machines, with the
+ * book's folder on disk and `grep -c` on `journal.jsonl` answering `0`.
+ *
+ * So this is the wiring that was missing, and only that wiring: the device id
+ * and clock floor the app already persists, the journal over the kernel's own
+ * filesystem, and the two binds. NO ledger, NO scheduler, NO role, NO peer —
+ * a CLI cannot dial anyone, and pretending otherwise would put a second,
+ * transport-less definition of "syncing" into this file. The commit lands in
+ * the journal; the outbox is rebuilt from those lines the next time the APP
+ * opens it, and the app pushes. That is why this works without a transport,
+ * and it is a property of `compact`, which deliberately keeps the last local
+ * commit even when a remote one landed after it.
+ *
+ * WHY THE DIRTY FLAG IS THE GATE, AND WHICH DIRECTION OF IT IS LOAD-BEARING.
+ * Two processes appending to one `journal.jsonl` would corrupt it — not
+ * merely the bytes, which `O_APPEND` would keep whole, but `nextSeq` and the
+ * rev CAS, which each process holds in memory and neither would see the other
+ * move. The advisory lock cannot prevent it: the app cannot take that lock (a
+ * webview's filesystem has no exclusive create, see `docs/cli.md`).
+ *
+ * The flag is what can. `open()` writes it before it returns, so a live
+ * journal ALWAYS has it up — and the useful direction is the contrapositive:
+ * **flag down means no journal opened these files and left them open.** That
+ * is the only guarantee needed here, and it holds without asking the
+ * operating system what is running.
+ *
+ * IT IS NOT A LIVENESS SIGNAL, and reading it as one is a mistake this
+ * comment exists to stop somebody repeating. Measured on a real library:
+ * `close()` did not clear it across an ordinary `quit app "Paper"`, and both
+ * machines carried the flag for days with the app shut. A Tauri app quits by
+ * tearing down the webview, and an async close that drains a queue and does
+ * file I/O is not guaranteed to finish first. So "flag up" means "up for SOME
+ * reason" — running, crashed, or simply quit — and the CLI may not conclude
+ * from it that anyone is there.
+ *
+ * Hence the asymmetry: a journal is opened only when the flag is DOWN, which
+ * is both safe and, on a library that has ever run the app, uncommon. The
+ * caller decides what to do about the refusal; this only refuses.
+ *
+ * A second reason the same gate is right: a dirty open owes
+ * `verifyAfterUncleanShutdown()`, a pass over every book that RAISES REVS.
+ * That is the app's job on its own schedule, not something a `paper book add`
+ * should do to sixteen gigabytes on its way past.
+ *
+ * WHAT IS STILL UNCOVERED, and is not pretended away: the app STARTING while
+ * a CLI command holds the journal. The flag is checked once, before opening.
+ * That window is the same one the CLI has always had against the stores, it
+ * is not made wider here, and closing it needs the app to take a real lock —
+ * a Rust command with an ACL entry, which is a phase of its own.
+ */
+export class JournalInUse extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'JournalInUse'
+  }
+}
+
+export interface LocalJournalOptions {
+  readonly services: KernelServices
+  /** Durability barrier. App-relative paths, as everywhere in this file. */
+  readonly fsync?: (path: string) => Promise<void>
+  /**
+   * Open even when the dirty flag is up, WITHOUT running the recovery pass
+   * the flag asks for and without clearing it.
+   *
+   * The caller states this, because the caller is the only one that can know
+   * it: the flag means "not closed cleanly", which in the field is permanent
+   * (the app's teardown cannot finish before its process dies), so the real
+   * question — is another writer live — is answered by asking the operating
+   * system, and a capability has no business doing that.
+   */
+  readonly allowDirty?: boolean
+}
+
+export interface LocalJournal {
+  /** Drain, clear the dirty flag, unbind. The clean half of the pair. */
+  readonly close: () => Promise<void>
+}
+
+export async function openLocalJournal({
+  services,
+  fsync,
+  allowDirty = false,
+}: LocalJournalOptions): Promise<LocalJournal> {
+  const fs = services.fs
+  /* Not a soft no: a caller that asked for a journal and silently got none
+   * would write exactly the unreplicated mutations this exists to stop. */
+  if (!fs) throw new Error('openLocalJournal: these services have no filesystem')
+  const dirty = await fs.exists(JOURNAL_DIRTY_PATH)
+  /* THE CALLER'S ANSWER OUTRANKS THE FLAG, IN BOTH DIRECTIONS.
+   *
+   * `allowDirty` used to be read only when the flag was up, so a caller that
+   * KNEW another process held the library was still allowed to open a journal
+   * whose flag happened to be down — which is precisely the app-starting
+   * window: the app is live, has not yet written the flag, and a CLI opening
+   * then makes two writers. The caller is the only side that can see a live
+   * process, so its refusal has to bind whatever the flag says. */
+  if (!allowDirty) {
+    throw new JournalInUse(
+      dirty
+        ? 'the sync journal is marked dirty — Paper is running on this machine, or last exited without closing it'
+        : 'Paper is running on this machine, or its presence could not be determined',
+    )
+  }
+
+  /* THE SAME DEVICE AND THE SAME FLOOR THE APP USES, read from the settings
+   * store they share. A private device id would make this machine's own CLI
+   * look like a third device to every peer, and a private floor would let a
+   * stamp go backwards across the two processes. */
+  const clock = createClock({
+    deviceId: ensureDeviceId(services.settings),
+    load: () => {
+      const raw = services.settings.get(CLOCK_FLOOR_SETTING)
+      return raw !== '' && isHlc(raw) ? (raw as Hlc) : null
+    },
+    save: (last) => services.settings.set(CLOCK_FLOOR_SETTING, last),
+  })
+  const unbindClock = services.bindClock(() => clock.now())
+  const journal = createJournal({
+    fs,
+    /* The shelf's queue, for `JournalOptions.queue`'s stated reason: the same
+     * one the stores write on, so a drain covers a journal append in flight. */
+    queue: services.writes,
+    /* Same resolver as the app's composition: the fence has to land on the
+     * lane the kernel's writers use, and `paper` shares that queue too. */
+    lane: (book, what) => (what === 'cards' ? '' : services.library.lane(book)),
+    clock: () => clock.now(),
+    ...(fsync ? { fsync } : {}),
+    /* Appending is ours; RECOVERING IS THE APP'S. Declining the pass keeps
+     * the flag up, so the app still owes it and still performs it. */
+    ...(dirty ? { recover: false } : {}),
+  })
+  try {
+    await journal.open()
+  } catch (error) {
+    /* The clock is bound before the open because the journal stamps with it;
+     * an open that threw would otherwise leave the port held by a journal
+     * that does not exist. */
+    unbindClock.dispose()
+    throw error
+  }
+  const unbindRecorder = services.bindRecorder(journal)
+  return {
+    close: async () => {
+      try {
+        await journal.close()
+      } finally {
+        unbindRecorder.dispose()
+        unbindClock.dispose()
+      }
+    },
+  }
+}
+
+/**
+ * Resolves when the journal this capability opened has finished closing.
+ *
+ * `Composition.dispose()` is synchronous, and the last thing sync's teardown
+ * does is asynchronous — drain the queue, write the meta, remove the dirty
+ * flag, fsync. `dispose()` therefore RETURNS BEFORE THE JOURNAL IS SHUT, which
+ * is invisible on a reload (the next lifetime already waits on this same
+ * promise) and fatal on a quit, where the process exits into the gap and the
+ * flag is left up forever.
+ *
+ * The quit handshake in `lib.rs` awaits this before letting the app exit.
+ * Resolves immediately when no journal was ever opened, and never rejects —
+ * a close that failed is reported through diagnostics, and a shutdown that
+ * refused to finish because of it would be a worse bug than the one it
+ * reported.
+ */
+export function journalClosed(): Promise<void> {
+  return journalHandoff.catch(() => {})
+}

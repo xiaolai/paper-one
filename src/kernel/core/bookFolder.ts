@@ -32,7 +32,7 @@ import type { VaultFs } from './bookVault'
 import { extensionFor } from './bookVault'
 import { isFormat, type Format } from './formats'
 import { hlcOf, isHlc, type Hlc } from './hlc'
-import { tagKey } from './tags'
+import { TAG_MAX, normalizeTag, tagKey } from './tags'
 
 export const BOOKS_DIR = 'books'
 export const TRASH_DIR = 'trash'
@@ -216,7 +216,20 @@ export interface BookRecord {
  * this file did not sanction.
  */
 function safeId(bookId: string): string {
-  return bookId.replace(/[^a-zA-Z0-9]/g, '_')
+  const safe = bookId.replace(/[^a-zA-Z0-9]/g, '_')
+  /* AN EMPTY SEGMENT IS NOT A BOOK'S FOLDER, IT IS THE LIBRARY'S.
+   *
+   * `folderOf('')` was `books/`, and `trashOf('')` was `trash/` — so
+   * `trashBook(fs, '')` renamed the WHOLE `books` directory into the trash.
+   * Reaching it needed a record whose id was empty, which nothing the app
+   * writes produces; the published service table changed that, because
+   * `book.add` takes an id from a caller. The refusal belongs here rather
+   * than at that one caller: this is the function that promises a path is one
+   * safe segment, and "one segment" was true of a slash and false of nothing.
+   *
+   * The same reasoning as the character class beside it, and the same place. */
+  if (safe === '') throw new Error('bookFolder: a book id must have at least one alphanumeric character')
+  return safe
 }
 
 export const folderOf = (bookId: string): string => `${BOOKS_DIR}/${safeId(bookId)}`
@@ -252,7 +265,19 @@ export const marksPathIn = (bookId: string): string => `${folderOf(bookId)}/mark
 export const contentPathIn = (bookId: string, name: string): string =>
   `${folderOf(bookId)}/content.${extensionFor(name)}`
 
-const MAX_FIELD = 500
+/**
+ * The bound on a record's prose fields, EXPORTED since phase 11.
+ *
+ * `parseRecord` SLICES at it, which is right for a file that may have been
+ * hand-edited: a title one character too long is still a title. It is wrong
+ * for a published API, where slicing means answering a caller with the title
+ * they sent and storing a different one — the write reports success, the read
+ * a fortnight later disagrees, and nothing in between said so. The service
+ * table refuses past this bound instead, and it refuses against THIS number
+ * rather than a copy of it.
+ */
+export const MAX_RECORD_FIELD = 500
+const MAX_FIELD = MAX_RECORD_FIELD
 /* There is no `MAX_LONG` any more. It was the shared 4000-character bound for
  * the two fields that are not prose — a reading position and an address — and
  * `text` SLICES at its bound. Both of them mean nothing shortened, and both were
@@ -269,7 +294,12 @@ const MAX_FIELD = 500
  * read. Generous enough that no real CFI reaches it, and a bound rather than
  * none because this parses a file a reader can edit.
  */
-const MAX_POSITION = 64_000
+/** The bound on a reading position, exported for the same reason as
+ *  `MAX_RECORD_FIELD` — and this one is DROPPED past rather than cut, so a
+ *  caller who exceeds it would otherwise be told the position was saved and
+ *  find the book opening at the beginning. */
+export const MAX_RECORD_POSITION = 64_000
+const MAX_POSITION = MAX_RECORD_POSITION
 /**
  * The bound for a book's origin, DROPPED past it rather than cut — for the same
  * reason as a position, and it took the same bug to notice. Slicing a URL does
@@ -309,6 +339,36 @@ const list = (v: unknown, limit = MAX_LIST): readonly string[] | undefined => {
   return clean.length ? clean : undefined
 }
 
+/**
+ * The reader's tags, read back as a writer would have written them.
+ *
+ * The general list reader TRUNCATES each entry at `MAX_FIELD`, which is the
+ * record-field cap and eight times what a tag may be: every write goes through
+ * `normalizeTag`, so a five-hundred-character tag is a state nothing in the app
+ * can produce. Reading one back kept it alive on the next write, published it
+ * on every `book.list` row, and — with 4 096 of them — put the row past what a
+ * frame can carry.
+ *
+ * Normalised rather than sliced, because slicing at a different length than the
+ * writer uses is how two spellings of one tag come to exist. Deduplicated by
+ * key afterwards, since two distinct over-long spellings can normalise to one.
+ */
+function readTags(raw: unknown, limit: number): readonly string[] | undefined {
+  if (!Array.isArray(raw)) return undefined
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const one of raw) {
+    if (typeof one !== 'string') continue
+    const tag = normalizeTag(one)
+    const key = tagKey(tag)
+    if (!key || seen.has(key)) continue
+    seen.add(key)
+    out.push(tag)
+    if (out.length >= limit) break
+  }
+  return out.length ? out : undefined
+}
+
 /** A BLAKE3 hash as `contentHash` stores it: 64 lowercase hex digits. */
 const CONTENT_HASH = /^[0-9a-f]{64}$/
 
@@ -332,7 +392,18 @@ function readTagClock(raw: unknown): TagClock | undefined {
     if (typeof value !== 'object' || value === null || Array.isArray(value)) continue
     const entry = value as Record<string, unknown>
     const spelling = entry['spelling']
-    if (typeof spelling !== 'string' || spelling === '' || spelling.length > MAX_FIELD) continue
+    /* A SPELLING NO WRITER CAN PRODUCE IS NOT A SPELLING.
+     *
+     * This bounded the field at `MAX_FIELD` — the general record-field cap —
+     * while every write goes through `normalizeTag`, which cuts at `TAG_MAX`
+     * code points. So the parser admitted entries eight times longer than any
+     * writer creates, and `book.get` publishes the WHOLE clock in one
+     * unpaged `req`: 4 096 entries at the old bound put a single response
+     * past the envelope's 4 MiB payload cap, where it fails as a wire error
+     * naming nothing. Counted in CODE POINTS for the same reason
+     * `normalizeTag` cuts in them — sixty emoji are a hundred and twenty
+     * UTF-16 units and are still sixty characters. */
+    if (typeof spelling !== 'string' || spelling === '' || [...spelling].length > TAG_MAX) continue
     if (tagKey(spelling) !== key) continue
     if (!isHlc(entry['at'])) continue
     if (typeof entry['on'] !== 'boolean') continue
@@ -384,8 +455,8 @@ export function parseRecord(raw: string | null): BookRecord | null {
     ...(list(r['subjects']) ? { subjects: list(r['subjects'])! } : {}),
     ...(clock
       ? { tagClock: clock, ...(derivedTags!.length ? { tags: derivedTags! } : {}) }
-      : list(r['tags'], MAX_TAGS)
-        ? { tags: list(r['tags'], MAX_TAGS)! }
+      : readTags(r['tags'], MAX_TAGS)
+        ? { tags: readTags(r['tags'], MAX_TAGS)! }
         : {}),
     /* NOT `text`, which SLICES. See `MAX_POSITION`: a shortened CFI is not a
      * rougher position, it is a broken one, and it used to overwrite the good

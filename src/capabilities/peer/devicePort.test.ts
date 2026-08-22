@@ -1,0 +1,417 @@
+import { describe, expect, it, vi } from 'vitest'
+import type { WirePeer } from './lib/wire'
+import { devicePortOver, deviceRow, readRole, releasePeer, serveWhenShelf } from './index'
+
+/**
+ * THE `device` NOUN'S ADAPTER — the three operations that change who this
+ * shelf trusts.
+ *
+ * They lived inline in the capability's `start`, which needs a composed app
+ * around it, so not one of them had ever been executed by a test: not the
+ * refusal translation, not the read-back that catches a dropped grant, not
+ * the concurrent-forget behaviour that exists because two of them raced in
+ * the field. These are authorisation mutations reachable over the wire.
+ */
+
+const PEER: WirePeer = {
+  id: 'peer-1',
+  name: 'Paper on macOS',
+  platform: 'macos',
+  role: 'satchel',
+  grants: ['book:read'],
+  pairedAt: 1_700_000_000_000,
+  lastSeenAt: 1_700_000_100_000,
+  lastAddrs: ['198.18.0.1:7842'],
+} as WirePeer
+
+/** A plugin whose stored peers the test controls. */
+function plugin(initial: readonly WirePeer[] = [PEER]) {
+  let peers = [...initial]
+  const calls = { setGrants: 0, forgetPeer: 0, listPeers: 0 }
+  return {
+    calls,
+    peers: () => peers,
+    listPeers: async () => {
+      calls.listPeers += 1
+      return peers
+    },
+    setGrants: async (id: string, grants: readonly string[]) => {
+      calls.setGrants += 1
+      const at = peers.findIndex((one) => one.id === id)
+      if (at === -1) throw { kind: 'peerUnknown' }
+      peers = peers.map((one, index) => (index === at ? { ...one, grants: [...grants] } : one))
+    },
+    forgetPeer: async (id: string) => {
+      calls.forgetPeer += 1
+      if (!peers.some((one) => one.id === id)) throw { kind: 'peerUnknown' }
+      peers = peers.filter((one) => one.id !== id)
+    },
+  }
+}
+
+describe('deviceRow', () => {
+  /**
+   * `lastAddrs` IS THIS LAN'S SHAPE — internal hostnames and private
+   * addresses — and no caller of `device.list` needs it to name a device.
+   * Built from named fields rather than spread, so it cannot be published by
+   * accident and neither can whatever the plugin adds next.
+   */
+  it('publishes exactly the declared fields and nothing else', () => {
+    const row = deviceRow(PEER)
+    expect(Object.keys(row).sort()).toEqual(['grants', 'id', 'lastSeenAt', 'name', 'pairedAt', 'platform', 'role'])
+    expect(JSON.stringify(row)).not.toContain('198.18')
+    expect(row).toMatchObject({ id: 'peer-1', role: 'satchel', platform: 'macos' })
+  })
+
+  /* THE GRANTS ARE COPIED. They are the plugin's own array, and a caller that
+   * sorted or pushed to what it was handed would be editing the
+   * authorisation record this process is holding. */
+  it('hands out a copy of the grants, not the plugin’s array', () => {
+    const row = deviceRow(PEER)
+    expect(row.grants).toEqual(PEER.grants)
+    expect(row.grants).not.toBe(PEER.grants)
+    ;(row.grants as string[]).push('shelf:admin')
+    expect(PEER.grants).toEqual(['book:read'])
+  })
+})
+
+describe('device.list', () => {
+  it('projects every stored peer', async () => {
+    const port = devicePortOver(plugin([PEER, { ...PEER, id: 'peer-2' }]))
+    expect((await port.list()).map((one) => one.id)).toEqual(['peer-1', 'peer-2'])
+  })
+
+  it('answers an empty list for a plugin with no peers', async () => {
+    expect(await devicePortOver(plugin([])).list()).toEqual([])
+  })
+})
+
+describe('device.grant', () => {
+  it('stores the grants and answers with the peer as it now stands', async () => {
+    const backing = plugin()
+    const port = devicePortOver(backing)
+    const after = await port.grant('peer-1', ['book:*', 'mark:read'])
+    expect(after.grants).toEqual(['book:*', 'mark:read'])
+    expect(backing.peers()[0]?.grants).toEqual(['book:*', 'mark:read'])
+  })
+
+  /**
+   * THE ANSWER IS READ BACK, NOT ECHOED.
+   *
+   * The plugin is the authority on what it stored. A caller told "these are
+   * the grants" from its own request would never learn that one had been
+   * dropped — which is precisely the case where a peer ends up with less
+   * access than the operator believes they granted.
+   */
+  it('reports what the plugin actually kept, not what was asked for', async () => {
+    const backing = plugin()
+    const dropping = {
+      ...backing,
+      setGrants: async (id: string, grants: readonly string[]) =>
+        backing.setGrants(id, grants.filter((one) => one !== 'shelf:admin')),
+    }
+    const after = await devicePortOver(dropping).grant('peer-1', ['book:*', 'shelf:admin'])
+    expect(after.grants).toEqual(['book:*'])
+  })
+
+  /**
+   * THE PLUGIN'S REFUSAL, TRANSLATED. `peerUnknown` is not a `ServiceError`,
+   * so the envelope carried it as `internal` — the generic code a caller
+   * cannot branch on — for a condition with a perfectly good name.
+   */
+  it('refuses an unknown peer by name rather than as an internal fault', async () => {
+    const port = devicePortOver(plugin([]))
+    await expect(port.grant('nobody', ['book:*'])).rejects.toMatchObject({
+      code: 'not-found',
+      message: 'no peer nobody',
+      retryable: false,
+    })
+  })
+
+  /* A PEER THAT VANISHED BETWEEN THE WRITE AND THE READ-BACK gets the same
+   * name, because it is the same fact. */
+  it('refuses when the peer disappears between the write and the read-back', async () => {
+    const backing = plugin()
+    const racing = {
+      ...backing,
+      listPeers: async () => (backing.calls.setGrants > 0 ? [] : backing.peers()),
+    }
+    await expect(devicePortOver(racing).grant('peer-1', ['book:*'])).rejects.toMatchObject({ code: 'not-found' })
+  })
+
+  /* ANY OTHER FAILURE IS CARRIED OUT AS ITSELF. Translating everything into
+   * `not-found` would tell an operator a peer is gone when the plugin simply
+   * could not be reached. */
+  it('carries an unrelated plugin failure through untranslated', async () => {
+    const backing = plugin()
+    const broken = {
+      ...backing,
+      setGrants: async () => {
+        throw new Error('the plugin is not responding')
+      },
+    }
+    await expect(devicePortOver(broken).grant('peer-1', ['book:*'])).rejects.toThrow(/not responding/)
+  })
+})
+
+describe('device.forget', () => {
+  it('revokes the pairing and says it did', async () => {
+    const backing = plugin()
+    expect(await devicePortOver(backing).forget('peer-1')).toBe(true)
+    expect(backing.peers()).toEqual([])
+  })
+
+  /**
+   * TWO CONCURRENT FORGETS BOTH SUCCEED — one deletes, the other reports
+   * "there was nothing to forget".
+   *
+   * This was a pre-check followed by a delete, two separate IPC calls: both
+   * saw the peer, one deleted it, and the other's delete failed on a peer that
+   * had just gone — reported as an error for doing exactly what was asked.
+   */
+  it('does not fail the loser of a race with another forget', async () => {
+    const backing = plugin()
+    const port = devicePortOver(backing)
+    const [first, second] = await Promise.all([port.forget('peer-1'), port.forget('peer-1')])
+    expect([first, second].filter(Boolean)).toHaveLength(1)
+    expect([first, second]).toContain(false)
+    expect(backing.peers()).toEqual([])
+  })
+
+  it('answers false for a peer that was never there', async () => {
+    expect(await devicePortOver(plugin([])).forget('nobody')).toBe(false)
+  })
+
+  it('carries an unrelated plugin failure through rather than reporting false', async () => {
+    const backing = plugin()
+    const broken = {
+      ...backing,
+      forgetPeer: async () => {
+        throw new Error('the plugin is not responding')
+      },
+    }
+    await expect(devicePortOver(broken).forget('peer-1')).rejects.toThrow(/not responding/)
+  })
+})
+
+/**
+ * THE ROLE READ IS ASKED EXACTLY ONCE PER COMPOSITION, so whatever it answers
+ * decides whether a shelf serves for the rest of the session.
+ *
+ * A single transient failure used to resolve to "satchel" — which serves
+ * nothing — so a shelf that lost one race at startup silently served nothing
+ * until the app was restarted.
+ */
+describe('readRole', () => {
+  const quiet = { warn: () => {} }
+
+  it('answers the role when the plugin is ready', async () => {
+    expect(await readRole({ localRole: async () => 'shelf' }, () => false, quiet)).toBe('shelf')
+  })
+
+  it('retries a plugin that is not ready yet, rather than concluding satchel', async () => {
+    vi.useFakeTimers()
+    try {
+      let tries = 0
+      const port = {
+        localRole: async () => {
+          tries += 1
+          if (tries < 3) throw new Error('not ready')
+          return 'shelf' as const
+        },
+      }
+      const answer = readRole(port, () => false, quiet)
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(await answer).toBe('shelf')
+      expect(tries).toBe(3)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  /* NULL, NOT A GUESS. The caller serves nothing either way, but "we could
+   * not find out" and "this is a satchel" are different facts. */
+  it('answers null and says so when it never becomes readable', async () => {
+    vi.useFakeTimers()
+    try {
+      const said: { event: string; fields: Record<string, unknown> }[] = []
+      const answer = readRole(
+        {
+          localRole: async () => {
+            throw new Error('the plugin is gone')
+          },
+        },
+        () => false,
+        { warn: (event, fields) => said.push({ event, fields }) },
+      )
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(await answer).toBeNull()
+      expect(said).toHaveLength(1)
+      expect(said[0]?.event).toBe('peer.role-unknown')
+      expect(said[0]?.fields.message).toMatch(/plugin is gone/)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  /* ABANDONED THE MOMENT THE CAPABILITY STOPS, so a dead plugin does not hold
+   * a teardown open for the length of the backoff. */
+  it('gives up at once when the capability has stopped', async () => {
+    let tries = 0
+    const answer = await readRole(
+      {
+        localRole: async () => {
+          tries += 1
+          throw new Error('not ready')
+        },
+      },
+      () => true,
+      quiet,
+    )
+    expect(answer).toBeNull()
+    expect(tries).toBe(0)
+  })
+})
+
+/**
+ * TEARDOWN, AS A FUNCTION.
+ *
+ * It used to read four `let` slots out of `start`'s scope, which is why that
+ * function ran past a hundred lines and why the teardown could only be
+ * exercised by composing the whole capability — so its one real property, that
+ * a throwing dispose must not rob the later steps, had never been executed.
+ */
+describe('releasePeer', () => {
+  const disposer = (record: string[], label: string, throws = false) => ({
+    dispose: () => {
+      record.push(label)
+      if (throws) throw new Error(`${label} failed`)
+    },
+  })
+
+  it('releases everything, in reverse order of acquisition', () => {
+    const seen: string[] = []
+    releasePeer(
+      {
+        port: null,
+        model: disposer(seen, 'model') as never,
+        serviceHost: disposer(seen, 'service-host'),
+        devicePort: disposer(seen, 'device-port'),
+      },
+      { warn: () => {} },
+    )
+    expect(seen).toEqual(['service-host', 'device-port', 'model'])
+  })
+
+  /**
+   * A CAPABILITY WHOSE TEARDOWN GIVES UP HALFWAY is worse than one that never
+   * had a teardown, because the half that ran makes the rest look done.
+   */
+  it('carries on past a dispose that throws, and says which one', () => {
+    const seen: string[] = []
+    const said: { event: string; fields: Record<string, unknown> }[] = []
+    releasePeer(
+      {
+        port: null,
+        model: disposer(seen, 'model') as never,
+        serviceHost: disposer(seen, 'service-host', true),
+        devicePort: disposer(seen, 'device-port'),
+      },
+      { warn: (event: string, fields: Record<string, unknown>) => said.push({ event, fields }) },
+    )
+    expect(seen).toEqual(['service-host', 'device-port', 'model'])
+    expect(said).toHaveLength(1)
+    expect(said[0]?.event).toBe('peer.teardown-step-failed')
+    expect(said[0]?.fields.label).toBe('service-host')
+  })
+
+  it('is a no-op for what was never acquired', () => {
+    expect(() =>
+      releasePeer({ port: null, model: null, serviceHost: null, devicePort: null }, { warn: () => {} }),
+    ).not.toThrow()
+  })
+})
+
+/**
+ * THE SHELF SIDE OF THE SERVICE TABLE.
+ *
+ * A shelf serves the composed set over the router; a satchel serves nothing.
+ * The property that could not be reached inline is the one about ORDER:
+ * teardown is re-checked after every await, so a serve that resolves past
+ * `stop` is unserved on the spot rather than leaking listeners into an ended
+ * lifetime.
+ */
+describe('serveWhenShelf', () => {
+  const quiet = { warn: () => {} }
+  const SERVICES = [{ name: 'book.list', grant: 'book:read', handler: () => [] }] as never
+
+  /** A port whose role and `serve` the test controls. */
+  function port(role: 'shelf' | 'satchel', onServe?: () => void) {
+    const state = { served: 0, unserved: 0 }
+    return {
+      state,
+      port: {
+        localRole: async () => role,
+        serve: async () => {
+          state.served += 1
+          onServe?.()
+          return () => void (state.unserved += 1)
+        },
+      } as never,
+    }
+  }
+
+  it('serves on a shelf', async () => {
+    const world = port('shelf')
+    const held = await serveWhenShelf({ port: world.port, stopped: () => false, diagnostics: quiet })(SERVICES)
+    expect(world.state.served).toBe(1)
+    held.dispose()
+    expect(world.state.unserved).toBe(1)
+  })
+
+  it('serves nothing on a satchel', async () => {
+    const world = port('satchel')
+    await serveWhenShelf({ port: world.port, stopped: () => false, diagnostics: quiet })(SERVICES)
+    expect(world.state.served).toBe(0)
+  })
+
+  it('serves nothing with no plugin at all', async () => {
+    const answer = await serveWhenShelf({ port: null, stopped: () => false, diagnostics: quiet })(SERVICES)
+    expect(() => answer.dispose()).not.toThrow()
+  })
+
+  it('serves nothing when the capability has already stopped', async () => {
+    const world = port('shelf')
+    await serveWhenShelf({ port: world.port, stopped: () => true, diagnostics: quiet })(SERVICES)
+    expect(world.state.served).toBe(0)
+  })
+
+  /**
+   * A SERVE THAT RESOLVES PAST `stop` IS UNSERVED ON THE SPOT.
+   *
+   * `serve` is asynchronous and the capability can be torn down while it is in
+   * flight — a restart, a failed boot. Without this the listeners it
+   * registered outlive the lifetime that asked for them, and the next `start`
+   * runs beside them.
+   */
+  it('undoes a serve that landed after the capability stopped', async () => {
+    let stopped = false
+    const world = port('shelf', () => {
+      stopped = true
+    })
+    const answer = await serveWhenShelf({ port: world.port, stopped: () => stopped, diagnostics: quiet })(SERVICES)
+    expect(world.state.served).toBe(1)
+    expect(world.state.unserved).toBe(1)
+    /* And the disposer it hands back does not unserve a second time. */
+    answer.dispose()
+    expect(world.state.unserved).toBe(1)
+  })
+
+  /* AN EMPTY SET IS NOT SERVED. Registering nothing costs a listener for no
+   * service, and the router would answer `unknown-service` either way. */
+  it('serves nothing when the composed set is empty', async () => {
+    const world = port('shelf')
+    await serveWhenShelf({ port: world.port, stopped: () => false, diagnostics: quiet })([] as never)
+    expect(world.state.served).toBe(0)
+  })
+})

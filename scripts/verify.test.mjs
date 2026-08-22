@@ -34,6 +34,7 @@ describe('the steps', () => {
       'typecheck',
       'test:coverage',
       'build',
+      'build:cli',
       'cargo metadata --locked',
       'cargo fmt --check',
       'cargo clippy -D warnings',
@@ -42,6 +43,9 @@ describe('the steps', () => {
     for (const step of STEPS.filter((s) => s.cmd === 'cargo')) expect(step.args).toContain('src-tauri/Cargo.toml')
     expect(STEPS.find((s) => s.name === 'cargo clippy -D warnings').args.slice(-3)).toEqual(['--', '-D', 'warnings'])
     expect(STEPS.find((s) => s.name === 'build').args).toEqual(['build'])
+    /* The CLI's bundle is gitignored, so no other step here would notice it
+     * stop compiling — and `bin/paper.mjs` is what `sync-scenario.sh` runs. */
+    expect(STEPS.find((s) => s.name === 'build:cli').args).toEqual(['build:cli'])
   })
 })
 
@@ -86,7 +90,7 @@ describe('spawnStep', () => {
 describe('parseArgs', () => {
   it('selects steps with --from and --only, lists with --list, refuses the rest', () => {
     expect(parseArgs([]).steps.map((s) => s.name)).toEqual(STEPS.map((s) => s.name))
-    expect(parseArgs(['--from', 'build']).steps.map((s) => s.name)).toEqual(['build', 'cargo metadata --locked', 'cargo fmt --check', 'cargo clippy -D warnings', 'cargo test --workspace'])
+    expect(parseArgs(['--from', 'build']).steps.map((s) => s.name)).toEqual(['build', 'build:cli', 'cargo metadata --locked', 'cargo fmt --check', 'cargo clippy -D warnings', 'cargo test --workspace'])
     expect(parseArgs(['--only', 'boundaries']).steps.map((s) => s.name)).toEqual(['boundaries'])
     expect(parseArgs(['--from', 'build', '--only', 'cargo fmt --check']).steps.map((s) => s.name)).toEqual(['cargo fmt --check'])
     expect(parseArgs(['--list'])).toEqual({ list: true })

@@ -13,6 +13,7 @@
     "build:desktop": "node scripts/sync-pdfjs-assets.mjs && TAURI_ENV_PLATFORM=darwin vite build",
     "build:ios": "node scripts/sync-pdfjs-assets.mjs && TAURI_ENV_PLATFORM=ios vite build",
     "build:android": "node scripts/sync-pdfjs-assets.mjs && TAURI_ENV_PLATFORM=android vite build",
+    "build:cli": "node scripts/build-cli.mjs",
     "build:all": "pnpm typecheck && pnpm build:desktop && pnpm build:ios && pnpm build:android",
     "preview": "vite preview",
     "typecheck": "rm -rf .types && tsc -b && node scripts/check-kernel-declarations.mjs",
@@ -33,6 +34,8 @@
     "css:check": "node scripts/check-dead-css.mjs",
     "directives:check": "node scripts/check-inert-directives.mjs",
     "features:check": "node scripts/check-feature-ledger.mjs",
+    "docs:services": "node scripts/write-service-docs.mjs",
+    "docs:notices": "node scripts/write-third-party-notices.mjs",
     "capability:remove": "node scripts/capability-remove.mjs",
     "verify": "node scripts/verify.mjs",
     "verify:without": "node scripts/verify-without.mjs"
@@ -72,5 +75,8 @@
     "typescript": "^5.9.0",
     "vite": "^7.1.0",
     "vitest": "3.2.7"
+  },
+  "bin": {
+    "paper": "./bin/paper.mjs"
   }
 }

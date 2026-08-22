@@ -57,7 +57,22 @@ export class CapabilityError extends Error {
 }
 
 /** The manifest's id rule, so the registry and the validator agree. */
-export const CAPABILITY_ID = /^[a-z][a-z0-9-]*$/
+/**
+ * PRIVATE, and a function is published instead of it.
+ *
+ * A `RegExp` is a mutable object. Exported, any module loaded before
+ * composition could replace its `.test` or call `.compile()` and widen what
+ * counts as a capability id — admitting path or namespace syntax the
+ * validator exists to reject, and doing it from outside the kernel with no
+ * trace at the call site. `isCapabilityId` closes over this one and cannot be
+ * redefined by a consumer.
+ */
+const CAPABILITY_ID_PATTERN = /^[a-z][a-z0-9-]*$/
+
+/** Whether `value` is a well-formed capability id. */
+export function isCapabilityId(value: unknown): value is string {
+  return typeof value === 'string' && CAPABILITY_ID_PATTERN.test(value)
+}
 /** The one id no capability may take: its namespaces would be the kernel's. */
 export const RESERVED_ID = 'kernel'
 
@@ -279,8 +294,8 @@ function checkIds(caps: readonly Capability[]): void {
   const seen = new Set<string>()
   for (const cap of caps) {
     const id: unknown = cap.id
-    if (typeof id !== 'string' || !CAPABILITY_ID.test(id)) {
-      throw invalid('invalid-id', null, `capability id ${JSON.stringify(id)} does not match ${CAPABILITY_ID}`)
+    if (!isCapabilityId(id)) {
+      throw invalid('invalid-id', null, `capability id ${JSON.stringify(id)} does not match ${CAPABILITY_ID_PATTERN}`)
     }
     if (id === RESERVED_ID) throw invalid('reserved-id', id, `"${RESERVED_ID}" is not a capability id`)
     if (seen.has(id)) throw invalid('duplicate-id', id, `capability "${id}" is listed twice`)
@@ -409,12 +424,40 @@ export function registrationOrder(caps: readonly Capability[]): string[] {
  * Commands are checked when they are built (`Composition.commands`), because
  * they are a function of the palette's context.
  */
-function checkNamespaces(caps: readonly Capability[]): void {
+function checkNamespaces(
+  caps: readonly Capability[],
+  kernelServices: readonly ServiceContribution[] = [],
+  kernelClients: readonly ClientContribution[] = [],
+): void {
   const panes = new Set<string>()
   const sections = new Set<string>()
   const actions = new Set<string>()
   const services = new Set<string>()
   const clients = new Set<string>()
+
+  /* THE KERNEL'S OWN SERVICES CLAIM THEIR NAMES FIRST (phase 11). The service
+   * table publishes `<noun>.<verb>` — `book.list`, `shelf.status` — which is
+   * NOT a capability's `<id>.<op>` and so is not subject to the prefix rule
+   * below. What it is subject to is uniqueness: two handlers under one name
+   * is exactly the collision the router refuses at construction, and finding
+   * it here means finding it BEFORE a single capability has started rather
+   * than after all of them have. */
+  for (const service of kernelServices) {
+    if (services.has(service.name)) {
+      throw invalid('duplicate-contribution', null, `service "${service.name}" is registered twice by the kernel`)
+    }
+    services.add(service.name)
+  }
+  /* The same for the CLIENT stubs the kernel declares — the satchel side of
+   * the same table. A capability's client name must be `<id>.<op>` and the
+   * table's is `<noun>.<verb>`, so the two sets cannot collide by accident;
+   * what this refuses is the kernel declaring one name twice. */
+  for (const client of kernelClients) {
+    if (clients.has(client.name)) {
+      throw invalid('duplicate-contribution', null, `client "${client.name}" is registered twice by the kernel`)
+    }
+    clients.add(client.name)
+  }
 
   const claim = (set: Set<string>, kind: string, key: string, cap: string) => {
     if (set.has(key)) throw invalid('duplicate-contribution', cap, `${kind} "${key}" is registered twice`)
@@ -506,6 +549,43 @@ function disposeAll(started: readonly { id: string; disposable: Disposable }[]):
   return errors
 }
 
+/** What a composition root may hand the registry beside the capabilities. */
+export interface CompositionOptions {
+  /**
+   * The KERNEL'S OWN services — the service table's handlers (phase 11).
+   *
+   * They are served through the same host, under the same grant check and in
+   * the same map as a capability's, because a caller must not be able to tell
+   * which side of the line a service came from. They are not a capability's
+   * contribution, so they carry no `<id>.` prefix and answer to no `requires`;
+   * what they do carry is a name that must be unique across both sets, which
+   * `checkNamespaces` settles before anything starts.
+   *
+   * Absent, the composition serves exactly what the capabilities contributed
+   * — which is what every composition did before this existed, and what a
+   * test composing one capability still wants.
+   */
+  readonly services?: readonly ServiceContribution[]
+  /**
+   * The kernel's CLIENT stubs — the satchel side of the same table, derived
+   * from it by `serviceClients()`.
+   *
+   * `ClientContribution`'s own comment called itself "a stub shape until a
+   * consumer lands", and phase 11 is that consumer: `paper --shelf <key>`
+   * calls exactly these names on a shelf. They cannot be a capability's,
+   * because a capability's client name must be `<id>.<op>` and the table's
+   * is `<noun>.<verb>` — so they arrive here, beside the services, or not at
+   * all.
+   *
+   * NOTHING READS `Composition.clients` TODAY, and that is worth saying
+   * rather than leaving to be discovered: the list is a DECLARATION of what
+   * this composition may call on a shelf, checked for duplicates and
+   * otherwise inert. It becomes load-bearing the day something narrows a
+   * connection to what its side actually calls.
+   */
+  readonly clients?: readonly ClientContribution[]
+}
+
 /**
  * Validate, order, start, and hand back what was contributed.
  *
@@ -517,10 +597,17 @@ export async function composeCapabilities(
   caps: readonly Capability[],
   api: KernelApi,
   signal: AbortSignal,
+  options: CompositionOptions = {},
 ): Promise<Composition> {
+  /* COPIED AND FROZEN on entry, like every capability's own contribution
+   * arrays below. `checkNamespaces` validates these and the registries are
+   * built from them, so a caller that kept a reference and pushed into it
+   * during an awaited `start` would otherwise land a name nothing checked. */
+  const kernelServices: readonly ServiceContribution[] = Object.freeze([...(options.services ?? [])])
+  const kernelClients: readonly ClientContribution[] = Object.freeze([...(options.clients ?? [])])
   checkIds(caps)
   checkRequires(caps)
-  checkNamespaces(caps)
+  checkNamespaces(caps, kernelServices, kernelClients)
   const order = registrationOrder(caps)
   const byId = new Map(caps.map((cap) => [cap.id, cap] as const))
   const ordered = order.map((id) => byId.get(id) as Capability)
@@ -706,10 +793,15 @@ export async function composeCapabilities(
   const panes = byOrder(kept.flatMap((one) => [...one.panes]))
   const settings = byOrder(kept.flatMap((one) => [...one.settings]))
   const bookActions = Object.freeze(kept.flatMap((one) => [...one.bookActions]))
-  const clients = Object.freeze(kept.flatMap((one) => [...one.clients]))
-  const services: ReadonlyMap<string, ServiceContribution> = new Map(
-    kept.flatMap((one) => one.services.map((service) => [service.name, service] as const)),
-  )
+  const clients = Object.freeze([...kernelClients, ...kept.flatMap((one) => [...one.clients])])
+  /* The kernel's own services first, then the capabilities' — one map, one
+   * router registration, one grant check. `checkNamespaces` already refused a
+   * collision between the two, so neither can quietly overwrite the other
+   * here. */
+  const services: ReadonlyMap<string, ServiceContribution> = new Map([
+    ...kernelServices.map((service) => [service.name, service] as const),
+    ...kept.flatMap((one) => one.services.map((service) => [service.name, service] as const)),
+  ])
   const frozenOrder = Object.freeze(startedOrdered.map((cap) => cap.id))
   const frozenFailures = Object.freeze([...failures])
 

@@ -182,10 +182,14 @@ const REVIEWED_FOOTPRINT = [
 /** Path constants the footprint above leans on: each must resolve under the
  *  capability's own namespace, or the allowlist would be naming a lie. */
 const SYNC_PATH_CONSTANTS = [
-  ['src/capabilities/sync/lib/journal.ts', 'SYNC_DIR', 'sync'],
-  ['src/capabilities/sync/lib/journal.ts', 'JOURNAL_PATH', 'sync/journal.jsonl'],
-  ['src/capabilities/sync/lib/journal.ts', 'JOURNAL_META_PATH', 'sync/journal.meta.json'],
-  ['src/capabilities/sync/lib/journal.ts', 'JOURNAL_DIRTY_PATH', 'sync/journal.dirty'],
+  /* DECLARED in `journalEntry.ts` — the journal's trust boundary, split out of
+   * `journal.ts` when that file passed a thousand lines — and re-exported from
+   * `journal.ts` so every importer keeps one door. This gate reads the
+   * DECLARATION, so it names the file that holds it. */
+  ['src/capabilities/sync/lib/journalEntry.ts', 'SYNC_DIR', 'sync'],
+  ['src/capabilities/sync/lib/journalEntry.ts', 'JOURNAL_PATH', 'sync/journal.jsonl'],
+  ['src/capabilities/sync/lib/journalEntry.ts', 'JOURNAL_META_PATH', 'sync/journal.meta.json'],
+  ['src/capabilities/sync/lib/journalEntry.ts', 'JOURNAL_DIRTY_PATH', 'sync/journal.dirty'],
   ['src/capabilities/sync/lib/coverCache.ts', 'COVER_INDEX_PATH', 'sync/covers.json'],
   ['src/capabilities/sync/ui/storageModel.ts', 'DOWNLOADS_INDEX_PATH', 'sync/downloads.json'],
   ['src/kernel/core/presence.ts', 'PRESENCE_PATH', 'sync/removed.json'],

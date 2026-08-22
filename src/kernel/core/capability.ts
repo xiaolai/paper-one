@@ -147,7 +147,21 @@ export interface SettingsSection {
   readonly render: PaneRenderer
 }
 
-/** An action on one book — Download, Remove download, Ask, Share… */
+/** An action on one book — Download, Evict, Ask, Share… */
+/**
+ * The icons a contributed action may ask for.
+ *
+ * Named for the DRAWING, not for the deed — `circle-minus`, not `evict` — so
+ * the vocabulary belongs to the design system rather than to whichever
+ * capability asked first. The UI layer holds a `Record<ActionIcon, …>`, so a
+ * name with no artwork is a compile error and artwork with no name is
+ * unreachable: one list, checked, in the way `HANDLERS` is checked against
+ * the service table.
+ */
+export const ACTION_ICONS = ['download', 'circle-minus'] as const
+
+export type ActionIcon = (typeof ACTION_ICONS)[number]
+
 export interface BookAction {
   readonly id: `${string}:${string}`
   readonly label: string
@@ -157,6 +171,28 @@ export interface BookAction {
    * render, against the shelf row, by the kernel's book menu.
    */
   readonly when?: (book: IndexedBook) => boolean
+  /**
+   * The icon drawn before the label — NAMED, not supplied.
+   *
+   * THE CAPABILITY CHOOSES WHICH, THE KERNEL OWNS THE ARTWORK. That split is
+   * the answer to the reasoning this field replaced ("a contribution carries
+   * a label, not artwork, and a wrong icon says more than none"): the wrong
+   * icon is what the kernel would have to GUESS, because only the capability
+   * knows that Download brings bytes here and Evict frees them without
+   * touching the shelf. Naming moves the choice to the side that can make it
+   * while leaving the drawing — and §08's one stroke weight, never filled —
+   * with the side that owns the design system.
+   *
+   * A NAME AND NOT A COMPONENT, for a reason measured rather than assumed: a
+   * capability's index is imported by `paper`, a Node process with no DOM, and
+   * a React icon at the top of that module put `lucide-react` into the CLI
+   * bundle. `build-cli.test.mjs` caught it — the bundle must import `node:`
+   * builtins and nothing else.
+   *
+   * Optional, and a row without one still aligns: the kernel draws an
+   * icon-sized gap in its place.
+   */
+  readonly icon?: ActionIcon
   /**
    * The kernel's menu does NOT await this and attaches no rejection
    * handler: an async action owns its own failures — catch, and speak
