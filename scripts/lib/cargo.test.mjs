@@ -142,7 +142,13 @@ ignored = "1"
     const real = readCargoManifest(readFileSync(REAL, 'utf8'))
     expect(real.features.get('default').items).toEqual(['desktop'])
     for (const platform of ['desktop', 'ios', 'android']) expect(real.features.has(platform)).toBe(true)
-    expect(dependenciesOfFeature('desktop', real)).toEqual(new Set(['tauri-plugin-mcp-bridge', 'tauri-plugin-persisted-scope', 'tauri']))
+    /* The desktop-only set. `tauri-plugin-inference` joined it in phase 15:
+       `lemond` ships for macOS, Windows and Linux and has no mobile build, so
+       gating the DEPENDENCY (not just the `.plugin()` call) is what keeps its
+       rustls provider off the iOS and Android targets entirely. */
+    expect(dependenciesOfFeature('desktop', real)).toEqual(
+      new Set(['tauri-plugin-inference', 'tauri-plugin-mcp-bridge', 'tauri-plugin-persisted-scope', 'tauri']),
+    )
     // Data-driven over whatever crates the tree has: each path dependency is found by its directory name.
     for (const dep of real.dependencies.values()) {
       if (dep.path === null) continue

@@ -1,4 +1,6 @@
 import type { Capability } from '../kernel'
+import { companion } from '../capabilities/companion'
+import { inference } from '../capabilities/inference'
 import { peer } from '../capabilities/peer'
 import { sync } from '../capabilities/sync'
 
@@ -21,4 +23,9 @@ import { sync } from '../capabilities/sync'
  * A composition root is the one place allowed to import every capability's
  * `index.ts` and both kernel entries (`.dependency-cruiser.cjs`).
  */
-export const capabilities: readonly Capability[] = [peer, sync]
+/* `inference` before `companion`, which the registry would work out anyway
+ * from `requires` — stated here because the pair is the phase-15 split and
+ * reading them adjacent is how the split stays legible. Both are DESKTOP
+ * ONLY: `lemond` ships for macOS, Windows and Linux and there is no mobile
+ * build of it, so the mobile compositions do not list them. */
+export const capabilities: readonly Capability[] = [peer, sync, inference, companion]

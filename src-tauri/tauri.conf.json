@@ -57,6 +57,9 @@
       "files": {
         "Resources/Assets.car": "icons/Assets.car"
       }
+    },
+    "resources": {
+      "../vendor/inference/current/": "runtime/"
     }
   }
 }

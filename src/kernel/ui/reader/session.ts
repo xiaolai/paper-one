@@ -13,6 +13,8 @@ import {
   type FootnoteRenderDetail,
   type FootnoteType,
 } from 'foliate-js/footnotes.js'
+import type { AskPassage } from '../../core/companion'
+import { screenPassages } from './passages'
 import { rangeBoxInHost, type HostRect } from './coordinates'
 import { isBacklink } from './backlink'
 import { suppressEmptyGeneratedContent } from './generatedContent'
@@ -511,6 +513,15 @@ export interface SessionNavigator {
   eraseMark: (anchor: MarkAnchor) => void
   /** Clear the book's selection — after acting on it, per §07. */
   deselect: () => void
+  /**
+   * The book text on screen, as passages a companion answer can cite.
+   *
+   * READ AT THE MOMENT THE QUESTION IS ASKED, never cached: the reader turns
+   * pages, and an answer grounded in the page before is an answer about
+   * somewhere else. Empty before the first section loads, which is honest —
+   * the companion then has nothing to cite and says so.
+   */
+  passages: () => readonly AskPassage[]
   /**
    * Dismiss the note popover and release the view it was rendered in.
    *
@@ -1278,6 +1289,10 @@ export class ReaderSession {
       drawMark: (anchor) => attachMark(view, anchor, { report: true }),
       eraseMark: (anchor) => attachMark(view, anchor, { remove: true, report: true }),
       deselect: () => view.deselect(),
+      /* Bound to the SESSION, not to this closure's `view`: the method reads
+         `#view` and `#disposed`, so a navigator held past a teardown answers
+         with the honest empty rather than reaching into a dead renderer. */
+      passages: () => this.passages(),
       closeFootnote: () => this.closeFootnote(),
       setFootnoteMount: (mount, within) => this.setFootnoteMount(mount, within),
       next: () => void view.next()?.catch?.(reportNavigation('next')),
@@ -1598,6 +1613,36 @@ export class ReaderSession {
     const view = this.#view
     if (!view || this.#disposed) return
     for (const index of this.#sections) this.#drawSection(view, index)
+  }
+
+  /**
+   * The book text on screen, as passages a companion answer can cite.
+   *
+   * WI-15.5's grounding, read from the live documents at the moment the
+   * question is asked — not cached, because the reader turns pages and an
+   * answer grounded in the page before is an answer about somewhere else.
+   *
+   * `renderer.getContents()` is THE ONLY WAY IN: both renderers call
+   * `attachShadow({ mode: 'closed' })`, so an embedder cannot reach the
+   * iframe from the DOM side at all.
+   *
+   * Empty rather than throwing when nothing is rendered — the companion then
+   * has nothing to cite and says so, which is the honest state before the
+   * first section loads.
+   */
+  passages(): readonly AskPassage[] {
+    const view = this.#view
+    if (!view || this.#disposed) return []
+    const renderer = view.renderer
+    if (!renderer) return []
+    try {
+      return screenPassages(renderer.getContents(), (index, range) => view.getCFI(index, range))
+    } catch {
+      /* A renderer mid-teardown, or one that has no contents to give. The
+         companion loses its grounding for this question, which the provider
+         reports; it must not take the reader's pane down with it. */
+      return []
+    }
   }
 
   /** Offer every mark belonging to one section to that section's overlay. */

@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/xiaolai/paper-one/main/models.manifest.schema.json",
+  "title": "Paper model manifest",
+  "description": "The models Paper will resolve, verify and activate. Lemonade's own server_models.json carries recipe, checkpoint and size and NO license and NO per-model digest — checked against 11.7.0's shipped resources/server_models.json, where `kokoro-v1` is a checkpoint, a recipe and a rounded gigabyte count and nothing else. So it cannot be the provenance record, and this is. A gallery entry is untrusted input until it has resolved to an entry here. Meaning of each field: docs/plans/phase-15-the-companion.md, WI-15.1; the enforcement is src-tauri/crates/tauri-plugin-inference/src/manifest.rs.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "models"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Relative path of this schema, so editors validate the file in place."
+    },
+    "version": {
+      "type": "integer",
+      "const": 1,
+      "description": "The manifest format. A file declaring a version this build does not speak is REFUSED, never read as version 1 — a future format silently reinterpreted is a catalogue scrambled with every field looking fine."
+    },
+    "models": {
+      "type": "array",
+      "description": "One entry per model Paper offers. Order is display order.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "label", "modality", "license", "backend", "artifacts"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._-]{1,120}$",
+            "description": "Stable identifier, and also a directory name under models/ — hence the closed alphabet. Unique across the manifest."
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "description": "What the settings pane calls it. Written for a reader, not derived from the checkpoint name."
+          },
+          "modality": {
+            "type": "string",
+            "enum": ["text", "speech"],
+            "description": "What the model does. `text` binds the companion and the gloss; `speech` binds Test voice. The set is closed because each modality is a code path, not a label."
+          },
+          "license": {
+            "type": "string",
+            "minLength": 1,
+            "description": "SPDX identifier where one exists, else the license's published name. Recorded because Lemonade's catalogue does not carry it and Paper resolves the artifact rather than redistributing it — the reader is entitled to know the terms before a multi-gigabyte download."
+          },
+          "backend": {
+            "type": "string",
+            "enum": ["llamacpp", "kokoro"],
+            "description": "Which runtime backend loads it. Closed, because an unrecognised backend is not something to pass through to the daemon and hope."
+          },
+          "artifacts": {
+            "type": "array",
+            "minItems": 1,
+            "description": "The files this model is made of. AN ARRAY, not a single file, because one model is routinely more than one artifact: Kokoro is a graph plus a voice pack, and a large GGUF is published as numbered shards. A schema with one `file` field would have forced a fake second model entry to carry a voice file that is not a model.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["file", "source", "sha256", "bytes"],
+              "properties": {
+                "file": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9._-]{1,120}$",
+                  "description": "The artifact's file name inside models/<id>/. A name, not a path — there is nothing here to traverse with."
+                },
+                "source": {
+                  "type": "string",
+                  "format": "uri",
+                  "pattern": "^https://",
+                  "description": "Where the artifact is fetched from. HTTPS only: these are the only URLs in the system that are not loopback, and each is a manifest constant rather than anything a caller supplies."
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[A-Fa-f0-9]{64}$",
+                  "description": "The artifact's SHA-256. Checked before activation; a mismatch refuses the model and leaves the previous slot live."
+                },
+                "bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "The artifact's exact byte count. Checked BEFORE the digest, because a truncated download is the common failure and a stat is cheaper than hashing gigabytes."
+                },
+                "role": {
+                  "type": "string",
+                  "enum": ["weights", "voices"],
+                  "description": "What this artifact is to the model. `weights` is the file the backend loads; `voices` is Kokoro's voice pack. Closed, so a new kind of artifact is a deliberate change rather than a string nobody validates."
+                }
+              }
+            }
+          },
+          "parameters": {
+            "type": "string",
+            "description": "Human-readable parameter count, for the settings row. Display only."
+          },
+          "quantization": {
+            "type": "string",
+            "description": "Quantization label, for the settings row. Display only."
+          },
+          "note": {
+            "type": "string",
+            "description": "Why this model is here, for a maintainer reading the manifest rather than the plan."
+          }
+        }
+      }
+    }
+  }
+}

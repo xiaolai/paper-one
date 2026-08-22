@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { buildCommands } from './commands'
+import { LOOK_UP_SETTING } from '../core/gloss'
 import { offeredFaces } from '../core/typefaces'
 import { presentFaces } from './fontProbe'
 import { canKeepPlace, resolveAccel } from './accel'
@@ -8,7 +9,6 @@ import { importFs as tauriImportFs, pickBooks, pickFolder, readBookAt } from '..
 import { positionRecorder, type PositionRecorder } from '../core/positionRecorder'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { isTauri, usePlatform, usePrefersDark, usePrefersReducedMotion } from './platform'
-import { NOT_CONFIGURED } from '../core/companion'
 import { planImport } from '../core/tagArchive'
 import { canArchiveTags, exportTagsToFile, importTagsFromFile } from './tagFiles'
 import { canArchiveMarks, exportMarksToFile, importMarksFromFile } from './marksFiles'
@@ -112,6 +112,25 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
    * hook, which explains why there is deliberately no control for it. */
   const reducedMotion = usePrefersReducedMotion()
   const [state, dispatch] = useAppState(services.settings, composition.panes)
+  /* The reader's `Look up` preference (WI-15.13). Read through the settings
+     store's `useSyncExternalStore` pair, so cycling the row in Settings
+     changes what the popover does without a remount. */
+  const settingsSnapshot = useSyncExternalStore(
+    services.settings.subscribe,
+    services.settings.getSnapshot,
+  )
+  /* The status bar's third rung, through the kernel's own port — the kernel
+     imports nothing from a capability, so `inference` binds this and App reads
+     it here. Null at rest, which is what keeps the bar byte-for-byte what it
+     was when nothing is downloading. */
+  const workLine = services.workLine()
+  const download = useSyncExternalStore(workLine.subscribe, workLine.line, workLine.line)
+  const lookUpMode = useMemo(
+    () => services.settings.get(LOOK_UP_SETTING),
+    /* `settingsSnapshot` is the dependency that matters: the store hands back
+       a new object on every change, which is what re-reads the value. */
+    [services.settings, settingsSnapshot],
+  )
   /* The open book lives here, not in the reader: Contents and Companion read
    * from it and they are panels of the side pane now. */
   const book = useBook()
@@ -1646,10 +1665,17 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
             onGoTo={jumpTo}
             onDeleteMark={marking.unmark}
             markFocus={marking.focus}
-            /* The one place the app decides what the companion is. There is no
-               provider in this build — see `lib/companion` — and this is the
-               line that changes when there is. */
-            companion={NOT_CONFIGURED}
+            /* The one place the app decides what the companion is — and this
+               IS the line the old comment said would change when a provider
+               arrived. It reads the kernel's port rather than a constant, so
+               `companion`'s bind reaches here without App knowing the
+               capability exists. Resolved per render, never captured: a
+               reader who installs a model must not have to restart. */
+            companion={services.companion()}
+            /* The grounding, as a GETTER: assembling it walks the rendered
+               document, and the thread calls it when the reader asks rather
+               than on every render. */
+            companionPassages={book.passages}
             books={library.books}
             /* GROUPED BY THE PANEL THEY SERVE — see `SidePaneProps`. Eight of
                these were flat props on a component that reads none of them. */
@@ -1683,6 +1709,11 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
           dispatch={dispatch}
           platform={platform}
           book={book}
+          /* The gloss port, read per render rather than captured: `inference`
+             binds it after composition, and a reader who installs a model
+             must not have to restart to get Look up back. */
+          gloss={services.gloss()}
+          lookUpMode={lookUpMode}
           marks={marks}
           marking={marking}
           bookmarking={bookmarking}
@@ -1726,6 +1757,7 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
             importNotice={importNotice}
             shelfUnread={shelfUnread}
             enriching={enrichment.pending}
+            download={download}
             onAddBooks={addBooks}
             bookActions={composition.bookActions}
           />

@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-inference-endpoints"
+description = "Enables the inference_endpoints command without any pre-configured scope."
+commands.allow = ["inference_endpoints"]
+
+[[permission]]
+identifier = "deny-inference-endpoints"
+description = "Denies the inference_endpoints command without any pre-configured scope."
+commands.deny = ["inference_endpoints"]

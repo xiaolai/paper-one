@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-inference-models"
+description = "Enables the inference_models command without any pre-configured scope."
+commands.allow = ["inference_models"]
+
+[[permission]]
+identifier = "deny-inference-models"
+description = "Denies the inference_models command without any pre-configured scope."
+commands.deny = ["inference_models"]

@@ -1,0 +1,144 @@
+[package]
+name = "tauri-plugin-inference"
+version = "0.1.0"
+description = "Paper's local inference runtime: a supervised lemond child, a per-launch bearer token, verified model artifacts, and agent probes, behind Tauri commands"
+authors = ["Paper"]
+license = ""
+edition = "2021"
+# The app crate and tauri-plugin-peer both say 1.91; the toolchain itself is
+# pinned by the root rust-toolchain.toml.
+rust-version = "1.91"
+# Not a crates.io crate: it is a workspace member of the app and reaches the
+# app by path only.
+publish = false
+# `tauri_plugin::Builder` refuses to build without `links`, and it must equal
+# the package name: that is how the app's tauri-build finds this plugin's
+# permission files (through the DEP_TAURI_PLUGIN_INFERENCE_* variables cargo
+# exports for a linked crate).
+links = "tauri-plugin-inference"
+
+[lib]
+name = "tauri_plugin_inference"
+path = "src/lib.rs"
+
+# One switch per mobile platform, matching tauri-plugin-peer's shape so
+# WI-5.9's "features describe the same set as the manifest" check has one name
+# per platform on this plugin's side too. Empty today: there is no mobile
+# inference runtime — `lemond` ships for macOS, Windows and Linux only — and
+# the capability reports `Unsupported` rather than compiling differently.
+[features]
+ios = []
+android = []
+
+[build-dependencies]
+tauri-plugin = { version = "2.6", features = ["build"] }
+
+[dependencies]
+# default-features = false: the plugin does not choose the webview or the
+# app-level features; the app does. Only the runtime types are needed here.
+tauri = { version = "2.11.3", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+# `process` is the whole point of this crate — a supervised child with piped
+# stdio; `signal` sends the SIGTERM that WI-15.0's acceptance turns on. rt +
+# sync for the lazily started daemon, io-util to read its stdout line by line,
+# time for the readiness deadline and the shutdown grace period, fs for the
+# config the daemon reads and the artifacts it is handed, macros for `select!`
+# in the streaming loops.
+tokio = { version = "1", features = [
+    "rt",
+    "process",
+    "signal",
+    "fs",
+    "sync",
+    "io-util",
+    "time",
+    "macros",
+] }
+# Two clients, two jobs, and the distinction is the boundary (see state.rs):
+#
+#   - the DAEMON client addresses 127.0.0.1 and nothing else. F1 puts every
+#     API-key route behind lemond's own `collection.router`, so the process
+#     that talks to a cloud endpoint is the daemon, never Paper. That client
+#     is built with `.no_proxy()` so a reader's HTTP_PROXY cannot route the
+#     bearer token and the reader's questions through somebody's server.
+#   - the DOWNLOAD client fetches model artifacts, and those are https:// URLs
+#     that are constants in `models.manifest.json`. So TLS is required, and
+#     an earlier draft of this file that turned it off "because everything is
+#     loopback" was simply wrong — it would have failed at the first install.
+#
+# `rustls` rather than `default-tls`: native-tls would mean OpenSSL headers on
+# the Linux leg of WI-15.3's gate, and rustls is already in the tree beneath
+# iroh. (The feature is spelled `rustls` in reqwest 0.13 — `rustls-tls` is the
+# 0.12 name and does not resolve.)
+#
+# THE aws-lc-rs QUESTION, WHICH `tauri-plugin-peer` ANSWERS DIFFERENTLY AND
+# CORRECTLY. That crate pins `tls-ring` because it cross-compiles to iOS and
+# Android, where aws-lc-rs needs a C/asm build with an NDK-configured clang.
+# This crate never reaches a phone: there is no mobile inference runtime, the
+# app registers the plugin behind its `desktop` feature (the same gate
+# `tauri-plugin-mcp-bridge` sits behind), so a mobile build does not compile
+# this crate at all. Desktop is where cmake is a reasonable ask.
+#
+# `system-proxy` is OFF, and that is a boundary rather than a saving: the
+# daemon client sets `.no_proxy()` explicitly, and leaving the feature out
+# means a reader's environment cannot silently route Paper's traffic even if
+# a future client here forgets to say so.
+#
+# NOT A NEW SUPPLY CHAIN: reqwest 0.13, rustls, sha2, rand and data-encoding
+# are all already resolved in Cargo.lock beneath tauri and iroh, so this
+# declares what is there rather than adding to it.
+reqwest = { version = "0.13", default-features = false, features = [
+    "json",
+    "stream",
+    "rustls",
+    "http2",
+    "charset",
+] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# SHA-256 for artifact verification. The plan says SHA-256 by name and the
+# manifest records one per entry; BLAKE3 is in the tree too but it is the peer
+# transport's hash for blobs Paper itself produced, and a digest published by
+# an upstream gallery is the one Paper has to match.
+sha2 = "0.10"
+# The per-launch bearer token. 0.9, the line already resolved in the tree.
+rand = "0.9"
+# Hex for the token and the digests.
+data-encoding = "2"
+# The one thing the plugin logs on its own: a daemon that exited on its own
+# and the supervisor's decision about it (the app bridges `log` through
+# tauri-plugin-log).
+log = "0.4"
+# The durable half of WI-15.8. Lemonade holds cloud keys in memory only, so
+# Paper re-provisions on every daemon start and needs somewhere to keep them
+# across launches that is not a file in the data root. One crate rather than
+# three hand-rolled platform bindings: on macOS it is `security-framework`,
+# which is already in the tree, and hand-rolling Keychain + DPAPI + Secret
+# Service is more liability than the dependency it would save.
+keyring = { version = "3", features = [
+    "apple-native",
+    "windows-native",
+    "sync-secret-service",
+] }
+
+# The supervised child's process GROUP, so a SIGTERM reaches the backends
+# `lemond` spawns and not just `lemond` itself — see `daemon.rs`. Unix only;
+# already in the tree via tokio, so no new compilation. Windows uses a Job
+# Object for the same guarantee.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+# A runtime for the tests that spawn a child; the app supplies its own.
+# No `tempfile`: scratch directories are `testutil::ScratchDir`, the same
+# hand-rolled guard `tauri-plugin-peer` uses, so the two crates' tests share
+# one convention and this one adds no dependency to get it.
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

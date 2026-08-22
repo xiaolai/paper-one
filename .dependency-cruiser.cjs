@@ -66,10 +66,25 @@ const FS_ADAPTERS = [
   '^src/kernel/ui/marksFiles\\.ts$',
 ]
 
-/** The peer capability's wire — the ONE capability file allowed to import
- *  @tauri-apps/api (WI-C.1). Everything else a capability does to the app
- *  goes through the kernel or through this wire. */
-const PEER_WIRE = '^src/capabilities/peer/lib/wire\\.ts$'
+/** The PLUGIN WIRES — the only capability files allowed to import
+ *  @tauri-apps/api (WI-C.1, WI-15.0). Everything else a capability does to
+ *  the app goes through the kernel or through one of these.
+ *
+ *  ONE PER TAURI PLUGIN, and the list is meant to stay short. A capability
+ *  with a Rust half needs exactly one file that names its commands, so that
+ *  the set of `invoke` names is auditable in one place and can be read against
+ *  the crate's own `build.rs` list. A second file in the same capability would
+ *  be the thing this rule exists to prevent; a second capability with its own
+ *  plugin is not.
+ *
+ *  `inference/lib/plugin.ts` is the second entry (phase 15): it wraps
+ *  `tauri-plugin-inference`, whose commands carry the bearer token, the model
+ *  installer and the agent turn. Everything above it calls a function; nothing
+ *  above it calls `invoke`. */
+const PLUGIN_WIRES = [
+  '^src/capabilities/peer/lib/wire\\.ts$',
+  '^src/capabilities/inference/lib/plugin\\.ts$',
+]
 
 /** A capability's public entry — the only file under `src/capabilities/<id>/`
  *  anything outside that directory may import. */
@@ -198,20 +213,21 @@ module.exports = {
       severity: 'error',
       comment:
         'A capability may not import @tauri-apps/* directly — the platform is reached through the ' +
-        "kernel's primitives, or through the peer capability's wire. The one exception is the wire " +
-        'itself, src/capabilities/peer/lib/wire.ts, which is where invoke/listen for the peer plugin ' +
-        'live (mirroring the fs-plugin allow-list above). Matched on the package name wherever it ' +
-        'resolves, like the fs rule.',
-      from: { path: '^src/capabilities/', pathNot: [PEER_WIRE] },
+        "kernel's primitives, or through a capability's own plugin wire. The exceptions are the " +
+        'wires themselves (see PLUGIN_WIRES): peer/lib/wire.ts and inference/lib/plugin.ts, which ' +
+        'are where invoke/listen for those two plugins live (mirroring the fs-plugin allow-list ' +
+        'above). One file per plugin, so the set of command names is auditable in one place. ' +
+        'Matched on the package name wherever it resolves, like the fs rule.',
+      from: { path: '^src/capabilities/', pathNot: PLUGIN_WIRES },
       to: { path: '(^|/)@tauri-apps/' },
     },
     {
       name: 'peer-wire-tauri-api-only',
       severity: 'error',
       comment:
-        "The wire's exception is @tauri-apps/api and nothing wider: the fs plugin, the dialog " +
+        "A wire's exception is @tauri-apps/api and nothing wider: the fs plugin, the dialog " +
         'plugin and every other @tauri-apps package stay out of capabilities entirely.',
-      from: { path: PEER_WIRE },
+      from: { path: PLUGIN_WIRES.join('|') },
       to: { path: '(^|/)@tauri-apps/(?!api(/|$))' },
     },
     {

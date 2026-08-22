@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-inference-stop"
+description = "Enables the inference_stop command without any pre-configured scope."
+commands.allow = ["inference_stop"]
+
+[[permission]]
+identifier = "deny-inference-stop"
+description = "Denies the inference_stop command without any pre-configured scope."
+commands.deny = ["inference_stop"]

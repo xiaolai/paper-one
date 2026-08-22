@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-inference-reveal-models-dir"
+description = "Enables the inference_reveal_models_dir command without any pre-configured scope."
+commands.allow = ["inference_reveal_models_dir"]
+
+[[permission]]
+identifier = "deny-inference-reveal-models-dir"
+description = "Denies the inference_reveal_models_dir command without any pre-configured scope."
+commands.deny = ["inference_reveal_models_dir"]

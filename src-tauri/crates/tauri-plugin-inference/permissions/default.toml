@@ -1,0 +1,37 @@
+"$schema" = "schemas/schema.json"
+
+[default]
+description = """
+The commands a Paper webview needs from the inference plugin: the runtime's
+status, start and stop; the model catalogue with install, remove, reveal and
+resource usage; generation and the gloss; speech; the route probe; cloud
+endpoint registration with a write-only key; one tool-free agent turn; and
+cancellation for any streaming request.
+
+NO GENERAL RUNNER IS AMONG THEM. No command takes a URL, a path, a host or an
+argv: a caller names a model id that must resolve in models.manifest.json, or
+a route id the probe minted. The bearer token, the loopback port and the cloud
+API keys never cross to the webview, and there is deliberately no command that
+reads a stored key back.
+"""
+permissions = [
+    "allow-inference-status",
+    "allow-inference-start",
+    "allow-inference-stop",
+    "allow-inference-models",
+    "allow-inference-install-model",
+    "allow-inference-remove-model",
+    "allow-inference-resource-usage",
+    "allow-inference-reveal-models-dir",
+    "allow-inference-generate",
+    "allow-inference-gloss",
+    "allow-inference-speak",
+    "allow-inference-probe",
+    "allow-inference-endpoints",
+    "allow-inference-add-endpoint",
+    "allow-inference-remove-endpoint",
+    "allow-inference-set-endpoint-key",
+    "allow-agent-ask",
+    "allow-agent-sign-in",
+    "allow-inference-cancel",
+]

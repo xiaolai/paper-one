@@ -11,7 +11,7 @@ import {
 import type { IndexedBook } from '../../core/bookIndex'
 import type { JumpTarget } from '../hooks/useJumps'
 import type { PaneContribution, SettingsSection } from '../../core/capability'
-import type { CompanionProvider } from '../../core/companion'
+import type { AskPassage, CompanionProvider } from '../../core/companion'
 import { ICON, type Platform } from '../../core/metrics'
 import { PANE_TITLES, renderContribution, shownPane } from '../panes'
 import { defaultPaneFor, paneFits, setReadingStyle, type AppDispatch, type AppState, type KernelPaneId } from '../state'
@@ -128,6 +128,15 @@ export interface SidePaneProps {
    */
   companion: CompanionProvider
   /**
+   * The book text the companion may ground an answer in, in reading order.
+   *
+   * A prop for the same reason the provider is: the passages are assembled
+   * from the rendered view, which is App's business, and a Companion that
+   * reached for them itself would be reading the reader's page from inside a
+   * side panel.
+   */
+  companionPassages?: () => readonly AskPassage[]
+  /**
    * Everything the Library panel needs, as ONE prop.
    *
    * These were eight flat props on a component that does not read a single one
@@ -185,6 +194,7 @@ export function SidePane({
   onDeleteMark,
   markFocus,
   companion,
+  companionPassages,
   books,
   library,
   settings,
@@ -229,6 +239,12 @@ export function SidePane({
             currentChapter={book.position.chapterLabel}
             hasBook={book.source !== null}
             provider={companion}
+            bookTitle={books.find((row) => row.bookId === book.bookId)?.title ?? ''}
+            passages={companionPassages ?? (() => [])}
+            /* A bare cfi IS a `JumpTarget` — the union's string arm — so a
+               citation navigates through exactly the path a search hit does,
+               jump stack included. */
+            {...(onGoTo ? { onGoTo } : {})}
           />
         )}
 

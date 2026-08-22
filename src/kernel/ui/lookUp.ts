@@ -21,6 +21,23 @@ import type { Platform } from '../core/metrics'
  * reader's own dictionary choices — it would look right on this machine and
  * wrong on the next. Dictionary.app is the honest version of the same feature
  * until there is something better to render.
+ *
+ * ## There is now something better to render, on some machines
+ *
+ * That last line was an invitation, and WI-15.13 takes it. A GLOSS —
+ * `GlossProvider` on the kernel, bound by `inference` — is one or two
+ * sentences about the word IN THE SENTENCE IT SITS IN, which is precisely the
+ * case the system dictionary handles worst: it doubles the headword, gives
+ * every sense of *close* rather than the one on the page, **and a multi-word
+ * selection returns nothing at all**. The selection popover offers Look up on
+ * any selection under 120 characters, so selecting a phrase on macOS today
+ * opens Dictionary.app onto a blank result. The gloss is the fix for that
+ * case, and it is the only lookup a Windows or Linux reader has ever had.
+ *
+ * ⚠️ **NOTHING BELOW REGRESSES THE EXISTING BEHAVIOUR.** With no model
+ * installed, [`decideLookUp`] answers `system` on macOS and `none` everywhere
+ * else — which is exactly `hasDictionary` and exactly today. Everything here
+ * is addition.
  */
 
 /** Whether this platform has a dictionary to hand a passage to. */
@@ -37,6 +54,39 @@ export function hasDictionary(platform: Platform): boolean {
  * phrase both fit comfortably.
  */
 const MAX_TERM = 120
+
+/** What a Look up gesture should actually do. */
+export type LookUpAction = 'system' | 'gloss' | 'both' | 'none'
+
+/**
+ * What to do when the reader asks to look something up.
+ *
+ * The three inputs are the platform's dictionary, whether a gloss is bound,
+ * and the reader's stored preference. NO REGRESSION IS THE RULE: with no
+ * gloss, this is `hasDictionary(platform) ? 'system' : 'none'` and nothing
+ * else — the same two outcomes the feature has always had.
+ *
+ * Kept here rather than in the reader so the rule has one home and a test,
+ * and so `Reader.tsx` reads as one call rather than three nested conditions.
+ */
+export function decideLookUp(
+  dictionary: boolean,
+  gloss: boolean,
+  preference: LookUpAction,
+): LookUpAction {
+  if (!gloss) return dictionary ? 'system' : 'none'
+  if (!dictionary) return 'gloss'
+  /* Both halves exist, so the reader's choice decides — and `both` earns its
+   * keep on the phrase case, where the system dictionary returns nothing and
+   * the gloss does not. */
+  return preference === 'none' ? 'system' : preference
+}
+
+/** Whether a term is short enough to be worth looking up at all. */
+export function isLookUpTerm(term: string): boolean {
+  const trimmed = term.trim().replace(/\s+/g, ' ')
+  return trimmed !== '' && trimmed.length <= MAX_TERM
+}
 
 /**
  * Hand a passage to the system dictionary.

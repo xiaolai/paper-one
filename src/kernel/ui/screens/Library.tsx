@@ -118,6 +118,18 @@ export interface LibraryProps {
    * filesystem and the parser live.
    */
   enriching: number
+  /**
+   * A model download in progress, as ONE finished line — or null.
+   *
+   * A STRING, not a count pair, and that is F3's rule reaching the status
+   * bar: the vocabulary has no progress bar, so the download reports as a
+   * fact ("Downloading Qwen3-4B — 412 MB of 2.5 GB") formatted by whoever
+   * owns the numbers. This file draws it and does not compute it.
+   *
+   * Null at rest, which is the whole of WI-15.12's negative half: with no
+   * download running the bar is byte-for-byte what it was.
+   */
+  download?: string | null
   /** What the last import did, in one line. */
   importNotice: string | null
   /** The search field's contents — held in app state, see `AppState.libraryQuery`. */
@@ -214,6 +226,7 @@ export function Library({
   importNotice,
   shelfUnread = false,
   enriching,
+  download = null,
   libraryQuery,
   onQueryChange,
   bookActions,
@@ -1052,6 +1065,27 @@ export function Library({
         {work !== null ? (
           <span className={styles.statusWork} role="status">
             {work}
+          </span>
+        ) : download !== null ? (
+          /* A MODEL DOWNLOAD, as a THIRD RUNG below the import (WI-15.12).
+             It fits the ladder without changing it, on the import line's own
+             stated grounds: it is the reader's own action, it reports a
+             count, and it stops — which is also why it carries
+             `role="status"` where the enrichment line does not.
+
+             It sits BELOW the import deliberately. An import is the reader
+             asking for their books; a model download is the reader asking for
+             a feature, and it can wait behind the shelf filling up.
+
+             ⚠️ NOTHING IS ADDED AT REST, and the negative half of this work
+             item is the load-bearing half. There is no standing "AI is ready"
+             line: readiness is not work, it would be the first thing ever to
+             hold this slot at rest, and it would have to outrank an import
+             the reader just asked for. Readiness lives in the composer, which
+             is the screen where the question actually gets asked. */
+          <span className={styles.statusWork} role="status">
+            <Sparkles size={ICON.control} strokeWidth={ICON.stroke} />
+            {download}
           </span>
         ) : enriching > 0 ? (
           /* NO LIVE REGION on this one, as before. `role="status"` is
