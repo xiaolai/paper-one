@@ -117,6 +117,14 @@ describe('the walk over a document', () => {
         cls, textAlign, direction, attrs,
         setAttribute: (n: string, v: string): void => { attrs.set(n, v) },
         marked: () => attrs.has('data-paper-prose'),
+        /* `markProse` also picks the chapter's opening now, which asks the DOM
+           about ancestors and text rather than about style. A fake that answers
+           neither throws from inside the walk — so it answers both, flatly:
+           nothing here is nested, and every paragraph has words in it. The
+           opening's own behaviour is exercised against a real DOM in
+           `markOpening.test.ts`, where those two answers are worth something. */
+        closest: () => null,
+        textContent: `words for ${cls}`,
       }
     })
     const order: string[] = []

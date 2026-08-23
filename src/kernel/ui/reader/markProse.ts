@@ -47,11 +47,116 @@ export function alignsAsProse(align: string, direction: string): boolean {
 /** The elements a reader means by "the text" — running prose, and nothing else. */
 const PROSE = 'p, li, blockquote, dd'
 
+/**
+ * What a chapter's opening paragraph is NOT inside.
+ *
+ * `p:first-of-type` cannot say this, which is the whole reason the opening is
+ * an attribute: it matches the first paragraph of every blockquote, note,
+ * caption and list item in the chapter as readily as the one the chapter opens
+ * with, and a drop cap on the first line of a pull quote is a defect nobody
+ * asked for.
+ *
+ * A WHITELIST WOULD BE WRONG HERE. The opening paragraph's ancestors are
+ * whatever the converter happened to wrap the chapter in — div, section,
+ * article, body itself — and there is no naming them. What CAN be named is the
+ * short list of containers that mean "this is an aside, not the running text",
+ * so the test is for those and everything else is the flow.
+ */
+const NOT_THE_FLOW = 'blockquote, aside, figure, figcaption, table, li, dd, dt, nav, header, footer, details'
+
+/**
+ * The paragraph a chapter opens with, or null when it has none.
+ *
+ * FIRST IN DOCUMENT ORDER, and among paragraphs only. A section is one spine
+ * item, so its first paragraph in the flow is the one under the chapter's
+ * heading — Paper does not need to find the heading to know that, and looking
+ * for one would fail on every chapter that opens straight into prose.
+ *
+ * Empty paragraphs are skipped rather than counted. Converters emit them for
+ * spacing constantly, and an initial three lines deep drawn on nothing is the
+ * worst outcome this function can produce.
+ *
+ * NO LENGTH TEST, deliberately, and it is worth saying why rather than leaving
+ * it to be discovered. A three-line initial on a two-line paragraph reserves
+ * the third line and hangs into it, which is a real typographic wrinkle and one
+ * that print has too. Guarding it would mean inventing a threshold in
+ * characters, which is a guess at a measure this function cannot see — it runs
+ * once at load, before the reader's measure is settled. The wrinkle is visible
+ * and self-explanatory; a silently-skipped drop cap is not.
+ */
+export function openingParagraph(body: Element): Element | null {
+  for (const p of body.querySelectorAll('p')) {
+    if (p.closest(NOT_THE_FLOW)) continue
+    if ((p.textContent ?? '').trim() === '') continue
+    return p
+  }
+  return null
+}
+
+/**
+ * Whether Paper's flourish may be drawn on this paragraph.
+ *
+ * False when the book already draws its own initial — see `InitialStyle` for
+ * why that has to be decided here rather than in the stylesheet.
+ *
+ * BOTH SIGNALS, not either alone. A float with no size change is a book raising
+ * a normal-size letter out of the flow; a size change with no float is a book
+ * setting a raised initial. Each is the book composing its own opening, and
+ * Paper's belongs in neither.
+ */
+export function booksOwnInitial(paragraphFontSize: string, initial: InitialStyle): boolean {
+  return initial.float !== 'none' || initial.fontSize !== paragraphFontSize
+}
+
 /** What the walk needs to know about one element. */
 export interface ProseStyle {
   readonly textAlign: string
   readonly direction: string
 }
+
+/**
+ * Does the book already draw an initial on this paragraph?
+ *
+ * WHY THIS IS A QUESTION AND NOT A STYLESHEET RULE. WI-14.4 puts the opening
+ * flourish in the tier where a book that states its own view wins, and that
+ * cannot be expressed in the cascade, because THE CASCADE RESOLVES PER
+ * PROPERTY. A book that already draws a drop cap says font-size, line-height,
+ * float and margin; Paper says initial-letter. Neither rule wins — they MERGE,
+ * and the reader gets the book's float model wearing Paper's sinkage. Measured
+ * on Bad Blood, which ships p.dropcaps3line::first-letter with a 4.5em float:
+ * the merged result reserved no space at all and the opening two lines ran
+ * straight through the letter.
+ *
+ * Winning the cascade instead is not open to us, and three guards in this repo
+ * say so in three different ways: the flourish must stay in the before tier
+ * (`bookSettings`), only seven properties may be marked important (`spacing`),
+ * and a font-size may be forced on the base and nowhere else (`bookSize`). All
+ * three are right. So the choice is made one level up, where it CAN be made —
+ * the paragraph is simply not marked, and a rule that matches nothing cannot
+ * merge with anything.
+ *
+ * THE TEST IS "DOES IT DIFFER FROM THE PARAGRAPH", not "is there a rule". A
+ * pseudo-element with no rule of its own computes to the element's own values,
+ * so a book that never mentions ::first-letter answers false on both counts
+ * without anything having to parse its stylesheet.
+ */
+export interface InitialStyle {
+  /** The pseudo-element's size. Equal to the paragraph's when unstyled. */
+  readonly fontSize: string
+  /** `none` unless the book floats the letter, which is the drop-cap model. */
+  readonly float: string
+}
+
+/**
+ * How the walk decides whether a book composes this opening — the second seam.
+ *
+ * A predicate rather than a style bag, because only one element is ever asked
+ * and the arithmetic behind the answer is `booksOwnInitial`, which is tested on
+ * its own. Keeping the seam this small also keeps the jsdom limit honest: the
+ * cascade is not something the unit lane can evaluate, and a reader that
+ * returned raw values would invite a test that pretended otherwise.
+ */
+export type InitialReader = (el: Element) => boolean
 
 /** How the walk reads an element's own alignment — the seam. */
 export type StyleReader = (el: Element) => ProseStyle
@@ -80,7 +185,7 @@ export type StyleReader = (el: Element) => ProseStyle
  * and these marks never need revisiting — which also means this can run once
  * per document, at load, rather than on every settings pass.
  */
-export function markProse(doc: Document, readStyle?: StyleReader): void {
+export function markProse(doc: Document, readStyle?: StyleReader, readInitial?: InitialReader): void {
   /* A section that failed to parse hands back a document with neither, and this
      runs on every section that loads — the same case `ensureLang` guards. */
   const win = doc.defaultView
@@ -92,6 +197,23 @@ export function markProse(doc: Document, readStyle?: StyleReader): void {
     ((el) => {
       const style = win!.getComputedStyle(el)
       return { textAlign: style.textAlign, direction: style.direction }
+    })
+
+  /* GUARDED ON THE CAPABILITY, NOT ON THE OBJECT. A document standing in for a
+     book in the unit lane has a `defaultView` that is a bare object — truthy,
+     and with no `getComputedStyle` on it — so a null check on the window passes
+     and the call below still throws. There is no cascade to ask in that lane,
+     and the honest answer when none can be asked is that the book composes
+     nothing. */
+  const composed: InitialReader =
+    readInitial ??
+    ((el) => {
+      if (typeof win?.getComputedStyle !== 'function') return false
+      const style = win.getComputedStyle(el, '::first-letter')
+      return booksOwnInitial(win.getComputedStyle(el).fontSize, {
+        fontSize: style.fontSize,
+        float: style.float,
+      })
     })
 
   /* READ EVERY ELEMENT BEFORE WRITING ANY. `getComputedStyle` flushes pending
@@ -109,4 +231,20 @@ export function markProse(doc: Document, readStyle?: StyleReader): void {
     if (alignsAsProse(textAlign, direction)) prose.push(el)
   }
   for (const el of prose) el.setAttribute('data-paper-prose', '')
+
+  /* THE OPENING, LAST, and its one style read is deliberately after every write
+   * above rather than folded into the loop: the loop's whole shape is "read all,
+   * then write all", and a read placed inside it would recompute the document
+   * once per paragraph. One read after the writes costs one recompute, which is
+   * the same recompute the next layout would have done anyway.
+   *
+   * `bookCss` has named this function as the owner of the mark since WI-14.4 and
+   * nothing set it, so the drop cap and the small caps were two settings that
+   * moved a pip and left the page alone.
+   *
+   * NOT MARKED WHEN THE BOOK COMPOSES ITS OWN OPENING — see `InitialStyle`.
+   * That is WI-14.4's before-tier rule ("a book that states a view goes on
+   * winning") enforced at the only place the cascade leaves open. */
+  const opening = openingParagraph(body)
+  if (opening && !composed(opening)) opening.setAttribute('data-paper-opening', '')
 }
