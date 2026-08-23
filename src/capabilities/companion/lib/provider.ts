@@ -2,6 +2,7 @@ import type { AskContext, Citation, CompanionProvider } from '../../../kernel'
 import type { Depth, InferencePort } from '../../inference'
 import {
   COMPANION_SYSTEM_PROMPT,
+  buildAgentTurn,
   buildQuestion,
   numberPassages,
   resolveCitations,
@@ -182,7 +183,7 @@ export function createCompanionProvider({
          costs the reader something. */
       const running = (
         isAgentRoute(chosen)
-          ? port.agentAsk(chosen, prompt, depth(), push, signal)
+          ? port.agentAsk(chosen, buildAgentTurn(prompt), depth(), push, signal)
           : port.generate(requireModelId(chosen), COMPANION_SYSTEM_PROMPT, prompt, push, signal)
       )
         .then(() => {})
