@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createKernelServices, scopeSettings } from '../../../kernel'
-import { ROUTE_SETTING, TOOLS_SETTING } from '../lib/settings'
+import { DEPTH_SETTING, ROUTE_SETTING } from '../lib/settings'
 import type { InferencePort, Probe, Route, UnusableReason } from '../../inference'
 import { DEPTH_LABELS, DEPTH_ORDER, createRoutesModel, resolveRoute, rowFor } from './routesModel'
 
@@ -262,7 +262,6 @@ function portWith(probe: Probe | (() => Promise<Probe>)): { port: InferencePort;
     probe: typeof probe === 'function' ? probe : async () => probe,
     ensureReady: async () => true,
     signIn: async (id: string) => void signedIn.push(id),
-    subscribe: () => () => {},
   } satisfies InferencePort
   return { port, signedIn }
 }
@@ -322,13 +321,16 @@ describe('the routes store', () => {
     await model.refresh()
     const before = model.getSnapshot()
     expect(model.getSnapshot()).toBe(before)
-    model.setTools(true)
+    /* A REAL SETTING WRITE, which is the invalidation under test. This used
+       to press the `Tools` toggle — a control that wrote a boolean nothing
+       ever read, and is gone; the effort cycle is the same shape and does
+       something. */
+    model.cycleDepth()
     const after = model.getSnapshot()
     expect(after).not.toBe(before)
     /* And stable again once rebuilt — the invalidation is per CHANGE, not
        per read, which is the half that stops the re-render loop. */
     expect(model.getSnapshot()).toBe(after)
-    expect(after.tools).toBe(true)
     model.dispose()
   })
 
@@ -346,11 +348,11 @@ describe('the routes store', () => {
     await model.refresh()
     expect(seen, 'one refresh produced more than one notification').toBe(1)
 
-    model.setTools(true)
+    model.cycleDepth()
     expect(seen, 'one setting write produced more than one notification').toBe(2)
 
     stop()
-    model.setTools(false)
+    model.cycleDepth()
     expect(seen, 'a detached listener was still notified').toBe(2)
     model.dispose()
   })
@@ -459,8 +461,7 @@ describe('the routes store', () => {
           started.push(id)
           await gate.promise
         },
-        subscribe: () => () => {},
-      } satisfies InferencePort
+        } satisfies InferencePort
       const model = createRoutesModel({ port, ...wiring() })
       await model.refresh()
 
@@ -484,8 +485,7 @@ describe('the routes store', () => {
           probeOf(signedIn ? codexReady : signedOut),
         ensureReady: async () => true,
         signIn: async () => {},
-        subscribe: () => () => {},
-      } satisfies InferencePort
+        } satisfies InferencePort
       const model = createRoutesModel({ port, ...wiring() })
       await model.refresh()
       await model.signIn('agent:codex')
@@ -517,8 +517,7 @@ describe('the routes store', () => {
         signIn: async () => {
           throw new Error('Codex is not installed')
         },
-        subscribe: () => () => {},
-      } satisfies InferencePort
+        } satisfies InferencePort
       const model = createRoutesModel({
         port,
         ...wiring(),
@@ -561,12 +560,30 @@ describe('the routes store', () => {
     model.dispose()
   })
 
-  it('sets tools through the settings store, not its own field', () => {
+  it('writes the effort through the settings store, not its own field', () => {
     const { settings, kernel } = wiring()
     const { port } = portWith(probeOf())
     const model = createRoutesModel({ port, settings, kernel })
-    model.setTools(true)
-    expect(settings.get(TOOLS_SETTING)).toBe(true)
+    model.cycleDepth()
+    expect(settings.get(DEPTH_SETTING)).toBe(DEPTH_ORDER[1])
+    model.dispose()
+  })
+
+  /* ⚠️ AND NOTHING WRITES `companion.tools`. There was a persisted setting and
+     a checkbox for it, and no answer path anywhere read either — so the row
+     told the reader they had restricted the companion, or freed it, and
+     neither was true. An inert privacy control fails convincingly, which is
+     worse than not having one. This is what stops it coming back without the
+     enforcement point that would make it mean something. */
+  it('stores nothing under `companion.tools`', () => {
+    const { settings, kernel } = wiring()
+    const { port } = portWith(probeOf())
+    const model = createRoutesModel({ port, settings, kernel })
+    model.cycleDepth()
+    model.use('agent:codex')
+    /* Neither in the snapshot the pane draws from, nor reachable as a
+       setting: `TOOLS_SETTING` no longer exists to be read. */
+    expect(Object.keys(model.getSnapshot())).not.toContain('tools')
     model.dispose()
   })
 
@@ -670,7 +687,6 @@ describe('the rows the pane can act on', () => {
         ),
       ensureReady: async () => true,
       signIn: async () => {},
-      subscribe: () => () => {},
     } satisfies InferencePort
     const model = createRoutesModel({
       port,

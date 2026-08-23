@@ -2,7 +2,7 @@ import type { SettingsStore } from '../../../kernel'
 import { LOOK_UP_LABELS, createGenerations, type KernelServices } from '../../../kernel'
 import type { Depth } from '../../inference'
 import { reasonOf, type InferencePort, type Probe, type Route } from '../../inference'
-import { DEPTH_SETTING, ROUTE_SETTING, TOOLS_SETTING } from '../lib/settings'
+import { DEPTH_SETTING, ROUTE_SETTING } from '../lib/settings'
 
 /**
  * The route list's decisions — no React, so they can be tested.
@@ -87,7 +87,6 @@ export interface RoutesSnapshot {
   /** True when the reader's stored choice is no longer usable. */
   readonly fellBack: boolean
   readonly lookUp: string | null
-  readonly tools: boolean
   /**
    * The effort label, or null when the control does not apply.
    *
@@ -176,7 +175,6 @@ export interface RoutesModel {
   use(id: string): void
   signIn(id: string): Promise<void>
   cycleLookUp(hasDictionary: boolean, hasGloss: boolean): void
-  setTools(value: boolean): void
   /** Advance the effort one place. */
   cycleDepth(): void
   dispose(): void
@@ -209,7 +207,6 @@ const EMPTY: RoutesSnapshot = {
   inUse: null,
   fellBack: false,
   lookUp: null,
-  tools: false,
   depth: null,
   loading: true,
 }
@@ -251,7 +248,6 @@ export function createRoutesModel({ port, settings, kernel, report }: RoutesMode
        * the row's label is resolved at render. `null` means "no control", and
        * the pane draws nothing. */
       lookUp: hasGloss ? LOOK_UP_LABELS[kernel.lookUp()] : null,
-      tools: settings.get(TOOLS_SETTING),
       /* Offered only while an AGENT answers — the two flags this maps to
          exist on the agent CLIs and nowhere else. */
       depth:
@@ -315,7 +311,6 @@ export function createRoutesModel({ port, settings, kernel, report }: RoutesMode
     /* One cycle, in the kernel — this was written out here and in
        `inference`'s store, identically, which is one algorithm in two files. */
     cycleLookUp: (hasDictionary, hasGloss) => kernel.cycleLookUp(hasDictionary, hasGloss),
-    setTools: (value) => settings.set(TOOLS_SETTING, value),
     cycleDepth: () => {
       const at = DEPTH_ORDER.indexOf(settings.get(DEPTH_SETTING))
       settings.set(DEPTH_SETTING, DEPTH_ORDER[(at + 1) % DEPTH_ORDER.length] as Depth)

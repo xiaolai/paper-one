@@ -167,6 +167,16 @@ export function Companion({
                 </div>
               ) : null}
 
+              {/* ⚠️ THE HALF WI-15.5 ASKED FOR AND NOTHING COULD DRAW. The
+                  drop of a fabricated `[47]` was implemented and tested; the
+                  visible note beside it was not, because the flag saying one
+                  had been dropped was discarded where the citations were
+                  resolved. An answer that quietly cites less than it claims is
+                  precisely the outcome the drop exists to prevent. */}
+              {message.notice !== null ? (
+                <div className={styles.turnNotice}>{message.notice}</div>
+              ) : null}
+
               {message.failure !== null ? (
                 <div className={styles.turnFailure}>{message.failure}</div>
               ) : null}

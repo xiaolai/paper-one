@@ -141,9 +141,10 @@ export function resolveCitations(answer: string, passages: readonly Passage[]): 
   return { citations, hadUnknownCitation }
 }
 
-/** What the thread shows when the model cited something that does not exist. */
-export const UNKNOWN_CITATION_NOTE =
-  'Part of this answer cited a passage that was not in the book text sent — that citation has been removed.'
+/* THE SENTENCE ITSELF LIVES IN `kernel/core/companion.ts`, beside the contract
+ * that carries the flag, because the kernel's thread is what renders it — and
+ * the kernel imports nothing from a capability. It was declared here and
+ * exported, and nothing anywhere could show it. */
 
 /**
  * What the model is told. Every line is load-bearing and several are the

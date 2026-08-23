@@ -158,6 +158,6 @@ export const companion: Capability = {
   },
 }
 
-export { DEPTH_SETTING, ROUTE_SETTING, TOOLS_SETTING } from './lib/settings'
+export { DEPTH_SETTING, ROUTE_SETTING } from './lib/settings'
 export type { Passage, SourcePassage } from './lib/passages'
-export { UNKNOWN_CITATION_NOTE, resolveCitations } from './lib/passages'
+export { resolveCitations } from './lib/passages'

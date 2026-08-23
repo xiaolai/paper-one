@@ -1,8 +1,8 @@
+import { UNKNOWN_CITATION_NOTE } from '../../../kernel'
 import { describe, expect, it } from 'vitest'
 import {
   COMPANION_SYSTEM_PROMPT,
   MAX_CONTEXT_CHARS,
-  UNKNOWN_CITATION_NOTE,
   buildQuestion,
   citedIndices,
   numberPassages,

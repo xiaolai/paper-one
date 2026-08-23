@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { UNKNOWN_CITATION_NOTE } from '../../core/companion'
 import type { AskContext, Citation, CompanionProvider } from '../../core/companion'
 
 /**
@@ -36,6 +37,15 @@ export interface ThreadMessage {
   readonly streaming: boolean
   /** Set when the answer failed, in the reader's words. */
   readonly failure: string | null
+  /**
+   * Set when the model cited a passage that was not sent.
+   *
+   * NOT a `failure`: the answer stands and the rest of its citations are
+   * real. What was removed is one claim's link, and §13 says a claim whose
+   * citation vanished must not stand unmarked — so it is said, on its own
+   * line, rather than left to look like an answer that simply cited less.
+   */
+  readonly notice: string | null
 }
 
 export interface CompanionThread {
@@ -107,8 +117,24 @@ export function useCompanionThread(
       const replyId = (nextId += 1)
       setMessages((prior) => [
         ...prior,
-        { id: readerId, role: 'reader', text: trimmed, citations: [], streaming: false, failure: null },
-        { id: replyId, role: 'companion', text: '', citations: [], streaming: true, failure: null },
+        {
+          id: readerId,
+          role: 'reader',
+          text: trimmed,
+          citations: [],
+          streaming: false,
+          failure: null,
+          notice: null,
+        },
+        {
+          id: replyId,
+          role: 'companion',
+          text: '',
+          citations: [],
+          streaming: true,
+          failure: null,
+          notice: null,
+        },
       ])
 
       const patch = (change: Partial<ThreadMessage>): void => {
@@ -127,11 +153,20 @@ export function useCompanionThread(
             patch({ text })
             step = await stream.next()
           }
-          /* The generator's RETURN value is the citations — Paper's own
-           * mapping from `[n]` back to a location, never anything the model
-           * produced. */
-          const citations = Array.isArray(step.value) ? step.value : []
-          patch({ text, citations, streaming: false })
+          /* The generator's RETURN value is Paper's own mapping from `[n]`
+           * back to a location, never anything the model produced — plus
+           * whether any `[n]` named a passage that was never sent.
+           *
+           * ⚠️ THE SECOND HALF USED TO BE THROWN AWAY one layer down, so the
+           * note WI-15.5 requires could not be shown by anything. See
+           * `AnswerEnd`. */
+          const end = step.value ?? undefined
+          patch({
+            text,
+            citations: end?.citations ?? [],
+            notice: end?.hadUnknownCitation === true ? UNKNOWN_CITATION_NOTE : null,
+            streaming: false,
+          })
         } catch (error) {
           if (controller.signal.aborted) {
             /* The reader's own abort. What arrived is kept — it is a real

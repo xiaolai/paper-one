@@ -191,23 +191,16 @@ export function CompanionPane({ model, hasDictionary }: CompanionPaneProps) {
         </>
       ) : null}
 
-      {/* A `<label>` rather than a sibling `<span>`: the text was next to the
-          checkbox and not associated with it, so the control had no accessible
-          name at all — a screen reader announced an unlabelled checkbox. The
-          same wrapping also makes the word itself a hit target. */}
-      <label className={ui.row}>
-        <span className={ui.grow}>Tools</span>
-        <input
-          type="checkbox"
-          className={ui.toggle}
-          checked={snapshot.tools}
-          onChange={(event) => model.setTools(event.currentTarget.checked)}
-        />
-      </label>
-      <div className={ui.hint}>
-        The companion answers from the book. Tools let it reach further; it will say
-        when it does.
-      </div>
+      {/* ⚠️ NO `Tools` TOGGLE, and it is a removal rather than an omission.
+       *
+       * It was persisted, it was drawn, and **nothing on any answer path read
+       * it.** The agent turns disable tools unconditionally and the local
+       * route has none, so the switch moved a boolean and changed nothing —
+       * while telling the reader, in a hint beneath it, that the companion
+       * could now reach further and would say when it did.
+       *
+       * An inert control is bad anywhere; an inert PRIVACY control is worse
+       * than none, because it fails convincingly. See `lib/settings.ts`. */}
     </div>
   )
 }

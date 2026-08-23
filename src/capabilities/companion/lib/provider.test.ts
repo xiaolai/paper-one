@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import type { AnswerEnd } from '../../../kernel'
 import type { AskContext } from '../../../kernel'
 import { COMPANION_SYSTEM_PROMPT } from './passages'
 import type { InferencePort } from '../../inference'
@@ -65,16 +66,25 @@ function portWith(
     probe: async () => ({ routes: [], runtimeVersion: null }),
     ensureReady: async () => true,
     signIn: async () => {},
-    subscribe: () => () => {},
   } satisfies InferencePort
   return { port, seen, signals }
 }
 
-const drain = async (stream: AsyncGenerator<string, unknown>): Promise<{ text: string; done: unknown }> => {
+/**
+ * Run a stream to its end, keeping the text and the answer's own resolution.
+ *
+ * `done` is an `AnswerEnd`, not a bare citation list: the provider returned
+ * `.citations` alone and threw `hadUnknownCitation` away, so the note WI-15.5
+ * requires for a fabricated `[n]` could not be rendered by anything. Both
+ * halves cross now, and `citations` below reads only the first.
+ */
+const drain = async (
+  stream: AsyncGenerator<string, unknown>,
+): Promise<{ text: string; done: AnswerEnd | undefined }> => {
   let text = ''
   for (;;) {
     const step = await stream.next()
-    if (step.done === true) return { text, done: step.value }
+    if (step.done === true) return { text, done: step.value as AnswerEnd | undefined }
     text += step.value
   }
 }
@@ -152,16 +162,38 @@ describe('the bound provider', () => {
 
   /* The citation map needs the numbering the answer was built against, not
      the passages a later render would produce. */
-  it('remembers the passages the last answer was grounded in', async () => {
+  it('resolves an answer’s citations against its own passage table', async () => {
     const { port } = portWith(async (onChunk) => {
       onChunk('It is in [1].')
       return ''
     })
     const provider = createCompanionProvider({ port, route: () => 'local:qwen3-4b', depth: () => 'default' })
-    expect(provider.lastPassages()).toEqual([])
     const { done } = await drain(provider.ask('where?', CONTEXT, new AbortController().signal))
-    expect(provider.lastPassages()).toHaveLength(1)
-    expect(done).toEqual([expect.objectContaining({ cfi: 'epubcfi(/6/4!/4/2)' })])
+    expect(done?.citations).toEqual([expect.objectContaining({ cfi: 'epubcfi(/6/4!/4/2)' })])
+    expect(done?.hadUnknownCitation).toBe(false)
+  })
+
+  /**
+   * ⚠️ AND A FABRICATED INDEX IS BOTH DROPPED AND DECLARED.
+   *
+   * WI-15.5's acceptance is *"a fabricated `[47]` produces an answer with no
+   * citation AND A VISIBLE NOTE"*. The drop was implemented and covered; the
+   * flag that makes the note showable was discarded at the one line that
+   * produced it, so no caller could ever render it and no test noticed —
+   * because none of them looked past `.citations`.
+   */
+  it('says when the model cited a passage that was never sent', async () => {
+    const { port } = portWith(async (onChunk) => {
+      onChunk('As shown in [47], and also [1].')
+      return ''
+    })
+    const provider = createCompanionProvider({ port, route: () => 'local:qwen3-4b', depth: () => 'default' })
+    const { done } = await drain(provider.ask('where?', CONTEXT, new AbortController().signal))
+
+    /* The real one stands; the invented one is gone rather than resolved to
+       the nearest plausible passage. */
+    expect(done?.citations).toEqual([expect.objectContaining({ cfi: 'epubcfi(/6/4!/4/2)' })])
+    expect(done?.hadUnknownCitation, 'the drop happened silently').toBe(true)
   })
 })
 
@@ -259,7 +291,6 @@ describe('overlapping asks', () => {
       probe: async () => ({ routes: [], runtimeVersion: null }),
       ensureReady: async () => true,
       signIn: async () => {},
-      subscribe: () => () => {},
     } satisfies InferencePort
 
     const provider = createCompanionProvider({ port, route: () => 'local:m', depth: () => 'default' })
@@ -275,10 +306,10 @@ describe('overlapping asks', () => {
     finish[1]?.('see [1].')
     const [a, b] = await Promise.all([first, second])
 
-    expect(a.done, 'the first answer cited the second question’s passage').toEqual([
+    expect(a.done?.citations, 'the first answer cited the second question’s passage').toEqual([
       expect.objectContaining({ cfi: 'cfi/FIRST' }),
     ])
-    expect(b.done).toEqual([expect.objectContaining({ cfi: 'cfi/SECOND' })])
+    expect(b.done?.citations).toEqual([expect.objectContaining({ cfi: 'cfi/SECOND' })])
   })
 })
 

@@ -23,17 +23,25 @@ export const ROUTE_SETTING: Setting<string> = defineSetting('companion.route', '
   typeof raw === 'string' ? raw : undefined,
 )
 
-/**
- * Whether the companion may reach beyond the book.
+/* ⚠️ NO `TOOLS_SETTING`, AND IT IS A REMOVAL RATHER THAN AN OMISSION.
  *
- * OFF by default and off in this phase: §13's rule is that the companion
- * answers from the book and says when it is drawing on outside knowledge, and
- * nothing here yet has a tool to offer. The setting exists so the surface is
- * declared rather than retrofitted, and the row says what it would mean.
+ * There was one — persisted, and drawn as a checkbox reading "Tools let it
+ * reach further; it will say when it does." **Nothing on any answer path ever
+ * read it.** The agent turns disable tools unconditionally (`agentask.rs`
+ * passes `--disallowed-tools "*"`, which is the whole of that sandbox) and the
+ * local route has no tools to enable, so the toggle moved a stored boolean and
+ * changed nothing whatsoever.
+ *
+ * That is worse than having no control. A reader who left it OFF was told they
+ * had restricted something, and a reader who turned it ON was told the
+ * companion could now reach further and would say so — neither statement was
+ * true, and both are about the one property §13 makes a promise on. An inert
+ * privacy control does not fail safe; it fails *convincingly*.
+ *
+ * The same argument this file's own voice-picker removal makes, and the same
+ * remedy: it comes back with the feature that needs it, and with an enforcement
+ * point on the request path rather than a field beside one.
  */
-export const TOOLS_SETTING: Setting<boolean> = defineSetting('companion.tools', false, (raw) =>
-  typeof raw === 'boolean' ? raw : undefined,
-)
 
 /**
  * How much of the reader's subscription one answer may spend.

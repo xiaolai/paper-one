@@ -1,7 +1,7 @@
 import { createElement } from 'react'
 import type { Capability, CapabilityContext, Disposable } from '../../kernel'
 import { createController, type Controller } from './lib/controller'
-import { createGlossProvider, type BoundGlossProvider } from './lib/glossProvider'
+import { createGlossProvider } from './lib/glossProvider'
 import { inferencePlugin, mintRequestId, type Depth, type InferencePlugin, type Probe } from './lib/plugin'
 import { createModelsModel, downloadLine, type ModelsModel } from './ui/modelsModel'
 import { ModelsPane } from './ui/ModelsPane'
@@ -33,9 +33,21 @@ import { ModelsPane } from './ui/ModelsPane'
 let running: {
   readonly plugin: InferencePlugin
   readonly controller: Controller
-  readonly gloss: BoundGlossProvider
 } | null = null
 let modelsModel: ModelsModel | null = null
+
+/**
+ * Which start is the current one.
+ *
+ * ⚠️ **AN OLD LIFETIME COULD STOP THE NEW ONE'S DAEMON.** `plugin.stop()` is
+ * fire-and-forget and addresses the plugin-wide daemon, not this capability's
+ * copy of it — there is only one. So on a rapid restart the outgoing
+ * lifetime's stop could land AFTER the incoming one had started a daemon and
+ * begun answering, cancelling its requests and killing its child process. The
+ * ownership checks around `running` and `modelsModel` do not cover it, because
+ * the action they guard is scheduled and lands later.
+ */
+let lifetime = 0
 
 /**
  * The PORT — what `inference` offers the capabilities that `require` it.
@@ -75,7 +87,6 @@ export interface InferencePort {
   /** Start the daemon if it is not up. False when it could not. */
   ensureReady(): Promise<boolean>
   signIn(route: string): Promise<void>
-  subscribe(listener: () => void): () => void
 }
 
 /** The port, or null when `inference` has not started. */
@@ -91,6 +102,13 @@ export function inferencePort(): InferencePort | null {
     signal: AbortSignal | null,
     run: (requestId: string) => Promise<T>,
   ): Promise<T> => {
+    /* ⚠️ CHECKED BEFORE THE LISTENER IS ADDED. `addEventListener('abort')` does
+     * not replay an abort that has already happened, so a signal cancelled
+     * before this ran registered a handler that would never fire and the work
+     * started anyway. `generate` below makes that a real window rather than a
+     * theoretical one: it awaits `ensureReady()` first, which is a process
+     * launch, and a reader pressing Stop during it was ignored. */
+    signal?.throwIfAborted()
     const requestId = mintRequestId(prefix)
     const abort = (): void => void plugin.cancel(requestId).catch(() => {})
     signal?.addEventListener('abort', abort, { once: true })
@@ -103,6 +121,10 @@ export function inferencePort(): InferencePort | null {
 
   return {
     generate: async (model, system, question, onChunk, signal) => {
+      /* Before the start as well as after it: a launch is seconds, and a
+         reader who gave up in that window must not have a daemon started on
+         their behalf. `withCancel` checks again on the far side. */
+      signal.throwIfAborted()
       if (!(await controller.ensureReady())) throw new Error('The runtime is not running')
       return withCancel('ask', signal, (id) => plugin.generate(id, model, system, question, onChunk))
     },
@@ -115,7 +137,6 @@ export function inferencePort(): InferencePort | null {
     probe: () => plugin.probe(),
     ensureReady: () => controller.ensureReady(),
     signIn: (route) => plugin.agentSignIn(route),
-    subscribe: (listener) => controller.subscribe(listener),
   }
 }
 
@@ -142,6 +163,7 @@ export const inference: Capability = {
     const controller = createController(plugin, (event, fields) => api.diagnostics.warn(event, fields))
     const gloss = createGlossProvider({ plugin, controller })
 
+    const myLifetime = ++lifetime
     let stopped = false
     let unbindGloss: Disposable | null = null
     let unbindWorkLine: Disposable | null = null
@@ -178,8 +200,14 @@ export const inference: Capability = {
       controller.dispose()
       /* The daemon is a CHILD PROCESS, and it must not outlive the capability
        * that owns it. Best-effort and unawaited: `dispose` is synchronous and
-       * Rust stops it again on app exit anyway. */
-      void plugin.stop().catch(() => {})
+       * Rust stops it again on app exit anyway.
+       *
+       * ⚠️ ONLY IF NOTHING HAS STARTED SINCE. There is one daemon for the
+       * plugin, not one per lifetime, so an outgoing stop landing after an
+       * incoming start killed the NEW capability's runtime and cancelled its
+       * requests. `running === myRunning` above cannot cover it: that check
+       * runs now and this action lands later. */
+      if (lifetime === myLifetime) void plugin.stop().catch(() => {})
     }
     api.onCleanup(stop)
     signal.addEventListener('abort', stop, { once: true })
@@ -196,7 +224,7 @@ export const inference: Capability = {
       },
       subscribe: (listener) => controller.subscribe(listener),
     })
-    myRunning = { plugin, controller, gloss }
+    myRunning = { plugin, controller }
     running = myRunning
     myModels = createModelsModel({
       controller,
@@ -221,19 +249,14 @@ export const inference: Capability = {
 }
 
 export { KEEP_LOADED_SETTING, LOOK_UP_SETTING } from './lib/settings'
-/**
- * The library status bar's download line, or null at rest (WI-15.12).
+/* THE DOWNLOAD LINE IS THE WORK-LINE BINDING, and only that.
  *
- * Exported from the capability rather than pushed into the kernel, because
- * the kernel imports nothing from a capability: `App` reads it through the
- * composition, the same way it reads any other contributed value.
- */
-export function inferenceDownloadLine(): string | null {
-  const held = running
-  if (held === null) return null
-  const snapshot = held.controller.getSnapshot()
-  return downloadLine(snapshot.runtime, snapshot.models)
-}
+ * An `inferenceDownloadLine()` export lived here beside it, with a comment
+ * saying `App` read it through the composition — which had stopped being true:
+ * `App` reads the bound work-line service, and the export's only remaining
+ * caller was a test of itself. Two implementations of one status line, one of
+ * them dead and documented as live, is how the live one comes to be changed
+ * without the dead one and nobody notices which is which. See `start`. */
 
 export { useInference } from './ui/useInference'
 export type { Controller, InferenceSnapshot, RuntimeState } from './lib/controller'

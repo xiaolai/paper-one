@@ -26,7 +26,7 @@ describe('the companion, gloss and work-line ports', () => {
     name,
     configured: true,
     async *ask() {
-      return []
+      return { citations: [], hadUnknownCitation: false }
     },
   })
 

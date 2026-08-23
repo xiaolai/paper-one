@@ -90,8 +90,37 @@ export interface CompanionProvider {
     question: string,
     context: AskContext,
     signal: AbortSignal,
-  ): AsyncGenerator<string, readonly Citation[] | void>
+  ): AsyncGenerator<string, AnswerEnd | void>
 }
+
+/**
+ * What a finished answer resolved to.
+ *
+ * ⚠️ **THIS WAS A BARE `Citation[]`, AND THE WARNING COULD NOT BE SHOWN.**
+ * WI-15.5's acceptance is *"a fabricated `[47]` in a model's output produces
+ * an answer with no citation AND A VISIBLE NOTE, never a citation pointing
+ * somewhere plausible."* The drop was implemented, tested, and correct; the
+ * note was not, because the provider returned `resolveCitations(…).citations`
+ * and threw the `hadUnknownCitation` flag away at that line. So a model that
+ * cited a passage nobody sent produced an answer that simply had one fewer
+ * citation than it claimed — silently, which is the half §13 says must not
+ * happen.
+ */
+export interface AnswerEnd {
+  readonly citations: readonly Citation[]
+  /** True when the model cited an index the passage table does not contain. */
+  readonly hadUnknownCitation: boolean
+}
+
+/**
+ * What the thread shows when the model cited something that does not exist.
+ *
+ * HERE, not in the capability that detects it: the kernel's thread renders it
+ * and the kernel imports nothing from a capability. It was declared beside the
+ * detection, exported, and unreachable by anything that could draw it.
+ */
+export const UNKNOWN_CITATION_NOTE =
+  'Part of this answer cited a passage that was not in the book text sent — that citation has been removed.'
 
 /**
  * The provider this build ships with.

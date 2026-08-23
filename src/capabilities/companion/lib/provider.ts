@@ -1,4 +1,4 @@
-import type { AskContext, Citation, CompanionProvider } from '../../../kernel'
+import type { AnswerEnd, AskContext, CompanionProvider } from '../../../kernel'
 import type { Depth, InferencePort } from '../../inference'
 import {
   COMPANION_SYSTEM_PROMPT,
@@ -6,7 +6,6 @@ import {
   buildQuestion,
   numberPassages,
   resolveCitations,
-  type Passage,
 } from './passages'
 
 /**
@@ -51,10 +50,18 @@ export interface CompanionProviderOptions {
   readonly depth: () => Depth
 }
 
-export interface BoundCompanionProvider extends CompanionProvider {
-  /** The passages the last answer was grounded in, for the citation map. */
-  lastPassages(): readonly Passage[]
-}
+/**
+ * The provider this capability binds.
+ *
+ * ⚠️ IT HAD A `lastPassages()` ACCESSOR AND NOTHING CALLED IT. Its contract
+ * was "the most recent answer's table", which is provider-wide mutable state
+ * shared by every concurrent ask — the exact shape of the defect that made two
+ * overlapping questions resolve each other's citations, and the reason the
+ * table each answer is numbered against is now held locally. Keeping a public
+ * reader for the floating value would have invited the same bug back through
+ * the front door, and no caller wanted it.
+ */
+export type BoundCompanionProvider = CompanionProvider
 
 /** Whether a route id names an agent rather than the local runtime. */
 export function isAgentRoute(route: RouteId): boolean {
@@ -125,7 +132,6 @@ export function createCompanionProvider({
   route,
   depth,
 }: CompanionProviderOptions): BoundCompanionProvider {
-  let numbered: readonly Passage[] = []
 
   return {
     get name(): string {
@@ -139,23 +145,21 @@ export function createCompanionProvider({
       question: string,
       context: AskContext,
       signal: AbortSignal,
-    ): AsyncGenerator<string, readonly Citation[] | void> {
+    ): AsyncGenerator<string, AnswerEnd | void> {
       const chosen = route()
       if (chosen === null) {
         throw new Error('The companion has no provider. Check `configured` before calling ask().')
       }
 
-      /* THIS REQUEST'S OWN TABLE, held locally.
+      /* THIS REQUEST'S OWN TABLE, AND ONLY THAT.
        *
-       * `numbered` is provider-wide, and the citation map at the end used to
-       * read it back — so two overlapping asks resolved the FIRST answer's
-       * `[n]` against the SECOND question's passages, and every citation
-       * pointed confidently at the wrong paragraph. The provider-wide value
-       * still exists for `lastPassages()`, whose contract is "the most
-       * recent"; what must not float is the table this answer is numbered
-       * against. */
+       * There was a provider-wide `numbered` that the citation map at the end
+       * read back, so two overlapping asks resolved the FIRST answer's `[n]`
+       * against the SECOND question's passages and every citation pointed
+       * confidently at the wrong paragraph. It survived that fix as backing
+       * for a `lastPassages()` accessor nothing called; with the accessor gone
+       * there is nothing provider-wide left to float. */
       const mine = numberPassages(context.passages)
-      numbered = mine
       const prompt = buildQuestion(
         context.bookTitle,
         context.chapterLabel,
@@ -213,10 +217,15 @@ export function createCompanionProvider({
 
       /* THE MAP BACK, and the drop. An index the table does not contain is
        * refused — never resolved to the nearest passage, which would be a
-       * citation pointing somewhere plausible. */
-      return resolveCitations(answer, mine).citations
+       * citation pointing somewhere plausible.
+       *
+       * ⚠️ AND THE FLAG TRAVELS WITH IT. This returned `.citations` alone, so
+       * the one thing that knew a citation had been fabricated dropped that
+       * fact on the way out and `UNKNOWN_CITATION_NOTE` could never be
+       * rendered by anything. A drop the reader is not told about is the
+       * failure mode the drop exists to prevent. */
+      return resolveCitations(answer, mine)
     },
 
-    lastPassages: () => numbered,
   }
 }

@@ -355,6 +355,17 @@
   color: var(--muted);
 }
 
+/* A citation that was removed because it named a passage nobody sent.
+ *
+ * The same voice as `.turnFailure` and deliberately not louder: the answer
+ * STANDS and its other citations are real, so this is a note about one claim
+ * rather than a failure of the turn. §13's rule is that such a claim must not
+ * stand unmarked — the requirement is that it is said, not that it shouts. */
+.turnNotice {
+  font-size: var(--text-caption);
+  color: var(--muted);
+}
+
 .companionHead {
   flex: 0 0 auto;
   padding: 0 var(--space-16) var(--space-10);
