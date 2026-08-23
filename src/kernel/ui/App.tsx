@@ -12,6 +12,7 @@ import { planImport } from '../core/tagArchive'
 import { canArchiveTags, exportTagsToFile, importTagsFromFile } from './tagFiles'
 import { canArchiveMarks, exportMarksToFile, importMarksFromFile } from './marksFiles'
 import { createHandover } from './importHandover'
+import { CLOSE_DRAIN_MS, createCloseSequence } from './closeWindow'
 import { openExternal } from './openExternal'
 import { planImport as planMarksImport } from '../core/marksArchive'
 import { hasOpenLayer, useAppState } from './state'
@@ -1046,18 +1047,22 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
      * is unregistered on the spot. */
     let disposed = false
     let stop: (() => void) | undefined
+    /* THE SEQUENCE IS ITS OWN UNIT, and every failure path lives there — see
+     * `closeWindow.ts`. `preventDefault` has already run by the time it
+     * starts, so nothing else will close this window; a throw anywhere in
+     * here used to reject the listener and leave the reader with a window
+     * that would not close. */
+    const close = createCloseSequence({
+      flush: flushBeforeClose,
+      drain: () => services.drain(),
+      destroy: () => getCurrentWindow().destroy(),
+      timeoutMs: CLOSE_DRAIN_MS,
+      report: (message, cause) => console.error(message, cause),
+    })
     void getCurrentWindow()
       .onCloseRequested(async (event) => {
         event.preventDefault()
-        /* WHAT IS HELD IN MEMORY FIRST, then what is on the queue. A queue can
-         * only drain what it has been given, and the thing most likely to be
-         * lost is the thing not yet handed over — a note being typed. */
-        flushBeforeClose()
-        await Promise.race([
-          services.drain(),
-          new Promise((resolve) => setTimeout(resolve, 2000)),
-        ])
-        await getCurrentWindow().destroy()
+        await close()
       })
       .then((unlisten) => {
         if (disposed) {
@@ -1073,7 +1078,15 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
         // "probably saved".
         console.error('Paper: could not hold the window open to finish saving', cause)
       })
-    return () => stop?.()
+    return () => {
+      /* SET, which it never was. The comment above describes a registration
+       * landing after its effect died being "unregistered on the spot", and
+       * `disposed` was declared and read and never written — so StrictMode's
+       * mount/unmount/mount left the first listener registered and the second
+       * mount added another: two intercepts, two teardowns, racing. */
+      disposed = true
+      stop?.()
+    }
   }, [services])
 
   /* The book intake — bytes first, then record, one effect — lives in
