@@ -1,5 +1,5 @@
 /**
- * Which asynchronous open is still the one the reader is waiting for.
+ * Which in-flight async result is still the one anybody is waiting for.
  *
  * # The shape this exists to remove
  *
@@ -18,6 +18,14 @@
  * supersedes.** A token only one producer advances answers a narrower question
  * than the one being asked, which is exactly how the import batch token failed
  * in the same file.
+ *
+ * # Why it is in `core/` and not next to its first caller
+ *
+ * The SECOND instance was `routesModel.refresh()`: two probes overlapping
+ * meant the one that RESOLVED last won rather than the one ISSUED last, so a
+ * slow first probe could overwrite a fast second one with a stale route list.
+ * Identical shape, different subsystem — so the primitive moved here and both
+ * draw on it rather than each growing its own counter.
  */
 
 export interface Generations {

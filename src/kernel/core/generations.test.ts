@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createGenerations } from './latestOpen'
+import { createGenerations } from './generations'
 
 /**
  * THE LAST OPEN WINS, whoever asked.

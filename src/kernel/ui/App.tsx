@@ -6,13 +6,13 @@ import { canKeepPlace, resolveAccel } from './accel'
 import { DEFAULT_STEP_IDX, applyMetrics } from '../core/metrics'
 import { importFs as tauriImportFs, pickBooks, pickFolder, readBookAt } from '../core/bookFiles'
 import { positionRecorder, type PositionRecorder } from '../core/positionRecorder'
+import { createGenerations } from '../core/generations'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { isTauri, usePlatform, usePrefersDark, usePrefersReducedMotion } from './platform'
 import { planImport } from '../core/tagArchive'
 import { canArchiveTags, exportTagsToFile, importTagsFromFile } from './tagFiles'
 import { canArchiveMarks, exportMarksToFile, importMarksFromFile } from './marksFiles'
 import { createHandover } from './importHandover'
-import { createGenerations } from './latestOpen'
 import { CLOSE_DRAIN_MS, createCloseSequence } from './closeWindow'
 import { openExternal } from './openExternal'
 import { planImport as planMarksImport } from '../core/marksArchive'
@@ -191,7 +191,7 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
    * effect's inputs do not change when a row is removed.
    */
 
-  /* EVERY OPEN SUPERSEDES A PENDING ONE — see `latestOpen.ts`. The counter
+  /* EVERY OPEN SUPERSEDES A PENDING ONE — see `core/generations.ts`. The counter
    * this replaces was advanced only by the stored-book route, so a shelf read
    * still in flight stayed "fresh" however many books the reader picked or
    * dropped afterwards, and landed on top of the one they had chosen. */

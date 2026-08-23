@@ -4,20 +4,69 @@ import { ROUTE_SETTING, TOOLS_SETTING } from '../lib/settings'
 import type { InferencePort, Probe, Route } from '../../inference'
 import { DEPTH_LABELS, DEPTH_ORDER, createRoutesModel, resolveRoute, rowFor } from './routesModel'
 
-const route = (over: Partial<Route> & Pick<Route, 'id' | 'kind'>): Route => ({
+/**
+ * Route fixtures that cannot be built into a state the probe never emits.
+ *
+ * The one generic builder this replaces defaulted to `installed: false` AND
+ * `unusable: null` — a local model that is not on disk and yet has no reason
+ * it cannot be used, which `probe.rs` never reports. Tests written on it were
+ * asserting over a shape the implementation is entitled to assume away, so a
+ * green result meant nothing in either direction.
+ *
+ * `local` therefore DERIVES its usability from installation, and only a
+ * non-local route may be handed an arbitrary `unusable`.
+ */
+const agentRoute = (over: Partial<Route> & Pick<Route, 'id'>): Route => ({
   label: over.id,
   detail: null,
   unusable: null,
-  installed: false,
+  installed: true,
   modality: 'text',
   ...over,
+  kind: 'agent',
 })
 
-const localReady = route({ id: 'local:qwen', kind: 'local', label: 'Qwen3-4B', detail: 'local · 2.5 GB', installed: true })
-const localAbsent = route({ id: 'local:kokoro', kind: 'local', label: 'Kokoro', unusable: 'Not installed', modality: 'speech' })
-const codexReady = route({ id: 'agent:codex', kind: 'agent', label: 'Codex', detail: 'ChatGPT · 0.149.0' })
-const claudeOut = route({ id: 'agent:claude', kind: 'agent', label: 'Claude', unusable: 'Signed out', detail: '2.1.240' })
-const endpointKeyless = route({ id: 'endpoint:proxy', kind: 'endpoint', label: 'My proxy', unusable: 'No key' })
+const endpointRoute = (over: Partial<Route> & Pick<Route, 'id'>): Route => ({
+  label: over.id,
+  detail: null,
+  unusable: null,
+  installed: true,
+  modality: 'text',
+  ...over,
+  kind: 'endpoint',
+})
+
+/** Installed means usable; absent means "Not installed". Nothing in between. */
+const localRoute = (
+  over: Partial<Omit<Route, 'unusable' | 'kind'>> & Pick<Route, 'id'> & { installed: boolean },
+): Route => ({
+  label: over.id,
+  detail: null,
+  modality: 'text',
+  ...over,
+  kind: 'local',
+  unusable: over.installed ? null : 'Not installed',
+})
+
+/* The generic builder is kept ONLY for the store suites, which need to name a
+   route without caring about its kind. It routes through the three above so
+   the coherence rule cannot be sidestepped by picking this one. */
+const route = (over: Partial<Route> & Pick<Route, 'id' | 'kind'>): Route =>
+  over.kind === 'local'
+    ? localRoute({ ...over, installed: over.installed ?? false })
+    : over.kind === 'agent'
+      ? agentRoute(over)
+      : endpointRoute(over)
+
+const localReady = localRoute({ id: 'local:qwen', label: 'Qwen3-4B', detail: 'local · 2.5 GB', installed: true })
+/* INSTALLED AND USABLE, and still not an answer — the only thing wrong with it
+   is that it speaks. The absent speech model this replaces was unusable for a
+   second reason, so it could not tell modality filtering from usability
+   filtering. */
+const voiceReady = localRoute({ id: 'local:kokoro', label: 'Kokoro', installed: true, modality: 'speech' })
+const codexReady = agentRoute({ id: 'agent:codex', label: 'Codex', detail: 'ChatGPT · 0.149.0' })
+const claudeOut = agentRoute({ id: 'agent:claude', label: 'Claude', unusable: 'Signed out', detail: '2.1.240' })
+const endpointKeyless = endpointRoute({ id: 'endpoint:proxy', label: 'My proxy', unusable: 'No key' })
 
 describe('resolveRoute', () => {
   it('uses the reader’s choice when it is usable', () => {
@@ -56,12 +105,32 @@ describe('resolveRoute', () => {
   /* A speech model answers no questions. Picking one would make the composer
    * offer a route that cannot reply. */
   it('never picks a speech route to answer with', () => {
-    const { inUse } = resolveRoute('', [localAbsent, codexReady])
+    /* `voiceReady` is INSTALLED and has no `unusable` reason, so the only
+       thing that can exclude it is its modality. Passing an absent voice here
+       — which the earlier fixture did — proved nothing: the usability filter
+       alone would have dropped it. */
+    const { inUse } = resolveRoute('', [voiceReady, codexReady])
     expect(inUse).toBe('agent:codex')
   })
 
+  /* AND NOT EVEN WHEN IT IS THE STORED CHOICE. `use` cannot write one today,
+     but a settings file carried over from the build whose voice picker shared
+     this setter can, and honouring it would leave the composer pointed at a
+     model that cannot reply. */
+  it('refuses a stored speech route and falls back, saying so', () => {
+    const { inUse, fellBack } = resolveRoute('local:kokoro', [voiceReady, codexReady])
+    expect(inUse).toBe('agent:codex')
+    expect(fellBack).toBe(true)
+  })
+
+  /* A speech route is not a usable route, so a shelf of nothing else answers
+     nothing at all rather than answering with the voice. */
+  it('reports nothing in use when only speech routes exist', () => {
+    expect(resolveRoute('', [voiceReady]).inUse).toBeNull()
+  })
+
   it('prefers local, then agent, then endpoint', () => {
-    const endpointReady = route({ id: 'endpoint:p', kind: 'endpoint', label: 'P', detail: 'endpoint' })
+    const endpointReady = endpointRoute({ id: 'endpoint:p', label: 'P', detail: 'endpoint' })
     expect(resolveRoute('', [endpointReady, codexReady, localReady]).inUse).toBe('local:qwen')
     expect(resolveRoute('', [endpointReady, codexReady]).inUse).toBe('agent:codex')
     expect(resolveRoute('', [endpointReady]).inUse).toBe('endpoint:p')
@@ -111,6 +180,41 @@ describe('rowFor', () => {
 
 
 /**
+ * The store fixtures, defined ONCE.
+ *
+ * Three suites below had grown their own `probeOf`, `portWith` and `wiring`,
+ * two of them near-identical and one of them silently dropping the sign-in
+ * recorder. Three copies of a fake is three chances for the fake to disagree
+ * with itself about what the port does, which is a failure mode no assertion
+ * in any of them can see.
+ */
+const probeOf = (...routes: Route[]): Probe => ({ routes, runtimeVersion: '1.0' })
+
+function portWith(probe: Probe | (() => Promise<Probe>)): { port: InferencePort; signedIn: string[] } {
+  const signedIn: string[] = []
+  const port = {
+    generate: async () => '',
+    agentAsk: async () => '',
+    probe: typeof probe === 'function' ? probe : async () => probe,
+    ensureReady: async () => true,
+    signIn: async (id: string) => void signedIn.push(id),
+    subscribe: () => () => {},
+  } satisfies InferencePort
+  return { port, signedIn }
+}
+
+/**
+ * THE REAL GUARD. `scopeSettings` confines this capability to `companion.`
+ * at every door, and the look-up mode is `kernel.lookUp` — so a store handed
+ * in raw makes these suites pass over a pane that throws on its first render.
+ * It did: both phase-15 panes read it through the scoped handle.
+ */
+function wiring() {
+  const services = createKernelServices({ fs: null, storage: null, initialBooks: [] })
+  return { settings: scopeSettings(services.settings, 'companion'), kernel: services }
+}
+
+/**
  * THE STORE ITSELF, not only the pure rows above.
  *
  * `useSyncExternalStore` puts three hard requirements on this object and none
@@ -121,38 +225,27 @@ describe('rowFor', () => {
  * gone. Each is a defect that reproduces only in a running app.
  */
 describe('the routes store', () => {
-  const probeOf = (...routes: Route[]): Probe => ({ routes, runtimeVersion: '1.0' })
-
-  function portWith(probe: Probe | (() => Promise<Probe>)): { port: InferencePort; signedIn: string[] } {
-    const signedIn: string[] = []
-    const port = {
-      generate: async () => '',
-      agentAsk: async () => '',
-      probe: typeof probe === 'function' ? probe : async () => probe,
-      ensureReady: async () => true,
-      signIn: async (id: string) => void signedIn.push(id),
-      subscribe: () => () => {},
-    } satisfies InferencePort
-    return { port, signedIn }
-  }
-
-  /**
-   * THE REAL GUARD. `scopeSettings` confines this capability to `companion.`
-   * at every door, and the look-up mode is `kernel.lookUp` — so a store handed
-   * in raw makes this whole suite pass over a pane that throws on its first
-   * render. It did: both phase-15 panes read it through the scoped handle.
-   */
-  function wiring() {
-    const services = createKernelServices({ fs: null, storage: null, initialBooks: [] })
-    return { settings: scopeSettings(services.settings, 'companion'), kernel: services }
-  }
-
   it('is empty and loading until the first probe resolves', async () => {
-    const { port } = portWith(probeOf())
+    const { port } = portWith(probeOf(codexReady))
     const model = createRoutesModel({ port, ...wiring() })
-    expect(model.getSnapshot().loading).toBe(true)
+    /* EMPTY, not merely `loading`. A model that exposed stale or half-built
+       rows on the very first read would satisfy the flag alone, and that read
+       is the one `useSyncExternalStore` performs during the first render —
+       the exact moment there is nothing to show yet. */
+    const first = model.getSnapshot()
+    expect(first.loading).toBe(true)
+    expect(first.rows).toEqual([])
+    expect(first.inUse).toBeNull()
+    expect(first.fellBack).toBe(false)
+    expect(first.lookUp).toBeNull()
+    expect(first.depth).toBeNull()
+
     await model.refresh()
-    expect(model.getSnapshot().loading).toBe(false)
+    const then = model.getSnapshot()
+    expect(then.loading).toBe(false)
+    /* And the probe's contents actually arrived, so "still empty" cannot pass
+       for "resolved". */
+    expect(then.rows.map((row) => row.id)).toEqual(['agent:codex'])
     model.dispose()
   })
 
@@ -175,18 +268,26 @@ describe('the routes store', () => {
     model.dispose()
   })
 
-  it('notifies subscribers and stops on unsubscribe', async () => {
+  it('notifies subscribers exactly once per change, and stops on unsubscribe', async () => {
     const { settings, kernel } = wiring()
     const { port } = portWith(probeOf())
     const model = createRoutesModel({ port, settings, kernel })
     let seen = 0
     const stop = model.subscribe(() => void (seen += 1))
+
+    /* EXACTLY ONE, NOT "AT LEAST ONE". `toBeGreaterThan(0)` accepts a store
+       that notifies twice per refresh, and every extra notification is a
+       React re-render of the whole pane — the cost this snapshot cache exists
+       to avoid, invisible to a lower-bound assertion. */
     await model.refresh()
-    expect(seen).toBeGreaterThan(0)
-    const after = seen
-    stop()
+    expect(seen, 'one refresh produced more than one notification').toBe(1)
+
     model.setTools(true)
-    expect(seen).toBe(after)
+    expect(seen, 'one setting write produced more than one notification').toBe(2)
+
+    stop()
+    model.setTools(false)
+    expect(seen, 'a detached listener was still notified').toBe(2)
     model.dispose()
   })
 
@@ -215,6 +316,43 @@ describe('the routes store', () => {
     release(probeOf())
     await inFlight
     expect(seen).toBe(0)
+  })
+
+  /**
+   * TWO REFRESHES IN FLIGHT, RESOLVING BACKWARDS.
+   *
+   * `port.probe()` spawns up to four child processes and they do not finish
+   * in the order they started — a Codex sign-in check can outlast a whole
+   * local scan. So the pane can issue a second refresh (reopened group, model
+   * just installed) while the first is still out, and an unguarded
+   * `probe = await port.probe()` writes whichever RESOLVES last.
+   *
+   * The disposal case below was the only deferred-probe test, and disposal is
+   * the easy half: `disposed` catches it. Nothing caught this one, and its
+   * symptom is a route list that is silently one generation out of date until
+   * the group is closed and opened again.
+   */
+  it('keeps the newest probe when an older one resolves after it', async () => {
+    const pending: ((probe: Probe) => void)[] = []
+    const { port } = portWith(() => new Promise<Probe>((resolve) => void pending.push(resolve)))
+    const model = createRoutesModel({ port, ...wiring() })
+
+    const older = model.refresh()
+    const newer = model.refresh()
+    expect(pending, 'both refreshes should have reached the port').toHaveLength(2)
+
+    /* BACKWARDS ON PURPOSE: the second call answers first, then the first. */
+    pending[1]!(probeOf(codexReady))
+    await newer
+    expect(model.getSnapshot().rows.map((row) => row.id)).toEqual(['agent:codex'])
+
+    pending[0]!(probeOf(localReady))
+    await older
+    expect(
+      model.getSnapshot().rows.map((row) => row.id),
+      'a superseded probe overwrote the current one',
+    ).toEqual(['agent:codex'])
+    model.dispose()
   })
 
   it('writes the chosen route, and signs in through the port', async () => {
@@ -277,27 +415,9 @@ describe('the routes store', () => {
  * follows.
  */
 describe('the effort control', () => {
-  const probeOf = (...routes: Route[]): Probe => ({ routes, runtimeVersion: '1.0' })
-
-  function portWith(probe: Probe): InferencePort {
-    return {
-      generate: async () => '',
-      agentAsk: async () => '',
-      probe: async () => probe,
-      ensureReady: async () => true,
-      signIn: async () => {},
-      subscribe: () => () => {},
-    } satisfies InferencePort
-  }
-
-  function wiring() {
-    const services = createKernelServices({ fs: null, storage: null, initialBooks: [] })
-    return { settings: scopeSettings(services.settings, 'companion'), kernel: services }
-  }
-
   it('is absent when a local model is answering', async () => {
     const { settings, kernel } = wiring()
-    const port = portWith(probeOf(route({ id: 'local:m', kind: 'local', installed: true })))
+    const { port } = portWith(probeOf(route({ id: 'local:m', kind: 'local', installed: true })))
     const model = createRoutesModel({ port, settings, kernel })
     await model.refresh()
     expect(model.getSnapshot().inUse).toBe('local:m')
@@ -307,7 +427,7 @@ describe('the effort control', () => {
 
   it('shows the account default while an agent is answering', async () => {
     const { settings, kernel } = wiring()
-    const port = portWith(probeOf(route({ id: 'agent:codex', kind: 'agent' })))
+    const { port } = portWith(probeOf(route({ id: 'agent:codex', kind: 'agent' })))
     const model = createRoutesModel({ port, settings, kernel })
     await model.refresh()
     expect(model.getSnapshot().depth).toBe(DEPTH_LABELS.default)
@@ -316,7 +436,7 @@ describe('the effort control', () => {
 
   it('cycles the whole set and wraps back to the account default', async () => {
     const { settings, kernel } = wiring()
-    const port = portWith(probeOf(route({ id: 'agent:codex', kind: 'agent' })))
+    const { port } = portWith(probeOf(route({ id: 'agent:codex', kind: 'agent' })))
     const model = createRoutesModel({ port, settings, kernel })
     await model.refresh()
     const seen = [model.getSnapshot().depth]
@@ -324,17 +444,23 @@ describe('the effort control', () => {
       model.cycleDepth()
       seen.push(model.getSnapshot().depth)
     }
-    /* Every state visited, and back where it started. */
-    expect(new Set(seen.slice(0, DEPTH_ORDER.length))).toEqual(
-      new Set(DEPTH_ORDER.map((one) => DEPTH_LABELS[one])),
-    )
-    expect(seen[seen.length - 1]).toBe(seen[0])
+    /* IN ORDER, NOT AS A SET. A `Set` comparison discards the sequence, so a
+       cycle that ran backwards — or in any other permutation — passed as long
+       as it visited everything and wrapped. The order is the behaviour: it is
+       what the reader sees each time they press the row. */
+    expect(seen).toEqual([...DEPTH_ORDER.map((one) => DEPTH_LABELS[one]), DEPTH_LABELS[DEPTH_ORDER[0]!]])
     model.dispose()
   })
 
   /* The default has to be the reader's own account setting: anything else is
-     Paper overriding a choice they already made with their money. */
-  it('starts at the account default, which sends no flag at all', () => {
+     Paper overriding a choice they already made with their money.
+
+     NAMED FOR WHAT IT CHECKS. This is an ordering assertion and nothing more —
+     that no flag is actually sent for `default` is a property of the adapter
+     that builds the command line, and it is asserted where that happens
+     (`agentask.rs`, `depth_args`), not here. The previous name claimed both
+     and tested one. */
+  it('puts the account default first in the cycle', () => {
     expect(DEPTH_ORDER[0]).toBe('default')
   })
 })
@@ -351,8 +477,6 @@ describe('the effort control', () => {
  * from `rows`, and `rows` is text-only however many voices the probe returns.
  */
 describe('the rows the pane can act on', () => {
-  const probeOf = (...routes: Route[]): Probe => ({ routes, runtimeVersion: '1.0' })
-
   it('are text routes only, even when speech routes are usable', async () => {
     const services = createKernelServices({ fs: null, storage: null, initialBooks: [] })
     const port = {

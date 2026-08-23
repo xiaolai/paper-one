@@ -202,6 +202,10 @@ export type { FileStore, FileStoreOptions, FileSystem } from './core/fileStore'
  * Public because sync's contentHash backfill is one of the two passes that
  * need it, and the other is the kernel's own enrichment. */
 export { breathe, restThenBreathe } from './core/breath'
+/* LAST-ISSUED WINS. Two subsystems raced their own async results and each
+   had grown a private counter; see `core/generations.ts`. */
+export { createGenerations } from './core/generations'
+export type { Generations } from './core/generations'
 export { writeQueue } from './core/writeQueue'
 export type { WriteQueue } from './core/writeQueue'
 export { tagKey } from './core/tags'

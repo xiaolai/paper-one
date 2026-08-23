@@ -1,5 +1,5 @@
 import type { SettingsStore } from '../../../kernel'
-import { LOOK_UP_LABELS, type KernelServices } from '../../../kernel'
+import { LOOK_UP_LABELS, createGenerations, type KernelServices } from '../../../kernel'
 import type { Depth } from '../../inference'
 import type { InferencePort, Probe, Route } from '../../inference'
 import { DEPTH_SETTING, ROUTE_SETTING, TOOLS_SETTING } from '../lib/settings'
@@ -176,6 +176,12 @@ export function createRoutesModel({ port, settings, kernel }: RoutesModelOptions
   let probe: Probe | null = null
   let cached: RoutesSnapshot | null = EMPTY
   let disposed = false
+  /* LAST ISSUED WINS, NOT LAST RESOLVED. `probe()` spawns up to four child
+     processes and they do not finish in the order they were started, so an
+     unguarded `probe = await port.probe()` lets a slow EARLIER refresh land on
+     top of a fast later one — the pane then shows a route list that was
+     already superseded, and nothing refreshes again until the group reopens. */
+  const generations = createGenerations()
 
   const invalidate = (): void => {
     cached = null
@@ -223,12 +229,18 @@ export function createRoutesModel({ port, settings, kernel }: RoutesModelOptions
      * a shut side pane would be a reader's battery spent on a question nobody
      * asked. */
     refresh: async () => {
+      const mine = generations.claim()
+      let found: Probe
       try {
-        probe = await port.probe()
+        found = await port.probe()
       } catch {
-        probe = { routes: [], runtimeVersion: null }
+        found = { routes: [], runtimeVersion: null }
       }
-      if (!disposed) invalidate()
+      /* Superseded, or the pane closed while the children ran. Either way this
+         result is nobody's, and writing it would be the stale overwrite. */
+      if (!mine() || disposed) return
+      probe = found
+      invalidate()
     },
     use: (id) => settings.set(ROUTE_SETTING, id),
     signIn: (id) => port.signIn(id),
@@ -242,6 +254,9 @@ export function createRoutesModel({ port, settings, kernel }: RoutesModelOptions
     },
     dispose: () => {
       disposed = true
+      /* Retire every in-flight probe too, so a late arrival cannot write
+         `probe` on a torn-down model even if `disposed` were ever relaxed. */
+      generations.claim()
       unsubscribeSettings()
       listeners.clear()
     },
