@@ -139,6 +139,9 @@ export type {
 export { createDiagnostics, defaultDiagnostics, redact } from './core/diagnostics'
 export type { DiagnosticsOptions, Sink } from './core/diagnostics'
 export { CAPABILITY_UI, type CapabilityUiClass } from './core/capabilityUi'
+/* WHAT A CONTRIBUTED `render()` DRAWS — see `core/renderSlot.ts`. */
+export { createRenderSlot } from './core/renderSlot'
+export type { RenderSlot } from './core/renderSlot'
 /* The first half of a shutdown: hand over what memory holds, so the queue has
  * something to drain. The composition root needs it for the QUIT path, which
  * is not the window-close path `App` already covers — see `beforeClose.ts`. */

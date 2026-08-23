@@ -1,5 +1,5 @@
 import { createElement } from 'react'
-import type { Capability, CapabilityContext, Disposable } from '../../kernel'
+import { createRenderSlot, type Capability, type CapabilityContext, type Disposable } from '../../kernel'
 import { DEPTH_SETTING, ROUTE_SETTING } from './lib/settings'
 import { inferencePort } from '../inference'
 import { createCompanionProvider, effectiveRoute } from './lib/provider'
@@ -27,17 +27,26 @@ import { CompanionPane } from './ui/CompanionPane'
 
 /* ---------------------------------------------------------- runtime state */
 
-let routesModel: RoutesModel | null = null
 /**
- * Whether this platform has a system dictionary, as the kernel answers it.
+ * What the settings section draws, and the fact it needs alongside.
  *
- * Kept beside `routesModel` because `render` is called by the settings pane
- * with no arguments, and this is a fact from `start`. Not derivable here: the
- * platform lives behind the kernel's React entry, which
- * `kernel-public-entry-only` puts out of a capability's reach — see
+ * A SLOT WITH RESTORATION, not a bare `let`. `render` is called by the pane
+ * with no arguments, so this has to be module-scoped — and the hand-written
+ * version could not tell a stop that follows a newer start from a stop of the
+ * only start there is: two live compositions left the second's teardown
+ * blanking a pane the first was still serving. See `createRenderSlot`.
+ *
+ * `hasDictionary` travels with the model because it is a fact from `start` and
+ * not derivable here: the platform lives behind the kernel's React entry,
+ * which `kernel-public-entry-only` puts out of a capability's reach — see
  * `KernelServices.hasDictionary`.
  */
-let systemDictionary = false
+interface CompanionSection {
+  readonly model: RoutesModel
+  readonly hasDictionary: boolean
+}
+
+const section = createRenderSlot<CompanionSection>()
 
 /* ⚠️ NO MODULE-GLOBAL `provider`, AND NO `companionProvider()` ACCESSOR.
  *
@@ -59,16 +68,13 @@ export const companion: Capability = {
       /* ABOVE Storage (10) and Devices (20): the companion is a reading
        * surface, and the two below it are about machines and bytes. */
       order: 5,
-      render: () =>
-        routesModel
-          ? createElement(CompanionPane, {
-              model: routesModel,
-              /* ASKED, NOT DEFAULTED. The prop used to be optional and this
-                 call passed nothing, so macOS — the one platform with a
-                 system dictionary — was told it had none. */
-              hasDictionary: systemDictionary,
-            })
-          : null,
+      render: () => {
+        const held = section.current()
+        /* ASKED, NOT DEFAULTED. `hasDictionary` used to be an optional prop
+           and this call passed nothing, so macOS — the one platform with a
+           system dictionary — was told it had none. */
+        return held === null ? null : createElement(CompanionPane, { model: held.model, hasDictionary: held.hasDictionary })
+      },
     },
   ],
 
@@ -76,6 +82,7 @@ export const companion: Capability = {
     let stopped = false
     let unbindCompanion: Disposable | null = null
     let myRoutes: RoutesModel | null = null
+    let showing: Disposable | null = null
 
     /**
      * One teardown step, isolated.
@@ -103,10 +110,7 @@ export const companion: Capability = {
       if (stopped) return
       stopped = true
       signal.removeEventListener('abort', stop)
-      if (routesModel === myRoutes) {
-        routesModel = null
-        systemDictionary = false
-      }
+      step('section', () => showing?.dispose())
       step('unbindCompanion', () => unbindCompanion?.dispose())
       step('routesModel', () => myRoutes?.dispose())
     }
@@ -130,8 +134,7 @@ export const companion: Capability = {
       kernel: api.services,
       report: (event, fields) => api.diagnostics.warn(event, fields),
     })
-    routesModel = myRoutes
-    systemDictionary = api.services.hasDictionary()
+    showing = section.hold({ model: myRoutes, hasDictionary: api.services.hasDictionary() })
 
     const boundProvider = createCompanionProvider({
       port,

@@ -1,5 +1,5 @@
 import { createElement } from 'react'
-import type { Capability, CapabilityContext, Disposable } from '../../kernel'
+import { createRenderSlot, type Capability, type CapabilityContext, type Disposable } from '../../kernel'
 import { createController, type Controller } from './lib/controller'
 import { createGlossProvider } from './lib/glossProvider'
 import { inferencePlugin, mintRequestId, type Depth, type InferencePlugin, type Probe } from './lib/plugin'
@@ -34,7 +34,16 @@ let running: {
   readonly plugin: InferencePlugin
   readonly controller: Controller
 } | null = null
-let modelsModel: ModelsModel | null = null
+/**
+ * What the Local models section draws.
+ *
+ * ⚠️ THE SAME SLOT `companion` USES, and it had the same defect: a bare `let`
+ * with an `=== mine` ownership check, which stops an OLD lifetime clearing a
+ * newer one's value and does nothing about two LIVE ones. Two compositions
+ * left the second overwriting the first, and stopping the second blanked a
+ * pane the first was still serving. See `createRenderSlot`.
+ */
+const section = createRenderSlot<ModelsModel>()
 
 /**
  * Which start is the current one.
@@ -44,7 +53,7 @@ let modelsModel: ModelsModel | null = null
  * copy of it — there is only one. So on a rapid restart the outgoing
  * lifetime's stop could land AFTER the incoming one had started a daemon and
  * begun answering, cancelling its requests and killing its child process. The
- * ownership checks around `running` and `modelsModel` do not cover it, because
+ * ownership checks around `running` and the render slot do not cover it, because
  * the action they guard is scheduled and lands later.
  */
 let lifetime = 0
@@ -154,7 +163,10 @@ export const inference: Capability = {
        * can slot between without renumbering either, and bytes this machine
        * is holding is exactly that shape. */
       order: 15,
-      render: () => (modelsModel ? createElement(ModelsPane, { model: modelsModel }) : null),
+      render: () => {
+        const model = section.current()
+        return model === null ? null : createElement(ModelsPane, { model })
+      },
     },
   ],
 
@@ -168,6 +180,7 @@ export const inference: Capability = {
     let unbindGloss: Disposable | null = null
     let unbindWorkLine: Disposable | null = null
     let myModels: ModelsModel | null = null
+    let showing: Disposable | null = null
     let myRunning: typeof running = null
 
     const stop = (): void => {
@@ -176,7 +189,7 @@ export const inference: Capability = {
       signal.removeEventListener('abort', stop)
       /* Ownership before clearing: an older stop firing after a restart must
        * not strip the newer start's state — the rule sync's own stop follows. */
-      if (modelsModel === myModels) modelsModel = null
+      showing?.dispose()
       if (running === myRunning) running = null
       for (const [label, unbind] of [
         ['unbindGloss', unbindGloss],
@@ -232,7 +245,7 @@ export const inference: Capability = {
       settings: api.settings,
       report: (event, fields) => api.diagnostics.warn(event, fields),
     })
-    modelsModel = myModels
+    showing = section.hold(myModels)
 
     /* Read what is on disk, unawaited: `start` must not block the composition
      * on IPC, and the pane subscribes to the store so a late answer arrives
