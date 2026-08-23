@@ -21,7 +21,8 @@ const css = readFileSync(
   'utf8',
 ).replace(/\/\*[\s\S]*?\*\//g, '')
 
-/** The reader's own sheet, where the book element's blend group is declared. */
+/** The reader's own sheet, where the book element's blend group and its
+ *  page-edge strip are declared. */
 const readerCss = readFileSync(
   fileURLToPath(new URL('../screens/Reader.module.css', import.meta.url)),
   'utf8',
@@ -94,6 +95,23 @@ describe('the highlight overlay', () => {
        the same reason: what this can catch is the declaration being deleted as
        dead CSS, which is exactly how it would go. */
     expect(/foliate-view\s*\{[^}]*isolation\s*:\s*isolate\s*;/.test(readerCss)).toBe(true)
+  })
+
+  it('leaves the strip outside the page to the stage, so it cannot go stale', () => {
+    /* NOT A BLEND QUESTION, and here anyway, because it is the same element and
+       the same trap: foliate copies a colour once and never looks again. The
+       strip is the `--page-margin` band the book's iframe does not cover, and
+       its inline background is the page as it was when the section LOADED — so
+       a theme change left Sepia paper down both sides of a Night page.
+
+       `!important` is load-bearing: foliate's value is inline, and a `::part`
+       rule loses to one without it. A rule that dropped it would keep matching
+       and stop working, which is why this asserts the whole declaration. */
+    expect(
+      /foliate-view::part\(filter\)\s*\{[^}]*background\s*:\s*transparent\s*!important\s*;/.test(
+        readerCss,
+      ),
+    ).toBe(true)
   })
 
   it('declares them on :root, where the shadow tree can inherit them', () => {
