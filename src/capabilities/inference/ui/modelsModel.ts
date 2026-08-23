@@ -273,15 +273,28 @@ export function createModelsModel({ controller, plugin, settings, kernel }: Mode
     testVoice: async () => {
       const voice = controller.getSnapshot().models.find((m) => m.modality === 'speech' && m.installed)
       if (!voice || voiceTest === 'speaking') return
-      if (!(await controller.ensureReady())) {
-        voiceTest = 'failed'
-        invalidate()
-        return
-      }
+      /* CLAIMED BEFORE THE FIRST AWAIT, which is the whole of the fix.
+       *
+       * The reentrancy guard above read `voiceTest`, and `voiceTest` was set
+       * to `speaking` only after `ensureReady()` resolved — so two presses of
+       * Play both saw `idle`, both waited for the runtime, and both went on to
+       * synthesise. Two requests, two `Audio` elements, and the first blob URL
+       * overwritten before anything could revoke it. A guard on the far side
+       * of an await guards nothing. */
       const requestId = mintRequestId('voice')
       voiceRequest = requestId
       voiceTest = 'speaking'
       invalidate()
+      if (!(await controller.ensureReady())) {
+        /* Ownership re-checked after every await from here on: a stop, a
+         * second press, or a disposal during the start is why this request
+         * may no longer be the one anybody is waiting for. */
+        if (voiceRequest !== requestId || disposed) return
+        voiceTest = 'failed'
+        invalidate()
+        return
+      }
+      if (voiceRequest !== requestId || disposed) return
       try {
         const bytes = await plugin.speak(requestId, voice.id, TEST_VOICE_LINE, null)
         if (voiceRequest !== requestId || disposed) return

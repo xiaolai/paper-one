@@ -383,4 +383,36 @@ describe('the models store', () => {
     expect(kernel.lookUp()).not.toBe(before)
     second.dispose()
   })
+  /**
+   * ONE VOICE TEST AT A TIME, AND THE GUARD IS ON THE NEAR SIDE OF THE AWAIT.
+   *
+   * `testVoice` returned early when `voiceTest === 'speaking'`, but set
+   * `speaking` only after `ensureReady()` resolved — so two presses of Play both
+   * saw `idle`, both waited for the runtime, and both went on to synthesise. Two
+   * requests spent, two `Audio` elements, and the first blob URL overwritten
+   * before anything revoked it. A guard on the far side of an await guards
+   * nothing.
+   */
+  it('spends one request, however fast the second press is', async () => {
+    const spoken: string[] = []
+    let releaseReady: () => void = () => {}
+    const ready = new Promise<void>((resolve) => void (releaseReady = resolve))
+
+    const { controller } = fakeController({ models: [model({ id: 'v', modality: 'speech', installed: true })] })
+    /* The runtime start is what both presses used to wait behind. */
+    const slowController = { ...controller, ensureReady: async () => { await ready; return true } }
+    const plugin = fakePlugin({
+    speak: (async (id: string) => { spoken.push(id); return [] }) as never,
+    cancel: (async () => {}) as never,
+  })
+      const models = createModelsModel({ controller: slowController, plugin, ...wiring() })
+
+      const first = models.testVoice()
+      const second = models.testVoice()
+      releaseReady()
+      await Promise.all([first, second])
+
+      expect(spoken, 'two presses synthesised twice').toHaveLength(1)
+      models.dispose()
+    })
 })

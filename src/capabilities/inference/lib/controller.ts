@@ -1,5 +1,5 @@
 import type { InferencePlugin, InstallProgress, ModelRow, RuntimeStatus } from './plugin'
-import { isCancelled, mintRequestId } from './plugin'
+import { errorKind, isCancelled, mintRequestId } from './plugin'
 
 /**
  * The runtime's state machine — `absent → installing → installed → starting →
@@ -222,16 +222,29 @@ export function createController(plugin: InferencePlugin, report?: ReportFailure
   const cancelInstall = (): void => {
     const requestId = installRequest
     if (requestId === null) return
-    installRequest = null
-    /* Best-effort: the request may have finished between the reader pressing
-     * Cancel and this landing, and `requestUnknown` is that race, not a
-     * failure worth showing. */
-    void plugin.cancel(requestId).catch(() => {})
-    /* The runtime state goes back too. Clearing only `installing` left the row
-     * reading `Downloading…` forever with nothing behind it, because the
-     * completion handler that would have cleared it now returns early on the
-     * ownership check above. */
-    set({ installing: null, runtime: { kind: 'installed' } })
+    /* OWNERSHIP IS NOT RELEASED HERE, and that is the fix.
+     *
+     * This used to clear `installRequest` and `installing` on the spot, so a
+     * new install could start the instant Cancel was pressed — while the
+     * cancelled one was still unwinding in Rust, against the same staging
+     * path derived from the same model id. Two writers, one file.
+     *
+     * The install's own settle is the only conclusive signal that the first
+     * one has finished, and it already restores the pre-install runtime on a
+     * cancellation. Releasing ownership there rather than here means there is
+     * exactly one place that decides an install is over, and `install`'s
+     * `installing !== null` guard keeps the next one out until it is.
+     *
+     * `requestUnknown` is the ordinary race — the request finished between
+     * the press and this landing — and is not worth showing. Anything else is
+     * a cancel that did not happen, which the reader is about to notice, so
+     * it is reported rather than swallowed. */
+    void plugin.cancel(requestId).catch((cause: unknown) => {
+      if (errorKind(cause) === 'requestUnknown') return
+      report?.('inference.cancel-failed', {
+        message: cause instanceof Error ? cause.message : String(cause),
+      })
+    })
   }
 
   return {

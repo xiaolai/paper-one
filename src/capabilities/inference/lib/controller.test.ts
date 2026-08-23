@@ -185,18 +185,72 @@ describe('the controller', () => {
     await install
   })
 
-  it('cancels the in-flight download by its request id', async () => {
+  /**
+   * OWNERSHIP IS RELEASED WHEN THE BACKEND CONFIRMS, NOT WHEN CANCEL IS
+   * PRESSED.
+   *
+   * This used to clear `installing` synchronously inside `cancelInstall`, and
+   * the fake here resolved `installModel` rather than rejecting it — so the
+   * test asserted the race instead of the requirement. The real
+   * `install::install` checks its cancel token and returns `Error::Cancelled`
+   * (there is a Rust case pinning `err.kind() == "cancelled"`), so a cancelled
+   * install DOES settle, and its settle is the only conclusive sign that Rust
+   * has stopped writing the staging path derived from the model id.
+   *
+   * Releasing early let the next install start against that same path while
+   * the first was still unwinding: two writers, one file.
+   */
+  const cancelled = () => Object.assign(new Error('cancelled'), { kind: 'cancelled' })
+
+  it('asks the backend to cancel, and holds ownership until it settles', async () => {
     const cancel = vi.fn(async () => {})
     const gate = deferred()
     const controller = createController(
-      plugin({ cancel: cancel as never, installModel: (() => gate.promise) as never }),
+      plugin({
+        cancel: cancel as never,
+        installModel: (() => gate.promise.then(() => Promise.reject(cancelled()))) as never,
+      }),
     )
     const install = controller.install('qwen')
     controller.cancelInstall()
     expect(cancel).toHaveBeenCalledTimes(1)
-    expect(controller.getSnapshot().installing).toBeNull()
+    /* STILL OWNED. Rust has been asked to stop and has not yet said it did. */
+    expect(controller.getSnapshot().installing, 'ownership was released before the backend confirmed').toBe(
+      'qwen',
+    )
+
     gate.open()
     await install
+    expect(controller.getSnapshot().installing).toBeNull()
+    controller.dispose()
+  })
+
+  /* THE RACE ITSELF. A second install pressed while the first is unwinding
+     must not reach the plugin — the staging path is derived from the model id
+     and the first writer has not let go of it. */
+  it('refuses a second install until the cancelled one has settled', async () => {
+    const started: string[] = []
+    const gate = deferred()
+    const controller = createController(
+      plugin({
+        cancel: (async () => {}) as never,
+        installModel: ((_id: string, model: string) => {
+          started.push(model)
+          return gate.promise.then(() => Promise.reject(cancelled()))
+        }) as never,
+      }),
+    )
+    const install = controller.install('qwen')
+    controller.cancelInstall()
+    await controller.install('kokoro')
+    expect(started, 'a second install started while the first was still unwinding').toEqual(['qwen'])
+
+    gate.open()
+    await install
+    /* And once it has settled, the next one is allowed through. */
+    await controller.install('kokoro').catch(() => {})
+    expect(started).toEqual(['qwen', 'kokoro'])
+    controller.dispose()
   })
 
   it('cancelling nothing is a no-op', () => {
