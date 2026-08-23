@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { createKernelServices, scopeSettings } from '../../../kernel'
 import { ROUTE_SETTING, TOOLS_SETTING } from '../lib/settings'
 import type { InferencePort, Probe, Route } from '../../inference'
-import { createRoutesModel, resolveRoute, rowFor, voiceRows } from './routesModel'
+import { DEPTH_LABELS, DEPTH_ORDER, createRoutesModel, resolveRoute, rowFor, voiceRows } from './routesModel'
 
 const route = (over: Partial<Route> & Pick<Route, 'id' | 'kind'>): Route => ({
   label: over.id,
@@ -291,5 +291,77 @@ describe('the routes store', () => {
     model.cycleLookUp(true, true)
     expect(kernel.lookUp()).not.toBe(before)
     model.dispose()
+  })
+})
+
+/**
+ * THE EFFORT ROW, which is offered only while an agent is answering.
+ *
+ * The two flags it maps to — Codex's `model_reasoning_effort`, Claude's
+ * `--model` alias — exist on the agent CLIs and nowhere else. A local model is
+ * handed a model id and neither flag means anything to it, so the control is
+ * ABSENT rather than present-and-inert, which is the same rule Look up
+ * follows.
+ */
+describe('the effort control', () => {
+  const probeOf = (...routes: Route[]): Probe => ({ routes, runtimeVersion: '1.0' })
+
+  function portWith(probe: Probe): InferencePort {
+    return {
+      generate: async () => '',
+      agentAsk: async () => '',
+      probe: async () => probe,
+      ensureReady: async () => true,
+      signIn: async () => {},
+      subscribe: () => () => {},
+    } satisfies InferencePort
+  }
+
+  function wiring() {
+    const services = createKernelServices({ fs: null, storage: null, initialBooks: [] })
+    return { settings: scopeSettings(services.settings, 'companion'), kernel: services }
+  }
+
+  it('is absent when a local model is answering', async () => {
+    const { settings, kernel } = wiring()
+    const port = portWith(probeOf(route({ id: 'local:m', kind: 'local', installed: true })))
+    const model = createRoutesModel({ port, settings, kernel })
+    await model.refresh()
+    expect(model.getSnapshot().inUse).toBe('local:m')
+    expect(model.getSnapshot().depth).toBeNull()
+    model.dispose()
+  })
+
+  it('shows the account default while an agent is answering', async () => {
+    const { settings, kernel } = wiring()
+    const port = portWith(probeOf(route({ id: 'agent:codex', kind: 'agent' })))
+    const model = createRoutesModel({ port, settings, kernel })
+    await model.refresh()
+    expect(model.getSnapshot().depth).toBe(DEPTH_LABELS.default)
+    model.dispose()
+  })
+
+  it('cycles the whole set and wraps back to the account default', async () => {
+    const { settings, kernel } = wiring()
+    const port = portWith(probeOf(route({ id: 'agent:codex', kind: 'agent' })))
+    const model = createRoutesModel({ port, settings, kernel })
+    await model.refresh()
+    const seen = [model.getSnapshot().depth]
+    for (let i = 0; i < DEPTH_ORDER.length; i++) {
+      model.cycleDepth()
+      seen.push(model.getSnapshot().depth)
+    }
+    /* Every state visited, and back where it started. */
+    expect(new Set(seen.slice(0, DEPTH_ORDER.length))).toEqual(
+      new Set(DEPTH_ORDER.map((one) => DEPTH_LABELS[one])),
+    )
+    expect(seen[seen.length - 1]).toBe(seen[0])
+    model.dispose()
+  })
+
+  /* The default has to be the reader's own account setting: anything else is
+     Paper overriding a choice they already made with their money. */
+  it('starts at the account default, which sends no flag at all', () => {
+    expect(DEPTH_ORDER[0]).toBe('default')
   })
 })

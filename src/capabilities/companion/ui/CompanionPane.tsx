@@ -112,6 +112,25 @@ export function CompanionPane({ model, hasDictionary = false }: CompanionPanePro
         </>
       ) : null}
 
+      {/* THE EFFORT, and it is absent rather than disabled when a local model
+          is answering — the two flags it maps to exist on the agent CLIs and
+          nowhere else. Same shape as Look up above: a cycle, because there
+          are three states and there cannot be a fourth. */}
+      {snapshot.depth !== null ? (
+        <>
+          <div className={ui.row}>
+            <span className={ui.grow}>Effort</span>
+            <button type="button" className={ui.button} onClick={() => model.cycleDepth()}>
+              {snapshot.depth}
+            </button>
+          </div>
+          <div className={ui.hint}>
+            How much of your subscription one answer may spend. Faster answers sooner
+            and costs less; more thorough thinks for longer.
+          </div>
+        </>
+      ) : null}
+
       <div className={ui.row}>
         <span className={ui.grow}>Tools</span>
         <input

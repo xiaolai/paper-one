@@ -368,6 +368,10 @@ pub async fn agent_ask<R: Runtime>(
     request_id: String,
     route: String,
     prompt: String,
+    // The reader's Faster / More thorough choice, from a closed set. `None`
+    // — an older caller, or one that does not care — reads as their account
+    // default, which is the only honest reading of "not asked".
+    depth: Option<crate::agentask::Depth>,
     chunks: Channel<String>,
 ) -> Result<String> {
     let which = match route.as_str() {
@@ -403,6 +407,7 @@ pub async fn agent_ask<R: Runtime>(
         std::path::Path::new(&program),
         &workdir,
         &prompt,
+        depth.unwrap_or_default(),
         &cancel,
         |text| {
             let _ = chunks.send(text);

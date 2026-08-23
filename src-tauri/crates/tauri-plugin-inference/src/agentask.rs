@@ -45,21 +45,54 @@
 use std::path::Path;
 use std::process::Stdio;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::agent::Agent;
 use crate::error::{Error, Result};
 use crate::requests::Cancel;
 
+/// How much the reader is willing to spend on one answer.
+///
+/// A CLOSED SET, and that is the whole security property: the two CLIs take a
+/// model id and a reasoning effort as free strings, and this crate's contract
+/// is that a caller names something from a set Paper controls — never a string
+/// that reaches an argv. `Depth` is that set; nothing here interpolates.
+///
+/// The two adapters spend it on DIFFERENT AXES, because their CLIs offer
+/// different ones, and both were measured on 2026-08-23:
+///
+/// - Codex takes `model_reasoning_effort`. At `low` a turn came back with
+///   `reasoning_output_tokens: 0`; the supported values are the vendor's own
+///   (`none, minimal, low, medium, high, xhigh, max`), which its API names in
+///   the 400 it returns for anything else. That validation is at TURN time,
+///   not at config-parse time — an invalid value costs a request before it
+///   fails, which is the second reason this is an enum and not a string.
+/// - Claude takes `--model`, whose aliases its own `--help` documents
+///   (`fable`, `opus`, `sonnet`). `--model sonnet` reported
+///   `model: claude-sonnet-5` in the init event with `tools: []` intact, so
+///   the choice does not weaken the lockdown.
+///
+/// `Default` passes NO flag at all, which is the case that matters most: it
+/// is the reader's own account default, the thing they are already paying
+/// for, and Paper has no business overriding it unasked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Depth {
+    #[default]
+    Default,
+    Faster,
+    Thorough,
+}
+
 /// Build the argv for a tool-free, read-only, one-shot turn.
 ///
 /// Pure, so every flag has a test that breaks when it is removed — the same
 /// discipline `spawn.rs` applies to the daemon's configuration, and for the
 /// same reason: these arguments are the whole of the sandbox.
-pub fn turn_args(agent: Agent, workdir: &Path) -> Vec<String> {
+pub fn turn_args(agent: Agent, workdir: &Path, depth: Depth) -> Vec<String> {
     let dir = workdir.to_string_lossy().into_owned();
-    match agent {
+    let mut args = match agent {
         Agent::Codex => vec![
             "exec".into(),
             // JSONL events rather than the human terminal UI. The plan
@@ -111,7 +144,32 @@ pub fn turn_args(agent: Agent, workdir: &Path) -> Vec<String> {
             "--disallowed-tools".into(),
             "*".into(),
         ],
+    };
+    /* APPENDED, NOT WOVEN IN. The lockdown above is what every test in this
+     * file asserts; adding the reader's choice at the end means no flag they
+     * can pick sits between two flags that depend on each other's order, and
+     * `Depth::Default` leaves the argv byte-for-byte what it has always
+     * been. */
+    match (agent, depth) {
+        (_, Depth::Default) => {}
+        (Agent::Codex, Depth::Faster) => {
+            args.push("-c".into());
+            args.push("model_reasoning_effort=low".into());
+        }
+        (Agent::Codex, Depth::Thorough) => {
+            args.push("-c".into());
+            args.push("model_reasoning_effort=high".into());
+        }
+        (Agent::Claude, Depth::Faster) => {
+            args.push("--model".into());
+            args.push("sonnet".into());
+        }
+        (Agent::Claude, Depth::Thorough) => {
+            args.push("--model".into());
+            args.push("opus".into());
+        }
     }
+    args
 }
 
 /// Codex's JSONL events, as much as Paper reads.
@@ -198,13 +256,14 @@ pub async fn ask(
     program: &Path,
     workdir: &Path,
     prompt: &str,
+    depth: Depth,
     cancel: &Cancel,
     mut on_delta: impl FnMut(String),
 ) -> Result<String> {
     tokio::fs::create_dir_all(workdir).await?;
 
     let mut cmd = tokio::process::Command::new(program);
-    cmd.args(turn_args(agent, workdir))
+    cmd.args(turn_args(agent, workdir, depth))
         .current_dir(workdir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -386,7 +445,7 @@ mod tests {
 
     #[test]
     fn claude_disables_every_tool_with_the_wildcard() {
-        let args = turn_args(Agent::Claude, Path::new("/tmp/empty"));
+        let args = turn_args(Agent::Claude, Path::new("/tmp/empty"), Depth::Default);
         let i = args
             .iter()
             .position(|a| a == "--disallowed-tools")
@@ -407,7 +466,7 @@ mod tests {
 
     #[test]
     fn claude_loads_none_of_the_readers_configuration() {
-        let args = turn_args(Agent::Claude, Path::new("/tmp/empty"));
+        let args = turn_args(Agent::Claude, Path::new("/tmp/empty"), Depth::Default);
         let i = args
             .iter()
             .position(|a| a == "--setting-sources")
@@ -429,7 +488,7 @@ mod tests {
 
     #[test]
     fn claude_streams_and_denies_by_default() {
-        let args = turn_args(Agent::Claude, Path::new("/tmp/empty"));
+        let args = turn_args(Agent::Claude, Path::new("/tmp/empty"), Depth::Default);
         assert!(args.iter().any(|a| a == "-p"));
         assert!(args.iter().any(|a| a == "--include-partial-messages"));
         let o = args
@@ -446,7 +505,7 @@ mod tests {
 
     #[test]
     fn codex_is_read_only_ephemeral_and_ignores_the_readers_config() {
-        let args = turn_args(Agent::Codex, Path::new("/tmp/empty"));
+        let args = turn_args(Agent::Codex, Path::new("/tmp/empty"), Depth::Default);
         assert_eq!(args[0], "exec");
         assert!(args.iter().any(|a| a == "--json"));
         assert!(
@@ -463,12 +522,69 @@ mod tests {
         assert_eq!(args[s + 1], "read-only");
     }
 
+    /// `Depth::Default` adds NOTHING. The reader's account default is what
+    /// they already pay for, and the argv stays what every test above pins.
+    #[test]
+    fn the_default_depth_changes_no_argument() {
+        for agent in crate::agent::AGENTS {
+            let plain = turn_args(agent, Path::new("/tmp/empty"), Depth::Default);
+            for arg in &plain {
+                assert!(
+                    !arg.contains("model_reasoning_effort") && arg != "--model",
+                    "{agent:?} chose a model nobody asked for: {arg:?}"
+                );
+            }
+        }
+    }
+
+    /// Each CLI spends the choice on the axis IT offers, both measured
+    /// 2026-08-23 — Codex on reasoning effort, Claude on a documented model
+    /// alias. Pinned by value, because an unsupported one is a 400 the reader
+    /// pays a request to discover.
+    #[test]
+    fn each_agent_spends_the_choice_on_the_axis_its_cli_offers() {
+        let codex_fast = turn_args(Agent::Codex, Path::new("/tmp/empty"), Depth::Faster);
+        assert!(codex_fast.contains(&"model_reasoning_effort=low".to_owned()));
+        let codex_deep = turn_args(Agent::Codex, Path::new("/tmp/empty"), Depth::Thorough);
+        assert!(codex_deep.contains(&"model_reasoning_effort=high".to_owned()));
+
+        let claude_fast = turn_args(Agent::Claude, Path::new("/tmp/empty"), Depth::Faster);
+        assert!(claude_fast.contains(&"sonnet".to_owned()));
+        let claude_deep = turn_args(Agent::Claude, Path::new("/tmp/empty"), Depth::Thorough);
+        assert!(claude_deep.contains(&"opus".to_owned()));
+    }
+
+    /// THE LOCKDOWN SURVIVES EVERY CHOICE. A depth that quietly dropped a
+    /// containment flag would be the worst kind of setting: one that trades
+    /// safety for speed without saying so.
+    #[test]
+    fn no_depth_weakens_the_lockdown() {
+        for agent in crate::agent::AGENTS {
+            let plain = turn_args(agent, Path::new("/tmp/empty"), Depth::Default);
+            for depth in [Depth::Faster, Depth::Thorough] {
+                let args = turn_args(agent, Path::new("/tmp/empty"), depth);
+                for flag in &plain {
+                    assert!(
+                        args.contains(flag),
+                        "{agent:?} at {depth:?} dropped {flag:?}"
+                    );
+                }
+                for arg in &args {
+                    assert!(
+                        !arg.contains("dangerous") && !arg.contains("bypass"),
+                        "{agent:?} at {depth:?} was handed {arg:?}"
+                    );
+                }
+            }
+        }
+    }
+
     /// Nothing dangerous, on either side. These flags exist and would make
     /// every other argument here pointless.
     #[test]
     fn no_bypass_flag_is_ever_passed() {
         for agent in crate::agent::AGENTS {
-            for arg in turn_args(agent, Path::new("/tmp/empty")) {
+            for arg in turn_args(agent, Path::new("/tmp/empty"), Depth::Default) {
                 assert!(
                     !arg.contains("dangerous") && !arg.contains("bypass"),
                     "{agent:?} was handed {arg:?}"
@@ -481,14 +597,14 @@ mod tests {
     /// end in the marker that says so for Codex.
     #[test]
     fn the_prompt_is_never_an_argument() {
-        let args = turn_args(Agent::Codex, Path::new("/tmp/empty"));
+        let args = turn_args(Agent::Codex, Path::new("/tmp/empty"), Depth::Default);
         assert_eq!(
             args.last().unwrap(),
             "-",
             "codex reads the prompt from stdin"
         );
         for agent in crate::agent::AGENTS {
-            for arg in turn_args(agent, Path::new("/tmp/empty")) {
+            for arg in turn_args(agent, Path::new("/tmp/empty"), Depth::Default) {
                 assert!(arg.len() < 200, "no argument should be carrying book text");
             }
         }
@@ -496,7 +612,7 @@ mod tests {
 
     #[test]
     fn the_working_root_is_the_directory_it_was_given() {
-        let args = turn_args(Agent::Codex, Path::new("/tmp/paper-empty"));
+        let args = turn_args(Agent::Codex, Path::new("/tmp/paper-empty"), Depth::Default);
         let c = args.iter().position(|a| a == "-C").expect("the flag");
         assert_eq!(args[c + 1], "/tmp/paper-empty");
     }

@@ -1,7 +1,8 @@
 import type { SettingsStore } from '../../../kernel'
 import { LOOK_UP_LABELS, type KernelServices } from '../../../kernel'
+import type { Depth } from '../../inference'
 import type { InferencePort, Probe, Route } from '../../inference'
-import { ROUTE_SETTING, TOOLS_SETTING } from '../lib/settings'
+import { DEPTH_SETTING, ROUTE_SETTING, TOOLS_SETTING } from '../lib/settings'
 
 /**
  * The route list's decisions — no React, so they can be tested.
@@ -42,6 +43,21 @@ import { ROUTE_SETTING, TOOLS_SETTING } from '../lib/settings'
 /** What a row's button does. */
 export type RowAction = 'use' | 'install' | 'sign-in' | 'in-use' | 'none'
 
+/**
+ * What the effort row shows, and the order it cycles in.
+ *
+ * `default` FIRST and named for what it is: the reader's own account setting,
+ * which they already pay for. The other two are Paper asking their CLI to
+ * spend less or more, and each adapter spends it on the axis its own CLI
+ * offers — see `agentask.rs`.
+ */
+export const DEPTH_ORDER: readonly Depth[] = ['default', 'faster', 'thorough']
+export const DEPTH_LABELS: Readonly<Record<Depth, string>> = {
+  default: 'Account default',
+  faster: 'Faster',
+  thorough: 'More thorough',
+}
+
 export interface RouteRow {
   readonly id: string
   readonly label: string
@@ -59,6 +75,14 @@ export interface RoutesSnapshot {
   readonly fellBack: boolean
   readonly lookUp: string | null
   readonly tools: boolean
+  /**
+   * The effort label, or null when the control does not apply.
+   *
+   * NULL FOR A LOCAL MODEL, because neither flag exists there: `lemond` is
+   * handed a model id, not a reasoning effort or an alias. A row that did
+   * nothing when pressed is the thing §07 exists to prevent.
+   */
+  readonly depth: string | null
   readonly voices: readonly RouteRow[]
   readonly loading: boolean
 }
@@ -131,6 +155,8 @@ export interface RoutesModel {
   signIn(id: string): Promise<void>
   cycleLookUp(hasDictionary: boolean, hasGloss: boolean): void
   setTools(value: boolean): void
+  /** Advance the effort one place. */
+  cycleDepth(): void
   dispose(): void
 }
 
@@ -153,6 +179,7 @@ const EMPTY: RoutesSnapshot = {
   fellBack: false,
   lookUp: null,
   tools: false,
+  depth: null,
   voices: [],
   loading: true,
 }
@@ -185,6 +212,12 @@ export function createRoutesModel({ port, settings, kernel }: RoutesModelOptions
        * the pane draws nothing. */
       lookUp: hasGloss ? LOOK_UP_LABELS[kernel.lookUp()] : null,
       tools: settings.get(TOOLS_SETTING),
+      /* Offered only while an AGENT answers — the two flags this maps to
+         exist on the agent CLIs and nowhere else. */
+      depth:
+        probe.routes.find((route) => route.id === inUse)?.kind === 'agent'
+          ? DEPTH_LABELS[settings.get(DEPTH_SETTING)]
+          : null,
       voices: voiceRows(probe.routes, inUse),
       loading: false,
     }
@@ -217,6 +250,10 @@ export function createRoutesModel({ port, settings, kernel }: RoutesModelOptions
        `inference`'s store, identically, which is one algorithm in two files. */
     cycleLookUp: (hasDictionary, hasGloss) => kernel.cycleLookUp(hasDictionary, hasGloss),
     setTools: (value) => settings.set(TOOLS_SETTING, value),
+    cycleDepth: () => {
+      const at = DEPTH_ORDER.indexOf(settings.get(DEPTH_SETTING))
+      settings.set(DEPTH_SETTING, DEPTH_ORDER[(at + 1) % DEPTH_ORDER.length] as Depth)
+    },
     dispose: () => {
       disposed = true
       unsubscribeSettings()

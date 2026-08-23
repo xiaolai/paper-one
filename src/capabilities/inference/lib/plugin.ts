@@ -29,6 +29,17 @@ export type RuntimeStatus =
 
 export type Modality = 'text' | 'speech'
 
+/**
+ * How much the reader is willing to spend on one answer.
+ *
+ * A CLOSED SET matching the crate's `Depth`, and closed for the same reason:
+ * both CLIs take a model id or a reasoning effort as a free string, and this
+ * file's contract is that nothing above it names one. `'default'` sends no
+ * flag at all — the reader's own account default, which is what they are
+ * already paying for.
+ */
+export type Depth = 'default' | 'faster' | 'thorough'
+
 export interface ModelRow {
   readonly id: string
   readonly label: string
@@ -136,10 +147,10 @@ export const inferencePlugin = {
   /** WRITE-ONLY. There is deliberately no `getEndpointKey`. */
   setEndpointKey: (id: string, key: string) => invoke<void>(command('inference_set_endpoint_key'), { id, key }),
 
-  agentAsk: (requestId: string, route: string, prompt: string, onChunk: (text: string) => void) => {
+  agentAsk: (requestId: string, route: string, prompt: string, depth: Depth, onChunk: (text: string) => void) => {
     const chunks = new Channel<string>()
     chunks.onmessage = onChunk
-    return invoke<string>(command('agent_ask'), { requestId, route, prompt, chunks })
+    return invoke<string>(command('agent_ask'), { requestId, route, prompt, depth, chunks })
   },
   agentSignIn: (route: string) => invoke<void>(command('agent_sign_in'), { route }),
 

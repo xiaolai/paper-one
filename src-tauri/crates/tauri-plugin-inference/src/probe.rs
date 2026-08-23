@@ -219,7 +219,23 @@ pub fn agent_route(probe: &AgentProbe) -> Route {
         kind: RouteKind::Agent,
         label: probe.agent.label().to_owned(),
         detail,
-        unusable: probe.unusable.map(str::to_owned),
+        /* THE VERSION IT NEEDS, not just that this one will not do.
+         *
+         * "Version not supported" is true and useless: the reader cannot act
+         * on it without going to look up what Paper wants, and Paper already
+         * knows — `minimum_version()` is the number this build was written
+         * against. The other two reasons stay the literals they were, because
+         * "Not installed" and "Signed out" each already name their own fix. */
+        unusable: probe.unusable.map(|reason| {
+            if reason == agent::VERSION_NOT_SUPPORTED {
+                format!(
+                    "{reason} — needs {} or newer",
+                    probe.agent.minimum_version()
+                )
+            } else {
+                reason.to_owned()
+            }
+        }),
         installed: false,
         bytes: None,
         // An agent answers questions and never reads aloud: WI-15.9's TTS is
@@ -415,5 +431,43 @@ mod tests {
             .route(&local_route_id("qwen3-4b-instruct-2507-q4-k-m"))
             .is_some());
         assert!(probe.route("nope").is_none());
+    }
+    /// A reader told "Version not supported" cannot act on it. Paper knows the
+    /// number it wants — this is that number reaching the pane.
+    #[test]
+    fn an_unsupported_version_says_which_one_is_needed() {
+        let row = agent_route(&AgentProbe {
+            agent: Agent::Codex,
+            path: Some("/usr/local/bin/codex".to_owned()),
+            version: Some(Version(0, 1, 0)),
+            auth: Some(AuthState::VersionUnsupported),
+            unusable: Some(agent::VERSION_NOT_SUPPORTED),
+        });
+        let said = row.unusable.expect("a reason");
+        assert!(said.starts_with(agent::VERSION_NOT_SUPPORTED), "{said}");
+        assert!(
+            said.contains(&Agent::Codex.minimum_version().to_string()),
+            "the reason should name the version it needs: {said}"
+        );
+    }
+
+    /// The other two reasons are unchanged — each already names its own fix,
+    /// and a version number bolted onto "Not installed" would be noise.
+    #[test]
+    fn the_other_reasons_are_left_exactly_as_they_were() {
+        let signed_out = agent_route(&AgentProbe {
+            agent: Agent::Claude,
+            path: Some("/usr/local/bin/claude".to_owned()),
+            version: Some(Version(9, 9, 9)),
+            auth: Some(AuthState::SignedOut),
+            unusable: Some(agent::SIGNED_OUT),
+        });
+        assert_eq!(signed_out.unusable.as_deref(), Some(agent::SIGNED_OUT));
+        assert_eq!(
+            agent_route(&AgentProbe::missing(Agent::Claude))
+                .unusable
+                .as_deref(),
+            Some(agent::NOT_INSTALLED)
+        );
     }
 }

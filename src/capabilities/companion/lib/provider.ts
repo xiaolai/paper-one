@@ -1,5 +1,5 @@
 import type { AskContext, Citation, CompanionProvider } from '../../../kernel'
-import type { InferencePort } from '../../inference'
+import type { Depth, InferencePort } from '../../inference'
 import {
   COMPANION_SYSTEM_PROMPT,
   buildQuestion,
@@ -42,6 +42,12 @@ export interface CompanionProviderOptions {
   readonly port: InferencePort
   /** The chosen route id, read per call so a change needs no rebind. */
   readonly route: () => RouteId | null
+  /**
+   * How much of the reader's subscription this answer may spend — read per
+   * call, for the same reason the route is: changing it must take effect on
+   * the next question, not on the next restart.
+   */
+  readonly depth: () => Depth
 }
 
 export interface BoundCompanionProvider extends CompanionProvider {
@@ -62,6 +68,7 @@ export function localModelOf(route: RouteId): string | null {
 export function createCompanionProvider({
   port,
   route,
+  depth,
 }: CompanionProviderOptions): BoundCompanionProvider {
   let numbered: readonly Passage[] = []
 
@@ -107,7 +114,7 @@ export function createCompanionProvider({
 
       const running = (
         isAgentRoute(chosen)
-          ? port.agentAsk(chosen, prompt, push)
+          ? port.agentAsk(chosen, prompt, depth(), push)
           : port.generate(localModelOf(chosen) ?? '', COMPANION_SYSTEM_PROMPT, prompt, push, signal)
       )
         .then(() => {})

@@ -2,7 +2,7 @@ import { createElement } from 'react'
 import type { Capability, CapabilityContext, Disposable } from '../../kernel'
 import { createController, type Controller } from './lib/controller'
 import { createGlossProvider, type BoundGlossProvider } from './lib/glossProvider'
-import { inferencePlugin, mintRequestId, type InferencePlugin, type Probe } from './lib/plugin'
+import { inferencePlugin, mintRequestId, type Depth, type InferencePlugin, type Probe } from './lib/plugin'
 import { createModelsModel, downloadLine, type ModelsModel } from './ui/modelsModel'
 import { ModelsPane } from './ui/ModelsPane'
 
@@ -55,7 +55,7 @@ export interface InferencePort {
     signal: AbortSignal,
   ): Promise<string>
   /** One tool-free turn from an agent CLI. */
-  agentAsk(route: string, prompt: string, onChunk: (text: string) => void): Promise<string>
+  agentAsk(route: string, prompt: string, depth: Depth, onChunk: (text: string) => void): Promise<string>
   /** Presence, version and auth for every route (WI-15.10). */
   probe(): Promise<Probe>
   /** Start the daemon if it is not up. False when it could not. */
@@ -96,8 +96,8 @@ export function inferencePort(): InferencePort | null {
      * no local daemon, which is the whole of F2's argument. Starting one to
      * ask Codex a question would make the download the local half needs a
      * prerequisite for the half that does not. */
-    agentAsk: (route, prompt, onChunk) =>
-      withCancel('agent', null, (id) => plugin.agentAsk(id, route, prompt, onChunk)),
+    agentAsk: (route, prompt, depth, onChunk) =>
+      withCancel('agent', null, (id) => plugin.agentAsk(id, route, prompt, depth, onChunk)),
     probe: () => plugin.probe(),
     ensureReady: () => controller.ensureReady(),
     signIn: (route) => plugin.agentSignIn(route),
@@ -212,4 +212,4 @@ export function inferenceDownloadLine(): string | null {
 
 export { useInference } from './ui/useInference'
 export type { Controller, InferenceSnapshot, RuntimeState } from './lib/controller'
-export type { InstallProgress, ModelRow, Probe, Route, RouteKind } from './lib/plugin'
+export type { Depth, InstallProgress, ModelRow, Probe, Route, RouteKind } from './lib/plugin'

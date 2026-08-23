@@ -1,6 +1,6 @@
 import { createElement } from 'react'
 import type { Capability, CapabilityContext, Disposable } from '../../kernel'
-import { ROUTE_SETTING } from './lib/settings'
+import { DEPTH_SETTING, ROUTE_SETTING } from './lib/settings'
 import { inferencePort } from '../inference'
 import { createCompanionProvider, type BoundCompanionProvider } from './lib/provider'
 import { createRoutesModel, type RoutesModel } from './ui/routesModel'
@@ -92,6 +92,10 @@ export const companion: Capability = {
         const chosen = api.settings.get(ROUTE_SETTING)
         return chosen === '' ? null : chosen
       },
+      /* Both read per call, and both from THIS capability's own namespace —
+         `companion.route` and `companion.depth`, which `scopeSettings` allows
+         and the kernel's own settings are not. */
+      depth: () => api.settings.get(DEPTH_SETTING),
     })
     provider = myProvider
     unbindCompanion = api.services.bindCompanion(myProvider)
@@ -104,6 +108,6 @@ export const companion: Capability = {
   },
 }
 
-export { ROUTE_SETTING, TOOLS_SETTING } from './lib/settings'
+export { DEPTH_SETTING, ROUTE_SETTING, TOOLS_SETTING } from './lib/settings'
 export type { Passage, SourcePassage } from './lib/passages'
 export { UNKNOWN_CITATION_NOTE, resolveCitations } from './lib/passages'

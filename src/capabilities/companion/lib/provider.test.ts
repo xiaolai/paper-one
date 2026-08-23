@@ -39,8 +39,8 @@ function portWith(
       seen.push(`generate:${model}`, prompt)
       return run(onChunk)
     },
-    agentAsk: async (route: string, prompt: string, onChunk: (t: string) => void) => {
-      seen.push(`agent:${route}`, prompt)
+    agentAsk: async (route: string, prompt: string, depth: string, onChunk: (t: string) => void) => {
+      seen.push(`agent:${route}`, prompt, `depth:${depth}`)
       return run(onChunk)
     },
     probe: async () => ({ routes: [], runtimeVersion: null }),
@@ -77,7 +77,7 @@ describe('the bound provider', () => {
   it('reports the chosen route as its name, and unconfigured with none', () => {
     let chosen: string | null = null
     const { port } = portWith(async () => '')
-    const provider = createCompanionProvider({ port, route: () => chosen })
+    const provider = createCompanionProvider({ port, route: () => chosen, depth: () => 'default' })
     expect(provider.configured).toBe(false)
     expect(provider.name).toBe('No model configured')
     chosen = 'local:qwen3-4b'
@@ -88,7 +88,7 @@ describe('the bound provider', () => {
 
   it('refuses to ask with no route, on iteration rather than on call', async () => {
     const { port } = portWith(async () => '')
-    const provider = createCompanionProvider({ port, route: () => null })
+    const provider = createCompanionProvider({ port, route: () => null, depth: () => 'default' })
     const stream = provider.ask('why?', CONTEXT, new AbortController().signal)
     await expect(stream.next()).rejects.toThrow(/no provider/i)
   })
@@ -101,21 +101,21 @@ describe('the bound provider', () => {
       onChunk('the whale.')
       return ''
     })
-    const provider = createCompanionProvider({ port, route: () => 'local:qwen3-4b' })
+    const provider = createCompanionProvider({ port, route: () => 'local:qwen3-4b', depth: () => 'default' })
     const { text } = await drain(provider.ask('why?', CONTEXT, new AbortController().signal))
     expect(text).toBe('Because the whale.')
   })
 
   it('sends the model id, not the route id, on a local route', async () => {
     const { port, seen } = portWith(async () => '')
-    const provider = createCompanionProvider({ port, route: () => 'local:qwen3-4b' })
+    const provider = createCompanionProvider({ port, route: () => 'local:qwen3-4b', depth: () => 'default' })
     await drain(provider.ask('why?', CONTEXT, new AbortController().signal))
     expect(seen[0]).toBe('generate:qwen3-4b')
   })
 
   it('sends the whole route id to an agent, and never touches generate', async () => {
     const { port, seen } = portWith(async () => '')
-    const provider = createCompanionProvider({ port, route: () => 'agent:codex' })
+    const provider = createCompanionProvider({ port, route: () => 'agent:codex', depth: () => 'thorough' })
     await drain(provider.ask('why?', CONTEXT, new AbortController().signal))
     expect(seen[0]).toBe('agent:agent:codex')
     expect(seen.some((one) => one.startsWith('generate:'))).toBe(false)
@@ -125,7 +125,7 @@ describe('the bound provider', () => {
     const { port } = portWith(async () => {
       throw new Error('the daemon went away')
     })
-    const provider = createCompanionProvider({ port, route: () => 'local:qwen3-4b' })
+    const provider = createCompanionProvider({ port, route: () => 'local:qwen3-4b', depth: () => 'default' })
     await expect(drain(provider.ask('why?', CONTEXT, new AbortController().signal))).rejects.toThrow(
       /went away/,
     )
@@ -138,7 +138,7 @@ describe('the bound provider', () => {
       onChunk('It is in [1].')
       return ''
     })
-    const provider = createCompanionProvider({ port, route: () => 'local:qwen3-4b' })
+    const provider = createCompanionProvider({ port, route: () => 'local:qwen3-4b', depth: () => 'default' })
     expect(provider.lastPassages()).toEqual([])
     const { done } = await drain(provider.ask('where?', CONTEXT, new AbortController().signal))
     expect(provider.lastPassages()).toHaveLength(1)

@@ -33,3 +33,22 @@ export const ROUTE_SETTING: Setting<string> = defineSetting('companion.route', '
 export const TOOLS_SETTING: Setting<boolean> = defineSetting('companion.tools', false, (raw) =>
   typeof raw === 'boolean' ? raw : undefined,
 )
+
+/**
+ * How much of the reader's subscription one answer may spend.
+ *
+ * THREE STATES, NOT TWO, and the third is the default: `'default'` sends no
+ * flag at all and lets the account decide. A two-state toggle would have had
+ * to pick one of them as "off", and both would have been Paper overriding a
+ * choice the reader already made with their money.
+ *
+ * The two adapters spend it on different axes — Codex on reasoning effort,
+ * Claude on a model alias — because those are the axes their CLIs expose. The
+ * setting names the reader's INTENT; `agentask.rs` owns the translation, which
+ * is why this value is a closed set and never a model id.
+ */
+export const DEPTH_SETTING: Setting<'default' | 'faster' | 'thorough'> = defineSetting(
+  'companion.depth',
+  'default',
+  (raw) => (raw === 'default' || raw === 'faster' || raw === 'thorough' ? raw : undefined),
+)
