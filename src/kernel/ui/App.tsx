@@ -11,6 +11,7 @@ import { isTauri, usePlatform, usePrefersDark, usePrefersReducedMotion } from '.
 import { planImport } from '../core/tagArchive'
 import { canArchiveTags, exportTagsToFile, importTagsFromFile } from './tagFiles'
 import { canArchiveMarks, exportMarksToFile, importMarksFromFile } from './marksFiles'
+import { createHandover } from './importHandover'
 import { openExternal } from './openExternal'
 import { planImport as planMarksImport } from '../core/marksArchive'
 import { hasOpenLayer, useAppState } from './state'
@@ -496,14 +497,29 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
        * unreadable drop was reported only when persistence happened to be
        * available, which is not what the warning was about. */
       if (note && (picked.length === 1 || !fs)) setImportNotice(note)
+
+      /* SUPERSEDED BY EVERY INTAKE, not only by a multi-book one.
+       *
+       * The token used to be taken inside the branch below, so a single-file
+       * pick or drop advanced nothing. A folder walk already running was
+       * therefore still `current()` when it finished, and its closing
+       * `openBook` ran AFTER the single book the reader had just asked for —
+       * leaving them in the older book. One book is as much an intake as a
+       * thousand, and the thing being superseded is "which book opens last",
+       * which every intake decides. */
+      importAbort.current?.abort()
+      importAbort.current = null
+      const batch = importBatch.current + 1
+      importBatch.current = batch
+      const current = () => importBatch.current === batch
+
       if (picked.length > 1 && fs) {
-        /* AND STOPS A RUNNING FOLDER WALK — the token below makes an older
-         * batch stop REPORTING, but a walk deep in `importFolder` kept
-         * COPYING against the same content-hashed paths. The signal is how it
-         * actually stops. */
-        importAbort.current?.abort()
-        importAbort.current = null
-        /* SUPERSEDES ANY BATCH ALREADY RUNNING. Two imports could overlap —
+        /* THE WALK ALSO HAS TO BE TOLD. The token makes an older batch stop
+         * REPORTING, but a walk deep in `importFolder` kept COPYING against
+         * the same content-hashed paths; the signal above is how it actually
+         * stops.
+         *
+         * (was: SUPERSEDES ANY BATCH ALREADY RUNNING. Two imports could overlap —
          * drop a folder, then drop a book — and the older, slower one then
          * called `openBook` last, so the reader ended up in the book they had
          * asked for first rather than the one they asked for last. Worse, both
@@ -511,12 +527,8 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
          * from the content hash, so two copies of the same book raced for one
          * path.
          *
-         * The token is taken BEFORE the first await and re-checked after every
-         * one: a batch that is no longer the current one stops writing, stops
-         * reporting, and above all does not open anything. */
-        const batch = importBatch.current + 1
-        importBatch.current = batch
-        const current = () => importBatch.current === batch
+         * The token is taken BEFORE the first await and re-checked after
+         * every one.) */
 
         /* PROGRESS, because a dropped folder can hold thousands. The picker's
          * folder route has reported per book from the start; the drop route
@@ -530,14 +542,13 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
          * see `onCopied`. A drop of a thousand books left the shelf saying
          * "Your library is empty" for the whole copy exactly as the picker
          * did; the two routes had one defect between them. */
-        let batchOut: ImportOutcome[] = []
-        let shelving = Promise.resolve(0)
-        const handOver = () => {
-          if (batchOut.length === 0 || !current()) return
-          const ready = batchOut
-          batchOut = []
-          shelving = shelving.then(async (sofar) => sofar + (await shelveImported(ready)))
-        }
+        /* ONE HANDOVER, SHARED WITH THE FOLDER ROUTE. Both grew their own —
+         * a pending array, the same threshold, a promise chain, a final flush
+         * — and both guarded it with the generation token, so a superseded
+         * import discarded shelf records for books already on disk. There is
+         * no token inside `createHandover`, which is what stops that being
+         * re-decided here. See `importHandover.ts`. */
+        const handed = createHandover<ImportOutcome>(SHELVE_BATCH, shelveImported)
         try {
           for (const [index, { file, path }] of picked.entries()) {
             if (!current()) return
@@ -548,26 +559,26 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
               const kept = await keepOwnCopy(fs, file, path)
               if (kept) {
                 outcomes.push(kept)
-                batchOut.push(kept)
+                handed.add(kept)
               }
             } catch (cause) {
               console.error('Paper: could not add', path ?? file.name, cause)
               outcomes.push({ path: path ?? file.name, status: 'failed', name: file.name })
             }
-            if (batchOut.length >= SHELVE_BATCH) handOver()
           }
         } finally {
           /* Even on the early return above: the bytes are on disk either way,
            * and leaving them recordless is the orphan this pipeline exists to
            * avoid. */
-          handOver()
+          handed.flush()
           if (current()) setImporting(null)
         }
-        if (!current()) return
-        /* AWAITED, where it used to be fired and forgotten — the count of
-         * books whose record could not be written is the notice's, and there
-         * is nowhere else for it to come from. */
-        const unsaved = await shelving
+        /* AWAITED UNCONDITIONALLY, and before the token is consulted. The
+         * count is the notice's, and the notice belongs to the current batch
+         * — but the WRITES belong to whoever made the copies, so a superseded
+         * batch still waits for its own records to land rather than walking
+         * away from a chain nothing is holding. */
+        const unsaved = await handed.settled()
         if (!current()) return
         const summary = summarise(outcomes, unsaved)
         setImportNotice(note ? `${summary} ${note}` : summary)
@@ -881,23 +892,26 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
        * The chain is what the notice waits on, so "N added" is still a
        * statement about writes that finished rather than writes that were
        * started. */
-      let shelving = Promise.resolve(0)
+      const handed = createHandover<ImportOutcome>(SHELVE_BATCH, shelveImported)
       try {
         const outcomes = await importFolder(
           importFs,
           folder,
           {
             onProgress: (progress) => { if (current()) setImporting(progress) },
+            /* UNCONDITIONAL, for the reason the drop path gives: a walk that
+             * has been superseded still copied these bytes, and a copy with
+             * no record is invisible to the shelf and to removal alike. The
+             * token below governs the notice, not the bookkeeping. */
             onCopied: (copied) => {
-              if (!current()) return
-              shelving = shelving.then(async (sofar) => sofar + (await shelveImported(copied)))
+              for (const one of copied) handed.add(one)
             },
             signal: controller.signal,
           },
         )
-        if (!current()) return
-        // Awaited for the unsaved count — see the drop path above.
-        const unsaved = await shelving
+        // Awaited for the unsaved count, and awaited even when superseded —
+        // see the drop path above.
+        const unsaved = await handed.settled()
         if (!current()) return
         setImportNotice(summarise(outcomes, unsaved))
       } catch (cause) {
