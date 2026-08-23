@@ -544,8 +544,21 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
        * leaving them in the older book. One book is as much an intake as a
        * thousand, and the thing being superseded is "which book opens last",
        * which every intake decides. */
+      /* ⚠️ AND THE ONE IT REPLACED IS NAMED, not dropped in silence.
+       *
+       * The two ways in disagree about what a second intake means, and each is
+       * defensible on its own: `addFolder` REFUSES while one is running,
+       * because ⌘K during a walk once started two of them; this one
+       * SUPERSEDES, because dropping books is the reader saying "these now".
+       * What was not defensible is the seam between them. A drop during a
+       * folder walk aborted that walk, and the walk's own notice is guarded by
+       * a generation token this line has just advanced — so it returned
+       * without a word and the reader lost an import in progress with nothing
+       * on screen to say it had happened. */
+      const superseded = importAbort.current !== null || importing !== null
       importAbort.current?.abort()
       importAbort.current = null
+      if (superseded) setImportNotice('That replaced the import already running.')
       const batch = importBatch.current + 1
       importBatch.current = batch
       const current = () => importBatch.current === batch
@@ -633,7 +646,7 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
       }
       openBook(opening.file, opening.path)
     },
-    [openBook, fs, shelveImported],
+    [openBook, fs, shelveImported, importing],
   )
 
   const addBooks = useCallback(() => {
