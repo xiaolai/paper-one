@@ -29,6 +29,29 @@ const readerCss = readFileSync(
 ).replace(/\/\*[\s\S]*?\*\//g, '')
 
 /**
+ * foliate's own modules, read from the pinned fork.
+ *
+ * A relative path into `node_modules` rather than a resolver, and the crudeness
+ * is the point: `readFileSync` THROWS on a path that has moved, so this fails
+ * loudly instead of quietly asserting over an empty string. The fork is a git
+ * dependency pinned to a SHA — see `docs/foliate-fork.md`.
+ */
+const FOLIATE = ['paginator.js', 'view.js', 'fixed-layout.js', 'overlayer.js'] as const
+
+function foliateSource(file: string): string {
+  const source = readFileSync(
+    fileURLToPath(new URL(`../../../../node_modules/foliate-js/${file}`, import.meta.url)),
+    'utf8',
+  )
+  /* A SCAN OVER NOTHING FINDS NOTHING, and would report it as safety. The path
+     throwing covers a module that moved; this covers one that is present and
+     empty, which is what a half-written install looks like. The smallest of the
+     four is `fixed-layout.js` at about 9kB. */
+  if (source.length < 2000) throw new Error(`foliate-js/${file} is ${source.length} bytes`)
+  return source
+}
+
+/**
  * The FIRST declaration of a custom property in the stylesheet.
  *
  * A text scan, not a cascade. It does not know about selector scope,
@@ -122,5 +145,54 @@ describe('the highlight overlay', () => {
     const root = /:root\s*\{([^}]*)\}/.exec(css)?.[1] ?? ''
     expect(root).toContain('--overlayer-highlight-blend-mode')
     expect(root).toContain('--overlayer-highlight-opacity')
+  })
+})
+
+/**
+ * WHAT MAKES THE ISOLATION SAFE, asserted against the pinned fork rather than
+ * argued in a comment.
+ *
+ * `isolation: isolate` on `foliate-view` does exactly two things: it makes the
+ * element a stacking context, which CONFINES descendants that carry a
+ * `z-index`, and it forms an isolated group, which confines `mix-blend-mode`.
+ * Everything Paper stacks — §12's scale in `metrics.ts`, from the gutter at 1
+ * to the scrim at 30 — is on a host element OUTSIDE the view, and the view's
+ * own `z-index` is still `auto`, so where it paints among its siblings has not
+ * moved. Only its descendants are confined, and the claim below is that there
+ * are none to confine.
+ *
+ * THE PROOF EXPIRES ON A REBASE, which is why it is here and not in a comment.
+ * The fork is pinned to a SHA, upstream's API is explicitly unstable and has
+ * already changed the painter contract under Paper once. The day the paginator
+ * grows a `z-index`, that element stops being able to reach the host's layers
+ * and nothing else in this repo would say so.
+ */
+describe('the blend group Paper draws around the book', () => {
+  it.each(FOLIATE)('confines no z-index in %s, because there is none', (file) => {
+    const found = foliateSource(file)
+      .split('\n')
+      .map((line, i) => [i + 1, line] as const)
+      .filter(([, line]) => /z-index/i.test(line))
+      .map(([n, line]) => `${file}:${n}: ${line.trim()}`)
+    /* Reported with the lines rather than as a count: if this ever fires, the
+       question is whether that z-index needed to escape the book, and that is
+       unanswerable from a number. */
+    expect(found).toEqual([])
+  })
+
+  it('leaves the only blend inside it the one the isolation exists to serve', () => {
+    /* `overlayer.js` sets `mixBlendMode` from `--overlayer-highlight-blend-mode`
+       — that IS the mark band, whose backdrop must be the book and therefore
+       must be inside the group. Any OTHER blend in foliate would be a second
+       one with its own idea of what it is blending against. */
+    const offenders = FOLIATE.flatMap((file) =>
+      foliateSource(file)
+        .split('\n')
+        .map((line, i) => [i + 1, line] as const)
+        .filter(([, line]) => /mix-?blend-?mode/i.test(line))
+        .filter(([, line]) => !/--overlayer-highlight-blend-mode/.test(line))
+        .map(([n, line]) => `${file}:${n}: ${line.trim()}`),
+    )
+    expect(offenders).toEqual([])
   })
 })
