@@ -208,6 +208,8 @@ struct ClaudeInner {
 
 #[derive(Debug, Deserialize)]
 struct ClaudeDelta {
+    #[serde(rename = "type", default)]
+    kind: String,
     #[serde(default)]
     text: Option<String>,
 }
@@ -216,37 +218,190 @@ struct ClaudeDelta {
 ///
 /// Pure and separately tested. Everything not named here is dropped — see the
 /// module header for the list of what that includes.
-pub fn parse_line(agent: Agent, line: &str) -> Option<String> {
+///
+/// # `Err` and `Ok(None)` are different answers
+///
+/// ⚠️ This returned `Option` and mapped a JSON parse failure to `None` with
+/// `.ok()?`, which put "this event is not an answer" and "this is not the
+/// protocol at all" in the same bucket. So a CLI whose output format had moved
+/// — a version bump, a wrapper writing its own lines into the stream, a
+/// truncated write — produced a turn that exited 0 with an empty or partial
+/// answer and no indication anything had gone wrong. A partial answer is
+/// indistinguishable from a complete one to every caller above, which is the
+/// same argument the nonzero-exit branch makes.
+///
+/// `Ok(None)` is now only ever "valid JSON, not an answer event".
+pub fn parse_line(agent: Agent, line: &str) -> Result<Option<String>> {
     let line = line.trim();
     if line.is_empty() {
-        return None;
+        return Ok(None);
     }
+    let malformed = |message: String| Error::AgentMalformed {
+        agent: agent.name(),
+        message,
+    };
     match agent {
         Agent::Codex => {
-            let event: CodexEvent = serde_json::from_str(line).ok()?;
+            let event: CodexEvent = serde_json::from_str(line)
+                .map_err(|err| malformed(format!("unreadable event: {err}")))?;
             // `item.completed` carrying an `agent_message` is the answer.
             // `thread.started`, `turn.started` and `turn.completed` carry a
             // thread id and token usage, and are dropped.
             if event.kind != "item.completed" {
-                return None;
+                return Ok(None);
             }
-            let item = event.item?;
-            (item.kind == "agent_message").then_some(item.text?)
+            let Some(item) = event.item else {
+                return Ok(None);
+            };
+            Ok((item.kind == "agent_message")
+                .then_some(item.text)
+                .flatten())
         }
         Agent::Claude => {
-            let event: ClaudeEvent = serde_json::from_str(line).ok()?;
+            let event: ClaudeEvent = serde_json::from_str(line)
+                .map_err(|err| malformed(format!("unreadable event: {err}")))?;
             // Only `stream_event` → `content_block_delta` → `text_delta`.
             // The `system`/`init`, `assistant` and `result` events carry the
             // working directory, session id, plugin paths and usage.
             if event.kind != "stream_event" {
-                return None;
+                return Ok(None);
             }
-            let inner = event.event?;
+            let Some(inner) = event.event else {
+                return Ok(None);
+            };
             if inner.kind != "content_block_delta" {
-                return None;
+                return Ok(None);
             }
-            inner.delta?.text
+            let Some(delta) = inner.delta else {
+                return Ok(None);
+            };
+            /* ⚠️ AND THE DELTA'S OWN TYPE. `content_block_delta` is a family:
+             * `input_json_delta`, `thinking_delta` and `signature_delta` are
+             * already in it, and anything the CLI adds later joins it. Matching
+             * on the block and forwarding whatever `text` field turned up would
+             * splice a tool call's arguments, or a reasoning trace, into the
+             * answer the reader is shown. */
+            if delta.kind != "text_delta" {
+                return Ok(None);
+            }
+            Ok(delta.text)
         }
+    }
+}
+
+/// How long one turn may take, and how long it may go quiet inside it.
+///
+/// ⚠️ **THERE WAS NO DEADLINE AT ALL.** A CLI that wedges — a network stall
+/// with no timeout of its own, a prompt for input Paper will never answer, a
+/// hung helper holding stdout open — kept the request slot and the subprocess
+/// for as long as the app ran, and the only way out was the reader pressing
+/// Stop on a pane they may have closed. Both bounds are needed: the whole-turn
+/// one catches a CLI that streams forever, and the quiet one catches the far
+/// more common case of a CLI that stops saying anything at all while a
+/// thorough answer is still legitimately in progress.
+const TURN_LIMIT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+const QUIET_LIMIT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// How much of a child's stderr is kept for the failure message.
+const STDERR_TAIL_BYTES: usize = 4096;
+
+/// A spawned agent process and everything it started, owned in one place.
+///
+/// ⚠️ **EVERY EXIT PATH USED TO CARRY ITS OWN TEARDOWN.** `ask` had nine
+/// returns and each repeated `terminate` then `kill`; three had been missed at
+/// one point or another — the success path, a `wait` that errors, a nonzero
+/// exit — and each miss left a helper running, which on a subscription route is
+/// a turn being spent on an answer nobody will read. Fixing instance N+1 with
+/// the class unexamined is how that cost three separate audit rounds.
+///
+/// Worse, a branch cannot run at all when a future is dropped mid-await, which
+/// is what cancelling the enclosing task does, and `kill_on_drop` reaches the
+/// leader only. So the teardown belongs in a destructor, which always runs:
+///
+/// - [`Drop`] signals the group SYNCHRONOUSLY, which is all a destructor can
+///   do, and leaves reaping to tokio's own `kill_on_drop` reaper.
+/// - [`Turn::stop`] is the async form, which also reaps, and is what the
+///   ordinary paths call.
+///
+/// Whichever runs, the group goes down. `stop` is idempotent, so calling it and
+/// then dropping does not signal twice.
+struct Turn {
+    child: tokio::process::Child,
+    /// Captured at spawn: `Child::id()` is `None` once anything has reaped it,
+    /// and every path here may have. See `procgroup::group_of`.
+    group: Option<u32>,
+    stopped: bool,
+    #[cfg(windows)]
+    _job: Option<crate::procgroup::JobHandle>,
+}
+
+impl Turn {
+    fn adopt(child: tokio::process::Child) -> Self {
+        let group = crate::procgroup::group_of(&child);
+        Self {
+            child,
+            group,
+            stopped: false,
+            #[cfg(windows)]
+            _job: None,
+        }
+    }
+
+    /// Signal the whole group, then reap it. Idempotent.
+    ///
+    /// Failures are logged rather than returned: they cannot mask the turn's
+    /// own outcome — a teardown that failed must not turn a delivered answer
+    /// into an error, nor a cancellation into an I/O failure — and a signal
+    /// that genuinely failed is a maintainer's problem, which is what `log` is
+    /// for here and in `daemon.rs`.
+    async fn stop(&mut self) {
+        if self.stopped {
+            return;
+        }
+        self.stopped = true;
+        if let Err(err) = crate::procgroup::terminate(&self.child) {
+            log::warn!("inference: could not signal an agent's group: {err}");
+        }
+        if let Err(err) = crate::procgroup::kill(&mut self.child, self.group).await {
+            log::warn!("inference: could not kill an agent's group: {err}");
+        }
+    }
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        if self.stopped {
+            return;
+        }
+        let _ = crate::procgroup::terminate(&self.child);
+        crate::procgroup::kill_now(self.group);
+    }
+}
+
+/// The last `STDERR_TAIL_BYTES` of a child's stderr.
+///
+/// ⚠️ **A TAIL, AND ACTUALLY BOUNDED.** What this replaces kept the PREFIX
+/// under an `if held.len() < 4096` check — so it was neither a tail nor a
+/// bound: one long line appended in full took the buffer far past the limit,
+/// and the interesting part of a CLI's stderr is what it said LAST, not the
+/// login banner it opened with.
+#[derive(Default)]
+struct Tail {
+    bytes: std::collections::VecDeque<u8>,
+}
+
+impl Tail {
+    fn push(&mut self, chunk: &[u8]) {
+        for &byte in chunk {
+            if self.bytes.len() == STDERR_TAIL_BYTES {
+                self.bytes.pop_front();
+            }
+            self.bytes.push_back(byte);
+        }
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.bytes.iter().copied().collect::<Vec<_>>()).into_owned()
     }
 }
 
@@ -260,7 +415,16 @@ pub async fn ask(
     cancel: &Cancel,
     mut on_delta: impl FnMut(String),
 ) -> Result<String> {
-    tokio::fs::create_dir_all(workdir).await?;
+    /* ⚠️ THE ARGV AND `current_dir` MUST BE THE SAME DIRECTORY. Codex is told
+     * its root with `-C <dir>`, and that argument is a `String` — so a path
+     * that is not valid Unicode became something ELSE under
+     * `to_string_lossy`, and the CLI was pointed at a directory that does not
+     * exist while the process itself ran in the one that does. Rejected here
+     * rather than silently rewritten. */
+    if workdir.to_str().is_none() {
+        return Err(Error::PathNotUnicode(workdir.to_path_buf()));
+    }
+    prepare_workdir(workdir).await?;
 
     let mut cmd = tokio::process::Command::new(program);
     cmd.args(turn_args(agent, workdir, depth))
@@ -275,7 +439,7 @@ pub async fn ask(
     // helpers, and cancelling must reach them rather than orphaning them.
     crate::procgroup::configure(&mut cmd);
 
-    let mut child = cmd.spawn().map_err(|e| {
+    let child = cmd.spawn().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             Error::AgentMissing(agent.name())
         } else {
@@ -283,16 +447,23 @@ pub async fn ask(
         }
     })?;
 
-    /* The group, captured before anything can reap the child — `Child::id()`
-     * is `None` after a wait, and every early return below may have waited. */
-    let group = crate::procgroup::group_of(&child);
+    /* OWNED FROM HERE. Everything below may return, and none of it repeats a
+     * teardown: `turn` holds the group, and the group goes down when it does. */
+    let mut turn = Turn::adopt(child);
 
     /* THE SAME JOB-OBJECT GUARANTEE THE DAEMON GETS. Without this an agent
      * CLI on Windows was held only by its own handle, so cancelling killed the
      * leader and left whatever it had spawned running — the exact gap
-     * `procgroup`'s header says the job object closes. Found by audit. */
+     * `procgroup`'s header says the job object closes.
+     *
+     * ⚠️ ADOPTED FIRST, THEN HELD. `?` here used to run before anything owned
+     * the child, so a job object that could not be created or assigned left a
+     * process that had already started — and had already had time to spawn
+     * descendants — with only `kill_on_drop`'s leader kill behind it. */
     #[cfg(windows)]
-    let _job = crate::procgroup::JobHandle::hold(&child)?;
+    {
+        turn._job = Some(crate::procgroup::JobHandle::hold(&turn.child)?);
+    }
 
     /* ⚠️ STDERR IS DRAINED, AND NOT DRAINING IT WAS A DEADLOCK.
      *
@@ -304,49 +475,22 @@ pub async fn ask(
      * come and `wait()` never returns. A verbose agent turn was enough.
      *
      * The bytes are kept for the failure message and otherwise dropped. */
-    let stderr_tail = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-    if let Some(stderr) = child.stderr.take() {
-        let sink = std::sync::Arc::clone(&stderr_tail);
-        tokio::spawn(async move {
-            let mut reader = BufReader::new(stderr);
-            let mut buffer = Vec::new();
-            loop {
-                buffer.clear();
-                match reader.read_until(b'\n', &mut buffer).await {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        if let Ok(mut held) = sink.lock() {
-                            /* Bounded: a child that loops printing must not
-                             * grow this without limit. */
-                            if held.len() < 4096 {
-                                held.push_str(&String::from_utf8_lossy(&buffer));
-                            }
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-    }
+    let stderr_tail = std::sync::Arc::new(std::sync::Mutex::new(Tail::default()));
+    /* ⚠️ AND THE HANDLE IS KEPT. Detached, this task raced `wait()`: the
+     * process could exit, the failure branch could read the buffer, and the
+     * drain could deliver the last — and most explanatory — bytes afterwards.
+     * The failure message was then empty or truncated, nondeterministically,
+     * in exactly the case somebody is reading it. */
+    let draining = child_stderr_drain(&mut turn.child, std::sync::Arc::clone(&stderr_tail));
 
-    /* EVERY EARLY RETURN BELOW TAKES THE GROUP DOWN. `?` on its own drops the
-     * `Child`, and `kill_on_drop` reaches the leader only — so a missing
-     * stdout or a read error left an agent turn running unattended, which on a
-     * subscription route is a turn being spent on an answer nobody will read.
-     * The closure is what makes that one line at each exit. */
-    let take_down = |child: &mut tokio::process::Child| {
-        let _ = crate::procgroup::terminate(child);
-    };
-
-    if let Some(mut stdin) = child.stdin.take() {
+    if let Some(mut stdin) = turn.child.stdin.take() {
         /* The write races cancellation: a child that stops reading stdin —
          * one that failed to start, or is waiting on a prompt Paper will never
          * answer — would otherwise block here with no way out. */
         let wrote = tokio::select! {
             biased;
             () = cancel.cancelled() => {
-                take_down(&mut child);
-                let _ = crate::procgroup::kill(&mut child, group).await;
+                turn.stop().await;
                 return Err(Error::Cancelled);
             }
             written = async {
@@ -355,15 +499,13 @@ pub async fn ask(
             } => written,
         };
         if let Err(failure) = wrote {
-            take_down(&mut child);
-            let _ = crate::procgroup::kill(&mut child, group).await;
+            turn.stop().await;
             return Err(Error::Io(failure));
         }
     }
 
-    let Some(stdout) = child.stdout.take() else {
-        take_down(&mut child);
-        let _ = crate::procgroup::kill(&mut child, group).await;
+    let Some(stdout) = turn.child.stdout.take() else {
+        turn.stop().await;
         return Err(Error::AgentMalformed {
             agent: agent.name(),
             message: "no stdout".to_owned(),
@@ -371,6 +513,11 @@ pub async fn ask(
     };
     let mut lines = BufReader::new(stdout).lines();
     let mut answer = String::new();
+    /* WHETHER AN ANSWER EVENT WAS EVER SEEN, which `answer.is_empty()` cannot
+     * tell from an answer event carrying an empty string. See the check after
+     * the exit status. */
+    let mut answered = false;
+    let deadline = tokio::time::Instant::now() + TURN_LIMIT;
 
     loop {
         let next = tokio::select! {
@@ -378,22 +525,44 @@ pub async fn ask(
             () = cancel.cancelled() => {
                 // The reader gave up. Take the whole group down rather than
                 // letting a subscription turn run on unattended.
-                take_down(&mut child);
-                let _ = crate::procgroup::kill(&mut child, group).await;
+                turn.stop().await;
                 return Err(Error::Cancelled);
             }
-            line = lines.next_line() => line,
+            () = tokio::time::sleep_until(deadline) => {
+                turn.stop().await;
+                return Err(Error::AgentMalformed {
+                    agent: agent.name(),
+                    message: format!("gave no answer within {}s", TURN_LIMIT.as_secs()),
+                });
+            }
+            line = tokio::time::timeout(QUIET_LIMIT, lines.next_line()) => match line {
+                Ok(line) => line,
+                Err(_elapsed) => {
+                    turn.stop().await;
+                    return Err(Error::AgentMalformed {
+                        agent: agent.name(),
+                        message: format!("said nothing for {}s", QUIET_LIMIT.as_secs()),
+                    });
+                }
+            },
         };
         match next {
             Ok(Some(line)) => {
-                if let Some(text) = parse_line(agent, &line) {
+                let parsed = match parse_line(agent, &line) {
+                    Ok(parsed) => parsed,
+                    Err(failure) => {
+                        turn.stop().await;
+                        return Err(failure);
+                    }
+                };
+                if let Some(text) = parsed {
+                    answered = true;
                     /* THE SAME BOUND THE DAEMON PATH TAKES, and for the same
                      * reason: the writer is another process, and an agent CLI
                      * that never stops emitting would otherwise grow this
                      * until the app died. */
                     if answer.len() + text.len() > crate::limits::MAX_ANSWER_BYTES {
-                        take_down(&mut child);
-                        let _ = crate::procgroup::kill(&mut child, group).await;
+                        turn.stop().await;
                         return Err(Error::FieldTooLarge {
                             field: "the answer",
                             limit: crate::limits::MAX_ANSWER_BYTES,
@@ -405,19 +574,12 @@ pub async fn ask(
             }
             Ok(None) => break,
             Err(err) => {
-                take_down(&mut child);
-                let _ = crate::procgroup::kill(&mut child, group).await;
+                turn.stop().await;
                 return Err(Error::Io(err));
             }
         }
     }
 
-    /* THE LAST TWO EXITS. `child.wait().await?` and the unsuccessful-exit
-     * return below were the only post-spawn paths still leaving without a
-     * group teardown — a `wait` that errors, or a CLI that exits non-zero
-     * having already spawned a helper, left that helper running. Found by the
-     * third audit round. `wait` reaps, so the group is captured above and
-     * `kill` takes it as a parameter rather than reading a pid that is gone. */
     /* THE WAIT RACES CANCELLATION TOO. Every other await in this function
      * does, and this one did not: a child that closes stdout and then hangs —
      * flushing telemetry, waiting on a prompt nobody will answer — left
@@ -427,19 +589,37 @@ pub async fn ask(
     let status = tokio::select! {
         biased;
         () = cancel.cancelled() => {
-            take_down(&mut child);
-            let _ = crate::procgroup::kill(&mut child, group).await;
+            turn.stop().await;
             return Err(Error::Cancelled);
         }
-        waited = child.wait() => match waited {
+        () = tokio::time::sleep_until(deadline) => {
+            turn.stop().await;
+            return Err(Error::AgentMalformed {
+                agent: agent.name(),
+                message: format!("did not exit within {}s", TURN_LIMIT.as_secs()),
+            });
+        }
+        waited = turn.child.wait() => match waited {
             Ok(status) => status,
             Err(failure) => {
-                take_down(&mut child);
-                let _ = crate::procgroup::kill(&mut child, group).await;
+                turn.stop().await;
                 return Err(Error::Io(failure));
             }
         },
     };
+
+    /* THE DRAIN IS FINISHED BEFORE THE BUFFER IS READ. The process is gone, so
+     * its stderr is at EOF and this cannot hang; without it the tail below is
+     * whatever happened to have arrived, which is a race in the one branch
+     * whose whole job is to explain a failure. */
+    if let Some(handle) = draining {
+        let _ = handle.await;
+    }
+    let tail = stderr_tail
+        .lock()
+        .map(|held| held.text().trim().to_owned())
+        .unwrap_or_default();
+
     /* A NONZERO EXIT IS A FAILED TURN, whatever arrived before it.
      *
      * This read `!status.success() && answer.is_empty()`, so a CLI that
@@ -448,11 +628,7 @@ pub async fn ask(
      * caller above. Both CLIs exit 0 on success, so a nonzero status means the
      * turn did not finish, and saying so is the only honest option. */
     if !status.success() {
-        let _ = crate::procgroup::kill(&mut child, group).await;
-        let tail = stderr_tail
-            .lock()
-            .map(|held| held.trim().to_owned())
-            .unwrap_or_default();
+        turn.stop().await;
         return Err(Error::AgentMalformed {
             agent: agent.name(),
             /* The child's own stderr, which is the half that says WHY —
@@ -465,13 +641,95 @@ pub async fn ask(
             },
         });
     }
+
+    /* ⚠️ AND A ZERO EXIT WITH NO ANSWER EVENT IS ALSO A FAILED TURN. This
+     * returned `Ok("")`, which reaches the reader as a companion that answered
+     * with nothing — the least actionable outcome there is. A CLI whose output
+     * format has moved, or that quietly refused, exits 0 and emits events this
+     * parser correctly finds nothing in; that is exactly the case worth
+     * naming rather than rendering as an empty bubble. */
+    if !answered {
+        turn.stop().await;
+        return Err(Error::AgentMalformed {
+            agent: agent.name(),
+            message: if tail.is_empty() {
+                "finished without answering".to_owned()
+            } else {
+                format!("finished without answering: {}", redact(&tail))
+            },
+        });
+    }
+
     /* THE GROUP GOES DOWN ON THE SUCCESS PATH TOO. A leader that exits
      * cleanly can still leave a detached helper holding the group — and one
      * that inherited stdout keeps a subscription turn alive after the answer
      * has been delivered. `wait` has reaped the leader; `group` was captured
      * before that, which is why this can still be taken down by id. */
-    let _ = crate::procgroup::kill(&mut child, group).await;
+    turn.stop().await;
     Ok(answer)
+}
+
+/// The empty, non-symlink directory the turn runs in.
+///
+/// ⚠️ `create_dir_all` ALONE DOES NOT ESTABLISH THIS. The path is persistent —
+/// `<data root>/agent-root` — so `create_dir_all` succeeds over a directory
+/// that already holds files from a previous build, and succeeds over a SYMLINK
+/// to somewhere else entirely. Either one hands the agent a working root it can
+/// read, which is the one thing the `-s read-only`/`-C <empty dir>` pair exists
+/// to prevent: the argv locks the agent out of the reader's library by pointing
+/// it at nothing, and a root with contents in it is no longer nothing.
+async fn prepare_workdir(workdir: &Path) -> Result<()> {
+    match tokio::fs::symlink_metadata(workdir).await {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            /* Replaced rather than followed: whatever it points at is not
+             * Paper's to empty, and running there is the case being refused. */
+            tokio::fs::remove_file(workdir).await?;
+        }
+        Ok(meta) if meta.is_dir() => {
+            /* Emptied rather than recreated wholesale, so a mount or a
+             * permission the reader set on the directory itself survives. */
+            let mut entries = tokio::fs::read_dir(workdir).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                if entry.file_type().await?.is_dir() {
+                    tokio::fs::remove_dir_all(&path).await?;
+                } else {
+                    tokio::fs::remove_file(&path).await?;
+                }
+            }
+            return Ok(());
+        }
+        Ok(_) => {
+            // A plain file where the directory belongs.
+            tokio::fs::remove_file(workdir).await?;
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(Error::Io(err)),
+    }
+    tokio::fs::create_dir_all(workdir).await?;
+    Ok(())
+}
+
+/// Drain the child's stderr into `sink`, returning the task to await later.
+fn child_stderr_drain(
+    child: &mut tokio::process::Child,
+    sink: std::sync::Arc<std::sync::Mutex<Tail>>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let stderr = child.stderr.take()?;
+    Some(tokio::spawn(async move {
+        let mut reader = BufReader::new(stderr);
+        let mut chunk = [0_u8; 1024];
+        loop {
+            match tokio::io::AsyncReadExt::read(&mut reader, &mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    if let Ok(mut held) = sink.lock() {
+                        held.push(&chunk[..read]);
+                    }
+                }
+            }
+        }
+    }))
 }
 
 /// One line of a child's stderr, bounded and stripped of anything identifying.
@@ -486,13 +744,21 @@ pub async fn ask(
 ///
 /// Bounded rather than parsed: no wording is matched, so nothing here goes
 /// stale when a CLI rephrases itself. What is removed is removed by SHAPE.
+///
+/// ⚠️ THE LAST LINE, NOT THE FIRST. The buffer this reads is a TAIL — the final
+/// few kilobytes of stderr — so its first line is very often a fragment of one,
+/// cut wherever the ring buffer happened to start. Taking the first line
+/// reported that fragment; and even with a complete buffer, a CLI's reason is
+/// what it says LAST, after whatever banner or deprecation notice it opened
+/// with.
 fn redact(tail: &str) -> String {
     const LIMIT: usize = 200;
-    let first = tail
+    let last = tail
         .lines()
+        .rev()
         .find(|line| !line.trim().is_empty())
         .unwrap_or("");
-    let scrubbed: String = first
+    let scrubbed: String = last
         .split_whitespace()
         .map(|word| {
             if word.contains('@') || word.contains('/') || word.contains('\\') {
@@ -701,8 +967,9 @@ mod tests {
             parse_line(
                 Agent::Codex,
                 r#"{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"ok"}}"#
-            ),
-            Some("ok".to_owned())
+            )
+            .ok(),
+            Some(Some("ok".to_owned()))
         );
         // Everything else is dropped, thread id and usage included.
         for noise in [
@@ -710,7 +977,7 @@ mod tests {
             r#"{"type":"turn.started"}"#,
             r#"{"type":"turn.completed","usage":{"input_tokens":14692,"output_tokens":5}}"#,
         ] {
-            assert_eq!(parse_line(Agent::Codex, noise), None, "{noise}");
+            assert_eq!(parse_line(Agent::Codex, noise).ok(), Some(None), "{noise}");
         }
     }
 
@@ -721,8 +988,9 @@ mod tests {
             parse_line(
                 Agent::Codex,
                 r#"{"type":"item.completed","item":{"id":"i1","type":"reasoning","text":"thinking"}}"#
-            ),
-            None
+            )
+            .ok(),
+            Some(None)
         );
     }
 
@@ -733,8 +1001,9 @@ mod tests {
             parse_line(
                 Agent::Claude,
                 r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}},"session_id":"2117b276","uuid":"77cee48b"}"#
-            ),
-            Some("ok".to_owned())
+            )
+            .ok(),
+            Some(Some("ok".to_owned()))
         );
     }
 
@@ -744,7 +1013,7 @@ mod tests {
     #[test]
     fn claudes_init_event_yields_nothing() {
         let init = r#"{"type":"system","subtype":"init","cwd":"/Users/someone/secret","session_id":"2117b276","model":"claude-opus-5","plugins":[{"name":"p","path":"/Users/someone/.claude/plugins/p"}],"tools":["Bash"]}"#;
-        assert_eq!(parse_line(Agent::Claude, init), None);
+        assert_eq!(parse_line(Agent::Claude, init).ok(), Some(None));
     }
 
     #[test]
@@ -756,16 +1025,58 @@ mod tests {
             r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#,
             r#"{"type":"system","subtype":"hook_started","hook_name":"SessionStart:startup"}"#,
         ] {
-            assert_eq!(parse_line(Agent::Claude, noise), None, "{noise}");
+            assert_eq!(parse_line(Agent::Claude, noise).ok(), Some(None), "{noise}");
         }
     }
 
     #[test]
-    fn malformed_and_blank_lines_are_skipped_by_both() {
+    fn blank_lines_are_skipped_by_both() {
         for agent in crate::agent::AGENTS {
-            for line in ["", "   ", "not json", "{}", "[]"] {
-                assert_eq!(parse_line(agent, line), None, "{agent:?} {line:?}");
+            for line in ["", "   ", "\t"] {
+                assert_eq!(
+                    parse_line(agent, line).ok(),
+                    Some(None),
+                    "{agent:?} {line:?}"
+                );
             }
+        }
+    }
+
+    /// ⚠️ NOT THE SAME ANSWER AS "this event is not an answer".
+    ///
+    /// These used to be folded into `None` by `.ok()?`, so a CLI whose output
+    /// format had moved produced a turn that exited 0 with an empty answer and
+    /// nothing anywhere saying why. A line that is not the protocol fails the
+    /// turn; a line that is the protocol and is not an answer does not.
+    #[test]
+    fn a_line_that_is_not_the_protocol_fails_the_turn() {
+        for agent in crate::agent::AGENTS {
+            for line in ["not json", "{}", "[]", r#"{"typo":"item.completed"}"#] {
+                assert!(
+                    matches!(parse_line(agent, line), Err(Error::AgentMalformed { .. })),
+                    "{agent:?} {line:?} was treated as ordinary noise"
+                );
+            }
+        }
+    }
+
+    /// `content_block_delta` is a family, and only one member is the answer.
+    ///
+    /// `input_json_delta` carries a tool call's arguments and `thinking_delta`
+    /// carries a reasoning trace; both are already in the stream, and anything
+    /// the CLI adds later joins it. Matching the block alone and forwarding
+    /// whatever `text` turned up would splice either into the reader's answer.
+    #[test]
+    fn only_a_text_delta_is_the_answer() {
+        for kind in ["input_json_delta", "thinking_delta", "signature_delta"] {
+            let line = format!(
+                r#"{{"type":"stream_event","event":{{"type":"content_block_delta","delta":{{"type":"{kind}","text":"leaked"}}}}}}"#
+            );
+            assert_eq!(
+                parse_line(Agent::Claude, &line).ok(),
+                Some(None),
+                "a {kind} reached the answer"
+            );
         }
     }
 
@@ -775,9 +1086,410 @@ mod tests {
     fn the_parsers_do_not_read_each_others_events() {
         let codex = r#"{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}"#;
         let claude = r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"text":"ok"}}}"#;
-        assert_eq!(parse_line(Agent::Claude, codex), None);
-        assert_eq!(parse_line(Agent::Codex, claude), None);
+        assert_eq!(parse_line(Agent::Claude, codex).ok(), Some(None));
+        assert_eq!(parse_line(Agent::Codex, claude).ok(), Some(None));
     }
+    // ── the subprocess lifecycle, against a fake CLI ─────────────────────
+    //
+    // ⚠️ EVERYTHING ABOVE IS PURE. The argv and the parsers had tests; the
+    // hundred and eighty lines that own a process — cancellation at each
+    // phase, a nonzero exit after a delta, a zero exit with no answer, stderr
+    // that outgrows its bound, a drain that finishes after `wait`, descendants
+    // that outlive the leader — had none at all. Every defect this round found
+    // in this file lived in exactly that gap, which is not a coincidence: the
+    // covered half is the half that was correct.
+    //
+    // The fake is a shell script, so there is no second binary to build and
+    // the behaviour under test is written where it is read.
+
+    #[cfg(unix)]
+    mod lifecycle {
+        use super::*;
+        use crate::testutil::ScratchDir;
+        use std::os::unix::fs::PermissionsExt;
+        use std::path::PathBuf;
+
+        /// Write `body` as an executable `sh` script and return its path.
+        fn fake_cli(dir: &Path, body: &str) -> PathBuf {
+            let path = dir.join("fake-cli");
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write the fake");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+            path
+        }
+
+        /// A Codex `agent_message` line, which is what the parser reads.
+        fn answer(text: &str) -> String {
+            format!(
+                r#"printf '%s\n' '{{"type":"item.completed","item":{{"type":"agent_message","text":"{text}"}}}}'"#
+            )
+        }
+
+        struct World {
+            _bin: ScratchDir,
+            work: ScratchDir,
+            program: PathBuf,
+        }
+
+        fn world(body: &str) -> World {
+            let bin = ScratchDir::new("agent-bin");
+            let program = fake_cli(bin.path(), body);
+            World {
+                _bin: bin,
+                work: ScratchDir::new("agent-work"),
+                program,
+            }
+        }
+
+        async fn run(w: &World, cancel: &Cancel) -> (Result<String>, Vec<String>) {
+            run_watching(w, cancel, |_| {}).await
+        }
+
+        /// `watch` sees each delta as it arrives — which is how the
+        /// cancellation cases below trip at a KNOWN point in the turn rather
+        /// than after a timer that has to guess at process start-up cost.
+        async fn run_watching(
+            w: &World,
+            cancel: &Cancel,
+            mut watch: impl FnMut(&str),
+        ) -> (Result<String>, Vec<String>) {
+            let mut deltas = Vec::new();
+            let out = ask(
+                Agent::Codex,
+                &w.program,
+                w.work.path(),
+                "the question",
+                Depth::Default,
+                cancel,
+                |text| {
+                    watch(&text);
+                    deltas.push(text);
+                },
+            )
+            .await;
+            (out, deltas)
+        }
+
+        /// A live request's token, with the registry kept alive alongside it.
+        fn token() -> (crate::requests::Guard, Cancel) {
+            let registry = crate::requests::Registry::default();
+            let guard = registry.begin("t").expect("a fresh request");
+            let cancel = guard.cancel();
+            (guard, cancel)
+        }
+
+        #[tokio::test]
+        async fn a_clean_turn_streams_its_answer_and_returns_it() {
+            let w = world(&format!("cat > /dev/null\n{}", answer("hello")));
+            let (out, deltas) = run(&w, &Cancel::never()).await;
+            assert_eq!(out.expect("the answer"), "hello");
+            assert_eq!(deltas, vec!["hello".to_owned()]);
+        }
+
+        /// ⚠️ A ZERO EXIT WITH NO ANSWER EVENT IS A FAILED TURN.
+        ///
+        /// This returned `Ok("")`, which reaches the reader as a companion
+        /// that answered with nothing — the least actionable outcome there is,
+        /// and the shape a CLI takes when its output format has moved or when
+        /// it refuses quietly.
+        #[tokio::test]
+        async fn a_zero_exit_with_no_answer_is_not_a_successful_turn() {
+            let w = world(r#"cat > /dev/null; printf '%s\n' '{"type":"turn.completed"}'"#);
+            let (out, _) = run(&w, &Cancel::never()).await;
+            match out {
+                Err(Error::AgentMalformed { message, .. }) => {
+                    assert!(message.contains("without answering"), "{message}");
+                }
+                other => panic!("an empty success was accepted: {other:?}"),
+            }
+        }
+
+        /// ⚠️ A TRUNCATED ANSWER IS INDISTINGUISHABLE FROM A COMPLETE ONE.
+        #[tokio::test]
+        async fn a_nonzero_exit_after_a_delta_fails_rather_than_returning_the_half() {
+            let w = world(&format!(
+                "cat > /dev/null\n{}\nexit 3",
+                answer("half an answ")
+            ));
+            let (out, _) = run(&w, &Cancel::never()).await;
+            match out {
+                Err(Error::AgentMalformed { message, .. }) => {
+                    assert!(message.contains("exited with"), "{message}");
+                }
+                other => panic!("a half answer was returned as success: {other:?}"),
+            }
+        }
+
+        /// The stderr tail is what says WHY, and it must be the LAST of it —
+        /// the bound this replaces kept the prefix, so a CLI that opens with a
+        /// banner reported the banner and dropped the reason.
+        #[tokio::test]
+        async fn the_failure_carries_the_end_of_stderr_not_its_beginning() {
+            let w = world(
+                r#"cat > /dev/null
+i=0
+while [ $i -lt 400 ]; do printf 'banner line %s\n' "$i" >&2; i=$((i+1)); done
+printf 'not logged in\n' >&2
+exit 1"#,
+            );
+            let (out, _) = run(&w, &Cancel::never()).await;
+            match out {
+                Err(Error::AgentMalformed { message, .. }) => {
+                    assert!(message.contains("not logged in"), "{message}");
+                }
+                other => panic!("expected a failure carrying stderr: {other:?}"),
+            }
+        }
+
+        /// A child that writes megabytes to stderr must neither deadlock nor
+        /// grow the tail without limit.
+        #[tokio::test]
+        async fn a_flood_of_stderr_neither_deadlocks_nor_grows_without_bound() {
+            let w = world(&format!(
+                r#"cat > /dev/null
+i=0
+while [ $i -lt 3000 ]; do printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa %s\n' "$i" >&2; i=$((i+1)); done
+{}"#,
+                answer("survived")
+            ));
+            let (out, _) = run(&w, &Cancel::never()).await;
+            assert_eq!(out.expect("the answer"), "survived");
+        }
+
+        /// Cancellation while the child is still producing.
+        ///
+        /// Tripped ON the first delta rather than after a timer: the point
+        /// under test is "a turn already streaming stops", and a timer would
+        /// be racing process start-up to establish it.
+        #[tokio::test]
+        async fn cancelling_mid_stream_stops_the_turn() {
+            let w = world(&format!(
+                "cat > /dev/null\n{}\nsleep 30\n{}",
+                answer("first"),
+                answer("second")
+            ));
+            let (_guard, cancel) = token();
+            let tripping = cancel.clone();
+            let (out, deltas) = run_watching(&w, &cancel, |_| tripping.trip()).await;
+            assert!(matches!(out, Err(Error::Cancelled)), "{out:?}");
+            /* The first arrived; the second, thirty seconds later, did not. */
+            assert_eq!(deltas, vec!["first".to_owned()]);
+        }
+
+        /// Cancellation before the child has said anything at all.
+        #[tokio::test]
+        async fn cancelling_before_the_first_line_stops_the_turn() {
+            let w = world("cat > /dev/null; sleep 30");
+            let (_guard, cancel) = token();
+            cancel.trip();
+            let (out, deltas) = run(&w, &cancel).await;
+            assert!(matches!(out, Err(Error::Cancelled)), "{out:?}");
+            assert!(deltas.is_empty());
+        }
+
+        /// ⚠️ EOF ON STDOUT IS NOT THE END OF THE PROCESS. A CLI that answers
+        /// and then hangs — flushing telemetry, waiting on a prompt — left
+        /// `wait()` pending with no way out, so Stop did nothing.
+        #[tokio::test]
+        async fn cancelling_while_the_child_hangs_after_its_answer_stops_the_turn() {
+            let w = world(&format!(
+                "cat > /dev/null\n{}\nexec 1>&-\nsleep 30",
+                answer("done")
+            ));
+            let (_guard, cancel) = token();
+            let tripping = cancel.clone();
+            let (out, _) = run_watching(&w, &cancel, |_| tripping.trip()).await;
+            assert!(matches!(out, Err(Error::Cancelled)), "{out:?}");
+        }
+
+        /// ⚠️ THE DESCENDANTS GO TOO, WHICH IS THE WHOLE POINT OF THE GROUP.
+        ///
+        /// `kill_on_drop` reaches the leader only. A CLI that has spawned a
+        /// helper — both of them do — left that helper running after a cancel,
+        /// which on a subscription route is a turn still being spent.
+        #[tokio::test]
+        async fn cancelling_takes_the_leader_s_children_down_with_it() {
+            let marker = ScratchDir::new("agent-marker");
+            let alive = marker.path().join("alive");
+            let w = world(&format!(
+                r#"cat > /dev/null
+( i=0; while [ $i -lt 200 ]; do printf 'x' >> '{marker}'; sleep 0.05; i=$((i+1)); done ) &
+while [ ! -s '{marker}' ]; do sleep 0.02; done
+{answer}
+sleep 30"#,
+                marker = alive.display(),
+                answer = answer("started")
+            ));
+            /* Cancelled once the leader has answered, which is also once its
+            helper is certainly running — a timer would be guessing. */
+            let (_guard, cancel) = token();
+            let tripping = cancel.clone();
+            let (out, _) = run_watching(&w, &cancel, |_| tripping.trip()).await;
+            assert!(matches!(out, Err(Error::Cancelled)), "{out:?}");
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            assert!(
+                alive.exists(),
+                "the helper never ran, so this proves nothing"
+            );
+
+            let when_stopped = std::fs::metadata(&alive).expect("the marker").len();
+            tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+            let later = std::fs::metadata(&alive).expect("the marker").len();
+            assert_eq!(
+                later, when_stopped,
+                "a descendant outlived the cancelled turn and kept writing"
+            );
+        }
+
+        /// ⚠️ THE CASE NO BRANCH CAN COVER: the future itself is dropped.
+        ///
+        /// Cancelling the enclosing task — the app shutting down, a `timeout`
+        /// elapsing, a `select!` losing — drops `ask` mid-await, and NONE of
+        /// its explicit teardown paths run. `kill_on_drop` reaches the leader
+        /// only, so before the owner existed this left the whole tree the CLI
+        /// had built running with nobody holding it. This is the reason the
+        /// teardown lives in a destructor rather than at each return.
+        #[tokio::test]
+        async fn dropping_the_turn_mid_await_still_takes_the_group_down() {
+            let marker = ScratchDir::new("agent-dropped");
+            let alive = marker.path().join("alive");
+            let w = world(&format!(
+                r#"cat > /dev/null
+( i=0; while [ $i -lt 200 ]; do printf 'x' >> '{marker}'; sleep 0.05; i=$((i+1)); done ) &
+while [ ! -s '{marker}' ]; do sleep 0.02; done
+{answer}
+sleep 30"#,
+                marker = alive.display(),
+                answer = answer("started")
+            ));
+
+            {
+                let never = Cancel::never();
+                /* DROPPED THE MOMENT THE FIRST DELTA ARRIVES, which the fake
+                emits only after its helper has written — so "the helper was
+                running when the future went away" is established by
+                construction rather than by a timer racing process
+                start-up. `select!` drops the losing branch's future, and no
+                cancellation token is involved at all, so nothing inside
+                `ask` gets the chance to clean up. */
+                let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+                let mut tx = Some(tx);
+                let turn = ask(
+                    Agent::Codex,
+                    &w.program,
+                    w.work.path(),
+                    "q",
+                    Depth::Default,
+                    &never,
+                    |_| {
+                        if let Some(tx) = tx.take() {
+                            let _ = tx.send(());
+                        }
+                    },
+                );
+                tokio::select! {
+                    finished = turn => panic!("the fake exited early: {finished:?}"),
+                    _ = rx => {}
+                }
+            }
+
+            assert!(
+                alive.exists(),
+                "the helper never ran, so this proves nothing"
+            );
+            let when_dropped = std::fs::metadata(&alive).expect("the marker").len();
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            assert_eq!(
+                std::fs::metadata(&alive).expect("the marker").len(),
+                when_dropped,
+                "a descendant outlived the dropped turn and kept writing"
+            );
+        }
+
+        /// The working root the agent is pointed at must be EMPTY, and
+        /// `create_dir_all` over a persistent path does not make it so.
+        #[tokio::test]
+        async fn the_working_root_is_emptied_before_the_turn() {
+            let w = world(&format!("cat > /dev/null\nls -A . >&2\n{}", answer("ok")));
+            std::fs::write(w.work.path().join("left-over.txt"), "from a previous turn")
+                .expect("seed");
+            std::fs::create_dir_all(w.work.path().join("nested/deep")).expect("seed");
+
+            let (out, _) = run(&w, &Cancel::never()).await;
+            assert_eq!(out.expect("the answer"), "ok");
+            let remaining: Vec<_> = std::fs::read_dir(w.work.path())
+                .expect("read the root")
+                .filter_map(|entry| entry.ok().map(|e| e.file_name()))
+                .collect();
+            assert!(
+                remaining.is_empty(),
+                "the agent was handed a working root with {remaining:?} in it"
+            );
+        }
+
+        /// And a symlink where the root belongs is replaced, not followed —
+        /// otherwise the "empty directory" the argv relies on is whatever the
+        /// link points at.
+        #[tokio::test]
+        async fn a_symlinked_working_root_is_replaced_rather_than_followed() {
+            let elsewhere = ScratchDir::new("agent-elsewhere");
+            std::fs::write(elsewhere.path().join("secret.txt"), "not the agent's").expect("seed");
+            let bin = ScratchDir::new("agent-bin");
+            let program = fake_cli(bin.path(), &format!("cat > /dev/null\n{}", answer("ok")));
+            let parent = ScratchDir::new("agent-parent");
+            let link = parent.path().join("agent-root");
+            std::os::unix::fs::symlink(elsewhere.path(), &link).expect("link");
+
+            let out = ask(
+                Agent::Codex,
+                &program,
+                &link,
+                "q",
+                Depth::Default,
+                &Cancel::never(),
+                |_| {},
+            )
+            .await;
+            assert_eq!(out.expect("the answer"), "ok");
+            assert!(
+                elsewhere.path().join("secret.txt").exists(),
+                "the link was followed and its target emptied"
+            );
+            assert!(!std::fs::symlink_metadata(&link)
+                .expect("the root")
+                .file_type()
+                .is_symlink());
+        }
+
+        /// Protocol drift fails the turn rather than producing a quiet blank.
+        #[tokio::test]
+        async fn output_that_is_not_the_protocol_fails_the_turn() {
+            let w = world(r#"cat > /dev/null; printf 'Welcome to the CLI!\n'"#);
+            let (out, _) = run(&w, &Cancel::never()).await;
+            match out {
+                Err(Error::AgentMalformed { message, .. }) => {
+                    assert!(message.contains("unreadable event"), "{message}");
+                }
+                other => panic!("non-protocol output was accepted: {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn a_missing_program_is_named_rather_than_reported_as_io() {
+            let dir = ScratchDir::new("agent-missing");
+            let out = ask(
+                Agent::Codex,
+                &dir.path().join("nothing-here"),
+                dir.path(),
+                "q",
+                Depth::Default,
+                &Cancel::never(),
+                |_| {},
+            )
+            .await;
+            assert!(matches!(out, Err(Error::AgentMissing("Codex"))), "{out:?}");
+        }
+    }
+
     /// The reason survives; the identity does not.
     #[test]
     fn redact_keeps_the_reason_and_drops_what_identifies() {
@@ -802,15 +1514,22 @@ mod tests {
     }
 
     /// ONE LINE, AND BOUNDED. A CLI that dumps a backtrace must not turn an
-    /// error row into a wall, and only the first line carries the reason.
+    /// error row into a wall.
+    ///
+    /// ⚠️ THE LAST LINE. What this reads is the TAIL of stderr, so its first
+    /// line is routinely a fragment cut wherever the ring buffer began — and
+    /// the reason a CLI gives is what it says last, after whatever banner it
+    /// opened with. Taking the first line reported the banner, or half of one.
     #[test]
-    fn redact_takes_one_bounded_line() {
-        let many = format!("first line\nsecond line\n{}", "x".repeat(500));
-        let said = redact(&many);
-        assert_eq!(said, "first line");
+    fn redact_takes_one_bounded_line_from_the_end() {
+        let many = format!("ne line\nsecond line\nnot logged in\n{}\n", "x".repeat(500));
+        assert_eq!(redact(&many), "x".repeat(200) + "…");
+        assert_eq!(
+            redact("ne line\nsecond line\nnot logged in\n"),
+            "not logged in"
+        );
 
         let long = redact(&"word ".repeat(200));
-        assert!(said.chars().count() <= 200);
         assert!(long.chars().count() <= 201, "{}", long.chars().count());
         assert!(long.ends_with('…'));
     }

@@ -141,6 +141,31 @@ pub async fn kill(child: &mut Child, _group: Option<u32>) -> io::Result<()> {
     child.kill().await
 }
 
+/// Force the group down from a DESTRUCTOR, where nothing can be awaited.
+///
+/// The async [`kill`] is the one to use everywhere else: it also reaps, so the
+/// leader does not linger as a zombie. This exists because `Drop` is the only
+/// teardown that still runs when a future is cancelled mid-await — the enclosing
+/// task being aborted, a panic unwinding — and in that case none of the explicit
+/// branches run at all. Reaping is left to tokio's own `kill_on_drop` reaper.
+///
+/// `group` is the id captured by [`group_of`] at spawn, for the reason given
+/// there.
+#[cfg(unix)]
+pub fn kill_now(group: Option<u32>) {
+    if let Some(pid) = group {
+        // Errors are unreachable to a destructor and ESRCH is the outcome
+        // asked for, so there is nothing to do with the return value.
+        unsafe { libc::killpg(pid as libc::pid_t, libc::SIGKILL) };
+    }
+}
+
+#[cfg(windows)]
+pub fn kill_now(_group: Option<u32>) {
+    // Nothing to do: the job object's own `Drop` terminates every process
+    // still in it, and the owner holds one for exactly as long as the child.
+}
+
 /// A Windows Job Object holding the daemon's whole process tree.
 ///
 /// Assigned after spawn, because assignment needs a process handle. Dropping
