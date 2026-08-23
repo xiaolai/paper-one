@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { createKernelServices, scopeSettings } from '../../../kernel'
 import { ROUTE_SETTING, TOOLS_SETTING } from '../lib/settings'
-import type { InferencePort, Probe, Route } from '../../inference'
+import type { InferencePort, Probe, Route, UnusableReason } from '../../inference'
 import { DEPTH_LABELS, DEPTH_ORDER, createRoutesModel, resolveRoute, rowFor } from './routesModel'
 
 /**
@@ -16,42 +16,71 @@ import { DEPTH_LABELS, DEPTH_ORDER, createRoutesModel, resolveRoute, rowFor } fr
  * `local` therefore DERIVES its usability from installation, and only a
  * non-local route may be handed an arbitrary `unusable`.
  */
-const agentRoute = (over: Partial<Route> & Pick<Route, 'id'>): Route => ({
+/**
+ * The reason code beside its sentence, exactly as `probe.rs` emits them.
+ *
+ * BOTH OR NEITHER. `rowFor` branches on the code and the pane shows the text,
+ * so a fixture carrying one without the other tests a route the probe cannot
+ * produce — and would hide the very drift the split exists to prevent.
+ */
+const REASONS: Readonly<Record<UnusableReason, string>> = {
+  notInstalled: 'Not installed',
+  runtimeMissing: 'Runtime not installed',
+  agentMissing: 'Not installed',
+  signedOut: 'Signed out',
+  versionUnsupported: 'Version not supported',
+  noKey: 'No key',
+}
+
+const because = (reason: UnusableReason | null) =>
+  reason === null ? { unusable: null } : { unusable: REASONS[reason], reason }
+
+const agentRoute = (
+  over: Partial<Omit<Route, 'unusable' | 'reason' | 'kind'>> &
+    Pick<Route, 'id'> & { reason?: UnusableReason },
+): Route => ({
   label: over.id,
   detail: null,
-  unusable: null,
   installed: true,
   modality: 'text',
   ...over,
+  ...because(over.reason ?? null),
   kind: 'agent',
 })
 
-const endpointRoute = (over: Partial<Route> & Pick<Route, 'id'>): Route => ({
+const endpointRoute = (
+  over: Partial<Omit<Route, 'unusable' | 'reason' | 'kind'>> &
+    Pick<Route, 'id'> & { reason?: UnusableReason },
+): Route => ({
   label: over.id,
   detail: null,
-  unusable: null,
   installed: true,
   modality: 'text',
   ...over,
+  ...because(over.reason ?? null),
   kind: 'endpoint',
 })
 
-/** Installed means usable; absent means "Not installed". Nothing in between. */
+/** Installed means usable; absent means `notInstalled`. Nothing in between. */
 const localRoute = (
-  over: Partial<Omit<Route, 'unusable' | 'kind'>> & Pick<Route, 'id'> & { installed: boolean },
+  over: Partial<Omit<Route, 'unusable' | 'reason' | 'kind'>> &
+    Pick<Route, 'id'> & { installed: boolean },
 ): Route => ({
   label: over.id,
   detail: null,
   modality: 'text',
   ...over,
   kind: 'local',
-  unusable: over.installed ? null : 'Not installed',
+  ...because(over.installed ? null : 'notInstalled'),
 })
 
 /* The generic builder is kept ONLY for the store suites, which need to name a
    route without caring about its kind. It routes through the three above so
    the coherence rule cannot be sidestepped by picking this one. */
-const route = (over: Partial<Route> & Pick<Route, 'id' | 'kind'>): Route =>
+const route = (
+  over: Partial<Omit<Route, 'unusable' | 'reason'>> &
+    Pick<Route, 'id' | 'kind'> & { reason?: UnusableReason },
+): Route =>
   over.kind === 'local'
     ? localRoute({ ...over, installed: over.installed ?? false })
     : over.kind === 'agent'
@@ -65,8 +94,8 @@ const localReady = localRoute({ id: 'local:qwen', label: 'Qwen3-4B', detail: 'lo
    filtering. */
 const voiceReady = localRoute({ id: 'local:kokoro', label: 'Kokoro', installed: true, modality: 'speech' })
 const codexReady = agentRoute({ id: 'agent:codex', label: 'Codex', detail: 'ChatGPT · 0.149.0' })
-const claudeOut = agentRoute({ id: 'agent:claude', label: 'Claude', unusable: 'Signed out', detail: '2.1.240' })
-const endpointKeyless = endpointRoute({ id: 'endpoint:proxy', label: 'My proxy', unusable: 'No key' })
+const claudeOut = agentRoute({ id: 'agent:claude', label: 'Claude', reason: 'signedOut', detail: '2.1.240' })
+const endpointKeyless = endpointRoute({ id: 'endpoint:proxy', label: 'My proxy', reason: 'noKey' })
 
 describe('resolveRoute', () => {
   it('uses the reader’s choice when it is usable', () => {
@@ -159,14 +188,40 @@ describe('rowFor', () => {
   })
 
   it('sends an uninstalled local model to Install rather than Use', () => {
-    const row = rowFor(route({ id: 'local:x', kind: 'local', label: 'X', unusable: 'Not installed' }), null)
+    const row = rowFor(localRoute({ id: 'local:x', label: 'X', installed: false }), null)
     expect(row.action).toBe('install')
   })
 
+  /**
+   * ⚠️ AND AN AGENT CLI THAT IS NOT INSTALLED IS NOT OFFERED ONE.
+   *
+   * The two read the same sentence — "Not installed" — and are opposite
+   * situations: Paper downloads a local model, and the reader installs a CLI.
+   * The branch that told them apart used to be `kind === 'local'` bolted onto
+   * a string comparison, which is a coincidence held together by hand. They
+   * carry different codes now.
+   */
+  it('offers no Install for an agent CLI that is not installed', () => {
+    const row = rowFor(agentRoute({ id: 'agent:codex', label: 'Codex', reason: 'agentMissing' }), null)
+    expect(row.value, 'the two still read the same to the reader').toBe('Not installed')
+    expect(row.action).toBe('none')
+  })
+
   it('offers no action for a route whose version is unsupported', () => {
-    const row = rowFor(route({ id: 'agent:codex', kind: 'agent', label: 'Codex', unusable: 'Version not supported' }), null)
+    const row = rowFor(agentRoute({ id: 'agent:codex', label: 'Codex', reason: 'versionUnsupported' }), null)
     expect(row.action).toBe('none')
     expect(row.value).toBe('Version not supported')
+  })
+
+  /* THE ACTION FOLLOWS THE CODE, NOT THE WORDING. If `probe.rs` rephrases a
+     reason — or a build translates one — the button must not change. */
+  it('draws the same action whatever sentence the reason carries', () => {
+    const rephrased: Route = {
+      ...localRoute({ id: 'local:x', label: 'X', installed: false }),
+      unusable: 'Nog niet geïnstalleerd',
+    }
+    expect(rowFor(rephrased, null).action).toBe('install')
+    expect(rowFor(rephrased, null).value).toBe('Nog niet geïnstalleerd')
   })
 
   /* F6: an agent row's value is the plan tier and the CLI version — never a

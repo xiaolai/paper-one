@@ -27,6 +27,7 @@
 //!
 //! Nothing lets a caller choose a URL for either.
 
+use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
 use serde::Serialize;
@@ -63,6 +64,22 @@ pub struct InferenceState {
     requests: Registry,
     layout: OnceLock<Layout>,
     endpoints: OnceLock<EndpointStore>,
+    /// Serialises every read-modify-write of the endpoint list.
+    ///
+    /// ⚠️ `add` and `remove` both read the file, edit it in memory and write it
+    /// back through the SAME temporary path. Two of them at once lose one of
+    /// the two edits, or rename a half-written file over the list — and the
+    /// list is the only record of what the reader configured. Nothing
+    /// serialised them; `#[tauri::command]`s run concurrently.
+    endpoint_writes: Mutex<()>,
+    /// The endpoints the DAEMON refused at its last start.
+    ///
+    /// Registration is best-effort and per provider, so one endpoint the
+    /// daemon will not take must not stop the local model working. But the
+    /// refusal was only logged, and the probe went on reporting the row usable
+    /// from Paper's own persisted state — so the reader could select a route
+    /// that had already been turned down, and find out at the question.
+    unregistered: Mutex<BTreeSet<String>>,
     downloads: OnceLock<reqwest::Client>,
 }
 
@@ -92,6 +109,11 @@ impl InferenceState {
         }
         let store = EndpointStore::new(&self.layout(app)?.base);
         Ok(self.endpoints.get_or_init(|| store))
+    }
+
+    /// The lock every endpoint mutation takes — see `endpoint_writes`.
+    pub fn endpoint_writes(&self) -> &Mutex<()> {
+        &self.endpoint_writes
     }
 
     /// The in-flight request registry.
@@ -199,6 +221,7 @@ impl InferenceState {
          * Best-effort per provider: one endpoint that will not register must
          * not stop the local model from working, and the route list already
          * reports a route that cannot answer. */
+        let mut refused = BTreeSet::new();
         for registration in registrations {
             if let Err(failure) = daemon
                 .post_json::<_, serde_json::Value>("/api/v1/install", &registration)
@@ -208,11 +231,45 @@ impl InferenceState {
                     "inference: could not register endpoint {}: {failure}",
                     registration.provider
                 );
+                /* RECORDED, NOT ONLY LOGGED. The probe reads this so a route
+                the daemon turned down is reported as unusable rather than
+                offered and then failing at the question. */
+                refused.insert(registration.provider.clone());
             }
         }
+        *self.unregistered.lock().await = refused;
 
         *slot = Some(daemon);
         Ok(port)
+    }
+
+    /// Drop a running daemon so the next start picks up new endpoint config.
+    ///
+    /// ⚠️ **KEYS ARE INJECTED AT SPAWN AND PROVIDERS REGISTERED AT START.**
+    /// So an endpoint added, re-keyed or removed while the daemon was up
+    /// changed nothing in the child: the new one could not answer until the
+    /// app restarted, and — the half that matters — a key the reader DELETED
+    /// stayed live in the child's environment and its provider stayed
+    /// registered. A credential somebody believes they removed is not
+    /// something to leave running until next launch.
+    ///
+    /// Stopping rather than restarting: `ensure_started` runs before every
+    /// question, so the next use brings it back with the current
+    /// configuration, and a settings command does not spend a process launch.
+    /// `stop` trips the in-flight tokens first, so a reader watching an answer
+    /// gets a cancellation rather than a stall — the same contract every other
+    /// daemon teardown has.
+    /// The endpoint ids the daemon refused. Empty when it has not started.
+    pub async fn unregistered(&self) -> BTreeSet<String> {
+        self.unregistered.lock().await.clone()
+    }
+
+    pub async fn reconfigure(&self) {
+        let taken = self.daemon.lock().await.take();
+        if let Some(daemon) = taken {
+            self.requests.cancel_all();
+            daemon.stop().await;
+        }
     }
 
     /// The running daemon, or [`Error::NotRunning`].

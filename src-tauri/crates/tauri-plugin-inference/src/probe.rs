@@ -53,6 +53,75 @@ pub enum RouteKind {
     Endpoint,
 }
 
+/// Why a route cannot answer, as a code the UI can branch on.
+///
+/// ⚠️ **THE SENTENCE WAS THE STATE.** `unusable` is display text in §11's
+/// voice, and `routesModel.ts` decided which BUTTON to draw by comparing it
+/// against the exact strings `"Not installed"` and `"Signed out"`. So the
+/// wording and the behaviour were the same field: rephrasing a reason — or
+/// translating one — silently turned an `[Install]` button into a dead row,
+/// with nothing anywhere to catch it. Worse, the local rows borrowed
+/// `agent::NOT_INSTALLED`, an agent-facing constant, purely because the two
+/// sentences happened to read the same.
+///
+/// So the code crosses beside the text, and the text is derived FROM the code
+/// — one place decides both, and they cannot disagree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UnusableReason {
+    /// A local model whose artifacts are not on disk. The fix is a download.
+    NotInstalled,
+    /// Installed, but the runtime that would load it is not there (F2).
+    RuntimeMissing,
+    /// An agent CLI that is not on the reader's PATH.
+    AgentMissing,
+    /// An agent CLI that is present but not logged in. The fix is a sign-in.
+    SignedOut,
+    /// An agent CLI too old for this build, or one it cannot read at all.
+    ///
+    /// `needs` is the version to move to, and is `None` when updating is not
+    /// in fact the fix — a partial install, a Store stub, or a CLI NEWER than
+    /// Paper whose auth wording this build does not recognise.
+    VersionUnsupported { needs: Option<String> },
+    /// A registered endpoint with no API key. The fix is to add one.
+    NoKey,
+    /// An endpoint the daemon refused to register.
+    ///
+    /// ⚠️ A row's usability was decided ENTIRELY from what Paper had persisted
+    /// — an id, a URL and a key in the keychain — and registration with the
+    /// daemon happens separately, best-effort, at start. So an endpoint whose
+    /// registration failed (a URL the daemon will not accept, a provider it
+    /// does not know, a daemon that was mid-restart) was reported usable, was
+    /// selectable, and then failed at the question. Persisted is not
+    /// registered.
+    NotRegistered,
+}
+
+impl UnusableReason {
+    /// The sentence the pane shows, in §11's voice: what happened, not a code.
+    pub fn text(&self) -> String {
+        match self {
+            UnusableReason::NotInstalled | UnusableReason::AgentMissing => {
+                agent::NOT_INSTALLED.to_owned()
+            }
+            UnusableReason::RuntimeMissing => "Runtime not installed".to_owned(),
+            UnusableReason::SignedOut => agent::SIGNED_OUT.to_owned(),
+            /* THE VERSION IT NEEDS, not just that this one will not do.
+             * "Version not supported" is true and useless: the reader cannot
+             * act on it without going to look up what Paper wants, and Paper
+             * already knows. */
+            UnusableReason::VersionUnsupported { needs: Some(needs) } => {
+                format!("{} — needs {needs} or newer", agent::VERSION_NOT_SUPPORTED)
+            }
+            UnusableReason::VersionUnsupported { needs: None } => {
+                agent::VERSION_NOT_SUPPORTED.to_owned()
+            }
+            UnusableReason::NoKey => "No key".to_owned(),
+            UnusableReason::NotRegistered => "The runtime would not accept it".to_owned(),
+        }
+    }
+}
+
 /// One row in the reader's "Answers with" list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -68,7 +137,13 @@ pub struct Route {
     pub detail: Option<String>,
     /// Why this route cannot answer, in the words the pane shows. `None`
     /// means usable.
+    ///
+    /// DISPLAY ONLY. Anything deciding what to DO reads `reason`; see
+    /// [`UnusableReason`] for what happened when this field was both.
     pub unusable: Option<String>,
+    /// The same fact as `unusable`, as a code. `None` means usable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<UnusableReason>,
     /// For a local route: whether the artifacts are on disk and verified.
     /// Always false for the other kinds, which have nothing to install.
     #[serde(default)]
@@ -101,8 +176,63 @@ impl From<crate::manifest::Modality> for Modality {
 }
 
 impl Route {
+    /// Whether this route can answer. **The one usability decision.**
+    ///
+    /// ⚠️ It used to be neither: this method existed and only the tests in
+    /// this file called it, while `commands.rs` gated the actual request on a
+    /// laxer catalogue-membership check and `routesModel.ts` re-derived
+    /// usability a third time from the reason sentence. Three opinions about
+    /// "can this answer", and the one guarding the request was the weakest.
+    /// `resolve_model` now asks this.
     pub fn usable(&self) -> bool {
-        self.unusable.is_none()
+        self.reason.is_none()
+    }
+
+    /// Whether the fields say the same thing about the same route.
+    ///
+    /// The struct is a wire DTO and cannot make its contradictions
+    /// unrepresentable — an endpoint marked installed, a local route with no
+    /// size, a route whose sentence and code disagree are all constructible.
+    /// So the invariants are stated here and checked over everything the three
+    /// constructors can build; see `every_route_satisfies_its_invariants`.
+    #[cfg(test)]
+    fn invariants_hold(&self) -> std::result::Result<(), String> {
+        if self.unusable.is_some() != self.reason.is_some() {
+            return Err("half a reason: the sentence and the code disagree about usability".into());
+        }
+        if let (Some(text), Some(reason)) = (&self.unusable, &self.reason) {
+            if text != &reason.text() {
+                return Err(format!("the sentence {text:?} is not {reason:?}'s"));
+            }
+        }
+        match self.kind {
+            // Only a local route has artifacts to install or a size to quote.
+            RouteKind::Local => {
+                if self.bytes.is_none() {
+                    return Err("a local route with no download size".into());
+                }
+            }
+            RouteKind::Agent | RouteKind::Endpoint => {
+                if self.installed {
+                    return Err("a non-local route claiming to be installed".into());
+                }
+                if self.bytes.is_some() {
+                    return Err("a non-local route quoting a download size".into());
+                }
+                if self.modality != Modality::Text {
+                    return Err("a non-local route that is not text".into());
+                }
+            }
+        }
+        // An installed local route is one whose artifacts are on disk; the
+        // reason for it being unusable can then only be the runtime.
+        if self.installed && self.reason == Some(UnusableReason::NotInstalled) {
+            return Err("installed and `notInstalled` at once".into());
+        }
+        if !self.installed && self.kind == RouteKind::Local && self.reason.is_none() {
+            return Err("a local route that is usable without being installed".into());
+        }
+        Ok(())
     }
 }
 
@@ -155,14 +285,29 @@ pub fn endpoint_route_id(id: &str) -> String {
 pub fn human_bytes(bytes: u64) -> String {
     const GB: f64 = 1_000_000_000.0;
     const MB: f64 = 1_000_000.0;
+    const KB: f64 = 1_000.0;
     let n = bytes as f64;
-    if n >= GB {
-        format!("{:.1} GB", n / GB)
-    } else if n >= MB {
-        format!("{:.0} MB", n / MB)
-    } else {
-        format!("{bytes} B")
+    if n < KB {
+        return format!("{bytes} B");
     }
+    /* ⚠️ THE UNIT IS CHOSEN AFTER ROUNDING, NOT BEFORE IT. Testing the raw
+     * figure against each threshold and rounding afterwards printed `1000 MB`
+     * for anything from 999 500 000 bytes up — four digits in a unit that only
+     * ever has three, beside a download quoted in the next unit up. `KB` was
+     * also simply missing, so a 4 KiB file read as `4096 B`.
+     *
+     * The same defect, and the same fix, as `formatBytes` in
+     * `modelsModel.ts`: the two formatters are read side by side in the same
+     * pane and must not disagree about where a boundary is. */
+    let kb = (n / KB).round();
+    if kb < 1_000.0 {
+        return format!("{kb:.0} KB");
+    }
+    let mb = (n / MB).round();
+    if mb < 1_000.0 {
+        return format!("{mb:.0} MB");
+    }
+    format!("{:.1} GB", n / GB)
 }
 
 /// Build the local rows from the manifest and what is on disk.
@@ -179,24 +324,28 @@ pub fn local_routes(
         .iter()
         .map(|model| {
             let is_installed = installed(model);
-            let unusable = if !is_installed {
-                Some(agent::NOT_INSTALLED.to_owned())
+            let reason = if !is_installed {
+                Some(UnusableReason::NotInstalled)
             } else if !runtime_available {
                 // Installed but the runtime is not there to load it. Absent
                 // is a normal state (F2) and this says so rather than
                 // offering a row that fails when pressed.
-                Some("Runtime not installed".to_owned())
+                Some(UnusableReason::RuntimeMissing)
             } else {
                 None
             };
+            /* Once, not once per field: the detail and the row's own figure
+            are the same number and were computed separately. */
+            let bytes = model.total_bytes();
             Route {
                 id: local_route_id(&model.id),
                 kind: RouteKind::Local,
                 label: model.label.clone(),
-                detail: Some(format!("local · {}", human_bytes(model.total_bytes()))),
-                unusable,
+                detail: Some(format!("local · {}", human_bytes(bytes))),
+                unusable: reason.as_ref().map(UnusableReason::text),
+                reason,
                 installed: is_installed,
-                bytes: Some(model.total_bytes()),
+                bytes: Some(bytes),
                 modality: model.modality.into(),
             }
         })
@@ -206,46 +355,43 @@ pub fn local_routes(
 /// Turn an agent probe into a row.
 pub fn agent_route(probe: &AgentProbe) -> Route {
     let version = probe.version.map(|v| v.to_string());
-    let detail = match (&probe.auth, &version) {
+    /* Only a SIGNED-IN agent WITH a plan adds anything to the version, which
+     * the four-arm match this replaces obscured by spelling the version-only
+     * case twice. */
+    let plan = match &probe.auth {
+        Some(AuthState::SignedIn { plan }) => plan.as_ref(),
+        _ => None,
+    };
+    let detail = version.as_ref().map(|v| match plan {
         // The plan tier and the CLI version — what the probe could honestly
         // learn. NOT a model menu (F6).
-        (Some(AuthState::SignedIn { plan: Some(plan) }), Some(v)) => Some(format!("{plan} · {v}")),
-        (Some(AuthState::SignedIn { plan: None }), Some(v)) => Some(v.clone()),
-        (_, Some(v)) => Some(v.clone()),
-        (_, None) => None,
-    };
+        Some(plan) => format!("{plan} · {v}"),
+        None => v.clone(),
+    });
+    let reason = probe.unusable.map(|text| match text {
+        agent::NOT_INSTALLED => UnusableReason::AgentMissing,
+        agent::SIGNED_OUT => UnusableReason::SignedOut,
+        /* ⚠️ THE VERSION IT NEEDS, ONLY WHEN UPDATING IS ACTUALLY THE FIX.
+         * `VersionUnsupported` arises three ways: a CLI genuinely too old, a
+         * CLI that would not say what it is (a partial install, a missing
+         * interpreter, Windows' Store stub), and one whose auth wording this
+         * build does not recognise — which is usually a CLI NEWER than Paper.
+         * Telling either of the last two to update names a remedy that will
+         * not work, and for the newer one it is precisely backwards. */
+        _ => UnusableReason::VersionUnsupported {
+            needs: probe
+                .version
+                .is_some_and(|found| found < probe.agent.minimum_version())
+                .then(|| probe.agent.minimum_version().to_string()),
+        },
+    });
     Route {
         id: agent_route_id(probe.agent),
         kind: RouteKind::Agent,
         label: probe.agent.label().to_owned(),
         detail,
-        /* THE VERSION IT NEEDS, not just that this one will not do.
-         *
-         * "Version not supported" is true and useless: the reader cannot act
-         * on it without going to look up what Paper wants, and Paper already
-         * knows — `minimum_version()` is the number this build was written
-         * against. The other two reasons stay the literals they were, because
-         * "Not installed" and "Signed out" each already name their own fix. */
-        unusable: probe.unusable.map(|reason| {
-            /* ONLY WHEN UPDATING IS ACTUALLY THE FIX, which is one of the
-             * three ways this reason arises. It also covers a CLI that would
-             * not say what it is — a partial install, a missing interpreter,
-             * Windows' Store stub — and one whose auth wording this build
-             * does not recognise, which is usually a CLI NEWER than Paper.
-             * Telling either reader to update names a remedy that will not
-             * work, and for the newer one it is precisely backwards. */
-            let too_old = probe
-                .version
-                .is_some_and(|found| found < probe.agent.minimum_version());
-            if reason == agent::VERSION_NOT_SUPPORTED && too_old {
-                format!(
-                    "{reason} — needs {} or newer",
-                    probe.agent.minimum_version()
-                )
-            } else {
-                reason.to_owned()
-            }
-        }),
+        unusable: reason.as_ref().map(UnusableReason::text),
+        reason,
         installed: false,
         bytes: None,
         // An agent answers questions and never reads aloud: WI-15.9's TTS is
@@ -255,15 +401,28 @@ pub fn agent_route(probe: &AgentProbe) -> Route {
 }
 
 /// Turn a registered endpoint into a row.
-pub fn endpoint_route(endpoint: &Endpoint) -> Route {
+///
+/// `registered` is whether the DAEMON accepted it, which is a separate fact
+/// from whether Paper has it stored — see [`UnusableReason::NotRegistered`].
+pub fn endpoint_route(endpoint: &Endpoint, registered: bool) -> Route {
+    // No key first: it is the one the reader can act on, and an endpoint with
+    // no key was never offered to the daemon to be refused.
+    let reason = if !endpoint.has_key {
+        Some(UnusableReason::NoKey)
+    } else if !registered {
+        Some(UnusableReason::NotRegistered)
+    } else {
+        None
+    };
     Route {
         id: endpoint_route_id(&endpoint.id),
         kind: RouteKind::Endpoint,
         label: endpoint.label.clone(),
         detail: endpoint.has_key.then(|| "endpoint".to_owned()),
-        // An endpoint with no key cannot answer, and says so with the action
-        // that fixes it rather than failing when pressed.
-        unusable: (!endpoint.has_key).then(|| "No key".to_owned()),
+        // An endpoint that cannot answer says why, with the action that fixes
+        // it where there is one, rather than failing when pressed.
+        unusable: reason.as_ref().map(UnusableReason::text),
+        reason,
         installed: false,
         bytes: None,
         modality: Modality::Text,
@@ -284,6 +443,166 @@ mod tests {
         assert_eq!(human_bytes(2_497_281_120), "2.5 GB");
         assert_eq!(human_bytes(325_532_387), "326 MB");
         assert_eq!(human_bytes(512), "512 B");
+    }
+
+    /// EVERY THRESHOLD, FROM BOTH SIDES.
+    ///
+    /// ⚠️ The three-figure rows are the ones that mattered. The unit was
+    /// chosen from the raw byte count and the rounding applied afterwards, so
+    /// anything from 999 500 000 bytes up printed `1000 MB` — four digits in
+    /// a unit that only has three — and there was no KB row at all, so a 4 KiB
+    /// file read as `4096 B`.
+    ///
+    /// The same defect and the same fix as `formatBytes` in `modelsModel.ts`.
+    /// The two are read side by side in one pane and must agree about where a
+    /// boundary is, which is why the cases match.
+    #[test]
+    fn human_bytes_promotes_its_unit_at_every_boundary() {
+        for (bytes, expected) in [
+            (0_u64, "0 B"),
+            (999, "999 B"),
+            (1_000, "1 KB"),
+            (1_499, "1 KB"),
+            (1_500, "2 KB"),
+            (4_096, "4 KB"),
+            (999_499, "999 KB"),
+            (999_500, "1 MB"),
+            (1_000_000, "1 MB"),
+            (999_499_999, "999 MB"),
+            (999_500_000, "1.0 GB"),
+            (1_000_000_000, "1.0 GB"),
+            (1_050_000_000, "1.1 GB"),
+        ] {
+            assert_eq!(human_bytes(bytes), expected, "{bytes}");
+        }
+    }
+
+    /// ⚠️ THE CODE AND THE SENTENCE ARE ONE DECISION.
+    ///
+    /// `routesModel.ts` chose which BUTTON to draw by comparing `unusable`
+    /// against the exact English strings `"Not installed"` and `"Signed out"`,
+    /// so the wording and the behaviour were the same field. They are separate
+    /// now, and this is what keeps them from drifting apart: every route any
+    /// constructor can build has both or neither, and the text is the one its
+    /// own code produces.
+    #[test]
+    fn every_route_satisfies_its_invariants() {
+        let mut routes = local_routes(&manifest(), |_| false, true);
+        routes.extend(local_routes(&manifest(), |_| true, false));
+        routes.extend(local_routes(&manifest(), |_| true, true));
+        for agent in crate::agent::AGENTS {
+            routes.push(agent_route(&AgentProbe::missing(agent)));
+            routes.push(agent_route(&AgentProbe {
+                agent,
+                path: Some("/usr/local/bin/cli".to_owned()),
+                version: Some(Version(9, 9, 9)),
+                auth: Some(AuthState::SignedOut),
+                unusable: Some(agent::SIGNED_OUT),
+            }));
+            routes.push(agent_route(&AgentProbe {
+                agent,
+                path: Some("/usr/local/bin/cli".to_owned()),
+                version: Some(Version(0, 0, 1)),
+                auth: None,
+                unusable: Some(agent::VERSION_NOT_SUPPORTED),
+            }));
+        }
+        for has_key in [false, true] {
+            for registered in [false, true] {
+                routes.push(endpoint_route(
+                    &Endpoint {
+                        id: "e".to_owned(),
+                        label: "E".to_owned(),
+                        base_url: "https://example.invalid".to_owned(),
+                        has_key,
+                    },
+                    registered,
+                ));
+            }
+        }
+
+        let mut unusable_seen = 0;
+        for route in &routes {
+            if route.reason.is_some() {
+                unusable_seen += 1;
+            }
+            /* EVERY invariant, not only the reason pair: the struct is a wire
+            DTO and cannot make its contradictions unrepresentable, so this
+            is where they are ruled out — over everything all three
+            constructors can build. */
+            if let Err(broken) = route.invariants_hold() {
+                panic!("{}: {broken}", route.id);
+            }
+        }
+        assert!(
+            unusable_seen > 0,
+            "no unusable route was built, so this proves nothing"
+        );
+        assert!(
+            routes.iter().any(|route| route.usable()),
+            "no usable route was built either"
+        );
+    }
+
+    /// ⚠️ PERSISTED IS NOT REGISTERED.
+    ///
+    /// A row's usability came entirely from what Paper had stored — an id, a
+    /// URL, a key in the keychain — while registration with the daemon happens
+    /// separately and best-effort at start. An endpoint the daemon refused was
+    /// reported usable, was selectable, and failed at the question.
+    #[test]
+    fn an_endpoint_the_daemon_refused_is_not_offered() {
+        let endpoint = Endpoint {
+            id: "proxy".to_owned(),
+            label: "P".to_owned(),
+            base_url: "https://e.example.com".to_owned(),
+            has_key: true,
+        };
+        assert!(endpoint_route(&endpoint, true).usable());
+
+        let refused = endpoint_route(&endpoint, false);
+        assert!(!refused.usable());
+        assert_eq!(refused.reason, Some(UnusableReason::NotRegistered));
+
+        /* A missing key outranks it: that is the one the reader can act on,
+        and an endpoint with no key was never offered to be refused. */
+        let keyless = Endpoint {
+            has_key: false,
+            ..endpoint
+        };
+        assert_eq!(
+            endpoint_route(&keyless, false).reason,
+            Some(UnusableReason::NoKey)
+        );
+    }
+
+    /// The three actionable codes are distinguishable without reading English.
+    #[test]
+    fn the_codes_name_the_action_that_fixes_them() {
+        let absent = &local_routes(&manifest(), |_| false, true)[0];
+        assert_eq!(absent.reason, Some(UnusableReason::NotInstalled));
+
+        let no_runtime = &local_routes(&manifest(), |_| true, false)[0];
+        assert_eq!(no_runtime.reason, Some(UnusableReason::RuntimeMissing));
+
+        let signed_out = agent_route(&AgentProbe {
+            agent: Agent::Codex,
+            path: Some("/usr/local/bin/codex".to_owned()),
+            version: Some(Version(9, 9, 9)),
+            auth: Some(AuthState::SignedOut),
+            unusable: Some(agent::SIGNED_OUT),
+        });
+        assert_eq!(signed_out.reason, Some(UnusableReason::SignedOut));
+
+        /* A local model that is not installed and an agent CLI that is not
+        installed READ the same and are not the same thing: one is fixed by
+        a download Paper performs, the other by the reader installing a CLI.
+        The shared sentence is why the local rows used to borrow an
+        agent-facing constant. */
+        let no_cli = agent_route(&AgentProbe::missing(Agent::Claude));
+        assert_eq!(no_cli.reason, Some(UnusableReason::AgentMissing));
+        assert_ne!(no_cli.reason, absent.reason);
+        assert_eq!(no_cli.unusable, absent.unusable);
     }
 
     #[test]
@@ -372,7 +691,7 @@ mod tests {
             base_url: "https://api.example.com/v1".to_owned(),
             has_key: false,
         };
-        let route = endpoint_route(&endpoint);
+        let route = endpoint_route(&endpoint, true);
         assert!(!route.usable());
         assert_eq!(route.unusable.as_deref(), Some("No key"));
     }
@@ -385,7 +704,7 @@ mod tests {
             base_url: "https://api.example.com/v1".to_owned(),
             has_key: true,
         };
-        assert!(endpoint_route(&endpoint).usable());
+        assert!(endpoint_route(&endpoint, true).usable());
     }
 
     /// Every route id is unique and namespaced, so the reader's persisted
@@ -395,12 +714,15 @@ mod tests {
         let mut routes = local_routes(&manifest(), |_| true, true);
         routes.push(agent_route(&AgentProbe::missing(Agent::Codex)));
         routes.push(agent_route(&AgentProbe::missing(Agent::Claude)));
-        routes.push(endpoint_route(&Endpoint {
-            id: "proxy".to_owned(),
-            label: "P".to_owned(),
-            base_url: "https://e.example.com".to_owned(),
-            has_key: true,
-        }));
+        routes.push(endpoint_route(
+            &Endpoint {
+                id: "proxy".to_owned(),
+                label: "P".to_owned(),
+                base_url: "https://e.example.com".to_owned(),
+                has_key: true,
+            },
+            true,
+        ));
         let ids: std::collections::BTreeSet<_> = routes.iter().map(|r| &r.id).collect();
         assert_eq!(ids.len(), routes.len(), "ids must not collide");
         for route in &routes {

@@ -100,6 +100,10 @@ impl LogTail {
     }
 }
 
+/// The daemon's health route, named once — see `SPEECH_ROUTE` in
+/// `commands.rs` for the same reason.
+const HEALTH_ROUTE: &str = "/api/v1/health";
+
 impl Daemon {
     /// Write the configuration, launch the child, and wait for it to answer.
     ///
@@ -276,7 +280,25 @@ impl Daemon {
 
     /// The daemon's health, authenticated.
     pub async fn health(&self) -> Result<Health> {
-        self.get_json("/api/v1/health").await
+        self.get_json(HEALTH_ROUTE).await
+    }
+
+    /// The health request, built but not sent.
+    ///
+    /// For a caller that must not hold the daemon's mutex across the wait —
+    /// `inference_resource_usage` is polled while a generation streams, and
+    /// waiting on the same lock made a memory reading queue behind an answer.
+    pub fn health_request(&self) -> reqwest::RequestBuilder {
+        self.request(reqwest::Method::GET, HEALTH_ROUTE)
+    }
+
+    /// Send a request built by [`Daemon::health_request`] and read the answer.
+    pub async fn read_health(request: reqwest::RequestBuilder) -> Result<Health> {
+        let response = request
+            .send()
+            .await
+            .map_err(|e| unreachable(HEALTH_ROUTE, e))?;
+        Self::parse(HEALTH_ROUTE, response).await
     }
 
     /// A GET against the daemon, with the bearer token attached.

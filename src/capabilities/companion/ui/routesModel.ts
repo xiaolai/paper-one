@@ -1,7 +1,7 @@
 import type { SettingsStore } from '../../../kernel'
 import { LOOK_UP_LABELS, createGenerations, type KernelServices } from '../../../kernel'
 import type { Depth } from '../../inference'
-import type { InferencePort, Probe, Route } from '../../inference'
+import { reasonOf, type InferencePort, type Probe, type Route } from '../../inference'
 import { DEPTH_SETTING, ROUTE_SETTING, TOOLS_SETTING } from '../lib/settings'
 
 /**
@@ -114,10 +114,17 @@ export function resolveRoute(
 /** Turn one probe route into a row, given what is in use. */
 export function rowFor(route: Route, inUse: string | null): RouteRow {
   const unusable = route.unusable !== null
+  /* ⚠️ THE CODE, NOT THE SENTENCE. This compared `unusable` against the exact
+     strings `'Not installed'` and `'Signed out'`, so the wording in `probe.rs`
+     and the button drawn here were the same field: rephrasing a reason turned
+     `[Install]` into a dead row silently. It also had to add `kind === 'local'`
+     to tell a model Paper can download from a CLI the reader must install,
+     because those two share a sentence — they no longer share a code. */
+  const reason = reasonOf(route)
   const action: RowAction = unusable
-    ? route.unusable === 'Not installed' && route.kind === 'local'
+    ? reason === 'notInstalled'
       ? 'install'
-      : route.unusable === 'Signed out'
+      : reason === 'signedOut'
         ? 'sign-in'
         : 'none'
     : route.id === inUse

@@ -59,16 +59,61 @@ export type InstallProgress =
 
 export type RouteKind = 'local' | 'agent' | 'endpoint'
 
+/**
+ * Why a route cannot answer, as a code rather than a sentence.
+ *
+ * ⚠️ **THE SENTENCE USED TO BE THE STATE.** `rowFor` decided which button to
+ * draw by comparing `unusable` against the exact English strings
+ * `'Not installed'` and `'Signed out'` — so rephrasing a reason in `probe.rs`,
+ * or translating one, silently turned an `[Install]` button into a dead row
+ * with nothing anywhere to catch it. Two different situations even shared a
+ * sentence: a local model Paper can download and an agent CLI the reader has
+ * to install both read "Not installed", and the local rows borrowed an
+ * agent-facing constant because of it.
+ *
+ * `probe.rs` emits both halves from one place, so they cannot disagree.
+ */
+export type UnusableReason =
+  | 'notInstalled'
+  | 'runtimeMissing'
+  | 'agentMissing'
+  | 'signedOut'
+  | 'versionUnsupported'
+  | 'noKey'
+
 export interface Route {
   readonly id: string
   readonly kind: RouteKind
   readonly label: string
   readonly detail: string | null
-  /** Why this route cannot answer, in the words the pane shows. */
+  /**
+   * Why this route cannot answer, in the words the pane shows.
+   *
+   * DISPLAY ONLY. Anything deciding what to DO reads `reason`.
+   */
   readonly unusable: string | null
+  /** The same fact as `unusable`, as a code. Absent means usable. */
+  readonly reason?: { readonly [K in UnusableReason]?: unknown } | UnusableReason
   readonly installed: boolean
   readonly bytes?: number
   readonly modality: Modality
+}
+
+/**
+ * The code on a route, whichever shape serde used for it.
+ *
+ * `versionUnsupported` carries a payload and the rest do not, so serde's
+ * externally-tagged encoding writes a bare string for the unit variants and a
+ * one-key object for the other. Both are read here rather than at each call
+ * site, because a call site that handled only one would be right until the
+ * first reason gained a field.
+ */
+export function reasonOf(route: Route): UnusableReason | null {
+  const { reason } = route
+  if (reason === undefined) return null
+  if (typeof reason === 'string') return reason
+  const [key] = Object.keys(reason)
+  return (key as UnusableReason | undefined) ?? null
 }
 
 export interface Probe {
@@ -86,6 +131,14 @@ export interface Endpoint {
 export interface ResourceUsage {
   /** `null`, never `0`, when the figure is unavailable. */
   readonly residentBytes: number | null
+  /**
+   * Which model is resident, as a MANIFEST ID.
+   *
+   * Never the daemon's own string: its model fields carry absolute artifact
+   * paths, and this crosses into a webview that renders untrusted book HTML.
+   * `commands.rs` matches the daemon's answer against the catalogue and sends
+   * the catalogue's id, or null when nothing matches.
+   */
   readonly modelLoaded: string | null
 }
 

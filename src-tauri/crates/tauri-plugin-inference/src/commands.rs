@@ -31,7 +31,7 @@ use tauri::{AppHandle, Runtime, State};
 
 use crate::agent::{self, Agent};
 use crate::agentask;
-use crate::endpoints::Endpoint;
+use crate::endpoints::{Endpoint, EndpointStore};
 use crate::error::{Error, Result};
 use crate::generate::{self, ChatRequest, Message};
 use crate::install::{self, Progress};
@@ -184,19 +184,62 @@ pub struct ResourceUsage {
     /// for returning null rather than zero for memory it cannot read. That
     /// honesty has to survive translation.
     pub resident_bytes: Option<u64>,
+    /// Which model is resident, as a MANIFEST ID — never the daemon's own
+    /// string.
+    ///
+    /// ⚠️ **THE DAEMON'S MODEL FIELDS CARRY ABSOLUTE ARTIFACT PATHS**, which
+    /// is documented in `daemon.rs` and is why this used to hand the webview a
+    /// path under the reader's home directory. The webview renders untrusted
+    /// book HTML; `agentask.rs` drops paths at its parse boundary for exactly
+    /// this reason, and a health reading is not an exemption from it.
+    ///
+    /// So the daemon's answer is matched against the catalogue and the
+    /// catalogue's id is what crosses. Anything that matches nothing is
+    /// `None`: an unrecognised string is not a fact worth leaking to say.
     pub model_loaded: Option<String>,
 }
 
 #[tauri::command]
-pub async fn inference_resource_usage(state: State<'_, InferenceState>) -> Result<ResourceUsage> {
-    let daemon = state.daemon().await?;
-    let health = daemon.health().await?;
+pub async fn inference_resource_usage<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, InferenceState>,
+) -> Result<ResourceUsage> {
+    /* The guard is dropped before the request, as in `inference_generate` —
+    otherwise a memory reading blocks behind whatever is streaming. */
+    let request = {
+        let daemon = state.daemon().await?;
+        daemon.health_request()
+    };
+    let health = crate::daemon::Daemon::read_health(request).await?;
+    let _ = &app;
     Ok(ResourceUsage {
         // Not reported by `/api/v1/health`; `None` until it is read from a
         // route that genuinely carries it, rather than a plausible zero.
         resident_bytes: None,
-        model_loaded: health.model_loaded,
+        model_loaded: health
+            .model_loaded
+            .and_then(|loaded| manifest_id_for(&state, &loaded)),
     })
+}
+
+/// The manifest id whose artifacts the daemon's `model_loaded` string names.
+///
+/// Matched by SHAPE rather than by equality, because the daemon answers with
+/// whatever it was handed — a path, a file name, or the id — and only one of
+/// those is safe to forward. `None` when nothing matches.
+fn manifest_id_for(state: &InferenceState, loaded: &str) -> Option<String> {
+    let manifest = state.manifest().ok()?;
+    manifest
+        .models
+        .iter()
+        .find(|model| {
+            loaded == model.id
+                || model
+                    .artifacts
+                    .iter()
+                    .any(|artifact| loaded.ends_with(&artifact.file))
+        })
+        .map(|model| model.id.clone())
 }
 
 /// The models folder, for `[Reveal]`. Returns the path; the kernel opens it.
@@ -244,8 +287,12 @@ pub async fn inference_probe<R: Runtime>(
     routes.push(probe::agent_route(&codex));
     routes.push(probe::agent_route(&claude));
 
+    /* Whether the DAEMON took each one, which is a separate fact from whether
+    Paper has it stored — see `UnusableReason::NotRegistered`. */
+    let unregistered = state.unregistered().await;
     for endpoint in state.endpoints(&app)?.list()? {
-        routes.push(probe::endpoint_route(&endpoint));
+        let registered = !unregistered.contains(&endpoint.id);
+        routes.push(probe::endpoint_route(&endpoint, registered));
     }
 
     let runtime_version = match state.status(&app).await {
@@ -281,25 +328,98 @@ const TEMPERATURE: f32 = 0.2;
 /// knows, including one it would pull from a remote registry. An audit caught
 /// it, and it is the exact gap the surrounding comments claimed did not exist.
 ///
-/// Returns the daemon-facing name for a manifest id, or a registered
-/// endpoint's id. Anything else is [`Error::ModelUnknown`].
+/// # Membership is not usability, and it is not modality
+///
+/// ⚠️ The first version checked only that the string appeared in the catalogue,
+/// which is three separate holes at once:
+///
+/// - **an uninstalled model resolved.** `inference_probe` reports it as
+///   `notInstalled` and the pane offers `[Install]`, and this said yes to it —
+///   so a caller bypassing the pane reached the daemon with a model whose
+///   artifacts are not on disk, and got a load failure instead of a refusal.
+/// - **a keyless endpoint resolved.** The probe marks it `noKey` for the same
+///   reason and this did not, so the request went out to be rejected upstream.
+/// - **the modality was never checked.** A speech model resolved for
+///   `inference_generate` and a text model for `inference_speak`. Untrusted
+///   book HTML naming a voice as its answering model is not a hypothetical:
+///   the whole point of the closed set is that the caller is not trusted.
+///
+/// So the check is the same one the probe publishes — `usable()` — rather than
+/// a second, laxer opinion sitting behind it. One decision, two readers.
+///
+/// Still `async`, and now for a reason: the audit's note that this awaited
+/// nothing was true of the membership check it replaces. Asking whether a
+/// model's artifacts are on disk is a filesystem read, and doing it with
+/// `tokio::fs` rather than a blocking twin keeps it off the runtime's thread.
 async fn resolve_model<R: Runtime>(
     app: &AppHandle<R>,
     state: &InferenceState,
     model: &str,
+    wanted: probe::Modality,
 ) -> Result<String> {
-    if state.manifest()?.model(model).is_ok() {
-        return Ok(model.to_owned());
+    let route = route_for(app, state, model).await?;
+    if !route.usable() {
+        /* The reason is already the reader's sentence, and the pane draws the
+        action that fixes it — this only has to refuse. */
+        return Err(Error::ModelUnknown(model.to_owned()));
     }
-    if state
+    if route.modality != wanted {
+        return Err(Error::ModelUnknown(model.to_owned()));
+    }
+    Ok(model.to_owned())
+}
+
+/// The probe's own row for `model`, built the same way `inference_probe` does.
+///
+/// ⚠️ **ONE SELECTION ABSTRACTION, NOT TWO.** `Route::usable` existed and was
+/// used only by this crate's tests, while the commands re-implemented a laxer
+/// membership check and the TypeScript re-implemented usability a third time.
+/// Three opinions about "can this answer" is two too many, and the one that
+/// gated the actual request was the weakest of them.
+async fn route_for<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &InferenceState,
+    model: &str,
+) -> Result<probe::Route> {
+    let manifest = state.manifest()?;
+    if let Ok(entry) = manifest.model(model) {
+        let layout = state.layout(app)?;
+        let runtime_available = crate::paths::bundled_runtime(app).is_ok();
+        let installed = install::is_installed(layout, entry).await;
+        return probe::local_routes(
+            &manifest,
+            |m| m.id == entry.id && installed,
+            runtime_available,
+        )
+        .into_iter()
+        .find(|route| route.id == probe::local_route_id(model))
+        .ok_or_else(|| Error::ModelUnknown(model.to_owned()));
+    }
+    /* The daemon's own verdict, so a route it refused is refused here too
+    rather than reaching it a second time to be refused again. */
+    let unregistered = state.unregistered().await;
+    state
         .endpoints(app)?
         .list()?
         .iter()
-        .any(|endpoint| endpoint.id == model)
-    {
-        return Ok(model.to_owned());
+        .find(|endpoint| endpoint.id == model)
+        .map(|endpoint| probe::endpoint_route(endpoint, !unregistered.contains(&endpoint.id)))
+        .ok_or_else(|| Error::ModelUnknown(model.to_owned()))
+}
+
+/// Which agent a route id names. The ids are the probe's own, never a path.
+///
+/// One function rather than the two verbatim copies this replaces: `agent_ask`
+/// and `agent_sign_in` each spelled the match out, including the error
+/// conversion, so a third agent — or a different spelling — would have had to
+/// be added in both.
+fn parse_agent_route(route: &str) -> Result<Agent> {
+    match route {
+        "agent:codex" => Ok(Agent::Codex),
+        "agent:claude" => Ok(Agent::Claude),
+        // A route id the probe did not mint. Never a path, never an argv.
+        other => Err(Error::ModelUnknown(other.to_owned())),
     }
-    Err(Error::ModelUnknown(model.to_owned()))
 }
 
 /// The one chat request builder, so the two callers cannot drift on roles,
@@ -340,13 +460,21 @@ pub async fn inference_generate<R: Runtime>(
     limits::within("request id", &request_id, limits::MAX_REQUEST_ID)?;
     limits::within("system prompt", &system, limits::MAX_SYSTEM)?;
     limits::within("question", &question, limits::MAX_QUESTION)?;
-    let model = resolve_model(&app, &state, &model).await?;
+    let model = resolve_model(&app, &state, &model, probe::Modality::Text).await?;
     let guard = state.requests().begin(&request_id)?;
     let cancel = guard.cancel();
-    let daemon = state.daemon().await?;
-    let request = daemon
-        .request(reqwest::Method::POST, generate::CHAT_ROUTE)
-        .json(&chat_request(model, system, question, MAX_ANSWER_TOKENS));
+    /* ⚠️ THE DAEMON LOCK IS DROPPED BEFORE THE NETWORK WAIT. `state.daemon()`
+     * hands back a mapped mutex guard, and holding it across a streamed
+     * generation serialised every other daemon command behind this one — the
+     * status poll, the memory reading, a voice test, a second question. A
+     * `RequestBuilder` owns its client, so the guard is needed only to build
+     * it. */
+    let request = {
+        let daemon = state.daemon().await?;
+        daemon
+            .request(reqwest::Method::POST, generate::CHAT_ROUTE)
+            .json(&chat_request(model, system, question, MAX_ANSWER_TOKENS))
+    };
     /* A SEND THAT FAILS CANCELS THE REQUEST. The webview dropped the channel —
      * the pane closed, the reader left — and going on would keep the daemon
      * generating into nothing, which on a loaded machine is a GPU spent on an
@@ -383,13 +511,16 @@ pub async fn inference_gloss<R: Runtime>(
      * argument set covered only the generate path, which left two commands
      * forwarding a caller-supplied model straight to the daemon — the exact
      * hole the header claims does not exist. An audit caught the omission. */
-    let model = resolve_model(&app, &state, &model).await?;
+    let model = resolve_model(&app, &state, &model, probe::Modality::Text).await?;
     let guard = state.requests().begin(&request_id)?;
     let cancel = guard.cancel();
-    let daemon = state.daemon().await?;
-    let request = daemon
-        .request(reqwest::Method::POST, generate::CHAT_ROUTE)
-        .json(&chat_request(model, system, question, MAX_GLOSS_TOKENS));
+    /* Dropped before the wait, as in `inference_generate` — see there. */
+    let request = {
+        let daemon = state.daemon().await?;
+        daemon
+            .request(reqwest::Method::POST, generate::CHAT_ROUTE)
+            .json(&chat_request(model, system, question, MAX_GLOSS_TOKENS))
+    };
     // Streamed on the wire, delivered whole: the daemon's non-streaming path
     // holds the whole answer before replying, and cancelling that is a
     // request nobody is reading rather than a generation that stopped.
@@ -414,12 +545,7 @@ pub async fn agent_ask<R: Runtime>(
 ) -> Result<String> {
     limits::within("request id", &request_id, limits::MAX_REQUEST_ID)?;
     limits::within("prompt", &prompt, limits::MAX_AGENT_PROMPT)?;
-    let which = match route.as_str() {
-        "agent:codex" => Agent::Codex,
-        "agent:claude" => Agent::Claude,
-        // A route id the probe did not mint. Never a path, never an argv.
-        other => return Err(Error::ModelUnknown(other.to_owned())),
-    };
+    let which = parse_agent_route(&route)?;
     /* REGISTERED BEFORE THE PROBE, and the probe races cancellation.
      *
      * `agent::probe` spawns up to two child processes with a five-second
@@ -461,8 +587,19 @@ pub async fn agent_ask<R: Runtime>(
         &prompt,
         depth.unwrap_or_default(),
         &cancel,
-        |text| {
-            let _ = chunks.send(text);
+        {
+            /* ⚠️ A SEND THAT FAILS CANCELS THE TURN, as it already did on the
+             * local path. The webview dropped the channel — the pane closed,
+             * the reader left — and swallowing that kept an agent CLI running
+             * to the end of its turn. On a subscription route that is not a
+             * wasted GPU cycle but a turn the reader has PAID for, spent on an
+             * answer nobody will read. */
+            let sink = cancel.clone();
+            move |text| {
+                if chunks.send(text).is_err() {
+                    sink.trip();
+                }
+            }
         },
     )
     .await
@@ -475,11 +612,7 @@ pub async fn agent_ask<R: Runtime>(
 /// stays theirs.
 #[tauri::command]
 pub async fn agent_sign_in(route: String) -> Result<()> {
-    let which = match route.as_str() {
-        "agent:codex" => Agent::Codex,
-        "agent:claude" => Agent::Claude,
-        other => return Err(Error::ModelUnknown(other.to_owned())),
-    };
+    let which = parse_agent_route(&route)?;
     let path = agent::which(which.exe()).ok_or_else(|| Error::AgentMissing(which.name()))?;
     let args: &[&str] = match which {
         Agent::Codex => &["login"],
@@ -498,12 +631,37 @@ pub async fn agent_sign_in(route: String) -> Result<()> {
 
 /* ────────────────────────────── cloud endpoints ─────────────────────────── */
 
+/// Run one endpoint-store operation off the async runtime.
+///
+/// ⚠️ **THE STORE IS BLOCKING, AND SO IS THE KEYCHAIN.** `read`/`write` are
+/// `std::fs`, and every key operation goes through the OS keychain, which on
+/// macOS can put a modal prompt in front of the reader — an unbounded wait on
+/// a tokio worker thread. Calling either straight from an `async` command
+/// stalls the runtime, and with it every other command, the daemon's health
+/// poll and any streaming answer.
+async fn on_store<R, T>(
+    app: &AppHandle<R>,
+    state: &InferenceState,
+    work: impl FnOnce(&EndpointStore) -> Result<T> + Send + 'static,
+) -> Result<T>
+where
+    R: Runtime,
+    T: Send + 'static,
+{
+    // Cloned rather than borrowed: `spawn_blocking` needs `'static`, and the
+    // store is a path.
+    let store = state.endpoints(app)?.clone();
+    tokio::task::spawn_blocking(move || work(&store))
+        .await
+        .map_err(|join| Error::Io(std::io::Error::other(join.to_string())))?
+}
+
 #[tauri::command]
 pub async fn inference_endpoints<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, InferenceState>,
 ) -> Result<Vec<Endpoint>> {
-    state.endpoints(&app)?.list()
+    on_store(&app, &state, |store| store.list()).await
 }
 
 #[tauri::command]
@@ -514,7 +672,16 @@ pub async fn inference_add_endpoint<R: Runtime>(
     label: String,
     base_url: String,
 ) -> Result<()> {
-    state.endpoints(&app)?.add(&id, &label, &base_url)
+    /* ⚠️ ONE WRITER AT A TIME. `add` and `remove` read the list, edit it and
+     * write it back through the same temporary path; nothing serialised them
+     * and `#[tauri::command]`s run concurrently, so two at once lose an edit
+     * or rename a half-written file over the reader's only copy. */
+    let _writing = state.endpoint_writes().lock().await;
+    on_store(&app, &state, move |store| store.add(&id, &label, &base_url)).await?;
+    /* The daemon takes its keys and its provider registrations at spawn, so a
+     * running one knows nothing about this until it is restarted. */
+    state.reconfigure().await;
+    Ok(())
 }
 
 #[tauri::command]
@@ -523,7 +690,13 @@ pub async fn inference_remove_endpoint<R: Runtime>(
     state: State<'_, InferenceState>,
     id: String,
 ) -> Result<()> {
-    state.endpoints(&app)?.remove(&id)
+    let _writing = state.endpoint_writes().lock().await;
+    on_store(&app, &state, move |store| store.remove(&id)).await?;
+    /* ⚠️ AND THIS IS THE HALF THAT MATTERS. Without it a key the reader
+     * deleted stayed live in the running child's environment, with its
+     * provider still registered, until the app was next launched. */
+    state.reconfigure().await;
+    Ok(())
 }
 
 /// Store an endpoint's key. WRITE-ONLY — there is deliberately no command
@@ -536,10 +709,22 @@ pub async fn inference_set_endpoint_key<R: Runtime>(
     id: String,
     key: String,
 ) -> Result<()> {
-    state.endpoints(&app)?.set_key(&id, &key)
+    let _writing = state.endpoint_writes().lock().await;
+    on_store(&app, &state, move |store| store.set_key(&id, &key)).await?;
+    // A changed key is a changed spawn environment; an empty one is a clear.
+    state.reconfigure().await;
+    Ok(())
 }
 
 /* ──────────────────────────────── narration ─────────────────────────────── */
+
+/// The daemon's speech route.
+///
+/// A constant because it was written out four times — in the request, in two
+/// unreachable-mappings and in the HTTP-status error — so a route change could
+/// leave the diagnostics naming a path the request never used. `CHAT_ROUTE`
+/// was already a constant for exactly this reason.
+const SPEECH_ROUTE: &str = "/api/v1/audio/generations";
 
 /// Synthesise speech (WI-15.9's `Test voice`).
 ///
@@ -559,27 +744,33 @@ pub async fn inference_speak<R: Runtime>(
 ) -> Result<Vec<u8>> {
     limits::within("request id", &request_id, limits::MAX_REQUEST_ID)?;
     limits::within("speech text", &text, limits::MAX_SPEECH_TEXT)?;
-    let model = resolve_model(&app, &state, &model).await?;
+    /* SPEECH, and this is where the modality check earns itself: without it a
+     * caller could name the text model here and the answering model in
+     * `inference_generate` could be a voice. */
+    let model = resolve_model(&app, &state, &model, probe::Modality::Speech).await?;
     let guard = state.requests().begin(&request_id)?;
     let cancel = guard.cancel();
-    let daemon = state.daemon().await?;
     let mut body = serde_json::json!({ "model": model, "prompt": text });
     if let Some(voice) = voice {
         body["voice"] = serde_json::Value::String(voice);
     }
-    let request = daemon
-        .request(reqwest::Method::POST, "/api/v1/audio/generations")
-        .json(&body);
+    /* Dropped before the wait, as in `inference_generate` — see there. */
+    let request = {
+        let daemon = state.daemon().await?;
+        daemon
+            .request(reqwest::Method::POST, SPEECH_ROUTE)
+            .json(&body)
+    };
     let response = tokio::select! {
         biased;
         () = cancel.cancelled() => return Err(Error::Cancelled),
-        sent = request.send() => sent.map_err(|e| crate::error::unreachable("/api/v1/audio/generations", e))?,
+        sent = request.send() => sent.map_err(|e| crate::error::unreachable(SPEECH_ROUTE, e))?,
     };
     let status = response.status();
     if !status.is_success() {
         return Err(Error::RuntimeHttp {
             status: status.as_u16(),
-            route: "/api/v1/audio/generations".to_owned(),
+            route: SPEECH_ROUTE.to_owned(),
         });
     }
     let bytes = tokio::select! {
@@ -587,7 +778,7 @@ pub async fn inference_speak<R: Runtime>(
         // Cancelling mid-utterance must stop the REQUEST as well as the
         // audio — WI-15.9's acceptance names both.
         () = cancel.cancelled() => return Err(Error::Cancelled),
-        body = response.bytes() => body.map_err(|e| crate::error::unreachable("/api/v1/audio/generations", e))?,
+        body = response.bytes() => body.map_err(|e| crate::error::unreachable(SPEECH_ROUTE, e))?,
     };
     Ok(bytes.to_vec())
 }
@@ -604,6 +795,47 @@ pub async fn inference_cancel(state: State<'_, InferenceState>, request_id: Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every accepted route id, and a sample of the rejected ones.
+    ///
+    /// One function rather than the two verbatim matches this replaces —
+    /// `agent_ask` and `agent_sign_in` each spelled it out, error conversion
+    /// included, so a third agent would have had to be added in both and a
+    /// drift between them would have been invisible.
+    #[test]
+    fn only_the_probe_s_own_agent_ids_are_accepted() {
+        assert_eq!(parse_agent_route("agent:codex").unwrap(), Agent::Codex);
+        assert_eq!(parse_agent_route("agent:claude").unwrap(), Agent::Claude);
+        /* EVERY AGENT HAS ONE. A new variant with no arm here would fail this
+        rather than silently becoming unreachable from the commands. */
+        for agent in crate::agent::AGENTS {
+            let id = crate::probe::agent_route_id(agent);
+            assert_eq!(parse_agent_route(&id).unwrap(), agent, "{id}");
+        }
+    }
+
+    /// ⚠️ NEVER A PATH, NEVER AN ARGV. The route string comes from a webview
+    /// that renders untrusted book HTML, and what it names is a program to
+    /// execute.
+    #[test]
+    fn anything_the_probe_did_not_mint_is_refused() {
+        for bad in [
+            "",
+            "codex",
+            "agent:",
+            "agent:codex ",
+            "AGENT:CODEX",
+            "/usr/local/bin/codex",
+            "agent:codex; rm -rf /",
+            "local:qwen",
+            "endpoint:proxy",
+        ] {
+            assert!(
+                matches!(parse_agent_route(bad), Err(Error::ModelUnknown(_))),
+                "{bad:?} was accepted as an agent route"
+            );
+        }
+    }
 
     /// The row the settings section renders. `installed` and `license` are
     /// both present, because the reader is entitled to know the terms before
