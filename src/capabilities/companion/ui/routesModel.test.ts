@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { createKernelServices, scopeSettings } from '../../../kernel'
 import { ROUTE_SETTING, TOOLS_SETTING } from '../lib/settings'
 import type { InferencePort, Probe, Route } from '../../inference'
-import { DEPTH_LABELS, DEPTH_ORDER, createRoutesModel, resolveRoute, rowFor, voiceRows } from './routesModel'
+import { DEPTH_LABELS, DEPTH_ORDER, createRoutesModel, resolveRoute, rowFor } from './routesModel'
 
 const route = (over: Partial<Route> & Pick<Route, 'id' | 'kind'>): Route => ({
   label: over.id,
@@ -109,33 +109,6 @@ describe('rowFor', () => {
   })
 })
 
-describe('voiceRows', () => {
-  const bella = route({ id: 'local:kokoro-bella', kind: 'local', label: 'Kokoro · Bella', modality: 'speech' })
-  const nicole = route({ id: 'local:kokoro-nicole', kind: 'local', label: 'Kokoro · Nicole', modality: 'speech' })
-
-  /* "Reading aloud is its own list, and only when there is a choice. One
-   * voice model installed is not a decision, and a picker offering one row is
-   * a control that asks a question with one answer. It appears at two." */
-  it('renders nothing at one voice', () => {
-    expect(voiceRows([bella, localReady], null)).toEqual([])
-  })
-
-  it('renders nothing at no voices', () => {
-    expect(voiceRows([localReady], null)).toEqual([])
-  })
-
-  it('appears at two', () => {
-    const rows = voiceRows([bella, nicole], 'local:kokoro-bella')
-    expect(rows).toHaveLength(2)
-    expect(rows[0]?.action).toBe('in-use')
-    expect(rows[1]?.action).toBe('use')
-  })
-
-  it('does not count an unusable voice towards the two', () => {
-    const absent = route({ id: 'local:k2', kind: 'local', label: 'K2', modality: 'speech', unusable: 'Not installed' })
-    expect(voiceRows([bella, absent], null)).toEqual([])
-  })
-})
 
 /**
  * THE STORE ITSELF, not only the pure rows above.
@@ -363,5 +336,46 @@ describe('the effort control', () => {
      Paper overriding a choice they already made with their money. */
   it('starts at the account default, which sends no flag at all', () => {
     expect(DEPTH_ORDER[0]).toBe('default')
+  })
+})
+
+/**
+ * NOTHING THE PANE CAN PRESS SETS A NON-TEXT ANSWERING ROUTE.
+ *
+ * `use` writes `companion.route`, which is the route that ANSWERS. A voice
+ * picker used to call the same setter with a speech route, so choosing a
+ * narrator set the companion to a model that cannot answer a question; it
+ * never fired only because the picker needed two usable speech models and the
+ * catalogue ships one. The picker is gone, and this is what stops the next one
+ * reaching for the same setter: every row the pane renders a `Use` on comes
+ * from `rows`, and `rows` is text-only however many voices the probe returns.
+ */
+describe('the rows the pane can act on', () => {
+  const probeOf = (...routes: Route[]): Probe => ({ routes, runtimeVersion: '1.0' })
+
+  it('are text routes only, even when speech routes are usable', async () => {
+    const services = createKernelServices({ fs: null, storage: null, initialBooks: [] })
+    const port = {
+      generate: async () => '',
+      agentAsk: async () => '',
+      probe: async () =>
+        probeOf(
+          route({ id: 'agent:codex', kind: 'agent' }),
+          route({ id: 'local:kokoro', kind: 'local', installed: true, modality: 'speech' }),
+          route({ id: 'local:kokoro-2', kind: 'local', installed: true, modality: 'speech' }),
+        ),
+      ensureReady: async () => true,
+      signIn: async () => {},
+      subscribe: () => () => {},
+    } satisfies InferencePort
+    const model = createRoutesModel({
+      port,
+      settings: scopeSettings(services.settings, 'companion'),
+      kernel: services,
+    })
+    await model.refresh()
+    const ids = model.getSnapshot().rows.map((r) => r.id)
+    expect(ids).toEqual(['agent:codex'])
+    model.dispose()
   })
 })

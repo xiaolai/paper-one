@@ -92,25 +92,20 @@ export function CompanionPane({ model, hasDictionary = false }: CompanionPanePro
         </>
       ) : null}
 
-      {snapshot.voices.length > 0 ? (
-        <>
-          <div className={ui.row}>
-            <span className={ui.grow}>Reads aloud with</span>
-          </div>
-          {snapshot.voices.map((voice) => (
-            <div key={voice.id} className={ui.row}>
-              <span className={ui.grow}>{voice.label}</span>
-              {voice.action === 'in-use' ? (
-                <span className={ui.value}>In use</span>
-              ) : (
-                <button type="button" className={ui.button} onClick={() => model.use(voice.id)}>
-                  Use
-                </button>
-              )}
-            </div>
-          ))}
-        </>
-      ) : null}
+      {/* NO VOICE PICKER, and it is a removal rather than an omission.
+       *
+       * It wrote the chosen voice into `companion.route` — the ANSWERING
+       * route — through the same `use` the text rows call, so picking a
+       * narrator set the companion to a speech model that cannot answer a
+       * question. It never fired only because `voiceRows` needed two usable
+       * speech models and the manifest ships one, so the defect was held off
+       * by an accident of the catalogue rather than by anything structural.
+       *
+       * Narration does not exist: `Test voice` proves a model and nothing
+       * reads it, which the feature ledger records as Absent. A picker with
+       * nothing to pick for is the shape-guessed-at-in-advance this pane's
+       * own stylesheet was cleaned of once already. It comes back with the
+       * feature that needs it, and with selection state of its own. */}
 
       {/* THE EFFORT, and it is absent rather than disabled when a local model
           is answering — the two flags it maps to exist on the agent CLIs and

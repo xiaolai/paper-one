@@ -83,7 +83,6 @@ export interface RoutesSnapshot {
    * nothing when pressed is the thing §07 exists to prevent.
    */
   readonly depth: string | null
-  readonly voices: readonly RouteRow[]
   readonly loading: boolean
 }
 
@@ -135,17 +134,6 @@ export function rowFor(route: Route, inUse: string | null): RouteRow {
   }
 }
 
-/**
- * The voice rows — and there are none below two.
- *
- * **Reading aloud is its own list, and only when there is a choice.** One
- * voice model installed is not a decision, and a picker offering one row is a
- * control that asks a question with one answer.
- */
-export function voiceRows(routes: readonly Route[], inUse: string | null): readonly RouteRow[] {
-  const voices = routes.filter((route) => route.modality === 'speech' && route.unusable === null)
-  return voices.length < 2 ? [] : voices.map((route) => rowFor(route, inUse))
-}
 
 export interface RoutesModel {
   getSnapshot(): RoutesSnapshot
@@ -180,7 +168,6 @@ const EMPTY: RoutesSnapshot = {
   lookUp: null,
   tools: false,
   depth: null,
-  voices: [],
   loading: true,
 }
 
@@ -218,7 +205,6 @@ export function createRoutesModel({ port, settings, kernel }: RoutesModelOptions
         probe.routes.find((route) => route.id === inUse)?.kind === 'agent'
           ? DEPTH_LABELS[settings.get(DEPTH_SETTING)]
           : null,
-      voices: voiceRows(probe.routes, inUse),
       loading: false,
     }
   }
