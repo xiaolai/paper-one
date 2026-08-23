@@ -178,6 +178,19 @@ function requireModelId(route: string): string {
   return id
 }
 
+/**
+ * "Nothing failed", as a value nothing else can be.
+ *
+ * ⚠️ `null` WAS DOING THIS JOB, and `null` is a value a rejection can carry:
+ * `Promise.reject(null)` — or `undefined`, which a thrown non-Error can also
+ * be — was caught, left the sentinel unchanged, and the turn then resolved as
+ * a SUCCESS. The reader was handed whatever text had arrived before the
+ * failure, presented as a finished answer, with no failure line and no way to
+ * tell it from a complete one. A sentinel has to be a value the domain cannot
+ * produce, and a symbol is the only such value here.
+ */
+const NOTHING_FAILED = Symbol('companion.noFailure')
+
 export function createCompanionProvider({
   port,
   route,
@@ -231,7 +244,7 @@ export function createCompanionProvider({
       const pending: string[] = []
       let notify: (() => void) | null = null
       let finished = false
-      let failure: unknown = null
+      let failure: unknown = NOTHING_FAILED
       const push = (text: string): void => {
         pending.push(text)
         notify?.()
@@ -269,7 +282,7 @@ export function createCompanionProvider({
         yield text
       }
       await running
-      if (failure !== null) throw failure
+      if (failure !== NOTHING_FAILED) throw failure
 
       /* THE MAP BACK, and the drop. An index the table does not contain is
        * refused — never resolved to the nearest passage, which would be a

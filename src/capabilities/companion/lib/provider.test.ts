@@ -263,6 +263,38 @@ describe('the bound provider', () => {
   })
 
   /**
+   * ⚠️ A REJECTION CARRYING `null` IS STILL A REJECTION.
+   *
+   * `null` was the "nothing failed" sentinel, and `null` is a value a
+   * rejection can carry — `Promise.reject(null)`, or a thrown `undefined`.
+   * Either was caught, left the sentinel unchanged, and the turn resolved as a
+   * SUCCESS: the reader got whatever text had arrived before the failure,
+   * presented as a finished answer, with no failure line and no way to tell it
+   * from a complete one. The quietest possible way to lose half an answer.
+   */
+  it.each([[null], [undefined], [0], [''], [false]])(
+    'raises a rejection that carries %p rather than calling it a success',
+    async (thrown) => {
+      const { port } = portWith(async (onChunk) => {
+        onChunk('half an answer')
+        return Promise.reject(thrown)
+      })
+      const provider = createCompanionProvider({ port, route: () => 'local:qwen3-4b', depth: () => 'default' })
+
+      /* THAT IT REJECTED, not what it rejected WITH — `undefined` is one of
+         the values under test, so anything asserting on the value would pass
+         or fail for the wrong reason. */
+      let rejected = false
+      try {
+        await drain(provider.ask('why?', CONTEXT, new AbortController().signal))
+      } catch {
+        rejected = true
+      }
+      expect(rejected, 'a failed turn was delivered as a finished answer').toBe(true)
+    },
+  )
+
+  /**
    * ⚠️ AND WHAT ARRIVED BEFORE THE FAILURE IS STILL DELIVERED.
    *
    * The case above throws before emitting anything, so it says nothing about
