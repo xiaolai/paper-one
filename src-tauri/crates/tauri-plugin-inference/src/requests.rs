@@ -365,4 +365,30 @@ mod tests {
         assert!(a.cancel().is_cancelled());
         assert!(!b.cancel().is_cancelled(), "b was not the one abandoned");
     }
+    /// A model lock and a request id cannot collide, and a second holder waits.
+    ///
+    /// `commands::lock_model` serialises artifact writes on `model:<id>` in
+    /// this same registry. That is only safe if a minted request id can never
+    /// be spelled the same way — they are `<kind>-<n>` — and if the second
+    /// holder is refused rather than admitted.
+    #[test]
+    fn a_model_lock_is_exclusive_and_cannot_collide_with_a_request() {
+        let registry = Registry::default();
+        let held = registry.begin("model:qwen").expect("the first holder");
+        assert!(
+            registry.begin("model:qwen").is_err(),
+            "two writers were admitted to one model's artifacts"
+        );
+        // A different model is a different lock.
+        let other = registry.begin("model:kokoro").expect("a different model");
+        // And a minted request id is untouched by either.
+        let request = registry.begin("install-1").expect("a request id");
+
+        drop(held);
+        registry
+            .begin("model:qwen")
+            .expect("the lock was not released when its guard was dropped");
+        drop(other);
+        drop(request);
+    }
 }

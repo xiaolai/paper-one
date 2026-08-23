@@ -112,6 +112,26 @@ pub async fn inference_models<R: Runtime>(
 ///
 /// `model` must resolve in the manifest — there is no URL parameter, and a
 /// gallery entry is untrusted input until it has become a manifest entry.
+/// A lock on one model's artifacts, held for as long as the guard lives.
+///
+/// SERIALISED BY WHAT IS WRITTEN, not by who asked. `begin` keys on the
+/// caller's `request_id`, which only stops the same request twice — so two
+/// installs of the SAME model under different ids both ran, both fetched, and
+/// both wrote the staging path derived from that model's id. A remove could
+/// land in the middle of either, because it carries no request id at all.
+///
+/// The registry is reused rather than a second map introduced: the guard's
+/// `Drop` already releases on every exit path, including a cancellation and a
+/// panic, which is the property that makes this safe to hold across an await.
+/// The `model:` prefix cannot collide with a minted request id — those are
+/// `<kind>-<n>` — and the busy error names the model rather than the key.
+fn lock_model(state: &InferenceState, model: &str) -> Result<crate::requests::Guard> {
+    state
+        .requests()
+        .begin(&format!("model:{model}"))
+        .map_err(|_| Error::RequestBusy(model.to_owned()))
+}
+
 #[tauri::command]
 pub async fn inference_install_model<R: Runtime>(
     app: AppHandle<R>,
@@ -122,6 +142,9 @@ pub async fn inference_install_model<R: Runtime>(
 ) -> Result<()> {
     let guard = state.requests().begin(&request_id)?;
     let cancel = guard.cancel();
+    /* Held for the whole download, so a second install of this model — or a
+     * remove of it — waits rather than writing the same staging path. */
+    let _artifacts = lock_model(&state, &model)?;
     let layout = state.layout(&app)?;
     let manifest = state.manifest()?;
     let entry: &ModelEntry = manifest.model(&model)?;
@@ -141,6 +164,10 @@ pub async fn inference_remove_model<R: Runtime>(
     state: State<'_, InferenceState>,
     model: String,
 ) -> Result<()> {
+    /* THE SAME LOCK THE INSTALL TAKES. Removing a model's artifacts while
+     * they are being fetched is the same collision from the other side, and
+     * this command carries no request id to have been serialised by. */
+    let _artifacts = lock_model(&state, &model)?;
     let layout = state.layout(&app)?;
     let manifest = state.manifest()?;
     install::remove(layout, manifest.model(&model)?).await
