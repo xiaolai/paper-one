@@ -7,15 +7,11 @@ import { DEFAULT_STEP_IDX, applyMetrics } from '../core/metrics'
 import { importFs as tauriImportFs, pickBooks, pickFolder, readBookAt } from '../core/bookFiles'
 import { positionRecorder, type PositionRecorder } from '../core/positionRecorder'
 import { createGenerations } from '../core/generations'
-import { getCurrentWindow } from '@tauri-apps/api/window'
-import { isTauri, usePlatform, usePrefersDark, usePrefersReducedMotion } from './platform'
-import { planImport } from '../core/tagArchive'
-import { canArchiveTags, exportTagsToFile, importTagsFromFile } from './tagFiles'
-import { canArchiveMarks, exportMarksToFile, importMarksFromFile } from './marksFiles'
-import { CLOSE_DRAIN_MS, createCloseSequence } from './closeWindow'
+import { usePlatform, usePrefersDark, usePrefersReducedMotion } from './platform'
 import { useImportRun } from './hooks/useImportRun'
+import { useArchives } from './hooks/useArchives'
+import { useWindowClose } from './hooks/useWindowClose'
 import { openExternal } from './openExternal'
-import { planImport as planMarksImport } from '../core/marksArchive'
 import { hasOpenLayer, useAppState } from './state'
 import { useTagPrefs } from './hooks/useTagPrefs'
 import type { KernelServices } from '../core/services'
@@ -23,7 +19,7 @@ import type { Composition } from '../core/registry'
 import { useBook } from './hooks/useBook'
 import { useBookIntake } from './hooks/useBookIntake'
 import { useEnrichment } from './hooks/useEnrichment'
-import { flushBeforeClose, onBeforeClose } from '../core/beforeClose'
+import { onBeforeClose } from '../core/beforeClose'
 import { useFileDrop, type DropHaul } from './hooks/useFileDrop'
 import { useLibrary } from './hooks/useLibrary'
 import { useCards } from './hooks/useCards'
@@ -720,174 +716,11 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
     return () => clearTimeout(timer)
   }, [importNotice])
 
-  /**
-   * The reader's filing, out to a file and back.
-   *
-   * BOTH REPORT THROUGH `importNotice`, which is the shelf's own line for
-   * "something just happened to your library" — an archive written silently is
-   * indistinguishable from a dialog the reader dismissed, and an import that
-   * merged nothing looks exactly like one that failed.
-   *
-   * A dismissed dialog says nothing at all, deliberately: the reader closed it,
-   * they know, and a message about it is the app narrating their own action.
-   */
-  const exportTagsNow = useCallback(() => {
-    void exportTagsToFile(library.books, new Date())
-      .then((path) => {
-        if (!path) return
-        const filed = library.books.filter((book) => (book.tags ?? []).length > 0).length
-        setImportNotice(
-          filed === 0
-            ? 'No tags to export yet — nothing on the shelf is filed.'
-            : `Exported the tags on ${filed} ${filed === 1 ? 'book' : 'books'}.`,
-        )
-      })
-      .catch((cause: unknown) => {
-        console.error('Paper: could not export your tags', cause)
-        setImportNotice('Those tags could not be written.')
-      })
-  }, [library.books])
-
-  const importTagsNow = useCallback(() => {
-    void importTagsFromFile()
-      .then((picked) => {
-        if (!picked) return
-        if (!picked.archive) {
-          setImportNotice('That file is not a Paper tag export.')
-          return
-        }
-        const plan = planImport(picked.archive, library.books)
-        for (const one of plan.additions) library.tagBooks([one.bookId], one.tags)
-        /* THE NUMBER THAT DID NOTHING IS WORTH SAYING TOO. An archive from
-           another library matches nothing here, and an import that reports only
-           its successes leaves the reader believing it worked. */
-        const missed = plan.unmatched > 0 ? ` ${plan.unmatched} not on this shelf.` : ''
-        setImportNotice(
-          plan.booksTouched === 0
-            ? `Nothing to add — those tags are already here.${missed}`
-            : `Added ${plan.tagsAdded} ${plan.tagsAdded === 1 ? 'tag' : 'tags'} across ${plan.booksTouched} ${plan.booksTouched === 1 ? 'book' : 'books'}.${missed}`,
-        )
-      })
-      .catch((cause: unknown) => {
-        console.error('Paper: could not import those tags', cause)
-        setImportNotice('That file could not be read.')
-      })
-  }, [library])
-  /**
-   * The reader's marginalia, out to a file and back.
-   *
-   * THE EMPTY-FILE TRAP, and it is why this awaits rather than reads.
-   * `MarksView.all` and `.allBookmarks` are empty until `loadAll()` has run,
-   * and the only caller of `loadAll` is the Marginalia panel mounting. So an
-   * export from the palette, in a session where that panel was never opened,
-   * would have walked an empty list, written `{"version":1,"books":[]}` and
-   * reported success — a backup that exists, opens, and contains nothing.
-   *
-   * That is "green is not evidence that anything happened" exactly, and it is
-   * the worst possible shape for THIS feature: the file is not read again
-   * until the day the reader needs it.
-   *
-   * `loadAllNow()` resolves with the rows rather than setting state and hoping
-   * a re-render arrives first — see `MarksView.loadAllNow`.
-   */
-  const exportMarksNow = useCallback(() => {
-    void (async () => {
-      /* CARDS ARE NOT LAZY — `CardStore` holds every row from the start,
-         because a card is explicitly cross-book and no surface ever asked for
-         one book's. Only the marks need the scan. */
-      const everyMark = await marks.loadAllNow()
-      const written = await exportMarksToFile(library.books, everyMark, cards.all, new Date())
-      if (!written) return
-      if (written.marks === 0 && written.cards === 0) {
-        setImportNotice('Nothing to export yet — no marks and no cards.')
-        return
-      }
-      const parts = [
-        `${written.marks} ${written.marks === 1 ? 'mark' : 'marks'}`,
-        `${written.cards} ${written.cards === 1 ? 'card' : 'cards'}`,
-      ]
-      /* SAYS WHICH FORMAT, because Markdown is a reading copy that cannot be
-         imported back — and a reader told only "exported" could keep one as
-         their only backup. */
-      const note = written.format === 'md' ? ' as Markdown, which cannot be imported back' : ''
-      setImportNotice(`Exported ${parts.join(' and ')} from ${written.books} ${written.books === 1 ? 'book' : 'books'}${note}.`)
-    })().catch((cause: unknown) => {
-      console.error('Paper: could not export your marginalia', cause)
-      setImportNotice('Those marks could not be written.')
-    })
-  }, [marks, cards, library.books])
-
-  const importMarksNow = useCallback(() => {
-    void (async () => {
-      const picked = await importMarksFromFile()
-      if (!picked) return
-      if (!picked.archive) {
-        setImportNotice('That file is not a Paper marginalia export.')
-        return
-      }
-      const everyMark = await marks.loadAllNow()
-      const plan = planMarksImport(picked.archive, library.books, everyMark, cards.all)
-      /* ONE WRITE PER BOOK, AND ONE FOR THE CARDS — and every one of them
-       * AWAITED before the notice below claims anything.
-       *
-       * This looped `marks.add` and `cards.make` per row and reported success
-       * without waiting for any of them. Two defects in one shape: each call
-       * is a whole-file read-mutate-write, so a thousand-mark archive rewrote
-       * a growing file a thousand times and the card store re-serialised its
-       * entire global list per card; and "Added N marks" appeared whether or
-       * not a single write had landed, so a full disk produced a cheerful
-       * notice and no marginalia. */
-      await Promise.all([
-        ...plan.additions.map((one) =>
-          marks.addMany(
-            one.bookId,
-            one.marks.map((mark) => ({
-              bookId: one.bookId,
-              cfi: mark.localAnchor.cfi,
-              sectionIndex: mark.localAnchor.sectionIndex,
-              text: mark.text,
-              prefix: mark.prefix,
-              suffix: mark.suffix,
-              note: mark.note,
-              kind: mark.kind,
-              tint: mark.tint,
-              style: mark.style,
-              chapter: mark.chapter,
-            })),
-          ),
-        ),
-        cards.makeMany(
-          plan.additions.flatMap((one) =>
-            one.cards.map((card) => ({
-              bookId: one.bookId,
-              kind: card.kind,
-              body: card.body,
-              answer: card.answer,
-              source: card.source,
-              cfi: card.localAnchor?.cfi ?? null,
-            })),
-          ),
-        ),
-      ])
-      /* THE BOOKS THAT MATCHED NOTHING ARE NAMED, not counted. An archive from
-         another library matches nothing here, and an import that reports only
-         its successes leaves the reader believing it worked. Three titles fit
-         in a sentence; past that the count carries the rest. */
-      const missing = plan.unmatched
-      const named = missing.slice(0, 3).map((one) => one.title || 'an untitled book').join(', ')
-      const rest = missing.length > 3 ? ` and ${missing.length - 3} more` : ''
-      const missed = missing.length > 0 ? ` Not on this shelf: ${named}${rest}.` : ''
-      const already = plan.duplicates > 0 ? ` ${plan.duplicates} already here.` : ''
-      setImportNotice(
-        plan.marksAdded === 0 && plan.cardsAdded === 0
-          ? `Nothing to add.${already}${missed}`
-          : `Added ${plan.marksAdded} ${plan.marksAdded === 1 ? 'mark' : 'marks'} and ${plan.cardsAdded} ${plan.cardsAdded === 1 ? 'card' : 'cards'} across ${plan.booksTouched} ${plan.booksTouched === 1 ? 'book' : 'books'}.${already}${missed}`,
-      )
-    })().catch((cause: unknown) => {
-      console.error('Paper: could not import that marginalia', cause)
-      setImportNotice('That file could not be read.')
-    })
-  }, [marks, cards, library.books])
+  /* THE READER'S FILING AND THEIR MARGINALIA, out to a file and back — see
+   * `useArchives`. Four handlers and a hundred and seventy lines of the same
+   * errand (pick, plan, write, say what happened), none of which touches the
+   * position, the screen or the keyboard map this component coordinates. */
+  const archives = useArchives({ library, marks, cards, notice: setImportNotice })
 
   const addFolder = useCallback(() => {
     void (async () => {
@@ -1037,74 +870,10 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
     if (overrideSpent(bookId, openAt, book.position.cfi)) setOpenAt(null)
   }, [openAt, bookId, book.position.cfi])
 
-  /**
-   * Hold the window shut until everything written has landed.
-   *
-   * Every write in this app is deliberately asynchronous — a page turn must not
-   * wait on a disk — and that is right until the process is about to go away, at
-   * which point an unfinished write is a highlight the reader will not get back.
-   * `pagehide` was the previous answer and it cannot be one: it STARTS the work
-   * and the webview is torn down underneath it.
-   *
-   * So the close is intercepted, the queue drained, and the window closed for
-   * real. The reader sees a window that takes a few milliseconds longer to shut,
-   * which is the correct price.
-   *
-   * BOUNDED. A queue that will not drain — a disk that has stopped answering —
-   * must not make the app unclosable, because then the only way out is to kill
-   * it and that loses strictly more. Two seconds is far past any real write.
-   */
-  useEffect(() => {
-    if (!isTauri()) return
-    /* The registration is ASYNC and the cleanup is not: torn down before the
-     * promise resolved — which StrictMode's mount/unmount/mount does on every
-     * launch in dev — `stop` was still undefined, the cleanup removed
-     * nothing, and the second mount added a second handler: two intercepts,
-     * two destroys, racing. A registration that lands after its effect died
-     * is unregistered on the spot. */
-    let disposed = false
-    let stop: (() => void) | undefined
-    /* THE SEQUENCE IS ITS OWN UNIT, and every failure path lives there — see
-     * `closeWindow.ts`. `preventDefault` has already run by the time it
-     * starts, so nothing else will close this window; a throw anywhere in
-     * here used to reject the listener and leave the reader with a window
-     * that would not close. */
-    const close = createCloseSequence({
-      flush: flushBeforeClose,
-      drain: () => services.drain(),
-      destroy: () => getCurrentWindow().destroy(),
-      timeoutMs: CLOSE_DRAIN_MS,
-      report: (message, cause) => console.error(message, cause),
-    })
-    void getCurrentWindow()
-      .onCloseRequested(async (event) => {
-        event.preventDefault()
-        await close()
-      })
-      .then((unlisten) => {
-        if (disposed) {
-          unlisten()
-          return
-        }
-        stop = unlisten
-      })
-      .catch((cause: unknown) => {
-        // Without the listener the window closes as it always did — writes in
-        // flight are at risk, which is the state this replaces rather than a
-        // new one. Reported, because it is the difference between "saved" and
-        // "probably saved".
-        console.error('Paper: could not hold the window open to finish saving', cause)
-      })
-    return () => {
-      /* SET, which it never was. The comment above describes a registration
-       * landing after its effect died being "unregistered on the spot", and
-       * `disposed` was declared and read and never written — so StrictMode's
-       * mount/unmount/mount left the first listener registered and the second
-       * mount added another: two intercepts, two teardowns, racing. */
-      disposed = true
-      stop?.()
-    }
-  }, [services])
+  /* HOLD THE WINDOW SHUT UNTIL EVERY WRITE HAS LANDED — see
+   * `useWindowClose`. A whole errand with its own lifetime failure modes, and
+   * both defects it has had were lifetime defects. */
+  useWindowClose(useCallback(() => services.drain(), [services]))
 
   /* The book intake — bytes first, then record, one effect — lives in
    * `useBookIntake`, where its ordering rationale is documented. */
@@ -1394,10 +1163,13 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
         editTags: readingBook ? openTags : null,
         jumpBack: jumps.canBack ? jumps.back : null,
         jumpForward: jumps.canForward ? jumps.forward : null,
-        exportMarks: canArchiveMarks() ? exportMarksNow : null,
-        importMarks: canArchiveMarks() ? importMarksNow : null,
-        exportTags: canArchiveTags() ? exportTagsNow : null,
-        importTags: canArchiveTags() ? importTagsNow : null,
+        /* NULL WHERE THE BUILD CANNOT DO IT — the palette omits the row
+           rather than offering one that would refuse. `useArchives` decides,
+           because it is what knows. */
+        exportMarks: archives.exportMarks,
+        importMarks: archives.importMarks,
+        exportTags: archives.exportTags,
+        importTags: archives.importTags,
         /* The same faces the settings panel offers — see `offeredFaces`. */
         faces: offeredHere,
         state,
@@ -1460,10 +1232,7 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
       openTags,
       composition,
       jumps,
-      exportMarksNow,
-      importMarksNow,
-      exportTagsNow,
-      importTagsNow,
+      archives,
     ],
   )
 
