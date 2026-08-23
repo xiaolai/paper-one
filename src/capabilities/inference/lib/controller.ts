@@ -104,7 +104,24 @@ export function detailFor(error: unknown): string {
   }
 }
 
-export function createController(plugin: InferencePlugin): Controller {
+/**
+ * Told when a refresh fails, so a degraded runtime is not silent.
+ *
+ * `refresh` catches its own error and turns it into a `degraded` state — which
+ * is right, since a capability must not fail to start over IPC. The cost was
+ * that `void controller.refresh().catch(…)` in `index.ts` could never fire:
+ * the promise never rejects, so the diagnostic it wrote was unreachable code.
+ *
+ * That mattered exactly once and completely. Every command was invoked without
+ * its `plugin:inference|` prefix, so every call rejected with a bare string,
+ * `detailFor` mapped it to its default, and the reader was told **Something
+ * went wrong** while the log said nothing at all. The message this reports is
+ * the maintainer's half — `Command inference_status not found` — which is the
+ * sentence that would have ended the search in a minute.
+ */
+export type ReportFailure = (event: string, fields: Record<string, unknown>) => void
+
+export function createController(plugin: InferencePlugin, report?: ReportFailure): Controller {
   let snapshot: InferenceSnapshot = INITIAL
   const listeners = new Set<() => void>()
   let disposed = false
@@ -144,7 +161,16 @@ export function createController(plugin: InferencePlugin): Controller {
       set(busy ? { models } : { runtime: runtimeFrom(status), models })
     } catch (error) {
       if (snapshot.installing === null) {
-        set({ runtime: { kind: 'degraded', detail: detailFor(error) } })
+        const detail = detailFor(error)
+        /* BOTH HALVES. `detail` is what the reader is shown; `message` is the
+           maintainer's, and they are deliberately different sentences — see
+           `detailFor`. Reporting only the first would have said "Something
+           went wrong" to the log as well. */
+        report?.('inference.refresh-failed', {
+          detail,
+          message: error instanceof Error ? error.message : String(error),
+        })
+        set({ runtime: { kind: 'degraded', detail } })
       }
     }
   }

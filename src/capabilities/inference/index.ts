@@ -125,7 +125,7 @@ export const inference: Capability = {
 
   start(api: CapabilityContext, signal: AbortSignal): Disposable {
     const plugin = inferencePlugin
-    const controller = createController(plugin)
+    const controller = createController(plugin, (event, fields) => api.diagnostics.warn(event, fields))
     const gloss = createGlossProvider({ plugin, controller })
 
     let stopped = false
@@ -185,11 +185,10 @@ export const inference: Capability = {
      * on IPC, and the pane subscribes to the store so a late answer arrives
      * on its own. A failure here is a `degraded` state the pane shows, never
      * a `start` that throws — F2 again. */
-    void controller.refresh().catch((error: unknown) => {
-      api.diagnostics.warn('inference.refresh-failed', {
-        message: error instanceof Error ? error.message : String(error),
-      })
-    })
+    /* Not `.catch` — `refresh` never rejects, it degrades. The report goes
+       through the controller's own hook, which is the only path a failure
+       here actually takes. */
+    void controller.refresh()
 
     api.diagnostics.info('inference.started', {})
     return { dispose: stop }

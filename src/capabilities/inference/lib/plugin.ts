@@ -79,22 +79,39 @@ export interface ResourceUsage {
 
 /* ────────────────────────────── the commands ────────────────────────────── */
 
-export const inferencePlugin = {
-  status: () => invoke<RuntimeStatus>('inference_status'),
-  start: () => invoke<number>('inference_start'),
-  stop: () => invoke<void>('inference_stop'),
+/**
+ * A plugin command's FULL name.
+ *
+ * `plugin:<name>|<command>` is how Tauri 2 registers a plugin's commands, and
+ * a bare name resolves against the app's own — which is not an error the
+ * caller can see coming. Every command in this file was invoked bare, so every
+ * call rejected with the string `Command inference_status not found`, and
+ * because that string carries no `kind`, `detailFor` mapped it to the one
+ * sentence that says nothing: **Something went wrong**. The runtime read
+ * degraded, the models folder and the memory figure read `—`, and the daemon
+ * was up and healthy the whole time.
+ *
+ * `tauri-plugin-peer` has had this helper since phase 7 (`wire.ts`); this file
+ * did not. `plugin.contract.test.ts` now holds both halves to it.
+ */
+const command = (name: string) => `plugin:inference|${name}`
 
-  models: () => invoke<readonly ModelRow[]>('inference_models'),
+export const inferencePlugin = {
+  status: () => invoke<RuntimeStatus>(command('inference_status')),
+  start: () => invoke<number>(command('inference_start')),
+  stop: () => invoke<void>(command('inference_stop')),
+
+  models: () => invoke<readonly ModelRow[]>(command('inference_models')),
   installModel: (requestId: string, model: string, onProgress: (p: InstallProgress) => void) => {
     const progress = new Channel<InstallProgress>()
     progress.onmessage = onProgress
-    return invoke<void>('inference_install_model', { requestId, model, progress })
+    return invoke<void>(command('inference_install_model'), { requestId, model, progress })
   },
-  removeModel: (model: string) => invoke<void>('inference_remove_model', { model }),
-  resourceUsage: () => invoke<ResourceUsage>('inference_resource_usage'),
-  revealModelsDir: () => invoke<string>('inference_reveal_models_dir'),
+  removeModel: (model: string) => invoke<void>(command('inference_remove_model'), { model }),
+  resourceUsage: () => invoke<ResourceUsage>(command('inference_resource_usage')),
+  revealModelsDir: () => invoke<string>(command('inference_reveal_models_dir')),
 
-  probe: () => invoke<Probe>('inference_probe'),
+  probe: () => invoke<Probe>(command('inference_probe')),
 
   generate: (
     requestId: string,
@@ -105,28 +122,28 @@ export const inferencePlugin = {
   ) => {
     const chunks = new Channel<string>()
     chunks.onmessage = onChunk
-    return invoke<string>('inference_generate', { requestId, model, system, question, chunks })
+    return invoke<string>(command('inference_generate'), { requestId, model, system, question, chunks })
   },
   gloss: (requestId: string, model: string, system: string, question: string) =>
-    invoke<string>('inference_gloss', { requestId, model, system, question }),
+    invoke<string>(command('inference_gloss'), { requestId, model, system, question }),
   speak: (requestId: string, model: string, text: string, voice: string | null) =>
-    invoke<number[]>('inference_speak', { requestId, model, text, voice }),
+    invoke<number[]>(command('inference_speak'), { requestId, model, text, voice }),
 
-  endpoints: () => invoke<readonly Endpoint[]>('inference_endpoints'),
+  endpoints: () => invoke<readonly Endpoint[]>(command('inference_endpoints')),
   addEndpoint: (id: string, label: string, baseUrl: string) =>
-    invoke<void>('inference_add_endpoint', { id, label, baseUrl }),
-  removeEndpoint: (id: string) => invoke<void>('inference_remove_endpoint', { id }),
+    invoke<void>(command('inference_add_endpoint'), { id, label, baseUrl }),
+  removeEndpoint: (id: string) => invoke<void>(command('inference_remove_endpoint'), { id }),
   /** WRITE-ONLY. There is deliberately no `getEndpointKey`. */
-  setEndpointKey: (id: string, key: string) => invoke<void>('inference_set_endpoint_key', { id, key }),
+  setEndpointKey: (id: string, key: string) => invoke<void>(command('inference_set_endpoint_key'), { id, key }),
 
   agentAsk: (requestId: string, route: string, prompt: string, onChunk: (text: string) => void) => {
     const chunks = new Channel<string>()
     chunks.onmessage = onChunk
-    return invoke<string>('agent_ask', { requestId, route, prompt, chunks })
+    return invoke<string>(command('agent_ask'), { requestId, route, prompt, chunks })
   },
-  agentSignIn: (route: string) => invoke<void>('agent_sign_in', { route }),
+  agentSignIn: (route: string) => invoke<void>(command('agent_sign_in'), { route }),
 
-  cancel: (requestId: string) => invoke<void>('inference_cancel', { requestId }),
+  cancel: (requestId: string) => invoke<void>(command('inference_cancel'), { requestId }),
 } as const
 
 /** The plugin's surface, so a test can stand in for it. */

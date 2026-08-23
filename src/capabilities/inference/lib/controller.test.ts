@@ -342,3 +342,58 @@ describe('uninstall', () => {
     controller.dispose()
   })
 })
+
+/**
+ * A DEGRADED RUNTIME IS NOT SILENT.
+ *
+ * `refresh` swallows its error by design — a capability must not fail to start
+ * over IPC — and the diagnostic that was supposed to record it lived on a
+ * `.catch` of a promise that never rejects. So the one failure that mattered,
+ * every command invoked without its plugin prefix, produced "Something went
+ * wrong" on screen and nothing whatsoever in the log.
+ */
+describe('reporting a failed refresh', () => {
+  it('reports the reader sentence and the maintainer message, which differ', async () => {
+    const seen: { event: string; fields: Record<string, unknown> }[] = []
+    const controller = createController(
+      plugin({
+        status: async () => {
+          throw new Error('Command inference_status not found')
+        },
+      }),
+      (event, fields) => void seen.push({ event, fields }),
+    )
+    await controller.refresh()
+
+    expect(seen).toHaveLength(1)
+    expect(seen[0]?.event).toBe('inference.refresh-failed')
+    /* The reader's half: `detailFor`'s default, because a bare string carries
+       no `kind`. The maintainer's half is the sentence that names the cause. */
+    expect(seen[0]?.fields.detail).toBe('Something went wrong')
+    expect(seen[0]?.fields.message).toBe('Command inference_status not found')
+    expect(controller.getSnapshot().runtime).toEqual({ kind: 'degraded', detail: 'Something went wrong' })
+    controller.dispose()
+  })
+
+  it('says nothing on a refresh that works', async () => {
+    const seen: string[] = []
+    const controller = createController(plugin(), (event) => void seen.push(event))
+    await controller.refresh()
+    expect(seen).toEqual([])
+    controller.dispose()
+  })
+
+  /* The hook is optional, because the fakes in every other suite here pass no
+     reporter and must not have to. */
+  it('does not require a reporter', async () => {
+    const controller = createController(
+      plugin({
+        status: async () => {
+          throw new Error('boom')
+        },
+      }),
+    )
+    await expect(controller.refresh()).resolves.toBeUndefined()
+    controller.dispose()
+  })
+})
