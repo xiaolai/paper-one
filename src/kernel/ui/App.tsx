@@ -182,15 +182,6 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
    * for finished loading out of sight, which reads as the click having done
    * nothing at all.
    */
-  /**
-   * Books the reader took off the shelf while they were open.
-   *
-   * Intake writes the bytes and then the record, with awaits in between, and a
-   * removal landing in that gap used to put the book straight back — the row
-   * reappeared as if the click had been ignored. Nothing else can see that: the
-   * effect's inputs do not change when a row is removed.
-   */
-
   /* EVERY OPEN SUPERSEDES A PENDING ONE — see `core/generations.ts`. The counter
    * this replaces was advanced only by the stored-book route, so a shelf read
    * still in flight stayed "fresh" however many books the reader picked or
@@ -204,6 +195,17 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
       /* Handed over WITH its source rather than set directly, so the effect that
        * notices the new source is the single place the path is decided. Set here
        * alone, it survived a route that does not come through this function. */
+      /* ⚠️ `intake` IS NOT IN THE DEPENDENCIES, and cannot be: it is declared
+       * two hundred lines below this, because `useBookIntake` needs the open
+       * book's id, meta and source, and those come from `book`. Listing it
+       * here would read the binding during render, before it exists.
+       *
+       * What makes that safe is that `noteOpen` and `noteRemoval` are stable
+       * for the hook's whole life. That used to be an accident of how the hook
+       * was written — `useCallback(…, [])` in a file nothing here points at —
+       * and `useBookIntake.stability.test.tsx` now asserts it, so the day it
+       * stops being true a test goes red instead of this callback quietly
+       * closing over a stale one. */
       intake.noteOpen(source, path)
       book.open(source)
     },
@@ -283,6 +285,28 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
    * with the one they had already abandoned. Each request takes a number; a
    * completion that is not the newest number says nothing. */
 
+  /**
+   * What to undo if the open now starting never lands.
+   *
+   * ⚠️ A CROSS-BOOK JUMP COMMITTED ITS STATE BEFORE THE OPEN SUCCEEDED.
+   * `goToJump` set the place override, started the read and answered `true` —
+   * so a book whose bytes are missing or unreadable left the reader where they
+   * were, with a "← Back to …" line offering a jump that never happened and,
+   * worse, an `openAt` override still armed. That override is spent by the
+   * next CFI to arrive, so it applied to whatever book they opened afterwards:
+   * a failed jump moved a later, unrelated open to the wrong place.
+   *
+   * A ref rather than a dependency because `openStored` is declared eight
+   * hundred lines above the state it has to undo. It is set immediately before
+   * the read and consumed by whichever settles first.
+   */
+  const undoOpen = useRef<(() => void) | null>(null)
+  const openFailed = useCallback(() => {
+    const undo = undoOpen.current
+    undoOpen.current = null
+    undo?.()
+  }, [])
+
   const openStored = useCallback(
     (entry: IndexedBook) => {
       if (!fs) return
@@ -290,7 +314,10 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
       const name = storedBookName(entry)
       void readOwnedBook(fs, contentPathIn(entry.bookId, name), name)
         .then((file) => {
-          if (fresh()) openBook(file, entry.origin ?? null)
+          if (!fresh()) return
+          /* Landed, so there is nothing left to undo. */
+          undoOpen.current = null
+          openBook(file, entry.origin ?? null)
         })
         .catch((cause: unknown) => {
           if (!fresh()) return
@@ -337,10 +364,13 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
            * still the reader's — and they are told rather than left clicking
            * something that does nothing. */
           console.error('Paper: could not read the stored book', entry.bookId, cause)
+          /* Nothing opened, so anything that committed on the assumption it
+             would has to come back off — see `undoOpen`. */
+          openFailed()
           setImportNotice('That book could not be opened. Try adding it again.')
         })
     },
-    [openBook, fs],
+    [openBook, fs, openFailed],
   )
 
   /* The drop hook now lives below `dropBooks`, which it takes as its handler —
@@ -558,7 +588,11 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
         const handed = createHandover<ImportOutcome>(SHELVE_BATCH, shelveImported)
         try {
           for (const [index, { file, path }] of picked.entries()) {
-            if (!current()) return
+            /* `break`, NOT `return`: the settle below is documented as
+               unconditional and a `return` here walked straight past it, so a
+               superseded batch abandoned the very write chain the comment says
+               it waits for. */
+            if (!current()) break
             setImporting({ done: index, total: picked.length })
             try {
               /* Never null without a signal — the only `null` is a stop, and
@@ -574,11 +608,10 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
             }
           }
         } finally {
-          /* Even on the early return above: the bytes are on disk either way,
+          /* Even when the loop broke early: the bytes are on disk either way,
            * and leaving them recordless is the orphan this pipeline exists to
            * avoid. */
           handed.flush()
-          if (current()) setImporting(null)
         }
         /* AWAITED UNCONDITIONALLY, and before the token is consulted. The
          * count is the notice's, and the notice belongs to the current batch
@@ -586,6 +619,14 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
          * batch still waits for its own records to land rather than walking
          * away from a chain nothing is holding. */
         const unsaved = await handed.settled()
+        /* ⚠️ CLEARED AFTER THE SHELF WRITES LAND, NOT BEFORE THEM. This sat in
+         * the `finally` above, so the progress went away and every control came
+         * back while the records were still being written — the reader could
+         * start a second import into a shelf the first one had not finished
+         * writing, and enrichment ran against rows that did not exist yet. The
+         * bar is what says "this is still happening", and it was lying by
+         * exactly the length of the write chain. */
+        if (current()) setImporting(null)
         if (!current()) return
         const summary = summarise(outcomes, unsaved)
         setImportNotice(note ? `${summary} ${note}` : summary)
@@ -962,6 +1003,7 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
    */
   const removeBook = useCallback(
     (entry: IndexedBook) => {
+      /* Stable for the hook's life, and asserted — see `openBook`. */
       intake.noteRemoval(entry.bookId)
       remove(entry.bookId)
     },
@@ -1240,6 +1282,30 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
     return here && here.cfi && id ? { bookId: id, cfi: here.cfi } : null
   }, [book])
 
+  /**
+   * "← Back to Loomings" — the line that tells a reader the key is worth
+   * pressing.
+   *
+   * A JUMP IS THE ONLY THING THAT CAN BE INVISIBLE. Every other way of moving
+   * through a book is something the reader did to the page in front of them;
+   * a jump replaces it, and without a word the reader has no reason to think
+   * anything is recoverable. ⌘[ existed for an afternoon before this and was
+   * a key nobody had been told about.
+   *
+   * NAMED BY CHAPTER, NOT BY PAGE. The plan's sketch said "back to p. 148" and
+   * a page number is the one thing an EPUB does not have — foliate only offers
+   * one where the book ships a page list, which most do not. The chapter is
+   * what the reader just left and what they would say themselves.
+   *
+   * Set only when a jump ACTUALLY happened: `jumpTo` returns false for a
+   * refused one, and offering a way back from a jump that did not occur is a
+   * worse lie than saying nothing.
+   */
+  const [returnTo, setReturnTo] = useState<string | null>(null)
+  /* DECLARED ABOVE `goToJump`, which clears it when a cross-book open fails.
+     A refused jump and a jump whose book would not open are the same lie to
+     the reader, and only the first was being caught. */
+
   /** Go where a jump asks, and say whether it was accepted — see `JumpsDeps`. */
   const goToJump = useCallback(
     (target: JumpTarget): boolean => {
@@ -1264,35 +1330,24 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
         setImportNotice('That book is no longer on your shelf.')
         return false
       }
+      /* ARMED BEFORE THE READ, consumed if it fails. The override and the
+         "← Back to …" line are both committed here on the assumption that the
+         open lands, and it can fail seconds later — missing content, an origin
+         that has moved. Without this the override stayed armed and was spent
+         by the NEXT book the reader opened, sending it to a place from a book
+         they never reached. */
+      undoOpen.current = () => {
+        setOpenAt(null)
+        setReturnTo(null)
+      }
       setOpenAt(target)
       openStored(row)
       return true
     },
-    [book, library.books, openStored],
+    [book, library.books, openStored, setReturnTo],
   )
 
   const jumps = useJumps({ placeHere, navigate: goToJump })
-
-  /**
-   * "← Back to Loomings" — the line that tells a reader the key is worth
-   * pressing.
-   *
-   * A JUMP IS THE ONLY THING THAT CAN BE INVISIBLE. Every other way of moving
-   * through a book is something the reader did to the page in front of them;
-   * a jump replaces it, and without a word the reader has no reason to think
-   * anything is recoverable. ⌘[ existed for an afternoon before this and was
-   * a key nobody had been told about.
-   *
-   * NAMED BY CHAPTER, NOT BY PAGE. The plan's sketch said "back to p. 148" and
-   * a page number is the one thing an EPUB does not have — foliate only offers
-   * one where the book ships a page list, which most do not. The chapter is
-   * what the reader just left and what they would say themselves.
-   *
-   * Set only when a jump ACTUALLY happened: `jumpTo` returns false for a
-   * refused one, and offering a way back from a jump that did not occur is a
-   * worse lie than saying nothing.
-   */
-  const [returnTo, setReturnTo] = useState<string | null>(null)
 
   /**
    * The note showing in place, or null.
@@ -1431,7 +1486,31 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
        missing, and the memo only stayed fresh because `book` happens to change
        on every relocation — a dependency that held by accident and would have
        stopped holding the moment the hook's inputs changed. */
-    [state, dispatch, book, marking, bookmarking, onReader, addBooks, addFolder, importing, readingBook, openTags, composition],
+    /* AND THE SAME OMISSION AGAIN, twice over. `jumps` supplies both jump
+       commands and their availability; the four archive callbacks close over
+       `library.books`, `marks` and `cards`. None was listed, so the palette
+       could offer a jump the stack no longer has, or export a library snapshot
+       taken several imports ago — a stale command is worse than a missing one
+       because it looks like it worked. */
+    [
+      state,
+      dispatch,
+      book,
+      marking,
+      bookmarking,
+      onReader,
+      addBooks,
+      addFolder,
+      importing,
+      readingBook,
+      openTags,
+      composition,
+      jumps,
+      exportMarksNow,
+      importMarksNow,
+      exportTagsNow,
+      importTagsNow,
+    ],
   )
 
   /* §11's keyboard map. Every combo the design publishes is bound here, and
@@ -1627,6 +1706,13 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
        stale one would toggle against the previous page. */
     bookmarking,
     onReader,
+    /* ⌘[ AND ⌘] READ ALL FOUR OF THESE, and none was listed — so the handler
+       closed over the jump stack as it stood when the effect last ran. Follow a
+       link, then press ⌘[: whether it was offered at all came from a stale
+       `canBack`, and `back` itself could be a function bound to a stack one
+       jump behind. Exactly the `state.markTint` defect above, on a different
+       object. */
+    jumps,
   ])
 
   /* Titlebar metadata comes from the OPEN book, and from nothing else.

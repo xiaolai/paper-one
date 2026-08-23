@@ -41,7 +41,7 @@ import { DEPTH_SETTING, ROUTE_SETTING, TOOLS_SETTING } from '../lib/settings'
  */
 
 /** What a row's button does. */
-export type RowAction = 'use' | 'install' | 'sign-in' | 'in-use' | 'none'
+export type RowAction = 'use' | 'install' | 'sign-in' | 'in-use' | 'none' | 'check-again'
 
 /**
  * What the effort row shows, and the order it cycles in.
@@ -69,6 +69,19 @@ export interface RouteRow {
 
 export interface RoutesSnapshot {
   readonly rows: readonly RouteRow[]
+  /**
+   * The route whose sign-in the reader has started, or null.
+   *
+   * ⚠️ **SIGNING IN USED TO CHANGE NOTHING ON SCREEN.** `agent_sign_in`
+   * launches the vendor's own login in a browser and returns at once — the
+   * credential is theirs and Paper never holds it — so nothing here learned
+   * that it had finished. The row went on saying `Signed out` however long the
+   * reader spent logging in, and pressing it again launched a second flow.
+   *
+   * So the press is a state: the row says it is waiting and offers
+   * `Check again`, which re-probes. One flow at a time, and a way out of it.
+   */
+  readonly signingIn: string | null
   /** The route in use, or null when nothing can answer. */
   readonly inUse: string | null
   /** True when the reader's stored choice is no longer usable. */
@@ -111,8 +124,13 @@ export function resolveRoute(
   return { inUse: sorted[0]!.id, fellBack: chosen !== '' }
 }
 
-/** Turn one probe route into a row, given what is in use. */
-export function rowFor(route: Route, inUse: string | null): RouteRow {
+/**
+ * Turn one probe route into a row, given what is in use.
+ *
+ * `signingIn` is the route the reader has a login flow open for, if any — see
+ * `RoutesSnapshot.signingIn`.
+ */
+export function rowFor(route: Route, inUse: string | null, signingIn: string | null = null): RouteRow {
   const unusable = route.unusable !== null
   /* ⚠️ THE CODE, NOT THE SENTENCE. This compared `unusable` against the exact
      strings `'Not installed'` and `'Signed out'`, so the wording in `probe.rs`
@@ -125,7 +143,11 @@ export function rowFor(route: Route, inUse: string | null): RouteRow {
     ? reason === 'notInstalled'
       ? 'install'
       : reason === 'signedOut'
-        ? 'sign-in'
+        ? /* Already waiting on a login this reader opened: offer the way to
+             find out rather than a second copy of the flow. */
+          route.id === signingIn
+          ? 'check-again'
+          : 'sign-in'
         : 'none'
     : route.id === inUse
       ? 'in-use'
@@ -135,7 +157,12 @@ export function rowFor(route: Route, inUse: string | null): RouteRow {
     label: route.label,
     /* An unusable route shows the REASON, which is §07's disabled-and-says-why
      * rather than a control that fails when pressed. */
-    value: unusable ? (route.unusable as string) : (route.detail ?? ''),
+    value:
+      action === 'check-again'
+        ? 'Waiting for sign-in…'
+        : unusable
+          ? (route.unusable as string)
+          : (route.detail ?? ''),
     action,
     unusable,
   }
@@ -166,10 +193,19 @@ export interface RoutesModelOptions {
    * `settings` and the read threw on the pane's first render.
    */
   readonly kernel: Pick<KernelServices, 'lookUp' | 'cycleLookUp'>
+  /**
+   * Told when launching a vendor's login flow fails.
+   *
+   * A missing CLI, a spawn that was refused. The reader sees the row return to
+   * `Sign in…`; this is the maintainer's half, which was previously the
+   * rejection of a promise nobody caught.
+   */
+  readonly report?: (event: string, fields: Record<string, unknown>) => void
 }
 
 const EMPTY: RoutesSnapshot = {
   rows: [],
+  signingIn: null,
   inUse: null,
   fellBack: false,
   lookUp: null,
@@ -178,7 +214,7 @@ const EMPTY: RoutesSnapshot = {
   loading: true,
 }
 
-export function createRoutesModel({ port, settings, kernel }: RoutesModelOptions): RoutesModel {
+export function createRoutesModel({ port, settings, kernel, report }: RoutesModelOptions): RoutesModel {
   const listeners = new Set<() => void>()
   let probe: Probe | null = null
   let cached: RoutesSnapshot | null = EMPTY
@@ -189,6 +225,7 @@ export function createRoutesModel({ port, settings, kernel }: RoutesModelOptions
      top of a fast later one — the pane then shows a route list that was
      already superseded, and nothing refreshes again until the group reopens. */
   const generations = createGenerations()
+  let signingIn: string | null = null
 
   const invalidate = (): void => {
     cached = null
@@ -204,7 +241,10 @@ export function createRoutesModel({ port, settings, kernel }: RoutesModelOptions
       (route) => route.kind === 'local' && route.modality === 'text' && route.installed,
     )
     return {
-      rows: probe.routes.filter((route) => route.modality === 'text').map((route) => rowFor(route, inUse)),
+      rows: probe.routes
+        .filter((route) => route.modality === 'text')
+        .map((route) => rowFor(route, inUse, signingIn)),
+      signingIn,
       inUse,
       fellBack,
       /* `hasDictionary` is the reader UI's answer and is not known here, so
@@ -247,10 +287,31 @@ export function createRoutesModel({ port, settings, kernel }: RoutesModelOptions
          result is nobody's, and writing it would be the stale overwrite. */
       if (!mine() || disposed) return
       probe = found
+      /* THE WAIT ENDS AT THE NEXT PROBE, whatever it says. If the login
+         worked the route is usable and the row moves to `Use`; if it did not,
+         the row goes back to `Sign in…` so the reader can try again rather
+         than waiting on a flow that has already failed. Either way this
+         terminates — a pending state with no exit is worse than none. */
+      signingIn = null
       invalidate()
     },
     use: (id) => settings.set(ROUTE_SETTING, id),
-    signIn: (id) => port.signIn(id),
+    signIn: async (id) => {
+      /* Claimed BEFORE the await, so a second press cannot open a second
+         flow while the first is being launched. */
+      signingIn = id
+      invalidate()
+      try {
+        await port.signIn(id)
+      } catch (error) {
+        signingIn = null
+        invalidate()
+        report?.('companion.sign-in-failed', {
+          route: id,
+          message: error instanceof Error ? error.message : String(error),
+        })
+      }
+    },
     /* One cycle, in the kernel — this was written out here and in
        `inference`'s store, identically, which is one algorithm in two files. */
     cycleLookUp: (hasDictionary, hasGloss) => kernel.cycleLookUp(hasDictionary, hasGloss),

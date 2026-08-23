@@ -190,6 +190,24 @@ export interface KernelServices {
   lookUp(): LookUpMode
   cycleLookUp(hasDictionary: boolean, hasGloss: boolean): void
   /**
+   * Whether this platform has a system dictionary to hand a passage to.
+   *
+   * ⚠️ **A CAPABILITY CANNOT WORK THIS OUT.** It is
+   * `ui/lookUp.ts`'s `hasDictionary(platform)`, and both the platform and that
+   * function live behind the kernel's React layer, which `kernel-public-entry-only`
+   * puts out of a capability's reach. So `CompanionPane` took it as an
+   * optional prop defaulting to `false`, and the production caller passed
+   * nothing — which on macOS silently removed the system dictionary from the
+   * cycle, so a reader could not select `System dictionary` or `Both` at all.
+   * A default that is wrong for the platform the feature exists for is not a
+   * default.
+   *
+   * The composition root answers it once, and every drawer of the control
+   * asks. Defaults to `false` only where there is genuinely no platform to
+   * ask about — a test, a headless service.
+   */
+  hasDictionary(): boolean
+  /**
    * Serve a composed set of services through the bound host, once every
    * capability has started (so a delegating handler's target is ready). The
    * registry calls this with `Composition.services`; the returned `Disposable`
@@ -228,6 +246,12 @@ export interface KernelServicesOptions {
    * as an empty one.
    */
   readonly shelfRead?: boolean
+  /**
+   * Whether this platform has a system dictionary — see
+   * `KernelServices.hasDictionary`. The composition root passes
+   * `hasDictionary(resolvePlatform())`; everything else leaves it false.
+   */
+  readonly hasDictionary?: boolean
   readonly recorder?: MutationRecorder
   readonly diagnostics?: Diagnostics
   readonly settingsMigration?: SettingsMigration
@@ -299,6 +323,7 @@ export function createKernelServices({
   diagnostics = NOOP_DIAGNOSTICS,
   settingsMigration,
   clock,
+  hasDictionary = false,
 }: KernelServicesOptions): KernelServices {
   /* The delegating ports. The stores capture THESE, so a bind after
    * construction reaches every store without any of them knowing. Each
@@ -450,6 +475,7 @@ export function createKernelServices({
       const index = current === null ? -1 : modes.indexOf(current)
       settings.set(LOOK_UP_SETTING, modes[(index + 1) % modes.length] as LookUpMode)
     },
+    hasDictionary: () => hasDictionary,
     bindWorkLine: (next) => workLineSlot.bind(next),
     workLine: () => workLineSlot.get(),
     serveServices: async (list) => (await serviceHostSlot.get()(list)) ?? NOOP_DISPOSABLE,

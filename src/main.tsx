@@ -31,8 +31,10 @@ import '@fontsource/ibm-plex-mono/500.css'
 import { buildServices, composeCapabilities, flushBeforeClose, createKernelServices, defaultDiagnostics, kernelApi, serviceClients } from './kernel'
 import {
   App,
+  CLOSE_DRAIN_MS,
   countingFs,
   emptyExpired,
+  hasDictionary,
   inTauri,
   installFatalHandlers,
   libraryFs,
@@ -43,6 +45,7 @@ import {
   openAppStorage,
   reportFs,
   reportStartup,
+  resolvePlatform,
   summariseMigration,
   timed,
   watchFs,
@@ -61,7 +64,6 @@ import { capabilities } from 'virtual:paper-composition'
 
 /** Bounded like `App`'s close handler, and under the shell's 5 s grace: a
  *  wedged queue must delay a quit, never prevent one. */
-const DRAIN_GRACE_MS = 2000
 
 installFatalHandlers()
 
@@ -213,6 +215,13 @@ async function boot(root: HTMLElement): Promise<void> {
      * from a library with none. `shelf.status` reported `books: 0` to a peer
      * asking whether this device was healthy. */
     shelfRead: !shelfUnread,
+    /* ASKED ONCE, HERE. A capability that draws the Look up control cannot
+     * work this out — the platform and `hasDictionary` both live behind the
+     * kernel's React layer, which `kernel-public-entry-only` puts out of its
+     * reach — so `CompanionPane` defaulted it to `false` and the caller
+     * passed nothing, which removed the system dictionary from the cycle on
+     * the one platform that has one. */
+    hasDictionary: hasDictionary(resolvePlatform()),
     diagnostics: defaultDiagnostics(),
   })
 
@@ -268,7 +277,10 @@ async function boot(root: HTMLElement): Promise<void> {
     abort: () => lifetime.abort(),
     journalClosed,
     signal: lifetime.signal,
-    graceMs: DRAIN_GRACE_MS,
+    /* THE SAME BOUND THE WINDOW CLOSE USES, imported rather than restated:
+       both drain the same queue under the same rule, and two spellings of one
+       policy is how they come to disagree. */
+    graceMs: CLOSE_DRAIN_MS,
     diagnostics: services.diagnostics,
   })
 

@@ -1,6 +1,6 @@
 import { useEffect, useSyncExternalStore } from 'react'
 import { CAPABILITY_UI as ui } from '../../../kernel'
-import type { RoutesModel } from './routesModel'
+import type { RouteRow, RoutesModel } from './routesModel'
 
 /**
  * The **Companion** section (`companion:provider`, order 5), rendered by the
@@ -20,14 +20,94 @@ import type { RoutesModel } from './routesModel'
 
 export interface CompanionPaneProps {
   readonly model: RoutesModel
-  /** Whether this platform has a system dictionary — `lookUp.ts`'s answer. */
-  readonly hasDictionary?: boolean
+  /**
+   * Whether this platform has a system dictionary — `lookUp.ts`'s answer,
+   * routed through `services.hasDictionary()`.
+   *
+   * ⚠️ **REQUIRED, AND IT USED TO DEFAULT TO `false`.** The production caller
+   * passed nothing, so on macOS — the one platform that HAS a dictionary — it
+   * was excluded from the cycle and the reader could not select
+   * `System dictionary` or `Both` at all. A default that is wrong on the
+   * platform the feature exists for is not a default, and an optional prop is
+   * how a caller forgets to answer.
+   */
+  readonly hasDictionary: boolean
 }
 
-export function CompanionPane({ model, hasDictionary = false }: CompanionPaneProps) {
+/**
+ * One route's action, exhaustively.
+ *
+ * A `switch` rather than the four-level nested ternary this replaces: five
+ * states rendered by nesting is unreadable, and — the part that matters — a
+ * sixth `RowAction` would fall through the last `: null` and render NOTHING,
+ * silently. Here it is a type error.
+ *
+ * ⚠️ **EVERY BUTTON NAMES ITS ROUTE.** They all read `Use` or `Sign in…`, and
+ * the label beside them is a sibling `<span>`, not a `<label>` — so a screen
+ * reader announced a list of identical buttons and there was no way to tell
+ * which route any of them belonged to.
+ */
+function RouteAction({ row, model }: { readonly row: RouteRow; readonly model: RoutesModel }) {
+  switch (row.action) {
+    case 'in-use':
+      return <span className={ui.value}>In use</span>
+    case 'use':
+      return (
+        <button
+          type="button"
+          className={ui.button}
+          aria-label={`Use ${row.label}`}
+          onClick={() => model.use(row.id)}
+        >
+          Use
+        </button>
+      )
+    case 'sign-in':
+      return (
+        <button
+          type="button"
+          className={ui.button}
+          aria-label={`Sign in to ${row.label}`}
+          onClick={() => void model.signIn(row.id)}
+        >
+          Sign in…
+        </button>
+      )
+    case 'check-again':
+      /* The vendor's login runs in a browser and tells Paper nothing when it
+         finishes, so this is the reader's way to ask. Without it the row said
+         `Signed out` for as long as they were logged in, and pressing it
+         again opened a second flow. */
+      return (
+        <button
+          type="button"
+          className={ui.button}
+          aria-label={`Check whether ${row.label} is signed in`}
+          onClick={() => void model.refresh().catch(() => {})}
+        >
+          Check again
+        </button>
+      )
+    case 'install':
+      /* A local model that is not installed carries `Install` instead of
+         `Use`, so one list does provisioning and selection without becoming
+         two. The Local models section owns the download. */
+      return <span className={ui.value}>Install in Local models</span>
+    case 'none':
+      return null
+  }
+}
+
+export function CompanionPane({ model, hasDictionary }: CompanionPaneProps) {
   const snapshot = useSyncExternalStore(model.subscribe, model.getSnapshot)
   useEffect(() => {
-    void model.refresh()
+    /* ⚠️ NOT FIRE-AND-FORGET. `refresh` never rejects — it absorbs a failed
+     * probe into an empty route list — but `void` on a promise that later
+     * gains a rejection is an unhandled one nobody notices, and StrictMode
+     * runs this effect twice. The model's own generation guard makes the
+     * second call harmless: the newer probe wins and the older is dropped
+     * rather than landing on top of it. */
+    void model.refresh().catch(() => {})
   }, [model])
 
   return (
@@ -41,22 +121,7 @@ export function CompanionPane({ model, hasDictionary = false }: CompanionPanePro
         <div key={row.id} className={ui.row}>
           <span className={ui.grow}>{row.label}</span>
           <span className={ui.value}>{row.value}</span>
-          {row.action === 'in-use' ? (
-            <span className={ui.value}>In use</span>
-          ) : row.action === 'use' ? (
-            <button type="button" className={ui.button} onClick={() => model.use(row.id)}>
-              Use
-            </button>
-          ) : row.action === 'sign-in' ? (
-            <button type="button" className={ui.button} onClick={() => void model.signIn(row.id)}>
-              Sign in…
-            </button>
-          ) : row.action === 'install' ? (
-            /* A local model that is not installed carries `Install` instead of
-               `Use`, so one list does provisioning and selection without
-               becoming two. The Local models section owns the download. */
-            <span className={ui.value}>Install in Local models</span>
-          ) : null}
+          <RouteAction row={row} model={model} />
         </div>
       ))}
 
@@ -126,7 +191,11 @@ export function CompanionPane({ model, hasDictionary = false }: CompanionPanePro
         </>
       ) : null}
 
-      <div className={ui.row}>
+      {/* A `<label>` rather than a sibling `<span>`: the text was next to the
+          checkbox and not associated with it, so the control had no accessible
+          name at all — a screen reader announced an unlabelled checkbox. The
+          same wrapping also makes the word itself a hit target. */}
+      <label className={ui.row}>
         <span className={ui.grow}>Tools</span>
         <input
           type="checkbox"
@@ -134,7 +203,7 @@ export function CompanionPane({ model, hasDictionary = false }: CompanionPanePro
           checked={snapshot.tools}
           onChange={(event) => model.setTools(event.currentTarget.checked)}
         />
-      </div>
+      </label>
       <div className={ui.hint}>
         The companion answers from the book. Tools let it reach further; it will say
         when it does.

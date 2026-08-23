@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { NOT_CONFIGURED, type CompanionProvider } from './companion'
 import { LOOK_UP_MODES, NO_GLOSS, availableModes, effectiveMode, type GlossProvider } from './gloss'
 import { NO_WORK_LINE, type WorkLine } from './ports'
+import { createKernelServices } from './services'
 import { servicesWith, spyRecorder } from './servicesWorld.testkit'
 
 /**
@@ -133,6 +134,43 @@ describe('the companion, gloss and work-line ports', () => {
  * `namespace` on their first render. This accessor is the seam; these cases
  * are what say it behaves.
  */
+/**
+ * WHETHER THIS PLATFORM HAS A DICTIONARY, which only the kernel can answer.
+ *
+ * ⚠️ `CompanionPane` took it as an OPTIONAL prop defaulting to `false` and the
+ * production caller passed nothing — so on macOS, the one platform that has a
+ * system dictionary, it was excluded from the cycle and the reader could not
+ * select `System dictionary` or `Both` at all. A capability cannot work it out
+ * for itself: the platform and `hasDictionary` both live behind the kernel's
+ * React entry, which `kernel-public-entry-only` puts out of its reach. So the
+ * composition root answers once and every drawer of the control asks.
+ */
+describe('the system dictionary', () => {
+  it('is false where no caller said otherwise', () => {
+    expect(servicesWith(spyRecorder().recorder).hasDictionary()).toBe(false)
+  })
+
+  it('reports what the composition root was told', () => {
+    const services = createKernelServices({
+      fs: null,
+      storage: null,
+      initialBooks: [],
+      hasDictionary: true,
+    })
+    expect(services.hasDictionary()).toBe(true)
+    /* AND IT REACHES THE CYCLE. With a dictionary and no gloss there is one
+       mode, so nothing moves; the point is that the mode EXISTS, which is
+       what the default of `false` was denying on macOS. */
+    expect(availableModes(services.hasDictionary(), false)).toEqual(['system'])
+    expect(availableModes(services.hasDictionary(), true)).toHaveLength(3)
+  })
+
+  it('offers only the gloss when the platform has no dictionary', () => {
+    const services = servicesWith(spyRecorder().recorder)
+    expect(availableModes(services.hasDictionary(), true)).toEqual(['gloss'])
+  })
+})
+
 describe('the look-up mode', () => {
   it('defaults to the system dictionary, which is what makes the no-regression rule true', () => {
     expect(servicesWith(spyRecorder().recorder).lookUp()).toBe('system')

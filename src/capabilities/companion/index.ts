@@ -28,6 +28,16 @@ import { CompanionPane } from './ui/CompanionPane'
 /* ---------------------------------------------------------- runtime state */
 
 let routesModel: RoutesModel | null = null
+/**
+ * Whether this platform has a system dictionary, as the kernel answers it.
+ *
+ * Kept beside `routesModel` because `render` is called by the settings pane
+ * with no arguments, and this is a fact from `start`. Not derivable here: the
+ * platform lives behind the kernel's React entry, which
+ * `kernel-public-entry-only` puts out of a capability's reach — see
+ * `KernelServices.hasDictionary`.
+ */
+let systemDictionary = false
 let provider: BoundCompanionProvider | null = null
 
 /** The bound provider, for a test and for the reader UI's thread. */
@@ -46,7 +56,16 @@ export const companion: Capability = {
       /* ABOVE Storage (10) and Devices (20): the companion is a reading
        * surface, and the two below it are about machines and bytes. */
       order: 5,
-      render: () => (routesModel ? createElement(CompanionPane, { model: routesModel }) : null),
+      render: () =>
+        routesModel
+          ? createElement(CompanionPane, {
+              model: routesModel,
+              /* ASKED, NOT DEFAULTED. The prop used to be optional and this
+                 call passed nothing, so macOS — the one platform with a
+                 system dictionary — was told it had none. */
+              hasDictionary: systemDictionary,
+            })
+          : null,
     },
   ],
 
@@ -60,7 +79,10 @@ export const companion: Capability = {
       if (stopped) return
       stopped = true
       signal.removeEventListener('abort', stop)
-      if (routesModel === myRoutes) routesModel = null
+      if (routesModel === myRoutes) {
+        routesModel = null
+        systemDictionary = false
+      }
       if (provider === myProvider) provider = null
       try {
         unbindCompanion?.dispose()
@@ -86,8 +108,14 @@ export const companion: Capability = {
       return { dispose: stop }
     }
 
-    myRoutes = createRoutesModel({ port, settings: api.settings, kernel: api.services })
+    myRoutes = createRoutesModel({
+      port,
+      settings: api.settings,
+      kernel: api.services,
+      report: (event, fields) => api.diagnostics.warn(event, fields),
+    })
     routesModel = myRoutes
+    systemDictionary = api.services.hasDictionary()
 
     myProvider = createCompanionProvider({
       port,

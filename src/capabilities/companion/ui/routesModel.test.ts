@@ -245,6 +245,15 @@ describe('rowFor', () => {
  */
 const probeOf = (...routes: Route[]): Probe => ({ routes, runtimeVersion: '1.0' })
 
+/** A promise the test opens when it wants the operation under test to finish. */
+function deferred(): { readonly promise: Promise<void>; open(): void } {
+  let open: () => void = () => {}
+  const promise = new Promise<void>((resolve) => {
+    open = resolve
+  })
+  return { promise, open: () => open() }
+}
+
 function portWith(probe: Probe | (() => Promise<Probe>)): { port: InferencePort; signedIn: string[] } {
   const signedIn: string[] = []
   const port = {
@@ -408,6 +417,122 @@ describe('the routes store', () => {
       'a superseded probe overwrote the current one',
     ).toEqual(['agent:codex'])
     model.dispose()
+  })
+
+  /**
+   * SIGNING IN IS A STATE, NOT A GESTURE THAT VANISHES.
+   *
+   * ⚠️ `agent_sign_in` launches the vendor's own login in a browser and
+   * returns at once — Paper never holds the credential — so nothing here ever
+   * learned it had finished. The row went on saying `Signed out` for however
+   * long the reader spent logging in, and pressing it again opened a SECOND
+   * flow. There was no pending state, no error, and no re-probe.
+   */
+  describe('signing in', () => {
+    const signedOut = route({ id: 'agent:codex', kind: 'agent', reason: 'signedOut' })
+
+    it('says it is waiting, and offers the way to find out', async () => {
+      const { port } = portWith(probeOf(signedOut))
+      const model = createRoutesModel({ port, ...wiring() })
+      await model.refresh()
+      expect(model.getSnapshot().rows[0]?.action).toBe('sign-in')
+
+      await model.signIn('agent:codex')
+      const row = model.getSnapshot().rows[0]
+      expect(row?.action, 'the row still offered a second login flow').toBe('check-again')
+      expect(row?.value).toBe('Waiting for sign-in…')
+      expect(model.getSnapshot().signingIn).toBe('agent:codex')
+      model.dispose()
+    })
+
+    /* ONE FLOW AT A TIME. The claim is made before the await, so a second
+       press while the first is being launched cannot open another. */
+    it('does not launch a second flow while one is being started', async () => {
+      const gate = deferred()
+      const started: string[] = []
+      const port = {
+        generate: async () => '',
+        agentAsk: async () => '',
+        probe: async () => probeOf(signedOut),
+        ensureReady: async () => true,
+        signIn: async (id: string) => {
+          started.push(id)
+          await gate.promise
+        },
+        subscribe: () => () => {},
+      } satisfies InferencePort
+      const model = createRoutesModel({ port, ...wiring() })
+      await model.refresh()
+
+      const first = model.signIn('agent:codex')
+      expect(model.getSnapshot().rows[0]?.action).toBe('check-again')
+      gate.open()
+      await first
+      expect(started).toEqual(['agent:codex'])
+      model.dispose()
+    })
+
+    /* AND THE WAIT TERMINATES. A pending state with no exit is worse than
+       none: the next probe ends it whatever it says, so a login that worked
+       shows `Use` and one that did not goes back to `Sign in…`. */
+    it('ends the wait at the next probe, whichever way it went', async () => {
+      let signedIn = false
+      const port = {
+        generate: async () => '',
+        agentAsk: async () => '',
+        probe: async () =>
+          probeOf(signedIn ? codexReady : signedOut),
+        ensureReady: async () => true,
+        signIn: async () => {},
+        subscribe: () => () => {},
+      } satisfies InferencePort
+      const model = createRoutesModel({ port, ...wiring() })
+      await model.refresh()
+      await model.signIn('agent:codex')
+      expect(model.getSnapshot().signingIn).toBe('agent:codex')
+
+      /* Still signed out: back to offering the flow rather than waiting on
+         one that has already failed. */
+      await model.refresh()
+      expect(model.getSnapshot().signingIn).toBeNull()
+      expect(model.getSnapshot().rows[0]?.action).toBe('sign-in')
+
+      await model.signIn('agent:codex')
+      signedIn = true
+      await model.refresh()
+      expect(model.getSnapshot().rows[0]?.action).toBe('in-use')
+      model.dispose()
+    })
+
+    /* A LAUNCH THAT FAILS DOES NOT LEAVE THE ROW WAITING FOREVER, and it says
+       so in the log — this used to be the rejection of a promise the pane
+       discarded with `void`. */
+    it('returns the row and reports when the flow will not launch', async () => {
+      const events: { event: string; fields: Record<string, unknown> }[] = []
+      const port = {
+        generate: async () => '',
+        agentAsk: async () => '',
+        probe: async () => probeOf(signedOut),
+        ensureReady: async () => true,
+        signIn: async () => {
+          throw new Error('Codex is not installed')
+        },
+        subscribe: () => () => {},
+      } satisfies InferencePort
+      const model = createRoutesModel({
+        port,
+        ...wiring(),
+        report: (event, fields) => void events.push({ event, fields }),
+      })
+      await model.refresh()
+
+      await expect(model.signIn('agent:codex')).resolves.toBeUndefined()
+      expect(model.getSnapshot().signingIn).toBeNull()
+      expect(model.getSnapshot().rows[0]?.action).toBe('sign-in')
+      expect(events[0]?.event).toBe('companion.sign-in-failed')
+      expect(events[0]?.fields.message).toBe('Codex is not installed')
+      model.dispose()
+    })
   })
 
   it('writes the chosen route, and signs in through the port', async () => {

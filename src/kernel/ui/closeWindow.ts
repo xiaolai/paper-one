@@ -31,6 +31,13 @@
  * A LIVENESS BOUND, not a performance assertion: the point past which waiting
  * is worse for the reader than losing the tail of the queue. A queue that
  * cannot finish must not leave them with a window that will not close.
+ *
+ * ⚠️ **ONE NUMBER, TWO SHUTDOWNS.** The window close and the app quit
+ * (`app/shutdown.ts`) drain the same queue under the same rule, and each had
+ * written `2000` out separately — so the two could have drifted into
+ * disagreeing about how long a reader's last highlight is worth waiting for,
+ * with nothing to notice. The quit path imports this rather than declaring its
+ * own.
  */
 export const CLOSE_DRAIN_MS = 2000
 
