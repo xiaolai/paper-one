@@ -32,15 +32,33 @@ const CONTEXT: AskContext = {
 
 function portWith(
   run: (onChunk: (text: string) => void) => Promise<string>,
-): { port: InferencePort; seen: string[] } {
+): { port: InferencePort; seen: string[]; signals: AbortSignal[] } {
   const seen: string[] = []
+  /* EVERY SIGNAL THE PORT WAS HANDED. The agent branch used to be given none,
+     and no test noticed because they all passed a signal nobody ever aborted —
+     a cancellation contract asserted by never exercising it. */
+  const signals: AbortSignal[] = []
   const port = {
-    generate: async (model: string, _system: string, prompt: string, onChunk: (t: string) => void) => {
+    generate: async (
+      model: string,
+      _system: string,
+      prompt: string,
+      onChunk: (t: string) => void,
+      signal: AbortSignal,
+    ) => {
       seen.push(`generate:${model}`, prompt)
+      signals.push(signal)
       return run(onChunk)
     },
-    agentAsk: async (route: string, prompt: string, depth: string, onChunk: (t: string) => void) => {
+    agentAsk: async (
+      route: string,
+      prompt: string,
+      depth: string,
+      onChunk: (t: string) => void,
+      signal: AbortSignal,
+    ) => {
       seen.push(`agent:${route}`, prompt, `depth:${depth}`)
+      signals.push(signal)
       return run(onChunk)
     },
     probe: async () => ({ routes: [], runtimeVersion: null }),
@@ -48,7 +66,7 @@ function portWith(
     signIn: async () => {},
     subscribe: () => () => {},
   } satisfies InferencePort
-  return { port, seen }
+  return { port, seen, signals }
 }
 
 const drain = async (stream: AsyncGenerator<string, unknown>): Promise<{ text: string; done: unknown }> => {
@@ -143,5 +161,40 @@ describe('the bound provider', () => {
     const { done } = await drain(provider.ask('where?', CONTEXT, new AbortController().signal))
     expect(provider.lastPassages()).toHaveLength(1)
     expect(done).toEqual([expect.objectContaining({ cfi: 'epubcfi(/6/4!/4/2)' })])
+  })
+})
+
+/**
+ * CANCELLATION REACHES BOTH ROUTES.
+ *
+ * `ask`'s contract says the reader can abandon a long answer, and the port is
+ * what turns that into a cancelled request. The agent branch was handed no
+ * signal at all, so abandoning a Codex or Claude answer left the CLI running
+ * and the reader's subscription being spent on text nobody would read — and
+ * every test here passed, because each supplied a signal it never aborted.
+ */
+describe('cancellation', () => {
+  it('hands the caller’s signal to the port, on every route', async () => {
+    for (const route of ['agent:codex', 'local:qwen3-4b']) {
+      const { port, signals } = portWith(async () => '')
+      const provider = createCompanionProvider({ port, route: () => route, depth: () => 'default' })
+      const controller = new AbortController()
+      await drain(provider.ask('why?', CONTEXT, controller.signal))
+      expect(signals, route).toHaveLength(1)
+      expect(signals[0], `${route} was given a different signal`).toBe(controller.signal)
+    }
+  })
+
+  /* THE SAME SIGNAL, so aborting it is observable by the port — which is what
+     `withCancel` listens to in order to cancel the in-flight request. */
+  it('gives the port a signal that actually fires', async () => {
+    const { port, signals } = portWith(async () => '')
+    const provider = createCompanionProvider({ port, route: () => 'agent:claude', depth: () => 'default' })
+    const controller = new AbortController()
+    await drain(provider.ask('why?', CONTEXT, controller.signal))
+    let fired = false
+    signals[0]?.addEventListener('abort', () => void (fired = true))
+    controller.abort()
+    expect(fired, 'aborting the caller’s controller did not reach the port’s signal').toBe(true)
   })
 })

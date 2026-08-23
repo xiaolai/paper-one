@@ -55,7 +55,21 @@ export interface InferencePort {
     signal: AbortSignal,
   ): Promise<string>
   /** One tool-free turn from an agent CLI. */
-  agentAsk(route: string, prompt: string, depth: Depth, onChunk: (text: string) => void): Promise<string>
+  /**
+   * One tool-free agent turn.
+   *
+   * THE SIGNAL IS NOT OPTIONAL HERE. `generate` has had one since it was
+   * written; this took `null` and therefore ignored the reader's Stop, so a
+   * cancelled question went on spending their subscription until the CLI
+   * finished by itself.
+   */
+  agentAsk(
+    route: string,
+    prompt: string,
+    depth: Depth,
+    onChunk: (text: string) => void,
+    signal: AbortSignal,
+  ): Promise<string>
   /** Presence, version and auth for every route (WI-15.10). */
   probe(): Promise<Probe>
   /** Start the daemon if it is not up. False when it could not. */
@@ -96,8 +110,8 @@ export function inferencePort(): InferencePort | null {
      * no local daemon, which is the whole of F2's argument. Starting one to
      * ask Codex a question would make the download the local half needs a
      * prerequisite for the half that does not. */
-    agentAsk: (route, prompt, depth, onChunk) =>
-      withCancel('agent', null, (id) => plugin.agentAsk(id, route, prompt, depth, onChunk)),
+    agentAsk: (route, prompt, depth, onChunk, signal) =>
+      withCancel('agent', signal, (id) => plugin.agentAsk(id, route, prompt, depth, onChunk)),
     probe: () => plugin.probe(),
     ensureReady: () => controller.ensureReady(),
     signIn: (route) => plugin.agentSignIn(route),

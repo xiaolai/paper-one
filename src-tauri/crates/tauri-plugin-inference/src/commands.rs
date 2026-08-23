@@ -380,7 +380,21 @@ pub async fn agent_ask<R: Runtime>(
         // A route id the probe did not mint. Never a path, never an argv.
         other => return Err(Error::ModelUnknown(other.to_owned())),
     };
-    let probe = agent::probe(which).await;
+    /* REGISTERED BEFORE THE PROBE, and the probe races cancellation.
+     *
+     * `agent::probe` spawns up to two child processes with a five-second
+     * timeout each, and registration used to happen after it. A reader who
+     * pressed Stop during that window cancelled a request id nothing had
+     * begun — the cancel answered `RequestUnknown` and the turn then started
+     * anyway, on their subscription. The guard has to exist before the first
+     * slow await, not before the spawn. */
+    let guard = state.requests().begin(&request_id)?;
+    let cancel = guard.cancel();
+    let probe = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Err(Error::Cancelled),
+        probed = agent::probe(which) => probed,
+    };
     if let Some(reason) = probe.unusable {
         return Err(match reason {
             agent::SIGNED_OUT => Error::AgentSignedOut(which.name()),
@@ -395,8 +409,6 @@ pub async fn agent_ask<R: Runtime>(
         .path
         .ok_or_else(|| Error::AgentMissing(which.name()))?;
 
-    let guard = state.requests().begin(&request_id)?;
-    let cancel = guard.cancel();
     // An EMPTY directory, owned by Paper, as the agent's working root. Not
     // the reader's library and not Paper's own data root: a read-only agent
     // pointed at the library could read every book, every note and the

@@ -406,15 +406,36 @@ pub async fn ask(
      * having already spawned a helper, left that helper running. Found by the
      * third audit round. `wait` reaps, so the group is captured above and
      * `kill` takes it as a parameter rather than reading a pid that is gone. */
-    let status = match child.wait().await {
-        Ok(status) => status,
-        Err(failure) => {
+    /* THE WAIT RACES CANCELLATION TOO. Every other await in this function
+     * does, and this one did not: a child that closes stdout and then hangs —
+     * flushing telemetry, waiting on a prompt nobody will answer — left
+     * `wait()` pending with no way out, so the reader's Stop did nothing and a
+     * subscription turn ran on unattended. EOF on stdout is not the end of the
+     * process. */
+    let status = tokio::select! {
+        biased;
+        () = cancel.cancelled() => {
             take_down(&mut child);
             let _ = crate::procgroup::kill(&mut child, group).await;
-            return Err(Error::Io(failure));
+            return Err(Error::Cancelled);
         }
+        waited = child.wait() => match waited {
+            Ok(status) => status,
+            Err(failure) => {
+                take_down(&mut child);
+                let _ = crate::procgroup::kill(&mut child, group).await;
+                return Err(Error::Io(failure));
+            }
+        },
     };
-    if !status.success() && answer.is_empty() {
+    /* A NONZERO EXIT IS A FAILED TURN, whatever arrived before it.
+     *
+     * This read `!status.success() && answer.is_empty()`, so a CLI that
+     * streamed half an answer and then died returned `Ok` with the half — and
+     * a truncated answer is indistinguishable from a complete one to every
+     * caller above. Both CLIs exit 0 on success, so a nonzero status means the
+     * turn did not finish, and saying so is the only honest option. */
+    if !status.success() {
         let _ = crate::procgroup::kill(&mut child, group).await;
         let tail = stderr_tail
             .lock()
@@ -428,11 +449,53 @@ pub async fn ask(
             message: if tail.is_empty() {
                 format!("exited with {status}")
             } else {
-                format!("exited with {status}: {tail}")
+                format!("exited with {status}: {}", redact(&tail))
             },
         });
     }
+    /* THE GROUP GOES DOWN ON THE SUCCESS PATH TOO. A leader that exits
+     * cleanly can still leave a detached helper holding the group — and one
+     * that inherited stdout keeps a subscription turn alive after the answer
+     * has been delivered. `wait` has reaped the leader; `group` was captured
+     * before that, which is why this can still be taken down by id. */
+    let _ = crate::procgroup::kill(&mut child, group).await;
     Ok(answer)
+}
+
+/// One line of a child's stderr, bounded and stripped of anything identifying.
+///
+/// THE REASON CROSSES, THE IDENTITY DOES NOT. The stderr tail is the half that
+/// says WHY — "not logged in", "model unavailable", a rate limit — and an exit
+/// code alone sends whoever reads it back to a terminal. But this string
+/// reaches a webview that renders untrusted book HTML, and both CLIs write
+/// absolute paths under the reader's home, and Claude's carries an account
+/// address. `agent.rs` drops those at the parse boundary for exactly this
+/// reason; an error message is not an exemption from it.
+///
+/// Bounded rather than parsed: no wording is matched, so nothing here goes
+/// stale when a CLI rephrases itself. What is removed is removed by SHAPE.
+fn redact(tail: &str) -> String {
+    const LIMIT: usize = 200;
+    let first = tail
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("");
+    let scrubbed: String = first
+        .split_whitespace()
+        .map(|word| {
+            if word.contains('@') || word.contains('/') || word.contains('\\') {
+                "[…]"
+            } else {
+                word
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if scrubbed.chars().count() > LIMIT {
+        scrubbed.chars().take(LIMIT).collect::<String>() + "…"
+    } else {
+        scrubbed
+    }
 }
 
 #[cfg(test)]
@@ -702,5 +765,49 @@ mod tests {
         let claude = r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"text":"ok"}}}"#;
         assert_eq!(parse_line(Agent::Claude, codex), None);
         assert_eq!(parse_line(Agent::Codex, claude), None);
+    }
+    /// The reason survives; the identity does not.
+    #[test]
+    fn redact_keeps_the_reason_and_drops_what_identifies() {
+        assert_eq!(redact("Not logged in"), "Not logged in");
+        assert_eq!(
+            redact("rate limit reached, retry in 60s"),
+            "rate limit reached, retry in 60s"
+        );
+
+        let with_path = redact("failed reading /Users/someone/.codex/auth.json");
+        assert!(with_path.starts_with("failed reading"), "{with_path}");
+        assert!(
+            !with_path.contains("someone"),
+            "a home path reached the webview: {with_path}"
+        );
+
+        let with_email = redact("signed in as reader@example.test");
+        assert!(
+            !with_email.contains('@'),
+            "an address reached the webview: {with_email}"
+        );
+    }
+
+    /// ONE LINE, AND BOUNDED. A CLI that dumps a backtrace must not turn an
+    /// error row into a wall, and only the first line carries the reason.
+    #[test]
+    fn redact_takes_one_bounded_line() {
+        let many = format!("first line\nsecond line\n{}", "x".repeat(500));
+        let said = redact(&many);
+        assert_eq!(said, "first line");
+
+        let long = redact(&"word ".repeat(200));
+        assert!(said.chars().count() <= 200);
+        assert!(long.chars().count() <= 201, "{}", long.chars().count());
+        assert!(long.ends_with('…'));
+    }
+
+    /// Leading blank lines are skipped rather than yielding an empty reason —
+    /// an empty tail is what makes the caller fall back to the bare exit code.
+    #[test]
+    fn redact_skips_leading_blank_lines() {
+        assert_eq!(redact("\n\n  \nNot logged in"), "Not logged in");
+        assert_eq!(redact(""), "");
     }
 }

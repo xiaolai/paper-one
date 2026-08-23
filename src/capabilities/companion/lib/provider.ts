@@ -112,9 +112,13 @@ export function createCompanionProvider({
         notify?.()
       }
 
+      /* BOTH BRANCHES TAKE THE SIGNAL. The agent branch did not, so `ask`'s
+         cancellation contract held for a local model and silently did not for
+         a subscription route — the one where abandoning an answer actually
+         costs the reader something. */
       const running = (
         isAgentRoute(chosen)
-          ? port.agentAsk(chosen, prompt, depth(), push)
+          ? port.agentAsk(chosen, prompt, depth(), push, signal)
           : port.generate(localModelOf(chosen) ?? '', COMPANION_SYSTEM_PROMPT, prompt, push, signal)
       )
         .then(() => {})
