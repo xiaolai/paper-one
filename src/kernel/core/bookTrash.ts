@@ -38,6 +38,31 @@ export const TRASH_DAYS = 14
 export const TRASH_KEPT_FOR = TRASH_DAYS === 14 ? 'two weeks' : `${TRASH_DAYS} days`
 const DAY_MS = 24 * 60 * 60 * 1000
 
+/**
+ * How long a trashed book has left, as the words a reader sees.
+ *
+ * Beside `TRASH_KEPT_FOR` and for its stated reason: the retention window and
+ * the copy describing it drift the moment they live apart, and this is the
+ * second sentence derived from `TRASH_DAYS`.
+ *
+ * "AT NEXT LAUNCH", NOT "TODAY", for an entry already past its window. The
+ * sweep is `emptyExpired`, run once at startup and never on a timer — so a
+ * book whose fortnight ended while the app was open is still there, still
+ * restorable, and saying "today" would promise a deletion that will not
+ * happen until the app is next started.
+ *
+ * A null `expiresAt` is an entry whose removal time could not be read. The
+ * sweep LEAVES those rather than guessing, so the honest word is that it
+ * stays.
+ */
+export function timeLeft(expiresAt: number | null, now: number): string {
+  if (expiresAt === null) return 'Kept'
+  const left = expiresAt - now
+  if (left <= 0) return 'Goes at next launch'
+  const days = Math.ceil(left / DAY_MS)
+  return days === 1 ? '1 day left' : `${days} days left`
+}
+
 export interface TrashFs extends VaultFs {
   readDir: (path: string) => Promise<{ name: string; isDirectory: boolean }[]>
   /** Remove a directory and everything in it. */

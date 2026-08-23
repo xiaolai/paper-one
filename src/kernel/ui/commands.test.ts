@@ -585,3 +585,31 @@ describe('contributed commands', () => {
     expect(buildCommands(ctx).some((c) => c.id.startsWith('example:'))).toBe(false)
   })
 })
+
+describe('the way into the removed books', () => {
+  /* ⌘K IS THE ONLY DOOR, so if this command is missing the sheet may as well
+     not exist. `trash.list` and `book.restore` were services for two phases
+     with no surface reaching either, while the remove confirmation promised
+     recovery "for two weeks" on screen — the gap this closes. */
+  it('is offered on the shelf', () => {
+    const { ctx, dispatched } = context({ screen: 'library' })
+    const command = find(buildCommands(ctx), 'library:trash')
+    expect(command?.label).toBe('Removed books…')
+    command?.run()
+    expect(dispatched).toEqual([{ type: 'toggleLayer', layer: 'trashOpen' }])
+  })
+
+  it('is not offered in the reader, where there is no shelf to restore to', () => {
+    expect(find(buildCommands(context({ screen: 'reader' }).ctx), 'library:trash')).toBeUndefined()
+  })
+
+  it('answers to the words a reader would actually type', () => {
+    /* Nobody hunting for a book they deleted searches "trash" first. They
+       search "deleted", or "restore", or "undo" — and a palette entry nobody
+       can find is the same as no entry. */
+    const commands = buildCommands(context({ screen: 'library' }).ctx)
+    for (const word of ['deleted', 'restore', 'undo', 'recover', 'trash']) {
+      expect(filterCommands(commands, word).map((c) => c.id), word).toContain('library:trash')
+    }
+  })
+})

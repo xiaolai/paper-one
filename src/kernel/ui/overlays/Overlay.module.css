@@ -180,3 +180,39 @@
   border-radius: var(--radius-mark);
   border: 1px solid var(--line-2);
 }
+
+/* ---- the trash sheet ---------------------------------------------------
+   A row here is not a button. Every other list in this file runs on click —
+   the switcher opens, the palette executes — and this one carries a control
+   INSIDE it, so making the row itself pressable would nest a button in a
+   button and give the reader two targets for two different acts. */
+.row[data-static='true'] {
+  cursor: default;
+}
+
+/* How long is left, which is the part that decides whether to act now. */
+.rowNote {
+  color: var(--ink-2);
+}
+
+/* The one control on the row. Quiet until wanted: the shelf is scanned, and a
+   column of filled buttons would read as a form to be completed. */
+.rowAction {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-6);
+  padding: var(--space-4) var(--space-10);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: none;
+  color: var(--ink-2);
+  font-family: inherit;
+  font-size: var(--text-caption);
+  cursor: pointer;
+}
+
+.rowAction:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}

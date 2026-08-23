@@ -27,7 +27,13 @@ import { isContributedPaneId, type Align, type PageLayout, type PaneId, type Rea
 /* `tagsOpen` is the tag editor as a sheet over the reader — the shelf opens
  * the same editor as a popover, which is not a layer because it is dismissed
  * by its own click-outside and never takes the window. */
-const LAYER_ORDER = ['paletteOpen', 'switcherOpen', 'tagsOpen'] as const
+/* `trashOpen` is the removed-books sheet. It EARNED its place the day the
+   app could remove a book but not un-remove one: `book.restore` and
+   `trash.list` had existed as services and CLI verbs since phase 11, and the
+   remove confirmation promised recovery "for two weeks", while no surface in
+   the app could perform it. A promise printed on screen that only a terminal
+   can keep is not a promise. */
+const LAYER_ORDER = ['paletteOpen', 'switcherOpen', 'tagsOpen', 'trashOpen'] as const
 
 /** Derived from LAYER_ORDER so the action types and the dismiss order cannot
  *  drift apart — adding a layer in one place now fails to compile in the other. */
@@ -74,6 +80,8 @@ export interface AppState {
   readonly switcherOpen: boolean
   /** The tag editor over the reader's current book, as a sheet — ⌘T. */
   readonly tagsOpen: boolean
+  /** Removed books, with what is left of their fortnight — see LAYER_ORDER. */
+  readonly trashOpen: boolean
   /** Chrome fades to 0 and returns on pointer-near (§06). */
   readonly chromeOn: boolean
   readonly rulerOn: boolean
@@ -200,6 +208,7 @@ export const initialState: AppState = {
   paletteOpen: false,
   libraryQuery: '',
   switcherOpen: false,
+  trashOpen: false,
   tagsOpen: false,
   chromeOn: false,
   rulerOn: false,
@@ -326,6 +335,11 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
         switcherOpen: false,
         paletteOpen: false,
         tagsOpen: false,
+        /* A SCREEN CHANGE CLOSES EVERY LAYER, and this one is in the list for
+           the reason the others are: the sheet is about the shelf, and a
+           reader who restored a book and opened it would otherwise come back
+           from the reader to find the trash still hanging over the library. */
+        trashOpen: false,
       }
     }
 

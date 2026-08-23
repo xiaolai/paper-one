@@ -47,6 +47,8 @@ import {
 import { BookSwitcher } from './overlays/BookSwitcher'
 import { CommandPalette } from './overlays/CommandPalette'
 import { OverlaySheet } from './overlays/OverlaySheet'
+import { listTrash, type TrashedBook } from '../core/bookTrash'
+import { TrashSheet } from './overlays/TrashSheet'
 import { TitleBar } from './shell/TitleBar'
 import { WindowShell } from './shell/WindowShell'
 import { Library } from './screens/Library'
@@ -933,6 +935,68 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
   )
 
   /**
+   * THE TRASH, READ ONLY WHILE THE SHEET IS OPEN.
+   *
+   * `listTrash` walks `trash/` and opens a `book.json` per folder, which is
+   * work proportional to everything ever removed — so it runs when the reader
+   * asks and not on every render of a shelf they are only scrolling.
+   *
+   * RE-READ AFTER A RESTORE rather than filtered in place: `restore` can come
+   * back `partial`, and a row removed from a local array would claim a success
+   * the disk did not give. The disk is the answer; this only shows it.
+   */
+  const [trashRows, setTrashRows] = useState<readonly TrashedBook[] | null>(null)
+  /* ONE NOW FOR THE WHOLE SHEET, read when it opens. A hundred rows each
+     calling `Date.now()` would be a hundred slightly different nows, and two
+     books removed in the same second could report different days left. The
+     same reasoning the shelf's own `now` carries; it does not ride here
+     because the shelf recomputes on a minute tick and a fortnight does not
+     need one. */
+  const [trashNow, setTrashNow] = useState(0)
+  const readTrash = useCallback(() => {
+    if (!fs) {
+      setTrashRows([])
+      return
+    }
+    let live = true
+    void listTrash(fs)
+      .then((rows) => {
+        if (!live) return
+        /* Newest first — the book a reader came here for is the one they just
+           lost, and it is almost never at the bottom of a fortnight's list. */
+        setTrashRows([...rows].sort((a, b) => (b.removedAt ?? 0) - (a.removedAt ?? 0)))
+      })
+      .catch(() => {
+        /* An unreadable trash is not an empty one, but there is nothing a
+           reader can do with the distinction here; the empty state says what
+           the room is for either way, and `listTrash` already reports. */
+        if (live) setTrashRows([])
+      })
+    return () => {
+      live = false
+    }
+  }, [fs])
+
+  useEffect(() => {
+    if (!state.trashOpen) return
+    setTrashRows(null)
+    setTrashNow(Date.now())
+    return readTrash()
+  }, [state.trashOpen, readTrash])
+
+  const restoreBook = useCallback(
+    (bookId: string) => {
+      void services.library.restore(bookId).then(() => {
+        readTrash()
+        /* The shelf learns about it the same way it learns about any other
+           change to the store — through the library subscription — so nothing
+           here has to put the row back by hand. */
+      })
+    },
+    [services.library, readTrash],
+  )
+
+  /**
    * Where to resume, read from the BOOK'S OWN RECORD rather than from the index.
    *
    * The index is a cache and it can be one write behind — a crash between
@@ -1764,6 +1828,19 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
           />
         )}
 
+        {/* REMOVED BOOKS, over the shelf. On the library screen only: it lists
+            what this device removed, and the shelf is where a reader notices
+            one missing. Reached from ⌘K — "Removed books…", which also answers
+            to deleted, restore and undo. */}
+        {state.screen === 'library' && state.trashOpen && (
+          <TrashSheet
+            rows={trashRows ?? []}
+            loading={trashRows === null}
+            now={trashNow}
+            onRestore={restoreBook}
+            onDismiss={() => dispatch({ type: 'closeLayer', layer: 'trashOpen' })}
+          />
+        )}
       </WindowShell>
 
     </>

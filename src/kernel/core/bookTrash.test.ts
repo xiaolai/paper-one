@@ -5,6 +5,7 @@ import {
   emptyExpired,
   rescueStrandedMarks,
   restoreBook,
+  timeLeft,
   trashBook,
 } from './bookTrash'
 import { fakeFs } from './fakeFs.testkit'
@@ -443,5 +444,36 @@ describe('a removal interrupted half way', () => {
     expect(fs.store.has(`${folderOf('book_a')}/book.json`)).toBe(true)
     expect(fs.store.has(`${folderOf('book_a')}/content.epub`)).toBe(true)
     expect(fs.store.has(`${folderOf('book_a')}/marks.json`)).toBe(true)
+  })
+})
+
+describe('how long a trashed book has left', () => {
+  /* The words a reader reads next to a Restore button, derived from the same
+     `TRASH_DAYS` the sweep uses — the drift `TRASH_KEPT_FOR` exists to stop. */
+  const now = 1_700_000_000_000
+  const day = 24 * 60 * 60 * 1000
+
+  it('counts the days', () => {
+    expect(timeLeft(now + 13 * day, now)).toBe('13 days left')
+  })
+
+  it('says one day in the singular, because "1 days" is a bug on screen', () => {
+    expect(timeLeft(now + day, now)).toBe('1 day left')
+  })
+
+  it('rounds up, so a book with hours left is not reported as gone', () => {
+    expect(timeLeft(now + 3 * 60 * 60 * 1000, now)).toBe('1 day left')
+  })
+
+  it('names the sweep rather than the calendar once the window has passed', () => {
+    /* `emptyExpired` runs at LAUNCH and never on a timer, so a book whose
+       fortnight ended while the app was open is still restorable. "Today"
+       would promise a deletion that has not been scheduled. */
+    expect(timeLeft(now - day, now)).toBe('Goes at next launch')
+    expect(timeLeft(now, now)).toBe('Goes at next launch')
+  })
+
+  it('says an unreadable entry stays, because the sweep leaves it', () => {
+    expect(timeLeft(null, now)).toBe('Kept')
   })
 })
