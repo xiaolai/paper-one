@@ -51,6 +51,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
         .invoke_handler(tauri::generate_handler![
             commands::peer_status,
             commands::peer_local_role,
+            commands::peer_set_local_role,
             commands::paper_data_root,
             commands::fs_fsync,
             commands::peer_list_peers,

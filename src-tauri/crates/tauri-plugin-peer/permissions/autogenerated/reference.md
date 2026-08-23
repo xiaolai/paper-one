@@ -11,6 +11,7 @@ every session is accepted only from a persisted peer.
 
 - `allow-peer-status`
 - `allow-peer-local-role`
+- `allow-peer-set-local-role`
 - `allow-paper-data-root`
 - `allow-fs-fsync`
 - `allow-peer-list-peers`
@@ -502,6 +503,32 @@ Enables the peer_set_grants command without any pre-configured scope.
 <td>
 
 Denies the peer_set_grants command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:allow-peer-set-local-role`
+
+</td>
+<td>
+
+Enables the peer_set_local_role command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`peer:deny-peer-set-local-role`
+
+</td>
+<td>
+
+Denies the peer_set_local_role command without any pre-configured scope.
 
 </td>
 </tr>
