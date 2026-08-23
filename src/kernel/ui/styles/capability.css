@@ -212,6 +212,72 @@
   font-size: var(--text-small);
 }
 
+/* A QR THAT BELONGS TO THE PAGE IT IS ON.
+ *
+ * The plugin renders it with the `qrcode` crate's SVG writer, which emits a
+ * WHITE RECT and BLACK MODULES at `min_dimensions(240, 240)`. Drawn as an
+ * `<img src="data:image/svg+xml,…">` that is a hard white card with black on
+ * it, pasted onto whatever theme the reader chose — no stylesheet can reach
+ * inside a data URI to say otherwise, which is why it looked imported rather
+ * than drawn.
+ *
+ * Inlined instead, the SVG is in the document and ordinary CSS reaches it: a
+ * `fill` PRESENTATION ATTRIBUTE loses to a `fill` PROPERTY, so the two rules
+ * below beat the crate's own colours without the crate knowing. The card
+ * becomes the page and the modules become ink.
+ *
+ * SIZED HERE, NOT IN THE MARKUP. The SVG carries its own 240px floor from
+ * `min_dimensions`; `width: 100%` against a bounded figure lets the pane
+ * decide instead, and `height: auto` keeps it square without the markup
+ * restating a number the SVG already knows.
+ */
+.paper-cap-qr {
+  width: var(--qr-size);
+  max-width: 100%;
+  align-self: center;
+}
+
+.paper-cap-qr svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+/* The crate's white card. */
+.paper-cap-qr svg rect {
+  fill: transparent;
+}
+
+/* The modules, in the reader's ink rather than in black. */
+.paper-cap-qr svg path {
+  fill: currentColor;
+}
+
+/* THE RING ON A FILLED PILL SITS ON IT, NOT OUTSIDE IT.
+ *
+ * §07's global ring is `outline-offset: var(--space-2)`, and that is right for
+ * the control it was written against: the composer's and the pane search's
+ * input is BARE AND TRANSPARENT inside a pill its PARENT draws, so the two
+ * pixels land in the parent's own fill and the whole thing reads as one
+ * focused control.
+ *
+ * This field is the pill. Making the input itself the filled shape is what the
+ * rule above exists to do, and it left the ring floating two pixels clear of
+ * the fill with the pane's background showing through the gap — a pill drawn
+ * around a pill. Nothing was wrong with either rule alone; the offset simply
+ * describes an element whose visible edge is its border box, and this one's
+ * visible edge is its background.
+ *
+ * A negative offset puts the ring back on the edge it belongs to, which is
+ * what `.noteInput` in `SidePane.module.css` already does for the same reason
+ * and by the same amount. Not zero: on a 999px radius the two curves meet at a
+ * tangent, and a hairline of pane background survives antialiasing between
+ * them.
+ */
+.paper-cap-field:focus-visible {
+  outline-offset: -1px;
+}
+
 .paper-cap-field::placeholder {
   color: var(--muted);
 }

@@ -100,6 +100,16 @@ export type TransferState = 'running' | 'done' | 'failed'
 
 export interface TransferProgress {
   readonly transferId: number
+  /**
+   * The blob folder — which book's bytes these are.
+   *
+   * `blobFolderOf(bookId)` derives the same string, so the caller that asked
+   * for a download matches its own request FORWARD, by computing the folder it
+   * expects rather than trying to invert `safeId`. The event carried a bare
+   * counter before this, which is why the only surface that ever read it could
+   * say "Transfer 1, done" and nothing a reader could act on.
+   */
+  readonly folder: string
   readonly received: number
   readonly total: number
   readonly state: TransferState
@@ -129,6 +139,14 @@ export type Unsubscribe = () => void
 export interface PeerWire {
   status(): Promise<PeerStatus>
   localRole(): Promise<PeerRole>
+  /**
+   * Record which side this device is, for the NEXT launch.
+   *
+   * Not a live switch — `role.rs` is read once when the node starts and `sync`
+   * binds it at its own start. A phone ignores it: the build target wins
+   * outright there.
+   */
+  setLocalRole(role: PeerRole): Promise<void>
   dataRoot(): Promise<string>
   fsync(path: string): Promise<void>
 
@@ -190,6 +208,7 @@ export function tauriWire(): PeerWire {
   return {
     status: () => invoke(command('peer_status')),
     localRole: () => invoke(command('peer_local_role')),
+    setLocalRole: (role) => invoke(command('peer_set_local_role'), { role }),
     dataRoot: () => invoke(command('paper_data_root')),
     fsync: (path) => invoke(command('fs_fsync'), { path }),
 

@@ -378,6 +378,9 @@ pub async fn fetch(
 
     let node = node.clone();
     let total = request.expected_size;
+    /* Copied out before the task takes ownership of anything else: the folder
+    is what lets the caller match this transfer to the book it asked for. */
+    let folder = request.folder.clone();
     let claim = TransferClaim {
         node: node.clone(),
         target: target.path().to_path_buf(),
@@ -394,6 +397,7 @@ pub async fn fetch(
             total,
             expected,
             transfer_id,
+            &folder,
             hooks,
             &landed,
         )
@@ -413,6 +417,7 @@ pub async fn fetch(
         };
         node.emit(PeerEvent::Transfer(TransferProgress {
             transfer_id,
+            folder: folder.clone(),
             received,
             total,
             state,
@@ -435,6 +440,7 @@ async fn run(
     expected_size: u64,
     expected: blake3::Hash,
     transfer_id: u64,
+    folder: &str,
     hooks: FetchHooks,
     landed: &AtomicU64,
 ) -> Result<()> {
@@ -450,6 +456,7 @@ async fn run(
         landed.store(received, Ordering::Relaxed);
         node.emit(PeerEvent::Transfer(TransferProgress {
             transfer_id,
+            folder: folder.to_owned(),
             received,
             total: expected_size,
             state: TransferState::Running,
@@ -753,6 +760,16 @@ mod tests {
         assert!(!target.with_extension("epub.part").exists());
         let events = transfer_events(&mut pair.satchel).await;
         assert!(events.iter().all(|e| e.transfer_id == transfer_id));
+        /* EVERY event names the book, not just the terminal one. A progress
+        report nobody can attribute to a book cannot be shown on the book,
+        which is the only place a reader looks for it — so the running
+        frames carry it too, and a surface that reads only the last event
+        is not the one being enabled here. */
+        assert!(
+            events.iter().all(|e| e.folder == "bk1"),
+            "every transfer event carries the blob folder: {:?}",
+            events.iter().map(|e| e.folder.as_str()).collect::<Vec<_>>()
+        );
         assert_eq!(events.first().unwrap().received, 0);
         assert!(
             events

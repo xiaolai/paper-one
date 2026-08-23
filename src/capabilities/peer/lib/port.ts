@@ -51,6 +51,14 @@ export interface Channel {
 export interface PeerPort {
   status(): Promise<PeerStatus>
   localRole(): Promise<PeerRole>
+  /**
+   * Record which side this device is, for the NEXT launch.
+   *
+   * Not a live switch — `role.rs` is read once when the node starts and `sync`
+   * binds it at its own start. A phone ignores it: the build target wins
+   * outright there.
+   */
+  setLocalRole(role: PeerRole): Promise<void>
   dataRoot(): Promise<string>
   /** The plugin's durability primitive — the sync journal's fsync hook. */
   fsync(path: string): Promise<void>
@@ -149,6 +157,7 @@ export function createPeerPort(wire: PeerWire): PeerPort {
   return {
     status: () => wire.status(),
     localRole: () => wire.localRole(),
+    setLocalRole: (role) => wire.setLocalRole(role),
     dataRoot: () => wire.dataRoot(),
     fsync: (path) => wire.fsync(path),
 

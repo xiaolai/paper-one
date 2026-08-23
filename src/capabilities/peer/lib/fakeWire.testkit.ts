@@ -83,7 +83,9 @@ export async function fakeBlobHash(bytes: Uint8Array): Promise<string> {
 
 class FakeWireImpl implements FakeWire {
   readonly id: string
-  readonly roleOf: PeerRole
+  /* Mutable on the fake alone, so `setLocalRole` can be observed in a test
+     without modelling a relaunch. The wire's own interface keeps it readonly. */
+  roleOf: PeerRole
   readonly blobs = new Map<string, Uint8Array>()
   landBlob: FakeWire['landBlob'] = null
   serveBlob: FakeWire['serveBlob'] = null
@@ -171,6 +173,14 @@ class FakeWireImpl implements FakeWire {
 
   async localRole(): Promise<PeerRole> {
     return this.roleOf
+  }
+
+  /* The fake applies it AT ONCE, where the plugin stores it for the next
+     launch. That difference is deliberate and stated: a test asserting the
+     pane's behaviour should not also have to model a restart, and no test may
+     read this as evidence that the real one switches live. */
+  async setLocalRole(role: PeerRole): Promise<void> {
+    this.roleOf = role
   }
 
   async dataRoot(): Promise<string> {
@@ -324,7 +334,14 @@ class FakeWireImpl implements FakeWire {
   async blobFetch(request: BlobRequest): Promise<number> {
     const transferId = this.nextTransfer++
     const progress = (state: TransferProgress['state'], received: number, total: number, error?: string) =>
-      this.emit('transfer', { transferId, received, total, state, ...(error === undefined ? {} : { error }) })
+      this.emit('transfer', {
+        transferId,
+        folder: request.folder,
+        received,
+        total,
+        state,
+        ...(error === undefined ? {} : { error }),
+      })
     const remote = this.links.get(request.peerId)
     const task = async (): Promise<void> => {
       const hasSession = [...this.sessions.values()].some((s) => s.open && s.peerId === request.peerId)

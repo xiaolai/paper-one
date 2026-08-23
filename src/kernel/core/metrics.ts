@@ -818,6 +818,22 @@ export const MARK_SWATCH = 14
 export const THEME_SWATCH_H = 52
 
 /**
+ * The pairing QR, drawn at the size a phone camera actually needs.
+ *
+ * 160, against the 192 the markup used to hard-code and the 240 floor the
+ * `qrcode` crate renders at. A QR is read from about a hand's distance and a
+ * modern camera resolves this version's modules well below 160; the old size
+ * was chosen to look like the thing it was — a picture — rather than to be
+ * scanned, and it dominated a settings pane that is otherwise rows of text.
+ *
+ * It is also the WRONG CONTROL for most pairings, which is why it is no
+ * longer the first thing the section offers: two Macs cannot photograph each
+ * other's screens, and the invite they need is a string. The QR is for a
+ * phone, and it is sized as the secondary affordance it is.
+ */
+export const QR_SIZE = 160
+
+/**
  * THE WINDOW WIDTHS THE LAYOUT CHANGES AT.
  *
  * Two, and only two, because each one is a decision about what to give up and
@@ -1071,6 +1087,7 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
     '--toc-indent': px(TOC_INDENT),
     '--mark-swatch': px(MARK_SWATCH),
     '--theme-swatch-h': px(THEME_SWATCH_H),
+    '--qr-size': px(QR_SIZE),
     '--track-w': px(TRACK_W),
     '--traffic-light': px(TRAFFIC_LIGHT),
     '--scrollbar-w': px(SCROLLBAR_W),

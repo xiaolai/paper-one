@@ -89,6 +89,16 @@ pub enum TransferState {
 #[serde(rename_all = "camelCase")]
 pub struct TransferProgress {
     pub transfer_id: u64,
+    /// WHICH BOOK'S BYTES THESE ARE — the blob folder from the request.
+    ///
+    /// The event used to carry a counter and nothing else, so every surface
+    /// downstream could say "Transfer 1, done" and no more. That is not a
+    /// presentation problem: a progress report nobody can attribute to a book
+    /// cannot be shown ON the book, which is the only place a reader looks for
+    /// it. The folder is already in `BlobRequest` when the fetch starts, and
+    /// `blobFolderOf(bookId)` on the TypeScript side derives the same string —
+    /// so the caller that asked for a download can match its own request.
+    pub folder: String,
     pub received: u64,
     pub total: u64,
     pub state: TransferState,
@@ -174,6 +184,7 @@ mod tests {
             }),
             PeerEvent::Transfer(TransferProgress {
                 transfer_id: 1,
+                folder: "a-book".into(),
                 received: 5,
                 total: 10,
                 state: TransferState::Running,
