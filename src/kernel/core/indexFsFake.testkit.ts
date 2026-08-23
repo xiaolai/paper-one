@@ -19,9 +19,17 @@ export function fakeFs(files: Record<string, string> = {}) {
   const store = new Map<string, Uint8Array>()
   for (const [k, v] of Object.entries(files)) store.set(k, new TextEncoder().encode(v))
   let reads = 0
-  const fs: IndexFs & { store: Map<string, Uint8Array>; reads: () => number } = {
+  /* Per path, because the assertion worth making is "this file was
+     rewritten once", not "the disk was touched once". */
+  const written = new Map<string, number>()
+  const fs: IndexFs & {
+    store: Map<string, Uint8Array>
+    reads: () => number
+    writes: (path: string) => number
+  } = {
     store,
     reads: () => reads,
+    writes: (path) => written.get(path) ?? 0,
     readDir: async (path) => {
       const names = new Set<string>()
       for (const key of store.keys()) {
@@ -43,7 +51,10 @@ export function fakeFs(files: Record<string, string> = {}) {
       if (!bytes) throw new Error(`no such file: ${path}`)
       return bytes
     },
-    writeFile: async (path, bytes) => void store.set(path, bytes),
+    writeFile: async (path, bytes) => {
+      written.set(path, (written.get(path) ?? 0) + 1)
+      store.set(path, bytes)
+    },
     /* A DIRECTORY EXISTS when anything lives under it — same reasoning as
      * `rename`. Answering only for exact keys made `trashBook`'s "is the folder
      * there" guard false for every folder, so removal silently moved nothing in
@@ -61,6 +72,11 @@ export function fakeFs(files: Record<string, string> = {}) {
       }
     },
     rename: async (from, to) => {
+      /* A RENAME COUNTS AS A WRITE OF ITS DESTINATION. Durable writes here go
+       * temp-file-then-rename, so counting only `writeFile` per path reports
+       * zero for every file the app actually rewrites — a counter that always
+       * answers zero is worse than none. */
+      written.set(to, (written.get(to) ?? 0) + 1)
       /* A DIRECTORY MOVES WITH ITS CONTENTS, as the real call does. Directories
        * are implicit here — a folder is the keys under it — so renaming one is
        * a prefix rewrite. Moving only the exact key made `trashBook`'s one

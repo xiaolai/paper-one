@@ -51,6 +51,15 @@ export interface Cards {
   subscribe(listener: () => void): () => void
   /** Add a card the caller minted (`createCard`). Newest first. */
   add(card: Card): Promise<void>
+  /**
+   * Add several cards in a single write.
+   *
+   * `add` per card serialises the WHOLE global card list every time, so an
+   * import of a thousand cards wrote the growing list a thousand times. One
+   * `addCard` per card, folded into one mutation, keeps the ordering identical
+   * to adding them in sequence.
+   */
+  addMany(cards: readonly Card[]): Promise<void>
   remove(id: string): Promise<void>
   /**
    * Change the list: publish and persist, in that order. A mutation returning
@@ -225,6 +234,12 @@ export function createCards({
       }
     },
     add: (card) => applyCards((prev) => addCard(prev, card)),
+    addMany: (cards) =>
+      cards.length === 0
+        ? Promise.resolve()
+        : /* Folded in order, so the newest-first ordering is what a sequence
+             of `add` calls would have produced. */
+          applyCards((prev) => cards.reduce<readonly Card[]>((sofar, card) => addCard(sofar, card), prev)),
     // A tombstone, not a vanished row — see `removeCard`.
     remove: (id) => applyCards((prev) => removeCard(prev, id, clock())),
     apply: (mutate) => applyCards(mutate),

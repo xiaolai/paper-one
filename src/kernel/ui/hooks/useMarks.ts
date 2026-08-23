@@ -42,6 +42,16 @@ export interface MarksView {
    */
   add: <T extends NewMark>(draft: T) => Mark & Pick<T, 'kind'>
   /**
+   * Mint and write several marks for ONE book in a single store write, and
+   * resolve when it has landed.
+   *
+   * `add` is right for the reader marking a passage — one mark, one write, the
+   * promise let go because the pane reports persistence separately. An import
+   * is the other case: a whole archive in one write per book, and an answer
+   * about whether it worked before anything is claimed.
+   */
+  addMany: (bookId: string, drafts: readonly NewMark[]) => Promise<void>
+  /**
    * Remove a mark — from ITS OWN BOOK, which is not always the open one.
    *
    * THE WHOLE MARK, not its id. These used to take an id and let the store
@@ -122,6 +132,8 @@ export function useMarks(store: MarkStore, bookId: string | null): MarksView {
         letGo(store.add(mark))
         return mark
       },
+      addMany: (bookId: string, drafts: readonly NewMark[]): Promise<void> =>
+        store.addMany(bookId, drafts.map((draft) => createMark(draft))),
       remove: (mark: MarkRef) => letGo(store.remove(mark.id, mark.bookId)),
       setNote: (mark: MarkRef, note: string) => letGo(store.updateNote(mark.id, note, mark.bookId)),
       rekey: (from: string, to: string) => letGo(store.rekey(from, to)),

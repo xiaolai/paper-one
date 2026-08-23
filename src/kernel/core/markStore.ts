@@ -151,6 +151,20 @@ export interface MarkStore {
    */
   add(mark: Mark): Promise<void>
   /**
+   * Add several marks to ONE book in a single write.
+   *
+   * `add` per row is a whole-file read, mutate and rewrite per row, queued —
+   * so importing an archive of a thousand marks did a thousand rewrites of a
+   * file that grew with every one of them. The reader's own marking never hits
+   * this (one mark, one write, which is correct), but an import is the case
+   * the per-row shape cannot serve.
+   *
+   * The same `upsertOverlapping` per mark, folded, so the overlap rule and the
+   * tombstoning are identical to adding them one at a time — this is one
+   * write, not a different policy.
+   */
+  addMany(bookId: string, marks: readonly Mark[]): Promise<void>
+  /**
    * Remove a mark wherever it lives. Routed by id: the open book's list is
    * consulted first, then `all`, then `bookId` when the caller knows it —
    * a mark none of them know is a rejection, not a silent no-op.
@@ -594,6 +608,16 @@ export function createMarkStore({
      * row is TOMBSTONED under this clock, so the replacement travels. */
     applyTo(mark.bookId, (prev) => upsertOverlapping(prev, mark, clock()))
 
+  const addMany: MarkStore['addMany'] = (bookId, marks) => {
+    if (marks.length === 0) return Promise.resolve()
+    /* ONE CLOCK READING PER MARK, as `add` takes — the stamps have to be
+     * distinct or the tombstones a later mark writes over an earlier one in
+     * the same batch cannot be ordered. */
+    return applyTo(bookId, (prev) =>
+      marks.reduce<readonly Mark[]>((sofar, mark) => upsertOverlapping(sofar, mark, clock()), prev),
+    )
+  }
+
   const remove: MarkStore['remove'] = (id, bookId) =>
     // A tombstone, not a vanished row — see `removeMark`.
     applyToMark(id, bookId, (prev) => removeMark(prev, id, clock()))
@@ -680,6 +704,7 @@ export function createMarkStore({
     forBook,
     loadAll,
     add,
+    addMany,
     remove,
     updateNote,
     setTint,

@@ -809,33 +809,48 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
       }
       const everyMark = await marks.loadAllNow()
       const plan = planMarksImport(picked.archive, library.books, everyMark, cards.all)
-      for (const one of plan.additions) {
-        for (const mark of one.marks) {
-          marks.add({
-            bookId: one.bookId,
-            cfi: mark.localAnchor.cfi,
-            sectionIndex: mark.localAnchor.sectionIndex,
-            text: mark.text,
-            prefix: mark.prefix,
-            suffix: mark.suffix,
-            note: mark.note,
-            kind: mark.kind,
-            tint: mark.tint,
-            style: mark.style,
-            chapter: mark.chapter,
-          })
-        }
-        for (const card of one.cards) {
-          cards.make({
-            bookId: one.bookId,
-            kind: card.kind,
-            body: card.body,
-            answer: card.answer,
-            source: card.source,
-            cfi: card.localAnchor?.cfi ?? null,
-          })
-        }
-      }
+      /* ONE WRITE PER BOOK, AND ONE FOR THE CARDS — and every one of them
+       * AWAITED before the notice below claims anything.
+       *
+       * This looped `marks.add` and `cards.make` per row and reported success
+       * without waiting for any of them. Two defects in one shape: each call
+       * is a whole-file read-mutate-write, so a thousand-mark archive rewrote
+       * a growing file a thousand times and the card store re-serialised its
+       * entire global list per card; and "Added N marks" appeared whether or
+       * not a single write had landed, so a full disk produced a cheerful
+       * notice and no marginalia. */
+      await Promise.all([
+        ...plan.additions.map((one) =>
+          marks.addMany(
+            one.bookId,
+            one.marks.map((mark) => ({
+              bookId: one.bookId,
+              cfi: mark.localAnchor.cfi,
+              sectionIndex: mark.localAnchor.sectionIndex,
+              text: mark.text,
+              prefix: mark.prefix,
+              suffix: mark.suffix,
+              note: mark.note,
+              kind: mark.kind,
+              tint: mark.tint,
+              style: mark.style,
+              chapter: mark.chapter,
+            })),
+          ),
+        ),
+        cards.makeMany(
+          plan.additions.flatMap((one) =>
+            one.cards.map((card) => ({
+              bookId: one.bookId,
+              kind: card.kind,
+              body: card.body,
+              answer: card.answer,
+              source: card.source,
+              cfi: card.localAnchor?.cfi ?? null,
+            })),
+          ),
+        ),
+      ])
       /* THE BOOKS THAT MATCHED NOTHING ARE NAMED, not counted. An archive from
          another library matches nothing here, and an import that reports only
          its successes leaves the reader believing it worked. Three titles fit

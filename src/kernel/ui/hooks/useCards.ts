@@ -24,6 +24,17 @@ export interface CardsView {
   /** Move every row from a superseded book id onto the current one — see the service. */
   rekey: (from: string, to: string) => void
   make: (draft: NewCard) => Card
+  /**
+   * Mint and write several cards in ONE store write, and resolve when it has
+   * landed.
+   *
+   * `make` is right for the reader making a card — one card, one write, and
+   * the promise let go because `persistent` is what reports a store that
+   * cannot take writes. An import is the other case: it needs the whole batch
+   * in one write, and it needs to know whether it worked before it tells the
+   * reader it did.
+   */
+  makeMany: (drafts: readonly NewCard[]) => Promise<void>
   discard: (id: string) => void
 }
 
@@ -43,6 +54,8 @@ export function useCards(store: Cards): CardsView {
         letGo(store.add(card))
         return card
       },
+      makeMany: (drafts: readonly NewCard[]): Promise<void> =>
+        store.addMany(drafts.map((draft) => createCard(draft))),
       discard: (id: string) => letGo(store.remove(id)),
       rekey: (from: string, to: string) => letGo(store.rekey(from, to)),
     }),

@@ -413,3 +413,69 @@ describe('every mark, without a panel having been opened', () => {
     expect([...scanned.all, ...scanned.allBookmarks].map((mark) => mark.id)).toEqual([kept.id])
   })
 })
+
+/**
+ * ONE WRITE FOR A BATCH, and the same policy as adding them one by one.
+ *
+ * `add` is a whole-file read, mutate and rewrite, queued — correct for a
+ * reader marking a passage, and quadratic for an import, which rewrote a
+ * growing file once per mark. `addMany` exists for that second case, and the
+ * risk in having two doors is that they diverge: these pin that the batch
+ * applies the SAME overlap rule, not a faster one that skips it.
+ */
+describe('addMany', () => {
+  const at = (cfi: string) => highlight({ cfi })
+
+  it('lands every mark in the batch', async () => {
+    const { store: marks } = store()
+    await marks.open(BOOK)
+    await marks.addMany(BOOK, [
+      at('epubcfi(/6/4!/4/2,/1:0,/1:5)'),
+      at('epubcfi(/6/4!/4/4,/1:0,/1:5)'),
+      at('epubcfi(/6/4!/4/6,/1:0,/1:5)'),
+    ])
+    const live = (await marks.forBook(BOOK)).filter((mark) => mark.deletedAt === undefined)
+    expect(live).toHaveLength(3)
+  })
+
+  it('writes the book once rather than once per mark', async () => {
+    const { fs, store: marks } = store()
+    await marks.open(BOOK)
+    const before = fs.writes(marksPathIn(BOOK))
+    await marks.addMany(BOOK, [at('epubcfi(/6/4!/4/2,/1:0,/1:5)'), at('epubcfi(/6/4!/4/4,/1:0,/1:5)')])
+    expect(fs.writes(marksPathIn(BOOK)) - before, 'a batch wrote once per mark').toBe(1)
+  })
+
+  /* THE SAME OVERLAP RULE. A batch containing two marks over one passage must
+     resolve exactly as adding them in sequence does — the second replaces the
+     first, and the first is tombstoned so the replacement travels. */
+  it('applies the overlap rule within the batch', async () => {
+    const { fs, store: marks } = store()
+    await marks.open(BOOK)
+    const first = at('epubcfi(/6/4!/4/2,/1:0,/1:20)')
+    const second = at('epubcfi(/6/4!/4/2,/1:5,/1:12)')
+    await marks.addMany(BOOK, [first, second])
+
+    const live = await marks.forBook(BOOK)
+    expect(live, 'an overlapping pair both survived a batch').toHaveLength(1)
+    expect(live[0]?.id).toBe(second.id)
+
+    /* THE TOMBSTONE IS IN THE FILE, not in `forBook` — which filters them, so
+       asserting there would have looked right and checked nothing. The
+       superseded row has to travel, which is the whole reason `add` tombstones
+       rather than dropping. */
+    const written = JSON.parse(new TextDecoder().decode(fs.store.get(marksPathIn(BOOK))!)) as Mark[]
+    expect(
+      written.find((mark) => mark.id === first.id)?.deletedAt,
+      'the replaced mark was dropped instead of tombstoned',
+    ).toBeDefined()
+  })
+
+  it('writes nothing for an empty batch', async () => {
+    const { fs, store: marks } = store()
+    await marks.open(BOOK)
+    const before = fs.writes(marksPathIn(BOOK))
+    await marks.addMany(BOOK, [])
+    expect(fs.writes(marksPathIn(BOOK))).toBe(before)
+  })
+})
