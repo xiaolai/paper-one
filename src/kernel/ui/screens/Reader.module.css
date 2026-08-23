@@ -160,6 +160,36 @@
 }
 
 /*
+ * THE BOOK AND ITS MARKS ARE ONE BLEND GROUP, and saying so is what makes a
+ * highlight a highlighter instead of a sticker.
+ *
+ * The Overlayer's bands are painted OVER the glyphs and survive only because
+ * they multiply — see `--overlayer-highlight-blend-mode` in `global.css`. The
+ * band and the words it marks live on opposite sides of an iframe boundary:
+ * the SVG is the iframe's sibling in the paginator's shadow tree. With no
+ * isolation declared, the blend group resolves at whatever ancestor happens to
+ * establish a stacking context, WebKit composites the book's iframe onto its
+ * own layer, and the band ends up with nothing beneath it to darken — so it
+ * composites as `normal` and paints an opaque slab over the marked words.
+ *
+ * NOT VISIBLE TO EITHER SCREENSHOT PATH THAT AN AGENT REACHES FIRST, which is
+ * why it survived: `webview_screenshot` re-renders the webview off the
+ * compositor and applies the blend correctly, so the capture looked right while
+ * the screen was wrong. Only a window-server capture (`scripts/shot-window.sh`)
+ * or the reader's own eyes show it. Measured on the running app, Sage, amber
+ * tint: the screen read #FAE3B5 — the raw fill — against #DBCC94 captured from
+ * the same instant through the webview. The words under it were gone.
+ *
+ * On `foliate-view` rather than `.text` because this element IS the boundary
+ * the group has to span: everything the blend needs — the book's iframe and the
+ * overlay that marks it — is inside its shadow tree, and nothing that has to
+ * escape a stacking context is.
+ */
+.text foliate-view {
+  isolation: isolate;
+}
+
+/*
  * In scrolled flow the book element is also the SCROLL PORT, and a scroll port
  * sized to the prose grid puts its scrollbar at the prose grid's edge.
  *

@@ -21,6 +21,12 @@ const css = readFileSync(
   'utf8',
 ).replace(/\/\*[\s\S]*?\*\//g, '')
 
+/** The reader's own sheet, where the book element's blend group is declared. */
+const readerCss = readFileSync(
+  fileURLToPath(new URL('../screens/Reader.module.css', import.meta.url)),
+  'utf8',
+).replace(/\/\*[\s\S]*?\*\//g, '')
+
 /**
  * The FIRST declaration of a custom property in the stylesheet.
  *
@@ -63,6 +69,31 @@ describe('the highlight overlay', () => {
     // Under multiply, opacity is the mark's strength and costs the text
     // nothing. Under `normal` it would be the strength of the film.
     expect(declared('--overlayer-highlight-opacity')).toBe('1')
+  })
+
+  it('gives the book element a blend group, or the mode above does nothing', () => {
+    /* THE MODE IS NOT ENOUGH ON ITS OWN, which is the whole reason this
+       assertion sits beside the three above rather than somewhere in the
+       layout tests. A band multiplies with its BACKDROP, and the words it
+       marks are on the far side of an iframe boundary — the Overlayer's SVG is
+       the iframe's sibling inside the paginator's shadow tree. With no
+       isolation declared the group resolves at whatever ancestor happens to
+       establish a stacking context, WebKit composites the book's iframe onto a
+       layer of its own, and the band finds nothing beneath it to darken: it
+       composites as `normal` and paints an opaque slab over the marked words.
+
+       IT LOOKED FINE FROM EVERY SCREENSHOT AN AGENT TAKES FIRST. The webview's
+       own capture re-renders off the compositor and applies the blend, so the
+       picture was right while the screen was wrong; only a window-server
+       capture (`scripts/shot-window.sh`) or a reader's eyes showed it.
+       Measured on the running app, Sage, amber tint: #FAE3B5 on screen — the
+       raw fill, words gone — against #DBCC94 from the webview at the same
+       instant.
+
+       A text scan, with the same limit as `declared` above and accepted for
+       the same reason: what this can catch is the declaration being deleted as
+       dead CSS, which is exactly how it would go. */
+    expect(/foliate-view\s*\{[^}]*isolation\s*:\s*isolate\s*;/.test(readerCss)).toBe(true)
   })
 
   it('declares them on :root, where the shadow tree can inherit them', () => {

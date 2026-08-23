@@ -2815,6 +2815,7 @@
     "src/kernel/ui/reader/generatedContent.test.ts > suppressEmptyGeneratedContent > replaces its own sheet rather than stacking one per re-render",
     "src/kernel/ui/reader/generatedContent.test.ts > suppressEmptyGeneratedContent > takes its sheet back off when the document no longer needs it",
     "src/kernel/ui/reader/markBlend.test.ts > the highlight overlay > declares them on :root, where the shadow tree can inherit them",
+    "src/kernel/ui/reader/markBlend.test.ts > the highlight overlay > gives the book element a blend group, or the mode above does nothing",
     "src/kernel/ui/reader/markBlend.test.ts > the highlight overlay > is fully opaque, which multiply makes safe",
     "src/kernel/ui/reader/markBlend.test.ts > the highlight overlay > multiplies rather than painting a film over the glyphs",
     "src/kernel/ui/reader/markBlend.test.ts > the highlight overlay > screens on the dark theme, because multiply can only darken",
