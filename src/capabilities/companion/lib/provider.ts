@@ -84,6 +84,41 @@ export function localModelOf(route: RouteId): string | null {
   return route.startsWith('local:') ? route.slice('local:'.length) : null
 }
 
+/**
+ * The daemon-facing model id inside a non-agent route, or null.
+ *
+ * BOTH PREFIXES, and that is the fix. The probe mints `local:<id>` and
+ * `endpoint:<id>`; the plugin's `resolve_model` accepts the BARE id of either,
+ * so a caller's job is to strip the namespace. Only `local:` was stripped, and
+ * every other non-agent route fell through a `?? ''` — so a registered cloud
+ * endpoint asked the daemon for a model called the empty string.
+ *
+ * Null for a shape this does not recognise, so the caller REFUSES rather than
+ * sending an empty model and letting the daemon name the failure.
+ */
+export function modelIdOf(route: RouteId): string | null {
+  for (const prefix of ['local:', 'endpoint:']) {
+    if (route.startsWith(prefix)) return route.slice(prefix.length)
+  }
+  return null
+}
+
+/**
+ * The model id for a non-agent route, or a refusal that names the route.
+ *
+ * An unrecognised route shape used to become `''`, which the daemon rejected
+ * as an unknown model — an error naming nothing the reader or a maintainer
+ * could act on. A route id Paper did not mint is Paper's mistake, and the
+ * message says which id.
+ */
+function requireModelId(route: RouteId): string {
+  const id = modelIdOf(route)
+  if (id === null || id === '') {
+    throw new Error(`The companion cannot answer on the route ${JSON.stringify(route)}.`)
+  }
+  return id
+}
+
 export function createCompanionProvider({
   port,
   route,
@@ -148,7 +183,7 @@ export function createCompanionProvider({
       const running = (
         isAgentRoute(chosen)
           ? port.agentAsk(chosen, prompt, depth(), push, signal)
-          : port.generate(localModelOf(chosen) ?? '', COMPANION_SYSTEM_PROMPT, prompt, push, signal)
+          : port.generate(requireModelId(chosen), COMPANION_SYSTEM_PROMPT, prompt, push, signal)
       )
         .then(() => {})
         .catch((error: unknown) => {

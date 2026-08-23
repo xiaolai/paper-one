@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { AskContext } from '../../../kernel'
 import type { InferencePort } from '../../inference'
-import { createCompanionProvider, effectiveRoute, isAgentRoute, localModelOf } from './provider'
+import { createCompanionProvider, effectiveRoute, isAgentRoute, localModelOf, modelIdOf } from './provider'
 
 /**
  * The provider that answers on all three routes.
@@ -278,5 +278,42 @@ describe('overlapping asks', () => {
       expect.objectContaining({ cfi: 'cfi/FIRST' }),
     ])
     expect(b.done).toEqual([expect.objectContaining({ cfi: 'cfi/SECOND' })])
+  })
+})
+
+/**
+ * EVERY NON-AGENT ROUTE IS PARSED, not assumed local.
+ *
+ * The probe mints `local:<id>` and `endpoint:<id>`, and the plugin's
+ * `resolve_model` takes the bare id of either — so stripping the namespace is
+ * the caller's job. Only `local:` was stripped and everything else fell
+ * through a `?? ''`, so a registered cloud endpoint asked the daemon for a
+ * model named the empty string and got back an error about a model nobody had
+ * named.
+ */
+describe('the daemon-facing model id', () => {
+  it('strips either namespace the probe mints', () => {
+    expect(modelIdOf('local:qwen3-4b')).toBe('qwen3-4b')
+    expect(modelIdOf('endpoint:my-openai')).toBe('my-openai')
+  })
+
+  it('refuses a shape it does not recognise, rather than answering empty', () => {
+    expect(modelIdOf('agent:codex')).toBeNull()
+    expect(modelIdOf('qwen3-4b')).toBeNull()
+  })
+
+  it('names the route when it cannot answer on it', async () => {
+    const { port } = portWith(async () => '')
+    const provider = createCompanionProvider({ port, route: () => 'weird:thing', depth: () => 'default' })
+    await expect(
+      drain(provider.ask('why?', CONTEXT, new AbortController().signal)),
+    ).rejects.toThrow(/weird:thing/)
+  })
+
+  it('sends an endpoint route to generate with its bare id', async () => {
+    const { port, seen } = portWith(async () => '')
+    const provider = createCompanionProvider({ port, route: () => 'endpoint:my-openai', depth: () => 'default' })
+    await drain(provider.ask('why?', CONTEXT, new AbortController().signal))
+    expect(seen[0]).toBe('generate:my-openai')
   })
 })
