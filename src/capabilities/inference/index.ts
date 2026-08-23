@@ -212,4 +212,5 @@ export function inferenceDownloadLine(): string | null {
 
 export { useInference } from './ui/useInference'
 export type { Controller, InferenceSnapshot, RuntimeState } from './lib/controller'
+export { DEPTHS } from './lib/plugin'
 export type { Depth, InstallProgress, ModelRow, Probe, Route, RouteKind } from './lib/plugin'

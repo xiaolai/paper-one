@@ -227,7 +227,17 @@ pub fn agent_route(probe: &AgentProbe) -> Route {
          * against. The other two reasons stay the literals they were, because
          * "Not installed" and "Signed out" each already name their own fix. */
         unusable: probe.unusable.map(|reason| {
-            if reason == agent::VERSION_NOT_SUPPORTED {
+            /* ONLY WHEN UPDATING IS ACTUALLY THE FIX, which is one of the
+             * three ways this reason arises. It also covers a CLI that would
+             * not say what it is — a partial install, a missing interpreter,
+             * Windows' Store stub — and one whose auth wording this build
+             * does not recognise, which is usually a CLI NEWER than Paper.
+             * Telling either reader to update names a remedy that will not
+             * work, and for the newer one it is precisely backwards. */
+            let too_old = probe
+                .version
+                .is_some_and(|found| found < probe.agent.minimum_version());
+            if reason == agent::VERSION_NOT_SUPPORTED && too_old {
                 format!(
                     "{reason} — needs {} or newer",
                     probe.agent.minimum_version()
@@ -468,6 +478,38 @@ mod tests {
                 .unusable
                 .as_deref(),
             Some(agent::NOT_INSTALLED)
+        );
+    }
+    /// AND ONLY WHEN UPDATING IS THE FIX. The same reason covers a CLI that
+    /// would not say what it is, and one whose auth wording is newer than this
+    /// build understands — telling either reader to update names a remedy that
+    /// does not work, and for the newer CLI it is backwards.
+    #[test]
+    fn an_unreadable_or_newer_version_is_not_told_to_update() {
+        let unreadable = agent_route(&AgentProbe {
+            agent: Agent::Codex,
+            path: Some("/usr/local/bin/codex".to_owned()),
+            version: None,
+            auth: Some(AuthState::VersionUnsupported),
+            unusable: Some(agent::VERSION_NOT_SUPPORTED),
+        });
+        assert_eq!(
+            unreadable.unusable.as_deref(),
+            Some(agent::VERSION_NOT_SUPPORTED),
+            "a CLI that would not name its version cannot be fixed by updating"
+        );
+
+        let newer = agent_route(&AgentProbe {
+            agent: Agent::Codex,
+            path: Some("/usr/local/bin/codex".to_owned()),
+            version: Some(Version(99, 0, 0)),
+            auth: Some(AuthState::VersionUnsupported),
+            unusable: Some(agent::VERSION_NOT_SUPPORTED),
+        });
+        assert_eq!(
+            newer.unusable.as_deref(),
+            Some(agent::VERSION_NOT_SUPPORTED),
+            "a CLI newer than this build must not be told to update"
         );
     }
 }

@@ -26,16 +26,40 @@ import { describe, expect, it } from 'vitest'
 
 const HERE = fileURLToPath(new URL('.', import.meta.url))
 const PLUGIN_TS = readFileSync(`${HERE}plugin.ts`, 'utf8')
-const BUILD_RS = readFileSync(
-  fileURLToPath(new URL('../../../../src-tauri/crates/tauri-plugin-inference/build.rs', import.meta.url)),
-  'utf8',
-)
+const CRATE = new URL('../../../../src-tauri/crates/tauri-plugin-inference/', import.meta.url)
+const rust = (rel: string): string => readFileSync(fileURLToPath(new URL(rel, CRATE)), 'utf8')
+const BUILD_RS = rust('build.rs')
+const LIB_RS = rust('src/lib.rs')
+const PERMISSIONS_TOML = rust('permissions/default.toml')
 
 /** The names `COMMANDS` declares, in the crate that registers them. */
 function crateCommands(): readonly string[] {
   const block = /const COMMANDS: &\[&str\] = &\[([\s\S]*?)\];/.exec(BUILD_RS)
   expect(block, 'COMMANDS is not in build.rs in the shape this reads').not.toBeNull()
   return [...(block?.[1] ?? '').matchAll(/"([a-z_]+)"/g)].map((m) => m[1] as string)
+}
+
+/**
+ * The commands `generate_handler!` actually registers — what is REACHABLE.
+ *
+ * `build.rs` only generates the permission scaffolding. A command can be in
+ * `COMMANDS` and in `plugin.ts` and still be uncallable if it never reaches
+ * this macro — the same shape as the defect that made every command in this
+ * file unreachable while `cargo check` and `tsc` were both green.
+ */
+function registeredCommands(): readonly string[] {
+  const block = /generate_handler!\[([\s\S]*?)\]/.exec(LIB_RS)
+  expect(block, 'generate_handler! is not in lib.rs in the shape this reads').not.toBeNull()
+  return [...(block?.[1] ?? '').matchAll(/commands::([a-z_]+)/g)].map((m) => m[1] as string)
+}
+
+/** The commands the webview is GRANTED, as `allow-<kebab-name>` entries. */
+function permittedCommands(): readonly string[] {
+  const block = /permissions\s*=\s*\[([\s\S]*?)\]/.exec(PERMISSIONS_TOML)
+  expect(block, 'permissions is not in default.toml in the shape this reads').not.toBeNull()
+  return [...(block?.[1] ?? '').matchAll(/"allow-([a-z-]+)"/g)].map((m) =>
+    (m[1] as string).replace(/-/g, '_'),
+  )
 }
 
 /**
@@ -47,7 +71,12 @@ function crateCommands(): readonly string[] {
  */
 function invoked(): readonly { readonly name: string; readonly prefixed: boolean }[] {
   const pattern = /invoke(?:<[^>]*>)?\(\s*(?:command\('([a-z_]+)'\)|'([a-z_]+)')/g
-  return [...PLUGIN_TS.matchAll(pattern)].map((m) => ({
+  /* COMMENTS ARE NOT CODE. This file's own prose names commands and shows the
+     bare spelling it exists to forbid; counting either would make the crate
+     comparison fail on a sentence, or let a commented-out call stand in for a
+     live one. */
+  const code = PLUGIN_TS.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1')
+  return [...code.matchAll(pattern)].map((m) => ({
     name: (m[1] ?? m[2]) as string,
     prefixed: m[1] !== undefined,
   }))
@@ -74,6 +103,23 @@ describe('the plugin command surface', () => {
   it('routes every command through the plugin prefix, never bare', () => {
     const bare = invoked().filter((one) => !one.prefixed).map((one) => one.name)
     expect(bare, `these reach invoke() without the plugin prefix — ${bare.join(', ')}`).toEqual([])
+  })
+
+  /**
+   * ALL THREE RUST SURFACES, not just the one that was easy to read.
+   *
+   * A command has to appear in `build.rs` (scaffolding), in
+   * `generate_handler!` (reachable), and in `permissions/default.toml`
+   * (granted). Any one of them missing makes the call fail at runtime while
+   * every compiler and every other test here stays green. Checking only
+   * `build.rs` — which is what this file did when it was written — answers a
+   * narrower question than its name suggests, and that is exactly the mistake
+   * it was created to stop.
+   */
+  it('registers, permits and declares the same set of commands', () => {
+    const declared = [...crateCommands()].sort()
+    expect([...registeredCommands()].sort(), 'generate_handler! disagrees with build.rs').toEqual(declared)
+    expect([...permittedCommands()].sort(), 'permissions/default.toml disagrees with build.rs').toEqual(declared)
   })
 
   it('builds the prefix the crate actually registers under', () => {

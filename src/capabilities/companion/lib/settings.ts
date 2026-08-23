@@ -1,4 +1,5 @@
 import { defineSetting, type Setting } from '../../../kernel'
+import { DEPTHS, type Depth } from '../../inference'
 
 /**
  * The `companion` capability's durable preferences.
@@ -47,8 +48,10 @@ export const TOOLS_SETTING: Setting<boolean> = defineSetting('companion.tools', 
  * setting names the reader's INTENT; `agentask.rs` owns the translation, which
  * is why this value is a closed set and never a model id.
  */
-export const DEPTH_SETTING: Setting<'default' | 'faster' | 'thorough'> = defineSetting(
-  'companion.depth',
-  'default',
-  (raw) => (raw === 'default' || raw === 'faster' || raw === 'thorough' ? raw : undefined),
+export const DEPTH_SETTING: Setting<Depth> = defineSetting('companion.depth', 'default', (raw) =>
+  /* VALIDATED AGAINST THE CANONICAL LIST, not a union repeated here. Spelling
+     the three states again would compile happily after `Depth` gained a
+     fourth, and the setting would then silently refuse a value the rest of
+     the system considers legal. */
+  (DEPTHS as readonly string[]).includes(raw as string) ? (raw as Depth) : undefined,
 )

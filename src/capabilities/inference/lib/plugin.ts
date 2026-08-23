@@ -38,7 +38,8 @@ export type Modality = 'text' | 'speech'
  * flag at all — the reader's own account default, which is what they are
  * already paying for.
  */
-export type Depth = 'default' | 'faster' | 'thorough'
+export const DEPTHS = ['default', 'faster', 'thorough'] as const
+export type Depth = (typeof DEPTHS)[number]
 
 export interface ModelRow {
   readonly id: string
