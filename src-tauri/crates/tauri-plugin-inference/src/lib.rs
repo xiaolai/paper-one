@@ -46,6 +46,7 @@ mod endpoints;
 mod error;
 mod generate;
 mod install;
+mod limits;
 mod manifest;
 mod paths;
 mod probe;

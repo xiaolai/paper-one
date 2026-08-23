@@ -117,6 +117,14 @@ pub enum Error {
     #[error("cancelled")]
     Cancelled,
 
+    /// A field arrived larger than this plugin will carry.
+    ///
+    /// The bound is on the FIELD, named, so the message says which one — a
+    /// generic "too large" from a command with five string parameters tells
+    /// whoever reads it nothing.
+    #[error("{field} is larger than this build accepts ({limit} bytes)")]
+    FieldTooLarge { field: &'static str, limit: usize },
+
     // ── agents (WI-15.6, WI-15.7, WI-15.10) ─────────────────────────────
     /// The agent CLI is not on `PATH`.
     #[error("{0} is not installed")]
@@ -175,6 +183,7 @@ impl Error {
             Error::RequestUnknown(_) => "requestUnknown",
             Error::RequestBusy(_) => "requestBusy",
             Error::Cancelled => "cancelled",
+            Error::FieldTooLarge { .. } => "fieldTooLarge",
             Error::AgentMissing(_) => "agentMissing",
             Error::AgentUnsupportedVersion { .. } => "agentUnsupportedVersion",
             Error::AgentSignedOut(_) => "agentSignedOut",

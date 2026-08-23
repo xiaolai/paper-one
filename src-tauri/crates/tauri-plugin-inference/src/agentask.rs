@@ -387,6 +387,18 @@ pub async fn ask(
         match next {
             Ok(Some(line)) => {
                 if let Some(text) = parse_line(agent, &line) {
+                    /* THE SAME BOUND THE DAEMON PATH TAKES, and for the same
+                     * reason: the writer is another process, and an agent CLI
+                     * that never stops emitting would otherwise grow this
+                     * until the app died. */
+                    if answer.len() + text.len() > crate::limits::MAX_ANSWER_BYTES {
+                        take_down(&mut child);
+                        let _ = crate::procgroup::kill(&mut child, group).await;
+                        return Err(Error::FieldTooLarge {
+                            field: "the answer",
+                            limit: crate::limits::MAX_ANSWER_BYTES,
+                        });
+                    }
                     answer.push_str(&text);
                     on_delta(text);
                 }

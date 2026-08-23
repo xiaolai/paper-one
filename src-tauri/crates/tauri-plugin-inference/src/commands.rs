@@ -35,6 +35,7 @@ use crate::endpoints::Endpoint;
 use crate::error::{Error, Result};
 use crate::generate::{self, ChatRequest, Message};
 use crate::install::{self, Progress};
+use crate::limits;
 use crate::manifest::ModelEntry;
 use crate::probe::{self, Probe, Route};
 use crate::state::{InferenceState, RuntimeStatus};
@@ -140,6 +141,7 @@ pub async fn inference_install_model<R: Runtime>(
     model: String,
     progress: Channel<Progress>,
 ) -> Result<()> {
+    limits::within("request id", &request_id, limits::MAX_REQUEST_ID)?;
     let guard = state.requests().begin(&request_id)?;
     let cancel = guard.cancel();
     /* Held for the whole download, so a second install of this model — or a
@@ -332,6 +334,12 @@ pub async fn inference_generate<R: Runtime>(
     question: String,
     chunks: Channel<String>,
 ) -> Result<String> {
+    /* BOUNDED BEFORE ANYTHING IS ALLOCATED, REGISTERED OR SENT. A closed
+     * command surface bounds which verbs a webview can reach; it says nothing
+     * about how much can be pushed through one. See `limits.rs`. */
+    limits::within("request id", &request_id, limits::MAX_REQUEST_ID)?;
+    limits::within("system prompt", &system, limits::MAX_SYSTEM)?;
+    limits::within("question", &question, limits::MAX_QUESTION)?;
     let model = resolve_model(&app, &state, &model).await?;
     let guard = state.requests().begin(&request_id)?;
     let cancel = guard.cancel();
@@ -368,6 +376,9 @@ pub async fn inference_gloss<R: Runtime>(
     system: String,
     question: String,
 ) -> Result<String> {
+    limits::within("request id", &request_id, limits::MAX_REQUEST_ID)?;
+    limits::within("system prompt", &system, limits::MAX_SYSTEM)?;
+    limits::within("question", &question, limits::MAX_QUESTION)?;
     /* RESOLVED, like `inference_generate`. The first version of the closed
      * argument set covered only the generate path, which left two commands
      * forwarding a caller-supplied model straight to the daemon — the exact
@@ -401,6 +412,8 @@ pub async fn agent_ask<R: Runtime>(
     depth: Option<crate::agentask::Depth>,
     chunks: Channel<String>,
 ) -> Result<String> {
+    limits::within("request id", &request_id, limits::MAX_REQUEST_ID)?;
+    limits::within("prompt", &prompt, limits::MAX_AGENT_PROMPT)?;
     let which = match route.as_str() {
         "agent:codex" => Agent::Codex,
         "agent:claude" => Agent::Claude,
@@ -544,6 +557,8 @@ pub async fn inference_speak<R: Runtime>(
     text: String,
     voice: Option<String>,
 ) -> Result<Vec<u8>> {
+    limits::within("request id", &request_id, limits::MAX_REQUEST_ID)?;
+    limits::within("speech text", &text, limits::MAX_SPEECH_TEXT)?;
     let model = resolve_model(&app, &state, &model).await?;
     let guard = state.requests().begin(&request_id)?;
     let cancel = guard.cancel();
@@ -582,6 +597,7 @@ pub async fn inference_speak<R: Runtime>(
 /// Cancel any streaming request by the id its caller minted.
 #[tauri::command]
 pub async fn inference_cancel(state: State<'_, InferenceState>, request_id: String) -> Result<()> {
+    limits::within("request id", &request_id, limits::MAX_REQUEST_ID)?;
     state.requests().cancel(&request_id)
 }
 

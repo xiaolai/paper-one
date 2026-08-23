@@ -181,6 +181,19 @@ pub async fn stream(
             let line: Vec<u8> = buffer.drain(..=newline).collect();
             match parse_line(&String::from_utf8_lossy(&line)) {
                 Event::Delta(text) => {
+                    /* BOUNDED, because the writer is a separate process. The
+                     * request asks for `MAX_ANSWER_TOKENS`, but nothing on
+                     * this side enforces that a daemon honours it — a wedged
+                     * or hostile one streaming without end would grow this
+                     * `String` until the app died. Refused by name rather
+                     * than truncated: half an answer presented as a whole one
+                     * is the shape this crate refuses everywhere else. */
+                    if answer.len() + text.len() > crate::limits::MAX_ANSWER_BYTES {
+                        return Err(Error::FieldTooLarge {
+                            field: "the answer",
+                            limit: crate::limits::MAX_ANSWER_BYTES,
+                        });
+                    }
                     answer.push_str(&text);
                     on_delta(text);
                 }
