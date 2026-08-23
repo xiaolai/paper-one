@@ -139,6 +139,9 @@ export type {
 export { createDiagnostics, defaultDiagnostics, redact } from './core/diagnostics'
 export type { DiagnosticsOptions, Sink } from './core/diagnostics'
 export { CAPABILITY_UI, type CapabilityUiClass } from './core/capabilityUi'
+/* EVERYTHING A CAPABILITY'S `start` ACQUIRED — see `core/capabilitySession.ts`. */
+export { openSession } from './core/capabilitySession'
+export type { CapabilitySession } from './core/capabilitySession'
 /* WHAT A CONTRIBUTED `render()` DRAWS — see `core/renderSlot.ts`. */
 export { createRenderSlot } from './core/renderSlot'
 export type { RenderSlot } from './core/renderSlot'

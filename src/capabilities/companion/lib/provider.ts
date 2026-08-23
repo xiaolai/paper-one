@@ -7,6 +7,7 @@ import {
   numberPassages,
   resolveCitations,
 } from './passages'
+import { streamed } from './streamed'
 
 /**
  * The companion provider — bound by `companion`, and by nothing else.
@@ -178,19 +179,6 @@ function requireModelId(route: string): string {
   return id
 }
 
-/**
- * "Nothing failed", as a value nothing else can be.
- *
- * ⚠️ `null` WAS DOING THIS JOB, and `null` is a value a rejection can carry:
- * `Promise.reject(null)` — or `undefined`, which a thrown non-Error can also
- * be — was caught, left the sentinel unchanged, and the turn then resolved as
- * a SUCCESS. The reader was handed whatever text had arrived before the
- * failure, presented as a finished answer, with no failure line and no way to
- * tell it from a complete one. A sentinel has to be a value the domain cannot
- * produce, and a symbol is the only such value here.
- */
-const NOTHING_FAILED = Symbol('companion.noFailure')
-
 export function createCompanionProvider({
   port,
   route,
@@ -237,52 +225,24 @@ export function createCompanionProvider({
         question,
       )
 
-      /* A queue between the Channel's callback and this generator: the plugin
-       * pushes deltas whenever they arrive, and a generator can only yield
-       * when its consumer asks. Without the queue, a delta arriving between
-       * two `next()` calls would be dropped. */
-      const pending: string[] = []
-      let notify: (() => void) | null = null
-      let finished = false
-      let failure: unknown = NOTHING_FAILED
-      const push = (text: string): void => {
-        pending.push(text)
-        notify?.()
-      }
-
+      /* THE TRANSPORT PUSHES, THIS PULLS — see `streamed`. Thirty lines of
+       * queue, wake-up and failure sentinel used to sit here, between the
+       * route dispatch above and the citation map below; the one defect they
+       * held was invisible among them and has a test of its own now. */
+      let answer = ''
       /* BOTH BRANCHES TAKE THE SIGNAL. The agent branch did not, so `ask`'s
          cancellation contract held for a local model and silently did not for
          a subscription route — the one where abandoning an answer actually
          costs the reader something. */
-      const running = (
+      const deltas = streamed<string>((push) =>
         isAgentRoute(chosen)
           ? port.agentAsk(chosen, buildAgentTurn(prompt), depth(), push, signal)
-          : port.generate(requireModelId(chosen), COMPANION_SYSTEM_PROMPT, prompt, push, signal)
+          : port.generate(requireModelId(chosen), COMPANION_SYSTEM_PROMPT, prompt, push, signal),
       )
-        .then(() => {})
-        .catch((error: unknown) => {
-          failure = error
-        })
-        .finally(() => {
-          finished = true
-          notify?.()
-        })
-
-      let answer = ''
-      while (!finished || pending.length > 0) {
-        if (pending.length === 0) {
-          await new Promise<void>((resolve) => {
-            notify = resolve
-          })
-          notify = null
-          continue
-        }
-        const text = pending.shift() as string
+      for await (const text of deltas) {
         answer += text
         yield text
       }
-      await running
-      if (failure !== NOTHING_FAILED) throw failure
 
       /* THE MAP BACK, and the drop. An index the table does not contain is
        * refused — never resolved to the nearest passage, which would be a

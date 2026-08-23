@@ -53,6 +53,7 @@ mod probe;
 mod procgroup;
 mod requests;
 mod spawn;
+mod speech;
 mod state;
 #[cfg(test)]
 mod testutil;

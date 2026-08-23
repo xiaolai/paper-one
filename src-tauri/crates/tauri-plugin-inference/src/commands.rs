@@ -38,6 +38,7 @@ use crate::install::{self, Progress};
 use crate::limits;
 use crate::manifest::ModelEntry;
 use crate::probe::{self, Probe, Route};
+use crate::speech;
 use crate::state::{InferenceState, RuntimeStatus};
 
 /* ────────────────────────────── the runtime ─────────────────────────────── */
@@ -718,21 +719,11 @@ pub async fn inference_set_endpoint_key<R: Runtime>(
 
 /* ──────────────────────────────── narration ─────────────────────────────── */
 
-/// The daemon's speech route.
-///
-/// A constant because it was written out four times — in the request, in two
-/// unreachable-mappings and in the HTTP-status error — so a route change could
-/// leave the diagnostics naming a path the request never used. `CHAT_ROUTE`
-/// was already a constant for exactly this reason.
-const SPEECH_ROUTE: &str = "/api/v1/audio/generations";
-
 /// Synthesise speech (WI-15.9's `Test voice`).
 ///
-/// The route is `/api/v1/audio/generations` and its field is **`prompt`**, not
-/// OpenAI's `input` — verified against 11.7.0, which answers `Missing
-/// 'prompt' field in request` for the OpenAI spelling. `/api/v1/audio/speech`
-/// does not answer at all. That asymmetry stays behind this command rather
-/// than being something a caller has to know.
+/// The route, its one surprising field name and the cancellation are
+/// `speech.rs`'s; what is left here is the policy every command in this module
+/// is supposed to be.
 #[tauri::command]
 pub async fn inference_speak<R: Runtime>(
     app: AppHandle<R>,
@@ -750,37 +741,19 @@ pub async fn inference_speak<R: Runtime>(
     let model = resolve_model(&app, &state, &model, probe::Modality::Speech).await?;
     let guard = state.requests().begin(&request_id)?;
     let cancel = guard.cancel();
-    let mut body = serde_json::json!({ "model": model, "prompt": text });
-    if let Some(voice) = voice {
-        body["voice"] = serde_json::Value::String(voice);
-    }
+    let body = speech::body(&model, &text, voice.as_deref());
     /* Dropped before the wait, as in `inference_generate` — see there. */
     let request = {
         let daemon = state.daemon().await?;
         daemon
-            .request(reqwest::Method::POST, SPEECH_ROUTE)
+            .request(reqwest::Method::POST, speech::SPEECH_ROUTE)
             .json(&body)
     };
-    let response = tokio::select! {
-        biased;
-        () = cancel.cancelled() => return Err(Error::Cancelled),
-        sent = request.send() => sent.map_err(|e| crate::error::unreachable(SPEECH_ROUTE, e))?,
-    };
-    let status = response.status();
-    if !status.is_success() {
-        return Err(Error::RuntimeHttp {
-            status: status.as_u16(),
-            route: SPEECH_ROUTE.to_owned(),
-        });
-    }
-    let bytes = tokio::select! {
-        biased;
-        // Cancelling mid-utterance must stop the REQUEST as well as the
-        // audio — WI-15.9's acceptance names both.
-        () = cancel.cancelled() => return Err(Error::Cancelled),
-        body = response.bytes() => body.map_err(|e| crate::error::unreachable(SPEECH_ROUTE, e))?,
-    };
-    Ok(bytes.to_vec())
+    /* THE TRANSPORT IS `speech`'s. This command is policy — bound the input,
+    resolve the model at the right modality, take the request slot — and
+    everything after it was HTTP, which is what `commands.rs`'s own header
+    says does not live here. */
+    speech::collect(request, &cancel).await
 }
 
 /* ────────────────────────────── cancellation ────────────────────────────── */

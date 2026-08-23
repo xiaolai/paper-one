@@ -332,21 +332,19 @@ function exclusiveSlot<T>(
   }
 }
 
-export function createKernelServices({
-  fs,
-  storage,
-  initialBooks = [],
-  shelfRead = true,
-  recorder = NOOP_RECORDER,
-  diagnostics = NOOP_DIAGNOSTICS,
-  settingsMigration,
-  clock,
-  hasDictionary = false,
-}: KernelServicesOptions): KernelServices {
-  /* The delegating ports. The stores capture THESE, so a bind after
-   * construction reaches every store without any of them knowing. Each
-   * slot's default target is what an unbind RESTORES. */
-  const recorderSlot = exclusiveSlot<MutationRecorder>('bindRecorder: the recorder port is already bound', recorder)
+/**
+ * The recorder every store writes through, routing each commit to whichever
+ * binding issued its begin.
+ *
+ * Its own function because it is a POLICY, not wiring: three cases, each with
+ * a different right answer, and the reasoning below is why. Inline among
+ * thirty other `const`s it read as setup, and the one time it was changed the
+ * change was made without the third case in view.
+ */
+function routedRecorder(
+  slot: { get(): MutationRecorder; generation(): number },
+  fallback: MutationRecorder,
+): MutationRecorder {
   /* A COMMIT GOES TO THE RECORDER THAT ISSUED ITS BEGIN, OR TO THE DEFAULT —
    * never to a DIFFERENT one.
    *
@@ -371,10 +369,10 @@ export function createKernelServices({
    * the DEFAULT, which is where an unbind already sent it — a dangling begin
    * in the old journal, nothing bogus in the new one, and recovery handles
    * both because it cannot tell them from a crash. */
-  const recorderPort: MutationRecorder = {
+  return {
     begin: async (book, what) => {
-      const at = recorderSlot.generation()
-      const token = await recorderSlot.get().begin(book, what)
+      const at = slot.generation()
+      const token = await slot.get().begin(book, what)
       /* THE RECORDER'S OWN OBJECT, UNTOUCHED — see `issuedAt`. */
       issuedAt.set(token, at)
       return token
@@ -384,10 +382,129 @@ export function createKernelServices({
          one — and falls through to the default, which is the same answer an
          unbind gets and the one recovery already understands. */
       const at = issuedAt.get(token)
-      const target = at === recorderSlot.generation() ? recorderSlot.get() : recorder
+      const target = at === slot.generation() ? slot.get() : fallback
       return target.commit(token, digest)
     },
   }
+}
+
+/** What `removeBlob` needs of the services being built around it. */
+interface BlobRemoval {
+  readonly fs: IndexFs | null
+  readonly writes: WriteQueue
+  readonly library: Library
+  readonly recorder: MutationRecorder
+}
+
+/**
+ * Delete one blob from a book's folder — the kernel's ONE door into
+ * `books/<id>/`.
+ *
+ * Its own function because it is an OPERATION, not composition: a closed name
+ * set, an ownership check against the shelf, a lane, a journal bracket and an
+ * idempotent delete, each with a reason that has to be read together. It sat
+ * inline among thirty bindings, where it was by some distance the longest
+ * thing in `createKernelServices` and the only one that did any work.
+ */
+async function removeBlob(
+  { fs, writes, library, recorder }: BlobRemoval,
+  bookId: string,
+  name: RemovableBlobName,
+): Promise<void> {
+    if (!REMOVABLE_BLOB_NAMES.has(name)) {
+      throw new Error(`removeBlob: ${JSON.stringify(name)} is not a blob the kernel removes`)
+    }
+    if (!fs) return
+    /* ⚠️ **AN ALIAS MUST NOT REACH ANOTHER BOOK'S FOLDER.** `folderOf`
+     * sanitises an id into `books/<safeId>` — a slash, a dot, anything
+     * outside [A-Za-z0-9] becomes `_` — which stops traversal and does NOT
+     * stop collision: it is many-to-one, so `book:a/b` and `book:a_b` are two
+     * ids over one directory. A caller holding the first could delete the
+     * second's content or jacket, and every check here passed it.
+     *
+     * The shelf is the authority on which id owns a folder. An id the shelf
+     * does not hold at all is left alone — that is an already-removed book,
+     * and absence is this operation's documented no-op — but an id whose
+     * folder belongs to a DIFFERENT, live book is refused rather than
+     * quietly honoured. */
+    const folder = folderOf(bookId)
+    const owner = library.getSnapshot().find((one) => folderOf(one.bookId) === folder)
+    if (owner !== undefined && owner.bookId !== bookId) {
+      throw new Error(
+        `removeBlob: ${JSON.stringify(bookId)} does not own ${folder} — ${JSON.stringify(owner.bookId)} does`,
+      )
+    }
+    /* `folderOf` sanitises the id into `books/<safeId>` — a slash, a dot,
+     * anything outside [A-Za-z0-9] becomes `_` — so the joined path cannot
+     * leave the book's folder whatever the id says. And the delete runs
+     * INSIDE the book's queued task, like every other folder mutation: a
+     * remove racing a landing or a folder move is the exact interleaving
+     * the one-queue rule exists to prevent, and within the task the
+     * exists/remove pair is atomic, so two concurrent removes both resolve
+     * as the documented absent-blob no-op. */
+    /* THE FOLDER'S LANE, not the id's — `library.lane`, the same resolver
+     * the record, mark and move writers use.
+     *
+     * This queued on the raw `bookId` while writing to `folderOf(bookId)`,
+     * and `folderOf` is MANY-TO-ONE: `book:a/b` and `book:a_b` are two ids
+     * and one directory, so they took two lanes over the same files and a
+     * delete could interleave with a landing or a folder move. The comment
+     * below already claimed this ran "inside the book's queued task, like
+     * every other folder mutation" — it was the one that did not. */
+    /* RECORDED, like every other folder mutation.
+     *
+     * A blob deletion changed the folder and journalled nothing, so a crash
+     * between the unlink and whatever the caller did next left the bytes
+     * gone with no entry saying so — invisible to the feed and to the
+     * unclean-shutdown verify pass. The kind follows the name: a cover is a
+     * `cover` mutation, everything else is `content`. */
+    /* THE SURFACE COMES FROM THE ONE MAP — see `REMOVABLE_BLOB_KINDS`. It
+     * was spelled out here as a second policy, so a removable cover name
+     * added to the closed set would have been journalled as `content` and
+     * told every peer the book's bytes had changed. */
+    const kind = REMOVABLE_BLOB_KINDS[name]
+    await writes.append(library.lane(bookId), async () => {
+      const path = `${folder}/${name}`
+      /* ⚠️ CHECKED BEFORE THE BRACKET IS OPENED, not inside it. An absent
+       * blob is the documented no-op, and opening a bracket around it wrote
+       * a committed mutation for a change that did not happen: the journal
+       * advanced, the feed carried an entry, and the verify pass had one more
+       * surface to digest — all for a file that was already gone. Removing
+       * the same blob twice, or evicting a book whose bytes a peer already
+       * took, did exactly this.
+       *
+       * EXISTS-THEN-REMOVE IS ATOMIC ONLY AGAINST THIS QUEUE, and another
+       * PROCESS can still take the file in between — so a remove that races
+       * one is an ordinary absence, not a fault. Absence is the documented
+       * no-op for this operation either way; raising it would turn two
+       * callers both doing the right thing into an error for one of them.
+       * Both checks are inside the queued task, so the pair is still atomic
+       * against everything else touching this folder. */
+      if (!(await fs.exists(path))) return
+      await recorded(recorder, bookId, kind, async () => {
+        await fs.remove(path).catch(async (cause: unknown) => {
+          if (await fs.exists(path)) throw cause
+        })
+      })
+    })
+}
+
+export function createKernelServices({
+  fs,
+  storage,
+  initialBooks = [],
+  shelfRead = true,
+  recorder = NOOP_RECORDER,
+  diagnostics = NOOP_DIAGNOSTICS,
+  settingsMigration,
+  clock,
+  hasDictionary = false,
+}: KernelServicesOptions): KernelServices {
+  /* The delegating ports. The stores capture THESE, so a bind after
+   * construction reaches every store without any of them knowing. Each
+   * slot's default target is what an unbind RESTORES. */
+  const recorderSlot = exclusiveSlot<MutationRecorder>('bindRecorder: the recorder port is already bound', recorder)
+  const recorderPort = routedRecorder(recorderSlot, recorder)
   const clockSlot = exclusiveSlot<() => Hlc>('bindClock: the clock port is already bound', clock ?? (() => hlcOf(Date.now())))
   const clockPort = () => clockSlot.get()()
 
@@ -429,84 +546,7 @@ export function createKernelServices({
     shelfRead: () => shelfRead,
     fs,
     storage,
-    removeBlob: async (bookId: string, name: RemovableBlobName): Promise<void> => {
-      if (!REMOVABLE_BLOB_NAMES.has(name)) {
-        throw new Error(`removeBlob: ${JSON.stringify(name)} is not a blob the kernel removes`)
-      }
-      if (!fs) return
-      /* ⚠️ **AN ALIAS MUST NOT REACH ANOTHER BOOK'S FOLDER.** `folderOf`
-       * sanitises an id into `books/<safeId>` — a slash, a dot, anything
-       * outside [A-Za-z0-9] becomes `_` — which stops traversal and does NOT
-       * stop collision: it is many-to-one, so `book:a/b` and `book:a_b` are two
-       * ids over one directory. A caller holding the first could delete the
-       * second's content or jacket, and every check here passed it.
-       *
-       * The shelf is the authority on which id owns a folder. An id the shelf
-       * does not hold at all is left alone — that is an already-removed book,
-       * and absence is this operation's documented no-op — but an id whose
-       * folder belongs to a DIFFERENT, live book is refused rather than
-       * quietly honoured. */
-      const folder = folderOf(bookId)
-      const owner = library.getSnapshot().find((one) => folderOf(one.bookId) === folder)
-      if (owner !== undefined && owner.bookId !== bookId) {
-        throw new Error(
-          `removeBlob: ${JSON.stringify(bookId)} does not own ${folder} — ${JSON.stringify(owner.bookId)} does`,
-        )
-      }
-      /* `folderOf` sanitises the id into `books/<safeId>` — a slash, a dot,
-       * anything outside [A-Za-z0-9] becomes `_` — so the joined path cannot
-       * leave the book's folder whatever the id says. And the delete runs
-       * INSIDE the book's queued task, like every other folder mutation: a
-       * remove racing a landing or a folder move is the exact interleaving
-       * the one-queue rule exists to prevent, and within the task the
-       * exists/remove pair is atomic, so two concurrent removes both resolve
-       * as the documented absent-blob no-op. */
-      /* THE FOLDER'S LANE, not the id's — `library.lane`, the same resolver
-       * the record, mark and move writers use.
-       *
-       * This queued on the raw `bookId` while writing to `folderOf(bookId)`,
-       * and `folderOf` is MANY-TO-ONE: `book:a/b` and `book:a_b` are two ids
-       * and one directory, so they took two lanes over the same files and a
-       * delete could interleave with a landing or a folder move. The comment
-       * below already claimed this ran "inside the book's queued task, like
-       * every other folder mutation" — it was the one that did not. */
-      /* RECORDED, like every other folder mutation.
-       *
-       * A blob deletion changed the folder and journalled nothing, so a crash
-       * between the unlink and whatever the caller did next left the bytes
-       * gone with no entry saying so — invisible to the feed and to the
-       * unclean-shutdown verify pass. The kind follows the name: a cover is a
-       * `cover` mutation, everything else is `content`. */
-      /* THE SURFACE COMES FROM THE ONE MAP — see `REMOVABLE_BLOB_KINDS`. It
-       * was spelled out here as a second policy, so a removable cover name
-       * added to the closed set would have been journalled as `content` and
-       * told every peer the book's bytes had changed. */
-      const kind = REMOVABLE_BLOB_KINDS[name]
-      await writes.append(library.lane(bookId), async () => {
-        const path = `${folder}/${name}`
-        /* ⚠️ CHECKED BEFORE THE BRACKET IS OPENED, not inside it. An absent
-         * blob is the documented no-op, and opening a bracket around it wrote
-         * a committed mutation for a change that did not happen: the journal
-         * advanced, the feed carried an entry, and the verify pass had one more
-         * surface to digest — all for a file that was already gone. Removing
-         * the same blob twice, or evicting a book whose bytes a peer already
-         * took, did exactly this.
-         *
-         * EXISTS-THEN-REMOVE IS ATOMIC ONLY AGAINST THIS QUEUE, and another
-         * PROCESS can still take the file in between — so a remove that races
-         * one is an ordinary absence, not a fault. Absence is the documented
-         * no-op for this operation either way; raising it would turn two
-         * callers both doing the right thing into an error for one of them.
-         * Both checks are inside the queued task, so the pair is still atomic
-         * against everything else touching this folder. */
-        if (!(await fs.exists(path))) return
-        await recorded(recorderPort, bookId, kind, async () => {
-          await fs.remove(path).catch(async (cause: unknown) => {
-            if (await fs.exists(path)) throw cause
-          })
-        })
-      })
-    },
+    removeBlob: (bookId, name) => removeBlob({ fs, writes, library, recorder: recorderPort }, bookId, name),
     bindRecorder: (next) => recorderSlot.bind(next),
     bindClock: (next) => clockSlot.bind(next),
     bindServiceHost: (next) => serviceHostSlot.bind(next),

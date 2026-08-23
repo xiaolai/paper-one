@@ -12,8 +12,8 @@ import { isTauri, usePlatform, usePrefersDark, usePrefersReducedMotion } from '.
 import { planImport } from '../core/tagArchive'
 import { canArchiveTags, exportTagsToFile, importTagsFromFile } from './tagFiles'
 import { canArchiveMarks, exportMarksToFile, importMarksFromFile } from './marksFiles'
-import { createHandover } from './importHandover'
 import { CLOSE_DRAIN_MS, createCloseSequence } from './closeWindow'
+import { useImportRun } from './hooks/useImportRun'
 import { openExternal } from './openExternal'
 import { planImport as planMarksImport } from '../core/marksArchive'
 import { hasOpenLayer, useAppState } from './state'
@@ -45,7 +45,6 @@ import {
   keepOwnCopy,
   summarise,
   type ImportOutcome,
-  type ImportProgress,
 } from '../core/importFolder'
 import { BookSwitcher } from './overlays/BookSwitcher'
 import { CommandPalette } from './overlays/CommandPalette'
@@ -395,7 +394,22 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
    * it stands down while books are arriving. It used to sit beside the import
    * handlers three hundred lines below, which is where it is written but not
    * where it is first needed. */
-  const [importing, setImporting] = useState<ImportProgress | null>(null)
+  /* NOT SEEDED WITH THE SHELF FAILURE any more. It shared this channel with
+   * import notices, so the first folder import or failed open replaced it — and
+   * it was not dismissable, so until then it sat there permanently. The screens
+   * say it themselves now, in the place that would otherwise have claimed the
+   * library was empty.
+   *
+   * DECLARED ABOVE THE IMPORT COORDINATOR, which writes every import's notice
+   * through it. */
+  const [importNotice, setImportNotice] = useState<string | null>(null)
+
+  /* THE IMPORT LIFECYCLE, ONCE — see `useImportRun`. The progress bar, the
+   * generation token, the abort handle, the handover and the settle were
+   * written out in both routes that copy books in, and had drifted apart in
+   * three ways by the time an audit read them side by side. */
+  const imports = useImportRun({ shelve: shelveImported, batch: SHELVE_BATCH, notice: setImportNotice })
+  const importing = imports.progress
 
   const enrichment = useEnrichment({
     books: library.books,
@@ -489,16 +503,6 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
    * then ONE is opened. The reader asked to add several and to be reading; both
    * happen, and neither is inferred from the other.
    */
-  /* Which import is the current one. Bumped by every route that copies books
-   * in, so a batch can tell that a newer one has started and stand down —
-   * see `addAndOpen`, and `addFolder`, which shares it. A ref rather than
-   * state because it is read inside a running loop, where a re-render's stale
-   * closure is exactly the thing that must not happen. */
-  const importBatch = useRef(0)
-  /* The running folder walk's abort handle. The batch token makes a
-   * superseded import stop REPORTING; this is what makes it stop WORKING —
-   * `importFolder` takes the signal and checks it between books. */
-  const importAbort = useRef<AbortController | null>(null)
 
   /**
    * Add every book, then open one — the shared half of picking and dropping.
@@ -555,98 +559,64 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
        * a generation token this line has just advanced — so it returned
        * without a word and the reader lost an import in progress with nothing
        * on screen to say it had happened. */
-      const superseded = importAbort.current !== null || importing !== null
-      importAbort.current?.abort()
-      importAbort.current = null
-      if (superseded) setImportNotice('That replaced the import already running.')
-      const batch = importBatch.current + 1
-      importBatch.current = batch
-      const current = () => importBatch.current === batch
+      /* ⚠️ AND THE ONE IT REPLACED IS NAMED, not dropped in silence. The two
+       * ways in disagree about what a second intake means, and each is
+       * defensible: `addFolder` REFUSES while one runs, because a keyboard
+       * shortcut during a walk once started two of them; this one SUPERSEDES,
+       * because dropping books is the reader saying "these now". What was not
+       * defensible is the seam. A drop during a folder walk aborted that walk,
+       * and the walk's notice is guarded by a token the drop had just
+       * advanced — so it returned without a word and the reader lost an import
+       * in progress with nothing on screen to say so. */
+      if (imports.busy) setImportNotice('That replaced the import already running.')
+      imports.supersede()
 
       if (picked.length > 1 && fs) {
-        /* THE WALK ALSO HAS TO BE TOLD. The token makes an older batch stop
-         * REPORTING, but a walk deep in `importFolder` kept COPYING against
-         * the same content-hashed paths; the signal above is how it actually
-         * stops.
-         *
-         * (was: SUPERSEDES ANY BATCH ALREADY RUNNING. Two imports could overlap —
-         * drop a folder, then drop a book — and the older, slower one then
-         * called `openBook` last, so the reader ended up in the book they had
-         * asked for first rather than the one they asked for last. Worse, both
-         * batches wrote through `keepOwnCopy`, whose destination is derived
-         * from the content hash, so two copies of the same book raced for one
-         * path.
-         *
-         * The token is taken BEFORE the first await and re-checked after
-         * every one.) */
-
-        /* PROGRESS, because a dropped folder can hold thousands. The picker's
-         * folder route has reported per book from the start; the drop route
-         * showed nothing at all until the whole batch finished, which on a
-         * large folder is indistinguishable from the app having hung. Same
-         * lifecycle, same channel, cleared in `finally` so an exception cannot
-         * strand the bar on screen. */
-        setImporting({ done: 0, total: picked.length })
-        const outcomes: ImportOutcome[] = []
-        /* THE SAME BATCHING THE FOLDER WALK DOES, and for the same reason —
-         * see `onCopied`. A drop of a thousand books left the shelf saying
-         * "Your library is empty" for the whole copy exactly as the picker
-         * did; the two routes had one defect between them. */
-        /* ONE HANDOVER, SHARED WITH THE FOLDER ROUTE. Both grew their own —
-         * a pending array, the same threshold, a promise chain, a final flush
-         * — and both guarded it with the generation token, so a superseded
-         * import discarded shelf records for books already on disk. There is
-         * no token inside `createHandover`, which is what stops that being
-         * re-decided here. See `importHandover.ts`. */
-        const handed = createHandover<ImportOutcome>(SHELVE_BATCH, shelveImported)
-        try {
-          for (const [index, { file, path }] of picked.entries()) {
-            /* `break`, NOT `return`: the settle below is documented as
-               unconditional and a `return` here walked straight past it, so a
-               superseded batch abandoned the very write chain the comment says
-               it waits for. */
-            if (!current()) break
-            setImporting({ done: index, total: picked.length })
-            try {
-              /* Never null without a signal — the only `null` is a stop, and
-               * neither the picker nor a drop has anything to stop. */
-              const kept = await keepOwnCopy(fs, file, path)
-              if (kept) {
-                outcomes.push(kept)
-                handed.add(kept)
+        const bytes = fs
+        /* THE LIFECYCLE IS `useImportRun`'s — the token, the signal, the
+         * progress bar, the handover chained one batch behind the copying, the
+         * settle the notice waits on, and the order the last two happen in.
+         * All six were written out here AND in the folder route, and had
+         * already drifted apart in three separate ways. What is left below is
+         * the WORK: copy each picked file, and say what happened to it. */
+        await imports.run(
+          async (run) => {
+            const outcomes: ImportOutcome[] = []
+            for (const [index, { file, path }] of picked.entries()) {
+              /* `break`, NOT `return`: the settle is unconditional, and
+                 returning walked straight past the write chain it waits for. */
+              if (!run.current()) break
+              run.report({ done: index, total: picked.length })
+              try {
+                /* Never null without a signal — the only `null` is a stop, and
+                 * neither the picker nor a drop has anything to stop. */
+                const kept = await keepOwnCopy(bytes, file, path)
+                if (kept) {
+                  outcomes.push(kept)
+                  run.shelve(kept)
+                }
+              } catch (cause) {
+                console.error('Paper: could not add', path ?? file.name, cause)
+                outcomes.push({ path: path ?? file.name, status: 'failed', name: file.name })
               }
-            } catch (cause) {
-              console.error('Paper: could not add', path ?? file.name, cause)
-              outcomes.push({ path: path ?? file.name, status: 'failed', name: file.name })
             }
-          }
-        } finally {
-          /* Even when the loop broke early: the bytes are on disk either way,
-           * and leaving them recordless is the orphan this pipeline exists to
-           * avoid. */
-          handed.flush()
-        }
-        /* AWAITED UNCONDITIONALLY, and before the token is consulted. The
-         * count is the notice's, and the notice belongs to the current batch
-         * — but the WRITES belong to whoever made the copies, so a superseded
-         * batch still waits for its own records to land rather than walking
-         * away from a chain nothing is holding. */
-        const unsaved = await handed.settled()
-        /* ⚠️ CLEARED AFTER THE SHELF WRITES LAND, NOT BEFORE THEM. This sat in
-         * the `finally` above, so the progress went away and every control came
-         * back while the records were still being written — the reader could
-         * start a second import into a shelf the first one had not finished
-         * writing, and enrichment ran against rows that did not exist yet. The
-         * bar is what says "this is still happening", and it was lying by
-         * exactly the length of the write chain. */
-        if (current()) setImporting(null)
-        if (!current()) return
-        const summary = summarise(outcomes, unsaved)
-        setImportNotice(note ? `${summary} ${note}` : summary)
+            return outcomes
+          },
+          {
+            summarise: (outcomes, unsaved) => {
+              const summary = summarise(outcomes, unsaved)
+              return note ? `${summary} ${note}` : summary
+            },
+            onFailure: (cause) => {
+              console.error('Paper: the import failed', cause)
+              setImportNotice('Those books could not be added.')
+            },
+          },
+        )
       }
       openBook(opening.file, opening.path)
     },
-    [openBook, fs, shelveImported, importing],
+    [openBook, fs, imports],
   )
 
   const addBooks = useCallback(() => {
@@ -727,12 +697,6 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
    * named individually: "4 of 300 failed" tells a reader nothing they can act
    * on.
    */
-  /* NOT SEEDED WITH THE SHELF FAILURE any more. It shared this channel with
-   * import notices, so the first folder import or failed open replaced it — and
-   * it was not dismissable, so until then it sat there permanently. The screens
-   * say it themselves now, in the place that would otherwise have claimed the
-   * library was empty. */
-  const [importNotice, setImportNotice] = useState<string | null>(null)
 
   /**
    * A notice is TRANSIENT, and it was not.
@@ -937,7 +901,7 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
        * lives in one caller is a guard the next caller has to remember. The
        * palette also omits the command while importing, so the reader is not
        * offered something that would refuse — but this is what makes it true. */
-      if (importing !== null) return
+      if (imports.busy) return
       /* A rejected picker is a FAILURE, not a cancellation — cancelling
        * resolves null — and swallowing it into the same null made a broken
        * dialog look like a change of mind: the reader clicked Import, nothing
@@ -948,57 +912,34 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
         return null
       })
       if (!folder || !importFs) return
-      /* Takes the same token `addAndOpen` uses, so the two routes supersede
-       * each other rather than only themselves. Without it a folder import
-       * finishing after a drop had started would clear the drop's progress bar
-       * and overwrite its notice — one import reporting on another's behalf. */
-      const batch = (importBatch.current += 1)
-      const current = () => importBatch.current === batch
-      /* A new walk retires the old one's WORK, not just its reporting. */
-      importAbort.current?.abort()
-      const controller = new AbortController()
-      importAbort.current = controller
-      setImporting({ done: 0, total: 0 })
-      /* SHELVED AS THE WALK RUNS, one batch behind — see `onCopied`. Chained
-       * rather than fired in parallel: each `shelveImported` already writes
-       * `WRITE_WIDTH` books at once, and starting a batch per handover would
-       * put the whole library back in flight together, which is the defect
-       * `addMany` exists to prevent.
-       *
-       * The chain is what the notice waits on, so "N added" is still a
-       * statement about writes that finished rather than writes that were
-       * started. */
-      const handed = createHandover<ImportOutcome>(SHELVE_BATCH, shelveImported)
-      try {
-        const outcomes = await importFolder(
-          importFs,
-          folder,
-          {
-            onProgress: (progress) => { if (current()) setImporting(progress) },
-            /* UNCONDITIONAL, for the reason the drop path gives: a walk that
-             * has been superseded still copied these bytes, and a copy with
-             * no record is invisible to the shelf and to removal alike. The
-             * token below governs the notice, not the bookkeeping. */
+      const bytes = importFs
+      /* THE LIFECYCLE IS `useImportRun`'s, THE SAME ONE THE DROP ROUTE USES —
+       * so the two supersede each other rather than only themselves, and the
+       * progress bar, the token, the signal and the settle cannot disagree
+       * between them. They already did, in three separate ways. */
+      await imports.run(
+        (run) =>
+          importFolder(bytes, folder, {
+            onProgress: run.report,
+            /* UNCONDITIONAL: a walk that has been superseded still copied
+             * these bytes, and a copy with no record is invisible to the shelf
+             * and to removal alike. The token governs the notice, never the
+             * bookkeeping. */
             onCopied: (copied) => {
-              for (const one of copied) handed.add(one)
+              for (const one of copied) run.shelve(one)
             },
-            signal: controller.signal,
+            signal: run.signal,
+          }),
+        {
+          summarise,
+          onFailure: (cause) => {
+            console.error('Paper: the folder import failed', cause)
+            setImportNotice('That folder could not be imported.')
           },
-        )
-        // Awaited for the unsaved count, and awaited even when superseded —
-        // see the drop path above.
-        const unsaved = await handed.settled()
-        if (!current()) return
-        setImportNotice(summarise(outcomes, unsaved))
-      } catch (cause) {
-        console.error('Paper: the folder import failed', cause)
-        if (current()) setImportNotice('That folder could not be imported.')
-      } finally {
-        if (importAbort.current === controller) importAbort.current = null
-        if (current()) setImporting(null)
-      }
+        },
+      )
     })()
-  }, [shelveImported, importFs, importing])
+  }, [importFs, imports])
 
 
   /**

@@ -1,5 +1,5 @@
 import { createElement } from 'react'
-import { createRenderSlot, type Capability, type CapabilityContext, type Disposable } from '../../kernel'
+import { createRenderSlot, openSession, type Capability, type CapabilityContext, type Disposable } from '../../kernel'
 import { createController, type Controller } from './lib/controller'
 import { createGlossProvider } from './lib/glossProvider'
 import { inferencePlugin, mintRequestId, type Depth, type InferencePlugin, type Probe } from './lib/plugin'
@@ -176,76 +176,67 @@ export const inference: Capability = {
     const gloss = createGlossProvider({ plugin, controller })
 
     const myLifetime = ++lifetime
-    let stopped = false
-    let unbindGloss: Disposable | null = null
-    let unbindWorkLine: Disposable | null = null
-    let myModels: ModelsModel | null = null
-    let showing: Disposable | null = null
-    let myRunning: typeof running = null
+    /* EVERYTHING THIS ACQUIRES, OWNED BY ONE THING — see `openSession`. The
+     * `stopped` flag, the listener removal, the guarded-step loop and a
+     * nullable `let` per resource were written out here, and the one resource
+     * that never made it into the list survived every teardown for months. */
+    const session = openSession(api, signal, 'inference.teardown-step-failed')
+    session.own('controller', () => controller.dispose())
 
-    const stop = (): void => {
-      if (stopped) return
-      stopped = true
-      signal.removeEventListener('abort', stop)
-      /* Ownership before clearing: an older stop firing after a restart must
-       * not strip the newer start's state — the rule sync's own stop follows. */
-      showing?.dispose()
-      if (running === myRunning) running = null
-      for (const [label, unbind] of [
-        ['unbindGloss', unbindGloss],
-        ['unbindWorkLine', unbindWorkLine],
-      ] as const) {
-        try {
-          unbind?.dispose()
-        } catch (error) {
-          api.diagnostics.warn('inference.teardown-step-failed', {
-            label,
-            message: error instanceof Error ? error.message : String(error),
-          })
-        }
-      }
-      /* ⚠️ THE MODEL IS DISPOSED TOO. Only the tests ever called this, so in
-         the running app a settings subscription, an `Audio` element, a blob
-         URL and any voice request in flight survived every teardown and
-         accumulated across restarts — a leak that is invisible because each
-         one on its own is small. */
-      myModels?.dispose()
-      controller.dispose()
-      /* The daemon is a CHILD PROCESS, and it must not outlive the capability
-       * that owns it. Best-effort and unawaited: `dispose` is synchronous and
-       * Rust stops it again on app exit anyway.
-       *
-       * ⚠️ ONLY IF NOTHING HAS STARTED SINCE. There is one daemon for the
-       * plugin, not one per lifetime, so an outgoing stop landing after an
-       * incoming start killed the NEW capability's runtime and cancelled its
-       * requests. `running === myRunning` above cannot cover it: that check
-       * runs now and this action lands later. */
-      if (lifetime === myLifetime) void plugin.stop().catch(() => {})
-    }
-    api.onCleanup(stop)
-    signal.addEventListener('abort', stop, { once: true })
+    const unbindGloss = api.services.bindGloss(gloss)
+    session.own('unbindGloss', () => unbindGloss.dispose())
 
-    unbindGloss = api.services.bindGloss(gloss)
     /* The library status bar's third rung (WI-15.12). A download is the
        reader's own action, it reports a count, and it stops — the import
        line's own stated grounds for holding that slot. Nothing is published
        at rest. */
-    unbindWorkLine = api.services.bindWorkLine({
+    const unbindWorkLine = api.services.bindWorkLine({
       line: () => {
         const snapshot = controller.getSnapshot()
         return downloadLine(snapshot.runtime, snapshot.models)
       },
       subscribe: (listener) => controller.subscribe(listener),
     })
-    myRunning = { plugin, controller }
+    session.own('unbindWorkLine', () => unbindWorkLine.dispose())
+
+    const myRunning = { plugin, controller }
     running = myRunning
-    myModels = createModelsModel({
+    /* Ownership before clearing: an older stop firing after a restart must not
+       strip the newer start's state — the rule sync's own stop follows. */
+    session.own('running', () => {
+      if (running === myRunning) running = null
+    })
+
+    const models = createModelsModel({
       controller,
       plugin,
       settings: api.settings,
       report: (event, fields) => api.diagnostics.warn(event, fields),
     })
-    showing = section.hold(myModels)
+    /* ⚠️ THE MODEL IS DISPOSED TOO. Only the tests ever called this, so in the
+       running app a settings subscription, an `Audio` element, a blob URL and
+       any voice request in flight survived every teardown and accumulated
+       across restarts — a leak that is invisible because each one on its own
+       is small. Owning it is what makes forgetting it impossible. */
+    session.own('modelsModel', () => models.dispose())
+    const showing = section.hold(models)
+    session.own('section', () => showing.dispose())
+
+    /* The daemon is a CHILD PROCESS, and it must not outlive the capability
+     * that owns it. Best-effort and unawaited: `dispose` is synchronous and
+     * Rust stops it again on app exit anyway.
+     *
+     * ⚠️ ONLY IF NOTHING HAS STARTED SINCE. There is one daemon for the
+     * plugin, not one per lifetime, so an outgoing stop landing after an
+     * incoming start killed the NEW capability's runtime and cancelled its
+     * requests. An ownership check made where the stop is REGISTERED cannot
+     * cover it: that check runs now and this action lands later.
+     *
+     * OWNED LAST, so it is released FIRST — nothing else here depends on the
+     * daemon, and the child process is the thing worth stopping soonest. */
+    session.own('daemon', () => {
+      if (lifetime === myLifetime) void plugin.stop().catch(() => {})
+    })
 
     /* Read what is on disk, unawaited: `start` must not block the composition
      * on IPC, and the pane subscribes to the store so a late answer arrives
@@ -257,7 +248,7 @@ export const inference: Capability = {
     void controller.refresh()
 
     api.diagnostics.info('inference.started', {})
-    return { dispose: stop }
+    return { dispose: session.stop }
   },
 }
 

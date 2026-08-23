@@ -1,5 +1,5 @@
 import { createElement } from 'react'
-import { createRenderSlot, type Capability, type CapabilityContext, type Disposable } from '../../kernel'
+import { createRenderSlot, openSession, type Capability, type CapabilityContext, type Disposable } from '../../kernel'
 import { DEPTH_SETTING, ROUTE_SETTING } from './lib/settings'
 import { inferencePort } from '../inference'
 import { createCompanionProvider, effectiveRoute } from './lib/provider'
@@ -79,43 +79,13 @@ export const companion: Capability = {
   ],
 
   start(api: CapabilityContext, signal: AbortSignal): Disposable {
-    let stopped = false
-    let unbindCompanion: Disposable | null = null
-    let myRoutes: RoutesModel | null = null
-    let showing: Disposable | null = null
-
-    /**
-     * One teardown step, isolated.
-     *
-     * ⚠️ ONLY `unbindCompanion` WAS. `myRoutes.dispose()` ran bare after it, so
-     * a throw there escaped the abort listener — and `stopped` is already true
-     * by then, so the registry's later cleanup call returns immediately and can
-     * neither retry nor report it. The failure would surface as an unhandled
-     * error during shutdown with nothing naming which step it came from, and
-     * every step after it would be skipped. The same guarded shape `inference`
-     * uses for its own list.
-     */
-    const step = (label: string, run: () => void): void => {
-      try {
-        run()
-      } catch (error) {
-        api.diagnostics.warn('companion.teardown-step-failed', {
-          label,
-          message: error instanceof Error ? error.message : String(error),
-        })
-      }
-    }
-
-    const stop = (): void => {
-      if (stopped) return
-      stopped = true
-      signal.removeEventListener('abort', stop)
-      step('section', () => showing?.dispose())
-      step('unbindCompanion', () => unbindCompanion?.dispose())
-      step('routesModel', () => myRoutes?.dispose())
-    }
-    api.onCleanup(stop)
-    signal.addEventListener('abort', stop, { once: true })
+    /* EVERYTHING THIS ACQUIRES, OWNED BY ONE THING — see `openSession`. The
+     * `stopped` flag, the listener removal and a guarded step per resource
+     * were written out here, and `routesModel.dispose()` ran bare after the
+     * one step that was guarded: a throw there escaped the abort listener with
+     * `stopped` already true, so the registry's later cleanup returned at once
+     * and could neither retry nor report it. */
+    const session = openSession(api, signal, 'companion.teardown-step-failed')
 
     const port = inferencePort()
     if (port === null) {
@@ -125,16 +95,20 @@ export const companion: Capability = {
        * marks and notes are unaffected. Throwing here would be F2's trap with
        * the roles reversed. */
       api.diagnostics.info('companion.started', { wired: false })
-      return { dispose: stop }
+      return { dispose: session.stop }
     }
 
-    myRoutes = createRoutesModel({
+    const routes = createRoutesModel({
       port,
       settings: api.settings,
       kernel: api.services,
       report: (event, fields) => api.diagnostics.warn(event, fields),
     })
-    showing = section.hold({ model: myRoutes, hasDictionary: api.services.hasDictionary() })
+    session.own('routesModel', () => routes.dispose())
+    /* HELD NOW, released later — `hold` is the acquisition and the disposer it
+       returns is what the session owns. */
+    const showing = section.hold({ model: routes, hasDictionary: api.services.hasDictionary() })
+    session.own('section', () => showing.dispose())
 
     const boundProvider = createCompanionProvider({
       port,
@@ -153,14 +127,15 @@ export const companion: Capability = {
        * one place that computes it.
        */
       route: () => {
-        return effectiveRoute(api.settings.get(ROUTE_SETTING), myRoutes?.getSnapshot().inUse ?? null)
+        return effectiveRoute(api.settings.get(ROUTE_SETTING), routes.getSnapshot().inUse ?? null)
       },
       /* Both read per call, and both from THIS capability's own namespace —
          `companion.route` and `companion.depth`, which `scopeSettings` allows
          and the kernel's own settings are not. */
       depth: () => api.settings.get(DEPTH_SETTING),
     })
-    unbindCompanion = api.services.bindCompanion(boundProvider)
+    const unbindCompanion = api.services.bindCompanion(boundProvider)
+    session.own('unbindCompanion', () => unbindCompanion.dispose())
 
     /* PROBED ONCE AT START, so the answer above EXISTS before the panel's
      * first render. WI-15.10 refuses a probe on a timer — four child
@@ -169,10 +144,10 @@ export const companion: Capability = {
      * Companion panel asks the moment it opens, and without it the panel's
      * first answer is a false negative. Unawaited, and a failure leaves the
      * snapshot empty, which reads as "nothing chosen" exactly as before. */
-    void myRoutes.refresh()
+    void routes.refresh()
 
     api.diagnostics.info('companion.started', { wired: true })
-    return { dispose: stop }
+    return { dispose: session.stop }
   },
 }
 
