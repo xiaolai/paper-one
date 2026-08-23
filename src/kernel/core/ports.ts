@@ -245,11 +245,6 @@ export type ContentBlobName = `content.${ContentExtension}` | 'cover.jpg'
 /** What a book's folder is called: `safeId` output, bounded. */
 export const BLOB_FOLDER = /^[A-Za-z0-9_]{1,80}$/
 
-const BLOB_NAMES: ReadonlySet<string> = new Set([
-  'cover.jpg',
-  ...CONTENT_EXTENSIONS.map((ext) => `content.${ext}`),
-])
-
 /**
  * The names the kernel's REMOVE primitive accepts (`KernelServices.removeBlob`
  * — WI-10.2): everything a blob may LAND under, plus the legacy `cover.webp`,
@@ -258,8 +253,32 @@ const BLOB_NAMES: ReadonlySet<string> = new Set([
  */
 export type RemovableBlobName = ContentBlobName | 'cover.webp'
 
+/**
+ * Every removable blob, and which SURFACE its removal is journalled under.
+ *
+ * ⚠️ **ONE MAP, BECAUSE THERE WERE TWO POLICIES.** The closed set lived here
+ * and the content/cover classification lived in `services.removeBlob` as
+ * `name === 'cover.webp' || name === 'cover.jpg' ? 'cover' : 'content'`. So
+ * adding a removable cover name — `cover.png`, say — passed validation here
+ * and was journalled as `content` there, telling every peer the book's BYTES
+ * had changed when its jacket had. The kind decides which key the journal
+ * tracks and therefore what a peer is told; a name that is legal in one place
+ * and misfiled in the other is a silent replication defect.
+ *
+ * The set below is derived from this, so a name cannot exist in one and not
+ * the other.
+ */
+export const REMOVABLE_BLOB_KINDS: Readonly<Record<RemovableBlobName, MutationKind>> =
+  Object.freeze({
+    'cover.jpg': 'cover',
+    /* Read-only on the landing side and still evictable — a jacket cached
+       before the honest name existed would otherwise be immortal. */
+    'cover.webp': 'cover',
+    ...Object.fromEntries(CONTENT_EXTENSIONS.map((ext) => [`content.${ext}`, 'content'])),
+  } as Record<RemovableBlobName, MutationKind>)
+
 /** The closed set behind `RemovableBlobName`, for the runtime check. */
-export const REMOVABLE_BLOB_NAMES: ReadonlySet<string> = new Set([...BLOB_NAMES, 'cover.webp'])
+export const REMOVABLE_BLOB_NAMES: ReadonlySet<string> = new Set(Object.keys(REMOVABLE_BLOB_KINDS))
 
 /**
  * Just the BOOK'S BYTES — every name content may be stored under, and nothing

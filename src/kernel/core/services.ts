@@ -7,7 +7,7 @@ import { createMarkStore, type MarkStore } from './markStore'
 import { folderOf } from './bookFolder'
 import { NOT_CONFIGURED, type CompanionProvider } from './companion'
 import { LOOK_UP_SETTING, NO_GLOSS, availableModes, effectiveMode, type GlossProvider, type LookUpMode } from './gloss'
-import { NO_WORK_LINE, NOOP_DIAGNOSTICS, NOOP_RECORDER, REMOVABLE_BLOB_NAMES, recorded, type DevicePort, type Diagnostics, type MutationKind, type MutationRecorder, type MutationToken, type RemovableBlobName, type SettingsStore, type ShelfPort, type SizePort, type WorkLine } from './ports'
+import { NO_WORK_LINE, NOOP_DIAGNOSTICS, NOOP_RECORDER, REMOVABLE_BLOB_KINDS, REMOVABLE_BLOB_NAMES, recorded, type DevicePort, type Diagnostics, type MutationRecorder, type MutationToken, type RemovableBlobName, type SettingsStore, type ShelfPort, type SizePort, type WorkLine } from './ports'
 import { carryLegacySettings, createSettingsStore, type SettingsMigration } from './settings'
 import { writeQueue, type WriteQueue } from './writeQueue'
 
@@ -273,14 +273,29 @@ export interface KernelServicesOptions {
  * Here the flag and the target move together, only under the disposer that
  * still owns the active binding.
  */
-/** Which binding issued a token. A symbol, so it cannot collide with a field
- *  a recorder defines and does not survive the JSON a journal writes. */
-const BINDING = Symbol('kernel.recorderBinding')
+/**
+ * Which binding issued each token, held BESIDE the token rather than on it.
+ *
+ * ⚠️ **THE TOKEN USED TO BE CLONED.** `{ ...token, [BINDING]: at }` returns a
+ * different object from the one the recorder minted, which breaks every
+ * recorder whose token is more than a bag of enumerable fields: one that keys
+ * a `Map` by identity, one that hands back a class instance with a prototype,
+ * one with a non-enumerable id. Each would be handed something it did not
+ * issue and would rightly refuse to commit it — after the file write, so the
+ * mutation is durable, unjournalled, and reported as a failure.
+ *
+ * `MutationToken` is an interface, so the kernel does not get to assume the
+ * shape behind it. A `WeakMap` records the generation without touching the
+ * value, and the token that reaches `commit` is byte-for-byte the one `begin`
+ * returned. Weak because the entry should die with the token; a bracket left
+ * open by a crash must not pin one forever.
+ */
+const issuedAt = new WeakMap<MutationToken, number>()
 
 function exclusiveSlot<T>(
   alreadyBound: string,
   fallback: T,
-): { get(): T; bind(next: T): Disposable; generation(): number } {
+): { get(): T; bind(next: T): Disposable; generation(): number; bound(): boolean } {
   let target = fallback
   /* Bumped on every bind AND every unbind, so "the binding that issued this"
    * is answerable later without holding a reference to the value itself. Used
@@ -294,6 +309,9 @@ function exclusiveSlot<T>(
   return {
     get: () => target,
     generation: () => generation,
+    /* Whether anything is bound, as opposed to the fallback answering. The
+       service host needs it: only the FALLBACK may return no disposer. */
+    bound: () => owner !== null,
     bind: (next) => {
       if (owner !== null) throw new Error(alreadyBound)
       const token = {}
@@ -357,10 +375,15 @@ export function createKernelServices({
     begin: async (book, what) => {
       const at = recorderSlot.generation()
       const token = await recorderSlot.get().begin(book, what)
-      return { ...token, [BINDING]: at } as MutationToken
+      /* THE RECORDER'S OWN OBJECT, UNTOUCHED — see `issuedAt`. */
+      issuedAt.set(token, at)
+      return token
     },
     commit: (token: MutationToken, digest?: string) => {
-      const at = (token as unknown as Record<symbol, unknown>)[BINDING]
+      /* A token this port never issued has no generation, so it cannot match
+         one — and falls through to the default, which is the same answer an
+         unbind gets and the one recovery already understands. */
+      const at = issuedAt.get(token)
       const target = at === recorderSlot.generation() ? recorderSlot.get() : recorder
       return target.commit(token, digest)
     },
@@ -411,6 +434,25 @@ export function createKernelServices({
         throw new Error(`removeBlob: ${JSON.stringify(name)} is not a blob the kernel removes`)
       }
       if (!fs) return
+      /* ⚠️ **AN ALIAS MUST NOT REACH ANOTHER BOOK'S FOLDER.** `folderOf`
+       * sanitises an id into `books/<safeId>` — a slash, a dot, anything
+       * outside [A-Za-z0-9] becomes `_` — which stops traversal and does NOT
+       * stop collision: it is many-to-one, so `book:a/b` and `book:a_b` are two
+       * ids over one directory. A caller holding the first could delete the
+       * second's content or jacket, and every check here passed it.
+       *
+       * The shelf is the authority on which id owns a folder. An id the shelf
+       * does not hold at all is left alone — that is an already-removed book,
+       * and absence is this operation's documented no-op — but an id whose
+       * folder belongs to a DIFFERENT, live book is refused rather than
+       * quietly honoured. */
+      const folder = folderOf(bookId)
+      const owner = library.getSnapshot().find((one) => folderOf(one.bookId) === folder)
+      if (owner !== undefined && owner.bookId !== bookId) {
+        throw new Error(
+          `removeBlob: ${JSON.stringify(bookId)} does not own ${folder} — ${JSON.stringify(owner.bookId)} does`,
+        )
+      }
       /* `folderOf` sanitises the id into `books/<safeId>` — a slash, a dot,
        * anything outside [A-Za-z0-9] becomes `_` — so the joined path cannot
        * leave the book's folder whatever the id says. And the delete runs
@@ -435,21 +477,35 @@ export function createKernelServices({
        * gone with no entry saying so — invisible to the feed and to the
        * unclean-shutdown verify pass. The kind follows the name: a cover is a
        * `cover` mutation, everything else is `content`. */
-      const kind: MutationKind = name === 'cover.webp' || name === 'cover.jpg' ? 'cover' : 'content'
-      await writes.append(library.lane(bookId), () =>
-        recorded(recorderPort, bookId, kind, async () => {
-        const path = `${folderOf(bookId)}/${name}`
-        /* EXISTS-THEN-REMOVE IS ATOMIC ONLY AGAINST THIS QUEUE, and another
+      /* THE SURFACE COMES FROM THE ONE MAP — see `REMOVABLE_BLOB_KINDS`. It
+       * was spelled out here as a second policy, so a removable cover name
+       * added to the closed set would have been journalled as `content` and
+       * told every peer the book's bytes had changed. */
+      const kind = REMOVABLE_BLOB_KINDS[name]
+      await writes.append(library.lane(bookId), async () => {
+        const path = `${folder}/${name}`
+        /* ⚠️ CHECKED BEFORE THE BRACKET IS OPENED, not inside it. An absent
+         * blob is the documented no-op, and opening a bracket around it wrote
+         * a committed mutation for a change that did not happen: the journal
+         * advanced, the feed carried an entry, and the verify pass had one more
+         * surface to digest — all for a file that was already gone. Removing
+         * the same blob twice, or evicting a book whose bytes a peer already
+         * took, did exactly this.
+         *
+         * EXISTS-THEN-REMOVE IS ATOMIC ONLY AGAINST THIS QUEUE, and another
          * PROCESS can still take the file in between — so a remove that races
          * one is an ordinary absence, not a fault. Absence is the documented
          * no-op for this operation either way; raising it would turn two
-         * callers both doing the right thing into an error for one of them. */
+         * callers both doing the right thing into an error for one of them.
+         * Both checks are inside the queued task, so the pair is still atomic
+         * against everything else touching this folder. */
         if (!(await fs.exists(path))) return
-        await fs.remove(path).catch(async (cause: unknown) => {
-          if (await fs.exists(path)) throw cause
+        await recorded(recorderPort, bookId, kind, async () => {
+          await fs.remove(path).catch(async (cause: unknown) => {
+            if (await fs.exists(path)) throw cause
+          })
         })
-        }),
-      )
+      })
     },
     bindRecorder: (next) => recorderSlot.bind(next),
     bindClock: (next) => clockSlot.bind(next),
@@ -478,7 +534,24 @@ export function createKernelServices({
     hasDictionary: () => hasDictionary,
     bindWorkLine: (next) => workLineSlot.bind(next),
     workLine: () => workLineSlot.get(),
-    serveServices: async (list) => (await serviceHostSlot.get()(list)) ?? NOOP_DISPOSABLE,
+    serveServices: async (list) => {
+      const bound = serviceHostSlot.bound()
+      const served = await serviceHostSlot.get()(list)
+      /* THE UNBOUND FALLBACK IS THE ONLY THING ALLOWED TO ANSWER NOTHING.
+       *
+       * ⚠️ This was `?? NOOP_DISPOSABLE`, which is indistinguishable from the
+       * fallback — so a BOUND host returning `undefined` in breach of its own
+       * contract was silently accepted, and if it had registered handlers
+       * their disposer went with it: teardown then took nothing down and the
+       * registrations leaked into the next composition. A host that answers
+       * wrongly is a defect in that host, and it has to be told so where it
+       * happens rather than at the next restart. */
+      if (!bound) return NOOP_DISPOSABLE
+      if (typeof (served as Disposable | undefined)?.dispose !== 'function') {
+        throw new Error('serveServices: the bound service host returned no disposer')
+      }
+      return served
+    },
     drain: async () => {
       await writes.idle()
       await storage?.flush?.()

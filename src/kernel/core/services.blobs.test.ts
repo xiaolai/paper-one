@@ -1,13 +1,17 @@
 import { describe, expect, it } from 'vitest'
+import type { IndexedBook } from './bookIndex'
 import { fakeFs } from './fakeFs.testkit'
 import { blobWorld, BOOK, CONTENT, deferred, servicesWith, spyRecorder } from './servicesWorld.testkit'
+import { REMOVABLE_BLOB_KINDS } from './ports'
 import { createKernelServices } from './services'
 
 /**
  * Everything that writes inside `books/<id>/`, and the one door out of it.
  */
 
-describe('blob deletion shares the folder’s lane', () => {
+describe('blob deletion and the folder it names', () => {
+  const OTHER: IndexedBook = { bookId: 'book:a_b', title: 'X', author: '', openedAt: 1 }
+
   it('queues on the same lane as every other writer to that folder', () => {
     const services = servicesWith(spyRecorder().recorder)
     /* Two distinct ids, one directory. */
@@ -15,15 +19,61 @@ describe('blob deletion shares the folder’s lane', () => {
   })
 
   /**
-   * AND `removeBlob` ACTUALLY TAKES THAT LANE.
+   * ⚠️ AND THAT COLLISION IS REFUSED, NOT MERELY SERIALISED.
    *
-   * The case above compares two lane names and never calls `removeBlob`, so
-   * the deletion could go back to queueing on the raw id — which is the
-   * regression it is named for — without turning red. `folderOf` is
-   * many-to-one, so `book:a/b` and `book:a_b` are two ids over one directory,
-   * and a delete on one must wait behind a write on the other.
+   * `folderOf` sanitises an id into `books/<safeId>` — every character outside
+   * [A-Za-z0-9] becomes `_` — so it stops traversal and does NOT stop
+   * collision: `book:a/b` and `book:a_b` are two ids over one directory. A
+   * caller holding the first could delete the second's content or its jacket,
+   * and every check in `removeBlob` passed it. Sharing a lane made that
+   * orderly; it did not make it right.
+   *
+   * The shelf is the authority on which id owns a folder.
    */
-  it('waits behind a write issued under the other spelling of its folder', async () => {
+  it('refuses an id whose folder belongs to a different book on the shelf', async () => {
+    const fs = fakeFs({
+      'books/book_a_b/book.json': JSON.stringify({ bookId: 'book:a_b', title: 'X' }),
+      'books/book_a_b/content.epub': 'bytes',
+    })
+    const spy = spyRecorder()
+    const services = createKernelServices({
+      fs,
+      storage: null,
+      initialBooks: [OTHER],
+      recorder: spy.recorder,
+    })
+
+    await expect(services.removeBlob('book:a/b', 'content.epub')).rejects.toThrow(/does not own/)
+    await services.drain()
+    expect(fs.store.has('books/book_a_b/content.epub'), 'another book’s bytes were taken').toBe(true)
+    expect(spy.kinds).toEqual([])
+    /* And the book that DOES own it is still served. */
+    await services.removeBlob('book:a_b', 'content.epub')
+    await services.drain()
+    expect(fs.store.has('books/book_a_b/content.epub')).toBe(false)
+  })
+
+  /* An id the shelf does not hold at all is an already-removed book, and
+     absence is this operation's documented no-op — refusing it would turn a
+     removal racing an eviction into an error for a caller doing the right
+     thing. Only a folder owned by a DIFFERENT live book is refused. */
+  it('leaves a book that is no longer on the shelf as an ordinary no-op', async () => {
+    const fs = fakeFs({ 'books/book_gone/content.epub': 'bytes' })
+    const services = createKernelServices({ fs, storage: null, initialBooks: [], recorder: spyRecorder().recorder })
+    await expect(services.removeBlob('book_gone', 'content.epub')).resolves.toBeUndefined()
+    await services.drain()
+    expect(fs.store.has('books/book_gone/content.epub')).toBe(false)
+  })
+
+  /**
+   * AND `removeBlob` ACTUALLY TAKES THE FOLDER'S LANE.
+   *
+   * The lane case above compares two names and never calls `removeBlob`, so
+   * the deletion could go back to queueing somewhere else without turning it
+   * red. A delete must wait behind a write to the same folder: the exists/
+   * remove pair is atomic only against this queue.
+   */
+  it('waits behind a write already in flight to its folder', async () => {
     const order: string[] = []
     const gate = deferred()
     const fs = fakeFs({
@@ -46,13 +96,12 @@ describe('blob deletion shares the folder’s lane', () => {
     const services = createKernelServices({
       fs: slow,
       storage: null,
-      initialBooks: [{ bookId: 'book:a_b', title: 'X', author: '', openedAt: 1 }],
+      initialBooks: [OTHER],
       recorder: spyRecorder().recorder,
     })
 
     const writing = services.library.update('book:a_b', (record) => ({ ...record, title: 'Y' }))
-    /* The OTHER spelling of the same folder. */
-    const removing = services.removeBlob('book:a/b', 'content.epub')
+    const removing = services.removeBlob('book:a_b', 'content.epub')
     await Promise.resolve()
     gate.open()
     await Promise.all([writing, removing])
@@ -101,6 +150,55 @@ describe('removeBlob', () => {
     await expect(w.services.removeBlob('book_x', 'content.epub')).resolves.toBeUndefined()
     await w.services.drain()
     expect(w.fs.store.has(CONTENT)).toBe(false)
+  })
+
+  /**
+   * ⚠️ AND THE NO-OP JOURNALS NOTHING.
+   *
+   * The bracket used to open before the existence check, so removing a blob
+   * that was already gone wrote a committed mutation for a change that did not
+   * happen: the journal advanced, the feed carried an entry, and the next
+   * unclean-shutdown verify pass had one more surface to digest — for a file
+   * nobody touched. Both the second remove above and evicting a book whose
+   * bytes a peer had already taken did exactly this.
+   */
+  it('journals nothing when the blob is already gone', async () => {
+    const w = blobWorld()
+    await w.services.removeBlob('book_x', 'content.epub')
+    await w.services.drain()
+    expect(w.spy.kinds, 'the real removal was not journalled, so this proves nothing').toEqual([
+      'content',
+    ])
+
+    await w.services.removeBlob('book_x', 'content.epub')
+    await w.services.drain()
+    expect(w.spy.kinds, 'a removal that removed nothing opened a bracket').toEqual(['content'])
+    expect(w.spy.commits).toHaveLength(1)
+  })
+
+  /* The SURFACE follows the name, from one map — see `REMOVABLE_BLOB_KINDS`.
+     The classification used to be written out a second time in `removeBlob`,
+     so a removable cover name added to the closed set would have been
+     journalled as `content` and told every peer the BYTES had changed. */
+  it('journals every removable name under the surface the map gives it', async () => {
+    for (const [name, kind] of Object.entries(REMOVABLE_BLOB_KINDS)) {
+      const spy = spyRecorder()
+      const path = `books/book_x/${name}`
+      const fs = fakeFs({
+        'books/book_x/book.json': JSON.stringify({ bookId: 'book_x', title: 'X' }),
+        [path]: 'bytes',
+      })
+      const services = createKernelServices({
+        fs,
+        storage: null,
+        initialBooks: [BOOK],
+        recorder: spy.recorder,
+      })
+      await services.removeBlob('book_x', name as 'cover.jpg')
+      await services.drain()
+      expect(fs.store.has(path), name).toBe(false)
+      expect(spy.kinds, name).toEqual([kind])
+    }
   })
 
   /**

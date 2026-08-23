@@ -92,6 +92,73 @@ describe('bindRecorder / bindClock disposers', () => {
  * file write had already happened, leaving a durable unjournalled mutation
  * and a write failure for something that did not fail.
  */
+/**
+ * THE TOKEN THAT REACHES `commit` IS THE ONE `begin` RETURNED.
+ *
+ * ⚠️ The port used to hand back `{ ...token, [BINDING]: generation }` — a
+ * different object. `MutationToken` is an interface, so a recorder is entitled
+ * to any shape behind it: a class instance, a key in an identity `Map`, a
+ * value with non-enumerable state. Every one of those would be given something
+ * it never issued and would rightly refuse it — AFTER the file write, so the
+ * mutation is durable, unjournalled, and reported to the reader as a failure.
+ *
+ * The journal this ships with happens to use a plain object, which is why
+ * nothing caught it.
+ */
+describe('the token crossing the recorder port', () => {
+  it('is the recorder’s own object, not a copy of its fields', async () => {
+    const issued: MutationToken[] = []
+    const committed: MutationToken[] = []
+    /* A token with identity and nothing enumerable to copy — the shape a
+       spread silently destroys. */
+    class Ticket implements MutationToken {
+      constructor(
+        readonly book: string,
+        readonly what: MutationKind,
+      ) {}
+    }
+    const journal: MutationRecorder = {
+      begin: async (book, what) => {
+        const ticket = new Ticket(book, what)
+        issued.push(ticket)
+        return ticket
+      },
+      commit: async (token) => void committed.push(token),
+    }
+    const services = servicesWith(journal)
+    await services.library.update('book_x', (record) => ({ ...record, title: 'A' }))
+    await services.drain()
+
+    expect(issued).toHaveLength(1)
+    expect(committed).toHaveLength(1)
+    expect(committed[0], 'the port handed back a copy').toBe(issued[0])
+    expect(committed[0], 'the prototype did not survive').toBeInstanceOf(Ticket)
+  })
+
+  /* AND A RECORDER KEYING BY IDENTITY STILL WORKS, which is the failure the
+     copy produced in practice: an open-bracket table missing its own key. */
+  it('lets a recorder match its own token by identity', async () => {
+    const open = new Set<MutationToken>()
+    let refused = 0
+    const journal: MutationRecorder = {
+      begin: async (book, what) => {
+        const token = { book, what }
+        open.add(token)
+        return token
+      },
+      commit: async (token) => {
+        if (!open.delete(token)) refused += 1
+      },
+    }
+    const services = servicesWith(journal)
+    await services.library.update('book_x', (record) => ({ ...record, title: 'B' }))
+    await services.drain()
+
+    expect(refused, 'the journal was handed a token it never issued').toBe(0)
+    expect(open.size, 'the bracket was left open').toBe(0)
+  })
+})
+
 describe('a bracket that spans a rebind', () => {
   it('sends the commit to the default, not to the journal bound since', async () => {
     const base = spyRecorder()

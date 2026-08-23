@@ -135,6 +135,50 @@ describe('the companion, gloss and work-line ports', () => {
  * are what say it behaves.
  */
 /**
+ * THE SERVICE HOST'S DISPOSER IS ITS CONTRACT.
+ *
+ * ⚠️ `serveServices` ended in `?? NOOP_DISPOSABLE`, which cannot tell a BOUND
+ * host that answered wrongly from the unbound fallback that answers nothing by
+ * design. So a host returning `undefined` — in breach of its own signature —
+ * was accepted silently, and if it had registered handlers their disposer went
+ * with it: teardown took nothing down and the registrations survived into the
+ * next composition. A defect in the host, reported at the next restart as a
+ * duplicate registration, with nothing to connect the two.
+ */
+describe('serving a composed set of services', () => {
+  it('answers a no-op disposer while nothing is bound', async () => {
+    const services = servicesWith(spyRecorder().recorder)
+    const served = await services.serveServices([])
+    expect(typeof served.dispose).toBe('function')
+    expect(() => served.dispose()).not.toThrow()
+  })
+
+  it('hands back the bound host’s own disposer', async () => {
+    const services = servicesWith(spyRecorder().recorder)
+    let disposed = 0
+    const own = { dispose: () => void (disposed += 1) }
+    services.bindServiceHost(() => own)
+
+    const served = await services.serveServices([])
+    expect(served, 'the host’s disposer was replaced').toBe(own)
+    served.dispose()
+    expect(disposed).toBe(1)
+  })
+
+  it('refuses a bound host that returns no disposer, rather than papering over it', async () => {
+    const services = servicesWith(spyRecorder().recorder)
+    services.bindServiceHost((() => undefined) as never)
+    await expect(services.serveServices([])).rejects.toThrow(/no disposer/)
+  })
+
+  it('refuses one whose disposer is not callable', async () => {
+    const services = servicesWith(spyRecorder().recorder)
+    services.bindServiceHost((() => ({ dispose: 'soon' })) as never)
+    await expect(services.serveServices([])).rejects.toThrow(/no disposer/)
+  })
+})
+
+/**
  * WHETHER THIS PLATFORM HAS A DICTIONARY, which only the kernel can answer.
  *
  * ⚠️ `CompanionPane` took it as an OPTIONAL prop defaulting to `false` and the
