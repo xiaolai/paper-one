@@ -2,7 +2,7 @@ import { createElement } from 'react'
 import type { Capability, CapabilityContext, Disposable } from '../../kernel'
 import { DEPTH_SETTING, ROUTE_SETTING } from './lib/settings'
 import { inferencePort } from '../inference'
-import { createCompanionProvider, effectiveRoute, type BoundCompanionProvider } from './lib/provider'
+import { createCompanionProvider, effectiveRoute } from './lib/provider'
 import { createRoutesModel, type RoutesModel } from './ui/routesModel'
 import { CompanionPane } from './ui/CompanionPane'
 
@@ -38,12 +38,15 @@ let routesModel: RoutesModel | null = null
  * `KernelServices.hasDictionary`.
  */
 let systemDictionary = false
-let provider: BoundCompanionProvider | null = null
 
-/** The bound provider, for a test and for the reader UI's thread. */
-export function companionProvider(): BoundCompanionProvider | null {
-  return provider
-}
+/* ⚠️ NO MODULE-GLOBAL `provider`, AND NO `companionProvider()` ACCESSOR.
+ *
+ * There were both, with a comment saying they were "for a test and for the
+ * reader UI's thread" — and neither read them. The thread takes the provider
+ * from `services.companion()`, which is the port this capability binds, so the
+ * global was a second reference to the same object with its own ownership
+ * check, its own assignment and its own clearing on stop. One live path and
+ * one dead one, and only the dead one looked like the public entry. */
 
 export const companion: Capability = {
   id: 'companion',
@@ -73,7 +76,28 @@ export const companion: Capability = {
     let stopped = false
     let unbindCompanion: Disposable | null = null
     let myRoutes: RoutesModel | null = null
-    let myProvider: BoundCompanionProvider | null = null
+
+    /**
+     * One teardown step, isolated.
+     *
+     * ⚠️ ONLY `unbindCompanion` WAS. `myRoutes.dispose()` ran bare after it, so
+     * a throw there escaped the abort listener — and `stopped` is already true
+     * by then, so the registry's later cleanup call returns immediately and can
+     * neither retry nor report it. The failure would surface as an unhandled
+     * error during shutdown with nothing naming which step it came from, and
+     * every step after it would be skipped. The same guarded shape `inference`
+     * uses for its own list.
+     */
+    const step = (label: string, run: () => void): void => {
+      try {
+        run()
+      } catch (error) {
+        api.diagnostics.warn('companion.teardown-step-failed', {
+          label,
+          message: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
 
     const stop = (): void => {
       if (stopped) return
@@ -83,16 +107,8 @@ export const companion: Capability = {
         routesModel = null
         systemDictionary = false
       }
-      if (provider === myProvider) provider = null
-      try {
-        unbindCompanion?.dispose()
-      } catch (error) {
-        api.diagnostics.warn('companion.teardown-step-failed', {
-          label: 'unbindCompanion',
-          message: error instanceof Error ? error.message : String(error),
-        })
-      }
-      myRoutes?.dispose()
+      step('unbindCompanion', () => unbindCompanion?.dispose())
+      step('routesModel', () => myRoutes?.dispose())
     }
     api.onCleanup(stop)
     signal.addEventListener('abort', stop, { once: true })
@@ -117,7 +133,7 @@ export const companion: Capability = {
     routesModel = myRoutes
     systemDictionary = api.services.hasDictionary()
 
-    myProvider = createCompanionProvider({
+    const boundProvider = createCompanionProvider({
       port,
       /**
        * ONE ANSWER TO "WHICH ROUTE ANSWERS", and it is the model's.
@@ -141,8 +157,7 @@ export const companion: Capability = {
          and the kernel's own settings are not. */
       depth: () => api.settings.get(DEPTH_SETTING),
     })
-    provider = myProvider
-    unbindCompanion = api.services.bindCompanion(myProvider)
+    unbindCompanion = api.services.bindCompanion(boundProvider)
 
     /* PROBED ONCE AT START, so the answer above EXISTS before the panel's
      * first render. WI-15.10 refuses a probe on a timer — four child

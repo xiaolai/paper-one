@@ -35,13 +35,61 @@ import {
  * must be identical on every route.
  */
 
-/** Which route answers. Route ids are the probe's own (`local:…`, `agent:…`). */
-export type RouteId = string
+/**
+ * Which route answers. Route ids are the probe's own — `local:…`, `agent:…`,
+ * `endpoint:…`.
+ *
+ * A template union rather than `string`, because every routing decision here
+ * turns on the prefix and `string` promises there is one. `agent:` with
+ * nothing after it satisfied `isAgentRoute`, went to the agent branch, and was
+ * refused at the IPC boundary as an unknown model — a failure named after the
+ * wrong thing, one process away from where it could have been named properly.
+ *
+ * The type is a shape, not a guarantee: values arrive from a persisted setting
+ * and from a probe, so `parseRoute` is what actually decides.
+ */
+export type RouteKindName = 'local' | 'agent' | 'endpoint'
+export type RouteId = `${RouteKindName}:${string}`
+
+/** A route id taken apart: which kind, and the identifier after the colon. */
+export interface ParsedRoute {
+  readonly kind: RouteKindName
+  readonly id: string
+}
+
+const ROUTE_KINDS: ReadonlySet<string> = new Set<RouteKindName>(['local', 'agent', 'endpoint'])
+
+/**
+ * Split a route id into its kind and its identifier, or null.
+ *
+ * ONE PARSER, EXHAUSTIVE. There were three prefix tests — `startsWith('agent:')`,
+ * a loop over `['local:', 'endpoint:']`, and an emptiness check in the caller —
+ * and between them a route could be an agent to one and unrecognised to
+ * another. Anything this returns null for is refused by name, here, rather
+ * than sent somewhere to fail under a different description.
+ */
+export function parseRoute(route: string): ParsedRoute | null {
+  const at = route.indexOf(':')
+  /* `at <= 0` covers both no colon and an empty kind (`:qwen`). */
+  if (at <= 0) return null
+  const kind = route.slice(0, at)
+  const id = route.slice(at + 1)
+  /* An empty identifier is not a route. `agent:` names no agent and
+     `endpoint:` asks the daemon for a model called the empty string. */
+  if (id === '' || !ROUTE_KINDS.has(kind)) return null
+  return { kind: kind as RouteKindName, id }
+}
 
 export interface CompanionProviderOptions {
   readonly port: InferencePort
-  /** The chosen route id, read per call so a change needs no rebind. */
-  readonly route: () => RouteId | null
+  /**
+   * The chosen route id, read per call so a change needs no rebind.
+   *
+   * `string`, NOT `RouteId`: the value comes from a persisted setting and from
+   * a probe, and the type system cannot vouch for either. `parseRoute` is the
+   * boundary — `RouteId` describes what has passed it, not what arrives.
+   */
+  readonly route: () => string | null
   /**
    * How much of the reader's subscription this answer may spend — read per
    * call, for the same reason the route is: changing it must take effect on
@@ -64,8 +112,8 @@ export interface CompanionProviderOptions {
 export type BoundCompanionProvider = CompanionProvider
 
 /** Whether a route id names an agent rather than the local runtime. */
-export function isAgentRoute(route: RouteId): boolean {
-  return route.startsWith('agent:')
+export function isAgentRoute(route: string): boolean {
+  return parseRoute(route)?.kind === 'agent'
 }
 
 /**
@@ -83,13 +131,18 @@ export function isAgentRoute(route: RouteId): boolean {
  * asserted: the getter that got this wrong was an inline closure nothing could
  * reach.
  */
-export function effectiveRoute(stored: string, fallback: RouteId | null): RouteId | null {
-  return stored === '' ? fallback : stored
+export function effectiveRoute(stored: string, fallback: string | null): RouteId | null {
+  /* PARSED, NOT MERELY NON-EMPTY. A stored value is whatever a previous build
+     — or a hand-edited settings file — left there, and a shape this does not
+     recognise must fall back rather than be dispatched on. */
+  if (stored !== '' && parseRoute(stored) !== null) return stored as RouteId
+  return fallback !== null && parseRoute(fallback) !== null ? (fallback as RouteId) : null
 }
 
 /** The model id inside a `local:` route. */
-export function localModelOf(route: RouteId): string | null {
-  return route.startsWith('local:') ? route.slice('local:'.length) : null
+export function localModelOf(route: string): string | null {
+  const parsed = parseRoute(route)
+  return parsed?.kind === 'local' ? parsed.id : null
 }
 
 /**
@@ -104,11 +157,9 @@ export function localModelOf(route: RouteId): string | null {
  * Null for a shape this does not recognise, so the caller REFUSES rather than
  * sending an empty model and letting the daemon name the failure.
  */
-export function modelIdOf(route: RouteId): string | null {
-  for (const prefix of ['local:', 'endpoint:']) {
-    if (route.startsWith(prefix)) return route.slice(prefix.length)
-  }
-  return null
+export function modelIdOf(route: string): string | null {
+  const parsed = parseRoute(route)
+  return parsed !== null && parsed.kind !== 'agent' ? parsed.id : null
 }
 
 /**
@@ -119,9 +170,9 @@ export function modelIdOf(route: RouteId): string | null {
  * could act on. A route id Paper did not mint is Paper's mistake, and the
  * message says which id.
  */
-function requireModelId(route: RouteId): string {
+function requireModelId(route: string): string {
   const id = modelIdOf(route)
-  if (id === null || id === '') {
+  if (id === null) {
     throw new Error(`The companion cannot answer on the route ${JSON.stringify(route)}.`)
   }
   return id
@@ -138,7 +189,12 @@ export function createCompanionProvider({
       return route() ?? 'No model configured'
     },
     get configured(): boolean {
-      return route() !== null
+      /* A route this cannot parse is not a configuration. `configured` is what
+         every affordance checks before offering to ask (§07), so answering
+         true for a malformed one puts a live control in front of a request
+         that can only fail. */
+      const chosen = route()
+      return chosen !== null && parseRoute(chosen) !== null
     },
 
     async *ask(

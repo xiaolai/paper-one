@@ -159,7 +159,53 @@ export interface ResourceUsage {
  * `tauri-plugin-peer` has had this helper since phase 7 (`wire.ts`); this file
  * did not. `plugin.contract.test.ts` now holds both halves to it.
  */
-const command = (name: string) => `plugin:inference|${name}`
+/**
+ * Every command this plugin exposes.
+ *
+ * A UNION, NOT `string`. `command` took any string, so a typo — or a name
+ * changed on the Rust side and not here — produced a perfectly well-formed
+ * `plugin:inference|inference_statuss` that failed at runtime with "command
+ * not found", which is exactly the failure the prefix bug already cost an
+ * afternoon to find once. `plugin.contract.test.ts` checks this list against
+ * the three Rust surfaces; the type is what makes a mistake in the list itself
+ * a compile error rather than a fourth place to check.
+ */
+export type InferenceCommand =
+  | 'inference_status'
+  | 'inference_start'
+  | 'inference_stop'
+  | 'inference_models'
+  | 'inference_install_model'
+  | 'inference_remove_model'
+  | 'inference_resource_usage'
+  | 'inference_reveal_models_dir'
+  | 'inference_probe'
+  | 'inference_generate'
+  | 'inference_gloss'
+  | 'inference_speak'
+  | 'inference_endpoints'
+  | 'inference_add_endpoint'
+  | 'inference_remove_endpoint'
+  | 'inference_set_endpoint_key'
+  | 'agent_ask'
+  | 'agent_sign_in'
+  | 'inference_cancel'
+
+const command = (name: InferenceCommand) => `plugin:inference|${name}`
+
+/**
+ * A `Channel` wired to `onMessage`, for the three commands that stream.
+ *
+ * The same four lines were written out in `installModel`, `generate` and
+ * `agentAsk`; a fourth streaming command would have been a fourth copy, and
+ * one of them forgetting to assign `onmessage` is a command that runs to
+ * completion having delivered nothing.
+ */
+function streamTo<T>(onMessage: (value: T) => void): Channel<T> {
+  const channel = new Channel<T>()
+  channel.onmessage = onMessage
+  return channel
+}
 
 export const inferencePlugin = {
   status: () => invoke<RuntimeStatus>(command('inference_status')),
@@ -167,11 +213,12 @@ export const inferencePlugin = {
   stop: () => invoke<void>(command('inference_stop')),
 
   models: () => invoke<readonly ModelRow[]>(command('inference_models')),
-  installModel: (requestId: string, model: string, onProgress: (p: InstallProgress) => void) => {
-    const progress = new Channel<InstallProgress>()
-    progress.onmessage = onProgress
-    return invoke<void>(command('inference_install_model'), { requestId, model, progress })
-  },
+  installModel: (requestId: string, model: string, onProgress: (p: InstallProgress) => void) =>
+    invoke<void>(command('inference_install_model'), {
+      requestId,
+      model,
+      progress: streamTo(onProgress),
+    }),
   removeModel: (model: string) => invoke<void>(command('inference_remove_model'), { model }),
   resourceUsage: () => invoke<ResourceUsage>(command('inference_resource_usage')),
   revealModelsDir: () => invoke<string>(command('inference_reveal_models_dir')),
@@ -184,11 +231,14 @@ export const inferencePlugin = {
     system: string,
     question: string,
     onChunk: (text: string) => void,
-  ) => {
-    const chunks = new Channel<string>()
-    chunks.onmessage = onChunk
-    return invoke<string>(command('inference_generate'), { requestId, model, system, question, chunks })
-  },
+  ) =>
+    invoke<string>(command('inference_generate'), {
+      requestId,
+      model,
+      system,
+      question,
+      chunks: streamTo(onChunk),
+    }),
   gloss: (requestId: string, model: string, system: string, question: string) =>
     invoke<string>(command('inference_gloss'), { requestId, model, system, question }),
   speak: (requestId: string, model: string, text: string, voice: string | null) =>
@@ -201,11 +251,14 @@ export const inferencePlugin = {
   /** WRITE-ONLY. There is deliberately no `getEndpointKey`. */
   setEndpointKey: (id: string, key: string) => invoke<void>(command('inference_set_endpoint_key'), { id, key }),
 
-  agentAsk: (requestId: string, route: string, prompt: string, depth: Depth, onChunk: (text: string) => void) => {
-    const chunks = new Channel<string>()
-    chunks.onmessage = onChunk
-    return invoke<string>(command('agent_ask'), { requestId, route, prompt, depth, chunks })
-  },
+  agentAsk: (requestId: string, route: string, prompt: string, depth: Depth, onChunk: (text: string) => void) =>
+    invoke<string>(command('agent_ask'), {
+      requestId,
+      route,
+      prompt,
+      depth,
+      chunks: streamTo(onChunk),
+    }),
   agentSignIn: (route: string) => invoke<void>(command('agent_sign_in'), { route }),
 
   cancel: (requestId: string) => invoke<void>(command('inference_cancel'), { requestId }),
@@ -242,9 +295,23 @@ export function isCancelled(error: unknown): boolean {
  * request does still be meaningful — see the crate's `requests.rs`. It is a
  * correlation id and nothing more: it is never a filename, never a key, and
  * never shown.
+ *
+ * # Unique across webviews and across reloads, not just within one
+ *
+ * ⚠️ This was a bare module-level counter, so it restarted at 1 on every
+ * webview reload and ran independently in every webview — while `Registry` in
+ * Rust holds ONE map for the whole process and refuses a duplicate id with
+ * `RequestBusy`. So a reload during a long answer, or a second window, minted
+ * `ask-1` against a request the daemon still had open, and the reader's next
+ * question was refused as "already in flight" — a state they could not see and
+ * could not clear.
+ *
+ * The counter still runs, because an ordered id is far easier to follow in a
+ * log than a bare UUID; a per-load random component is what makes it unique.
  */
+const SESSION = Math.random().toString(36).slice(2, 10)
 let counter = 0
 export function mintRequestId(prefix: string): string {
   counter += 1
-  return `${prefix}-${counter}`
+  return `${prefix}-${SESSION}-${counter}`
 }

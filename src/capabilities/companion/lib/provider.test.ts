@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { AnswerEnd } from '../../../kernel'
 import type { AskContext } from '../../../kernel'
 import { COMPANION_SYSTEM_PROMPT } from './passages'
-import type { InferencePort } from '../../inference'
+import type { InferencePort, Probe } from '../../inference'
 import { createCompanionProvider, effectiveRoute, isAgentRoute, localModelOf, modelIdOf } from './provider'
 
 /**
@@ -32,23 +32,68 @@ const CONTEXT: AskContext = {
   ],
 }
 
+/** One recorded call to `generate`, with every argument kept apart. */
+interface GenerateCall {
+  readonly model: string
+  readonly system: string
+  readonly question: string
+  readonly signal: AbortSignal
+}
+
+/** One recorded call to `agentAsk`. */
+interface AgentCall {
+  readonly route: string
+  readonly prompt: string
+  readonly depth: string
+  readonly signal: AbortSignal
+}
+
+/**
+ * The inference port, with each argument kept as itself.
+ *
+ * ⚠️ **THE OLD FAKE FLATTENED EVERYTHING INTO ONE `string[]`.** It pushed
+ * `` `generate:${model}` ``, the prompt, and — on the agent branch —
+ * `` `depth:${depth}` ``, discarding the system prompt entirely and mixing the
+ * rest into one list. So a provider that swapped the system prompt for the
+ * question, or sent the depth as the route, produced the same `seen` array; the
+ * system prompt was not checked at all, because it was never recorded; and
+ * every call to an unexpected method was permitted silently, because the
+ * remaining methods were permissive no-ops.
+ *
+ * `refuse` is what makes the last one visible: a method this test did not
+ * expect throws instead of answering.
+ */
 function portWith(
   run: (onChunk: (text: string) => void) => Promise<string>,
-): { port: InferencePort; seen: string[]; signals: AbortSignal[] } {
+  allow: { readonly probe?: () => Promise<Probe>; readonly ensureReady?: () => Promise<boolean> } = {},
+): {
+  port: InferencePort
+  generates: GenerateCall[]
+  agents: AgentCall[]
+  /** Both call kinds in order, as `kind:id` — for the routing assertions. */
+  seen: string[]
+  signals: AbortSignal[]
+} {
+  const generates: GenerateCall[] = []
+  const agents: AgentCall[] = []
   const seen: string[] = []
   /* EVERY SIGNAL THE PORT WAS HANDED. The agent branch used to be given none,
      and no test noticed because they all passed a signal nobody ever aborted —
      a cancellation contract asserted by never exercising it. */
   const signals: AbortSignal[] = []
+  const refuse = (method: string) => (): never => {
+    throw new Error(`the provider called ${method}, which this test did not expect`)
+  }
   const port = {
     generate: async (
       model: string,
-      _system: string,
-      prompt: string,
+      system: string,
+      question: string,
       onChunk: (t: string) => void,
       signal: AbortSignal,
     ) => {
-      seen.push(`generate:${model}`, prompt)
+      generates.push({ model, system, question, signal })
+      seen.push(`generate:${model}`)
       signals.push(signal)
       return run(onChunk)
     },
@@ -59,15 +104,19 @@ function portWith(
       onChunk: (t: string) => void,
       signal: AbortSignal,
     ) => {
-      seen.push(`agent:${route}`, prompt, `depth:${depth}`)
+      agents.push({ route, prompt, depth, signal })
+      seen.push(`agent:${route}`)
       signals.push(signal)
       return run(onChunk)
     },
-    probe: async () => ({ routes: [], runtimeVersion: null }),
-    ensureReady: async () => true,
-    signIn: async () => {},
+    /* REFUSED UNLESS ASKED FOR. The provider has no business probing or
+       starting a runtime to answer a question, and a permissive no-op made
+       either invisible. */
+    probe: allow.probe ?? (refuse('probe') as unknown as InferencePort['probe']),
+    ensureReady: allow.ensureReady ?? (refuse('ensureReady') as unknown as InferencePort['ensureReady']),
+    signIn: refuse('signIn') as unknown as InferencePort['signIn'],
   } satisfies InferencePort
-  return { port, seen, signals }
+  return { port, generates, agents, seen, signals }
 }
 
 /**
@@ -136,18 +185,71 @@ describe('the bound provider', () => {
   })
 
   it('sends the model id, not the route id, on a local route', async () => {
-    const { port, seen } = portWith(async () => '')
+    const { port, generates, agents } = portWith(async () => '')
     const provider = createCompanionProvider({ port, route: () => 'local:qwen3-4b', depth: () => 'default' })
     await drain(provider.ask('why?', CONTEXT, new AbortController().signal))
-    expect(seen[0]).toBe('generate:qwen3-4b')
+
+    expect(generates).toHaveLength(1)
+    expect(agents).toHaveLength(0)
+    expect(generates[0]?.model).toBe('qwen3-4b')
+    /* ⚠️ THE SYSTEM PROMPT, WHICH NOTHING USED TO RECORD. The old fake
+       discarded it, so a provider that sent the question as the system message
+       and the rules as the question produced an identical `seen` array. */
+    expect(generates[0]?.system).toBe(COMPANION_SYSTEM_PROMPT)
+    expect(generates[0]?.question).toContain('why?')
+    expect(generates[0]?.question).toContain('Call me Ishmael')
   })
 
   it('sends the whole route id to an agent, and never touches generate', async () => {
-    const { port, seen } = portWith(async () => '')
+    const { port, generates, agents } = portWith(async () => '')
     const provider = createCompanionProvider({ port, route: () => 'agent:codex', depth: () => 'thorough' })
     await drain(provider.ask('why?', CONTEXT, new AbortController().signal))
-    expect(seen[0]).toBe('agent:agent:codex')
-    expect(seen.some((one) => one.startsWith('generate:'))).toBe(false)
+
+    expect(agents).toHaveLength(1)
+    expect(agents[0]?.route).toBe('agent:codex')
+    expect(agents[0]?.depth).toBe('thorough')
+    expect(generates, 'an agent route reached the local runtime').toHaveLength(0)
+  })
+
+  /**
+   * ⚠️ A MALFORMED ROUTE IS REFUSED BEFORE ANYTHING IS SPENT.
+   *
+   * The route-shape tests stopped at the parsing helpers, so nothing checked
+   * what the PROVIDER does with one. It treated every non-agent route as
+   * local, and `agent:` with an empty suffix satisfied `isAgentRoute` — so a
+   * setting left by an older build, or hand-edited, reached the daemon with an
+   * empty model id, or reached an agent CLI to be refused a process away under
+   * a name that explained nothing.
+   */
+  it('refuses a route it cannot parse, without calling the port at all', async () => {
+    for (const bad of ['', 'qwen3-4b', 'local:', 'agent:', 'endpoint:', ':qwen', 'weird:thing']) {
+      const { port, generates, agents } = portWith(async () => '')
+      const provider = createCompanionProvider({ port, route: () => bad, depth: () => 'default' })
+      /* An unparseable route is not a configuration, so nothing offers to ask
+         on it in the first place (§07). */
+      expect(provider.configured, `${bad} passed as configured`).toBe(false)
+
+      await expect(
+        drain(provider.ask('why?', CONTEXT, new AbortController().signal)),
+        bad,
+      ).rejects.toThrow()
+      expect(generates, `${bad} reached generate`).toHaveLength(0)
+      expect(agents, `${bad} reached an agent`).toHaveLength(0)
+    }
+  })
+
+  it('is configured, and answers, on each shape the probe mints', async () => {
+    for (const [route, kind] of [
+      ['local:qwen3-4b', 'generate'],
+      ['agent:codex', 'agent'],
+      ['endpoint:my-openai', 'generate'],
+    ] as const) {
+      const { port, generates, agents } = portWith(async () => '')
+      const provider = createCompanionProvider({ port, route: () => route, depth: () => 'default' })
+      expect(provider.configured, route).toBe(true)
+      await drain(provider.ask('why?', CONTEXT, new AbortController().signal))
+      expect(kind === 'generate' ? generates : agents, route).toHaveLength(1)
+    }
   })
 
   it('raises what the port raised, rather than ending the answer quietly', async () => {
@@ -158,6 +260,42 @@ describe('the bound provider', () => {
     await expect(drain(provider.ask('why?', CONTEXT, new AbortController().signal))).rejects.toThrow(
       /went away/,
     )
+  })
+
+  /**
+   * ⚠️ AND WHAT ARRIVED BEFORE THE FAILURE IS STILL DELIVERED.
+   *
+   * The case above throws before emitting anything, so it says nothing about
+   * ordering — a provider that dropped its buffer on the way to rejecting
+   * would pass it. The reader has already SEEN those words on screen; an
+   * answer that fails halfway must fail after them, not instead of them,
+   * because the thread keeps a partial answer and reports the failure beside
+   * it.
+   */
+  it('yields what it buffered before it raises', async () => {
+    const { port } = portWith(async (onChunk) => {
+      onChunk('It begins')
+      onChunk(' and then')
+      throw new Error('the daemon went away')
+    })
+    const provider = createCompanionProvider({ port, route: () => 'local:qwen3-4b', depth: () => 'default' })
+    const stream = provider.ask('why?', CONTEXT, new AbortController().signal)
+
+    const before: string[] = []
+    let raised: unknown = null
+    try {
+      for (;;) {
+        const step = await stream.next()
+        if (step.done === true) break
+        before.push(step.value)
+      }
+    } catch (error) {
+      raised = error
+    }
+    expect(before.join(''), 'the partial answer was dropped on the way to the failure').toBe(
+      'It begins and then',
+    )
+    expect((raised as Error | null)?.message).toMatch(/went away/)
   })
 
   /* The citation map needs the numbering the answer was built against, not
@@ -362,10 +500,11 @@ describe('the daemon-facing model id', () => {
  */
 describe('what an agent is actually sent', () => {
   const promptFor = async (route: string): Promise<string> => {
-    const { port, seen } = portWith(async () => '')
+    const { port, agents } = portWith(async () => '')
     const provider = createCompanionProvider({ port, route: () => route, depth: () => 'default' })
     await drain(provider.ask('why the whale?', CONTEXT, new AbortController().signal))
-    return seen[1] as string
+    expect(agents, 'the route did not reach the agent branch').toHaveLength(1)
+    return agents[0]!.prompt
   }
 
   it('carries every rule the local route gets in its system prompt', async () => {

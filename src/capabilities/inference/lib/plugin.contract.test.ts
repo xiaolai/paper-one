@@ -3,34 +3,41 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 /**
- * THE TYPESCRIPT SURFACE AND THE CRATE NAME THE SAME COMMANDS, THE SAME WAY.
+ * FOUR SURFACES NAME THE SAME COMMANDS, THE SAME WAY.
  *
- * `plugin.ts`'s own header has always said the set of names in it "should
- * equal `COMMANDS` in the crate's `build.rs`, and a command that appears in
- * one and not the other is a mistake somebody can see". Nothing checked it,
- * and the mistake that actually happened was one nobody saw: every command was
- * invoked BARE.
+ * A command has to appear in the crate's `build.rs` (scaffolding), in
+ * `generate_handler!` (reachable), in `permissions/default.toml` (granted),
+ * and in `plugin.ts` (called) — with the plugin prefix. Any one of them
+ * missing or misspelled fails only in a running app, while every compiler and
+ * every unit test that hands the plugin in as a fake stays green. That is not
+ * hypothetical: the whole capability's IPC was once dead because the calls
+ * omitted the prefix, and the reader was told only "Something went wrong"
+ * while the daemon answered normally the entire time. `plugin.ts`'s header
+ * carries that story; it is not repeated here.
  *
- * Tauri 2 registers a plugin's commands as `plugin:<name>|<command>`. A bare
- * name resolves against the app's own commands, finds nothing, and rejects
- * with the string `Command inference_status not found` — a string, so it
- * carries no `kind`, so `detailFor` maps it to its default: **Something went
- * wrong**. The whole capability's IPC was dead, the Runtime row said that one
- * uninformative sentence, Memory and Models folder read `—`, and `lemond` was
- * running and answering the entire time. `tauri-plugin-peer` has had the
- * prefix helper since phase 7; this file did not.
- *
- * READ FROM THE SOURCES, both of them, rather than from a list kept here — a
- * third copy would be the very thing this is checking for.
+ * READ FROM THE SOURCES, all four, rather than from a list kept here — a fifth
+ * copy would be the very thing this is checking for.
  */
 
 const HERE = fileURLToPath(new URL('.', import.meta.url))
 const PLUGIN_TS = readFileSync(`${HERE}plugin.ts`, 'utf8')
 const CRATE = new URL('../../../../src-tauri/crates/tauri-plugin-inference/', import.meta.url)
 const rust = (rel: string): string => readFileSync(fileURLToPath(new URL(rel, CRATE)), 'utf8')
-const BUILD_RS = rust('build.rs')
-const LIB_RS = rust('src/lib.rs')
-const PERMISSIONS_TOML = rust('permissions/default.toml')
+/**
+ * Rust with its comments removed.
+ *
+ * ⚠️ COMMENTS ARE NOT CODE, and these files are heavily commented. A doc
+ * comment naming a command, or one commented out during a refactor, was
+ * counted as a declaration — so a command could be "registered" by a sentence
+ * about it. `plugin.ts` was already stripped for exactly this reason; the Rust
+ * side was not.
+ */
+const bare = (source: string): string =>
+  source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+
+const BUILD_RS = bare(rust('build.rs'))
+const LIB_RS = bare(rust('src/lib.rs'))
+const PERMISSIONS_TOML = bare(rust('permissions/default.toml'))
 
 /** The names `COMMANDS` declares, in the crate that registers them. */
 function crateCommands(): readonly string[] {
@@ -69,6 +76,19 @@ function permittedCommands(): readonly string[] {
  * the bare one is exactly what this file exists to catch, and a pattern that
  * only recognised the correct shape would report an empty list and pass.
  */
+/**
+ * The names `InferenceCommand` admits — the TypeScript side's own closed set.
+ *
+ * `command()` takes this union rather than `string`, so a name outside it does
+ * not compile. Comparing it against the crate is what makes the union itself
+ * checkable, rather than a fourth place to keep in step by hand.
+ */
+function declaredInTypeScript(): readonly string[] {
+  const block = /export type InferenceCommand =([\s\S]*?)\n\n/.exec(PLUGIN_TS)
+  expect(block, 'InferenceCommand is not in plugin.ts in the shape this reads').not.toBeNull()
+  return [...(block?.[1] ?? '').matchAll(/'([a-z_]+)'/g)].map((m) => m[1] as string)
+}
+
 function invoked(): readonly { readonly name: string; readonly prefixed: boolean }[] {
   const pattern = /invoke(?:<[^>]*>)?\(\s*(?:command\('([a-z_]+)'\)|'([a-z_]+)')/g
   /* COMMENTS ARE NOT CODE. This file's own prose names commands and shows the
@@ -83,14 +103,45 @@ function invoked(): readonly { readonly name: string; readonly prefixed: boolean
 }
 
 describe('the plugin command surface', () => {
+  /* EVERY PARSER READ SOMETHING. Each of these regexes depends on one textual
+     shape holding in a file this test does not own, and a reformat that broke
+     one would leave it matching nothing — at which point every equality below
+     compares two empty lists and passes. Non-emptiness is the guard; a
+     threshold like `> 10` is not, because it also fails the day the surface
+     legitimately shrinks to ten. */
+  it('reads a non-empty set from each of the four surfaces', () => {
+    for (const [where, names] of [
+      ['build.rs COMMANDS', crateCommands()],
+      ['generate_handler!', registeredCommands()],
+      ['permissions/default.toml', permittedCommands()],
+      ['InferenceCommand', declaredInTypeScript()],
+      ['plugin.ts invoke() calls', invoked().map((one) => one.name)],
+    ] as const) {
+      expect(names, `${where} parsed as empty — the shape this test reads has moved`).not.toEqual([])
+    }
+  })
+
   it('names every command the crate registers, and no others', () => {
-    const declared = crateCommands()
-    expect(declared.length).toBeGreaterThan(10)
-    const used = invoked().map((one) => one.name)
-    /* Every name matched, so the pattern above is reading something — an
-       empty list would satisfy neither this nor the prefix case below. */
-    expect(used.length).toBe(declared.length)
-    expect([...used].sort()).toEqual([...declared].sort())
+    const declared = [...crateCommands()].sort()
+    const used = [...invoked().map((one) => one.name)].sort()
+    expect(used).toEqual(declared)
+    /* AND THE UNION `command()` ACCEPTS IS THE SAME SET — so a name that is
+       legal to the compiler but unknown to the crate cannot exist. */
+    expect([...declaredInTypeScript()].sort(), 'InferenceCommand disagrees with build.rs').toEqual(declared)
+  })
+
+  /* Each name once, in each place. A duplicate in the union or in the
+     permissions list would keep every sorted comparison above happy while
+     hiding a name that was dropped. */
+  it('names each command exactly once in each surface', () => {
+    for (const [where, names] of [
+      ['build.rs COMMANDS', crateCommands()],
+      ['generate_handler!', registeredCommands()],
+      ['permissions/default.toml', permittedCommands()],
+      ['InferenceCommand', declaredInTypeScript()],
+    ] as const) {
+      expect(new Set(names).size, `${where} names something twice`).toBe(names.length)
+    }
   })
 
   /**
@@ -126,12 +177,16 @@ describe('the plugin command surface', () => {
     /* `Builder::new("inference")` in the crate's lib.rs is the other half of
        the string; a rename there and not here is the same defect wearing a
        different name. */
-    const lib = readFileSync(
-      fileURLToPath(new URL('../../../../src-tauri/crates/tauri-plugin-inference/src/lib.rs', import.meta.url)),
-      'utf8',
-    )
-    const registered = /Builder::new\("([a-z_]+)"\)/.exec(lib)?.[1]
-    expect(registered).toBe('inference')
-    expect(PLUGIN_TS).toContain(`plugin:${registered}|`)
+    const registered = /Builder::new\("([a-z_]+)"\)/.exec(LIB_RS)?.[1]
+    expect(registered, 'Builder::new is not in lib.rs in the shape this reads').toBe('inference')
+
+    /* ⚠️ THE HELPER'S OWN TEMPLATE, not `toContain`. Searching the whole file
+       for `plugin:inference|` was satisfied by a stale comment or an unused
+       string — the file is full of prose about this very prefix — while
+       `command()` returned something else entirely. This reads the one line
+       that builds the string every call goes through. */
+    const template = /const command = \(name: InferenceCommand\) => `([^`$]*)\$\{name\}`/.exec(PLUGIN_TS)
+    expect(template, 'the command helper is not in plugin.ts in the shape this reads').not.toBeNull()
+    expect(template?.[1]).toBe(`plugin:${registered}|`)
   })
 })
