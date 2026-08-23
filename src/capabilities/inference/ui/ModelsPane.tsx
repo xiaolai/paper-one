@@ -47,6 +47,11 @@ export function ModelsPane({ model }: { readonly model: ModelsModel }) {
         Answers, and looking a word up, are produced on this machine. Nothing you
         ask leaves it.
       </div>
+      {/* WHAT WENT WRONG WITH THE LAST DOWNLOAD OR REMOVAL. Both buttons below
+          are `void`-ed, so neither can report anything by rejecting; before
+          this the reader pressed Remove, nothing happened, and nothing said
+          why. Same slot and same voice as `Test voice`'s failure line. */}
+      {snapshot.failure === null ? null : <div className={ui.hint}>{snapshot.failure}</div>}
 
       {snapshot.models.map((entry) => {
         const action = modelAction(entry, runtime)

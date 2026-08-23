@@ -1,17 +1,11 @@
-import type { KernelServices, SettingsStore } from '../../../kernel'
-import { LOOK_UP_LABELS, availableModes, effectiveMode, type LookUpMode } from '../../../kernel'
-import type { Controller, InferenceSnapshot, RuntimeState } from '../lib/controller'
-import { mintRequestId, type InferencePlugin } from '../lib/plugin'
-
-/**
- * What `Test voice` says.
- *
- * One short sentence with a comma and a full stop, so the reader hears the
- * prosody rather than a single word — which is the only thing a voice test
- * actually tells them.
- */
-export const TEST_VOICE_LINE = 'This is the voice Paper will read aloud with, once reading aloud arrives.'
+import type { SettingsStore } from '../../../kernel'
+import { createGenerations } from '../../../kernel'
+import type { Controller, InferenceSnapshot, ReportFailure, RuntimeState } from '../lib/controller'
+import type { InferencePlugin } from '../lib/plugin'
 import { KEEP_LOADED_SETTING } from '../lib/settings'
+import { createVoiceTester, type AudioSink, type VoiceTest } from './voiceTest'
+
+export { TEST_VOICE_LINE, type VoiceTest } from './voiceTest'
 
 /**
  * The Local models section's decisions — no React, so they can be tested.
@@ -33,24 +27,21 @@ import { KEEP_LOADED_SETTING } from '../lib/settings'
  */
 
 export interface ModelsSnapshot extends InferenceSnapshot {
-  readonly lookUp: LookUpMode
   readonly keepLoaded: boolean
   readonly modelsDir: string | null
   readonly residentBytes: number | null
   readonly voiceTest: VoiceTest
 }
 
-/** What `Test voice` is doing. */
-export type VoiceTest = 'idle' | 'speaking' | 'failed'
-
 export interface ModelsModel {
   getSnapshot(): ModelsSnapshot
   subscribe(listener: () => void): () => void
   refresh(): Promise<void>
-  install(model: string): Promise<void>
+  /** Resolves false when the model did not end up installed — see the
+   *  controller. Never rejects: the pane calls it fire-and-forget. */
+  install(model: string): Promise<boolean>
   cancelInstall(): void
-  uninstall(model: string): Promise<void>
-  cycleLookUp(hasDictionary: boolean): void
+  uninstall(model: string): Promise<boolean>
   setKeepLoaded(value: boolean): void
   /**
    * Play a short line through an installed voice (WI-15.9).
@@ -62,7 +53,6 @@ export interface ModelsModel {
   testVoice(): Promise<void>
   /** Stop the utterance AND the request behind it. */
   stopVoice(): void
-  reveal(): Promise<string>
   dispose(): void
 }
 
@@ -78,10 +68,17 @@ export interface ModelsModel {
  */
 export function formatBytes(bytes: number | null): string {
   if (bytes === null) return '—'
-  if (bytes >= 1_000_000_000) return `${(bytes / 1_000_000_000).toFixed(1)} GB`
-  if (bytes >= 1_000_000) return `${Math.round(bytes / 1_000_000)} MB`
-  if (bytes >= 1_000) return `${Math.round(bytes / 1_000)} KB`
-  return `${bytes} B`
+  if (bytes < 1_000) return `${bytes} B`
+  /* ⚠️ THE UNIT IS CHOSEN AFTER ROUNDING, NOT BEFORE IT. Testing the raw
+     figure against each threshold and rounding afterwards printed `1000 KB`
+     for anything from 999 500 bytes up, and `1000 MB` at the next boundary —
+     four digits in a unit that only ever has three, for a reader comparing it
+     against a download quoted as 1 MB. */
+  const kb = Math.round(bytes / 1_000)
+  if (kb < 1_000) return `${kb} KB`
+  const mb = Math.round(bytes / 1_000_000)
+  if (mb < 1_000) return `${mb} MB`
+  return `${(bytes / 1_000_000_000).toFixed(1)} GB`
 }
 
 /**
@@ -141,14 +138,23 @@ function labelOf(id: string, models: readonly { readonly id: string; readonly la
   return models.find((model) => model.id === id)?.label ?? id
 }
 
+/**
+ * Whether the runtime is busy with THIS model's own download or verification.
+ *
+ * One predicate rather than the two verbatim copies this replaces: the row's
+ * value and the row's button both ask it, and two spellings of one question is
+ * how a row ends up showing `Downloading…` beside an `[Install]` button.
+ */
+export function isActiveInstall(runtime: RuntimeState, modelId: string): boolean {
+  return (runtime.kind === 'installing' || runtime.kind === 'verifying') && runtime.model === modelId
+}
+
 /** The right-hand value for one model's row. */
 export function modelValue(
   model: { readonly id: string; readonly bytes: number; readonly installed: boolean },
   runtime: RuntimeState,
 ): string {
-  if ((runtime.kind === 'installing' || runtime.kind === 'verifying') && runtime.model === model.id) {
-    return runtimeValue(runtime)
-  }
+  if (isActiveInstall(runtime, model.id)) return runtimeValue(runtime)
   if (model.installed) return `Installed · ${formatBytes(model.bytes)}`
   return formatBytes(model.bytes)
 }
@@ -164,21 +170,8 @@ export function modelAction(
   model: { readonly id: string; readonly installed: boolean },
   runtime: RuntimeState,
 ): 'install' | 'remove' | 'cancel' {
-  if ((runtime.kind === 'installing' || runtime.kind === 'verifying') && runtime.model === model.id) {
-    return 'cancel'
-  }
+  if (isActiveInstall(runtime, model.id)) return 'cancel'
   return model.installed ? 'remove' : 'install'
-}
-
-/** The Look up row's current label, given what this platform and build have. */
-export function lookUpValue(
-  chosen: LookUpMode,
-  hasDictionary: boolean,
-  hasGloss: boolean,
-): string | null {
-  const modes = availableModes(hasDictionary, hasGloss)
-  const mode = effectiveMode(chosen, modes)
-  return mode === null ? null : LOOK_UP_LABELS[mode]
 }
 
 export interface ModelsModelOptions {
@@ -186,25 +179,39 @@ export interface ModelsModelOptions {
   readonly plugin: InferencePlugin
   readonly settings: SettingsStore
   /**
-   * The kernel's own view of `Look up`.
+   * Told when a best-effort read fails.
    *
-   * NOT `settings`, and this is not a style choice: `LOOK_UP_SETTING` is
-   * `kernel.lookUp`, and `scopeSettings` confines this capability's settings
-   * handle to `inference.` at every door. Reading it through `settings` threw
-   * `namespace` on the pane's first render — see `KernelServices.lookUp`.
+   * The models folder and the memory figure are allowed to be unknown, and
+   * both used to reach `null` through a bare `.catch(() => null)` — so a
+   * permission problem, a dropped IPC connection and a command that was never
+   * registered were indistinguishable from a daemon that is simply not
+   * running. The `null` is still the right answer for the reader; discarding
+   * the reason was the mistake.
    */
-  readonly kernel: Pick<KernelServices, 'lookUp' | 'cycleLookUp'>
+  readonly report?: ReportFailure
+  /**
+   * Where a voice test plays, defaulting to the browser's `Audio`.
+   *
+   * Injected so a suite can watch playback rather than crash on it: these
+   * tests run on `node`, and before this seam existed `testVoice` reached
+   * `new Audio(...)`, threw `ReferenceError`, and was swallowed by a catch —
+   * a green test over a code path that could not run at all.
+   */
+  readonly audio?: AudioSink
 }
 
-export function createModelsModel({ controller, plugin, settings, kernel }: ModelsModelOptions): ModelsModel {
+const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
+
+export function createModelsModel({ controller, plugin, settings, report, audio }: ModelsModelOptions): ModelsModel {
   const listeners = new Set<() => void>()
   let modelsDir: string | null = null
   let residentBytes: number | null = null
-  let voiceTest: VoiceTest = 'idle'
   let disposed = false
-  let voiceRequest: string | null = null
-  let playing: HTMLAudioElement | null = null
-  let playingUrl: string | null = null
+  /* LAST ISSUED WINS. `refresh` makes three IPC calls and the pane calls it on
+     every open, so two can be out at once — and without this the older one's
+     `resourceUsage` lands last, or its failed `revealModelsDir` replaces a
+     directory the newer one had successfully resolved with `null`. */
+  const generations = createGenerations()
 
   const emit = (): void => {
     for (const listener of [...listeners]) listener()
@@ -218,16 +225,30 @@ export function createModelsModel({ controller, plugin, settings, kernel }: Mode
     cached = null
     emit()
   }
-  const releaseAudio = (): void => {
-    playing?.pause()
-    playing = null
-    if (playingUrl !== null) {
-      URL.revokeObjectURL(playingUrl)
-      playingUrl = null
-    }
-  }
   const unsubscribeController = controller.subscribe(invalidate)
   const unsubscribeSettings = settings.subscribe(invalidate)
+
+  const voice = createVoiceTester({
+    plugin,
+    ensureReady: () => controller.ensureReady(),
+    changed: invalidate,
+    /* Spread rather than assigned: under `exactOptionalPropertyTypes` an
+       optional property that is present-and-undefined is not the same as an
+       absent one, and both of these are genuinely absent when not supplied. */
+    ...(report === undefined ? {} : { report }),
+    ...(audio === undefined ? {} : { audio }),
+  })
+
+  /** Best effort, but never silent: `null` when it could not be read, and the
+      reason goes to the log rather than nowhere. */
+  const attempt = async <T>(read: () => Promise<T>, event: string): Promise<T | null> => {
+    try {
+      return await read()
+    } catch (error) {
+      report?.(event, { message: messageOf(error) })
+      return null
+    }
+  }
 
   return {
     getSnapshot: () => {
@@ -235,11 +256,10 @@ export function createModelsModel({ controller, plugin, settings, kernel }: Mode
         const base = controller.getSnapshot()
         cached = {
           ...base,
-          lookUp: kernel.lookUp(),
           keepLoaded: settings.get(KEEP_LOADED_SETTING),
           modelsDir,
           residentBytes,
-          voiceTest,
+          voiceTest: voice.state(),
         }
       }
       return cached
@@ -249,99 +269,46 @@ export function createModelsModel({ controller, plugin, settings, kernel }: Mode
       return () => void listeners.delete(listener)
     },
     refresh: async () => {
+      const mine = generations.claim()
       await controller.refresh()
       /* Both are best-effort and neither may fail the refresh: the models
        * folder is a convenience and the memory figure is honestly unknown
        * when the daemon is not running. */
-      if (modelsDir === null) {
-        modelsDir = await plugin.revealModelsDir().catch(() => null)
-      }
-      residentBytes = await plugin
-        .resourceUsage()
-        .then((usage) => usage.residentBytes)
-        .catch(() => null)
-      if (!disposed) invalidate()
+      const [dir, resident] = await Promise.all([
+        modelsDir === null
+          ? attempt(() => plugin.revealModelsDir(), 'inference.models-dir-failed')
+          : Promise.resolve(modelsDir),
+        attempt(() => plugin.resourceUsage().then((usage) => usage.residentBytes), 'inference.resource-usage-failed'),
+      ])
+      /* GATHERED LOCALLY, COMMITTED TOGETHER, AND ONLY IF STILL CURRENT.
+         Assigning each as it arrived meant a superseded refresh could write
+         one field and a disposed one could write both. */
+      if (!mine() || disposed) return
+      modelsDir = dir
+      residentBytes = resident
+      invalidate()
     },
     install: (model) => controller.install(model),
     cancelInstall: () => controller.cancelInstall(),
-    uninstall: (model) => controller.uninstall(model),
-    /* The kernel owns the cycle; this file owns only the answer to "is there
-       a gloss on this machine", which is the controller's to give. */
-    cycleLookUp: (hasDictionary) => kernel.cycleLookUp(hasDictionary, controller.textModel() !== null),
+    uninstall: (model) => {
+      /* STOPPED BEFORE IT IS DELETED. `Test voice`'s Stop button lives on the
+         voice's own row, so removing the model that is speaking took the only
+         control that could end it off the screen — and the audio played on. */
+      voice.stopIf(model)
+      return controller.uninstall(model)
+    },
     setKeepLoaded: (value) => settings.set(KEEP_LOADED_SETTING, value),
 
     testVoice: async () => {
-      const voice = controller.getSnapshot().models.find((m) => m.modality === 'speech' && m.installed)
-      if (!voice || voiceTest === 'speaking') return
-      /* CLAIMED BEFORE THE FIRST AWAIT, which is the whole of the fix.
-       *
-       * The reentrancy guard above read `voiceTest`, and `voiceTest` was set
-       * to `speaking` only after `ensureReady()` resolved — so two presses of
-       * Play both saw `idle`, both waited for the runtime, and both went on to
-       * synthesise. Two requests, two `Audio` elements, and the first blob URL
-       * overwritten before anything could revoke it. A guard on the far side
-       * of an await guards nothing. */
-      const requestId = mintRequestId('voice')
-      voiceRequest = requestId
-      voiceTest = 'speaking'
-      invalidate()
-      if (!(await controller.ensureReady())) {
-        /* Ownership re-checked after every await from here on: a stop, a
-         * second press, or a disposal during the start is why this request
-         * may no longer be the one anybody is waiting for. */
-        if (voiceRequest !== requestId || disposed) return
-        voiceTest = 'failed'
-        invalidate()
-        return
-      }
-      if (voiceRequest !== requestId || disposed) return
-      try {
-        const bytes = await plugin.speak(requestId, voice.id, TEST_VOICE_LINE, null)
-        if (voiceRequest !== requestId || disposed) return
-        /* A blob URL rather than a data URL: the audio is hundreds of
-           kilobytes, and base64 would put a megabyte-long string through the
-           DOM to play four seconds of speech. Revoked on stop, so the bytes
-           are released rather than held for the app's lifetime. */
-        const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: 'audio/wav' }))
-        playingUrl = url
-        const audio = new Audio(url)
-        playing = audio
-        audio.onended = () => {
-          if (voiceRequest !== requestId) return
-          voiceTest = 'idle'
-          releaseAudio()
-          invalidate()
-        }
-        await audio.play()
-      } catch {
-        if (voiceRequest !== requestId) return
-        /* Cancelling is the reader's own doing and returns to idle; anything
-           else is a failure the row says out loud. */
-        voiceTest = voiceRequest === null ? 'idle' : 'failed'
-        releaseAudio()
-        invalidate()
-      }
+      const model = controller.getSnapshot().models.find((row) => row.modality === 'speech' && row.installed)
+      if (model === undefined) return
+      await voice.play(model.id)
     },
+    stopVoice: () => voice.stop(),
 
-    stopVoice: () => {
-      const requestId = voiceRequest
-      voiceRequest = null
-      /* BOTH, which is what WI-15.9's acceptance names: "cancelling
-         mid-utterance stops both the audio and the request". Stopping only the
-         audio would leave the daemon synthesising into nothing. */
-      if (requestId !== null) void plugin.cancel(requestId).catch(() => {})
-      releaseAudio()
-      voiceTest = 'idle'
-      invalidate()
-    },
-
-    reveal: () => plugin.revealModelsDir(),
     dispose: () => {
       disposed = true
-      /* An utterance must not outlive the pane that started it. */
-      if (voiceRequest !== null) void plugin.cancel(voiceRequest).catch(() => {})
-      voiceRequest = null
-      releaseAudio()
+      voice.dispose()
       unsubscribeController()
       unsubscribeSettings()
       listeners.clear()

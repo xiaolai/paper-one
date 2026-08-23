@@ -1,3 +1,4 @@
+import { createGenerations } from '../../../kernel'
 import type { InferencePlugin, InstallProgress, ModelRow, RuntimeStatus } from './plugin'
 import { errorKind, isCancelled, mintRequestId } from './plugin'
 
@@ -39,6 +40,20 @@ export interface InferenceSnapshot {
   readonly models: readonly ModelRow[]
   /** The model id currently downloading, or null. At most one at a time. */
   readonly installing: string | null
+  /**
+   * What went wrong with the last download or removal, in the reader's words.
+   *
+   * Here because the only callers are `void model.install(id)` and
+   * `void model.uninstall(id)` in `ModelsPane` — a rejection from either is an
+   * unhandled promise and a reader who is told nothing at all. Every other
+   * operation on this controller already absorbs its failure into state
+   * (`refresh` into `degraded`, `ensureReady` into `false`); these two were the
+   * exceptions, and being the exception is what made them silent.
+   *
+   * Cleared when the next download or removal starts, so it describes the last
+   * thing the reader did rather than accumulating.
+   */
+  readonly failure: string | null
 }
 
 export interface InferenceStore {
@@ -49,7 +64,15 @@ export interface InferenceStore {
 export interface Controller extends InferenceStore {
   /** Read the runtime's status and the model list. Safe to call repeatedly. */
   refresh(): Promise<void>
-  install(model: string): Promise<void>
+  /**
+   * Download a model. **Resolves; never rejects.**
+   *
+   * False means it did not end up installed — refused because another download
+   * owns the slot, cancelled by the reader, or failed. A failure also lands in
+   * `snapshot.failure`; the three are distinguishable there and in the log,
+   * and none of them reaches a caller as a rejection.
+   */
+  install(model: string): Promise<boolean>
   cancelInstall(): void
   /**
    * Delete a model's artifacts.
@@ -62,7 +85,7 @@ export interface Controller extends InferenceStore {
    * command; naming it plainly keeps that gate sharp instead of adding a
    * false positive to its allowlist.
    */
-  uninstall(model: string): Promise<void>
+  uninstall(model: string): Promise<boolean>
   /** Start the daemon if it is not up. Answers false when it could not. */
   ensureReady(): Promise<boolean>
   /** The id of an installed text model, or null — what `gloss` answers with. */
@@ -74,6 +97,7 @@ const INITIAL: InferenceSnapshot = {
   runtime: { kind: 'absent', reason: 'Not installed' },
   models: [],
   installing: null,
+  failure: null,
 }
 
 /**
@@ -121,17 +145,70 @@ export function detailFor(error: unknown): string {
  */
 export type ReportFailure = (event: string, fields: Record<string, unknown>) => void
 
-export function createController(plugin: InferencePlugin, report?: ReportFailure): Controller {
+/**
+ * The download that currently owns the runtime slot.
+ *
+ * ONE OBJECT, because the three fields were three variables — `snapshot
+ * .installing`, a separate `installRequest`, and a closure-local `before` —
+ * and every path had to remember to move all three together. Two did not: an
+ * explicit cancel restored `installed` rather than the state the reader
+ * started from, and `ensureReady` wrote `starting` over a download in flight
+ * while `installing` still said it was downloading. Both are the same mistake,
+ * which is what makes them one variable now.
+ */
+interface Install {
+  readonly requestId: string
+  readonly model: string
+  /** Where to put the runtime back if the reader cancels. */
+  readonly before: RuntimeState
+}
+
+/** The maintainer's half of a failure — see `detailFor` for the reader's. */
+const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
+
+/**
+ * The six commands this controller actually uses, of the plugin's nineteen.
+ *
+ * NARROWED ON PURPOSE. Taking the whole `InferencePlugin` meant a test double
+ * had to be cast through `unknown` to stand in for it, and once one cast is
+ * there the compiler stops checking any of the signatures — which is precisely
+ * how a plugin API change would reach production past a green suite. Naming
+ * the six lets a fake be written with no cast at all, so drift in any of them
+ * is a type error in the test.
+ */
+export type ControllerPlugin = Pick<
+  InferencePlugin,
+  'status' | 'models' | 'start' | 'installModel' | 'removeModel' | 'cancel'
+>
+
+export function createController(plugin: ControllerPlugin, report?: ReportFailure): Controller {
   let snapshot: InferenceSnapshot = INITIAL
   const listeners = new Set<() => void>()
   let disposed = false
-  let installRequest: string | null = null
+  let install_: Install | null = null
+  /* LAST ISSUED WINS. Two refreshes overlap whenever the reader opens the pane
+     while one is already out, and `status()` and `models()` are two IPC round
+     trips that need not return in the order they were asked. Without this the
+     older one lands last and puts back the catalogue it read. */
+  const generations = createGenerations()
 
   const set = (next: Partial<InferenceSnapshot>): void => {
     if (disposed) return
     snapshot = { ...snapshot, ...next }
     for (const listener of [...listeners]) listener()
   }
+
+  /**
+   * Whether a download owns the runtime slot.
+   *
+   * ⚠️ **NOTHING ELSE WRITES `runtime` WHILE THIS IS TRUE.** A download is the
+   * only operation whose state the reader is actively watching — it carries the
+   * byte counts and it is what puts Cancel on screen. `refresh` already
+   * followed this rule; `ensureReady` did not, so asking a question mid-download
+   * replaced `installing` with `starting` and the Cancel button vanished until
+   * the next progress event arrived.
+   */
+  const owned = (): boolean => install_ !== null
 
   const runtimeFrom = (status: RuntimeStatus): RuntimeState => {
     switch (status.state) {
@@ -144,106 +221,127 @@ export function createController(plugin: InferencePlugin, report?: ReportFailure
     }
   }
 
+  /**
+   * The catalogue with one row's installed flag corrected.
+   *
+   * Applied from the command's OWN result rather than waiting for the refresh
+   * that follows it: `refresh` swallows its failure by design, so an install
+   * or a removal that relied on it alone reported success over a row still
+   * saying the opposite. The refresh still runs and still wins when it works —
+   * this only keeps the row honest when it does not.
+   */
+  const withInstalled = (id: string, installed: boolean): ModelRow[] =>
+    snapshot.models.map((row) => (row.id === id ? { ...row, installed } : row))
+
   const refresh = async (): Promise<void> => {
-    /* A refresh must not stamp over a download in flight: the reader opened
-     * the pane, the list reloaded, and `installing` would become `installed`
-     * with the bytes still arriving.
-     *
-     * ⚠️ `busy` IS READ AFTER THE AWAIT, NOT BEFORE IT. Snapshotting it first
-     * left a race the reader can hit: a refresh starts while nothing is
-     * downloading, the reader presses Install, and the refresh lands with a
-     * stale `busy = false` and stamps `installed` over a download whose bytes
-     * are still arriving. Found by audit. Reading it on the far side asks the
-     * question at the moment the answer is used. */
+    const mine = generations.claim()
     try {
       const [status, models] = await Promise.all([plugin.status(), plugin.models()])
-      const busy = snapshot.installing !== null
-      set(busy ? { models } : { runtime: runtimeFrom(status), models })
+      /* Superseded by a later refresh — its answer is the current one. */
+      if (!mine()) return
+      /* A refresh must not stamp over a download in flight: the reader opened
+       * the pane, the list reloaded, and `installing` would become `installed`
+       * with the bytes still arriving.
+       *
+       * ⚠️ OWNERSHIP IS READ AFTER THE AWAIT, NOT BEFORE IT. Snapshotting it
+       * first left a race the reader can hit: a refresh starts while nothing is
+       * downloading, the reader presses Install, and the refresh lands with a
+       * stale answer and stamps `installed` over a download whose bytes are
+       * still arriving. Found by audit. Reading it on the far side asks the
+       * question at the moment the answer is used. */
+      set(owned() ? { models } : { runtime: runtimeFrom(status), models })
     } catch (error) {
-      if (snapshot.installing === null) {
-        const detail = detailFor(error)
-        /* BOTH HALVES. `detail` is what the reader is shown; `message` is the
-           maintainer's, and they are deliberately different sentences — see
-           `detailFor`. Reporting only the first would have said "Something
-           went wrong" to the log as well. */
-        report?.('inference.refresh-failed', {
-          detail,
-          message: error instanceof Error ? error.message : String(error),
-        })
-        set({ runtime: { kind: 'degraded', detail } })
-      }
+      const detail = detailFor(error)
+      /* ⚠️ REPORTED WHATEVER ELSE IS HAPPENING. This used to be inside the
+         install guard, so every refresh that failed during a download was
+         discarded entirely — diagnostic included. Suppressing the STATE write
+         is the requirement; suppressing the record of the failure is how a
+         degraded runtime goes back to being silent, which is the one thing
+         this reporter exists to prevent.
+
+         BOTH HALVES. `detail` is what the reader is shown; `message` is the
+         maintainer's, and they are deliberately different sentences — see
+         `detailFor`. Reporting only the first would have said "Something went
+         wrong" to the log as well. */
+      report?.('inference.refresh-failed', { detail, message: messageOf(error) })
+      if (mine() && !owned()) set({ runtime: { kind: 'degraded', detail } })
     }
   }
 
-  const install = async (model: string): Promise<void> => {
-    if (snapshot.installing !== null) return
+  const install = async (model: string): Promise<boolean> => {
+    /* REFUSED, AND IT SAYS SO. Returning nothing here made a refusal
+       indistinguishable from a finished download to every caller. */
+    if (install_ !== null) return false
     const requestId = mintRequestId('install')
-    installRequest = requestId
     /* What to go back to if the reader cancels. `installed` was assumed, which
      * is wrong for the common case — a reader cancelling their FIRST download
      * had nothing installed and the row claimed otherwise. */
-    const before = snapshot.runtime
-    set({ installing: model, runtime: { kind: 'installing', model, received: 0, total: 0 } })
+    const session: Install = { requestId, model, before: snapshot.runtime }
+    install_ = session
+    set({ installing: model, failure: null, runtime: { kind: 'installing', model, received: 0, total: 0 } })
+    /* ⚠️ OWNERSHIP ON EVERY COMPLETION PATH. A cancelled install's promise
+     * still runs to completion, and without this check its handler cleared the
+     * slot and stamped state belonging to the install that had REPLACED it —
+     * so the second download's progress vanished and its row went back to
+     * Install while the bytes kept arriving. Found by audit. The rule is the
+     * one `sync`'s teardown follows: an older lifetime never writes over a
+     * newer one. */
+    const mine = (): boolean => install_?.requestId === requestId
     try {
       await plugin.installModel(requestId, model, (progress: InstallProgress) => {
-        if (installRequest !== requestId) return
+        if (!mine()) return
         if (progress.kind === 'downloading') {
           set({ runtime: { kind: 'installing', model, received: progress.received, total: progress.total } })
         } else if (progress.kind === 'verifying') {
           set({ runtime: { kind: 'verifying', model } })
         }
       })
-      /* ⚠️ OWNERSHIP ON EVERY COMPLETION PATH. A cancelled install's promise
-       * still runs to completion, and without this check its handler cleared
-       * `installRequest` and stamped state belonging to the install that had
-       * REPLACED it — so the second download's progress vanished and its row
-       * went back to Install while the bytes kept arriving. Found by audit.
-       * The rule is the one `sync`'s teardown follows: an older lifetime never
-       * writes over a newer one. */
-      if (installRequest !== requestId) return
-      installRequest = null
-      set({ installing: null, runtime: { kind: 'installed' } })
+      if (!mine()) return false
+      install_ = null
+      set({ installing: null, runtime: { kind: 'installed' }, models: withInstalled(model, true) })
       await refresh()
+      return true
     } catch (error) {
-      if (installRequest !== requestId) return
-      installRequest = null
-      /* A cancellation is the reader's own doing and is not a fault: the
-       * state returns to what it was, and nothing is said about it. Restoring
-       * the PRE-INSTALL runtime rather than assuming `installed` — the reader
-       * may have had nothing installed when they started. */
-      set({
-        installing: null,
-        runtime: isCancelled(error) ? before : { kind: 'degraded', detail: detailFor(error) },
-      })
-      if (!isCancelled(error)) throw error
+      if (!mine()) return false
+      install_ = null
+      /* A cancellation is the reader's own doing and is not a fault: the state
+       * returns to what it was, and nothing is said about it. Restoring the
+       * PRE-INSTALL runtime rather than assuming `installed` — the reader may
+       * have had nothing installed when they started. */
+      if (isCancelled(error)) {
+        set({ installing: null, runtime: session.before })
+        return false
+      }
+      const detail = detailFor(error)
+      report?.('inference.install-failed', { model, detail, message: messageOf(error) })
+      set({ installing: null, failure: detail, runtime: { kind: 'degraded', detail } })
+      return false
     }
   }
 
   const cancelInstall = (): void => {
-    const requestId = installRequest
+    const requestId = install_?.requestId ?? null
     if (requestId === null) return
     /* OWNERSHIP IS NOT RELEASED HERE, and that is the fix.
      *
-     * This used to clear `installRequest` and `installing` on the spot, so a
-     * new install could start the instant Cancel was pressed — while the
-     * cancelled one was still unwinding in Rust, against the same staging
-     * path derived from the same model id. Two writers, one file.
+     * This used to clear the slot on the spot, so a new install could start the
+     * instant Cancel was pressed — while the cancelled one was still unwinding
+     * in Rust, against the same staging path derived from the same model id.
+     * Two writers, one file.
      *
-     * The install's own settle is the only conclusive signal that the first
-     * one has finished, and it already restores the pre-install runtime on a
+     * The install's own settle is the only conclusive signal that the first one
+     * has finished, and it already restores the pre-install runtime on a
      * cancellation. Releasing ownership there rather than here means there is
      * exactly one place that decides an install is over, and `install`'s
-     * `installing !== null` guard keeps the next one out until it is.
+     * own guard keeps the next one out until it is.
      *
-     * `requestUnknown` is the ordinary race — the request finished between
-     * the press and this landing — and is not worth showing. Anything else is
-     * a cancel that did not happen, which the reader is about to notice, so
-     * it is reported rather than swallowed. */
+     * `requestUnknown` is the ordinary race — the request finished between the
+     * press and this landing — and is not worth showing. Anything else is a
+     * cancel that did not happen, which the reader is about to notice, so it is
+     * reported rather than swallowed. */
     void plugin.cancel(requestId).catch((cause: unknown) => {
       if (errorKind(cause) === 'requestUnknown') return
-      report?.('inference.cancel-failed', {
-        message: cause instanceof Error ? cause.message : String(cause),
-      })
+      report?.('inference.cancel-failed', { message: messageOf(cause) })
     })
   }
 
@@ -257,8 +355,24 @@ export function createController(plugin: InferencePlugin, report?: ReportFailure
     install,
     cancelInstall,
     uninstall: async (model) => {
-      await plugin.removeModel(model)
+      set({ failure: null })
+      try {
+        await plugin.removeModel(model)
+      } catch (error) {
+        /* RESOLVES FALSE, DOES NOT REJECT — the caller is `void
+           model.uninstall(id)`, so a rejection here is an unhandled promise
+           and a Remove button that appears to have done nothing. */
+        const detail = detailFor(error)
+        report?.('inference.remove-failed', { model, detail, message: messageOf(error) })
+        set({ failure: detail })
+        return false
+      }
+      set({ models: withInstalled(model, false) })
+      /* The re-read is still the authority when it works: the daemon knows what
+         is on disk. The local correction above is what stops a swallowed
+         refresh failure leaving a deleted model reading Installed. */
       await refresh()
+      return true
     },
     ensureReady: async () => {
       /* ⚠️ NO CACHED `ready`. Trusting the last known state meant a daemon
@@ -268,20 +382,26 @@ export function createController(plugin: InferencePlugin, report?: ReportFailure
        * it health-checks and returns the same port — so asking every time
        * costs one loopback round trip and buys a runtime that recovers.
        * Found by audit. */
-      if (snapshot.runtime.kind !== 'ready') set({ runtime: { kind: 'starting' } })
+      if (!owned() && snapshot.runtime.kind !== 'ready') set({ runtime: { kind: 'starting' } })
       try {
         await plugin.start()
         const status = await plugin.status()
-        set({ runtime: runtimeFrom(status) })
+        /* Asked and answered either way; only the STATE write waits for the
+           download to finish owning the slot. */
+        if (!owned()) set({ runtime: runtimeFrom(status) })
         return status.state === 'ready'
       } catch (error) {
-        set({ runtime: { kind: 'degraded', detail: detailFor(error) } })
+        if (!owned()) set({ runtime: { kind: 'degraded', detail: detailFor(error) } })
         return false
       }
     },
     textModel: () => snapshot.models.find((m) => m.modality === 'text' && m.installed)?.id ?? null,
     dispose: () => {
       disposed = true
+      /* Release the slot and retire every refresh in flight, so a late settle
+         cannot write through a torn-down controller. */
+      install_ = null
+      generations.claim()
       listeners.clear()
     },
   }

@@ -1,17 +1,28 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createKernelServices, scopeSettings } from '../../../kernel'
 import type { Controller, InferenceSnapshot, RuntimeState } from '../lib/controller'
-import type { InferencePlugin, ModelRow } from '../lib/plugin'
+import type { ModelRow, ResourceUsage } from '../lib/plugin'
+import type { AudioSink } from './voiceTest'
 import { KEEP_LOADED_SETTING } from '../lib/settings'
 import {
   createModelsModel,
   downloadLine,
   formatBytes,
-  lookUpValue,
+  isActiveInstall,
   modelAction,
   modelValue,
   runtimeValue,
+  type ModelsModelOptions,
 } from './modelsModel'
+
+/** A promise the test opens when it wants the operation under test to finish. */
+function deferred(): { readonly promise: Promise<void>; open(): void } {
+  let open: () => void = () => {}
+  const promise = new Promise<void>((resolve) => {
+    open = resolve
+  })
+  return { promise, open: () => open() }
+}
 
 const MODELS = [
   { id: 'qwen', label: 'Qwen3-4B', bytes: 2_497_281_120, installed: false },
@@ -29,13 +40,38 @@ describe('formatBytes', () => {
     expect(formatBytes(512)).toBe('512 B')
   })
 
+  /**
+   * EVERY THRESHOLD, FROM BOTH SIDES.
+   *
+   * ⚠️ The three-figure rows are the ones that mattered. The unit used to be
+   * chosen from the RAW byte count and the rounding applied afterwards, so
+   * anything from 999 500 bytes up printed `1000 KB` — four digits in a unit
+   * that only has three — and 999 500 000 printed `1000 MB`. Neither is a
+   * number the reader can compare against a download quoted in the next unit
+   * up, and no test above this line goes anywhere near either boundary.
+   */
+  it.each([
+    [0, '0 B'],
+    [999, '999 B'],
+    [1_000, '1 KB'],
+    [1_499, '1 KB'],
+    [1_500, '2 KB'],
+    [999_499, '999 KB'],
+    [999_500, '1 MB'],
+    [1_000_000, '1 MB'],
+    [999_499_999, '999 MB'],
+    [999_500_000, '1.0 GB'],
+    [1_000_000_000, '1.0 GB'],
+    [1_050_000_000, '1.1 GB'],
+  ])('formats %i as %s', (bytes, expected) => {
+    expect(formatBytes(bytes)).toBe(expected)
+  })
+
   /* `—`, NEVER `0`. Lemonade is specifically credited for returning null
    * rather than zero for memory it cannot read, and a `0` beside "Memory" is
    * a claim that nothing is resident — a different statement from "unknown". */
-  it('says `—` for an unknown figure and never zero', () => {
+  it('says `—` for an unknown figure, which a genuine zero is not', () => {
     expect(formatBytes(null)).toBe('—')
-    expect(formatBytes(null)).not.toBe('0 B')
-    /* And a genuine zero is still a zero, which is not the same thing. */
     expect(formatBytes(0)).toBe('0 B')
   })
 })
@@ -68,6 +104,20 @@ describe('runtimeValue', () => {
 
   it('says `Running` for a daemon that would not name its version', () => {
     expect(runtimeValue({ kind: 'ready', version: '' })).toBe('Running')
+  })
+})
+
+/* ONE PREDICATE BEHIND BOTH FORMATTERS. It was written out twice, so a row
+   could have drifted into showing `Downloading…` beside an `[Install]`. */
+describe('isActiveInstall', () => {
+  it('is true only for this model’s own download or verification', () => {
+    const downloading: RuntimeState = { kind: 'installing', model: 'qwen', received: 0, total: 1 }
+    expect(isActiveInstall(downloading, 'qwen')).toBe(true)
+    expect(isActiveInstall(downloading, 'kokoro')).toBe(false)
+    expect(isActiveInstall({ kind: 'verifying', model: 'qwen' }, 'qwen')).toBe(true)
+    expect(isActiveInstall({ kind: 'verifying', model: 'qwen' }, 'kokoro')).toBe(false)
+    expect(isActiveInstall({ kind: 'installed' }, 'qwen')).toBe(false)
+    expect(isActiveInstall({ kind: 'ready', version: '1' }, 'qwen')).toBe(false)
   })
 })
 
@@ -114,7 +164,9 @@ describe('downloadLine', () => {
   /* ── WI-15.12's NEGATIVE HALF, WHICH IS THE LOAD-BEARING HALF ─────────
    * "with no download running the status bar is byte-for-byte what it is
    * today". Nothing is added at rest — and in particular there is no
-   * standing "AI is ready", because readiness is not work. */
+   * standing "AI is ready", because readiness is not work. That claim is
+   * exercised by `ready` inside the list below; it does not need a second
+   * test of its own restating it. */
   it('is null at rest, in every state that is not a download', () => {
     const atRest: RuntimeState[] = [
       { kind: 'absent', reason: 'x' },
@@ -123,12 +175,7 @@ describe('downloadLine', () => {
       { kind: 'ready', version: '11.7.0' },
       { kind: 'degraded', detail: 'The runtime stopped' },
     ]
-    for (const state of atRest) expect(downloadLine(state, MODELS)).toBeNull()
-  })
-
-  it('never says the companion is ready', () => {
-    const line = downloadLine({ kind: 'ready', version: '11.7.0' }, MODELS)
-    expect(line).toBeNull()
+    for (const state of atRest) expect(downloadLine(state, MODELS), state.kind).toBeNull()
   })
 
   it('names the model and both counts while downloading', () => {
@@ -143,22 +190,6 @@ describe('downloadLine', () => {
   it('falls back to the id when the catalogue has not loaded yet', () => {
     const state: RuntimeState = { kind: 'installing', model: 'unknown-id', received: 0, total: 0 }
     expect(downloadLine(state, [])).toBe('Downloading unknown-id')
-  })
-})
-
-describe('lookUpValue', () => {
-  it('is null where there is no control to draw', () => {
-    expect(lookUpValue('system', false, false)).toBeNull()
-  })
-
-  it('names the mode in the reader’s words', () => {
-    expect(lookUpValue('system', true, false)).toBe('System dictionary')
-    expect(lookUpValue('gloss', false, true)).toBe('Gloss')
-    expect(lookUpValue('both', true, true)).toBe('Both')
-  })
-
-  it('shows what is actually in use when the stored choice is unavailable', () => {
-    expect(lookUpValue('both', true, false)).toBe('System dictionary')
   })
 })
 
@@ -182,47 +213,87 @@ describe('the models store', () => {
     ...over,
   })
 
-  function fakeController(snapshot: Partial<InferenceSnapshot> = {}): {
-    controller: Controller
-    calls: string[]
-    notify: () => void
-  } {
-    const calls: string[] = []
+  /** A snapshot, built separately from the controller that publishes it. */
+  const snapshotOf = (over: Partial<InferenceSnapshot> = {}): InferenceSnapshot => ({
+    runtime: { kind: 'ready', version: '1.0' },
+    models: [],
+    installing: null,
+    failure: null,
+    ...over,
+  })
+
+  /**
+   * A typed controller double with explicit spies.
+   *
+   * SPLIT FROM SNAPSHOT CONSTRUCTION, and no cast anywhere. The single
+   * multi-purpose fake this replaces had drifted from the real contract in
+   * three separate places at once: it put a `port` field on a `RuntimeState`
+   * that has none and hid it behind an `as RuntimeState`, its `textModel`
+   * answered `'a-model'` instead of the installed row's id, and its
+   * `install`/`uninstall` resolved `undefined` against a `Promise<boolean>`.
+   * Every one of those is a contract the store is entitled to rely on.
+   */
+  function fakeController(snapshot: Partial<InferenceSnapshot> = {}) {
     const listeners = new Set<() => void>()
-    const state: InferenceSnapshot = {
-      runtime: { kind: 'ready', version: '1.0', port: 1234 } as RuntimeState,
-      models: [],
-      installing: null,
-      ...snapshot,
+    let unsubscribes = 0
+    const state = snapshotOf(snapshot)
+    const spies = {
+      refresh: vi.fn(async () => {}),
+      install: vi.fn(async (_model: string) => true),
+      cancelInstall: vi.fn(() => {}),
+      uninstall: vi.fn(async (_model: string) => true),
+      ensureReady: vi.fn(async () => true),
+      dispose: vi.fn(() => {}),
+    }
+    const controller: Controller = {
+      ...spies,
+      getSnapshot: () => state,
+      subscribe: (listener) => {
+        listeners.add(listener)
+        return () => {
+          unsubscribes += 1
+          listeners.delete(listener)
+        }
+      },
+      /* The documented contract: the installed text row's OWN id. */
+      textModel: () => state.models.find((row) => row.modality === 'text' && row.installed)?.id ?? null,
     }
     return {
-      calls,
+      controller,
+      ...spies,
       notify: () => {
-        for (const l of [...listeners]) l()
+        for (const listener of [...listeners]) listener()
       },
-      controller: {
-        getSnapshot: () => state,
-        subscribe: (listener) => {
-          listeners.add(listener)
-          return () => void listeners.delete(listener)
-        },
-        refresh: async () => void calls.push('refresh'),
-        install: async (id) => void calls.push(`install:${id}`),
-        cancelInstall: () => void calls.push('cancel'),
-        uninstall: async (id) => void calls.push(`uninstall:${id}`),
-        ensureReady: async () => true,
-        textModel: () => (state.models.some((m) => m.modality === 'text' && m.installed) ? 'a-model' : null),
-        dispose: () => void calls.push('dispose'),
-      },
+      subscribers: () => listeners.size,
+      unsubscribes: () => unsubscribes,
     }
   }
 
-  const fakePlugin = (over: Partial<InferencePlugin> = {}): InferencePlugin =>
-    ({
-      revealModelsDir: async () => '/models',
-      resourceUsage: async () => ({ residentBytes: 42 }),
-      ...over,
-    }) as InferencePlugin
+  const USAGE: ResourceUsage = { residentBytes: 42, modelLoaded: 'qwen' }
+
+  /* Playback that goes nowhere. `voiceTest.test.ts` drives the sink itself;
+     here it only has to exist, because `Audio` does not on `node`. */
+  const silentAudio = (): AudioSink => ({ play: () => ({ stop: () => {} }) })
+
+  /** Only the three commands the store actually calls, each a real spy. */
+  function fakePlugin(
+    over: Partial<{
+      revealModelsDir: () => Promise<string>
+      resourceUsage: () => Promise<ResourceUsage>
+      speak: (requestId: string, model: string, text: string, voice: string | null) => Promise<number[]>
+      cancel: (requestId: string) => Promise<void>
+    }> = {},
+  ) {
+    return {
+      revealModelsDir: vi.fn(over.revealModelsDir ?? (async () => '/models')),
+      resourceUsage: vi.fn(over.resourceUsage ?? (async (): Promise<ResourceUsage> => USAGE)),
+      speak: vi.fn(over.speak ?? (async () => [1])),
+      cancel: vi.fn(over.cancel ?? (async () => {})),
+    } as unknown as ModelsModelOptions['plugin'] & {
+      revealModelsDir: ReturnType<typeof vi.fn>
+      resourceUsage: ReturnType<typeof vi.fn>
+    }
+  }
 
   /**
    * THE REAL GUARD, and this is the whole reason these tests exist in this
@@ -232,25 +303,27 @@ describe('the models store', () => {
    * every door. Handing the store in raw — which is what an earlier version
    * of this suite did — makes every assertion here pass over a pane that
    * throws `namespace` on its first render in the running app, which is
-   * exactly what happened: `getSnapshot` read `kernel.lookUp` through this
-   * handle and `Settings → Local models` was an uncaught error.
-   *
-   * `kernel` is the real `KernelServices`, so the look-up accessor under test
-   * is the one that ships.
+   * exactly what happened once already.
    */
   function wiring() {
     const services = createKernelServices({ fs: null, storage: null, initialBooks: [] })
-    return { settings: scopeSettings(services.settings, 'inference'), kernel: services }
+    return { settings: scopeSettings(services.settings, 'inference') }
   }
 
   it('folds the settings and the plugin readings into the controller snapshot', async () => {
     const { controller } = fakeController({ models: [model({ id: 'a', installed: true })] })
-    const models = createModelsModel({ controller, plugin: fakePlugin(), ...wiring() })
+    const { settings } = wiring()
+    /* SEEDED AWAY FROM THE DEFAULT, so a store that hardcoded the field could
+       not pass by coincidence. */
+    settings.set(KEEP_LOADED_SETTING, true)
+
+    const models = createModelsModel({ controller, plugin: fakePlugin(), settings })
     await models.refresh()
     const snap = models.getSnapshot()
     expect(snap.models).toHaveLength(1)
     expect(snap.modelsDir).toBe('/models')
     expect(snap.residentBytes).toBe(42)
+    expect(snap.keepLoaded).toBe(true)
     expect(snap.voiceTest).toBe('idle')
     models.dispose()
   })
@@ -259,8 +332,9 @@ describe('the models store', () => {
      and the memory figure is honestly unknown when the daemon is down, so a
      rejection from either must leave the refresh — and the model list —
      standing. */
-  it('survives a plugin that refuses both readings', async () => {
-    const { controller } = fakeController({ models: [model({ id: 'a' })] })
+  it('survives a plugin that refuses both readings, and says so in the log', async () => {
+    const events: string[] = []
+    const world = fakeController({ models: [model({ id: 'a' })] })
     const plugin = fakePlugin({
       revealModelsDir: async () => {
         throw new Error('no window server')
@@ -269,11 +343,57 @@ describe('the models store', () => {
         throw new Error('daemon is down')
       },
     })
-    const models = createModelsModel({ controller, plugin, ...wiring() })
+    const models = createModelsModel({
+      controller: world.controller,
+      plugin,
+      ...wiring(),
+      report: (event) => void events.push(event),
+    })
     await expect(models.refresh()).resolves.toBeUndefined()
+
+    /* THE CONTROLLER WAS STILL ASKED. Preloading the list and checking only
+       that it survived would pass a store that never refreshed at all. */
+    expect(world.refresh).toHaveBeenCalledTimes(1)
     expect(models.getSnapshot().modelsDir).toBeNull()
     expect(models.getSnapshot().residentBytes).toBeNull()
     expect(models.getSnapshot().models).toHaveLength(1)
+    /* ⚠️ AND NEITHER FAILURE IS SILENT. A bare `.catch(() => null)` made a
+       permission problem, a dropped IPC connection and a command that was
+       never registered indistinguishable from a daemon that is simply off. */
+    expect(events.sort()).toEqual(['inference.models-dir-failed', 'inference.resource-usage-failed'])
+    models.dispose()
+  })
+
+  /**
+   * TWO REFRESHES, NEWEST WINS.
+   *
+   * Three IPC calls per refresh and the pane calls it on every open, so two
+   * can be out at once. Unsequenced, the older one's memory figure lands last
+   * — and its FAILED directory read replaces a path the newer one had
+   * successfully resolved with `null`.
+   */
+  it('keeps the newest refresh when an older one resolves after it', async () => {
+    const world = fakeController()
+    let asked = 0
+    const gates = [deferred(), deferred()]
+    const plugin = fakePlugin({
+      resourceUsage: async () => {
+        const mine = asked++
+        await gates[mine]!.promise
+        return { residentBytes: mine === 0 ? 111 : 222, modelLoaded: null }
+      },
+    })
+    const models = createModelsModel({ controller: world.controller, plugin, ...wiring() })
+
+    const older = models.refresh()
+    const newer = models.refresh()
+    gates[1]!.open()
+    await newer
+    expect(models.getSnapshot().residentBytes).toBe(222)
+
+    gates[0]!.open()
+    await older
+    expect(models.getSnapshot().residentBytes, 'a superseded refresh overwrote the current reading').toBe(222)
     models.dispose()
   })
 
@@ -290,7 +410,7 @@ describe('the models store', () => {
     models.dispose()
   })
 
-  it('notifies subscribers, and stops on unsubscribe', async () => {
+  it('notifies subscribers, and stops on unsubscribe', () => {
     const { controller, notify } = fakeController()
     const models = createModelsModel({ controller, plugin: fakePlugin(), ...wiring() })
     let seen = 0
@@ -303,7 +423,41 @@ describe('the models store', () => {
     models.dispose()
   })
 
-  it('does not notify after dispose', async () => {
+  /**
+   * DISPOSE DETACHES FROM UPSTREAM, NOT JUST FROM ITS OWN LISTENERS.
+   *
+   * Counting notifications cannot see this: `dispose` clears the model's own
+   * listener set, so a controller subscription left attached still fires — it
+   * just fires into an empty set, and the count stays at zero either way. The
+   * unsubscribe has to be observed at the source.
+   */
+  it('detaches from the controller and the settings on dispose', () => {
+    const world = fakeController()
+    const services = createKernelServices({ fs: null, storage: null, initialBooks: [] })
+    let settingsSubscribers = 0
+    const scoped = scopeSettings(services.settings, 'inference')
+    const settings = {
+      ...scoped,
+      subscribe: (listener: () => void) => {
+        settingsSubscribers += 1
+        const off = scoped.subscribe(listener)
+        return () => {
+          settingsSubscribers -= 1
+          off()
+        }
+      },
+    }
+    const models = createModelsModel({ controller: world.controller, plugin: fakePlugin(), settings })
+    expect(world.subscribers()).toBe(1)
+    expect(settingsSubscribers).toBe(1)
+
+    models.dispose()
+    expect(world.unsubscribes(), 'the controller subscription outlived the model').toBe(1)
+    expect(world.subscribers()).toBe(0)
+    expect(settingsSubscribers, 'the settings subscription outlived the model').toBe(0)
+  })
+
+  it('does not notify after dispose', () => {
     const { controller, notify } = fakeController()
     const models = createModelsModel({ controller, plugin: fakePlugin(), ...wiring() })
     let seen = 0
@@ -314,50 +468,77 @@ describe('the models store', () => {
   })
 
   it('passes install, cancel and uninstall straight through to the controller', async () => {
-    const { controller, calls } = fakeController()
-    const models = createModelsModel({ controller, plugin: fakePlugin(), ...wiring() })
-    await models.install('a')
+    const world = fakeController()
+    const models = createModelsModel({ controller: world.controller, plugin: fakePlugin(), ...wiring() })
+    await expect(models.install('a')).resolves.toBe(true)
     models.cancelInstall()
-    await models.uninstall('a')
-    expect(calls).toEqual(['install:a', 'cancel', 'uninstall:a'])
+    await expect(models.uninstall('a')).resolves.toBe(true)
+    expect(world.install.mock.calls).toEqual([['a']])
+    expect(world.cancelInstall).toHaveBeenCalledTimes(1)
+    expect(world.uninstall.mock.calls).toEqual([['a']])
+    models.dispose()
+  })
+
+  /**
+   * REMOVING THE VOICE THAT IS SPEAKING STOPS IT FIRST.
+   *
+   * `Test voice`'s Stop button lives on the voice's own row, so deleting that
+   * model takes the only control that could end the utterance off the screen —
+   * and the audio played on with the request still open at the daemon.
+   */
+  it('stops a voice test before removing the model it is playing through', async () => {
+    const world = fakeController({ models: [model({ id: 'kokoro', modality: 'speech', installed: true })] })
+    const plugin = fakePlugin()
+    const models = createModelsModel({ controller: world.controller, plugin, ...wiring(), audio: silentAudio() })
+    await models.testVoice()
+    expect(models.getSnapshot().voiceTest).toBe('speaking')
+
+    await models.uninstall('kokoro')
+    expect(models.getSnapshot().voiceTest, 'the voice kept playing after its model was deleted').toBe('idle')
+    expect(plugin.cancel).toHaveBeenCalledTimes(1)
+    models.dispose()
+  })
+
+  it('leaves a voice test alone when a different model is removed', async () => {
+    const world = fakeController({
+      models: [model({ id: 'kokoro', modality: 'speech', installed: true }), model({ id: 'qwen', installed: true })],
+    })
+    const models = createModelsModel({
+      controller: world.controller,
+      plugin: fakePlugin(),
+      ...wiring(),
+      audio: silentAudio(),
+    })
+    await models.testVoice()
+    await models.uninstall('qwen')
+    expect(models.getSnapshot().voiceTest).toBe('speaking')
     models.dispose()
   })
 
   it('writes keepLoaded through its OWN namespace, which the guard allows', () => {
-    const { settings, kernel } = wiring()
+    const { settings } = wiring()
     const { controller } = fakeController()
-    const models = createModelsModel({ controller, plugin: fakePlugin(), settings, kernel })
+    const models = createModelsModel({ controller, plugin: fakePlugin(), settings })
     models.setKeepLoaded(true)
     expect(settings.get(KEEP_LOADED_SETTING)).toBe(true)
     models.dispose()
   })
 
   /* THE REGRESSION, NAMED. `getSnapshot` is what `useSyncExternalStore` calls
-     on mount, and it reads the look-up mode. Reading it through `settings`
-     throws `namespace` — under the real guard, this test is what says so. */
-  it('reads the look-up mode without touching the kernel namespace', () => {
-    const { settings, kernel } = wiring()
+     on mount, and it reads settings through the scoped handle. Reading
+     anything outside `inference.` there throws `namespace` — under the real
+     guard, this is what says so. */
+  it('builds a snapshot without touching another capability’s namespace', () => {
+    const { settings } = wiring()
     const { controller } = fakeController()
-    const models = createModelsModel({ controller, plugin: fakePlugin(), settings, kernel })
+    const models = createModelsModel({ controller, plugin: fakePlugin(), settings })
     expect(() => models.getSnapshot()).not.toThrow()
-    expect(models.getSnapshot().lookUp).toBe(kernel.lookUp())
-    models.dispose()
-  })
-
-  /* The cycle is over what this machine can actually do, so a build with no
-     dictionary and no local model cannot be cycled into a mode that would do
-     nothing when pressed. */
-  it('reveals the models folder through the plugin, not a path it built itself', async () => {
-    const { controller } = fakeController()
-    const models = createModelsModel({ controller, plugin: fakePlugin(), ...wiring() })
-    await expect(models.reveal()).resolves.toBe('/models')
     models.dispose()
   })
 
   /* STOPPING WHEN NOTHING IS PLAYING IS A NO-OP, and it has to be: the pane's
      stop control is reachable the moment a test starts, and the audio element
-     may not exist yet. Releasing a null element or revoking a null URL would
-     throw where the reader pressed Stop. */
+     may not exist yet. */
   it('stops a voice test that never started, without throwing', () => {
     const { controller } = fakeController()
     const models = createModelsModel({ controller, plugin: fakePlugin(), ...wiring() })
@@ -366,53 +547,16 @@ describe('the models store', () => {
     models.dispose()
   })
 
-  it('cycles Look up only when more than one mode is available', () => {
-    const { settings, kernel } = wiring()
-    const { controller } = fakeController()
-    const models = createModelsModel({ controller, plugin: fakePlugin(), settings, kernel })
-    const before = kernel.lookUp()
-    /* No dictionary and no model: one mode at most, so pressing does nothing
-       rather than cycling into a mode that would fail when used. */
-    models.cycleLookUp(false)
-    expect(kernel.lookUp()).toBe(before)
+  /* NO VOICE, NO REQUEST. `Test voice` is absent from the pane until a speech
+     model is installed, but the method is reachable and must not synthesise
+     against a model that is not there. */
+  it('does nothing when no speech model is installed', async () => {
+    const world = fakeController({ models: [model({ id: 'qwen', installed: true })] })
+    const plugin = fakePlugin()
+    const models = createModelsModel({ controller: world.controller, plugin, ...wiring() })
+    await models.testVoice()
+    expect(models.getSnapshot().voiceTest).toBe('idle')
+    expect(world.ensureReady).not.toHaveBeenCalled()
     models.dispose()
-
-    const withModel = fakeController({ models: [model({ id: 'a', installed: true })] })
-    const second = createModelsModel({ controller: withModel.controller, plugin: fakePlugin(), settings, kernel })
-    second.cycleLookUp(true)
-    expect(kernel.lookUp()).not.toBe(before)
-    second.dispose()
   })
-  /**
-   * ONE VOICE TEST AT A TIME, AND THE GUARD IS ON THE NEAR SIDE OF THE AWAIT.
-   *
-   * `testVoice` returned early when `voiceTest === 'speaking'`, but set
-   * `speaking` only after `ensureReady()` resolved — so two presses of Play both
-   * saw `idle`, both waited for the runtime, and both went on to synthesise. Two
-   * requests spent, two `Audio` elements, and the first blob URL overwritten
-   * before anything revoked it. A guard on the far side of an await guards
-   * nothing.
-   */
-  it('spends one request, however fast the second press is', async () => {
-    const spoken: string[] = []
-    let releaseReady: () => void = () => {}
-    const ready = new Promise<void>((resolve) => void (releaseReady = resolve))
-
-    const { controller } = fakeController({ models: [model({ id: 'v', modality: 'speech', installed: true })] })
-    /* The runtime start is what both presses used to wait behind. */
-    const slowController = { ...controller, ensureReady: async () => { await ready; return true } }
-    const plugin = fakePlugin({
-    speak: (async (id: string) => { spoken.push(id); return [] }) as never,
-    cancel: (async () => {}) as never,
-  })
-      const models = createModelsModel({ controller: slowController, plugin, ...wiring() })
-
-      const first = models.testVoice()
-      const second = models.testVoice()
-      releaseReady()
-      await Promise.all([first, second])
-
-      expect(spoken, 'two presses synthesised twice').toHaveLength(1)
-      models.dispose()
-    })
 })

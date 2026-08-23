@@ -169,6 +169,12 @@ export const inference: Capability = {
           })
         }
       }
+      /* ⚠️ THE MODEL IS DISPOSED TOO. Only the tests ever called this, so in
+         the running app a settings subscription, an `Audio` element, a blob
+         URL and any voice request in flight survived every teardown and
+         accumulated across restarts — a leak that is invisible because each
+         one on its own is small. */
+      myModels?.dispose()
       controller.dispose()
       /* The daemon is a CHILD PROCESS, and it must not outlive the capability
        * that owns it. Best-effort and unawaited: `dispose` is synchronous and
@@ -192,7 +198,12 @@ export const inference: Capability = {
     })
     myRunning = { plugin, controller, gloss }
     running = myRunning
-    myModels = createModelsModel({ controller, plugin, settings: api.settings, kernel: api.services })
+    myModels = createModelsModel({
+      controller,
+      plugin,
+      settings: api.settings,
+      report: (event, fields) => api.diagnostics.warn(event, fields),
+    })
     modelsModel = myModels
 
     /* Read what is on disk, unawaited: `start` must not block the composition
