@@ -1,7 +1,8 @@
 import { useMemo, useRef, type DragEvent, type MouseEvent } from 'react'
-import { Check, MoreHorizontal } from 'lucide-react'
+import { Check, CloudDownload, MoreHorizontal } from 'lucide-react'
 import {
-  CANNOT_OPEN,
+  cannotOpenReason,
+  fetchAction,
   allTags,
   canOpen,
   displayTitle,
@@ -92,10 +93,14 @@ export interface BookCellProps {
   readonly onSetFinished: (bookId: string, finished: boolean) => void
   /** Contributed actions, passed through to the menu — see `BookMenu`. */
   readonly actions: readonly BookAction[]
+  /** What a capability says is happening to this book — see `BookRow`, which
+   *  carries the note on why this is not called `status`. */
+  readonly activity: { readonly label: string; readonly fraction?: number } | null
 }
 
 /** How many chips fit on the card's one line before the rest become a count. */
 const CHIPS = 4
+
 
 export function BookCell({
   book,
@@ -117,6 +122,7 @@ export function BookCell({
   onUntagBooks,
   onSetFinished,
   actions,
+  activity,
 }: BookCellProps) {
   const openable = canOpen(book)
   const tags = allTags(book)
@@ -261,7 +267,7 @@ export function BookCell({
               : `Select ${title}`
             : openable
               ? `Open ${title}`
-              : CANNOT_OPEN
+              : cannotOpenReason(book, actions)
         }
         onClick={onJacketClick}
       >
@@ -284,11 +290,6 @@ export function BookCell({
 
             One thing that used to ride on the author line stays, because it
             is a signal and not a caption: a book Paper has no copy of. */}
-        {!openable && (
-          <span className={styles.noCopy} title={CANNOT_OPEN}>
-            no copy
-          </span>
-        )}
         {/* The selection mark, on the jacket's corner: a check in a filled
             circle, the platform's own vocabulary for "this one is in". Drawn
             only when selected — a hollow circle on every card while selecting
@@ -300,6 +301,50 @@ export function BookCell({
         )}
       </button>
 
+      {/* NOT HERE — AND THE WAY TO FETCH IT, which is one control.
+          A MARK RATHER THAN A CAPTION. This was the words "no copy" in a
+          pill, which at 11px needed a quarter of the jacket to say what a
+          glyph says at 15, on the one surface whose whole purpose is that
+          the artwork is legible. The sentence moved to the `title`, where
+          two lines fit and the remedy fits with them.
+
+          AND IT IS THE DOWNLOAD. A reader who sees "not on this device"
+          wants it on this device, and the cloud is where they will press —
+          Music and Photos taught that gesture, and offering the glyph
+          without it makes the reader go and find the menu instead. It runs
+          the SAME contributed action the menu lists, found by the same rule,
+          so the two cannot come to mean different things.
+
+          OUTSIDE THE OPEN BUTTON, for the reason the meta line below is: a
+          button nested in a button is invalid, and browsers resolve it by
+          dropping the inner one — so the download would simply never fire.
+          `.cell` is the positioned ancestor either way, so it lands in the
+          same corner it did as a child.
+
+          A SPAN WHEN THERE IS NOTHING TO PRESS. On a device with no peer to
+          fetch from, the bytes are gone and re-importing is the repair; a
+          button there would be a control that does nothing. */}
+      {!openable &&
+        (() => {
+          const fetch = fetchAction(book, actions)
+          const said = cannotOpenReason(book, actions)
+          const glyph = <CloudDownload size={ICON.control} strokeWidth={ICON.stroke} aria-hidden />
+          /* The words a screen reader still gets: an `svg` carrying a `title`
+             is announced by neither, and this is the button's whole name. */
+          const words = <span className={styles.srOnly}>{said}</span>
+          return fetch ? (
+            <button type="button" className={styles.noCopy} title={said} onClick={() => void fetch.run(book.bookId)}>
+              {glyph}
+              {words}
+            </button>
+          ) : (
+            <span className={styles.noCopy} title={said}>
+              {glyph}
+              {words}
+            </span>
+          )
+        })()}
+
       {/* THE META LINE: the progress rule, and the one control that reaches
           everything else. Outside the open button, because a button nested
           in a button is invalid and browsers resolve it by dropping the inner
@@ -310,7 +355,11 @@ export function BookCell({
           a zero-width bar under every unread book is a row of noise — and
           the ellipsis then holds the row's end alone. */}
       <div className={styles.metaRow}>
-        {status !== 'unread' ? (
+        {/* The rule's slot, while something is happening to this book — see the
+            note in `BookRow`: one slot, one meaning at a time. */}
+        {activity ? (
+          <span className={styles.cellActivity}>{activity.label}</span>
+        ) : status !== 'unread' ? (
           <span
             className={styles.progress}
             data-finished={status === 'finished'}

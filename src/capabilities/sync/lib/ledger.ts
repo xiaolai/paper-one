@@ -96,6 +96,19 @@ export interface LedgerOptions {
   /** Hash a blob in THIS device's data root — the plugin's `peer_hash_file`. */
   readonly hashFile?: (folder: string, name: string) => Promise<{ blake3: string; size: number }>
   readonly pageLimit?: number
+  /**
+   * A book whose CONTENT this device did not have has just landed from a peer.
+   *
+   * The shelf side only, and only for the fetch-then-commit path: a book the
+   * reader already had, pushed again because a mark moved, is not an arrival
+   * and must not be announced as one. Called after the bytes are committed and
+   * before the ack, so a caller that persists it cannot record an arrival the
+   * sender was never told about.
+   *
+   * Best-effort by contract — see the call site. Provenance is a courtesy to
+   * the reader, and a courtesy must never be able to fail a replication.
+   */
+  readonly onArrived?: (bookId: string, peerId: string) => void
 }
 
 export interface SyncSummary {
@@ -200,6 +213,7 @@ export function createLedger({
   fetchBlob,
   hashFile,
   pageLimit = DEFAULT_PAGE_LIMIT,
+  onArrived,
 }: LedgerOptions): Ledger {
   if (!Number.isInteger(pageLimit) || pageLimit < 1) {
     throw new Error(`createLedger: pageLimit must be a positive integer, not ${JSON.stringify(pageLimit)}`)
@@ -577,6 +591,16 @@ export function createLedger({
       const name = contentBlobName({ format: group.format })
       await fetchBlob!(peer, folder, { name, size: group.size ?? 0, hash: group.contentHash as string })
       await applyRemote([{ keys: [{ book: group.book, what: 'content' }], run: () => library.refreshContent(group.book) }])
+      /* THE READER IS TOLD WHERE IT CAME FROM, and this is the only moment
+       * that knows: the merge above has the book, the session has the peer,
+       * and one line later the ack goes out and both are gone. Wrapped,
+       * because a note about provenance must not be able to fail an import
+       * whose bytes are already committed. */
+      try {
+        onArrived?.(group.book, peer)
+      } catch {
+        /* Told nobody. The book is here, which is the part that mattered. */
+      }
     }
     /* The cover moves whenever it is offered and this device lacks it —
      * INDEPENDENT of the content fetch (#21), and tracked for retry rather

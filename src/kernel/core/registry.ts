@@ -1,4 +1,5 @@
 import type {
+  BookStatus,
   BookAction,
   Capability,
   CapabilityContext,
@@ -84,6 +85,7 @@ export interface Contributions {
   commands(ctx: CommandContext): Command[]
   readonly settings: readonly SettingsSection[]
   readonly bookActions: readonly BookAction[]
+  readonly bookStatuses: readonly BookStatus[]
   /** By service name. */
   readonly services: ReadonlyMap<string, ServiceContribution>
   readonly clients: readonly ClientContribution[]
@@ -487,6 +489,10 @@ function checkNamespaces(
       prefixed('book action id', action.id, colon, cap.id)
       claim(actions, 'book action', action.id, cap.id)
     }
+    for (const status of cap.bookStatuses ?? []) {
+      prefixed('book status id', status.id, colon, cap.id)
+      claim(actions, 'book status', status.id, cap.id)
+    }
     for (const service of cap.services ?? []) {
       prefixed('service name', service.name, dot, cap.id)
       prefixed('grant', service.grant, colon, cap.id)
@@ -505,6 +511,7 @@ const NOTHING: Disposable = { dispose: () => {} }
 const EMPTY_PANES: readonly PaneContribution[] = Object.freeze([])
 const EMPTY_SECTIONS: readonly SettingsSection[] = Object.freeze([])
 const EMPTY_ACTIONS: readonly BookAction[] = Object.freeze([])
+const EMPTY_STATUSES: readonly BookStatus[] = Object.freeze([])
 const EMPTY_CLIENTS: readonly ClientContribution[] = Object.freeze([])
 const EMPTY_SERVICES: ReadonlyMap<string, ServiceContribution> = new Map()
 
@@ -629,6 +636,7 @@ export async function composeCapabilities(
       panes: Object.freeze([...(cap.panes ?? [])]),
       settings: Object.freeze([...(cap.settings ?? [])]),
       bookActions: Object.freeze([...(cap.bookActions ?? [])]),
+      bookStatuses: Object.freeze([...(cap.bookStatuses ?? [])]),
       clients: Object.freeze([...(cap.clients ?? [])]),
       services: Object.freeze([...(cap.services ?? [])]),
     }),
@@ -793,6 +801,7 @@ export async function composeCapabilities(
   const panes = byOrder(kept.flatMap((one) => [...one.panes]))
   const settings = byOrder(kept.flatMap((one) => [...one.settings]))
   const bookActions = Object.freeze(kept.flatMap((one) => [...one.bookActions]))
+  const bookStatuses = Object.freeze(kept.flatMap((one) => [...one.bookStatuses]))
   const clients = Object.freeze([...kernelClients, ...kept.flatMap((one) => [...one.clients])])
   /* The kernel's own services first, then the capabilities' — one map, one
    * router registration, one grant check. `checkNamespaces` already refused a
@@ -846,6 +855,9 @@ export async function composeCapabilities(
     },
     get bookActions() {
       return disposed ? EMPTY_ACTIONS : bookActions
+    },
+    get bookStatuses() {
+      return disposed ? EMPTY_STATUSES : bookStatuses
     },
     get services() {
       return disposed ? EMPTY_SERVICES : services

@@ -1631,6 +1631,7 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
                 }}
                 onDismiss={() => dispatch({ type: 'closeLayer', layer: 'switcherOpen' })}
                 onAddBooks={addBooks}
+                bookActions={composition.bookActions}
               />
             )}
             {/* The tag editor over the book being read — ⌘T. The same box the
@@ -1759,8 +1760,10 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
             download={download}
             onAddBooks={addBooks}
             bookActions={composition.bookActions}
+            bookStatuses={composition.bookStatuses}
           />
         )}
+
       </WindowShell>
 
     </>

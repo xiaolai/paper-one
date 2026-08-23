@@ -562,16 +562,42 @@
 /* OVER THE JACKET, out of flow. In flow it added a line under the cover that
    the fixed cell had no budget for, and was clipped. It is a stamp on the
    book it warns about — where the eye is — and takes no height. */
+/* THE CORNER MARK on a book this device has no copy of.
+   A GLYPH SINCE IT STOPPED BEING WORDS: this held the caption "no copy",
+   which at 11px was 52px wide, and the sentence it was shortened from is
+   125px — wider than the 126px card, and clipped by `.cell`'s hidden
+   overflow. The words moved to the `title`, where two lines fit and the
+   remedy fits with them; what stays here is the smallest thing that can
+   carry a meaning on artwork.
+   SQUARE PADDING, so the chip is round rather than a pill with one glyph
+   rattling inside a shape built for text.
+   IT IS A `button` WHEN THE BYTES CAN BE FETCHED and a `span` when they
+   cannot, so the resets below are unconditional — a `span` is unharmed by
+   them, and the alternative was two classes that must agree on a shape. */
 .noCopy {
   position: absolute;
   inset-inline-start: var(--space-6);
   inset-block-start: var(--space-6);
-  padding: var(--space-2) var(--space-6);
-  border-radius: var(--radius-chip);
+  display: inline-flex;
+  padding: var(--space-4);
+  border: 0;
+  border-radius: var(--radius-pill);
   background: var(--surface);
-  font-size: var(--text-caption);
   color: var(--muted);
   box-shadow: var(--shadow-pill);
+  /* ABOVE THE JACKET. It is a sibling of the open button now rather than a
+     child — a button inside a button is dropped by the browser — so it needs
+     to be told it sits on top rather than inheriting that from nesting. */
+  z-index: 1;
+}
+
+/* Only the fetching one is pressable, and only it says so. */
+button.noCopy {
+  cursor: pointer;
+}
+
+button.noCopy:hover {
+  color: var(--ink);
 }
 
 .empty {
@@ -1218,4 +1244,21 @@
   overflow: hidden;
   clip-path: inset(50%);
   white-space: nowrap;
+}
+
+/* WHAT A CAPABILITY SAYS IS HAPPENING TO THIS BOOK, in the grid's meta row.
+ *
+ * The list row reuses its own bar and percent for this; a cell has no bar to
+ * reuse — its rule is a full-width hairline that means reading progress — so
+ * the word stands alone. Quiet, because it is transient: a download announces
+ * itself by being there at all, and a shelf where one cell shouts is a shelf
+ * the eye keeps returning to for no reason. */
+.cellActivity {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-micro);
+  color: var(--muted);
 }

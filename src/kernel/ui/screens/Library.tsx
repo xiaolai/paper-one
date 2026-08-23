@@ -27,7 +27,7 @@ import { displayTitle, shelfFor, tagCounts, tagKey } from '../../core/library'
 import type { LibraryOrder } from '../../core/library'
 import { writeBookDrag } from '../../core/bookDrag'
 import type { IndexedBook } from '../../core/bookIndex'
-import type { BookAction } from '../../core/capability'
+import type { BookAction, BookStatus } from '../../core/capability'
 import { TRASH_KEPT_FOR } from '../../core/bookTrash'
 import { withStatus, withUntagged, withoutTag } from '../../core/searchQuery'
 import { moment, onFirstPaint } from '../devTiming'
@@ -142,6 +142,8 @@ export interface LibraryProps {
    * per row by each action's `when`.
    */
   bookActions: readonly BookAction[]
+  /** Transient per-book state from capabilities — see `BookStatus`. */
+  bookStatuses: readonly BookStatus[]
 }
 
 /* The three sorts, as marks. The words were dropped from the toolbar; the
@@ -230,7 +232,41 @@ export function Library({
   libraryQuery,
   onQueryChange,
   bookActions,
+  bookStatuses,
 }: LibraryProps) {
+  /* ONE SUBSCRIPTION FOR THE SHELF, NOT ONE PER ROW.
+   *
+   * A capability's `BookStatus` is pulled — the kernel asks `of` while it
+   * draws and re-asks when the store says something moved. Subscribing per row
+   * would mean 1,962 listeners on a store that is almost always saying "no",
+   * so the screen holds one and re-renders; `of` is required to be cheap for
+   * exactly this reason.
+   *
+   * A counter rather than the value itself: what changed is per-book and the
+   * screen does not know which book, so the honest signal is "ask again". */
+  const [statusTick, setStatusTick] = useState(0)
+  useEffect(() => {
+    if (bookStatuses.length === 0) return
+    const bump = () => setStatusTick((n) => n + 1)
+    const offs = bookStatuses.map((one) => one.subscribe(bump))
+    return () => {
+      for (const off of offs) off()
+    }
+  }, [bookStatuses])
+  const activityOf = useCallback(
+    (book: IndexedBook) => {
+      /* `statusTick` is read so the memo is rebuilt when a store moves; the
+         value itself carries no meaning and is never rendered. */
+      void statusTick
+      for (const one of bookStatuses) {
+        const said = one.of(book)
+        if (said) return said
+      }
+      return null
+    },
+    [bookStatuses, statusTick],
+  )
+
   const [order, setOrder] = useState<LibraryOrder>('recent')
   /* Alongside `order` rather than in app state: both are how this screen is
      being looked at right now, neither survives a launch, and splitting the
@@ -873,10 +909,15 @@ export function Library({
                 type="button"
                 className={styles.removeConfirm}
                 onClick={() => {
-                  /* Captured before anything is removed. `selectedBooks` is
-                     derived from the shelf, and the shelf changes under the
-                     first removal — iterating it directly would drop every
-                     book after the first. */
+                  /* A COPY, but not the thing that makes this correct — the
+                     comment here used to say the shelf changes under the first
+                     removal and would drop every book after it, and that
+                     cannot happen: `selectedBooks` is a `useMemo` captured by
+                     THIS render's closure, so the loop iterates a list no
+                     later render can reach. Removing the spread leaves
+                     `LibraryBulk.test.tsx` green, which is how that was found.
+                     Kept as belt-and-braces for a future in which the loop
+                     awaits, and no longer credited with more than it does. */
                   const going = [...selectedBooks]
                   setRemovingSelection(false)
                   clearSelection()
@@ -1017,6 +1058,7 @@ export function Library({
               onRemove,
               onSetFinished,
               actions: bookActions,
+              activity: activityOf(book),
             }
             return layout === 'list' ? (
               <BookRow key={book.bookId} {...shared} now={now} />

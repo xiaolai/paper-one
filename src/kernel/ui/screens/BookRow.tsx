@@ -3,7 +3,7 @@ import { Check, MoreHorizontal } from 'lucide-react'
 import type { IndexedBook } from '../../core/bookIndex'
 import type { BookAction } from '../../core/capability'
 import {
-  CANNOT_OPEN,
+  cannotOpenReason,
   canOpen,
   displayAuthor,
   displayTitle,
@@ -67,7 +67,16 @@ export interface BookRowProps {
   readonly onSetFinished: (bookId: string, finished: boolean) => void
   /** Contributed actions, passed through to the menu — see `BookMenu`. */
   readonly actions: readonly BookAction[]
+  /**
+   * What a capability says is happening to this book right now, or null.
+   *
+   * NOT `status`, which this row already uses for how far the reader got. Two
+   * different meanings under one name in one component is a bug waiting for
+   * whoever edits it next.
+   */
+  readonly activity: { readonly label: string; readonly fraction?: number } | null
 }
+
 
 export function BookRow({
   book,
@@ -89,6 +98,7 @@ export function BookRow({
   onRemove,
   onSetFinished,
   actions,
+  activity,
 }: BookRowProps) {
   const title = displayTitle(book)
   const author = displayAuthor(book)
@@ -168,7 +178,7 @@ export function BookRow({
               : `Select ${title}`
             : openable
               ? `Open ${title}`
-              : CANNOT_OPEN
+              : cannotOpenReason(book, actions)
         }
         onClick={onRowClick}
       >
@@ -207,8 +217,25 @@ export function BookRow({
             each said differently: finished is a word, because a bar at 100%
             and a bar at 97% are the same picture; untouched is a dash, because
             "0%" implies a reader started and got nowhere. */}
+        {/* THE PROGRESS SLOT SAYS ONE THING AT A TIME, and while a capability
+            has something happening it says that. A download runs for seconds
+            and reading progress is not going anywhere; two bars side by side
+            in one row would make the reader work out which is which, every
+            row, forever, to solve a collision that lasts a minute. */}
         <span className={styles.rowProgress}>
-          {status === 'finished' ? (
+          {activity ? (
+            <>
+              {activity.fraction === undefined ? null : (
+                <span className={styles.rowBar} aria-hidden="true">
+                  <span
+                    className={styles.rowBarFill}
+                    style={{ inlineSize: `${Math.round(activity.fraction * 100)}%` }}
+                  />
+                </span>
+              )}
+              <span className={styles.rowPercent}>{activity.label}</span>
+            </>
+          ) : status === 'finished' ? (
             <span className={styles.rowFinished}>Finished</span>
           ) : progress > 0 ? (
             <>

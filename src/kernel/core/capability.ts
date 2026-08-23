@@ -162,6 +162,37 @@ export const ACTION_ICONS = ['download', 'circle-minus'] as const
 
 export type ActionIcon = (typeof ACTION_ICONS)[number]
 
+/**
+ * A capability's transient word about ONE book, drawn on its shelf row.
+ *
+ * THE SIBLING OF `BookAction`, and it exists for the half that one cannot do.
+ * A capability can already put "Download" in a book's menu; it had no way to
+ * say that the download is HAPPENING. Sync's answer was a list of rows in
+ * Settings reading "Transfer 1 — done": history, in the wrong place, naming a
+ * counter no reader can attribute to a book. Progress belongs where the action
+ * was taken, and the kernel owns that row.
+ *
+ * PULLED, NOT PUSHED, and subscribed rather than polled. The kernel asks `of`
+ * during render and re-asks when `subscribe` fires — so the capability keeps
+ * its own state in its own store and the kernel keeps no per-book cache to go
+ * stale. `of` must be cheap and synchronous: it runs once per visible row.
+ *
+ * NULL IS THE COMMON ANSWER and must stay cheap — a shelf of 1,962 books asks
+ * this for every row it draws, and all but the one downloading say no.
+ *
+ * The kernel draws it, so a capability cannot invent a colour or a shape here
+ * any more than `BookAction` can supply artwork. `fraction` is offered when
+ * the work has a known size; without it the row shows the label alone, which
+ * is what an indeterminate wait honestly looks like.
+ */
+export interface BookStatus {
+  readonly id: `${string}:${string}`
+  /** Fires when any book's answer may have changed. */
+  subscribe(listener: () => void): () => void
+  /** What to say about this book right now, or null for the usual nothing. */
+  of(book: IndexedBook): { readonly label: string; readonly fraction?: number } | null
+}
+
 export interface BookAction {
   readonly id: `${string}:${string}`
   readonly label: string
@@ -171,6 +202,22 @@ export interface BookAction {
    * render, against the shelf row, by the kernel's book menu.
    */
   readonly when?: (book: IndexedBook) => boolean
+  /**
+   * Whether running this would bring the book's CONTENT to this device.
+   *
+   * Declared for the same reason `icon` is named rather than supplied: only
+   * the capability knows that Download brings bytes here and Evict frees
+   * them. The kernel needs the fact for one sentence it has to get right —
+   * the tooltip on a book it cannot open, which prescribes a remedy. That
+   * message said "add the file again" unconditionally, so a satchel showed a
+   * reader the wrong instruction on every metadata-only row while offering
+   * the right one, Download, in the same row's menu.
+   *
+   * NOT INFERRED FROM `icon: 'download'`. Artwork is a rendering choice and
+   * a future action could wear that glyph without fetching anything; a fact
+   * the kernel makes decisions on has to be stated.
+   */
+  readonly fetchesContent?: boolean
   /**
    * The icon drawn before the label — NAMED, not supplied.
    *
@@ -246,6 +293,8 @@ export interface Capability {
   readonly commands?: (ctx: CommandContext) => Command[]
   readonly settings?: readonly SettingsSection[]
   readonly bookActions?: readonly BookAction[]
+  /** Transient per-book state drawn on the shelf row — see `BookStatus`. */
+  readonly bookStatuses?: readonly BookStatus[]
   readonly services?: readonly ServiceContribution[]
   readonly clients?: readonly ClientContribution[]
   /**

@@ -21,9 +21,11 @@ import { createClock, ensureDeviceId, isHlc, type Hlc } from './lib/clock'
 import { createBackfill } from './lib/backfill'
 import { createCoverCache, type CoverCache } from './lib/coverCache'
 import { JOURNAL_DIRTY_PATH, createJournal, type Journal } from './lib/journal'
-import { createLedger, type Ledger, type SyncChannel } from './lib/ledger'
+import { blobFolderOf, createLedger, type Ledger, type SyncChannel } from './lib/ledger'
 import { SYNC_SERVICES, parseContentAnswer, type SyncRole } from './lib/protocol'
 import { bindRole, bindScheduler, currentRole, syncNow, syncStatus, unbindRole, unbindScheduler } from './lib/runtime'
+import { createDownloads, describeDownload } from './lib/downloads'
+import { describeArrival, dropArrival, readArrivals, recordArrival, type Arrival } from './lib/arrivals'
 import { createSyncScheduler, type SyncScheduler } from './lib/scheduler'
 import { DEGRADED_DETAIL } from './lib/status'
 import { createStorageModel, dropDownloadSize, recordDownloadSize, type StorageModel } from './ui/storageModel'
@@ -102,6 +104,21 @@ const delegated = (name: string, grant: string): ServiceContribution => ({
   },
 })
 
+/* MODULE-LEVEL, like `syncStatus`, because a `Capability` is a VALUE: its
+ * `bookStatuses` are read once at composition, before any `start` has run, so
+ * the store they read has to exist before the runtime does. */
+const downloads = createDownloads()
+
+/* ARRIVALS, mirrored in memory for the shelf row to read synchronously.
+ * The file is the record; this is what `of` can answer from without awaiting.
+ * Module-level for the reason `downloads` is: `bookStatuses` are read at
+ * composition, before any `start` has run. */
+const arrivals = new Map<string, Arrival>()
+const arrivalListeners = new Set<() => void>()
+const arrivalsChanged = () => {
+  for (const listener of [...arrivalListeners]) listener()
+}
+
 const SERVICE_LIST: readonly ServiceContribution[] = Object.values(SYNC_SERVICES).map((service) =>
   delegated(service.name, service.grant),
 )
@@ -126,13 +143,26 @@ async function withShelf<T>(task: (channel: SyncChannel) => Promise<T>): Promise
 async function downloadAction(bookId: string): Promise<void> {
   const held = running
   if (!held) return
-  await withShelf(async (channel) => {
-    const { size } = await held.ledger.download(channel, bookId)
-    const fs = held.fs
-    if (fs) await recordDownloadSize(fs, bookId, size).catch(() => {})
-    /* The jacket, best-effort — a cover that will not come costs nothing. */
-    await held.coverCache?.ensure(bookId).catch(() => {})
-  })
+  /* BEFORE the channel opens, not after: the first transfer event can arrive
+     while `download` is still awaiting, and an expectation registered later
+     would drop it. Registering early also makes the row answer the click at
+     once rather than when the first byte lands. */
+  downloads.expect(bookId, blobFolderOf(bookId))
+  try {
+    await withShelf(async (channel) => {
+      const { size } = await held.ledger.download(channel, bookId)
+      const fs = held.fs
+      if (fs) await recordDownloadSize(fs, bookId, size).catch(() => {})
+      /* The jacket, best-effort — a cover that will not come costs nothing. */
+      await held.coverCache?.ensure(bookId).catch(() => {})
+    })
+  } finally {
+    /* WHATEVER HAPPENED. A terminal transfer event clears this already, but a
+       download that fails before any event — no session, a refused grant —
+       produces none at all, and a row left saying "Downloading…" forever is
+       worse than the failure it is hiding. */
+    downloads.forget(bookId)
+  }
 }
 
 async function removeDownloadAction(bookId: string): Promise<void> {
@@ -328,11 +358,64 @@ export const sync: Capability = {
     },
   ],
 
+  /* WHAT IS HAPPENING TO A BOOK, in the order a reader needs to hear it.
+   *
+   * The kernel takes the FIRST status that answers, so this list is a
+   * priority. A download is in flight and finishes in a minute; an arrival
+   * note has no deadline and sits there until the book is opened. With the
+   * note first, a re-download of a book that had been pushed here would draw
+   * its provenance instead of its progress for the whole transfer.
+   *
+   * Beside the action that starts it, which is the whole point: the reader
+   * clicks Download in this menu and the answer appears on the row they
+   * clicked, not in a list in Settings.
+   */
+  bookStatuses: [
+    {
+      id: 'sync:downloading',
+      subscribe: downloads.subscribe,
+      of: (book) => {
+        const one = downloads.of(book.bookId)
+        return one === null ? null : describeDownload(one)
+      },
+    },
+    {
+      /* WHERE A BOOK CAME FROM, when it came from somewhere. Announced rather
+       * than gated — see `arrivals.ts` on why the shelf must not hold an
+       * approval queue. It clears itself once the reader opens the book, so
+       * this asks `describeArrival` on every render rather than caching a
+       * decision that `openedAt` can invalidate underneath it. */
+      id: 'sync:arrived',
+      subscribe: (listener) => {
+        arrivalListeners.add(listener)
+        return () => arrivalListeners.delete(listener)
+      },
+      of: (book) => {
+        const arrival = arrivals.get(book.bookId)
+        if (arrival === undefined) return null
+        const said = describeArrival(arrival, book)
+        if (said === null) {
+          /* Noticed. Forget it here and on disk, so the row stops asking and a
+             relaunch does not resurrect it. Fire-and-forget: the memory drop is
+             what this render needs, and the file catches up. */
+          arrivals.delete(book.bookId)
+          const fs = running?.fs
+          if (fs) void dropArrival(fs, book.bookId).catch(() => {})
+          return null
+        }
+        return said
+      },
+    },
+  ],
+
   bookActions: [
     {
       id: 'sync:download',
       label: 'Download',
       icon: 'download',
+      /* The fact the kernel needs for the tooltip on a row it cannot open:
+         this is the repair, not re-importing the original file. */
+      fetchesContent: true,
       /* A satchel's metadata-only row. The kernel's open path still refuses
        * a book with no bytes (`canOpen`); tap-to-open-fetches is C.6 polish
        * — this action is the honest seam today. */
@@ -399,6 +482,7 @@ export const sync: Capability = {
     let unserve: (() => void) | null = null
     let scheduler: SyncScheduler | null = null
     let unregisterSyncNow: (() => void) | null = null
+    let offTransfer: (() => void) | null = null
     let backfillTimer: ReturnType<typeof setTimeout> | null = null
     let boundRole: object | null = null
     let stopped = false
@@ -422,6 +506,7 @@ export const sync: Capability = {
         if (scheduler !== null) unbindScheduler(scheduler)
       })
       step('syncNow', () => unregisterSyncNow?.())
+      step('transfers', () => offTransfer?.())
       step('shelf-port', () => unbindShelfPort?.dispose())
       step('serve', () => unserve?.())
       step('backfill', () => {
@@ -571,6 +656,23 @@ export const sync: Capability = {
         role,
         fetchBlob: fetchVerifiedBlob,
         hashFile: (folder, name) => port.hashFile(folder, name),
+        onArrived: (bookId, peerId) => {
+          /* THE NAME, NOT THE ID. "Added from 8e20a13e…" is the same defect
+             this pane spent a day being dug out of. Resolved against the peer
+             record, and falling back to a plain sentence rather than to the
+             id: a book that arrived from a device since revoked still arrived
+             from somewhere, and the reader is owed that much. */
+          void (async () => {
+            const from =
+              (await port.listPeers().catch(() => [])).find((one) => one.id === peerId)?.name ??
+              'another device'
+            const arrival: Arrival = { from, at: Date.now() }
+            arrivals.set(bookId, arrival)
+            arrivalsChanged()
+            const fs = services.fs
+            if (fs) await recordArrival(fs, bookId, arrival).catch(() => {})
+          })()
+        },
       })
       myHandlers = new Map(ledger.services().map((service) => [service.name, service.handler]))
       handlers = myHandlers
@@ -654,6 +756,17 @@ export const sync: Capability = {
          * module-global store, and a previous lifetime's `degraded` must not
          * survive into this one looking current. */
         syncStatus.set({ state: 'idle', detail: null })
+        /* WHAT ARRIVED WHILE NOBODY WAS LOOKING. The shelf is the unattended
+           device, so the notice has to survive a relaunch or it would only
+           ever be seen by a reader who happened to be watching. */
+        if (services.fs) {
+          void readArrivals(services.fs)
+            .then((held) => {
+              for (const [book, arrival] of Object.entries(held)) arrivals.set(book, arrival)
+              arrivalsChanged()
+            })
+            .catch(() => {})
+        }
         unserve = port.onSessionOpen(() => syncStatus.set({ state: 'ok', lastSyncAt: Date.now() }))
       } else {
         const run = async (): Promise<void> => {
@@ -689,6 +802,10 @@ export const sync: Capability = {
             : {}),
         })
         bindScheduler(scheduler)
+        /* THE FEED. A satchel is the side that fetches bytes, so this is the
+           side that has progress to report. Registered with the other
+           satchel-only bindings so it comes off on the same teardown. */
+        offTransfer = port.onTransfer((event) => downloads.apply(event))
         unregisterSyncNow = registerSyncNow(syncNow)
         scheduler.start()
       }

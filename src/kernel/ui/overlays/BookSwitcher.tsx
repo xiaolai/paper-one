@@ -2,7 +2,8 @@ import { useMemo, useState } from 'react'
 import { Search } from 'lucide-react'
 import { coverTintFor } from '../../core/bookAccent'
 import type { IndexedBook } from '../../core/bookIndex'
-import { CANNOT_OPEN, canOpen, displayAuthor, displayTitle, matchesQuery } from '../../core/library'
+import { cannotOpenReason, canOpen, displayAuthor, displayTitle, matchesQuery } from '../../core/library'
+import type { BookAction } from '../../core/capability'
 import { ICON } from '../../core/metrics'
 import { OverlaySheet } from './OverlaySheet'
 import styles from './Overlay.module.css'
@@ -33,6 +34,12 @@ export interface BookSwitcherProps {
   onOpen: (entry: IndexedBook) => void
   onDismiss: () => void
   onAddBooks: () => void
+  /* THE SAME ACTIONS THE SHELF HAS, for the same reason the disabled rule is
+     the shelf's: a book with no bytes here explains itself in whichever
+     surface the reader is looking at, and the remedy it names depends on
+     whether anything can fetch the content. Without these the switcher would
+     tell a satchel reader to re-import a file the shelf can simply send. */
+  bookActions: readonly BookAction[]
 }
 
 export function BookSwitcher({
@@ -41,6 +48,7 @@ export function BookSwitcher({
   onOpen,
   onDismiss,
   onAddBooks,
+  bookActions,
 }: BookSwitcherProps) {
   const [query, setQuery] = useState('')
 
@@ -91,7 +99,7 @@ export function BookSwitcher({
                  * row that cannot open should say so where it is. */
                 disabled={isCurrent || !canOpen(book)}
                 data-disabled={isCurrent || !canOpen(book)}
-                title={isCurrent ? 'Already open' : canOpen(book) ? undefined : CANNOT_OPEN}
+                title={isCurrent ? 'Already open' : canOpen(book) ? undefined : cannotOpenReason(book, bookActions)}
                 onClick={() => onOpen(book)}
               >
                 <span

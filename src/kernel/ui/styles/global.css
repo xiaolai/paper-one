@@ -159,7 +159,38 @@ a:hover {
 }
 
 /* §07: focus is on :focus-visible only, so pointer users never see it, and it
- * sits outside the element rather than replacing the border. */
+ * sits outside the element rather than replacing the border.
+ *
+ * THE OFFSET CARRIES A PRECONDITION, and it is stated here because a control
+ * that breaks it fails silently — the ring still draws, in the wrong place, and
+ * nothing anywhere goes red.
+ *
+ *   This default assumes the control's VISIBLE EDGE IS ITS BORDER BOX, and that
+ *   there is room around it for two pixels of gap.
+ *
+ * Both halves get broken, and neither is exotic:
+ *
+ *   THE CONTROL IS ITS OWN FILL. The composer's input is bare and transparent
+ *   inside a pill its PARENT draws, so the two pixels land in the parent's fill
+ *   and the whole thing reads as one focused control. An input that IS the
+ *   filled pill — `.paper-cap-field`, `.noteInput` — puts those same two pixels
+ *   outside its own background, and the pane shows through the gap: a pill
+ *   drawn around a pill. Those inset instead.
+ *
+ *   THE CONTAINER WOULD CLIP IT. An icon button in a floating toolbar or on the
+ *   reading bar has no two pixels to give — `SelectionTools .tool`,
+ *   `FootnotePopover .tool`, `.bookmarkToggle` all inset by `--space-2` for
+ *   this reason, and none of them is filled. A dense row is the milder version
+ *   of the same problem and takes a 1px hairline instead.
+ *
+ * SO THE VALUE IS NOT DERIVABLE FROM WHETHER THE CONTROL IS FILLED, and an
+ * earlier draft of this note said it was. Fill and clipping are two independent
+ * reasons and the app has controls in every combination of them. What a new
+ * control owes is a decision, not a number copied from its neighbour.
+ *
+ * `docs/design-tokens.md` has the audit that finds a control which never made
+ * one — the failure is an ABSENT declaration, so no check over declarations can
+ * see it. */
 :focus-visible {
   outline: 3px solid var(--accent, #1B3A6B);
   outline-offset: var(--space-2);

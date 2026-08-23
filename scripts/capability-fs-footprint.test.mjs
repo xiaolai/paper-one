@@ -145,6 +145,14 @@ const REVIEWED_FOOTPRINT = [
   // refuses anything but content.<ext> / cover.jpg / the legacy cover.webp.
   'sync/lib/coverCache.ts removeBlob(book)',
 
+  /* -- sync/lib/arrivals.ts -- which books turned up here on their own. */
+  /* One index under `sync/`, written the way the covers LRU and the downloads
+   * ledger are: read-modify-write through `atomicWrite`, never a raw handle.
+   * It holds a device name and a timestamp per book and nothing else — no
+   * path, so no path can widen — and the row is dropped once the reader opens
+   * the book. `ARRIVALS_INDEX_PATH` = sync/arrivals.json (asserted below). */
+  'sync/lib/arrivals.ts atomicWrite(fs, ARRIVALS_INDEX_PATH)',
+
   /* -- sync/lib/journal.ts -- the replication spine, all under sync/. */
   'sync/lib/journal.ts atomicWrite(fs, JOURNAL_META_PATH)',
   'sync/lib/journal.ts atomicWrite(fs, JOURNAL_PATH)',
@@ -190,6 +198,7 @@ const SYNC_PATH_CONSTANTS = [
   ['src/capabilities/sync/lib/journalEntry.ts', 'JOURNAL_PATH', 'sync/journal.jsonl'],
   ['src/capabilities/sync/lib/journalEntry.ts', 'JOURNAL_META_PATH', 'sync/journal.meta.json'],
   ['src/capabilities/sync/lib/journalEntry.ts', 'JOURNAL_DIRTY_PATH', 'sync/journal.dirty'],
+  ['src/capabilities/sync/lib/arrivals.ts', 'ARRIVALS_INDEX_PATH', 'sync/arrivals.json'],
   ['src/capabilities/sync/lib/coverCache.ts', 'COVER_INDEX_PATH', 'sync/covers.json'],
   ['src/capabilities/sync/ui/storageModel.ts', 'DOWNLOADS_INDEX_PATH', 'sync/downloads.json'],
   ['src/kernel/core/presence.ts', 'PRESENCE_PATH', 'sync/removed.json'],
