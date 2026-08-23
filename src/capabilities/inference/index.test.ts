@@ -54,6 +54,39 @@ describe('starting and stopping the capability', () => {
   }
 
   /**
+   * ⚠️ THE FOUR ENDPOINT COMMANDS HAD NO CALLER ANYWHERE UNDER `src/`.
+   *
+   * Everything under them was built and tested — the endpoint file, the key in
+   * the OS keychain, the provisioning into the daemon's environment at spawn,
+   * the per-start registration, the probe route and `resolve_model`'s
+   * acceptance of it — and a reader could not add one, so none of it could ever
+   * run in the app. The feature ledger called it Shipped. An audit found the
+   * commands with nothing invoking them.
+   *
+   * This is what says the section exists and is wired: a contributed pane draws
+   * nothing until `start` holds a model for it.
+   */
+  it('contributes a Cloud endpoints section, drawn only while it is running', () => {
+    const endpoints = inference.settings?.find((one) => one.id === 'inference:endpoints')
+    expect(endpoints, 'the Cloud endpoints section is not contributed').toBeDefined()
+    expect(endpoints?.render(), 'a section drew before anything started').toBeNull()
+
+    const handle = started()
+    expect(endpoints?.render(), 'the section drew nothing while the capability ran').not.toBeNull()
+    handle.dispose()
+    expect(endpoints?.render(), 'the section outlived the capability').toBeNull()
+  })
+
+  /* AFTER Local models, because it is the same subject one step further out:
+     this machine's models, then somebody else's. */
+  it('puts the two inference sections in that order', () => {
+    const ids = (inference.settings ?? []).map((one) => one.id)
+    expect(ids).toEqual(['inference:models', 'inference:endpoints'])
+    const orders = (inference.settings ?? []).map((one) => one.order)
+    expect(orders).toEqual([...orders].sort((a, b) => (a ?? 0) - (b ?? 0)))
+  })
+
+  /**
    * ⚠️ TWO LIVE COMPOSITIONS, AND THE SECOND'S TEARDOWN BLANKING THE FIRST.
    *
    * The settings section reads a module slot, because `render` takes no

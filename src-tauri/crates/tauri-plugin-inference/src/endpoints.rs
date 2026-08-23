@@ -331,6 +331,59 @@ impl EndpointStore {
 
 #[cfg(test)]
 mod tests {
+    /// ⚠️ **ONE CORPUS, TWO VALIDATORS.** `endpointsModel.ts` refuses the same
+    /// things in the reader's own words, beside the field, so a bad address is
+    /// not a round trip and an error naming nothing they can act on. Two
+    /// implementations of one rule is the shape that drifts, and neither side
+    /// can see the other — so both read `fixtures/endpoint-validation.json`
+    /// and assert their own answer against it. A rule changed on one side
+    /// alone turns this red, or its twin.
+    #[test]
+    fn the_shared_corpus_says_what_this_accepts() {
+        let corpus: serde_json::Value =
+            serde_json::from_str(include_str!("../fixtures/endpoint-validation.json"))
+                .expect("the shared corpus parses");
+
+        let cases = |group: &str, key: &str| -> Vec<String> {
+            corpus[group][key]
+                .as_array()
+                .unwrap_or_else(|| panic!("{group}.{key} is a list"))
+                .iter()
+                .map(|one| one.as_str().expect("a string").to_owned())
+                .collect()
+        };
+
+        /* NON-EMPTY, so a corpus that failed to parse into the shape this
+        reads cannot pass by comparing nothing. */
+        for (group, key) in [
+            ("ids", "valid"),
+            ("ids", "invalid"),
+            ("baseUrls", "valid"),
+            ("baseUrls", "invalid"),
+        ] {
+            assert!(!cases(group, key).is_empty(), "{group}.{key} is empty");
+        }
+
+        for id in cases("ids", "valid") {
+            assert!(valid_id(&id), "the corpus calls {id:?} a valid name");
+        }
+        for id in cases("ids", "invalid") {
+            assert!(!valid_id(&id), "the corpus calls {id:?} an invalid name");
+        }
+        for url in cases("baseUrls", "valid") {
+            assert!(
+                valid_base_url(&url),
+                "the corpus calls {url:?} a valid address"
+            );
+        }
+        for url in cases("baseUrls", "invalid") {
+            assert!(
+                !valid_base_url(&url),
+                "the corpus calls {url:?} an invalid address"
+            );
+        }
+    }
+
     use super::*;
 
     #[test]

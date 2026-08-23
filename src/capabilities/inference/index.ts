@@ -5,6 +5,8 @@ import { createGlossProvider } from './lib/glossProvider'
 import { inferencePlugin, mintRequestId, type Depth, type InferencePlugin, type Probe } from './lib/plugin'
 import { createModelsModel, downloadLine, type ModelsModel } from './ui/modelsModel'
 import { ModelsPane } from './ui/ModelsPane'
+import { createEndpointsModel, type EndpointsModel } from './ui/endpointsModel'
+import { EndpointsPane } from './ui/EndpointsPane'
 
 /**
  * The `inference` capability — the local runtime, the model catalogue, and
@@ -44,6 +46,8 @@ let running: {
  * pane the first was still serving. See `createRenderSlot`.
  */
 const section = createRenderSlot<ModelsModel>()
+/** The same slot again, for the Cloud endpoints section. */
+const endpointsSection = createRenderSlot<EndpointsModel>()
 
 /**
  * Which start is the current one.
@@ -168,6 +172,17 @@ export const inference: Capability = {
         return model === null ? null : createElement(ModelsPane, { model })
       },
     },
+    {
+      id: 'inference:endpoints',
+      title: 'Cloud endpoints',
+      /* AFTER Local models (15), because it is the same subject one step
+         further out: this machine's models, then somebody else's. */
+      order: 16,
+      render: () => {
+        const model = endpointsSection.current()
+        return model === null ? null : createElement(EndpointsPane, { model })
+      },
+    },
   ],
 
   start(api: CapabilityContext, signal: AbortSignal): Disposable {
@@ -221,6 +236,19 @@ export const inference: Capability = {
     session.own('modelsModel', () => models.dispose())
     const showing = section.hold(models)
     session.own('section', () => showing.dispose())
+
+    /* CLOUD ENDPOINTS (WI-15.8). Everything under this pane was built and
+       tested and had no caller: the four commands existed, were permitted, and
+       nothing under `src/` invoked them, so the keychain path, the
+       provisioning and the per-start registration could never run in the app.
+       An audit found it; the feature ledger had called it Shipped. */
+    const endpoints = createEndpointsModel({
+      plugin,
+      report: (event, fields) => api.diagnostics.warn(event, fields),
+    })
+    session.own('endpointsModel', () => endpoints.dispose())
+    const showingEndpoints = endpointsSection.hold(endpoints)
+    session.own('endpointsSection', () => showingEndpoints.dispose())
 
     /* The daemon is a CHILD PROCESS, and it must not outlive the capability
      * that owns it. Best-effort and unawaited: `dispose` is synchronous and

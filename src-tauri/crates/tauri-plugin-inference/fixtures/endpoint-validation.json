@@ -1,0 +1,68 @@
+{
+  "note": [
+    "ONE CORPUS, TWO VALIDATORS. `endpoints.rs` decides what Paper stores;",
+    "`endpointsModel.ts` refuses the same things in the reader's own words,",
+    "beside the field, so a bad address is not a round trip and a",
+    "`ManifestMalformed` naming nothing they can act on.",
+    "",
+    "Two implementations of one rule is the shape that drifts, and neither",
+    "side can see the other. So both test suites read THIS file and assert",
+    "their own answer against it: `endpoints.rs`'s tests and",
+    "`endpointsModel.test.ts`. A case added here fails whichever side is",
+    "wrong, and a rule changed on one side alone fails immediately.",
+    "",
+    "Every case is one the crate's own `valid_id`/`valid_base_url` decide."
+  ],
+  "ids": {
+    "valid": [
+      "a",
+      "0",
+      "my-proxy",
+      "openai-1",
+      "a-b-c",
+      "-",
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ],
+    "invalid": [
+      "",
+      "A",
+      "My-Proxy",
+      "my proxy",
+      "my_proxy",
+      "my.proxy",
+      "my/proxy",
+      "my:proxy",
+      "é",
+      "my proxy ",
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  },
+  "baseUrls": {
+    "valid": [
+      "https://a",
+      "https://api.example.com",
+      "https://api.example.com/v1",
+      "https://api.example.com:8443/v1",
+      "https://api.example.com/v1?x=1",
+      "https://127.0.0.1:11434/v1",
+      "https://my-host.example.com"
+    ],
+    "invalid": [
+      "",
+      "api.example.com",
+      "http://api.example.com",
+      "HTTPS://api.example.com",
+      "https://",
+      "https:///v1",
+      "https://?x=1",
+      "https://user:pass@api.example.com",
+      "https://api.example.com#frag",
+      "https://api.example.com/a#b",
+      "https://exa mple.com",
+      "https://api.example.com ",
+      "https://api.example.com\n",
+      "https://api.\texample.com",
+      "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+  }
+}
