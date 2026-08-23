@@ -60,6 +60,25 @@ export function isAgentRoute(route: RouteId): boolean {
   return route.startsWith('agent:')
 }
 
+/**
+ * Which route actually answers, given the reader's stored preference and the
+ * fall-back the settings pane is showing.
+ *
+ * ONE FUNCTION BECAUSE THERE WAS ONE QUESTION AND TWO ANSWERS. `ROUTE_SETTING`
+ * documents `''` as "pick the best usable one"; the pane implemented that with
+ * `resolveRoute` and the provider did not, returning `null` for the same
+ * state. A reader signed into Codex was told `Codex · In use` in Settings and
+ * "the companion is not available" in the panel — and the false half was the
+ * one they met first.
+ *
+ * Pure, and separated from the capability's wiring precisely so it can be
+ * asserted: the getter that got this wrong was an inline closure nothing could
+ * reach.
+ */
+export function effectiveRoute(stored: string, fallback: RouteId | null): RouteId | null {
+  return stored === '' ? fallback : stored
+}
+
 /** The model id inside a `local:` route. */
 export function localModelOf(route: RouteId): string | null {
   return route.startsWith('local:') ? route.slice('local:'.length) : null
@@ -90,11 +109,21 @@ export function createCompanionProvider({
         throw new Error('The companion has no provider. Check `configured` before calling ask().')
       }
 
-      numbered = numberPassages(context.passages)
+      /* THIS REQUEST'S OWN TABLE, held locally.
+       *
+       * `numbered` is provider-wide, and the citation map at the end used to
+       * read it back — so two overlapping asks resolved the FIRST answer's
+       * `[n]` against the SECOND question's passages, and every citation
+       * pointed confidently at the wrong paragraph. The provider-wide value
+       * still exists for `lastPassages()`, whose contract is "the most
+       * recent"; what must not float is the table this answer is numbered
+       * against. */
+      const mine = numberPassages(context.passages)
+      numbered = mine
       const prompt = buildQuestion(
         context.bookTitle,
         context.chapterLabel,
-        numbered,
+        mine,
         context.selection,
         question,
       )
@@ -149,7 +178,7 @@ export function createCompanionProvider({
       /* THE MAP BACK, and the drop. An index the table does not contain is
        * refused — never resolved to the nearest passage, which would be a
        * citation pointing somewhere plausible. */
-      return resolveCitations(answer, numbered).citations
+      return resolveCitations(answer, mine).citations
     },
 
     lastPassages: () => numbered,

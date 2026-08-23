@@ -2,7 +2,7 @@ import { createElement } from 'react'
 import type { Capability, CapabilityContext, Disposable } from '../../kernel'
 import { DEPTH_SETTING, ROUTE_SETTING } from './lib/settings'
 import { inferencePort } from '../inference'
-import { createCompanionProvider, type BoundCompanionProvider } from './lib/provider'
+import { createCompanionProvider, effectiveRoute, type BoundCompanionProvider } from './lib/provider'
 import { createRoutesModel, type RoutesModel } from './ui/routesModel'
 import { CompanionPane } from './ui/CompanionPane'
 
@@ -86,11 +86,27 @@ export const companion: Capability = {
       return { dispose: stop }
     }
 
+    myRoutes = createRoutesModel({ port, settings: api.settings, kernel: api.services })
+    routesModel = myRoutes
+
     myProvider = createCompanionProvider({
       port,
+      /**
+       * ONE ANSWER TO "WHICH ROUTE ANSWERS", and it is the model's.
+       *
+       * `ROUTE_SETTING`'s own header says `''` means "pick the best usable
+       * one", which `resolveRoute` does — for the SETTINGS PANE. This getter
+       * returned `null` for the same state, so a reader signed into Codex saw
+       * the pane say `Codex · In use` while the Companion panel said the
+       * companion was not available and refused to send. Two surfaces, one
+       * question, opposite answers, and the false one was the common case: it
+       * is what every reader sees before they ever open the settings group.
+       *
+       * The stored preference still wins; only the fall-back is read from the
+       * one place that computes it.
+       */
       route: () => {
-        const chosen = api.settings.get(ROUTE_SETTING)
-        return chosen === '' ? null : chosen
+        return effectiveRoute(api.settings.get(ROUTE_SETTING), myRoutes?.getSnapshot().inUse ?? null)
       },
       /* Both read per call, and both from THIS capability's own namespace —
          `companion.route` and `companion.depth`, which `scopeSettings` allows
@@ -100,8 +116,14 @@ export const companion: Capability = {
     provider = myProvider
     unbindCompanion = api.services.bindCompanion(myProvider)
 
-    myRoutes = createRoutesModel({ port, settings: api.settings, kernel: api.services })
-    routesModel = myRoutes
+    /* PROBED ONCE AT START, so the answer above EXISTS before the panel's
+     * first render. WI-15.10 refuses a probe on a timer — four child
+     * processes behind a shut pane is a reader's battery spent on a question
+     * nobody asked — and this is not one: it is the single question the
+     * Companion panel asks the moment it opens, and without it the panel's
+     * first answer is a false negative. Unawaited, and a failure leaves the
+     * snapshot empty, which reads as "nothing chosen" exactly as before. */
+    void myRoutes.refresh()
 
     api.diagnostics.info('companion.started', { wired: true })
     return { dispose: stop }

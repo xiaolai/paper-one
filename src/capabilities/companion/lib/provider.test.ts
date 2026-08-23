@@ -1,7 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { AskContext } from '../../../kernel'
 import type { InferencePort } from '../../inference'
-import { createCompanionProvider, isAgentRoute, localModelOf } from './provider'
+import { createCompanionProvider, effectiveRoute, isAgentRoute, localModelOf } from './provider'
 
 /**
  * The provider that answers on all three routes.
@@ -196,5 +196,87 @@ describe('cancellation', () => {
     signals[0]?.addEventListener('abort', () => void (fired = true))
     controller.abort()
     expect(fired, 'aborting the caller’s controller did not reach the port’s signal').toBe(true)
+  })
+})
+
+/**
+ * THE TWO SURFACES AGREE ON WHICH ROUTE ANSWERS.
+ *
+ * The settings pane resolves `''` to the best usable route and shows it as
+ * `In use`. The provider used to read the stored value raw and answer `null`
+ * for the same state, so the panel said the companion was unavailable while
+ * the pane said Codex was answering. Whichever half a reader met first, one of
+ * them was lying.
+ */
+describe('the effective route', () => {
+  it('takes the fall-back when nothing is stored, rather than refusing', () => {
+    expect(effectiveRoute('', 'agent:codex')).toBe('agent:codex')
+  })
+
+  it('prefers what the reader actually chose', () => {
+    expect(effectiveRoute('agent:claude', 'agent:codex')).toBe('agent:claude')
+  })
+
+  /* Nothing stored and nothing usable is the one case that is genuinely
+     unconfigured — and the pane shows no `In use` row for it either. */
+  it('is null only when there is nothing to fall back to', () => {
+    expect(effectiveRoute('', null)).toBeNull()
+  })
+})
+
+/**
+ * TWO ASKS IN FLIGHT RESOLVE AGAINST THEIR OWN PASSAGES.
+ *
+ * The numbering used to live on the provider, so the second question
+ * overwrote it before the first had finished — and the first answer's `[1]`
+ * then resolved to the second question's paragraph. Every citation still
+ * pointed somewhere plausible, which is the worst shape this defect could
+ * take: nothing looks wrong.
+ *
+ * The old single-request test could not see it, and that is why it survived.
+ */
+describe('overlapping asks', () => {
+  const passageIn = (text: string, cfi: string) => ({
+    text: `${text} — padded past the minimum passage length so it is not dropped by numberPassages.`,
+    cfi,
+    label: '¶1 · line 1',
+  })
+
+  it('resolves each answer against the table it was numbered with', async () => {
+    /* Both turns are opened, then finished in reverse order: the second
+       question is numbered while the first is still streaming. */
+    const finish: ((text: string) => void)[] = []
+    const port = {
+      generate: async (_m: string, _s: string, _p: string, onChunk: (t: string) => void) =>
+        new Promise<string>((resolve) => {
+          finish.push((text) => {
+            onChunk(text)
+            resolve('')
+          })
+        }),
+      agentAsk: async () => '',
+      probe: async () => ({ routes: [], runtimeVersion: null }),
+      ensureReady: async () => true,
+      signIn: async () => {},
+      subscribe: () => () => {},
+    } satisfies InferencePort
+
+    const provider = createCompanionProvider({ port, route: () => 'local:m', depth: () => 'default' })
+    const first = drain(
+      provider.ask('one', { ...CONTEXT, passages: [passageIn('First', 'cfi/FIRST')] }, new AbortController().signal),
+    )
+    const second = drain(
+      provider.ask('two', { ...CONTEXT, passages: [passageIn('Second', 'cfi/SECOND')] }, new AbortController().signal),
+    )
+    await vi.waitFor(() => expect(finish).toHaveLength(2))
+
+    finish[0]?.('see [1].')
+    finish[1]?.('see [1].')
+    const [a, b] = await Promise.all([first, second])
+
+    expect(a.done, 'the first answer cited the second question’s passage').toEqual([
+      expect.objectContaining({ cfi: 'cfi/FIRST' }),
+    ])
+    expect(b.done).toEqual([expect.objectContaining({ cfi: 'cfi/SECOND' })])
   })
 })
