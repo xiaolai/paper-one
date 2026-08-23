@@ -12,6 +12,7 @@ import { planImport } from '../core/tagArchive'
 import { canArchiveTags, exportTagsToFile, importTagsFromFile } from './tagFiles'
 import { canArchiveMarks, exportMarksToFile, importMarksFromFile } from './marksFiles'
 import { createHandover } from './importHandover'
+import { createGenerations } from './latestOpen'
 import { CLOSE_DRAIN_MS, createCloseSequence } from './closeWindow'
 import { openExternal } from './openExternal'
 import { planImport as planMarksImport } from '../core/marksArchive'
@@ -190,8 +191,15 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
    * effect's inputs do not change when a row is removed.
    */
 
+  /* EVERY OPEN SUPERSEDES A PENDING ONE — see `latestOpen.ts`. The counter
+   * this replaces was advanced only by the stored-book route, so a shelf read
+   * still in flight stayed "fresh" however many books the reader picked or
+   * dropped afterwards, and landed on top of the one they had chosen. */
+  const openGenerations = useRef(createGenerations())
+
   const openBook = useCallback(
     (source: File | string, path: string | null = null) => {
+      openGenerations.current.claim()
       dispatch({ type: 'goScreen', screen: 'reader' })
       /* Handed over WITH its source rather than set directly, so the effect that
        * notices the new source is the single place the path is decided. Set here
@@ -274,13 +282,11 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
    * after the second's and replace the book the reader most recently chose
    * with the one they had already abandoned. Each request takes a number; a
    * completion that is not the newest number says nothing. */
-  const openGeneration = useRef(0)
 
   const openStored = useCallback(
     (entry: IndexedBook) => {
       if (!fs) return
-      const generation = ++openGeneration.current
-      const fresh = () => openGeneration.current === generation
+      const fresh = openGenerations.current.claim()
       const name = storedBookName(entry)
       void readOwnedBook(fs, contentPathIn(entry.bookId, name), name)
         .then((file) => {
