@@ -43,9 +43,14 @@ app is a reader and the features are simply absent.
 
 ```sh
 pnpm install
-pnpm tauri dev     # run it
-pnpm verify        # the full gate — types, lint, tests, build, cargo
+pnpm app           # run it
+pnpm verify        # the full gate — types, tests, build, cargo
 ```
+
+`pnpm app`, not `pnpm tauri dev`. It overlays `src-tauri/tauri.dev.conf.json`,
+which exists to set `withGlobalTauri: true` — false in the shipped app, and
+required in development by anything that drives the running window. Plain
+`tauri dev` starts a build that looks fine and cannot be driven.
 
 `pnpm build` rather than `pnpm typecheck` is the honest check for anything
 touching the reader: some failures are visible only to a real build.
