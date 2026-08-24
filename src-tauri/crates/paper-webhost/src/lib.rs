@@ -39,6 +39,8 @@
 //! frames, exactly as `tauri-plugin-peer` does. Anything that starts answering
 //! service calls in Rust here is building a second copy of every handler.
 
+pub mod pipe;
+
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -51,6 +53,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use paper_webauth::sessions::{Credential, Sessions};
 use paper_webauth::{DeviceAuth, Outcome, Refused};
+use pipe::Pipe;
 use serde::Deserialize;
 
 /// The cookie the browser gets, and the only place its name is written.
@@ -82,6 +85,7 @@ pub const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
 pub struct WebHost {
     pub auth: DeviceAuth,
     pub sessions: Sessions,
+    pub pipe: Pipe,
 }
 
 impl WebHost {
@@ -89,6 +93,7 @@ impl WebHost {
         Self {
             auth: DeviceAuth::new(),
             sessions: Sessions::new(),
+            pipe: Pipe::new(),
         }
     }
 }
@@ -231,11 +236,14 @@ async fn signout(
     request_headers: axum::http::HeaderMap,
 ) -> Response {
     if let Some(credential) = presented(&request_headers) {
-        /* ⚠️ The returned SessionId is dropped here because there is no live
-         * channel yet. When the frame pipe lands it MUST be used to close that
-         * session — `Sessions::revoke` says so, and a revocation that only
-         * forgets the credential leaves an open socket answering requests. */
+        /* BOTH HALVES, IN THIS ORDER. Forgetting the credential first means a
+         * socket that closes a moment later cannot be re-opened in between;
+         * closing first would leave a window where the browser reconnects with
+         * a credential that is still good. `Sessions::revoke` warns that
+         * forgetting alone leaves an open socket answering requests — this is
+         * the call that stops it. */
         let _ = state.sessions.revoke(&credential);
+        state.pipe.close_credential(&credential, "revoked");
     }
     let mut response = StatusCode::NO_CONTENT.into_response();
     response.headers_mut().insert(
@@ -435,6 +443,59 @@ mod tests {
                 .status(),
             StatusCode::UNAUTHORIZED,
             "the credential must be dead after signout"
+        );
+    }
+
+    #[tokio::test]
+    async fn signing_out_closes_the_live_socket_not_just_the_credential() {
+        /* PLAN §7, end to end. `Sessions::revoke` forgetting the credential is
+         * not enough on its own — its own doc comment says a revocation that
+         * only forgets leaves an open socket answering requests. This asserts
+         * the HTTP path does both. */
+        let state = host();
+        let code = live_code(&state);
+        let granted = call(
+            Arc::clone(&state),
+            json_post("/api/auth/submit", &format!(r#"{{"code":"{code}"}}"#), None),
+        )
+        .await;
+        let pair = granted.headers()[header::SET_COOKIE]
+            .to_str()
+            .expect("ascii")
+            .split(';')
+            .next()
+            .expect("name=value")
+            .to_owned();
+        let value = pair.split_once('=').expect("name=value").1.to_owned();
+        let credential = paper_webauth::sessions::Credential::from_presented(&value);
+
+        // A socket the browser already holds, admitted the ordinary way.
+        let admission = state
+            .sessions
+            .validate(&credential, Instant::now())
+            .expect("valid");
+        let admitted = state.sessions.admit(admission).expect("admitted");
+        let socket = state
+            .pipe
+            .open(admitted, credential.clone())
+            .expect("a live socket");
+        assert_eq!(state.pipe.live_count(), 1);
+
+        let _ = call(
+            Arc::clone(&state),
+            json_post("/api/auth/signout", "", Some(&pair)),
+        )
+        .await;
+
+        assert_eq!(
+            state.pipe.closed_reason(socket).as_deref(),
+            Some("revoked"),
+            "the socket must close, not merely the credential"
+        );
+        assert_eq!(state.pipe.live_count(), 0);
+        assert_eq!(
+            state.pipe.push(socket, b"still here?".to_vec()),
+            crate::pipe::Push::Gone
         );
     }
 
