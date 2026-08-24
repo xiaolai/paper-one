@@ -238,9 +238,14 @@ export function DevicesPane({ model, syncNow }: DevicesPaneProps) {
             {/* WHAT MOVES, in artifacts rather than in wildcards. */}
             <div className={ui.hint}>
               {describeGrants(peer.grants)}
+              {/* LAST SEEN, NOT LAST SYNCED. `lastSeenAt` is stamped when the
+                  transport made contact — a session that opened and moved
+                  nothing counts — so "last synced" claimed a successful
+                  exchange the field cannot vouch for, and a reader debugging
+                  a silent pair was told it had synced a minute ago. */}
               {peer.lastSeenAt
-                ? ` · last synced ${new Date(peer.lastSeenAt).toLocaleString()}`
-                : ' · never synced'}
+                ? ` · last seen ${new Date(peer.lastSeenAt).toLocaleString()}`
+                : ' · never seen'}
             </div>
             {/* OFFERED ONLY WHERE IT BITES. Grants are checked by the side
                 being CALLED, and a shelf answers satchels rather than dialling
@@ -286,16 +291,6 @@ export function DevicesPane({ model, syncNow }: DevicesPaneProps) {
         </div>
       )}
 
-      <label className={ui.row}>
-        <span className={ui.grow}>Local network only</span>
-        <input
-          type="checkbox"
-          className={ui.toggle}
-          checked={snapshot.localOnly}
-          onChange={(event) => model.setLocalOnly(event.target.checked)}
-        />
-      </label>
-      <div className={ui.hint}>Saved now; keeping the connection off relays lands with the two-instance work.</div>
     </div>
   )
 }

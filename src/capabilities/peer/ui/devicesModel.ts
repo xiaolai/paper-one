@@ -1,11 +1,9 @@
-import { defineSetting, type Setting, type SettingsStore } from '../../../kernel'
 import type { PeerPort } from '../lib/port'
 import type {
   PairOffer,
   PairingPending,
   PairingResult,
   PeerRole,
-  TransferProgress,
   Unsubscribe,
   WirePeer,
 } from '../lib/wire'
@@ -17,13 +15,25 @@ import type {
  * adapter over `getSnapshot`/`subscribe`.
  */
 
-/** "Local network only" — persisted NOW; plumbing it into the plugin's
- *  endpoint (RelayMode::Disabled, no DNS) is a later work item and is noted
- *  in `docs/sync.md`. Owned by peer because the endpoint it will configure
- *  is peer's. */
-export const LOCAL_ONLY_SETTING: Setting<boolean> = defineSetting('peer.localOnly', false, (raw) =>
-  typeof raw === 'boolean' ? raw : undefined,
-)
+/*
+ * "LOCAL NETWORK ONLY" IS GONE, and it is worth saying why rather than
+ * leaving a gap here.
+ *
+ * It was a checkbox wired to nothing: `peer.localOnly` was defined, stored,
+ * published into the snapshot and drawn — and no code anywhere read it to
+ * change behaviour. Every sync still went out over n0's relays and n0's DNS,
+ * while a reader was being shown a control whose name is a promise about
+ * where their library travels. A security control that does not control
+ * anything is worse than its absence, because it is believed.
+ *
+ * The transport already has the knobs — `NodeConfig` carries `relay_mode` and
+ * `discovery { n0_dns, mdns }`, and the test preset runs with
+ * `RelayMode::Disabled` — so the honest version is not far away. What it
+ * needs first is a decision this codebase cannot make yet: `for_app` sets
+ * `mdns: cfg!(not(target_os = "ios"))`, so on iOS "local only" would mean no
+ * relay, no DNS and no mDNS — a switch that silently turns sync off. That is
+ * a mobile-transport decision, and the toggle comes back with it.
+ */
 
 /** The grants pairing one's own device writes (§2.2). */
 export const OWN_DEVICE_GRANTS: readonly string[] = ['sync:*', 'blob:*']
@@ -50,6 +60,34 @@ export const OWN_DEVICE_GRANTS: readonly string[] = ['sync:*', 'blob:*']
  * dropping the second is a device that syncs its marks and cannot open a book.
  */
 export const READ_ONLY_GRANTS: readonly string[] = ['sync:pull', 'blob:read']
+
+/**
+ * The grant list the write toggle should write, given what the peer already
+ * holds.
+ *
+ * REPLACING THE WHOLE LIST WAS WRONG IN BOTH DIRECTIONS. Turning write off
+ * used to send exactly `READ_ONLY_GRANTS`, so a peer holding some grant this
+ * pane does not model — `shelf:admin`, or anything a later version or the CLI
+ * writes — lost it silently to a toggle about writing. And a peer holding NO
+ * sync grants at all would have been GRANTED `sync:pull` and `blob:read` by a
+ * control whose only stated effect is to take access away.
+ *
+ * So the toggle owns exactly the families it names: everything under `sync:`
+ * and `blob:` is dropped and replaced by the chosen pair, and every other
+ * grant is carried through untouched.
+ */
+export function grantsForWrite(held: readonly string[], canWrite: boolean): string[] {
+  const mine = (grant: string) => grant.startsWith('sync:') || grant.startsWith('blob:')
+  const kept = held.filter((grant) => !mine(grant))
+  if (canWrite) return [...kept, ...OWN_DEVICE_GRANTS]
+  /* TURNING IT OFF NEVER GRANTS ANYTHING. A peer holding no sync or blob
+     grant at all is not a read-write device being demoted — it is a device
+     with no access — and handing it `sync:pull` and `blob:read` from a
+     control whose entire stated effect is to take access away is the wrong
+     direction for a permission to move on its own. */
+  if (held.length === kept.length) return kept
+  return [...kept, ...READ_ONLY_GRANTS]
+}
 
 /**
  * Whether a peer may still change things here.
@@ -217,6 +255,16 @@ export interface DevicesSnapshot {
   readonly role: PeerRole | null
   readonly endpointId: string | null
   readonly peers: readonly WirePeer[]
+  /**
+   * Whether `peers` has been read from the plugin yet.
+   *
+   * AN EMPTY LIST BEFORE THE FIRST REFRESH LOOKS EXACTLY LIKE NO PEERS, and
+   * `roleIsSettable` reads emptiness as "safe to change sides". So a pane
+   * rendered in the gap before the first `refresh()` resolved offered the
+   * role control on a device that is already paired — and the write is
+   * durable, so the mistake survives the restart it asks for.
+   */
+  readonly peersLoaded: boolean
   /** The QR being shown, when pairing was begun here. */
   readonly offer: PairOffer | null
   /** A satchel asking to pair — the human confirms against the SAS. */
@@ -224,9 +272,6 @@ export interface DevicesSnapshot {
   /** The SAS to show after `pairWithCode`, while the other side decides. */
   readonly sas: string | null
   readonly lastResult: PairingResult | null
-  /** Newest first, capped. */
-  readonly transfers: readonly TransferProgress[]
-  readonly localOnly: boolean
   /** Set since launch and not yet in force — the node read the old one. */
   readonly roleNeedsRestart: boolean
   readonly error: string | null
@@ -241,7 +286,6 @@ export interface DevicesModel {
   confirmPairing(accept: boolean): Promise<void>
   pairWithCode(uri: string): Promise<void>
   forget(id: string): Promise<void>
-  setLocalOnly(on: boolean): void
   /** Record which side this device is. Applies at the next launch. */
   setRole(role: PeerRole): Promise<void>
   /** Let a paired device change things here, or restrict it to reading. */
@@ -272,14 +316,10 @@ export function inlineQrSvg(svg: string): string {
   return svg.replace(/^\s*<\?xml[^?]*\?>\s*/i, '')
 }
 
-const KEPT_TRANSFERS = 20
-
 export function createDevicesModel({
   port,
-  settings,
 }: {
   readonly port: PeerPort | null
-  readonly settings: SettingsStore
 }): DevicesModel {
   let snapshot: DevicesSnapshot = {
     available: port !== null,
@@ -290,8 +330,7 @@ export function createDevicesModel({
     pending: null,
     sas: null,
     lastResult: null,
-    transfers: [],
-    localOnly: settings.get(LOCAL_ONLY_SETTING),
+    peersLoaded: false,
     roleNeedsRestart: false,
     error: null,
   }
@@ -311,16 +350,45 @@ export function createDevicesModel({
         publish({ lastResult, pending: null, sas: null, offer: lastResult.ok ? null : snapshot.offer })
         void refresh()
       }),
-      port.onTransfer((event) => {
-        const rest = snapshot.transfers.filter((one) => one.transferId !== event.transferId)
-        publish({ transfers: [event, ...rest].slice(0, KEPT_TRANSFERS) })
-      }),
+      /* NO TRANSFER SUBSCRIPTION. This kept the twenty most recent transfer
+         events so the pane could list them — "Transfer 1 — done", the surface
+         that per-book download progress replaced. The list went; the
+         subscription and its twenty retained records did not, so every device
+         pane held a rolling buffer of events nothing rendered. Progress now
+         reaches the book's own row through sync's `BookStatus`, which is the
+         only place a reader looks for it. */
     )
   }
 
   /* Refreshes overlap — a listener fires one while a command's own refresh
    * is in flight — and they can resolve out of order; only the NEWEST may
    * publish, or an older peer list overwrites a newer one. */
+  /**
+   * THE INVITE RETIRES ITSELF, because the attempt behind it does.
+   *
+   * `PairOffer.expiresAt` was carried into the snapshot and never read: the
+   * QR and its copy button stayed on screen indefinitely, so the obvious
+   * thing to do with a stale pane — copy the code and send it — produced a
+   * refusal on the other device with nothing here suggesting why. Cleared in
+   * the MODEL rather than by a component timer, because the snapshot is what
+   * every consumer reads and an offer that is gone should be gone for all of
+   * them.
+   */
+  let offerTimer: ReturnType<typeof setTimeout> | null = null
+  const retireOffer = (offer: PairOffer | null): void => {
+    if (offerTimer !== null) clearTimeout(offerTimer)
+    offerTimer = null
+    if (offer === null) return
+    const left = offer.expiresAt - Date.now()
+    if (left <= 0) return
+    offerTimer = setTimeout(() => {
+      offerTimer = null
+      if (disposed) return
+      /* Only if it is still THIS offer — a newer begin has its own timer. */
+      if (snapshot.offer === offer) publish({ offer: null })
+    }, left)
+  }
+
   let refreshGeneration = 0
   /* One generation for every pairing-shaped operation (begin, pair-by-code,
    * cancel): whichever started LAST owns the next publish, and a disposal
@@ -336,7 +404,7 @@ export function createDevicesModel({
     try {
       const [status, peers] = await Promise.all([port.status(), port.listPeers()])
       if (mine !== refreshGeneration) return
-      publish({ role: status.role, endpointId: status.endpointId, peers, error: null })
+      publish({ role: status.role, endpointId: status.endpointId, peers, peersLoaded: true, error: null })
     } catch (thrown) {
       if (mine !== refreshGeneration) return
       publish({ error: said(thrown) })
@@ -359,12 +427,19 @@ export function createDevicesModel({
        * to publish while `lastResult` was set left every later begin with a
        * live backend attempt and no visible QR. Only a confirmation the
        * human is mid-way through (`pending`) may not be stomped. */
+      /* CHECKED BEFORE THE CALL, not after it. `pairBegin` replaces whatever
+         attempt the backend is holding — so testing `pending` only around the
+         PUBLISH destroyed the confirmation the human was reading a SAS for,
+         and then declined to show the new offer, leaving both. The comment
+         above says this may not be stomped; now it is not. */
+      if (snapshot.pending !== null) return
       const mine = ++beginGeneration
       try {
         const offer = await port.pairBegin(name)
         if (mine !== beginGeneration || disposed) return
         if (snapshot.pending === null) {
           publish({ offer, lastResult: null, sas: null, error: null })
+          retireOffer(offer)
         }
       } catch (thrown) {
         if (mine !== beginGeneration || disposed) return
@@ -442,14 +517,17 @@ export function createDevicesModel({
         if (!disposed) publish({ error: said(thrown) })
       }
     },
-    setLocalOnly: (on) => {
-      settings.set(LOCAL_ONLY_SETTING, on)
-      publish({ localOnly: on })
-    },
     setPeerCanWrite: async (id, canWrite) => {
-      if (!port) return
+      if (!port || disposed) return
       try {
-        await port.setGrants(id, [...(canWrite ? OWN_DEVICE_GRANTS : READ_ONLY_GRANTS)])
+        /* Read what the peer holds first: the toggle owns `sync:` and `blob:`
+           and must not be able to add or drop anything else — see
+           `grantsForWrite`. */
+        const held = (await port.listPeers()).find((one) => one.id === id)?.grants ?? []
+        /* Re-checked across the await: a disposal between the read and the
+           write must not start further IPC on a dead model. */
+        if (disposed) return
+        await port.setGrants(id, grantsForWrite(held, canWrite))
         /* Re-read rather than assume: the plugin is the owner of the record,
            and a grant list echoed back from here would be this pane's idea of
            what it wrote rather than what the store holds. */
@@ -459,14 +537,26 @@ export function createDevicesModel({
       }
     },
     setRole: async (role) => {
-      if (!port) return
+      if (!port || disposed) return
+      /* THE INVARIANT, ENFORCED WHERE IT CAN BE. Changing sides while paired
+         leaves a pair with no shelf or two of them, and the write is durable,
+         so the mistake survives the restart it asks for. The pane hides the
+         control, but hiding is not enforcing — and `peersLoaded` is why the
+         emptiness is trustworthy: before the first refresh the list is empty
+         because nothing has been read, which is not the same answer. */
+      if (!snapshot.peersLoaded || !roleIsSettable(snapshot.peers)) return
+      /* CHOOSING WHAT IS ALREADY RUNNING IS NOT A CHANGE. Every successful
+         write used to raise "restart to apply", including the one that put
+         the device back where it started. */
+      const changes = snapshot.role !== null && snapshot.role !== role
       try {
         await port.setLocalRole(role)
+        if (disposed) return
         /* `snapshot.role` is NOT moved to match. It reports what the node is
            running as, and the node read its role at start — claiming the new
            one here would put a sentence on screen that the next `refresh()`
            would quietly contradict. The flag is what the pane shows instead. */
-        publish({ roleNeedsRestart: true })
+        publish({ roleNeedsRestart: changes })
       } catch (thrown) {
         if (!disposed) publish({ error: said(thrown) })
       }
@@ -477,6 +567,8 @@ export function createDevicesModel({
       disposed = true
       beginGeneration++
       refreshGeneration++
+      if (offerTimer !== null) clearTimeout(offerTimer)
+      offerTimer = null
       for (const off of offs.splice(0)) off()
       listeners.clear()
     },

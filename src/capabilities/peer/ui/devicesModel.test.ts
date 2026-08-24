@@ -1,9 +1,7 @@
-import { describe, expect, it } from 'vitest'
-import { createKernelServices } from '../../../kernel'
+import { describe, expect, it, vi } from 'vitest'
 import { fakeWire, linkWires } from '../lib/fakeWire.testkit'
 import { createPeerPort } from '../lib/port'
 import {
-  LOCAL_ONLY_SETTING,
   READ_ONLY_GRANTS,
   ROLE_CHOICES,
   canJoinWithCode,
@@ -17,6 +15,7 @@ import {
   describeRole,
   inlineQrSvg,
   pairingFault,
+  grantsForWrite,
 } from './devicesModel'
 
 /**
@@ -27,17 +26,9 @@ import {
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
 
-function settingsOnly() {
-  const map = new Map<string, string>()
-  return createKernelServices({
-    fs: null,
-    storage: { getItem: (k) => map.get(k) ?? null, setItem: (k, v) => void map.set(k, v) },
-  }).settings
-}
-
 describe('the devices model', () => {
   it('is honestly unavailable with no port', () => {
-    const model = createDevicesModel({ port: null, settings: settingsOnly() })
+    const model = createDevicesModel({ port: null })
     expect(model.getSnapshot().available).toBe(false)
   })
 
@@ -45,8 +36,8 @@ describe('the devices model', () => {
     const shelfWire = fakeWire({ role: 'shelf', endpointId: 'shelf-dev' })
     const satchelWire = fakeWire({ role: 'satchel', endpointId: 'satchel-dev' })
     linkWires(shelfWire, satchelWire)
-    const shelf = createDevicesModel({ port: createPeerPort(shelfWire), settings: settingsOnly() })
-    const satchel = createDevicesModel({ port: createPeerPort(satchelWire), settings: settingsOnly() })
+    const shelf = createDevicesModel({ port: createPeerPort(shelfWire) })
+    const satchel = createDevicesModel({ port: createPeerPort(satchelWire) })
 
     await shelf.beginPairing('My Mac')
     const offer = shelf.getSnapshot().offer
@@ -76,8 +67,8 @@ describe('the devices model', () => {
     const shelfWire = fakeWire({ role: 'shelf', endpointId: 'shelf-dev2' })
     const satchelWire = fakeWire({ role: 'satchel', endpointId: 'satchel-dev2' })
     linkWires(shelfWire, satchelWire)
-    const shelf = createDevicesModel({ port: createPeerPort(shelfWire), settings: settingsOnly() })
-    const satchel = createDevicesModel({ port: createPeerPort(satchelWire), settings: settingsOnly() })
+    const shelf = createDevicesModel({ port: createPeerPort(shelfWire) })
+    const satchel = createDevicesModel({ port: createPeerPort(satchelWire) })
     await shelf.beginPairing()
     await satchel.pairWithCode(shelf.getSnapshot().offer!.url)
     await tick()
@@ -92,19 +83,22 @@ describe('the devices model', () => {
 
   it('a bad code surfaces as an error, not a throw', async () => {
     const wire = fakeWire({ role: 'satchel', endpointId: 'satchel-dev3' })
-    const model = createDevicesModel({ port: createPeerPort(wire), settings: settingsOnly() })
+    const model = createDevicesModel({ port: createPeerPort(wire) })
     await model.pairWithCode('not-a-code')
     expect(model.getSnapshot().error).toMatch(/not a pairing URI/)
   })
 
-  it('local-only is persisted under its settings key', () => {
-    const settings = settingsOnly()
+  it('offers no control this app cannot honour', () => {
+    /* "Local network only" used to live here: a checkbox whose setting was
+       stored and read by nothing, while every sync still crossed n0's relays.
+       This test asserted the persistence and so PASSED for a control that did
+       not work — the shape of test that makes a dead feature look alive. It
+       comes back with the mobile transport work, which is where the iOS mDNS
+       question that blocks it gets answered. */
     const wire = fakeWire({ role: 'shelf', endpointId: 'shelf-dev4' })
-    const model = createDevicesModel({ port: createPeerPort(wire), settings })
-    expect(model.getSnapshot().localOnly).toBe(false)
-    model.setLocalOnly(true)
-    expect(model.getSnapshot().localOnly).toBe(true)
-    expect(settings.get(LOCAL_ONLY_SETTING)).toBe(true)
+    const model = createDevicesModel({ port: createPeerPort(wire) })
+    expect('localOnly' in model.getSnapshot()).toBe(false)
+    expect('setLocalOnly' in model).toBe(false)
   })
 })
 
@@ -117,18 +111,24 @@ describe('the devices model', () => {
  * DOM, which is the same reason every other decision in this file lives here.
  */
 describe('what the pane says about a device', () => {
-  it('says what a role DOES, because the reader cannot change what it IS', () => {
-    /* `role.rs` fixes this at build time and the `PAPER_ROLE` override is
-       debug-only, so "shelf" on screen named a choice nobody can make. */
+  it('says what a role DOES, because the word alone does not tell a reader', () => {
+    /* "Shelf" and "satchel" are the protocol's words, not the reader's. This
+       used to add that the role could not be changed at all — true when
+       `role.rs` fixed it at build time with only a debug `PAPER_ROLE`
+       override, and false since a desktop can be asked. What survives is the
+       reason the sentence exists: the reader picks by what a device DOES. */
     expect(describeRole('shelf')).toBe('Holds your library')
     expect(describeRole('satchel')).toBe('Reads from your library')
     expect(describeRole(null)).toBe('…')
   })
 
-  it('names the pairing that cannot work, since the protocol will not refuse it', () => {
-    /* Two desktops is the DEFAULT outcome — a desktop build is a shelf — and
-       both sides record the pairing, both report ready, and no session ever
-       opens. Measured: paired, mutual, silent for 34 hours, and the only
+  it('names a stored pairing that cannot work, which the handshake cannot catch', () => {
+    /* NOT AT PAIRING TIME. `pairing.rs` refuses a dialler whose hello is not
+       a satchel ("role-mismatch"), so two shelves cannot COMPLETE a
+       handshake. What it cannot see is a pairing that becomes same-role
+       AFTERWARDS — which the reader-settable role now makes reachable, and is
+       why `setRole` refuses while peers exist. Both sides then hold a record,
+       both report ready, and no session ever
        symptom was a menu with no Download in it. */
     expect(pairingFault('shelf', 'shelf')).toMatch(/nothing will sync/)
     expect(pairingFault('satchel', 'satchel')).toMatch(/nothing to sync from/)
@@ -206,7 +206,7 @@ describe('where the reader says their books live', () => {
 
   it('records the answer without claiming the running node changed', async () => {
     const wire = fakeWire({ role: 'shelf', endpointId: 'role-choice-dev' })
-    const model = createDevicesModel({ port: createPeerPort(wire), settings: settingsOnly() })
+    const model = createDevicesModel({ port: createPeerPort(wire) })
     await model.refresh()
     expect(model.getSnapshot().roleNeedsRestart).toBe(false)
 
@@ -262,11 +262,11 @@ describe('restricting a paired device to reading', () => {
     const shelfWire = fakeWire({ role: 'shelf', endpointId: 'grant-shelf' })
     const satchelWire = fakeWire({ role: 'satchel', endpointId: 'grant-satchel' })
     linkWires(shelfWire, satchelWire)
-    const shelf = createDevicesModel({ port: createPeerPort(shelfWire), settings: settingsOnly() })
+    const shelf = createDevicesModel({ port: createPeerPort(shelfWire) })
 
     await shelf.beginPairing('Shelf')
     const offer = shelf.getSnapshot().offer!
-    const satchel = createDevicesModel({ port: createPeerPort(satchelWire), settings: settingsOnly() })
+    const satchel = createDevicesModel({ port: createPeerPort(satchelWire) })
     await satchel.pairWithCode(offer.url)
     await tick()
     await shelf.confirmPairing(true)
@@ -318,6 +318,180 @@ describe('which half of pairing a device may do', () => {
   it('never offers both to one device', () => {
     for (const role of ['shelf', 'satchel', null] as const) {
       expect(canOfferInvite(role) && canJoinWithCode(role)).toBe(false)
+    }
+  })
+})
+
+describe('what the write toggle is allowed to change', () => {
+  /* It used to REPLACE the whole grant list, which was wrong in both
+     directions: a peer holding anything this pane does not model — say
+     `shelf:admin`, the one grant that can empty a trash — lost it to a toggle
+     about writing; and a peer holding NO sync grants would have been GRANTED
+     read access by the control whose only stated purpose is removing access. */
+
+  it('adds write without disturbing a grant it does not own', () => {
+    expect(grantsForWrite(['shelf:admin', 'sync:pull', 'blob:read'], true)).toEqual([
+      'shelf:admin',
+      ...OWN_DEVICE_GRANTS,
+    ])
+  })
+
+  it('removes write without disturbing a grant it does not own', () => {
+    expect(grantsForWrite(['shelf:admin', 'sync:*', 'blob:*'], false)).toEqual([
+      'shelf:admin',
+      ...READ_ONLY_GRANTS,
+    ])
+  })
+
+  it('never grants read to a peer that held nothing', () => {
+    /* The direction a permission must never move on its own. */
+    expect(grantsForWrite([], false)).toEqual([])
+    expect(grantsForWrite(['shelf:admin'], false)).toEqual(['shelf:admin'])
+  })
+
+  it('still grants write to a peer that held nothing, because that is the ask', () => {
+    expect(grantsForWrite([], true)).toEqual([...OWN_DEVICE_GRANTS])
+  })
+
+  it('replaces the sync family rather than accumulating it', () => {
+    /* Toggling twice must not leave both sets on the peer. */
+    const on = grantsForWrite(['sync:pull', 'blob:read'], true)
+    expect(grantsForWrite(on, false)).toEqual([...READ_ONLY_GRANTS])
+  })
+})
+
+describe('the role control, and what it refuses', () => {
+  /* The pane hides this control on a paired device, but hiding is not
+     enforcing: the model is reachable, the write is durable, and a device
+     that changes sides while paired leaves the pair with no shelf or two. */
+
+  it('refuses before the peer list has been read', async () => {
+    /* THE TRAP. An empty list before the first refresh looks exactly like a
+       device with no peers, and `roleIsSettable` reads emptiness as safe —
+       so the control was live in the gap, on a device that may be paired. */
+    const wire = fakeWire({ role: 'shelf', endpointId: 'shelf-r1' })
+    const model = createDevicesModel({ port: createPeerPort(wire) })
+    expect(model.getSnapshot().peersLoaded).toBe(false)
+    await model.setRole('satchel')
+    expect(wire.pendingRole, 'the plugin was never asked').toBeNull()
+    expect(model.getSnapshot().roleNeedsRestart).toBe(false)
+  })
+
+  it('refuses once the device is actually paired', async () => {
+    const shelfWire = fakeWire({ role: 'shelf', endpointId: 'shelf-r3' })
+    const satchelWire = fakeWire({ role: 'satchel', endpointId: 'satchel-r3' })
+    linkWires(shelfWire, satchelWire)
+    const shelf = createDevicesModel({ port: createPeerPort(shelfWire) })
+    const satchel = createDevicesModel({ port: createPeerPort(satchelWire) })
+    await shelf.beginPairing('My Mac')
+    await satchel.pairWithCode(shelf.getSnapshot().offer!.url)
+    await tick()
+    await shelf.confirmPairing(true)
+    await tick()
+    await tick()
+    expect(shelf.getSnapshot().peers.length).toBe(1)
+
+    await shelf.setRole('satchel')
+    expect(shelfWire.pendingRole, 'a paired device may not change sides').toBeNull()
+  })
+
+  it('reports the role the node is RUNNING, not the one just chosen', async () => {
+    /* The plugin stores the choice for the next launch. The fake used to
+       apply it at once, so this exact assertion would have PASSED against a
+       live switch the real one does not perform — a fake refuting the thing
+       it stands in for. */
+    const wire = fakeWire({ role: 'shelf', endpointId: 'shelf-r4' })
+    const model = createDevicesModel({ port: createPeerPort(wire) })
+    await model.refresh()
+    await model.setRole('satchel')
+    await model.refresh()
+    expect(model.getSnapshot().role, 'still the running role').toBe('shelf')
+    expect(model.getSnapshot().roleNeedsRestart).toBe(true)
+
+    wire.restart()
+    await model.refresh()
+    expect(model.getSnapshot().role, 'and now it is in force').toBe('satchel')
+  })
+
+  it('says a restart is needed only when the role actually changed', async () => {
+    const wire = fakeWire({ role: 'shelf', endpointId: 'shelf-r2' })
+    const model = createDevicesModel({ port: createPeerPort(wire) })
+    await model.refresh()
+    await model.setRole('shelf')
+    expect(model.getSnapshot().roleNeedsRestart, 'chose what is already running').toBe(false)
+    await model.setRole('satchel')
+    expect(model.getSnapshot().roleNeedsRestart, 'chose the other side').toBe(true)
+  })
+})
+
+describe('beginning a pairing while one is being confirmed', () => {
+  it('leaves the confirmation the human is reading a SAS for', async () => {
+    /* `pairBegin` REPLACES the attempt the backend holds, so testing `pending`
+       only around the PUBLISH destroyed the confirmation in progress and then
+       declined to show the new offer — losing both, with the pane still
+       displaying a SAS that no longer matched anything. */
+    const shelfWire = fakeWire({ role: 'shelf', endpointId: 'shelf-guard' })
+    const satchelWire = fakeWire({ role: 'satchel', endpointId: 'satchel-guard' })
+    linkWires(shelfWire, satchelWire)
+    const shelf = createDevicesModel({ port: createPeerPort(shelfWire) })
+    const satchel = createDevicesModel({ port: createPeerPort(satchelWire) })
+
+    await shelf.beginPairing('My Mac')
+    await satchel.pairWithCode(shelf.getSnapshot().offer!.url)
+    await tick()
+    const pending = shelf.getSnapshot().pending
+    expect(pending?.id, 'a confirmation is in progress').toBe('satchel-guard')
+
+    await shelf.beginPairing('My Mac')
+    await tick()
+    expect(shelf.getSnapshot().pending, 'it survived the second begin').toEqual(pending)
+
+    /* And the confirmation still completes, which is the part that was
+       actually broken: the attempt behind the SAS was still there. */
+    await shelf.confirmPairing(true)
+    await tick()
+    await tick()
+    expect(shelf.getSnapshot().peers.map((one) => one.id)).toEqual(['satchel-guard'])
+  })
+})
+
+describe('an invite that has run out', () => {
+  it('leaves the pane rather than staying copyable for ever', async () => {
+    /* `expiresAt` was carried into the snapshot and read by nothing, so a QR
+       and its copy button sat there indefinitely — and the obvious thing to
+       do with a stale pane, copy the code and send it, produced a refusal on
+       the other device with nothing here suggesting why. */
+    vi.useFakeTimers()
+    try {
+      const wire = fakeWire({ role: 'shelf', endpointId: 'shelf-exp' })
+      const model = createDevicesModel({ port: createPeerPort(wire) })
+      await model.beginPairing('My Mac')
+      const offer = model.getSnapshot().offer
+      expect(offer, 'an invite was minted').not.toBeNull()
+
+      vi.advanceTimersByTime(offer!.expiresAt - Date.now() - 1)
+      expect(model.getSnapshot().offer, 'still valid a millisecond before').not.toBeNull()
+
+      vi.advanceTimersByTime(2)
+      expect(model.getSnapshot().offer, 'gone once the attempt expired').toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('drops its timer on dispose, so nothing publishes into a dead model', async () => {
+    vi.useFakeTimers()
+    try {
+      const wire = fakeWire({ role: 'shelf', endpointId: 'shelf-exp2' })
+      const model = createDevicesModel({ port: createPeerPort(wire) })
+      await model.beginPairing('My Mac')
+      const seen: number[] = []
+      model.subscribe(() => seen.push(1))
+      model.dispose()
+      vi.advanceTimersByTime(10 * 60_000)
+      expect(seen).toEqual([])
+    } finally {
+      vi.useRealTimers()
     }
   })
 })

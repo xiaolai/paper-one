@@ -194,8 +194,19 @@ function subscription<T>(event: string, fn: (payload: T) => void): Unsubscribe {
   })
   /* A registration that FAILS must not sit as an unhandled rejection until
    * somebody unsubscribes — it is contained here, once, and unsubscribing
-   * then finds nothing to detach. */
-  void pending.catch(() => {})
+   * then finds nothing to detach.
+   *
+   * BUT IT IS SAID OUT LOUD. Containment used to be the whole of it, so a
+   * `listen` that never attached left the caller believing it had
+   * subscribed: pairing confirmations, session frames or transfer progress
+   * simply never arrived, and every symptom of that looks like the other
+   * device being silent. `console.error` rather than the diagnostics port
+   * because this file is the raw Tauri seam and takes no injected
+   * dependencies — one that reached for a port would have to be constructed,
+   * and `tauriWire()` is a bare function by design. */
+  void pending.catch((thrown: unknown) => {
+    console.error(`peer: could not subscribe to "${event}"`, thrown)
+  })
   return () => {
     if (!live) return
     live = false
