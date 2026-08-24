@@ -106,6 +106,10 @@ export function describeArrival(
   book: { readonly openedAt?: number },
 ): { label: string } | null {
   const opened = book.openedAt
-  if (typeof opened === 'number' && opened > arrival.at) return null
+  /* AT OR AFTER, not strictly after. Both stamps are milliseconds and a book
+     opened in the same millisecond it landed is a book the reader has seen —
+     a collision is rare but the strict comparison made it a notice that
+     survived being read. */
+  if (typeof opened === 'number' && opened >= arrival.at) return null
   return { label: `Added from ${arrival.from}` }
 }

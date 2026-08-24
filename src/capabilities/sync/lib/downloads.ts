@@ -6,26 +6,22 @@
  * Settings reading "Transfer 1 — done": a counter, in a surface nobody opens
  * to watch a download, kept twenty deep including the finished ones. It could
  * not have been better written — `TransferProgress` carried no book, so no
- * surface downstream could attribute a byte to a title. The plugin's event
- * carries the blob folder now, and this is what turns that into a sentence on
- * the book the reader clicked.
+ * surface downstream could attribute a byte to a title.
  *
- * FORWARD MATCHING, NEVER AN INVERSE. `blobFolderOf(bookId)` derives the
- * folder from the book; going the other way would mean inverting `safeId`,
- * which is lossy by design. So a download registers the folder it EXPECTS when
- * it starts, and events are matched against that map. A transfer nobody
- * registered — a cover the cache fetched on its own, a peer's own business —
- * is ignored rather than guessed at.
+ * IT NO LONGER GUESSES WHICH BOOK. The first version matched a GLOBAL stream
+ * of transfer events to a book by blob folder, because the folder was the only
+ * identifying thing an event carried. That was wrong in a way its own tests
+ * could not see: a book's cover and its content live in the SAME folder — the
+ * cover cache derives it with the same `blobFolderOf` — so a jacket fetched
+ * while a download ran updated the reader's progress line with somebody else's
+ * bytes, and the cover's terminal event cleared the row while the book was
+ * still coming down.
  *
- * TERMINAL EVENTS CLEAR THE ENTRY. `done` and `failed` both end the activity:
- * the row goes back to saying what it always says, and the book's own state —
- * bytes present or not — is the record. A failure that vanishes silently is
- * the one real cost of that, and it is deliberate: the download either landed
- * or the menu still offers Download, which is a truer signal than a stale row
- * claiming a failure the reader has since retried.
+ * `port.fetchBlob` has always taken a per-request `onProgress`. The ledger
+ * threads it through `download` now, so each fetch reports to the book that
+ * asked for it and no correlation happens anywhere. What is left here is what
+ * remains once the guessing is removed: a map, and the sentence drawn from it.
  */
-
-import type { TransferProgress } from '../../peer'
 
 /** What the shelf row shows while a book is coming down. */
 export interface Downloading {
@@ -34,10 +30,10 @@ export interface Downloading {
 }
 
 export interface Downloads {
-  /** Say a fetch is expected for this book, under this blob folder. */
-  expect(bookId: string, folder: string): void
-  /** Fold in a transfer event. Unregistered folders are ignored. */
-  apply(event: TransferProgress): void
+  /** Say a fetch has begun for this book. */
+  expect(bookId: string): void
+  /** Bytes moved, reported by THAT book's own transfer. */
+  progress(bookId: string, received: number, total: number): void
   /** Stop tracking — the download resolved, or its caller gave up. */
   forget(bookId: string): void
   /** What to say about this book, or null. */
@@ -46,40 +42,30 @@ export interface Downloads {
 }
 
 export function createDownloads(): Downloads {
-  /** folder → bookId, so an event finds its book in one lookup. */
-  const byFolder = new Map<string, string>()
   const active = new Map<string, Downloading>()
   const listeners = new Set<() => void>()
   const publish = () => {
     for (const listener of [...listeners]) listener()
   }
 
-  const drop = (bookId: string) => {
-    const had = active.delete(bookId)
-    for (const [folder, id] of byFolder) if (id === bookId) byFolder.delete(folder)
-    if (had) publish()
-  }
-
   return {
-    expect: (bookId, folder) => {
-      byFolder.set(folder, bookId)
+    expect: (bookId) => {
       /* Registered as zero-of-unknown rather than left absent: the reader
          clicked Download and the row must answer immediately, not when the
          first byte happens to arrive. `total` of 0 reads as indeterminate. */
       active.set(bookId, { received: 0, total: 0 })
       publish()
     },
-    apply: (event) => {
-      const bookId = byFolder.get(event.folder)
-      if (bookId === undefined) return
-      if (event.state === 'running') {
-        active.set(bookId, { received: event.received, total: event.total })
-        publish()
-        return
-      }
-      drop(bookId)
+    progress: (bookId, received, total) => {
+      /* ONLY FOR A BOOK STILL BEING WATCHED. A late frame from a transfer
+         whose caller already gave up must not put the row back. */
+      if (!active.has(bookId)) return
+      active.set(bookId, { received, total })
+      publish()
     },
-    forget: drop,
+    forget: (bookId) => {
+      if (active.delete(bookId)) publish()
+    },
     of: (bookId) => active.get(bookId) ?? null,
     subscribe: (listener) => {
       listeners.add(listener)
@@ -99,5 +85,9 @@ export function createDownloads(): Downloads {
 export function describeDownload(one: Downloading): { label: string; fraction?: number } {
   if (!(one.total > 0)) return { label: 'Downloading…' }
   const fraction = Math.min(1, one.received / one.total)
-  return { label: `Downloading ${Math.round(fraction * 100)}%`, fraction }
+  /* FLOORED, so 100% means done. `Math.round` reported "Downloading 100%" at
+     999 of 1000 bytes and then sat there — the one number a reader reads as
+     "it has finished", shown while it had not. The bar keeps the true
+     fraction; only the words are conservative. */
+  return { label: `Downloading ${Math.floor(fraction * 100)}%`, fraction }
 }
