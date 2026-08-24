@@ -145,9 +145,14 @@ ignored = "1"
     /* The desktop-only set. `tauri-plugin-inference` joined it in phase 15:
        `lemond` ships for macOS, Windows and Linux and has no mobile build, so
        gating the DEPENDENCY (not just the `.plugin()` call) is what keeps its
-       rustls provider off the iOS and Android targets entirely. */
+       rustls provider off the iOS and Android targets entirely.
+
+       `axum` joined it in phase 18 for the same reason in a different shape:
+       it serves the browser client, a phone is never a shelf, and a dependency
+       gated only at the call site is still compiled. This set is a LEDGER —
+       it fails when the desktop-only set changes, which is the point. */
     expect(dependenciesOfFeature('desktop', real)).toEqual(
-      new Set(['tauri-plugin-inference', 'tauri-plugin-mcp-bridge', 'tauri-plugin-persisted-scope', 'tauri']),
+      new Set(['axum', 'tauri-plugin-inference', 'tauri-plugin-mcp-bridge', 'tauri-plugin-persisted-scope', 'tauri']),
     )
     // Data-driven over whatever crates the tree has: each path dependency is found by its directory name.
     for (const dep of real.dependencies.values()) {
