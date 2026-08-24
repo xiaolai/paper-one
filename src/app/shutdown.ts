@@ -34,8 +34,10 @@ export interface ShutdownDeps {
   readonly drain: () => Promise<void>
   /** End the capabilities' lifetime — unbinds the recorder, closes the journal. */
   readonly abort: () => void
-  /** Resolve once the journal has finished closing. */
-  readonly journalClosed: () => Promise<void>
+  /** Resolve once every capability's async tail has finished — see
+   *  `Capability.quiesce`. Named for the question, not for the one capability
+   *  that currently answers it. */
+  readonly quiesce: () => Promise<void>
   /** The composition's lifetime, so the listener is released with it. */
   readonly signal: AbortSignal
   /** How long to wait for the queue. Under the shell's own grace. */
@@ -99,7 +101,7 @@ export function armShutdownInBackground(deps: ShutdownDeps): void {
  *   3. `abort` LAST of the three: aborting unbinds the recorder and closes the
  *      journal, so anything drained after it would reach disk with no journal
  *      entry — unreplicable, which is the defect this phase existed to remove.
- *   4. `journalClosed` — the flag must come down before the process exits, or
+ *   4. `quiesce` — the journal's flag must come down before the process exits, or
  *      the next launch reads a crash that did not happen.
  *
  * An earlier version ran only steps 3 and 4, which flushed the journal and
@@ -111,7 +113,7 @@ async function runTeardown(deps: ShutdownDeps): Promise<void> {
     deps.flush()
     await Promise.race([deps.drain(), wait(deps.graceMs)])
     deps.abort()
-    await deps.journalClosed()
+    await deps.quiesce()
   } catch (error) {
     /* CAUGHT AND SAID, not left to escape.
      *

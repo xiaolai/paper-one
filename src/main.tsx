@@ -51,14 +51,6 @@ import {
   watchFs,
   type IndexedBook,
 } from './kernel/ui'
-/* NAMED DIRECTLY, where every other capability arrives through the virtual
- * composition module. The quit handshake has to await a specific async tail
- * — the sync journal's close — and `Composition.dispose()` is synchronous by
- * design, so there is no generic seam to wait on. `journalClosed()` resolves
- * at once when sync was never composed, so a build without it is unaffected;
- * the day a second capability owes an async tail, this should become a
- * property of `Composition` instead of a second import here. */
-import { journalClosed } from './capabilities/sync'
 import { armShutdownInBackground } from './app/shutdown'
 import { capabilities } from 'virtual:paper-composition'
 
@@ -249,8 +241,8 @@ async function boot(root: HTMLElement): Promise<void> {
    * handshake exists to prevent, during the window most likely to be slow.
    *
    * Everything it needs already exists here: `lifetime` and `services` are
-   * built above, and `journalClosed()` resolves at once when no journal has
-   * been opened yet, which is precisely the startup case.
+   * built above, and `quiesce()` resolves at once when no capability has
+   * opened anything yet, which is precisely the startup case.
    *
    * THE HANDSHAKE ITSELF LIVES IN `app/shutdown.ts`, where it can be tested:
    * its ordering, its bounding and its failure paths are the parts that go
@@ -275,7 +267,26 @@ async function boot(root: HTMLElement): Promise<void> {
     flush: flushBeforeClose,
     drain: () => services.drain(),
     abort: () => lifetime.abort(),
-    journalClosed,
+    /* EVERY CAPABILITY'S ASYNC TAIL, read from the STATIC composition list
+       rather than from the composed object.
+
+       The note this replaces said that the day a second capability owed a
+       tail, it should become a property of `Composition` — and it cannot be.
+       This handshake is armed BEFORE `composeCapabilities` is awaited, on
+       purpose, because a quit during startup is the window most likely to be
+       slow. A tail read off the composition would therefore be a no-op for
+       exactly as long as composition takes, which is the same window in which
+       sync's `start` opens the journal: quit there and the flag stays up,
+       which is the failure the handshake exists to prevent.
+
+       `capabilities` is imported at module load, so this thunk sees every
+       capability's `quiesce` from the first tick, and each one answers about
+       live module state at the moment it is called. `Promise.all` rather than
+       `allSettled`: one tail rejecting must reach `shutdown.ts`'s failure
+       path exactly as a single rejecting tail used to. */
+    quiesce: async () => {
+      await Promise.all(capabilities.map((cap) => cap.quiesce?.()))
+    },
     signal: lifetime.signal,
     /* THE SAME BOUND THE WINDOW CLOSE USES, imported rather than restated:
        both drain the same queue under the same rule, and two spellings of one

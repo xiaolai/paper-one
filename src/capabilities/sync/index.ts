@@ -408,6 +408,12 @@ export const sync: Capability = {
   id: 'sync',
   requires: ['peer'],
 
+  /* The journal's dirty flag, as the kernel's own `quiesce` question. Hoisted
+   * — `journalClosed` is a function declaration further down this file — and
+   * it resolves at once when no journal was ever opened, which is the startup
+   * case the shutdown handshake is armed for. */
+  quiesce: journalClosed,
+
   settings: [
     {
       id: 'sync:storage',

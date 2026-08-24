@@ -43,7 +43,7 @@ function shell(over: Partial<ShutdownDeps> = {}) {
       order.push('abort')
       lifetime.abort()
     },
-    journalClosed: async () => void order.push('journalClosed'),
+    quiesce: async () => void order.push('quiesce'),
     signal: lifetime.signal,
     graceMs: 2_000,
     diagnostics: { warn: () => {}, info: () => {}, error: () => {} } as unknown as ShutdownDeps['diagnostics'],
@@ -87,7 +87,7 @@ describe('the teardown order', () => {
     const world = shell()
     await armShutdown(world.deps)
     await world.quit()
-    expect(world.order).toEqual(['flush', 'drain', 'abort', 'journalClosed'])
+    expect(world.order).toEqual(['flush', 'drain', 'abort', 'quiesce'])
   })
 
   it('answers the shell exactly once, and only when it is done', async () => {
@@ -95,7 +95,7 @@ describe('the teardown order', () => {
     await armShutdown(world.deps)
     await world.quit()
     expect(world.emitted).toEqual([SHUTDOWN_DONE_EVENT])
-    expect(world.order.at(-1)).toBe('journalClosed')
+    expect(world.order.at(-1)).toBe('quiesce')
   })
 
   /**
@@ -117,7 +117,7 @@ describe('the teardown order', () => {
       expect(world.order).toEqual(['flush'])
       await vi.advanceTimersByTimeAsync(2)
       await answered
-      expect(world.order).toEqual(['flush', 'abort', 'journalClosed'])
+      expect(world.order).toEqual(['flush', 'abort', 'quiesce'])
       expect(world.emitted).toEqual([SHUTDOWN_DONE_EVENT])
       expect(world.deps.signal.aborted).toBe(true)
     } finally {
@@ -137,7 +137,7 @@ describe('the teardown order', () => {
       { flush: () => { throw new Error('flush failed') } },
       { drain: async () => { throw new Error('drain failed') } },
       { abort: () => { throw new Error('abort failed') } },
-      { journalClosed: async () => { throw new Error('journal failed') } },
+      { quiesce: async () => { throw new Error('journal failed') } },
     ] as Partial<ShutdownDeps>[]) {
       const said: string[] = []
       const world = shell({
@@ -172,7 +172,7 @@ describe('the teardown order', () => {
      * surface as a crash on the way out. */
     world.quit()
     await vi.waitFor(() => expect(attempted).toBe(1))
-    expect(world.order).toEqual(['flush', 'drain', 'abort', 'journalClosed'])
+    expect(world.order).toEqual(['flush', 'drain', 'abort', 'quiesce'])
   })
 })
 

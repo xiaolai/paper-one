@@ -304,4 +304,25 @@ export interface Capability {
    * no registry entry, listener or timer, of this capability or any other.
    */
   start?(ctx: CapabilityContext, signal: AbortSignal): Disposable | Promise<Disposable>
+  /**
+   * An async tail the host awaits before the process exits, after `start`'s
+   * `Disposable` has run and the lifetime has been aborted.
+   *
+   * `Disposable` is synchronous, so it can BEGIN a close but cannot say when
+   * one finished — and the thing most worth waiting for is exactly that: the
+   * sync journal's dirty flag must come down before the process goes, or the
+   * next launch repairs a library that was never damaged.
+   *
+   * WHY IT LIVES ON THE CAPABILITY and not in the composition file: a host
+   * that imported the tail directly would name the capability, and
+   * `capability:remove <id>` would leave that import behind — which is how
+   * `pnpm verify:without sync` came to fail. Reached through this field, the
+   * only place that names the capability is the composition's array, which the
+   * remover already understands.
+   *
+   * Called whether or not the capability started: it is a question about
+   * module state, not about a live registration, and a capability that failed
+   * to start may still have opened something.
+   */
+  quiesce?(): Promise<void>
 }
