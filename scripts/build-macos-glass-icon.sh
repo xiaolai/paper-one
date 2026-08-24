@@ -15,10 +15,23 @@
 # generated once and checked in. Re-run this script whenever `Paper.icon`
 # changes, which is the same rule those files already follow.
 #
-# `actool` fails SILENTLY. Given a manifest with a bad enum, a missing asset or
-# an unknown key it prints nothing, exits 0, and writes no catalogue — verified
-# by feeding it `"kind": "bogus-value"`. So every check below is load-bearing:
-# without them a broken icon looks exactly like a successful build.
+# `actool`'s failure modes, re-measured on Xcode 26.4.1 (2026-08-24). An earlier
+# note here claimed it fails silently on any bad input; that is NOT true on this
+# toolchain, and believing it aims the guard below at the wrong hazard:
+#
+#   bad enum ("kind": "bogus-value")   exit 1, no catalogue, 3 error lines
+#   missing asset (image-name absent)  exit 1, no catalogue, 3 error lines
+#   malformed fill colour              exit 1, no catalogue, 3 error lines
+#   UNKNOWN KEY                        exit 0, catalogue written, NO error
+#
+# So the three loud cases are already caught by `set -e`. The one that still
+# slips through is an unknown key: actool ignores it, exits 0, and emits a
+# catalogue byte-identical to the correct one — verified by diffing sizes. That
+# means a mistyped key silently has no effect, and NO existence check can catch
+# it. Only rendering the compiled icon and inspecting pixels can.
+#
+# The check below is kept anyway: it costs nothing, and it still fires if a
+# future toolchain regresses to the silent behaviour, or on an older Xcode.
 
 set -euo pipefail
 
@@ -62,7 +75,9 @@ trap 'rm -rf "$work"' EXIT
 
 if [[ ! -s "$work/Assets.car" ]]; then
   echo "build-macos-glass-icon: actool produced no Assets.car." >&2
-  echo "  It exits 0 on a malformed icon.json, so this is the real error." >&2
+  echo "  On Xcode 26.4.1 actool normally exits non-zero and set -e catches it" >&2
+  echo "  first, so reaching here means it exited 0 and still wrote nothing —" >&2
+  echo "  an older or regressed toolchain." >&2
   echo "  Check icon.json against the keys actool accepts, and confirm every" >&2
   echo "  image-name resolves to a file in Paper.icon/Assets/." >&2
   exit 1
