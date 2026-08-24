@@ -595,8 +595,16 @@ mod tests {
                 "{fake} should be refused as a dial hint"
             );
         }
-        // A tailnet address looks equally synthetic and carries real traffic
-        // on this fleet; dropping it would remove a working route.
+        // A tailnet address looks equally synthetic to a reader and carries
+        // real traffic; dropping it would remove a working route. `is_synthetic`
+        // keys on 198.18/19, unspecified and loopback ONLY, so what matters here
+        // is the range each address sits in, never its exact value.
+        //
+        // DOCUMENTATION RANGES AND THE BASE OF THE CGNAT BLOCK, on purpose. This
+        // list held two addresses copied from a real peer store — one tailnet,
+        // one routable and public — which is network topology, and this file is
+        // public. RFC 5737 and 100.64.0.0/10 say the same thing about ranges
+        // while naming nobody's machine.
         for real in ["192.168.1.16", "100.64.0.1", "10.0.0.4", "203.0.113.9"] {
             assert!(
                 !is_synthetic(real.parse::<IpAddr>().unwrap()),
