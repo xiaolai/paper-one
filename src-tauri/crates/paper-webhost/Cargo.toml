@@ -1,0 +1,23 @@
+[package]
+name = "paper-webhost"
+version = "0.1.0"
+description = "Paper's shelf-side HTTP surface for the browser client: the six-digit endpoints, the session cookie and the policy headers"
+authors = ["Paper"]
+license = ""
+edition = "2021"
+rust-version = "1.91"
+publish = false
+
+[dependencies]
+paper-webauth = { path = "../paper-webauth" }
+# The same feature set the app crate takes, for the same reasons written there.
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "ws", "json"] }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# `ServiceExt::oneshot` drives the router in-process, so the tests exercise the
+# real handlers, the real extractors and the real headers without binding a
+# port. `tower` is already in this tree; only the `util` feature is new.
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+tokio = { version = "1", features = ["macros", "rt"] }

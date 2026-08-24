@@ -3941,6 +3941,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "paper-webhost"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "http-body-util",
+ "paper-webauth",
+ "serde",
+ "tokio",
+ "tower",
+]
+
+[[package]]
 name = "parking"
 version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
