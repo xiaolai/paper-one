@@ -271,6 +271,23 @@ const boundaries = (segments) => compact(segments.map((s) => [s.text, s.index]))
 const flags = (segments) => compact(segments.map((s) => s.wordLike))
 
 /**
+ * Everything about a row that is INPUT rather than result.
+ *
+ * ⚠️ **Comparing ids was not enough, and this harness was the second place to
+ * learn it.** `sentence-parity.mjs` was audited and fixed first; this one was
+ * left on the grounds that it is separately tested — which was the wrong
+ * reason, because its tests did not carry the new guarantee across. Two
+ * harnesses that disagree about what "the same corpus" means is one defect in
+ * two files.
+ *
+ * The gap it closes: a webview report produced from an OLDER corpus, whose rows
+ * kept their ids while their `strs`, edges or expectation moved underneath
+ * them, agrees on every id and can agree on the snapped answers by luck. What
+ * it cannot do is agree on this.
+ */
+const inputsOf = (row) => compact([row.id, row.strs, row.start, row.end, row.expected])
+
+/**
  * A webview report against this engine's, row for row.
  *
  * Three outcomes, and the difference between them is the whole calibration of
@@ -319,6 +336,14 @@ export function compareReports(local, live) {
   for (let i = 0; i < localIds.length; i += 1) {
     const here = local.rows[i]
     const there = live.rows[i]
+    if (inputsOf(here) !== inputsOf(there)) {
+      problems.push(
+        `${here.id}: the report was produced from a DIFFERENT version of this row\n` +
+          `    node    ${inputsOf(here)}\n` +
+          `    webview ${inputsOf(there)}`,
+      )
+      continue
+    }
     if (compact(here.actual) !== compact(there.actual)) {
       problems.push(
         `${here.id}: snapped differently\n` +

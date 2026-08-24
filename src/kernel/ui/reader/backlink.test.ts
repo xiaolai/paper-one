@@ -115,6 +115,67 @@ describe('isBacklink', () => {
   })
 })
 
+/**
+ * THE OTHER PARSE MODE, which had no case here at all until §16 found it.
+ *
+ * foliate reparses a section as `text/html` when it will not parse as XML
+ * (`node_modules/foliate-js/epub.js`), and an HTML parser has no namespaces to
+ * put `epub:type` in — the attribute arrives under its literal name in the null
+ * namespace. `backlink.ts` read only `getAttributeNS(OPS, 'type')`, so for
+ * every book on that path both semantic tests answered "no attribute" and only
+ * the structural fallback was left.
+ *
+ * **The suite above cannot see this and is not at fault for it**: its `xhtml`
+ * helper exists because `innerHTML` on an HTML document drops the prefix, which
+ * would have made every case vacuous. The fix was to read both spellings; the
+ * cases below are what makes the fix checkable, and each one is chosen so the
+ * attribute is the ONLY thing that can decide it — no note ancestor, and an
+ * `href` that resolves to nothing.
+ */
+function html(body: string): Document {
+  return new DOMParser().parseFromString(
+    `<html><body>${body}</body></html>`,
+    'text/html',
+  )
+}
+
+describe('isBacklink — a section parsed as text/html', () => {
+  it('is a document where the namespaced read really does answer null', () => {
+    /* The fixture's own assumption, asserted rather than assumed — the mirror
+       of the XHTML case above. If this ever returns "backlink", the two
+       fixtures have stopped differing and the cases below prove nothing. */
+    const doc = html('<a id="x" epub:type="backlink" href="#nowhere">*</a>')
+    const el = anchor(doc, '#x')
+
+    expect(el.getAttributeNS(OPS, 'type')).toBeNull()
+    expect(el.getAttribute('epub:type')).toBe('backlink')
+  })
+
+  it('reads a labelled backlink whose attribute is in no namespace', () => {
+    const doc = html('<p>Some prose <a id="b" epub:type="backlink" href="#nowhere">*</a></p>')
+
+    expect(isBacklink(anchor(doc, '#b'))).toBe(true)
+  })
+
+  it('reads a note container whose attribute is in no namespace', () => {
+    const doc = html(
+      '<aside epub:type="footnote" id="n"><p><a id="back" href="#nowhere">*</a> the note</p></aside>',
+    )
+
+    expect(isBacklink(anchor(doc, '#back'))).toBe(true)
+  })
+
+  /* Non-vacuity for the pair: the same shape with no semantic on it must still
+   * be a way IN, or the two cases above would pass for a predicate that had
+   * simply started answering true. */
+  it('still takes an unlabelled reference in prose as a way in', () => {
+    const doc = html('<p>Some prose <a id="ref" href="#nowhere">*</a></p>')
+
+    expect(isBacklink(anchor(doc, '#ref'))).toBe(false)
+  })
+})
+
+
 describe('noteText', () => {
   const bodyOf = (markup: string) => {
     const doc = xhtml(markup)

@@ -23,7 +23,8 @@ import { bookAccent } from '../../core/bookAccent'
 import { citation, type Source } from '../../core/citation'
 import { decideLookUp, hasDictionary, isLookUpTerm, lookUp } from '../lookUp'
 import { NO_GLOSS, type GlossProvider, type LookUpMode } from '../../core/gloss'
-import { sentenceAround, useGloss } from '../hooks/useGloss'
+import { NOOP_DIAGNOSTICS, type Diagnostics } from '../../core/ports'
+import { askGloss, useGloss } from '../hooks/useGloss'
 import { marginMarks, type MarkAppearance } from '../../core/marks'
 import type { MarksView } from '../hooks/useMarks'
 import type { Marking } from '../hooks/useMarking'
@@ -37,6 +38,7 @@ import type { PageIntent } from '../reader/wheelPaging'
 import { MarginMarks } from '../reader/MarginMarks'
 import { ReadingRuler } from '../reader/ReadingRuler'
 import { SelectionTools } from '../reader/SelectionTools'
+import { GlossStrip } from '../reader/GlossStrip'
 import styles from './Reader.module.css'
 import { pageFilter } from '../reader/fixedLayout'
 
@@ -67,6 +69,21 @@ export interface ReaderProps {
   gloss?: GlossProvider
   /** The reader's stored `Look up` preference. */
   lookUpMode?: LookUpMode
+  /**
+   * Where a lookup says whether it found a real sentence (WI-16.4, §F4).
+   *
+   * OBSERVABILITY, NOT UI. After §16 some lookups use the sentence the term
+   * sits in and some fall back to the 32-character window, and the reader
+   * cannot act on the difference — showing it would be noise, and this app does
+   * not narrate its internals to readers. But a build where some common markup
+   * sends EVERY lookup down the fallback is indistinguishable from a working
+   * one without a count, which is the failure the whole phase is arranged to
+   * prevent, one level up.
+   *
+   * The default writes nothing, so nothing here depends on the composition
+   * root having bound one.
+   */
+  diagnostics?: Diagnostics
   marks: MarksView
   marking: Marking
   /** Keeping a place, and telling whether this one is kept — see the hook. */
@@ -162,6 +179,7 @@ export function Reader({
   book,
   gloss: glossProvider = NO_GLOSS,
   lookUpMode = 'system',
+  diagnostics = NOOP_DIAGNOSTICS,
   marks,
   marking,
   bookmarking,
@@ -225,14 +243,26 @@ export function Reader({
      reader's preference. `decideLookUp` is the rule; this is where it lands. */
   const gloss = useGloss(glossProvider)
   const lookUpAction = decideLookUp(hasDictionary(platform), glossProvider.available, lookUpMode)
-  const askGloss = (term: string): void => {
-    if (!selection) return
-    gloss.ask(
-      term,
-      sentenceAround(selection.prefix, selection.text, selection.suffix),
-      book.meta?.title ?? '',
-    )
-  }
+  /* THE SENTENCE, or today's answer (WI-16.4). `askGloss` walks the document
+     for the sentence the term really sits in and falls back to the
+     32-character window when it cannot vouch for one — so the worst outcome is
+     exactly what shipped before it existed. The handler lives THERE rather
+     than here so it can be driven by a test; this is the wiring and nothing
+     else.
+
+     ONLY FROM THE LOOK UP GESTURE. `publish()` never reaches here: a walk per
+     `selectionchange` would be a walk per pointer move.
+
+     The term comes back from the request rather than being passed through,
+     because the sentence may not spell it the way the selection did — ruby
+     readings are filtered out of both, and `漢かん字` is what `flatten` gives
+     for what the book prints as `漢字`. */
+  const lookUpGloss = (): void =>
+    askGloss(gloss, selection, {
+      fixedLayout: book.fixedLayout,
+      diagnostics,
+      bookTitle: book.meta?.title ?? '',
+    })
 
   /** What the next mark takes, as one value, so nothing has to pair them up. */
   const appearance = useMemo<MarkAppearance>(
@@ -853,7 +883,7 @@ export function Reader({
                               })
                             }
                             if (lookUpAction === 'gloss' || lookUpAction === 'both') {
-                              askGloss(term)
+                              lookUpGloss()
                             }
                           }
                     }
@@ -864,39 +894,11 @@ export function Reader({
                   />
                 </div>
 
-                {/* THE GLOSS (WI-15.13), under the selection popup.
-                    AMBER, ALWAYS. It is machine-written text appearing in the
-                    reader, and `marks.ts` reserves the companion kind, its
-                    amber tint and the wave style for exactly this. A
-                    definition from Apple's dictionary is authoritative and a
-                    gloss from a 4B model is not; the reader must be able to
-                    tell without being told, which is what the mark is for.
-
-                    It is DISMISSED rather than consumed with the selection:
-                    the reader's next act after understanding a word is
-                    usually to mark it, so taking the selection down would
-                    make them select it again. */}
-                {gloss.state.kind !== 'idle' && (
-                  <div className={styles.gloss} data-kind="companion" role="status">
-                    <span className={styles.glossTerm}>{gloss.state.term}</span>
-                    <span className={styles.glossBody}>
-                      {gloss.state.kind === 'asking'
-                        ? 'Looking…'
-                        : gloss.state.kind === 'ready'
-                          ? gloss.state.text
-                          : gloss.state.reason}
-                    </span>
-                    <button
-                      type="button"
-                      className={styles.glossClose}
-                      onClick={() => gloss.dismiss()}
-                      aria-label="Dismiss"
-                      title="Dismiss"
-                    >
-                      ×
-                    </button>
-                  </div>
-                )}
+                {/* THE GLOSS, and the lookup that did not arrive beside it.
+                    Its own component (WI-16.3) so the two can be RENDERED in a
+                    test rather than read back out of this file's source — see
+                    `GlossStrip`, where the whole argument lives. */}
+                <GlossStrip state={gloss.state} onDismiss={() => gloss.dismiss()} />
 
                 {/* The way back from a jump. Above the failure notice and
                     styled apart from it: one is an offer and the other is an

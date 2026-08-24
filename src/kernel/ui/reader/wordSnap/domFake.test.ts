@@ -127,6 +127,48 @@ describe('the WI-5 fixture fake', () => {
     expect(fixture.text('after the repaint').isConnected).toBe(true)
   })
 
+  /*
+   * The two parse modes, kept apart. foliate reparses invalid XHTML as
+   * `text/html`, and an HTML parser has no namespaces to put `epub:type` in —
+   * so the SAME markup answers `getAttributeNS(OPS,'type')` with `null` in one
+   * book and `"noteref"` in the next. A fake that served `getAttributeNS` out
+   * of the literal table would erase that difference and certify an
+   * implementation that reads only the namespaced form, which is the defect
+   * `backlink.ts` shipped with for a phase.
+   */
+  it('answers getAttributeNS only from the namespaced table, never the literal one', () => {
+    const OPS = 'http://www.idpf.org/2007/ops'
+    const fixture = buildFixture(
+      elem('div', {}, [
+        elem('a', { id: 'html-parsed', attributes: { 'epub:type': 'noteref' } }, [txt('3')]),
+        elem(
+          'a',
+          {
+            id: 'xhtml-parsed',
+            attributes: { 'epub:type': 'noteref' },
+            namespaced: { [`${OPS}|type`]: 'noteref' },
+          },
+          [txt('4')],
+        ),
+      ]),
+    )
+
+    const html = fixture.element('html-parsed')
+    const xhtml = fixture.element('xhtml-parsed')
+
+    expect(html.getAttribute('epub:type')).toBe('noteref')
+    expect(html.getAttributeNS(OPS, 'type')).toBeNull()
+    expect(xhtml.getAttribute('epub:type')).toBe('noteref')
+    expect(xhtml.getAttributeNS(OPS, 'type')).toBe('noteref')
+  })
+
+  it('returns null for an attribute a fixture never declared', () => {
+    const fixture = buildFixture(elem('p', { id: 'bare' }, [txt('nothing declared')]))
+
+    expect(fixture.element('bare').getAttribute('lang')).toBeNull()
+    expect(fixture.element('bare').getAttributeNS('urn:x', 'lang')).toBeNull()
+  })
+
   it('counts a visit for every node whose type a walk reads', () => {
     const fixture = buildFixture(elem('p', {}, [txt('one'), elem('em', {}, [txt('two')])]))
     expect(fixture.visits).toBe(0)

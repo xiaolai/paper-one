@@ -90,6 +90,25 @@ function clean(text: string): string {
 }
 
 /**
+ * Whether a range still describes something in the document.
+ *
+ * BOTH ends, because a range with one live boundary and one dead one is not a
+ * half-success — it is a selection nobody can see, and `applySnap` refuses to
+ * write one for the same reason. `isConnected` is transitive: a text node whose
+ * grandparent was replaced still points at its own parent and is still
+ * disconnected, which is exactly the shape `replaceChildren()` leaves behind.
+ *
+ * HERE rather than in each caller, and it has three: `session.ts` before it
+ * publishes a snapshot, and `sentenceAt` before it walks one that may have sat
+ * in a snapshot since. Two spellings of one liveness rule is how they come to
+ * disagree about what a dead range is — the same argument `walkRoot`'s header
+ * makes about the tree.
+ */
+export function connectedRange(range: Range): boolean {
+  return range.startContainer.isConnected && range.endContainer.isConnected
+}
+
+/**
  * The range's text over the flattened tree, or `null` to fall back.
  *
  * The tree is chosen exactly as `applySnap` chooses it — `walkRoot` from the

@@ -753,6 +753,64 @@ describe('flatten — the bounded walk', () => {
     ).toEqual({ start: at(fixture, 'alpha ', 0), end: at(fixture, 'Hello', 5) })
   })
 
+  /*
+   * §16 E1, first half. **`maxChars` is a budget, not a bound.** A single text
+   * node is never split (`gather` takes it whole or not at all), so an anchor
+   * sitting in a 5 000-character node comes back with all 5 000 of them
+   * however small the budget was.
+   *
+   * Written down as a case rather than as a comment because the number reads
+   * like a ceiling everywhere it is passed: `sentenceAt` hands `flatten` 4 000
+   * and a caller reasoning about prompt size from that alone would be wrong by
+   * whatever the anchor's own node happens to hold.
+   */
+  it('returns the anchor’s own node whole, however small the budget', () => {
+    const long = 'x'.repeat(5_000)
+    const fixture = buildFixture(
+      elem('div', {}, [elem('p', {}, [txt(long)]), elem('p', {}, [txt('the next block')])]),
+    )
+    const anchor = at(fixture, long, 2_500)
+
+    const flat = flatten(fixture.root, { maxChars: 100, anchors: [anchor] })
+
+    expect(flat.strs.join('')).toBe(long)
+    expect(flat.strs.join('').length).toBeGreaterThan(100)
+    expect(flat.toFlat(anchor.node, anchor.offset)).not.toBeNull()
+  })
+
+  /*
+   * §16 E1, second half, and this is the one that costs a sentence its head.
+   * The per-node test is `used + text.length > budget` — ALL OR NOTHING — and
+   * the backward budget is a quarter of `maxChars`. So at 4 000, a
+   * 1 001-character node sitting immediately behind the anchor contributes
+   * **nothing at all**: the window starts at the anchor's own node, and
+   * everything before it in the same block is gone.
+   *
+   * `truncatedStart` does say so here. What it cannot say is whether the run
+   * that survived is a block or the tail of one, which is why `sentenceAt`
+   * reads none of these flags and gates on where the segmenter found a
+   * boundary instead.
+   */
+  it('drops a node behind the anchor whole when it exceeds the backward quarter', () => {
+    const justOver = 'b'.repeat(1_001)
+    const justUnder = 'c'.repeat(1_000)
+    const over = buildFixture(elem('p', {}, [txt(justOver), txt('the anchor node')]))
+    const under = buildFixture(elem('p', {}, [txt(justUnder), txt('another anchor node')]))
+
+    const lost = flatten(over.root, { maxChars: 4_000, anchors: [at(over, 'the anchor node', 4)] })
+    const kept = flatten(under.root, {
+      maxChars: 4_000,
+      anchors: [at(under, 'another anchor node', 4)],
+    })
+
+    expect(lost.strs.join('')).toBe('the anchor node')
+    expect(lost.truncatedStart).toBe(true)
+    /* One character less and the whole node arrives — the cliff is the node's
+     * length against the quarter-budget, not a gradual squeeze. */
+    expect(kept.strs.join('')).toBe(`${justUnder}another anchor node`)
+    expect(kept.truncatedStart).toBe(false)
+  })
+
   /** Characters are not the only way a document is pathological: a tree can
    *  be mostly empty elements. The node bound fails closed the same way. */
   it('fails closed when the node bound is reached before the character bound', () => {

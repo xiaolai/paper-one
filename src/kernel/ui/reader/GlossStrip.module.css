@@ -1,0 +1,109 @@
+/* The gloss strip — the definition that arrived, and the lookup that did not.
+ *
+ * Co-located with its component, like every other stylesheet in this directory.
+ * These rules lived in `Reader.module.css` while the markup was inline there;
+ * `GlossStrip.tsx` reaching back into a SCREEN's module for them made it the
+ * one file in `reader/` that did, which is the sort of exception nobody
+ * remembers the reason for six months later.
+ *
+ * The strip is a child of the reader's flex column, so `flex: 0 0 auto` and the
+ * `--space-24` inline margin are what keep it in line with `.notice` and
+ * `.returnHint`, which are still the screen's. */
+
+/* THE GLOSS (WI-15.13) — machine-written text in the reader's own page.
+ *
+ * AMBER, and that is the whole point rather than decoration. `marks.ts`
+ * reserves the companion kind and its amber tint for exactly this: a
+ * definition from Apple's dictionary is authoritative and a gloss from a 4B
+ * model is not, and the reader must be able to tell without being told.
+ *
+ * It borrows `.notice`'s position at the foot rather than floating beside the
+ * word: the selection popup already owns the space next to the passage, and
+ * two surfaces competing for it is how one ends up covering the other. */
+.gloss {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-8);
+  margin: 0 var(--space-24) var(--space-8);
+  padding: var(--space-8) var(--space-12);
+  border: 1px solid var(--amber-line);
+  border-radius: var(--radius-md);
+  background: var(--amber-bg);
+  font-size: var(--text-ui);
+}
+
+.glossTerm {
+  flex: 0 0 auto;
+  color: var(--amber);
+  font-weight: var(--weight-medium);
+}
+
+.glossBody {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--ink);
+}
+
+.glossClose {
+  flex: 0 0 auto;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: var(--text-ui);
+  cursor: pointer;
+}
+
+.glossClose:hover {
+  color: var(--ink);
+}
+
+/* THE LOOKUP THAT DID NOT ARRIVE (WI-16.3) — and the whole point is that it
+ * does not look like the rule above.
+ *
+ * `gloss.ts` states the doctrine: a provider "must never resolve with an
+ * apology, because an apology rendered in amber reads as a definition". The
+ * port honours it — `glossProvider` throws rather than resolving, and refuses
+ * an empty answer — and THE VIEW UNDID IT, putting the failure through
+ * `.gloss`: amber box, amber headword, reason in the body slot. A reader
+ * glancing at it saw the shape of a definition.
+ *
+ * So: no amber, no box, small and grey, at the foot where a passing notice
+ * belongs. It borrows nothing from `.gloss` — sharing so much as the border
+ * would be the same mistake in a lighter shade. `.glossClose` IS shared,
+ * because a dismiss control is a dismiss control and two of them would drift
+ * apart in size for no reason. */
+.glossFailed {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-8);
+  margin: 0 var(--space-24) var(--space-8);
+  padding: var(--space-8) 0 0;
+  border-top: 1px solid var(--line-2);
+  font-size: var(--text-small);
+  color: var(--muted);
+}
+
+/* SHRINKABLE, because the term is the reader's selection and `isLookUpTerm`
+ * allows 120 characters of it. At `flex: 0 0 auto` a phrase lookup that failed
+ * pushed the dismiss control off the end of the line. */
+.glossFailedSaid {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+/* What went wrong, said rather than swallowed — the rule `lookUp` states for
+ * the system dictionary — but SECOND and quieter, because the reader's
+ * question is "did I get a definition", not "which subsystem declined". */
+.glossFailedReason {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink-2);
+  opacity: 0.75;
+}

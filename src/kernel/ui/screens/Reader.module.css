@@ -466,56 +466,6 @@
   }
 }
 
-/* THE GLOSS (WI-15.13) — machine-written text in the reader's own page.
- *
- * AMBER, and that is the whole point rather than decoration. `marks.ts`
- * reserves the companion kind and its amber tint for exactly this: a
- * definition from Apple's dictionary is authoritative and a gloss from a 4B
- * model is not, and the reader must be able to tell without being told.
- *
- * It borrows `.notice`'s position at the foot rather than floating beside the
- * word: the selection popup already owns the space next to the passage, and
- * two surfaces competing for it is how one ends up covering the other. */
-.gloss {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-8);
-  margin: 0 var(--space-24) var(--space-8);
-  padding: var(--space-8) var(--space-12);
-  border: 1px solid var(--amber-line);
-  border-radius: var(--radius-md);
-  background: var(--amber-bg);
-  font-size: var(--text-ui);
-}
-
-.glossTerm {
-  flex: 0 0 auto;
-  color: var(--amber);
-  font-weight: var(--weight-medium);
-}
-
-.glossBody {
-  flex: 1 1 auto;
-  min-width: 0;
-  color: var(--ink);
-}
-
-.glossClose {
-  flex: 0 0 auto;
-  border: none;
-  background: none;
-  padding: 0;
-  color: var(--muted);
-  font-family: inherit;
-  font-size: var(--text-ui);
-  cursor: pointer;
-}
-
-.glossClose:hover {
-  color: var(--ink);
-}
-
 .notice {
   flex: 0 0 auto;
   display: flex;

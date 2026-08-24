@@ -37,7 +37,7 @@ import { watchGestureProvenance } from './wordSnap/gestureProvenance'
 import { createReflowGuard } from './wordSnap/invalidate'
 import { wheelPager, type PageIntent } from './wheelPaging'
 import { markContext } from './wordSnap/markContext'
-import { rangeText } from './wordSnap/rangeText'
+import { connectedRange, rangeText } from './wordSnap/rangeText'
 
 /**
  * The reader's lifecycle, as a plain object.
@@ -650,19 +650,6 @@ interface Destroyable {
 
 function destroyable(value: unknown): value is Destroyable {
   return typeof (value as Destroyable | null)?.destroy === 'function'
-}
-
-/**
- * Whether a range still describes something in the document.
- *
- * BOTH ends, because a range with one live boundary and one dead one is not a
- * half-success — it is a selection nobody can see, and `applySnap` refuses to
- * write one for the same reason. `isConnected` is transitive: a text node whose
- * grandparent was replaced still points at its own parent and is still
- * disconnected, which is exactly the shape `replaceChildren()` leaves behind.
- */
-function connectedRange(range: Range): boolean {
-  return range.startContainer.isConnected && range.endContainer.isConnected
 }
 
 export class ReaderSession {
