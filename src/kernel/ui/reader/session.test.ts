@@ -1588,7 +1588,7 @@ describe('ReaderSession marks', () => {
  * native selection and no `selectionchange`. The `live` lane exists
  * (`scripts/word-snap-live.mjs`) and covers the adapter, not the gesture.
  *
- * **This pairing is permanently unmet**; `dev-docs/manual-selection-checklist.md`
+ * **This pairing is permanently unmet**; the manual selection checklist
  * §1 is the cover.
  */
 describe('ReaderSession gesture provenance', () => {
@@ -2309,7 +2309,7 @@ describe('ReaderSession gesture provenance', () => {
  * **Live-lane partner: none, and there cannot be one.** Every ordering here is
  * a claim about how WebKit sequences real events, and the bridge dispatches
  * `isTrusted: false` ones that produce no native selection at all.
- * **Permanently unmet**; `dev-docs/manual-selection-checklist.md` §1 — rows
+ * **Permanently unmet**; the manual selection checklist §1 — rows
  * 1.13 and 1.10 in particular — is the only cover.
  */
 describe('ReaderSession — a pointer gesture always publishes', () => {
@@ -2442,7 +2442,7 @@ describe('ReaderSession — a pointer gesture always publishes', () => {
  * (`block-merge`, `br-merge`); the **drag** that produces the selection is
  * unreachable from any harness, since the Tauri MCP bridge dispatches
  * `isTrusted: false` events which produce no native selection. That half is
- * permanently unmet — `dev-docs/manual-selection-checklist.md` §1 — and the
+ * permanently unmet — the manual selection checklist §1 — and the
  * live lane is manual-only besides.
  */
 describe('ReaderSession publishes the selection', () => {
@@ -2852,7 +2852,7 @@ describe('ReaderSession publishes the selection', () => {
    * (`scripts/word-snap-live.mjs`) and does not reach it either — it needs a
    * selection made by a gesture, and the bridge dispatches `isTrusted: false`
    * events. No case below claims it. **Permanently unmet**, covered only by
-   * `dev-docs/manual-selection-checklist.md` rows 2.5 – 2.8.
+   * The manual selection checklist rows 2.5 – 2.8.
    */
   describe('WI-11 — a repaint under a live selection', () => {
     const WORDS = 'the quick brown fox'

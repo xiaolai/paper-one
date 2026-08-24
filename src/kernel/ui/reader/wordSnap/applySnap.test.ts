@@ -44,7 +44,7 @@ import {
  * `pnpm test` is no evidence it has been run; and it reaches no **gesture** —
  * the bridge dispatches `isTrusted: false` events, so a real backward drag,
  * a torn-down section and a caret click stay on
- * `dev-docs/manual-selection-checklist.md`. Nothing below is an integration
+ * The manual selection checklist. Nothing below is an integration
  * test.
  */
 
@@ -278,7 +278,7 @@ describe('applySnap — the live selection after the write', () => {
    * "snapping into a torn-down section aborts", which the `live` lane does not
    * check either — tearing a section down under a pending snap needs a real
    * gesture and a real navigation. **Still UNMET**, and covered only by
-   * `dev-docs/manual-selection-checklist.md`.
+   * The manual selection checklist.
    */
   it.each([
     { row: 'both ends inside the replaced subtree', anchor: 'stale', focus: 'stale' },

@@ -26,7 +26,7 @@ import { snapWordRange } from './snapWordRange'
  * inherited `visibility`, `display: contents`, and every claim about a real
  * EPUB section document or a real PDF text layer have no automated cover at
  * all. The lane is manual-only besides, so a green `pnpm test` says nothing
- * about whether it has been run — see `dev-docs/manual-selection-checklist.md`.
+ * about whether it has been run — see the manual selection checklist.
  */
 
 /** The flattened text, as WI-3 will segment it. */

@@ -39,28 +39,32 @@ import { CHECKS, assertRan, buildDomSnippet } from './word-snap-live.mjs'
  * `screencapture` exiting 0 having written nothing, which this repository has
  * been bitten by twice (`AGENTS.md`).
  *
- * So the cases below check three things the unit lane genuinely can check:
+ * So the cases below check two things the unit lane genuinely can check:
  *
  * 1. **the lane is configured as specified** — `gateOn: ["manual"]`,
  *    `coverage: "none"`, and a probe that runs without the app;
  * 2. **the runner fails closed** — an unreachable bridge and a zero-row corpus
  *    both exit non-zero, and the snippet reports failure rather than success in
- *    an engine with no DOM;
- * 3. **the manual checklist is complete** — every unautomatable gesture named,
- *    with the environment it is pinned to recorded.
+ *    an engine with no DOM.
  *
  * **Nothing here verifies a gesture, and nothing here claims a live run
  * happened.** The Tauri MCP bridge dispatches `isTrusted: false` events, which
  * produce no native selection and no `selectionchange`; no harness at any level
- * reaches a drag, a double-click, a long-press or a pen. A green run of this
- * file means the checklist EXISTS and is complete, never that it was performed
- * — which is exactly why the checklist carries its own status line.
+ * reaches a drag, a double-click, a long-press or a pen.
+ *
+ * **The manual gesture record is no longer in this repository.** It was
+ * The manual selection checklist, and seven cases here asserted it
+ * named every unautomatable gesture, pinned its environment with no
+ * placeholders, and declared an honest run status. It was removed from the
+ * history deliberately; those seven assertions went with it, and this file no
+ * longer has any way to tell whether the manual lane is documented at all.
+ * That cover is gone rather than relocated — if it is wanted back, the
+ * checklist has to return to a tracked path first.
  */
 
 const ROOT = new URL('../', import.meta.url)
 const SCRIPT = fileURLToPath(new URL('./word-snap-live.mjs', import.meta.url))
 const CONFIG = fileURLToPath(new URL('.claude/tdd-guardian/config.json', ROOT))
-const CHECKLIST = fileURLToPath(new URL('dev-docs/manual-selection-checklist.md', ROOT))
 
 /** The script, as a user would run it. `status`, not a throw: every exit-code
  *  case below is one where a non-zero exit is the point. */
@@ -99,13 +103,10 @@ function closedPort() {
  * red for everyone but the machine that ran `/tdd-guardian:init`.
  *
  * Absent, the four lane cases below are **skipped and say so in their names**,
- * never quietly passed. The checklist is a different matter and is tracked
- * deliberately (see the `.gitignore` entry): it is the only cover for every
- * gesture in this feature, so it may not be machine-local.
+ * never quietly passed.
  */
 const config = existsSync(CONFIG) ? JSON.parse(readFileSync(CONFIG, 'utf8')) : null
 const noConfig = config === null
-const checklist = readFileSync(CHECKLIST, 'utf8')
 
 describe.skipIf(noConfig)('the live lane (skipped when this checkout has no .claude/tdd-guardian/config.json)', () => {
   /*
@@ -366,127 +367,5 @@ describe('word-snap-live — the DOM-check snippet', () => {
   it('is a different snippet from the corpus parity one, and both are non-empty', () => {
     expect(buildDomSnippet().length).toBeGreaterThan(0)
     expect(CORPUS.length).toBeGreaterThan(0)
-  })
-})
-
-describe('the manual gesture checklist', () => {
-  /**
-   * Every gesture the plan names, as the phrase the checklist must carry.
-   *
-   * This is the list that turns "a checklist exists" into something a gate can
-   * see. It cannot verify the gestures were performed — nothing can — but it
-   * can verify the document is complete, which is the difference between an
-   * honest manual lane and a decorative one.
-   */
-  const REQUIRED = [
-    /mouse drag[^\n]*left[- ]to[- ]right/i,
-    /mouse drag[^\n]*right[- ]to[- ]left/i,
-    /double[- ]click/i,
-    /triple[- ]click/i,
-    /shift\s*\+\s*click/i,
-    /shift\s*\+\s*arrow/i,
-    /outside the iframe/i,
-    /outside the window/i,
-    /long[- ]press/i,
-    /selection handle/i,
-    /force[- ]touch/i,
-    /\bpen\b/i,
-    /paginated EPUB/i,
-    /page turn/i,
-    /re-mark/i,
-    /orphan/i,
-  ]
-
-  it('names every gesture no harness can reach', () => {
-    const missing = REQUIRED.filter((pattern) => !pattern.test(checklist)).map(String)
-
-    expect(missing).toEqual([])
-  })
-
-  /* shift+arrow is the one keyboard case, and its expected result is the
-   * opposite of every other row's. A checklist that listed it without saying so
-   * would read as "snapping works here too". */
-  it('says shift+arrow must stay unsnapped', () => {
-    expect(checklist).toMatch(/shift\s*\+\s*arrow[\s\S]{0,400}?unsnapped/i)
-  })
-
-  /* The paginator race. The assertion is the ABSENCE of an event, which is why
-   * it cannot be automated and why it has to be spelled out. */
-  it('says the paginated EPUB case must not turn the page', () => {
-    expect(checklist).toMatch(/paginated EPUB[\s\S]{0,400}?no page turn/i)
-  })
-
-  /*
-   * WI-10's declared debt. Reverting `useMarking.selected` to byte-equality,
-   * deleting its `eraseMark` line, or reverting `useMarks`' `upsertOverlapping`
-   * to the byte-exact `upsertMark`, each survives every test in this repository
-   * — nothing imports either hook, and the unit lane has no DOM and no React
-   * renderer. It is the largest unverified surface in the feature, and the only
-   * place it can be checked is here.
-   *
-   * `upsertOverlapping` is named because the checklist ONCE MISSED IT: it
-   * listed the two `useMarking` survivors and not the `useMarks` one, while
-   * claiming to be the complete cover. A section that is a cover by declaration
-   * and not by content is worse than no section, so the third name is asserted
-   * here rather than left to whoever reads it next.
-   */
-  it('covers the mark-overlap surface no test in this repo reaches', () => {
-    expect(checklist).toMatch(/useMarking/)
-    expect(checklist).toMatch(/eraseMark/)
-    expect(checklist).toMatch(/upsertOverlapping/)
-    expect(checklist).toMatch(/duplicate/i)
-  })
-
-  /*
-   * Not "there is a heading called Environment" — the values themselves, and
-   * they must not be placeholders. A checklist recording `macOS TBD` records
-   * nothing, and the version is the entire point: ICU moves with the OS, so a
-   * run against an unrecorded WebKit cannot be compared with the next one.
-   */
-  it('records the OS, WebKit and app versions it is pinned to, with no placeholders', () => {
-    const fields = {
-      macOS: /^\|\s*macOS\s*\|\s*([^|]+?)\s*\|/m,
-      WebKit: /^\|\s*WebKit\s*\|\s*([^|]+?)\s*\|/m,
-      Safari: /^\|\s*Safari\s*\|\s*([^|]+?)\s*\|/m,
-      Date: /^\|\s*Date\s*\|\s*([^|]+?)\s*\|/m,
-    }
-
-    for (const [name, pattern] of Object.entries(fields)) {
-      const match = checklist.match(pattern)
-      expect(match, `${name} row missing from the environment table`).not.toBeNull()
-      expect(match[1], `${name} is a placeholder`).not.toMatch(/TODO|TBD|\bxx\b|^-+$|^\?+$/i)
-      expect(match[1].length).toBeGreaterThan(2)
-    }
-  })
-
-  /*
-   * The status is DECLARED, not inferred. Without it a complete-looking
-   * checklist reads as a performed one, and a green `pnpm test` reads as
-   * evidence about gestures it has never touched. Three values, one of which is
-   * honest about having run nothing.
-   */
-  it('declares its run status as one of the allowed values', () => {
-    const match = checklist.match(/^\|\s*Status\s*\|\s*([^|]+?)\s*\|/m)
-
-    expect(match).not.toBeNull()
-    /* PARTIAL was added when the first rows were actually run: a checklist
-     * with some rows performed and some not is the normal state during a
-     * feature, and forcing it to claim NOT RUN or PASS would make it lie in
-     * one direction or the other. Still a bare enum with no prose, because
-     * the whole point of the assertion is that the status cannot be padded
-     * into something that reads as done. */
-    expect(['NOT RUN', 'PARTIAL', 'PASS', 'FAIL']).toContain(match[1])
-  })
-
-  /*
-   * The claim the plan's last acceptance criterion forbids. `webview_interact`
-   * dispatches `isTrusted: false`, so the checklist must say WHY these are
-   * manual, not merely that they are — otherwise the next reader tries to
-   * automate them and concludes the app is broken.
-   */
-  it('says why no harness reaches these, not merely that none does', () => {
-    expect(checklist).toMatch(/isTrusted/)
-    expect(checklist).toMatch(/webview_interact/)
-    expect(checklist).toMatch(/selectionchange/)
   })
 })

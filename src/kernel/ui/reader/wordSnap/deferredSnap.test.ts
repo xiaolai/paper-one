@@ -20,7 +20,7 @@ import { watchGestureProvenance } from './gestureProvenance'
  * level of effort — the `live` lane included, since the bridge dispatches
  * `isTrusted: false` events and WebKit builds no native selection from them.
  * No case below claims to: the obligation is **permanently UNMET**, and its
- * only cover is `dev-docs/manual-selection-checklist.md` §2.
+ * only cover is the manual selection checklist §2.
  *
  * Every case runs against the same fakes the rest of this directory uses —
  * `domFake.testkit.ts`, `selectionFake.testkit.ts`, `documentFake.testkit.ts` —
@@ -147,7 +147,7 @@ describe('deferSnap — when the snap runs', () => {
    * the race exists.
    *
    * Live partner: "a drag near a page edge in a paginated EPUB does not turn
-   * the page" — `dev-docs/manual-selection-checklist.md` rows 2.1 and 2.2.
+   * the page" — the manual selection checklist rows 2.1 and 2.2.
    * **Permanently UNMET by any harness**: it needs a trusted drag.
    */
   it('does not run inside the pointerup handler, and has run one macrotask later', () => {
@@ -225,7 +225,7 @@ describe('deferSnap — cancellation', () => {
    * own guarantee: nothing mutates and nothing settles.
    *
    * Live partners: "close the book mid-gesture", "turn the page mid-gesture" —
-   * `dev-docs/manual-selection-checklist.md`. **Permanently UNMET by any
+   * The manual selection checklist. **Permanently UNMET by any
    * harness**: both need a trusted gesture to interrupt.
    */
   it('mutates nothing and settles nothing when cancelled before the macrotask', () => {

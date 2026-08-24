@@ -38,7 +38,7 @@
  *
  * What it still does not reach: a real backward **drag**. The bridge dispatches
  * `isTrusted: false` events, so no harness produces a native selection.
- * `dev-docs/manual-selection-checklist.md` row 1.2 is the only cover for that.
+ * The manual selection checklist row 1.2 is the only cover for that.
  */
 
 import { snapInDom, walkRoot, type DomPosition } from './flatten'

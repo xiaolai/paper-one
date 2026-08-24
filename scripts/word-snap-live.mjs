@@ -27,8 +27,13 @@
  * `rangeText` and inspects the resulting `Selection` — and it verifies WebKit's
  * own semantics. It does not reach a single gesture. Mouse drag, double-click,
  * triple-click, shift+click, long-press, selection-handle drag, force touch and
- * pen have no lane at any level; `dev-docs/manual-selection-checklist.md` is the
+ * pen have no lane at any level; the manual selection checklist is the
  * only thing that covers them, on real hardware, by hand.
+ *
+ * THAT CHECKLIST IS NOT IN THIS REPOSITORY. It was `dev-docs/`-local and was
+ * purged from the history when the repository was published, so nothing here
+ * can check that it exists, is complete, or was ever run. Treat every mention
+ * of it below as naming a document kept outside version control.
  *
  * Nothing this file prints may be read as evidence about a gesture.
  *
@@ -541,7 +546,8 @@ const USAGE = [
   '  node scripts/word-snap-live.mjs --json          print both reports as JSON',
   '',
   'The app must be running (pnpm tauri dev, a DEBUG build — the bridge is not in release).',
-  'No gesture is reachable from here: see dev-docs/manual-selection-checklist.md.',
+  'No gesture is reachable from here: see the manual selection checklist,',
+  'which is kept outside this repository.',
 ].join('\n')
 
 function option(argv, name) {
@@ -562,7 +568,8 @@ async function main(argv) {
     process.stdout.write(
       CHECKS.length + ' programmatic checks, plus the ' +
         'WI-4 corpus, run against the live WKWebView.\n' +
-        'No gesture is among them, and none can be: see dev-docs/manual-selection-checklist.md.\n',
+        'No gesture is among them, and none can be: see the manual selection\n' +
+        'checklist, kept outside this repository.\n',
     )
     return 0
   }
@@ -646,8 +653,8 @@ async function main(argv) {
     process.stderr.write(
       'word-snap-live: ' + parityLive.rows.length + ' corpus rows agree with this engine and ' +
         domLive.ran + ' checks pass in ' + domLive.engine + '\n' +
-        '  NOT covered, by anything, at any level: every gesture. See\n' +
-        '  dev-docs/manual-selection-checklist.md.\n',
+        '  NOT covered, by anything, at any level: every gesture. See the\n' +
+        '  manual selection checklist, kept outside this repository.\n',
     )
     return 0
   }

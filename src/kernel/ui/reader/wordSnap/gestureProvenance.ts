@@ -67,7 +67,7 @@
  *
  * **This pairing is permanently unmet.** Real drags, double-click, long-press,
  * selection handles, touch, pen and force-touch are covered only by
- * `dev-docs/manual-selection-checklist.md` §1, by a person on real hardware.
+ * The manual selection checklist §1, by a person on real hardware.
  */
 
 export interface GestureProvenance {

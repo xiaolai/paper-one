@@ -30,7 +30,7 @@ import { importSpecifiers, scan } from './sourceScan.testkit'
  * a selection made by a gesture, which no harness produces.
  *
  * **This pairing is permanently unmet**, and its only cover is
- * `dev-docs/manual-selection-checklist.md` §2.
+ * The manual selection checklist §2.
  */
 
 /** A page document, keyed only by identity — which is all the guard asks of it.
@@ -230,7 +230,7 @@ describe('createReflowGuard — the notification', () => {
  * would leave every behavioural case in `session.test.ts` green while the live
  * app never notified anybody. Whether a real zoom clears a real highlight is
  * **permanently outside every lane** — it needs a selection made by a gesture —
- * and lives in `dev-docs/manual-selection-checklist.md` §2.
+ * and lives in the manual selection checklist §2.
  */
 describe('makePdf takes its render generation from the seam', () => {
   const source = readFileSync(fileURLToPath(new URL('../makePdf.ts', import.meta.url)), 'utf8')

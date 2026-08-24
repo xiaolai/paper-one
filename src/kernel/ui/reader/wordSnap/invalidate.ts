@@ -46,7 +46,7 @@
  * (`scripts/word-snap-live.mjs`) does not reach it either: it needs a selection
  * made by a gesture, and the bridge dispatches `isTrusted: false` events.
  *
- * **This pairing is permanently unmet.** `dev-docs/manual-selection-checklist.md`
+ * **This pairing is permanently unmet.** the manual selection checklist
  * §2 carries the PDF zoom rows.
  */
 

@@ -37,7 +37,7 @@ import { watchGestureProvenance, type GestureProvenance } from './gestureProvena
  *
  * **This pairing is permanently unmet.** Drags, double-click, long-press,
  * selection handles, touch, pen and force-touch are covered only by
- * `dev-docs/manual-selection-checklist.md` §1, and this file claims nothing
+ * The manual selection checklist §1, and this file claims nothing
  * about them.
  */
 

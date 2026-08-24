@@ -52,7 +52,7 @@
  * (`scripts/word-snap-live.mjs`) and covers the adapter, not the events.
  *
  * **This pairing is permanently unmet.** The only cover is
- * `dev-docs/manual-selection-checklist.md`, run by a person on real hardware.
+ * The manual selection checklist, run by a person on real hardware.
  */
 
 import type { FakeSelection } from './selectionFake.testkit'

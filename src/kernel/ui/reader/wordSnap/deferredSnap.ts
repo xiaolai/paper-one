@@ -75,7 +75,7 @@
  * snap has not run while the `pointerup` listeners are still running) and the
  * cancellation paths.
  *
- * **This pairing is permanently unmet.** `dev-docs/manual-selection-checklist.md`
+ * **This pairing is permanently unmet.** the manual selection checklist
  * §2 is the only cover, and if it fails there the fallback is suppressing
  * `checkPointerSelection` around the mutation — which means touching the pinned
  * foliate fork.

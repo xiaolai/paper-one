@@ -53,15 +53,10 @@ CLAUDE.md
 # account id, so it must not be committed.
 error.log
 
-# Scratch space for companion HTML artifacts and working notes.
-dev-docs/*
-
-# …except the manual gesture checklist, which is not a working note. It is the
-# ONLY cover for every gesture in the selection feature — no lane at any level
-# reaches trusted pointer input — and `scripts/word-snap-live.test.mjs` asserts
-# it exists and is complete. Left untracked, that test is red on any checkout
-# but this one, and the checklist's recorded status could never be reviewed.
-!dev-docs/manual-selection-checklist.md
+# Scratch space for companion HTML artifacts and working notes. Ignored whole,
+# with no exceptions: the manual gesture checklist was re-included here until
+# it was purged from the history, and nothing in dev-docs/ is tracked now.
+dev-docs/
 
 # --- Application build artifacts ---
 node_modules/
