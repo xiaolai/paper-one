@@ -116,7 +116,32 @@ export function paperComposition(options = {}) {
     },
     generateBundle(_outputOptions, bundle) {
       const manifest = loadManifest(root)
-      const decision = decideBundle(platform, bundleModuleIds(bundle), manifest, bundleRoots(root))
+      const ids = bundleModuleIds(bundle)
+
+      /* NO TAURI IN A BROWSER BUNDLE, and this is the assertion rather than a
+       * habit of writing careful imports.
+       *
+       * The web build is served to somebody else's phone. `@tauri-apps` code
+       * there is dead at best, and at worst it is `appStorage.ts` silently
+       * falling back to `localStorage` while the reader believes their marks
+       * are on the shelf. It arrives TRANSITIVELY — one import of
+       * `./kernel/ui` pulls five modules that reach the Tauri API — so a rule
+       * about which files may import what would not catch it. What catches it
+       * is looking at the bundle.
+       *
+       * Verified once by hand on the first web build (0 references). This is
+       * what keeps it at zero. */
+      if (platform === 'web') {
+        const tauri = ids.filter((id) => id.includes('@tauri-apps') || id.includes('tauri-apps/api'))
+        if (tauri.length > 0) {
+          this.error(
+            `assert-bundle: the web bundle reaches ${tauri.length} Tauri module(s), which do not exist in a browser:\n  ` +
+              tauri.slice(0, 10).join('\n  '),
+          )
+        }
+      }
+
+      const decision = decideBundle(platform, ids, manifest, bundleRoots(root))
       if (!decision.ok) {
         const lines = decision.findings.map(formatFinding)
         this.error(`assert-bundle: the ${platform} bundle is not the manifest's ${platform} set (${lines.length} findings):\n  ${lines.join('\n  ')}`)

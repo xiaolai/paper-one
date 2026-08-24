@@ -38,7 +38,28 @@ const path = require('node:path')
 /** The composition roots: one static composition per platform, and the file
  *  that imports exactly one of them. `composition.contract.test.ts` is NOT one —
  *  the platform list is closed, so the test falls under the ordinary rule. */
-const COMPOSITION_ROOTS = ['^src/app/composition\\.(desktop|ios|android)\\.ts$', '^src/main\\.tsx$']
+const COMPOSITION_ROOTS = [
+  '^src/app/composition\\.(desktop|ios|android|web)\\.ts$',
+  '^src/main\\.tsx$',
+  /* The BROWSER client's root (phase 18). A second root rather than a branch
+   * inside `main.tsx`: that file arms a shutdown handshake with the Rust
+   * shell, tears down the sync journal and migrates a legacy library, and the
+   * imports carrying those pull `@tauri-apps` into a bundle served to a
+   * phone. `assert-bundle` refuses a web bundle that reaches one. */
+  '^src/main\\.web\\.tsx$',
+]
+
+/** The design system's stylesheets.
+ *
+ * A composition root reaches these DIRECTLY only because the browser root
+ * cannot take the ordinary path: `src/kernel/ui/index.ts` imports them, and it
+ * also reaches `appStorage.ts` and four other modules that import
+ * `@tauri-apps`, which do not exist in a browser.
+ *
+ * Narrow on purpose — `.css` under `styles/` and nothing else. A stylesheet
+ * carries no imports and cannot smuggle a dependency past the boundary these
+ * rules exist to hold; a `.ts` file there could, so it stays refused. */
+const KERNEL_STYLESHEETS = '^src/kernel/ui/styles/.*\\.css$'
 
 /** The kernel's two entries: the React-free public one every capability may
  *  import, and the UI one only a composition root may. */
@@ -176,7 +197,7 @@ module.exports = {
         'UI entry exists because the public entry is React-free and a root has to render App; ' +
         'nothing else may import it, and a root may not reach past either.',
       from: { path: COMPOSITION_ROOTS },
-      to: { path: '^src/kernel/', pathNot: [KERNEL_PUBLIC_ENTRY, KERNEL_UI_ENTRY] },
+      to: { path: '^src/kernel/', pathNot: [KERNEL_PUBLIC_ENTRY, KERNEL_UI_ENTRY, KERNEL_STYLESHEETS] },
     },
     {
       name: 'capability-only-via-index',
@@ -239,10 +260,16 @@ module.exports = {
         'capability-requires-declared judges only direct capability-to-capability edges. And the rule ' +
         'covers every module, not just capabilities, so a capability cannot launder the edge through ' +
         'a shared intermediary either — and one PLATFORM root cannot import another, which would ' +
-        'braid two platforms\' capability graphs. Only src/main.tsx (the entry choosing its root) and ' +
-        'tests are exempt.',
-      from: { path: '^src/', pathNot: ['^src/main\\.tsx$', '\\.(test|testkit)\\.tsx?$'] },
-      to: { path: '^src/app/composition\\.(desktop|ios|android)\\.ts$' },
+        'braid two platforms\' capability graphs. Only the two entries that choose a root — ' +
+        'src/main.tsx and src/main.web.tsx — and tests are exempt.',
+      from: {
+        path: '^src/',
+        /* Both entries choose a root, and neither may be reached FROM one —
+         * `src/main.web.tsx` is the browser client's, exempt for exactly the
+         * reason `src/main.tsx` is. */
+        pathNot: ['^src/main\\.tsx$', '^src/main\\.web\\.tsx$', '\\.(test|testkit)\\.tsx?$'],
+      },
+      to: { path: '^src/app/composition\\.(desktop|ios|android|web)\\.ts$' },
     },
     {
       name: 'no-circular',

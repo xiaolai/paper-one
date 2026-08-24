@@ -1,0 +1,100 @@
+/* The six-digit screen.
+ *
+ * Every value here resolves through the design system's tokens
+ * (`src/kernel/ui/styles/tokens.css`) rather than being invented — the same
+ * rule `dev-docs/design-tokens.md` states and `tokens.test.ts` enforces for the
+ * desktop app. The one exception is the digit field's own width, which is
+ * derived from its character count and belongs to nothing else.
+ *
+ * The layout is the mobile design's idiom: one purpose per screen, centred,
+ * with the safe-area inset respected so a notched phone does not clip it. */
+
+.screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100dvh;
+  padding: var(--space-24);
+  /* `100dvh` plus the inset rather than `100vh`: mobile Safari's toolbars make
+   * `vh` taller than the visible viewport, which pushes a centred layout under
+   * the browser chrome exactly when the keyboard is up. */
+  padding-bottom: max(var(--space-24), env(safe-area-inset-bottom));
+  background: var(--bg);
+  color: var(--ink);
+  text-align: center;
+  gap: var(--space-16);
+}
+
+.title {
+  font-size: var(--text-title);
+  font-weight: 500;
+  margin: 0;
+}
+
+.explain {
+  font-size: var(--text-body);
+  color: var(--muted);
+  margin: 0;
+  max-width: var(--gate-measure);
+  line-height: 1.5;
+}
+
+.code {
+  /* Tabular so the six digits do not jump as they are typed. */
+  font-variant-numeric: tabular-nums;
+  font-family: var(--gate-mono);
+  font-size: var(--text-title);
+  letter-spacing: var(--track-caps-wide);
+  /* Six characters plus the tracking between them — a DERIVATION from the type
+   * token rather than a measured guess, which is what the token guard asks for
+   * (`tokens.test.ts`: "derivations are what this guard wants people to
+   * write"). `7.5 * var(--text-title)` is 7.5em at this font size. */
+  width: calc(7.5 * var(--text-title));
+  padding: var(--space-12) var(--space-8);
+  text-align: center;
+  border: 1px solid var(--line-3);
+  border-radius: var(--gate-radius);
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.code:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: var(--space-2);
+}
+
+.code[aria-invalid='true'] {
+  border-color: var(--amber-line);
+}
+
+.submit {
+  font-size: var(--text-ui);
+  padding: var(--space-12) var(--space-24);
+  border: 0;
+  border-radius: var(--gate-radius);
+  background: var(--accent);
+  color: var(--surface);
+  /* The design system's large control, which IS the platform's 44px minimum
+   * touch target — one number, in one place, rather than a second spelling. */
+  min-height: var(--gate-control-h);
+}
+
+.submit:disabled {
+  opacity: 0.5;
+}
+
+/* AMBER, because that is this design system's colour for "the machine is
+ * telling you something", and a refusal is exactly that. It is not red: the
+ * reader has not broken anything, and a wrong code is an ordinary event. */
+.problem {
+  font-size: var(--text-small);
+  color: var(--amber);
+  background: var(--amber-bg);
+  border: 1px solid var(--amber-line);
+  border-radius: var(--gate-radius);
+  padding: var(--space-8) var(--space-12);
+  margin: 0;
+  max-width: var(--gate-measure);
+  line-height: 1.45;
+}
