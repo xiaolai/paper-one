@@ -3,6 +3,7 @@ import { folderOf, trashOf } from './bookFolder'
 import {
   TRASH_DAYS,
   emptyExpired,
+  listTrash,
   rescueStrandedMarks,
   restoreBook,
   timeLeft,
@@ -475,5 +476,49 @@ describe('how long a trashed book has left', () => {
 
   it('says an unreadable entry stays, because the sweep leaves it', () => {
     expect(timeLeft(null, now)).toBe('Kept')
+  })
+})
+
+describe('a removal stamp that cannot be trusted', () => {
+  /* `Number('')` IS ZERO and `Number.isFinite(0)` is true, so an empty or
+     half-written `.removed` read as the epoch — older than any window — and
+     the sweep DELETED THE BOOK. The contract this file states is the
+     opposite: an unreadable stamp is left alone, because erring towards
+     keeping is the only direction that cannot lose a reader's work. A crash
+     between the folder move and the stamp write is exactly how an empty one
+     occurs, which is the case the old test set missed: it covered a MISSING
+     stamp and a non-numeric one, and both of those already behaved. */
+  const seeded = (stamp: string) =>
+    fakeFs({ 'trash/bk1/book.json': '{"bookId":"bk1"}', 'trash/bk1/.removed': stamp })
+
+  for (const [name, stamp] of [
+    ['empty', ''],
+    ['whitespace', '  \n'],
+    ['zero', '0'],
+    ['negative', '-1'],
+    ['fractional', '1.5'],
+    ['not a number', 'yesterday'],
+  ] as const) {
+    it(`leaves a book whose stamp is ${name}`, async () => {
+      const fs = seeded(stamp)
+      expect(await emptyExpired(fs, Date.now())).toEqual([])
+      expect(await fs.exists('trash/bk1/book.json'), 'the book survived').toBe(true)
+    })
+  }
+
+  it('still sweeps a book whose stamp is a real, expired time', async () => {
+    /* The guard must not have bought safety by never deleting anything. */
+    const fs = seeded(String(Date.now() - (TRASH_DAYS + 1) * 24 * 60 * 60 * 1000))
+    expect(await emptyExpired(fs, Date.now())).toEqual(['bk1'])
+  })
+
+  it('reports an untrustworthy stamp as no time at all, not as 1970', async () => {
+    /* The other half of the same parse. `listTrash` had its own copy of the
+       coercion, where a zero showed as a row removed in 1970 with its
+       fortnight long gone — the surface that REPORTS the deadline disagreeing
+       with the sweep that ENFORCES it. */
+    const rows = await listTrash(seeded(''))
+    expect(rows[0]?.removedAt).toBeNull()
+    expect(rows[0]?.expiresAt).toBeNull()
   })
 })

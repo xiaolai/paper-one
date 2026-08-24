@@ -69,7 +69,22 @@ export interface TrashFs extends VaultFs {
   removeDir: (path: string) => Promise<void>
 }
 
-/** Move a book's folder into the trash. Returns false when there was none. */
+/**
+ * Move a book's folder into the trash.
+ *
+ * FALSE MEANS THE REMOVAL DID NOT HAPPEN — which covers two different things
+ * and deliberately does not distinguish them: there was no folder to move, or
+ * a move failed and the rollback put everything back. The contract used to
+ * say only the first, and a reader of it would conclude that a `false` is
+ * always benign.
+ *
+ * The distinction is the CALLER'S to draw, because only the caller can ask
+ * the cheap question that settles it — `libraryStore.remove` does exactly
+ * that: on false it checks whether the folder is still there and throws if it
+ * is, which is how an optimistically removed row gets put back. Answering it
+ * here would mean a second stat on the happy path for a case the one caller
+ * already handles.
+ */
 export async function trashBook(fs: TrashFs, bookId: string): Promise<boolean> {
   try {
     /* CHECKED FIRST. Without this, removing a book that is not there renamed
@@ -145,7 +160,20 @@ export async function trashBook(fs: TrashFs, bookId: string): Promise<boolean> {
      * rename does not reliably change mtime on every filesystem — and reading
      * one back through the plugin would need a stat permission this app does not
      * ask for. A file with a number in it needs neither. */
-    await fs.writeFile(`${trashOf(bookId)}/.removed`, new TextEncoder().encode(String(Date.now())))
+    /* THE STAMP IS BEST-EFFORT, AND ITS FAILURE IS NOT THE REMOVAL'S.
+       By this line the folder is already under `trash/` — the move happened,
+       the shelf is right to have dropped the row, and there is nothing to
+       roll back. Letting a failed stamp fall into the catch below returned
+       `false`, which says "the removal did not happen"; the caller then finds
+       the live folder gone, concludes all is well, and the two disagree about
+       an event that DID occur. `readStamp` already treats an absent stamp as
+       "leave this alone", so the cost of losing it is a trash entry that
+       never ages out — visible, recoverable, and much the smaller wrong. */
+    try {
+      await fs.writeFile(`${trashOf(bookId)}/.removed`, new TextEncoder().encode(String(Date.now())))
+    } catch {
+      /* Kept for ever rather than reported as un-removed. */
+    }
     return true
   } catch {
     return false
@@ -280,6 +308,34 @@ export interface TrashedBook {
   readonly expiresAt: number | null
 }
 
+/**
+ * The removal stamp, or null when there is not a usable one.
+ *
+ * `Number('')` IS ZERO, and `Number.isFinite(0)` is true — so an empty or
+ * half-written `.removed` read as "removed at the epoch", which is older than
+ * any retention window, and `emptyExpired` DELETED THE BOOK. That is the one
+ * outcome this file's contract forbids: "a folder that will not read, or
+ * whose stamp is missing, is LEFT rather than deleted". Whitespace does the
+ * same thing, and a crash between `mkdir` and the stamp write is exactly how
+ * an empty one occurs.
+ *
+ * ONE PARSER FOR BOTH READERS. `listTrash` had the same coercion, where it
+ * showed as a row removed in 1970 with its fortnight long gone; two copies of
+ * this rule is how the surface that REPORTS the deadline and the sweep that
+ * ENFORCES it come to disagree about which books are past it.
+ *
+ * A stamp must be a positive integer of milliseconds. Zero and negatives are
+ * refused rather than clamped: no removal happened at or before the epoch, so
+ * such a value is corruption, and corruption must not be able to delete.
+ */
+export function readStamp(raw: string): number | null {
+  const text = raw.trim()
+  if (text === '') return null
+  const stamp = Number(text)
+  if (!Number.isInteger(stamp) || stamp <= 0) return null
+  return stamp
+}
+
 export async function listTrash(fs: TrashFs, signal?: AbortSignal): Promise<TrashedBook[]> {
   /* ABSENT AND UNREADABLE ARE NOT THE SAME ANSWER — the rule this file's own
    * `readMarks` neighbour records, and the one a bare `catch` here broke. No
@@ -307,8 +363,7 @@ export async function listTrash(fs: TrashFs, signal?: AbortSignal): Promise<Tras
     }
     let removedAt: number | null = null
     try {
-      const stamp = Number(new TextDecoder().decode(await fs.readFile(`${at}/.removed`)))
-      if (Number.isFinite(stamp)) removedAt = stamp
+      removedAt = readStamp(new TextDecoder().decode(await fs.readFile(`${at}/.removed`)))
     } catch {
       removedAt = null
     }
@@ -345,8 +400,8 @@ export async function emptyExpired(fs: TrashFs, now = Date.now()): Promise<strin
     if (!entry.isDirectory) continue
     const at = `trash/${entry.name}`
     try {
-      const stamp = Number(new TextDecoder().decode(await fs.readFile(`${at}/.removed`)))
-      if (!Number.isFinite(stamp)) continue
+      const stamp = readStamp(new TextDecoder().decode(await fs.readFile(`${at}/.removed`)))
+      if (stamp === null) continue
       if (now - stamp < TRASH_DAYS * DAY_MS) continue
       await fs.removeDir(at)
       gone.push(entry.name)

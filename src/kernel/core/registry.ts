@@ -434,6 +434,12 @@ function checkNamespaces(
   const panes = new Set<string>()
   const sections = new Set<string>()
   const actions = new Set<string>()
+  /* ITS OWN SET. Statuses used to claim into `actions`, so a capability whose
+     action and status shared one natural name — `sync:download` for the verb
+     and for the progress it reports — was refused as a duplicate
+     contribution. They are different contributions in different lists, read
+     by different code; only the namespace prefix is shared. */
+  const statuses = new Set<string>()
   const services = new Set<string>()
   const clients = new Set<string>()
 
@@ -491,7 +497,7 @@ function checkNamespaces(
     }
     for (const status of cap.bookStatuses ?? []) {
       prefixed('book status id', status.id, colon, cap.id)
-      claim(actions, 'book status', status.id, cap.id)
+      claim(statuses, 'book status', status.id, cap.id)
     }
     for (const service of cap.services ?? []) {
       prefixed('service name', service.name, dot, cap.id)

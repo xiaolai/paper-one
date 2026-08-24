@@ -39,6 +39,19 @@ const LAYER_ORDER = ['paletteOpen', 'switcherOpen', 'tagsOpen', 'trashOpen'] as 
  *  drift apart — adding a layer in one place now fails to compile in the other. */
 export type Layer = (typeof LAYER_ORDER)[number]
 
+/**
+ * Every layer, shut — derived from the one list rather than typed out again.
+ *
+ * `goScreen` used to repeat each field by hand, so `LAYER_ORDER` was the
+ * declared source of truth for the DISMISS ORDER while the closing was a
+ * second list beside it. A layer added to one and not the other compiles, and
+ * the symptom is a sheet about the shelf still hanging over the reader.
+ */
+const ALL_LAYERS_SHUT = Object.fromEntries(LAYER_ORDER.map((layer) => [layer, false])) as Record<
+  Layer,
+  false
+>
+
 /* AT MOST ONE LAYER IS OPEN — enforced in `toggleLayer`, over the whole of
  * LAYER_ORDER. There used to be a second list of "modal" layers beside this
  * one, byte-identical to it, because they were once free to stack and the
@@ -332,14 +345,10 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
         ...state,
         screen: action.screen,
         pane,
-        switcherOpen: false,
-        paletteOpen: false,
-        tagsOpen: false,
-        /* A SCREEN CHANGE CLOSES EVERY LAYER, and this one is in the list for
-           the reason the others are: the sheet is about the shelf, and a
-           reader who restored a book and opened it would otherwise come back
-           from the reader to find the trash still hanging over the library. */
-        trashOpen: false,
+        /* A SCREEN CHANGE CLOSES EVERY LAYER — all of them, from the list that
+           also decides the dismiss order, so a layer added later cannot be
+           added to one and forgotten in the other. */
+        ...ALL_LAYERS_SHUT,
       }
     }
 
