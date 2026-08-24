@@ -1,0 +1,22 @@
+"$schema" = "schemas/schema.json"
+
+[default]
+description = """
+The commands a Paper webview needs from the webhost plugin: the server's
+status and bound port; showing and cancelling the six-digit code a human types
+into a browser; listing and revoking paired browsers; and the frame pipe
+(ready, send, recv) between a browser's socket and the service router.
+
+The server binds loopback only and answers no service call itself — it carries
+frames to the webview, which holds the router.
+"""
+permissions = [
+    "allow-webhost-status",
+    "allow-webhost-begin-code",
+    "allow-webhost-cancel-code",
+    "allow-webhost-sessions",
+    "allow-webhost-revoke",
+    "allow-webhost-ready",
+    "allow-webhost-send",
+    "allow-webhost-session-recv",
+]

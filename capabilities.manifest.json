@@ -50,6 +50,21 @@
       "platforms": [
         "desktop"
       ]
+    },
+    {
+      "id": "webhost",
+      "requires": [
+        "peer"
+      ],
+      "ts": "webhost",
+      "platforms": [
+        "desktop"
+      ],
+      "crate": "tauri-plugin-webhost",
+      "plugin": "webhost",
+      "permissions": [
+        "webhost:default"
+      ]
     }
   ]
 }

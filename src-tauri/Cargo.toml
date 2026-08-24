@@ -86,6 +86,9 @@ tauri-plugin-inference = { path = "crates/tauri-plugin-inference", optional = tr
 # NO `tower-http`: the SPA is embedded by build.rs rather than served from a
 # directory, so there is no `ServeDir` and no path-traversal surface to test.
 # NO `macros`, `http2`, `multipart`, `query`, `form`, or `tracing`.
+# The browser client's host (crates/tauri-plugin-webhost). DESKTOP ONLY, for
+# the reason written on the dependency below it.
+tauri-plugin-webhost = { path = "crates/tauri-plugin-webhost", optional = true }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "ws", "json"], optional = true }
 
 # One feature per platform, and the platform set is closed: `desktop` (the
@@ -121,6 +124,7 @@ desktop = [
     "dep:tauri-plugin-persisted-scope",
     "dep:tauri-plugin-inference",
     "dep:axum",
+    "dep:tauri-plugin-webhost",
     "tauri/tray-icon",
 ]
 ios = ["tauri-plugin-peer/ios"]

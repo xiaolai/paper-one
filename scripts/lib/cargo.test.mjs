@@ -149,10 +149,19 @@ ignored = "1"
 
        `axum` joined it in phase 18 for the same reason in a different shape:
        it serves the browser client, a phone is never a shelf, and a dependency
-       gated only at the call site is still compiled. This set is a LEDGER —
-       it fails when the desktop-only set changes, which is the point. */
+       gated only at the call site is still compiled. `tauri-plugin-webhost`
+       joined on the same reasoning when the host became a capability. This set
+       is a LEDGER — it fails when the desktop-only set changes, which is
+       exactly the point, and it has now caught two deliberate changes. */
     expect(dependenciesOfFeature('desktop', real)).toEqual(
-      new Set(['axum', 'tauri-plugin-inference', 'tauri-plugin-mcp-bridge', 'tauri-plugin-persisted-scope', 'tauri']),
+      new Set([
+        'axum',
+        'tauri-plugin-inference',
+        'tauri-plugin-mcp-bridge',
+        'tauri-plugin-persisted-scope',
+        'tauri-plugin-webhost',
+        'tauri',
+      ]),
     )
     // Data-driven over whatever crates the tree has: each path dependency is found by its directory name.
     for (const dep of real.dependencies.values()) {

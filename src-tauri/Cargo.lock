@@ -139,6 +139,7 @@ dependencies = [
  "tauri-plugin-mcp-bridge",
  "tauri-plugin-peer",
  "tauri-plugin-persisted-scope",
+ "tauri-plugin-webhost",
 ]
 
 [[package]]
@@ -5840,6 +5841,21 @@ dependencies = [
  "tauri",
  "tauri-plugin-fs",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "tauri-plugin-webhost"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "log",
+ "paper-webauth",
+ "paper-webhost",
+ "serde",
+ "tauri",
+ "tauri-plugin",
+ "thiserror 2.0.20",
+ "tokio",
 ]
 
 [[package]]

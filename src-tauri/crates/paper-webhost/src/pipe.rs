@@ -303,6 +303,30 @@ impl Pipe {
             .map(|s| s.admitted)
     }
 
+    /// Every live socket, oldest first. For the shelf's Devices list.
+    pub fn live_ids(&self) -> Vec<WebSessionId> {
+        let guard = self.inner.lock().expect("pipe mutex poisoned");
+        let mut ids: Vec<WebSessionId> = guard
+            .sessions
+            .iter()
+            .filter(|(_, s)| s.closed.is_none())
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// The credential behind a socket, so a caller can revoke the whole
+    /// browser rather than the one connection it happened to name.
+    pub fn credential_of(&self, id: WebSessionId) -> Option<Credential> {
+        self.inner
+            .lock()
+            .expect("pipe mutex poisoned")
+            .sessions
+            .get(&id)
+            .map(|s| s.credential.clone())
+    }
+
     pub fn live_count(&self) -> usize {
         self.inner
             .lock()
@@ -506,6 +530,31 @@ mod tests {
         pipe.close(socket, "first");
         pipe.close(socket, "second");
         assert_eq!(pipe.closed_reason(socket).as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn live_ids_lists_the_open_sockets_only() {
+        let (pipe, sessions) = (Pipe::new(), Sessions::new());
+        let (id, credential) = admitted(&sessions);
+        let first = pipe.open(id, credential.clone(), wire().0).expect("open");
+        let second = pipe.open(id, credential.clone(), wire().0).expect("open");
+        assert_eq!(pipe.live_ids(), vec![first, second]);
+
+        pipe.close(first, "done");
+        assert_eq!(pipe.live_ids(), vec![second]);
+    }
+
+    #[test]
+    fn a_socket_knows_the_credential_behind_it() {
+        /* Revoking by socket must cut the whole BROWSER off, not the one
+         * connection the caller happened to name. */
+        let (pipe, sessions) = (Pipe::new(), Sessions::new());
+        let (id, credential) = admitted(&sessions);
+        let one = pipe.open(id, credential.clone(), wire().0).expect("open");
+        let two = pipe.open(id, credential.clone(), wire().0).expect("open");
+
+        let found = pipe.credential_of(one).expect("a credential");
+        assert_eq!(pipe.close_credential(&found, "revoked"), vec![one, two]);
     }
 
     #[test]

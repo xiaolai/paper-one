@@ -3,6 +3,7 @@ import { companion } from '../capabilities/companion'
 import { inference } from '../capabilities/inference'
 import { peer } from '../capabilities/peer'
 import { sync } from '../capabilities/sync'
+import { webhost } from '../capabilities/webhost'
 
 /**
  * The DESKTOP composition: the capabilities composed onto the kernel in a
@@ -28,4 +29,8 @@ import { sync } from '../capabilities/sync'
  * reading them adjacent is how the split stays legible. Both are DESKTOP
  * ONLY: `lemond` ships for macOS, Windows and Linux and there is no mobile
  * build of it, so the mobile compositions do not list them. */
-export const capabilities: readonly Capability[] = [peer, sync, inference, companion]
+/* `webhost` last, and after `peer`, which it declares in `requires` — it needs
+ * peer's envelope rather than anything peer-to-peer, and the note in its
+ * `index.ts` says why that dependency is honest but misshapen. DESKTOP ONLY: a
+ * phone is a satchel, never a shelf, and has nothing to serve. */
+export const capabilities: readonly Capability[] = [peer, sync, inference, companion, webhost]

@@ -364,6 +364,22 @@ pub fn run() {
         builder = builder.plugin(tauri_plugin_inference::init());
     }
 
+    /* The browser client's host. DESKTOP ONLY, and gated at the DEPENDENCY as
+     * well as here (src-tauri/Cargo.toml) — a phone is a satchel, never a
+     * shelf, and gating only at this call would still compile an HTTP server
+     * and its whole stack into the mobile bundle.
+     *
+     * It binds one pinned loopback port and does not scan for another if that
+     * one is taken; the crate's header says why, and it is the automation
+     * bridge's lesson rather than a new one. A failed bind is logged and not
+     * fatal: the reader keeps an app, and `webhost_status` reports a null port
+     * so the pane can say what is missing. Its commands are granted by
+     * `webhost:default` in capabilities/default.json. */
+    #[cfg(feature = "desktop")]
+    {
+        builder = builder.plugin(tauri_plugin_webhost::init());
+    }
+
     builder = builder
         // The peer transport, every platform. Its commands are granted by
         // `peer:default` in capabilities/default.json.
