@@ -1,0 +1,22 @@
+[package]
+name = "paper-webauth"
+version = "0.1.0"
+description = "Paper's browser device-authorization: a one-time 6-digit code, atomically rate-limited"
+authors = ["Paper"]
+license = ""
+edition = "2021"
+# Matches the app crate and tauri-plugin-peer; the toolchain itself is pinned
+# by the root rust-toolchain.toml.
+rust-version = "1.91"
+# Not a crates.io crate: a workspace member of the app.
+publish = false
+
+[dependencies]
+# THE SAME VERSION THE PEER PLUGIN USES. Two versions of `rand` in one tree is
+# two CSPRNG configurations to reason about, and this crate's whole value is
+# that its randomness is boring. `rand::random` here is the same call
+# `pairing.rs:432` makes for its pairing secret.
+rand = "0.10"
+# Constant-time comparison. The 6-digit code is a secret compared against
+# attacker-supplied input; `==` on bytes short-circuits and leaks position.
+subtle = "2"
