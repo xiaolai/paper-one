@@ -119,7 +119,7 @@ export interface GlossRequestOptions {
    * every line its own absolutely positioned span); in the pre-paginated EPUB
    * measured, it is one WORD. Neither yielded a single vouched sentence in ten
    * samples, against two in ten for the reflowable control. Transcript:
-   * `docs/plans/evidence/wi-16-5-measurements.md`.
+   * `dev-docs/plans/evidence/wi-16-5-measurements.md`.
    */
   readonly fixedLayout?: boolean | undefined
   readonly diagnostics?: Diagnostics | undefined

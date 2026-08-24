@@ -8,7 +8,7 @@ import path from 'node:path'
  * `capabilities.manifest.json` is the one place that lists Paper's first-party
  * capabilities — their ids, what they require, where their TypeScript and Rust
  * live, which platforms compose them, and the Tauri plugin and permissions
- * they bring. The meaning of each field is the ADR's (`docs/adr/0001-…`); this
+ * they bring. The meaning of each field is the ADR's (`dev-docs/adr/0001-…`); this
  * module is the enforcement, and `capabilities.manifest.schema.json` is the
  * same rules restated for editors (SCH-1 in the tests keeps the two aligned).
  *

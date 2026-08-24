@@ -34,8 +34,6 @@
     "compositions:check": "node scripts/check-compositions.mjs",
     "css:check": "node scripts/check-dead-css.mjs",
     "directives:check": "node scripts/check-inert-directives.mjs",
-    "features:check": "node scripts/check-feature-ledger.mjs",
-    "docs:services": "node scripts/write-service-docs.mjs",
     "docs:notices": "node scripts/write-third-party-notices.mjs",
     "capability:remove": "node scripts/capability-remove.mjs",
     "verify": "node scripts/verify.mjs",

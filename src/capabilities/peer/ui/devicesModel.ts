@@ -237,7 +237,7 @@ export function pairingFault(mine: PeerRole | null, theirs: PeerRole | null): st
  * all require the same `sync:pull` grant (`protocol.ts`). So this returns one
  * phrase covering all of it rather than a list that would imply the reader
  * could have some and not others. Making that true is a change to the sync
- * protocol's grants, not to this function — see `docs/sync.md`.
+ * protocol's grants, not to this function — see `dev-docs/sync.md`.
  */
 export function describeGrants(grants: readonly string[]): string {
   const has = (g: string) => grants.some((held) => held === g || held === `${g.split(':')[0]}:*`)

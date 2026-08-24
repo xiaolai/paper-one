@@ -53,7 +53,7 @@ export interface PaneEntry {
  * The panel COMPONENT is not what was deleted — there was never one, only an
  * empty state inline in `SidePane`. Reinstating this is one row plus one id in
  * `KERNEL_PANE_IDS`, the day something fills it. See
- * `docs/plans/phase-12-the-return-path.md`, WI-12.5. */
+ * `dev-docs/plans/phase-12-the-return-path.md`, WI-12.5. */
 export const PANES: readonly PaneEntry[] = [
   { id: 'toc', label: 'Contents', combo: '⌘1' },
   { id: 'marginalia', label: 'Marginalia', combo: '⌘2' },

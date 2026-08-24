@@ -1,7 +1,7 @@
 //! `tauri-plugin-inference` — Paper's local inference runtime, as a Tauri
 //! plugin.
 //!
-//! What it is (docs/plans/phase-15-the-companion.md, WI-15.0): a supervised
+//! What it is (dev-docs/plans/phase-15-the-companion.md, WI-15.0): a supervised
 //! `lemond` child, the per-launch bearer token that authenticates to it, the
 //! Paper-owned cache and model directories, SHA-256 verification before any
 //! artifact is activated, and the probes that report what the two agent CLIs

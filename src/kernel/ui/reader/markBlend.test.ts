@@ -34,7 +34,7 @@ const readerCss = readFileSync(
  * A relative path into `node_modules` rather than a resolver, and the crudeness
  * is the point: `readFileSync` THROWS on a path that has moved, so this fails
  * loudly instead of quietly asserting over an empty string. The fork is a git
- * dependency pinned to a SHA — see `docs/foliate-fork.md`.
+ * dependency pinned to a SHA — see `dev-docs/foliate-fork.md`.
  */
 const FOLIATE = ['paginator.js', 'view.js', 'fixed-layout.js', 'overlayer.js'] as const
 

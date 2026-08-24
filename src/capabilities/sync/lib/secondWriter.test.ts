@@ -40,7 +40,7 @@ import { recordDigest } from './merge'
  * can no longer create on purpose — another tool, an editor, a restore from
  * backup — which is exactly why the journal still has to survive them.
  *
- * `docs/cli.md` states the same thing, and the two must be read together: if
+ * `dev-docs/cli.md` states the same thing, and the two must be read together: if
  * this comment and that document ever disagree, one of them is describing a
  * version of the CLI that no longer exists.
  */

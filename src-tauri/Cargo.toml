@@ -37,7 +37,7 @@ tauri = { version = "2.11.3", features = ["macos-private-api", "image-png"] }
 tauri-plugin-log = "2"
 # Reopening a book, and the reader's own work outliving the webview's storage.
 # A picked `File` is a handle to bytes granted for one session, and localStorage
-# has a quota and no backup — see docs/plans/phase-02-native-storage-and-library.md.
+# has a quota and no backup — see dev-docs/plans/phase-02-native-storage-and-library.md.
 # NO `watch` FEATURE. It was here for the connected-folder import, which is gone
 # — and it is worth knowing why it needed saying: `watch` is a feature flag, not
 # a default, so without it the plugin still builds, the JS `watch()` import still

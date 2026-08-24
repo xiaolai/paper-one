@@ -2,7 +2,7 @@
 //
 // `bookCss` reads the host's @font-face rules out of `document.styleSheets`, so
 // it needs a document even when the assertion is about a plain declaration.
-// See docs/hook-tests.md for the per-file opt-in.
+// See dev-docs/hook-tests.md for the per-file opt-in.
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_STEP_IDX, READING_STEPS } from '../../core/metrics'
 import { bookSheets, resolvedBookCss } from './bookCss'

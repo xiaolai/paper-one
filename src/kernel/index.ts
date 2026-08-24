@@ -66,7 +66,7 @@ export {
 export type { CapabilityErrorCode, Composition, CompositionOptions, Contributions } from './core/registry'
 
 /* THE SERVICE TABLE — the one declaration the router registration, the client
- * stubs, the CLI's commands and `docs/service-table.md` are all derived from
+ * stubs, the CLI's commands and `dev-docs/service-table.md` are all derived from
  * (phase 11). Public because all four consumers sit outside the kernel. */
 export {
   GRANT_FAMILIES,

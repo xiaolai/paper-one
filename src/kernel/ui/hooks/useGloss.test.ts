@@ -393,7 +393,7 @@ describe('what the lookup path costs', () => {
      * `publish()` would survive the scan above. The honest instrument is a
      * dependency-cruiser `reachable` rule over the whole call graph, which is a
      * change to the boundary system rather than to this phase. Recorded under
-     * "What the audit rounds found" in `docs/plans/phase-16-the-sentence.md`
+     * "What the audit rounds found" in `dev-docs/plans/phase-16-the-sentence.md`
      * rather than implied away. */
     expect(reader).toContain('askGloss(gloss, selection')
   })

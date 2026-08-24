@@ -174,7 +174,7 @@ export async function paper({
          * what automation reads, and this one was lying.
          *
          * It costs the reader nothing they cannot undo in a second: quit
-         * Paper and run it again. `docs/cli.md` has always said not to write
+         * Paper and run it again. `dev-docs/cli.md` has always said not to write
          * while the app is open; this enforces it instead of advising it.
          * Reads are untouched. */
         journalBusy = error

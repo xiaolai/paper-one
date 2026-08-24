@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/xiaolai/paper-one/main/capabilities.manifest.schema.json",
   "title": "Paper capabilities manifest",
-  "description": "The list of Paper's first-party capabilities: ids, what each requires, where its TypeScript and Rust live, which platforms compose it, and the Tauri plugin and permissions it brings. This schema is the editor-facing restatement of scripts/lib/architecture.mjs, which is the enforcement (`pnpm architecture:check`); it does not check cross-item uniqueness, resolvability, acyclicity, or that the directories exist. Meaning of each field: docs/adr/0001-kernel-capabilities.md; the field-by-field rules: docs/capabilities-manifest.md.",
+  "description": "The list of Paper's first-party capabilities: ids, what each requires, where its TypeScript and Rust live, which platforms compose it, and the Tauri plugin and permissions it brings. This schema is the editor-facing restatement of scripts/lib/architecture.mjs, which is the enforcement (`pnpm architecture:check`); it does not check cross-item uniqueness, resolvability, acyclicity, or that the directories exist. Meaning of each field: dev-docs/adr/0001-kernel-capabilities.md; the field-by-field rules: dev-docs/capabilities-manifest.md.",
   "type": "object",
   "additionalProperties": false,
   "required": ["capabilities"],

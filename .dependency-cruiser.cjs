@@ -2,7 +2,7 @@
 
 /**
  * The boundary rules — decision 2 ("public entrypoints") and the "declared"
- * half of decision 3 (`requires`) of `docs/adr/0001-kernel-capabilities.md`,
+ * half of decision 3 (`requires`) of `dev-docs/adr/0001-kernel-capabilities.md`,
  * as `pnpm boundaries` (`scripts/check-boundaries.mjs`) enforces them.
  *
  * Every rule here matches on the RESOLVED path of an edge, so anything that

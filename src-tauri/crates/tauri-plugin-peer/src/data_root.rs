@@ -17,7 +17,7 @@
 //! book vault while holding separate identities, and nothing complains until
 //! the first journal append hands `fs_fsync` a path from THIS root for a file
 //! the kernel wrote in the other one. Measured 2026-08-20; the two-instance
-//! harness is two machines (`scripts/second-instance.sh`, `docs/sync.md`).
+//! harness is two machines (`scripts/second-instance.sh`, `dev-docs/sync.md`).
 //!
 //! The sync capability asks for the root through `paper_data_root` rather than
 //! computing `appDataDir()` itself, so ITS paths agree with this plugin's. The

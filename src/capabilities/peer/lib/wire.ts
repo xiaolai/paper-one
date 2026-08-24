@@ -5,7 +5,7 @@ import { listen } from '@tauri-apps/api/event'
  * The wire — the peer capability's ONE window onto the Tauri plugin.
  *
  * `PeerWire` is a typed face over every command `tauri-plugin-peer` exposes
- * and every event it emits (`docs/plans/phase-07-peer-plugin.md`, "Contract
+ * and every event it emits (`dev-docs/plans/phase-07-peer-plugin.md`, "Contract
  * with the webview"). `tauriWire()` is the real one; `fakeWire.testkit.ts`
  * is the in-memory pair the protocol tests run on. Everything above this
  * file — the port, the ledger, the panes — speaks `PeerWire` and cannot

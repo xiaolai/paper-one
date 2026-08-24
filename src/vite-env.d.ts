@@ -354,7 +354,7 @@ declare module 'foliate-js/view.js' {
  * nothing at all — is written here and would otherwise be written again.
  *
  * MIT, and it ships in the fork Paper pins. Nothing on npm called `foliate-js`
- * is the author's; see `docs/foliate-fork.md`.
+ * is the author's; see `dev-docs/foliate-fork.md`.
  */
 declare module 'foliate-js/footnotes.js' {
   import type { Book, View } from 'foliate-js/view.js'

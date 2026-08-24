@@ -1,6 +1,6 @@
 # The unified gate, on a clean clone. `pnpm verify` is the copy‑paste command a
 # developer runs locally; CI runs exactly the same thing so "green here" and
-# "green there" are one fact. (docs/plans/phase-05-kernel-capabilities.md, K.12)
+# "green there" are one fact. (dev-docs/plans/phase-05-kernel-capabilities.md, K.12)
 name: verify
 
 on:

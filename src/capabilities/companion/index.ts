@@ -17,7 +17,7 @@ import { CompanionPane } from './ui/CompanionPane'
  *
  * # It is not one capability with the runtime, and F2 is why
  *
- * [Phase 5's diagram](../../../docs/plans/phase-05-kernel-capabilities.md)
+ * [Phase 5's diagram](../../../dev-docs/plans/phase-05-kernel-capabilities.md)
  * draws the capability row as `peer — sync — companion — social`: one
  * `companion`, sketched before there was anything to put in it. A single
  * capability owning both the sidecar and the provider choice has exactly one

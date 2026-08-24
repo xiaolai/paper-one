@@ -23,7 +23,7 @@ import viteConfig from './vite.config'
  * assert that no DOM exists, and the other fifty-odd suites should not pay
  * jsdom's start-up for a DOM they never touch. A suite that genuinely mounts a
  * hook opts in per FILE with `// @vitest-environment jsdom` on its first line —
- * `kernel/ui/hooks/useLibrary.test.ts` is the exemplar; see `docs/hook-tests.md`.
+ * `kernel/ui/hooks/useLibrary.test.ts` is the exemplar; see `dev-docs/hook-tests.md`.
  *
  * `vite.config.ts` is merged in rather than duplicated so the tests see the
  * same plugins and resolution the app is built with — before this file existed
@@ -89,7 +89,7 @@ const PROJECTS: readonly Project[] = [
  * test's own lines being "covered" is not information.
  *
  * Thresholds are the measured baseline (see WI-5.10 in
- * `docs/plans/phase-05-kernel-capabilities.md`), global minus one point so the
+ * `dev-docs/plans/phase-05-kernel-capabilities.md`), global minus one point so the
  * gate only ratchets up, and the pure-core areas held at their own measured
  * floor. The global set is checked over every file; each glob key is checked
  * again over the files it matches (root-relative), so a core file counts in

@@ -1,6 +1,6 @@
 /**
  * carve-kernel — move the reader into `src/kernel/{core,ui}` and re‑point every
- * relative reference. K.3 of docs/plans/phase-05-kernel-capabilities.md.
+ * relative reference. K.3 of dev-docs/plans/phase-05-kernel-capabilities.md.
  *
  * REPLAYABLE, BY DESIGN. Another branch keeps adding files under the old
  * directories; the move therefore cannot be a one‑off commit anyone rebases

@@ -52,7 +52,7 @@
  * namespace precisely because the whole suite is worthless without it.
  *
  * `epubSemantics.ts` reads both, in one place, so the next caller does not have
- * to remember. Recorded as a finding in `docs/plans/phase-16-the-sentence.md`
+ * to remember. Recorded as a finding in `dev-docs/plans/phase-16-the-sentence.md`
  * §B2, where the same trap was met from the other side.
  */
 import { ariaRoles, epubTypes } from './epubSemantics'

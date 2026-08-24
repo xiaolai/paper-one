@@ -1019,7 +1019,7 @@ export type { SyncStatus } from './lib/status'
  * merely the bytes, which `O_APPEND` would keep whole, but `nextSeq` and the
  * rev CAS, which each process holds in memory and neither would see the other
  * move. The advisory lock cannot prevent it: the app cannot take that lock (a
- * webview's filesystem has no exclusive create, see `docs/cli.md`).
+ * webview's filesystem has no exclusive create, see `dev-docs/cli.md`).
  *
  * The flag is what can. `open()` writes it before it returns, so a live
  * journal ALWAYS has it up — and the useful direction is the contrapositive:

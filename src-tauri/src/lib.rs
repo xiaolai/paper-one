@@ -277,7 +277,7 @@ fn open_external(url: String) -> Result<(), String> {
 /// a flicker — the hardest kind of wrong to attribute. One owner of the maths,
 /// which is tao; this only asks it to run.
 ///
-/// `docs/traffic-lights.md` owns the measured mapping. Do not restate it here.
+/// `dev-docs/traffic-lights.md` owns the measured mapping. Do not restate it here.
 #[cfg(target_os = "macos")]
 fn nudge_traffic_lights(window: &tauri::WebviewWindow) {
     use objc2_app_kit::NSWindow;

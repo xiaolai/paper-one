@@ -678,7 +678,7 @@ export const ROW_BOOK = ROW.book
  *
  * The bar is `TITLEBAR_H` tall — 52 on macOS, 44 elsewhere — and on macOS its
  * contents have to clear the traffic lights, whose position is set from
- * `tauri.conf.json` and measured, not guessed (see `docs/traffic-lights.md`).
+ * `tauri.conf.json` and measured, not guessed (see `dev-docs/traffic-lights.md`).
  * 30 is what fits: `CONTROL.md` at 34 leaves 9px of margin in a 52px bar and
  * crowds the lights; `CONTROL.sm` at 28 reads as small beside them. It is a
  * token rather than a ramp step because the constraint is the window's, not the
@@ -869,7 +869,7 @@ export const TRACK_W = 3
  *
  * Here so that nothing else in the app can be 12px "to match the lights"
  * without saying so — and so the one place that draws them names where the
- * number comes from. See `docs/traffic-lights.md`.
+ * number comes from. See `dev-docs/traffic-lights.md`.
  */
 export const TRAFFIC_LIGHT = 12
 

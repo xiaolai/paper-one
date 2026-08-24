@@ -1,7 +1,7 @@
 # The mobile matrix — real `tauri ios build` (and `android build` when an SDK is
 # present) on a clean clone, on a schedule, so SDK/CI rot is found weekly rather
 # than the day someone needs a phone build. Informational IPA/APK sizes are
-# recorded as artifacts. (docs/plans/phase-05-kernel-capabilities.md, K.11/K.12)
+# recorded as artifacts. (dev-docs/plans/phase-05-kernel-capabilities.md, K.11/K.12)
 name: mobile
 
 on:

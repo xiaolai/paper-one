@@ -31,23 +31,16 @@ export const STEPS = Object.freeze([
   { name: 'compositions:check', cmd: 'pnpm', args: ['compositions:check'] },
   { name: 'css:check', cmd: 'pnpm', args: ['css:check'] },
   { name: 'directives:check', cmd: 'pnpm', args: ['directives:check'] },
-  /* THE LEDGERS DESCRIBE CODE THAT EXISTS. `docs/feature-ledger.md` and
-   * `docs/library-ledger.md` are read to decide what to build next, which
-   * makes a stale row worse than no row: a feature listed Absent when it ships
-   * is work about to be redone. Re-audited 2026-08-21, eleven rows of the
-   * first had drifted and nine understated the app, while every path in it
-   * still named `lib/…` — a directory the kernel carve emptied months earlier.
+  /* THE FEATURE-LEDGER GATE IS GONE, and this note is what is left of it.
+   * It read `dev-docs/feature-ledger.md` and `dev-docs/library-ledger.md` and checked
+   * that every path claim named a file that exists — the Where column being a
+   * claim about the filesystem, answered by the filesystem. Both ledgers moved
+   * out of the repository with the rest of `dev-docs/`, so the gate had no input
+   * on a clean checkout and was removed rather than made conditional on an
+   * untracked path, which is the failure this repository has already had.
    *
-   * BOTH, since 2026-08-23, and the second is the argument for the first being
-   * too narrow: `library-ledger.md` was outside this gate, and went from phase
-   * 5 to phase 14 with eighteen understating rows and every path naming that
-   * same dead directory. The check ran green throughout, over one file, under
-   * a name that reads as though it covered the subject.
-   *
-   * The State column needs a human; the Where column is a claim about the
-   * filesystem, and this is the filesystem answering. See
-   * scripts/lib/ledger.mjs. */
-  { name: 'features:check', cmd: 'pnpm', args: ['features:check'] },
+   * NOTHING REPLACES IT. Stale rows in those ledgers are now caught by nobody.
+   */
   { name: 'boundaries', cmd: 'pnpm', args: ['boundaries'] },
   /* `boundaries:selftest` IS NOT A STEP, AND THE CASES DID NOT STOP RUNNING.
    *

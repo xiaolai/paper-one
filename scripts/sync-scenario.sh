@@ -39,7 +39,7 @@
 #   scripts/sync-scenario.sh <user@host> [--timeout N] [--out FILE] [--dry-run] [--clean]
 #
 #     --timeout N   seconds to wait for each convergence (default 90)
-#     --out FILE    transcript path (default docs/plans/evidence/wi-11-7-<stamp>.md)
+#     --out FILE    transcript path (default dev-docs/plans/evidence/wi-11-7-<stamp>.md)
 #     --dry-run     preflight only: prove both ends answer, change nothing
 #     --clean       remove this scenario's book and tag from both sides, then stop
 #
@@ -141,7 +141,7 @@ case "$remote" in
 esac
 
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-[ -n "$out" ] || out="$REPO_ROOT/docs/plans/evidence/wi-11-7-$stamp.md"
+[ -n "$out" ] || out="$REPO_ROOT/dev-docs/plans/evidence/wi-11-7-$stamp.md"
 mkdir -p "$(dirname "$out")"
 # TRUNCATED, not appended. `log` writes with `tee -a`, so an explicit `--out`
 # pointed at a previous run's file quietly continued it — producing a document
@@ -510,7 +510,7 @@ done
 # change the journal never saw is a change that can never travel. Both runs
 # spent every convergence step waiting for something that could not happen.
 #
-# This is the documented limitation of WI-11.5 (`docs/cli.md`, "the part the
+# This is the documented limitation of WI-11.5 (`dev-docs/cli.md`, "the part the
 # lock does not cover"), reaching further than the doc claimed: not merely
 # "the app may not notice", but "a CLI mutation cannot replicate, ever".
 #
@@ -547,7 +547,7 @@ probe_journaling() {
   if [ "$seen" -gt 0 ]; then
     pass "a CLI write reaches the sync journal ($before -> $after bytes), so it can replicate"
   else
-    fail 'a CLI write did NOT reach the sync journal, so nothing below can replicate. `paper` binds the journal only when no Paper process holds it — see WI-11.7 in docs/plans/phase-11-service-api.md.'
+    fail 'a CLI write did NOT reach the sync journal, so nothing below can replicate. `paper` binds the journal only when no Paper process holds it — see WI-11.7 in dev-docs/plans/phase-11-service-api.md.'
   fi
 }
 probe_journaling

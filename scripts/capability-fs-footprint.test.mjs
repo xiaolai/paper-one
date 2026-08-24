@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest'
 /**
  * WI-10.1 — the capability fs/storage FOOTPRINT, pinned from source.
  *
- * Phase 10's confinement rules (`docs/plans/phase-10-capability-confinement.md`)
+ * Phase 10's confinement rules (`dev-docs/plans/phase-10-capability-confinement.md`)
  * are only correct against a KNOWN surface: the set of places a capability
  * touches the kernel's raw filesystem or flat store. This test enumerates that
  * surface from the source tree — every write-shaped fs call, every raw

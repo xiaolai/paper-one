@@ -26,7 +26,6 @@ describe('the steps', () => {
       'compositions:check',
       'css:check',
       'directives:check',
-      'features:check',
       'boundaries',
       'test:projects',
       'test:ledger',

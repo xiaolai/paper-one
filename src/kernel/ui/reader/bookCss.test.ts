@@ -2,7 +2,7 @@
 //
 // `bookCss` copies the host's @font-face rules out of `document.styleSheets`
 // into the book, so it needs a document to read even when the assertion is about
-// a plain declaration. See docs/hook-tests.md for the per-file opt-in.
+// a plain declaration. See dev-docs/hook-tests.md for the per-file opt-in.
 import { describe, expect, it } from 'vitest'
 import { ALIGNS, type Align } from '../../core/uiTypes'
 import { resolvedBookCss } from './bookCss'

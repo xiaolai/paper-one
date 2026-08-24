@@ -43,7 +43,7 @@ import { makeDataDir, nodeIndexFs, nodeSizePort, nodeTextFs } from './fs'
 export const APP_IDENTIFIER = 'one.paper.reader'
 
 /** The environment variable that moves the data directory, for a harness
- *  driving two instances (`docs/sync.md`). Read only by this host: the app
+ *  driving two instances (`dev-docs/sync.md`). Read only by this host: the app
  *  honours it in `tauri-plugin-peer` and NOT in the kernel, which is the trap
  *  WI-8.6 recorded — so a Node host that read it silently would be agreeing
  *  with only half of the app. It is here so a test can point at a fixture. */

@@ -38,8 +38,9 @@ import type { ClientContribution } from './capability'
  * So: a service is DECLARED here, once. `services/handlers.ts` maps each
  * declared name to its behaviour and the type system refuses a name with no
  * handler; `serviceClients()` derives the satchel-side stubs; `src/cli`
- * derives its commands; `docs/service-table.md` is generated from these rows
- * and `scripts/check-service-docs` refuses a committed copy that has drifted.
+ * derives its commands. A generated `service-table.md` and the check that
+ * refused a drifted copy of it both left the repository with `dev-docs/`, so these
+ * rows are no longer mirrored into a document anything verifies.
  * Nothing below is written twice anywhere.
  *
  * WHAT IS NOT HERE, deliberately:
@@ -267,7 +268,7 @@ export interface ServiceField {
    * --help` said the same, while the service refused everything but three
    * words. A caller learned the vocabulary by being refused.
    *
-   * Declared here, `readInput` enforces it and `docs/service-table.md` prints
+   * Declared here, `readInput` enforces it and `dev-docs/service-table.md` prints
    * it — one statement, checked and published, instead of a rule in a handler
    * and a sentence in a doc string that nothing holds to it.
    */

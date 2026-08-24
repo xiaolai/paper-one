@@ -78,7 +78,7 @@ function run(args, { cwd = REPO_ROOT, script = SCRIPT, env } = {}) {
 function validateOnly(args) {
   /* `--out` TO A TEMPORARY PATH, always.
    *
-   * The script's default transcript is `docs/plans/evidence/wi-11-7-<stamp>.md`,
+   * The script's default transcript is `dev-docs/plans/evidence/wi-11-7-<stamp>.md`,
    * and it writes the header before it reaches the ssh this test never lets it
    * finish — so every accepted-argument case left a file in the repository.
    * A hundred and twenty-nine of them accumulated before anyone looked at
@@ -108,7 +108,7 @@ describe('the script itself', () => {
   /**
    * EXECUTABLE MEANS THE BIT, not the shebang.
    *
-   * This read the file's TEXT and called that executable. `docs/cli.md` tells
+   * This read the file's TEXT and called that executable. `dev-docs/cli.md` tells
    * a reader to run `./scripts/sync-scenario.sh <user@host>` — which is the
    * mode bit, not the first line — and every test in this file invokes it as
    * `bash <path>`, which works on a file with no execute permission at all.

@@ -310,7 +310,7 @@ describe('the renderer Paper actually ships', () => {
    * before and 15 after, with a relocate for every one of them and the scroll
    * settling exactly on a page boundary.
    *
-   * Pinned because it lives in the fork, and `docs/foliate-fork.md` is explicit
+   * Pinned because it lives in the fork, and `dev-docs/foliate-fork.md` is explicit
    * that a clean rebase means the text merged, not that the reader works. This
    * commit is the kind that drops out silently: nothing else in Paper mentions
    * it, and its absence looks like sluggishness rather than like breakage.

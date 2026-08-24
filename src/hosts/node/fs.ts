@@ -258,7 +258,7 @@ export function nodeTextFs(root: string): FileSystem {
  * journal is opened rather than held for the duration. The real fix is a
  * per-data-root lock taken by both the app and the CLI, which needs a Rust
  * command with an ACL entry on the app side; until that exists this is the
- * honest approximation and is documented as one in `docs/cli.md`.
+ * honest approximation and is documented as one in `dev-docs/cli.md`.
  */
 export type AppPresence = 'running' | 'absent' | 'unknown'
 

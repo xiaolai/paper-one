@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render the companion HTML view of docs/feature-ledger.md.
+"""Render the companion HTML view of dev-docs/feature-ledger.md.
 
 This script holds NO feature data. It parses the Markdown and renders it, which
 is the only arrangement under which the page's own footer — "generated from the
@@ -325,7 +325,7 @@ def main() -> None:
 {''.join(render_matrix(t, b, r, comparators) for t, b, r in matrices)}
 
 <footer>
-  <p>Generated from <code>docs/feature-ledger.md</code> by
+  <p>Generated from <code>dev-docs/feature-ledger.md</code> by
   <code>scripts/gen-feature-ledger.py</code>, which parses that file and holds no
   feature data of its own. Regenerate after editing the ledger.</p>
 </footer>

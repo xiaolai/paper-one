@@ -188,7 +188,7 @@ a:hover {
  * reasons and the app has controls in every combination of them. What a new
  * control owes is a decision, not a number copied from its neighbour.
  *
- * `docs/design-tokens.md` has the audit that finds a control which never made
+ * `dev-docs/design-tokens.md` has the audit that finds a control which never made
  * one — the failure is an ABSENT declaration, so no check over declarations can
  * see it. */
 :focus-visible {

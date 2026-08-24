@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/xiaolai/paper-one/main/models.manifest.schema.json",
   "title": "Paper model manifest",
-  "description": "The models Paper will resolve, verify and activate. Lemonade's own server_models.json carries recipe, checkpoint and size and NO license and NO per-model digest — checked against 11.7.0's shipped resources/server_models.json, where `kokoro-v1` is a checkpoint, a recipe and a rounded gigabyte count and nothing else. So it cannot be the provenance record, and this is. A gallery entry is untrusted input until it has resolved to an entry here. Meaning of each field: docs/plans/phase-15-the-companion.md, WI-15.1; the enforcement is src-tauri/crates/tauri-plugin-inference/src/manifest.rs.",
+  "description": "The models Paper will resolve, verify and activate. Lemonade's own server_models.json carries recipe, checkpoint and size and NO license and NO per-model digest — checked against 11.7.0's shipped resources/server_models.json, where `kokoro-v1` is a checkpoint, a recipe and a rounded gigabyte count and nothing else. So it cannot be the provenance record, and this is. A gallery entry is untrusted input until it has resolved to an entry here. Meaning of each field: dev-docs/plans/phase-15-the-companion.md, WI-15.1; the enforcement is src-tauri/crates/tauri-plugin-inference/src/manifest.rs.",
   "type": "object",
   "additionalProperties": false,
   "required": ["version", "models"],

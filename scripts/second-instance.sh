@@ -3,7 +3,7 @@
 # Stand a satchel up on a SECOND MAC and forward its automation bridge here, so
 # the shelf ⇄ satchel scenario (WI-8.6) can be driven from one place.
 #
-# THE RUNBOOK IS `docs/sync.md`. It carries why this is two machines rather than
+# THE RUNBOOK IS `dev-docs/sync.md`. It carries why this is two machines rather than
 # two processes, why the satchel runs from a checkout rather than a shipped
 # bundle, and what `PAPER_TEST_DATA_DIR` does and does not move. Those facts are
 # operational and belong where an operator looks; repeating them here produced a
