@@ -24,7 +24,23 @@ import path from 'node:path'
 
 /* --------------------------------------------------------------- constants */
 
-export const PLATFORMS = Object.freeze(['desktop', 'ios', 'android'])
+export const PLATFORMS = Object.freeze(['desktop', 'ios', 'android', 'web'])
+
+/**
+ * The platforms that compile Rust.
+ *
+ * `web` is a platform of this application in every sense the manifest cares
+ * about — it has a composition, it composes capabilities, and the bundle
+ * assertion holds it to the manifest. It is NOT a Tauri target: the browser
+ * client is served to somebody else's browser and has no `src-tauri` in it at
+ * all.
+ *
+ * So anything asking "which Cargo feature compiles this platform" must iterate
+ * THIS list rather than `PLATFORMS`. There is no `web` feature in
+ * `src-tauri/Cargo.toml` and there must not be one — a feature that compiles
+ * nothing is a feature somebody will later try to use.
+ */
+export const NATIVE_PLATFORMS = Object.freeze(['desktop', 'ios', 'android'])
 
 /** A capability id: lowercase, starts with a letter, then letters/digits/hyphens. */
 export const ID_PATTERN = /^[a-z][a-z0-9-]*$/

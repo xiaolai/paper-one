@@ -139,6 +139,10 @@ describe('checkCompositionFiles', () => {
       'src/app/composition.desktop.ts': "import { a } from '../capabilities/a'\nexport const capabilities = [a]\n",
       'src/app/composition.ios.ts': "import { a } from '../capabilities/a'\nimport { b } from '../capabilities/b'\nexport const capabilities = [a, b]\n",
       'src/app/composition.android.ts': 'export const capabilities = []\n',
+      /* Every platform has a static composition, so the base fixture needs one
+         per platform or every case reports COMPOSITION_ABSENT for the missing
+         file rather than the thing it is testing. `web` composes nothing. */
+      'src/app/composition.web.ts': 'export const capabilities = []\n',
       ...over,
     }
     return (rel) => base[rel] ?? null

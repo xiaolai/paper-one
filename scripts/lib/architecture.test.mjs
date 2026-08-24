@@ -8,6 +8,7 @@ import {
   ENTRY_FIELDS,
   FINDING_CODES,
   ID_PATTERN,
+  NATIVE_PLATFORMS,
   PLATFORMS,
   REQUIRED_FIELDS,
   ROOT_FIELDS,
@@ -508,11 +509,14 @@ describe('validateManifest — shapes and fields', () => {
     expect(() => validate(manifestOf(cap('a', { crate: 'tauri-plugin-peer' })), crateThrowing)).toThrow(/probe consulted/)
   })
 
-  it('V-9 platforms: empty, unknown, duplicate, not an array; one and all three pass', () => {
+  it('V-9 platforms: empty, unknown, duplicate, not an array; one and all four pass', () => {
     expect(strip(validate(manifestOf(cap('a', { platforms: [] }))))).toEqual([
       { code: 'PLATFORMS_EMPTY', path: '/capabilities/0/platforms' },
     ])
-    expect(strip(validate(manifestOf(cap('a', { platforms: ['web'] }))))).toEqual([
+    /* `web` used to be the unknown platform here, and became a real one in
+       phase 18 — so this case needed a name that is still not a platform. Any
+       change to PLATFORMS should expect to land on this line. */
+    expect(strip(validate(manifestOf(cap('a', { platforms: ['freebsd'] }))))).toEqual([
       { code: 'PLATFORMS_UNKNOWN', path: '/capabilities/0/platforms/0' },
     ])
     expect(strip(validate(manifestOf(cap('a', { platforms: ['ios', 'ios'] }))))).toEqual([
@@ -526,6 +530,7 @@ describe('validateManifest — shapes and fields', () => {
     ])
     expect(validate(manifestOf(cap('a', { platforms: ['ios'] })))).toEqual([])
     expect(validate(manifestOf(cap('a', { platforms: ['desktop', 'ios', 'android'] })))).toEqual([])
+    expect(validate(manifestOf(cap('a', { platforms: ['desktop', 'ios', 'android', 'web'] })))).toEqual([])
   })
 
   it('V-10 plugin and permissions shapes; a repeated permission string is clean', () => {
@@ -1007,7 +1012,11 @@ describe('constants', () => {
     }
     expect(ID_PATTERN.flags).toBe('')
     expect(DIR_NAME_PATTERN.flags).toBe('')
-    expect(PLATFORMS).toEqual(['desktop', 'ios', 'android'])
+    expect(PLATFORMS).toEqual(['desktop', 'ios', 'android', 'web'])
+    /* `web` is a platform of the application and NOT a Tauri target: the
+       browser client compiles no Rust, so it has no Cargo feature. Anything
+       asking which feature compiles a platform iterates this instead. */
+    expect(NATIVE_PLATFORMS).toEqual(['desktop', 'ios', 'android'])
     expect(REQUIRED_FIELDS).toEqual(['id', 'ts', 'platforms'])
     expect(ROOT_FIELDS).toEqual(['$schema', 'capabilities'])
     expect(ENTRY_FIELDS).toEqual(['id', 'requires', 'ts', 'platforms', 'crate', 'plugin', 'permissions'])

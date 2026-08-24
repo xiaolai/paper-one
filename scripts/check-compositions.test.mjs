@@ -45,6 +45,10 @@ function fixture(over = {}) {
     'src/app/composition.desktop.ts': "import { peer } from '../capabilities/peer'\nexport const capabilities = [peer]\n",
     'src/app/composition.ios.ts': "import { peer } from '../capabilities/peer'\nimport { mob } from '../capabilities/mob'\nexport const capabilities = [peer, mob]\n",
     'src/app/composition.android.ts': "import { peer } from '../capabilities/peer'\nexport const capabilities = [peer]\n",
+    /* `web` composes nothing — a browser can compose no Tauri-bound
+       capability — but the FILE must exist: every platform has a static
+       composition, and its absence is COMPOSITION_ABSENT. */
+    'src/app/composition.web.ts': 'export const capabilities = []\n',
     'src-tauri/crates/tauri-plugin-peer/Cargo.toml': '[package]\nname = "tauri-plugin-peer"\n',
     'src-tauri/crates/tauri-plugin-mob/Cargo.toml': '[package]\nname = "tauri-plugin-mob"\n',
     'src-tauri/crates/tauri-plugin-orphan/Cargo.toml': '[package]\nname = "tauri-plugin-orphan"\n',
@@ -65,7 +69,7 @@ function fixture(over = {}) {
 }
 
 describe('the real tree', () => {
-  it('is clean: 3 platforms, the manifest\'s capabilities, a note for each unclaimed crate, 0 findings', () => {
+  it('is clean: 4 platforms, the manifest\'s capabilities, a note for each unclaimed crate, 0 findings', () => {
     // Computed from the tree, not spelled out: `pnpm verify:without <id>`
     // runs this suite in a copy with `<id>` gone.
     const manifest = JSON.parse(readFileSync(join(REPO_ROOT, 'capabilities.manifest.json'), 'utf8'))
@@ -75,7 +79,7 @@ describe('the real tree', () => {
     expect(err).toBe('')
     expect(out).toBe(
       unclaimed.map((name) => `note: src-tauri/crates/${name} is claimed by no manifest entry — its features, registration and grants are not checked\n`).join('') +
-        `compositions-check: 3 platforms, ${manifest.capabilities.length} capabilities, ${claimed.size} crates checked, 0 findings\n`,
+        `compositions-check: 4 platforms, ${manifest.capabilities.length} capabilities, ${claimed.size} crates checked, 0 findings\n`,
     )
     expect(code).toBe(0)
   })
@@ -87,7 +91,7 @@ describe('a tree with crates', () => {
     const { code, out } = run(['--root', root])
     expect(out).toBe(
       'note: src-tauri/crates/tauri-plugin-orphan is claimed by no manifest entry — its features, registration and grants are not checked\n' +
-        'compositions-check: 3 platforms, 2 capabilities, 2 crates checked, 0 findings\n',
+        'compositions-check: 4 platforms, 2 capabilities, 2 crates checked, 0 findings\n',
     )
     expect(code).toBe(0)
   })
@@ -96,6 +100,7 @@ describe('a tree with crates', () => {
     const root = fixture({
       // composition drift: android forgets peer; desktop adds mob
       'src/app/composition.android.ts': 'export const capabilities = []\n',
+      'src/app/composition.web.ts': 'export const capabilities = []\n',
       'src/app/composition.desktop.ts': "import { peer } from '../capabilities/peer'\nimport { mob } from '../capabilities/mob'\nexport const capabilities = [peer, mob]\n",
       // Rust drift: mob forwarded on android too; peer not registered; peer:default not granted
       'src-tauri/Cargo.toml':
@@ -118,7 +123,7 @@ describe('a tree with crates', () => {
       'note:',
       'compositions-check:',
     ])
-    expect(lines[lines.length - 1]).toBe('compositions-check: 3 platforms, 2 capabilities, 2 crates checked, 7 findings')
+    expect(lines[lines.length - 1]).toBe('compositions-check: 4 platforms, 2 capabilities, 2 crates checked, 7 findings')
     expect(code).toBe(1)
   })
 
@@ -144,7 +149,7 @@ describe('the helpers', () => {
     expect(listCrates(join(root, 'nowhere'))).toEqual([])
     expect(loadManifest(root).manifest.capabilities).toHaveLength(2)
     expect(loadManifest(join(root, 'nowhere')).error).toContain('cannot read')
-    expect(formatSummary(checkCompositions(root).summary)).toBe('compositions-check: 3 platforms, 2 capabilities, 2 crates checked, 0 findings')
+    expect(formatSummary(checkCompositions(root).summary)).toBe('compositions-check: 4 platforms, 2 capabilities, 2 crates checked, 0 findings')
     expect(() => checkCompositions(join(root, 'nowhere'))).toThrow(/cannot read/)
     expect(checkCompositions(REPO_ROOT).findings).toEqual([])
   })

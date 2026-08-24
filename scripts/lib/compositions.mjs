@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { PLATFORMS } from './architecture.mjs'
+import { NATIVE_PLATFORMS, PLATFORMS } from './architecture.mjs'
 import { dependenciesOfFeature, dependencyForCrate, readCargoManifest, rustName } from './cargo.mjs'
 
 /**
@@ -36,6 +36,12 @@ import { dependenciesOfFeature, dependencyForCrate, readCargoManifest, rustName 
 export function platformFromTauriEnv(value) {
   if (value === 'ios') return 'ios'
   if (value === 'android' || value === 'androideabi') return 'android'
+  /* `web` IS NOT A TAURI TARGET, so the Tauri CLI never sets this to it. The
+   * browser-client build sets it by hand — `pnpm build:web` — exactly as
+   * `build:ios` does, and the value is honoured here rather than being made a
+   * special case in the plugin. Everything else, including unset, is a desktop
+   * build; that default is load-bearing for `pnpm dev`. */
+  if (value === 'web') return 'web'
   return 'desktop'
 }
 
@@ -396,10 +402,18 @@ export function checkRustSurfaces(manifest, files) {
           finding('CRATE_DEP_ABSENT', where, `src-tauri/Cargo.toml has no [dependencies] entry with path = "crates/${entry.crate}"`),
         )
       } else {
+        /* NATIVE platforms only, on both sides of the comparison.
+         *
+         * A crate is compiled by a Cargo feature, and `web` has none because
+         * the browser client compiles no Rust at all. Comparing against every
+         * platform made an UNCONDITIONAL dependency look wrong the moment
+         * `web` was added — `tauri-plugin-peer` is compiled for every target
+         * that has targets, and the checker read that as "every platform
+         * including the one with no compiler". */
         const compiled = dep.optional
-          ? PLATFORMS.filter((p) => dependenciesOfFeature(p, cargo).has(dep.name))
-          : [...PLATFORMS]
-        const want = PLATFORMS.filter((p) => entry.platforms.includes(p))
+          ? NATIVE_PLATFORMS.filter((p) => dependenciesOfFeature(p, cargo).has(dep.name))
+          : [...NATIVE_PLATFORMS]
+        const want = NATIVE_PLATFORMS.filter((p) => entry.platforms.includes(p))
         if (compiled.join(',') !== want.join(',')) {
           const how = dep.optional ? `the [features] forward it on [${compiled.join(', ')}]` : 'it is unconditional, so every platform compiles it'
           findings.push(
