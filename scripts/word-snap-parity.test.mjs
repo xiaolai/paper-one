@@ -236,6 +236,26 @@ describe('word-snap-parity — the script', () => {
     expect(err).toMatch(/"offset": ?4/)
   })
 
+  /*
+   * The staleness comparing IDs could not see, and the reason this check exists
+   * in both harnesses rather than one: a report from an older corpus whose row
+   * kept its id while its strings moved underneath it. It agrees on every id,
+   * and it can agree on the snapped answer by luck.
+   */
+  it('exits non-zero when a row kept its id but changed underneath', () => {
+    const local = JSON.parse(run(['--check']).out)
+    const tampered = structuredClone(local)
+    const target = tampered.rows.find((row) => row.id === 'expand-both-edges')
+    target.strs = ['the quick brown cat']
+
+    const path = tempFile('restated.json', JSON.stringify(tampered))
+    const { code, err } = run(['--compare', path])
+
+    expect(code).not.toBe(0)
+    expect(err).toMatch(/DIFFERENT version of this row/)
+    expect(err).toContain('expand-both-edges')
+  })
+
   it('exits non-zero when the report was produced from a different corpus', () => {
     const local = JSON.parse(run(['--check']).out)
     const short = { ...local, rows: local.rows.slice(1), total: local.total - 1 }
