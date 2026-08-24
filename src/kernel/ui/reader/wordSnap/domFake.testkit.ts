@@ -34,8 +34,14 @@
  *    element — which is what the bounded-walk case asserts against. A visit
  *    count is the honest observable there; a wall-clock threshold is flaky and
  *    proves nothing on a loaded machine.
+ * 6. **Keeps namespaced attributes apart from literal ones.** `getAttributeNS`
+ *    answers only what a fixture declared as namespaced, and `getAttribute`
+ *    only what it declared literally. That is the difference between a book
+ *    foliate parsed as XHTML and one it had to reparse as `text/html`, and an
+ *    implementation reading one spelling is a live defect — see
+ *    `ElementOptions.namespaced`.
  *
- * `domFake.test.ts` asserts all five, because a fake that quietly stopped
+ * `domFake.test.ts` asserts all six, because a fake that quietly stopped
  * doing any of them would leave every case that depends on it green and
  * vacuous, and nothing else in the suite would notice.
  *
@@ -86,6 +92,27 @@ export interface ElementOptions {
   readonly display?: string
   readonly visibility?: string
   readonly position?: string
+  /**
+   * Attributes under their LITERAL, qualified names — what `getAttribute`
+   * answers, and all an HTML parser leaves behind.
+   */
+  readonly attributes?: Readonly<Record<string, string>>
+  /**
+   * Attributes an XML parser put in a namespace, keyed `<namespace>|<local>` —
+   * what `getAttributeNS` answers, and NOTHING ELSE answers it.
+   *
+   * The two are declared separately on purpose, because in this repository
+   * they genuinely come apart and an implementation that reads only one of
+   * them is a live defect. foliate reparses invalid XHTML as `text/html`, and
+   * an HTML parser has no namespaces to put `epub:type` in — measured on the
+   * same markup, `getAttributeNS(OPS,'type')` is `null` under `text/html` and
+   * `"noteref"` under `application/xhtml+xml`, while `getAttribute('epub:type')`
+   * is `"noteref"` under both. A fake that answered `getAttributeNS` out of the
+   * literal table would make the HTML case indistinguishable from the XHTML
+   * one, and certify exactly the bug it exists to catch. So a fixture states
+   * both facts or it states one, and the reader has to cope with what it says.
+   */
+  readonly namespaced?: Readonly<Record<string, string>>
 }
 
 export function txt(data: string): Spec {
@@ -198,6 +225,17 @@ class FakeElement extends FakeNode {
 
   protected override get rawNodeType(): number {
     return ELEMENT_NODE
+  }
+
+  /** The literal, qualified name — all an HTML parser leaves behind. */
+  getAttribute(name: string): string | null {
+    return this.options.attributes?.[name] ?? null
+  }
+
+  /** The namespaced spelling, and ONLY that — see `ElementOptions.namespaced`
+   *  for why this must not fall back to the literal table. */
+  getAttributeNS(namespace: string, local: string): string | null {
+    return this.options.namespaced?.[`${namespace}|${local}`] ?? null
   }
 }
 
