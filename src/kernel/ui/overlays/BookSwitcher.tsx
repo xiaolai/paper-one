@@ -13,12 +13,12 @@ import styles from './Overlay.module.css'
  *
  * It lists books this reader has actually opened, not a fixture shelf.
  *
- * EVERY ROW OPENS. It used to be thin for a reason that no longer exists: a book
- * picked or dropped as a File could not be reopened, because a File is a handle
- * to bytes granted for one session — so those rows were shown but disabled, with
- * the reason stated. Paper now keeps its own copy of every book in the book's own
- * folder, so there is no such thing as a row that cannot be opened, and the
- * disabled state, its explanation and the concept behind them are all gone.
+ * ALMOST EVERY ROW OPENS. It used to be thin for a reason that no longer exists:
+ * a book picked or dropped as a File could not be reopened, because a File is a
+ * handle to bytes granted for one session — so those rows were shown but disabled,
+ * with the reason stated. Paper keeps its own copy of every book in the book's own
+ * folder now, so THAT reason is gone; what remains is a book whose bytes are not
+ * on this device, which is disabled here and says why in its `title`.
  *
  * It stays GLOBAL, and deliberately: this is navigation, not browsing. A reader
  * reaching for it wants any book, not any book within whatever tag the shelf
@@ -97,10 +97,20 @@ export function BookSwitcher({
                  * and failed — with the explanation appearing on the Library
                  * screen, which is not the screen the reader is looking at. A
                  * row that cannot open should say so where it is. */
-                disabled={isCurrent || !canOpen(book)}
+                /* `aria-disabled`, NOT `disabled`. A disabled button is
+                   removed from the tab order, so the row's explanation — the
+                   whole point of showing it rather than hiding it — was
+                   unreachable by the readers most likely to need it: a
+                   keyboard user could not land on the row, and a screen
+                   reader announced nothing. Marked unavailable and left
+                   focusable, with the click guarded instead. */
+                aria-disabled={isCurrent || !canOpen(book)}
                 data-disabled={isCurrent || !canOpen(book)}
                 title={isCurrent ? 'Already open' : canOpen(book) ? undefined : cannotOpenReason(book, bookActions)}
-                onClick={() => onOpen(book)}
+                onClick={() => {
+                  if (isCurrent || !canOpen(book)) return
+                  onOpen(book)
+                }}
               >
                 <span
                   className={styles.cover}

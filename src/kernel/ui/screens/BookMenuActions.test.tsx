@@ -78,7 +78,10 @@ describe("a book's own menu", () => {
     const onSetFinished = vi.fn()
     render(<Library {...shelf} books={[book({ finished: true })]} onSetFinished={onSetFinished} />)
     openMenu()
-    fireEvent.click(screen.getByRole('menuitem', { name: /not finished|unfinished|Mark as unread/i }))
+    /* ONE EXACT LABEL. A regex offering three alternatives passed whichever
+       the menu happened to say, so the wrong word for this state — a book
+       with no saved position — could not have been caught. */
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Mark as unread' }))
     expect(onSetFinished).toHaveBeenCalledWith('bk1', false)
   })
 

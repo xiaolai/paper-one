@@ -946,6 +946,18 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
    * the disk did not give. The disk is the answer; this only shows it.
    */
   const [trashRows, setTrashRows] = useState<readonly TrashedBook[] | null>(null)
+  /* WHY IT COULD NOT BE READ, kept apart from "there is nothing in it".
+     `listTrash` throws for a trash directory that exists and will not read —
+     on purpose, so unreadable is never reported as empty — and turning that
+     into `[]` put "Nothing removed" in front of a reader whose book was
+     sitting right there. */
+  const [trashError, setTrashError] = useState<string | null>(null)
+  /* A SECOND SLOT, because one could not hold both. A restore reported its
+     failure into `trashError` and then refreshed the list, and the refresh
+     begins by clearing that field — so the message a reader needed was gone
+     in the same tick it was written. Each slot is owned by exactly one
+     thing: the list read clears its own, the action clears its own. */
+  const [restoreError, setRestoreError] = useState<string | null>(null)
   /* ONE NOW FOR THE WHOLE SHEET, read when it opens. A hundred rows each
      calling `Date.now()` would be a hundred slightly different nows, and two
      books removed in the same second could report different days left. The
@@ -953,24 +965,36 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
      because the shelf recomputes on a minute tick and a fortnight does not
      need one. */
   const [trashNow, setTrashNow] = useState(0)
+  /* WHICH SCAN IS ALLOWED TO ANSWER. `readTrash` returns a cleanup that the
+     effect uses, and the post-restore call discarded it — so an older scan
+     could still be in flight across a close-and-reopen and overwrite the
+     newer one's rows. A counter settles it without the caller having to
+     remember a cleanup it has nowhere to put. */
+  const trashScan = useRef(0)
   const readTrash = useCallback(() => {
     if (!fs) {
       setTrashRows([])
+      setTrashError(null)
       return
     }
+    const scan = ++trashScan.current
     let live = true
+    setTrashError(null)
     void listTrash(fs)
       .then((rows) => {
-        if (!live) return
+        if (!live || scan !== trashScan.current) return
         /* Newest first — the book a reader came here for is the one they just
-           lost, and it is almost never at the bottom of a fortnight's list. */
-        setTrashRows([...rows].sort((a, b) => (b.removedAt ?? 0) - (a.removedAt ?? 0)))
+           lost, and it is almost never at the bottom of a fortnight's list.
+           An entry with no readable stamp sorts last rather than as 1970: it
+           is not old, it is unknown. */
+        setTrashRows(
+          [...rows].sort((a, b) => (b.removedAt ?? -Infinity) - (a.removedAt ?? -Infinity)),
+        )
       })
-      .catch(() => {
-        /* An unreadable trash is not an empty one, but there is nothing a
-           reader can do with the distinction here; the empty state says what
-           the room is for either way, and `listTrash` already reports. */
-        if (live) setTrashRows([])
+      .catch((thrown: unknown) => {
+        if (!live || scan !== trashScan.current) return
+        setTrashRows([])
+        setTrashError(thrown instanceof Error ? thrown.message : String(thrown))
       })
     return () => {
       live = false
@@ -980,18 +1004,44 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
   useEffect(() => {
     if (!state.trashOpen) return
     setTrashRows(null)
+    setTrashError(null)
+    setRestoreError(null)
     setTrashNow(Date.now())
     return readTrash()
   }, [state.trashOpen, readTrash])
 
   const restoreBook = useCallback(
     (bookId: string) => {
-      void services.library.restore(bookId).then(() => {
-        readTrash()
-        /* The shelf learns about it the same way it learns about any other
-           change to the store — through the library subscription — so nothing
-           here has to put the row back by hand. */
-      })
+      /* RETURNED, so the row can disable itself while this runs — and CAUGHT,
+         because `restore` rejects on a filesystem fault and an unhandled
+         rejection was a button that reported nothing either way: the row
+         stayed, the book did not come back, and the only trace was in the
+         console. The message goes where the list's own failure goes. */
+      setRestoreError(null)
+      return services.library
+        .restore(bookId)
+        .then((outcome) => {
+          /* A PARTIAL RESTORE IS NOT A SUCCESS. `restoreBook` moves file by
+             file and a name already live wins, so some of the book can come
+             back while the rest stays behind; saying nothing would leave the
+             reader believing they had it. */
+          if (outcome.state === 'partial') {
+            setRestoreError('Some of that book could not be moved back. It is still here.')
+          } else if (outcome.state === 'absent') {
+            setRestoreError('That book is no longer in the trash.')
+          }
+        })
+        .catch((thrown: unknown) => {
+          setRestoreError(thrown instanceof Error ? thrown.message : String(thrown))
+        })
+        .finally(() => {
+          /* The shelf learns about the restore itself through the library
+             subscription; this is only the trash list catching up. The
+             cleanup is discarded on purpose — `trashScan` is what stops a
+             superseded read from answering, and there is nowhere here to hang
+             an unsubscribe. */
+          void readTrash()
+        })
     },
     [services.library, readTrash],
   )
@@ -1698,6 +1748,30 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
                 bookActions={composition.bookActions}
               />
             )}
+            {/* REMOVED BOOKS, over the shelf. On the library screen only:
+                it lists what this device removed, and the shelf is where a
+                reader notices one missing. Reached from ⌘K — "Removed books…",
+                which also answers to deleted, restore and undo.
+
+                IN `overlays`, WITH THE OTHER LAYERS, not beside `<Library>` in
+                the shell's children. `WindowShell` marks that subtree `inert`
+                when the pane is open on a narrow window — so the sheet
+                rendered, took the scrim, and could not be clicked or focused,
+                on the one surface whose entire purpose is a button that undoes
+                a deletion. The jsdom tests could not see it: they mount the
+                sheet directly and never build the shell around it. */}
+            {state.screen === 'library' && state.trashOpen && (
+              <TrashSheet
+                rows={trashRows ?? []}
+                loading={trashRows === null}
+                /* The action's word wins: it is the newer answer, and it is
+                   the one the reader just asked for. */
+                error={restoreError ?? trashError}
+                now={trashNow}
+                onRestore={restoreBook}
+                onDismiss={() => dispatch({ type: 'closeLayer', layer: 'trashOpen' })}
+              />
+            )}
             {/* The tag editor over the book being read — ⌘T. The same box the
                 shelf opens over a card, in a sheet, because in the reader
                 there is no card to hang it from. */}
@@ -1828,19 +1902,6 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
           />
         )}
 
-        {/* REMOVED BOOKS, over the shelf. On the library screen only: it lists
-            what this device removed, and the shelf is where a reader notices
-            one missing. Reached from ⌘K — "Removed books…", which also answers
-            to deleted, restore and undo. */}
-        {state.screen === 'library' && state.trashOpen && (
-          <TrashSheet
-            rows={trashRows ?? []}
-            loading={trashRows === null}
-            now={trashNow}
-            onRestore={restoreBook}
-            onDismiss={() => dispatch({ type: 'closeLayer', layer: 'trashOpen' })}
-          />
-        )}
       </WindowShell>
 
     </>

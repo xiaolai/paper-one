@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BookCell, readSelectClick } from './BookCell'
 import { CANNOT_OPEN, CANNOT_OPEN_FETCHABLE } from '../../core/library'
 import type { BookAction } from '../../core/capability'
 import { BookRow } from './BookRow'
+import { Library } from './Library'
 import type { IndexedBook } from '../../core/bookIndex'
 
 /**
@@ -270,10 +271,130 @@ describe('the corner mark on a book with no bytes here', () => {
     expect(onSelect).not.toHaveBeenCalled()
   })
 
+  it('will not take a second press while the first is still running', () => {
+    /* The capability coalesces duplicate downloads, but a control that keeps
+       accepting clicks while doing the thing it was clicked for reads as one
+       that did not hear the first. */
+    let release = () => {}
+    const run = vi.fn(() => new Promise<void>((resolve) => { release = resolve }))
+    const { container } = render(
+      <BookCell {...shared} setQuery={vi.fn()} book={noBytes()} actions={[{ ...downloadAction, run }]} />,
+    )
+    const mark = container.querySelector('[class*="noCopy"]') as HTMLButtonElement
+    fireEvent.click(mark)
+    expect(run).toHaveBeenCalledTimes(1)
+    expect(mark.disabled).toBe(true)
+    fireEvent.click(mark)
+    expect(run).toHaveBeenCalledTimes(1)
+    release()
+  })
+
+  it('comes back when the action fails before it returns a promise', async () => {
+    /* A SYNCHRONOUS throw never reaches `.finally`, so the button stayed
+       disabled for the life of the card — the reader's only route to the
+       bytes, dead, because the failure was too early. */
+    const run = vi.fn(() => {
+      throw new Error('no session')
+    })
+    const { container } = render(
+      <BookCell {...shared} setQuery={vi.fn()} book={noBytes()} actions={[{ ...downloadAction, run }]} />,
+    )
+    const mark = container.querySelector('[class*="noCopy"]') as HTMLButtonElement
+    /* The control must come back whichever way the action failed, and a
+       synchronous throw is the one that used to escape `.finally`. Reporting
+       belongs to the action — sync's download sets `degraded` — so what is
+       asserted here is the button, not the message. */
+    fireEvent.click(mark)
+    expect(run).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(mark.disabled, 'the control released itself').toBe(false))
+  })
+
   it('still says it in words, for a reader who cannot see the glyph', () => {
     /* An `svg` with a `title` attribute is announced by no screen reader, and
        this is the button's whole accessible name. */
     render(<BookCell {...shared} setQuery={vi.fn()} book={noBytes()} actions={[downloadAction]} />)
     expect(screen.getByText(oneLine(CANNOT_OPEN_FETCHABLE))).toBeTruthy()
+  })
+})
+
+describe('extending a selection across the shelf', () => {
+  /* `readSelectClick` only decides that ⇧ MEANS range. What a range IS — the
+     anchor, the two indices, the slice, and what happens with no anchor —
+     lives in `Library.select` and nothing exercised it, so a reversed range,
+     a missing anchor or an off-by-one could regress silently. Driven through
+     the shelf, because the indices are into the shelf AS SHOWN: whatever the
+     sort and filter have made of it, not the order the books arrived in. */
+  /* Authors share no letter with the queried one, so a filter test narrows by
+     TITLE and the shelf actually shrinks. */
+  const shelfBooks = [
+    book({ bookId: 'a', title: 'Anna', author: 'Zed' }),
+    book({ bookId: 'b', title: 'Bede', author: 'Zed' }),
+    book({ bookId: 'c', title: 'Cato', author: 'Zed' }),
+    book({ bookId: 'd', title: 'Dido', author: 'Zed' }),
+  ]
+
+  const shelf = {
+    books: shelfBooks,
+    platform: 'macos',
+    onOpen: vi.fn(),
+    onAddBooks: vi.fn(),
+    onRemove: vi.fn(),
+    onTagBooks: vi.fn(),
+    onUntagBooks: vi.fn(),
+    lastRemoval: null,
+    onUndoRemoveTag: vi.fn(),
+    onSetFinished: vi.fn(),
+    onAddFolder: vi.fn(),
+    importing: null,
+    enriching: 0,
+    importNotice: null,
+    libraryQuery: '',
+    onQueryChange: vi.fn(),
+    bookActions: [],
+    bookStatuses: [],
+  } as const
+
+  const selected = () =>
+    [...document.querySelectorAll('[title^="Deselect "]')].map((el) =>
+      el.getAttribute('title')?.replace('Deselect ', ''),
+    )
+
+  it('takes everything between the anchor and the click', () => {
+    render(<Library {...shelf} />)
+    fireEvent.click(screen.getByTitle('Open Anna'), { metaKey: true })
+    /* An UNselected card offers "Select" while a selection is running; only
+       the ones already in say "Deselect". */
+    fireEvent.click(screen.getByTitle('Select Cato'), { shiftKey: true })
+    expect(selected()).toEqual(['Anna', 'Bede', 'Cato'])
+  })
+
+  it('runs backwards just as well', () => {
+    /* `Math.min`/`Math.max` are what make this true; a naive slice from the
+       anchor forwards selects nothing when the reader clicks upwards. */
+    render(<Library {...shelf} />)
+    fireEvent.click(screen.getByTitle('Open Dido'), { metaKey: true })
+    fireEvent.click(screen.getByTitle('Select Bede'), { shiftKey: true })
+    expect(selected()).toEqual(['Bede', 'Cato', 'Dido'])
+  })
+
+  it('is a plain toggle when there is no anchor to run from', () => {
+    /* The documented fallback. Without it the first ⇧-click on a fresh shelf
+       does nothing at all, which reads as a broken modifier. */
+    render(<Library {...shelf} />)
+    fireEvent.click(screen.getByTitle('Open Cato'), { shiftKey: true })
+    expect(selected()).toEqual(['Cato'])
+  })
+
+  it('extends across the shelf AS SHOWN, not as it was given', () => {
+    /* The indices are into the filtered shelf. A range computed against the
+       unfiltered list would select books the reader cannot see. */
+    render(<Library {...shelf} libraryQuery="a" />)
+    const shown = [...document.querySelectorAll('[title^="Open "]')].map((el) =>
+      el.getAttribute('title')?.replace('Open ', ''),
+    )
+    expect(shown.length, 'the query narrowed the shelf').toBeLessThan(shelfBooks.length)
+    fireEvent.click(screen.getByTitle(`Open ${shown[0]}`), { metaKey: true })
+    fireEvent.click(screen.getByTitle(`Select ${shown[shown.length - 1]}`), { shiftKey: true })
+    expect(selected()).toEqual(shown)
   })
 })

@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { TrashSheet } from './TrashSheet'
-import type { TrashedBook } from '../../core/bookTrash'
+import { TRASH_KEPT_FOR, type TrashedBook } from '../../core/bookTrash'
 
 /**
  * THE SURFACE THAT KEEPS A PROMISE THE APP WAS ALREADY MAKING.
@@ -32,7 +32,7 @@ const row = (over: Partial<TrashedBook> = {}): TrashedBook => ({
 
 const NOW = 1_700_000_000_000 + 24 * 60 * 60 * 1000
 
-const shared = { loading: false, onRestore: vi.fn(), onDismiss: vi.fn(), now: NOW } as const
+const shared = { loading: false, error: null, onRestore: vi.fn(), onDismiss: vi.fn(), now: NOW } as const
 
 describe('the removed-books sheet', () => {
   it('lists what was removed, with how long is left to change your mind', () => {
@@ -108,6 +108,79 @@ describe('the removed-books sheet', () => {
     expect(scrim).toBeTruthy()
     fireEvent.pointerDown(scrim!, { isPrimary: true, button: 0 })
     expect(onDismiss).toHaveBeenCalled()
+  })
+
+  it('says a read FAILED rather than that the trash is empty', () => {
+    /* `listTrash` throws for a trash that exists and will not read — on
+       purpose, so unreadable is never reported as empty. Collapsing that into
+       "Nothing removed" tells a reader their book is gone on the one surface
+       built to get it back. */
+    render(<TrashSheet {...shared} rows={[]} error="EACCES" />)
+    expect(screen.getByText(/could not be read/)).toBeTruthy()
+    expect(screen.queryByText(/Nothing removed/)).toBeNull()
+  })
+
+  it('names a book whose record could not be read', () => {
+    /* `listTrash` returns an empty title for an unreadable `book.json`, which
+       is one of the reasons a book needs rescuing in the first place. The old
+       row was blank above a button reading "Put  back in the library". */
+    render(<TrashSheet {...shared} rows={[row({ title: '', folder: 'bad-blood' })]} />)
+    expect(screen.getByText('bad-blood')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Restore bad-blood' })).toBeTruthy()
+  })
+
+  it('gives each restore button the book\'s name, not just "Restore"', () => {
+    /* Every button had the same accessible name, so a screen-reader user
+       could not tell which book they were about to put back. */
+    render(
+      <TrashSheet
+        {...shared}
+        rows={[row(), row({ bookId: 'bk2', title: 'Seeing Like a State', folder: 'seeing' })]}
+      />,
+    )
+    expect(screen.getByRole('button', { name: 'Restore Bad Blood' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Restore Seeing Like a State' })).toBeTruthy()
+  })
+
+  it('takes the retention window from the constant that governs the sweep', () => {
+    /* `TRASH_KEPT_FOR` exists precisely to stop this copy drifting from
+       `TRASH_DAYS`, and the empty state had "two weeks" typed into it. */
+    render(<TrashSheet {...shared} rows={[]} />)
+    expect(screen.getByText(new RegExp(TRASH_KEPT_FOR))).toBeTruthy()
+  })
+
+  it('shows the row working, and refuses a second press', async () => {
+    /* A restore moves a folder file by file — slow and fallible — and the
+       button used to be fire-and-forget, so a reader with a large book
+       pressed a control that looked untouched and pressed it again. */
+    let release = () => {}
+    const onRestore = vi.fn(() => new Promise<void>((resolve) => { release = resolve }))
+    render(<TrashSheet {...shared} rows={[row()]} onRestore={onRestore} />)
+    const button = screen.getByRole('button', { name: 'Restore Bad Blood' })
+    fireEvent.click(button)
+    expect(onRestore).toHaveBeenCalledTimes(1)
+    expect(screen.getByText('Restoring…')).toBeTruthy()
+    fireEvent.click(button)
+    expect(onRestore).toHaveBeenCalledTimes(1)
+    release()
+    await waitFor(() => expect(screen.getByText('Restore')).toBeTruthy())
+  })
+
+  it('gives the row back when the restore fails', async () => {
+    /* Both failure shapes. A dead button on the surface that exists to undo a
+       deletion is the worst place to leave one. */
+    for (const failing of [
+      () => Promise.reject(new Error('EIO')),
+      () => {
+        throw new Error('EIO')
+      },
+    ]) {
+      render(<TrashSheet {...shared} rows={[row()]} onRestore={failing} />)
+      const button = screen.getByRole('button', { name: 'Restore Bad Blood' }) as HTMLButtonElement
+      fireEvent.click(button)
+      await waitFor(() => expect(button.disabled, 'the row let go').toBe(false))
+      cleanup()
+    }
   })
 
   it('announces itself as a dialog, named', () => {

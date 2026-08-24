@@ -84,10 +84,25 @@ const NOT_THE_FLOW = 'blockquote, aside, figure, figcaption, table, li, dd, dt, 
  * once at load, before the reader's measure is settled. The wrinkle is visible
  * and self-explanatory; a silently-skipped drop cap is not.
  */
-export function openingParagraph(body: Element): Element | null {
+export function openingParagraph(
+  body: Element,
+  /**
+   * An extra test the paragraph must pass, beyond being in the flow and not
+   * empty.
+   *
+   * THE STRUCTURAL ANSWER IS NOT THE TYPOGRAPHIC ONE. Without this, the first
+   * `<p>` won outright — so a centred dedication, an epigraph or a chapter
+   * number took the drop cap, which is the one place a sunk capital can never
+   * belong. The walk passes "did I call this prose", and the search FALLS
+   * THROUGH to the paragraph that qualifies rather than giving up on the
+   * first that does not.
+   */
+  accepts: (p: Element) => boolean = () => true,
+): Element | null {
   for (const p of body.querySelectorAll('p')) {
     if (p.closest(NOT_THE_FLOW)) continue
     if ((p.textContent ?? '').trim() === '') continue
+    if (!accepts(p)) continue
     return p
   }
   return null
@@ -99,12 +114,16 @@ export function openingParagraph(body: Element): Element | null {
  * False when the book already draws its own initial — see `InitialStyle` for
  * why that has to be decided here rather than in the stylesheet.
  *
- * BOTH SIGNALS, not either alone. A float with no size change is a book raising
+ * EITHER SIGNAL IS ENOUGH — both are inspected, and one alone answers yes.
+ * (This said "BOTH SIGNALS, not either alone", which the examples below and
+ * the `||` beneath them both contradict.) A float with no size change is a book raising
  * a normal-size letter out of the flow; a size change with no float is a book
  * setting a raised initial. Each is the book composing its own opening, and
  * Paper's belongs in neither.
  */
 export function booksOwnInitial(paragraphFontSize: string, initial: InitialStyle): boolean {
+  const sunk = (initial.initialLetter ?? '').trim()
+  if (sunk !== '' && sunk !== 'normal') return true
   return initial.float !== 'none' || initial.fontSize !== paragraphFontSize
 }
 
@@ -145,6 +164,18 @@ export interface InitialStyle {
   readonly fontSize: string
   /** `none` unless the book floats the letter, which is the drop-cap model. */
   readonly float: string
+  /**
+   * `initial-letter`, the property that exists for exactly this.
+   *
+   * THE THIRD SIGNAL, and the one a book written after 2020 is most likely to
+   * use: it sinks a capital without floating it or changing `font-size`, so a
+   * book composing a perfectly good drop cap read as composing nothing and
+   * got Paper's flourish merged on top of its own. WebKit still wants the
+   * prefix, which is why both are asked for and either counts.
+   *
+   * Absent or `normal` means the book is not using it.
+   */
+  readonly initialLetter?: string
 }
 
 /**
@@ -213,6 +244,20 @@ export function markProse(doc: Document, readStyle?: StyleReader, readInitial?: 
       return booksOwnInitial(win.getComputedStyle(el).fontSize, {
         fontSize: style.fontSize,
         float: style.float,
+        /* `getPropertyValue` rather than a typed field: `initial-letter` is
+           not in every lib.dom, and WebKit answers on the prefix. */
+        /* EITHER, AND `normal` IS NOT AN ANSWER. `a || b` let a standard
+           value of `normal` — truthy — mask a prefixed value that said the
+           book DOES sink its capital, which is the arrangement WebKit
+           actually produces. */
+        initialLetter:
+          [
+            style.getPropertyValue('initial-letter'),
+            style.getPropertyValue('-webkit-initial-letter'),
+          ].find((value) => {
+            const said = (value ?? '').trim()
+            return said !== '' && said !== 'normal'
+          }) ?? '',
       })
     })
 
@@ -245,6 +290,13 @@ export function markProse(doc: Document, readStyle?: StyleReader, readInitial?: 
    * NOT MARKED WHEN THE BOOK COMPOSES ITS OWN OPENING — see `InitialStyle`.
    * That is WI-14.4's before-tier rule ("a book that states a view goes on
    * winning") enforced at the only place the cascade leaves open. */
-  const opening = openingParagraph(body)
+  /* AND IT HAS TO BE PROSE. `openingParagraph` answers a STRUCTURAL question —
+     the first non-empty `<p>` outside the furniture — which is not the same as
+     the typographic one the loop above just settled. A centred dedication, an
+     epigraph or a chapter number is rejected as prose and was still the first
+     paragraph, so it got Paper's drop cap: a sunk capital on a centred line,
+     which is the one place it can never belong. */
+  const isProse = new Set(prose)
+  const opening = openingParagraph(body, (p) => isProse.has(p))
   if (opening && !composed(opening)) opening.setAttribute('data-paper-opening', '')
 }

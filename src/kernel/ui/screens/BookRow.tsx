@@ -78,6 +78,21 @@ export interface BookRowProps {
 }
 
 
+/**
+ * The bar's width for a capability-supplied fraction, or null for no bar.
+ *
+ * A CONTRIBUTION IS UNTRUSTED INPUT to the kernel. This multiplied whatever
+ * arrived by 100 and wrote it into `inline-size`, so a capability computing
+ * `received / total` with a zero total produced `NaN%`, a resumed transfer
+ * counting bytes already on disk produced more than 100%, and either rendered
+ * as a broken row rather than as the capability's bug. Non-finite means "no
+ * bar", which is the same answer an absent fraction gets.
+ */
+function barWidth(fraction: number | undefined): number | null {
+  if (fraction === undefined || !Number.isFinite(fraction)) return null
+  return Math.round(Math.min(1, Math.max(0, fraction)) * 100)
+}
+
 export function BookRow({
   book,
   now,
@@ -225,11 +240,11 @@ export function BookRow({
         <span className={styles.rowProgress}>
           {activity ? (
             <>
-              {activity.fraction === undefined ? null : (
+              {barWidth(activity.fraction) === null ? null : (
                 <span className={styles.rowBar} aria-hidden="true">
                   <span
                     className={styles.rowBarFill}
-                    style={{ inlineSize: `${Math.round(activity.fraction * 100)}%` }}
+                    style={{ inlineSize: `${barWidth(activity.fraction)}%` }}
                   />
                 </span>
               )}

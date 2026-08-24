@@ -172,7 +172,11 @@ describe('the blend group Paper draws around the book', () => {
     const found = foliateSource(file)
       .split('\n')
       .map((line, i) => [i + 1, line] as const)
-      .filter(([, line]) => /z-index/i.test(line))
+      /* BOTH SPELLINGS. foliate is JavaScript, where the style API's name is
+         `zIndex` — so a guard matching only the CSS `z-index` had a hole
+         exactly where a rebase would put one, and would have passed a
+         `element.style.zIndex = '1'` without a word. */
+      .filter(([, line]) => /z-?index/i.test(line))
       .map(([n, line]) => `${file}:${n}: ${line.trim()}`)
     /* Reported with the lines rather than as a count: if this ever fires, the
        question is whether that z-index needed to escape the book, and that is

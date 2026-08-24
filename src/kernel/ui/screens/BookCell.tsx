@@ -1,4 +1,4 @@
-import { useMemo, useRef, type DragEvent, type MouseEvent } from 'react'
+import { useMemo, useRef, useState, type DragEvent, type MouseEvent } from 'react'
 import { Check, CloudDownload, MoreHorizontal } from 'lucide-react'
 import {
   cannotOpenReason,
@@ -130,7 +130,9 @@ export function BookCell({
   const status = statusOf(book)
   const menuOpen = menuFor === book.bookId
   const editing = tagging === book.bookId
-  /* ANCHORED TO THE CARD, NOT TO THE BUTTON. The ellipsis is a 24px mark at
+  /* ANCHORED TO THE BUTTON, NOT TO THE CARD — the opposite of what this
+   * comment used to open with, and of what the code did before the
+   * measurement below. The ellipsis is a 24px mark at
    * the card's far right; anchored to it, a menu that has to flip to `start`
    * on the first column lands with its left edge on the button's left — 100px
    * in from the cover, hanging in the middle of nothing, and the reader asked
@@ -235,6 +237,8 @@ export function BookCell({
    * list; MEMOIZED, or a fresh `[book]` on every shelf render invalidates
    * every books-keyed memo inside it. */
   const editorBooks = useMemo(() => [book], [book])
+  /* Whether this card's fetch is in flight — see the corner mark below. */
+  const [fetching, setFetching] = useState(false)
 
   return (
     <div
@@ -282,11 +286,12 @@ export function BookCell({
             covers — that is what a jacket is for — and a title and an author
             printed under every one restated what the artwork already says, at
             a size that could not be read without leaning in and a width that
-            truncated most of them to a fragment. Both live on the button's
-            `title`, so a hover names the book, and the tint carries the title
-            for a book that has no artwork to name it. The switcher lists
-            title and author because a LIST is read by its words; a shelf is
-            not.
+            truncated most of them to a fragment. The TITLE lives on the
+            button's `title`, so a hover names the book, and the tint carries
+            it for a book that has no artwork to name it. The author is not
+            there and does not need to be: a shelf is scanned to find a book
+            already known. The switcher lists both because a LIST is read by
+            its words; a shelf is not.
 
             One thing that used to ride on the author line stays, because it
             is a signal and not a caption: a book Paper has no copy of. */}
@@ -333,7 +338,42 @@ export function BookCell({
              is announced by neither, and this is the button's whole name. */
           const words = <span className={styles.srOnly}>{said}</span>
           return fetch ? (
-            <button type="button" className={styles.noCopy} title={said} onClick={() => void fetch.run(book.bookId)}>
+            <button
+              type="button"
+              className={styles.noCopy}
+              title={said}
+              /* DISABLED WHILE IT WORKS. Nothing else stopped a second press:
+                 the capability coalesces duplicate downloads now, but a
+                 control that keeps accepting clicks while doing the thing it
+                 was clicked for reads as one that did not hear the first. */
+              disabled={fetching}
+              aria-busy={fetching}
+              onClick={() => {
+                setFetching(true)
+                /* THE ACTION STILL STARTS SYNCHRONOUSLY — deferring it into a
+                   microtask to tidy the error handling would change when a
+                   download begins to buy nothing.
+
+                   BOTH FAILURE SHAPES RELEASE THE CONTROL. `run` is typed
+                   `void | Promise<void>`, so it can fail BEFORE returning
+                   anything, and a synchronous throw never reaches a
+                   `.finally` — which left this button disabled for the life
+                   of the card: the reader's only route to the bytes, dead,
+                   because the failure came too early.
+
+                   REPORTING IS THE ACTION'S JOB, not this button's — sync's
+                   download catches its own failure and sets `degraded`. What
+                   is caught here is only so a capability that breaks that
+                   contract cannot leave the control stuck. */
+                try {
+                  void Promise.resolve(fetch.run(book.bookId))
+                    .catch(() => {})
+                    .finally(() => setFetching(false))
+                } catch {
+                  setFetching(false)
+                }
+              }}
+            >
               {glyph}
               {words}
             </button>

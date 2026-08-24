@@ -101,6 +101,23 @@ describe('a book that draws its own initial', () => {
     expect(booksOwnInitial('21px', size('94.5px'))).toBe(true)
   })
 
+  it('is recognised by `initial-letter`, which is the property built for it', () => {
+    /* THE ONE A MODERN BOOK USES. It sinks a capital without floating it and
+       without changing `font-size`, so a book composing a perfectly good drop
+       cap read as composing nothing — and got Paper's merged on top. */
+    expect(booksOwnInitial('21px', { ...size('21px'), initialLetter: '3' })).toBe(true)
+    expect(booksOwnInitial('21px', { ...size('21px'), initialLetter: '2 3' })).toBe(true)
+  })
+
+  it('is not claimed by an `initial-letter` that says nothing', () => {
+    /* `normal` and the empty string are what a browser answers for a book
+       that never set it — treating either as a composed initial would
+       withhold the flourish from every book. */
+    expect(booksOwnInitial('21px', { ...size('21px'), initialLetter: 'normal' })).toBe(false)
+    expect(booksOwnInitial('21px', { ...size('21px'), initialLetter: '' })).toBe(false)
+    expect(booksOwnInitial('21px', { ...size('21px'), initialLetter: '  ' })).toBe(false)
+  })
+
   it('is NOT claimed when the pseudo-element merely inherits', () => {
     /* A pseudo-element with no rule of its own computes to the element's own
        values, so a book that never mentions ::first-letter answers false on
@@ -131,6 +148,22 @@ describe('the mark the walk writes', () => {
     html('<h1>One</h1><p id="first">Elizabeth knew.</p><p>Later.</p>')
     markProse(document, prose, () => true)
     expect(document.getElementById('first')?.hasAttribute('data-paper-opening')).toBe(false)
+  })
+
+  it('skips a first paragraph the walk did not call prose', () => {
+    /* A CENTRED DEDICATION IS NOT AN OPENING. `openingParagraph` answers a
+       structural question — the first non-empty `<p>` outside the furniture —
+       which is not the typographic one the walk settles. The dedication was
+       rejected as prose and was still first, so it got a sunk capital on a
+       centred line: the one place a drop cap can never belong. */
+    const centred: StyleReader = (el) =>
+      el.id === 'dedication'
+        ? { textAlign: 'center', direction: 'ltr' }
+        : { textAlign: 'justify', direction: 'ltr' }
+    html('<p id="dedication">For my mother.</p><p id="real">Elizabeth knew.</p>')
+    markProse(document, centred, () => false)
+    expect(document.getElementById('dedication')?.hasAttribute('data-paper-opening')).toBe(false)
+    expect(document.getElementById('real')?.hasAttribute('data-paper-opening')).toBe(true)
   })
 
   it('marks exactly one paragraph, whatever the chapter contains', () => {

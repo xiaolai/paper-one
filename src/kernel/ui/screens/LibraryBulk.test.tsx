@@ -77,8 +77,11 @@ describe('removing a selection', () => {
   })
 
   it('removes every book that was selected, while the shelf shrinks underneath', () => {
-    /* The shelf shrinks as each removal lands, which is what the real caller
-       does. Three books in, three out, and none left on screen. */
+    /* THE HARNESS REMOVES AS IT IS ASKED, which is what the real caller does
+       — though React batches the state updates until the handler returns, so
+       the shelf does not visibly shrink BETWEEN calls. What this pins is the
+       observable contract either way: three books in, three callbacks out,
+       none left on screen. */
     const removed: string[] = []
     function Shrinking() {
       const [books, setBooks] = useState(BOOKS)
@@ -118,7 +121,9 @@ describe('marking a selection finished', () => {
     render(<Library {...shelf} onSetFinished={onSetFinished} />)
     selectAll()
     fireEvent.click(screen.getByText('Mark as finished'))
-    expect(onSetFinished).toHaveBeenCalledTimes(3)
+    /* THE SET, not the count — calling one book three times would have
+       satisfied a count. */
+    expect(onSetFinished.mock.calls.map((c) => c[0]).sort()).toEqual(['bk1', 'bk2', 'bk3'])
     expect(onSetFinished.mock.calls.every((c) => c[1] === true)).toBe(true)
   })
 })

@@ -124,7 +124,13 @@ describe('narrowing the shelf', () => {
     const onQueryChange = vi.fn()
     render(<Library {...shelf} libraryQuery="tag:history" onQueryChange={onQueryChange} />)
     fireEvent.click(screen.getByTitle('Clear this filter'))
-    expect(onQueryChange).toHaveBeenCalled()
+    /* APPLIED, not merely called. The query is a controlled prop, so what
+       arrives is an updater — and an updater that returned the query
+       untouched would have satisfied "was called" while the chip stayed. */
+    const asked = onQueryChange.mock.calls.at(-1)![0]
+    const after = typeof asked === 'function' ? asked('tag:history') : asked
+    expect(after).not.toContain('tag:history')
+    expect(after.trim()).toBe('')
   })
 })
 
@@ -155,11 +161,25 @@ describe('the select-all accelerator', () => {
 })
 
 describe('the toolbar menus', () => {
-  it('opens the sort menu and reorders by what was picked', () => {
-    render(<Library {...shelf} />)
+  it('opens the sort menu and reorders the shelf by what was picked', () => {
+    /* THE BOOKS, not just the button. The fixtures are arranged so recency
+       and title disagree — with the old ones they happened to coincide, so a
+       menu that changed its own label and sorted nothing would have passed. */
+    const byTitle = [
+      book({ bookId: 'z', title: 'Zeno', openedAt: 3000 }),
+      book({ bookId: 'a', title: 'Anna', openedAt: 1000 }),
+    ]
+    const shown = () =>
+      [...document.querySelectorAll('[title^="Open "]')].map((el) =>
+        el.getAttribute('title')?.replace('Open ', ''),
+      )
+    render(<Library {...shelf} books={byTitle} />)
+    expect(shown(), 'most recently opened first').toEqual(['Zeno', 'Anna'])
+
     fireEvent.click(screen.getByLabelText('Sort: Recently opened'))
     fireEvent.click(screen.getByText('Title'))
     expect(screen.getByLabelText('Sort: Title')).toBeTruthy()
+    expect(shown(), 'now alphabetical').toEqual(['Anna', 'Zeno'])
   })
 
   it('offers the shelf\'s own tags and reading states to narrow by', () => {
@@ -206,7 +226,7 @@ describe('the toolbar menus', () => {
 })
 
 describe('a capability store that moves', () => {
-  it('makes the shelf ask again', () => {
+  it('makes the shelf ask again', async () => {
     /* THE PULL LOOP. `BookStatus.of` is asked while the shelf draws and
        re-asked when `subscribe` fires — one listener for the screen, not one
        per row. Without this, a download would register its progress and no
@@ -224,7 +244,7 @@ describe('a capability store that moves', () => {
     render(<Library {...shelf} bookStatuses={[status]} />)
     expect(screen.queryByText('Downloading 25%')).toBeNull()
     answer = { label: 'Downloading 25%' }
-    act(() => fire())
+    await act(async () => { fire() })
     expect(screen.getAllByText('Downloading 25%').length).toBeGreaterThan(0)
   })
 })
