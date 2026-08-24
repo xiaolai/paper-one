@@ -7,6 +7,12 @@ const COMMANDS: &[&str] = &[
     // WI-5.8
     "peer_status",
     "peer_local_role",
+    // The role a reader can change. THIS LIST IS WHAT GENERATES THE
+    // PERMISSIONS — `peer_set_local_role` was registered in `lib.rs` and its
+    // permission file committed by hand, so the build was green on a tree
+    // that already had the artifact and would have deleted it on the next
+    // clean regeneration, leaving `default.toml` pointing at nothing.
+    "peer_set_local_role",
     "paper_data_root",
     "fs_fsync",
     // WI-B.1 — peers and grants

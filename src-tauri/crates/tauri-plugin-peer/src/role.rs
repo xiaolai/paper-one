@@ -1,9 +1,10 @@
 //! Which side of a pairing this device is.
 //!
 //! The build target and the runtime role are separate types on purpose (plan
-//! III.2.2). A mobile build is always a satchel. A desktop build is a shelf —
-//! unless, in a debug build, `PAPER_ROLE=satchel` says otherwise, which is
-//! how one Mac pairs to another as a satchel in the two-instance harness. The
+//! III.2.2). A mobile build is always a satchel. A desktop build DEFAULTS to
+//! shelf and can be told otherwise three ways — `PAPER_ROLE` in a debug
+//! build, and, since the section below, the reader's own stored answer in any
+//! build. `resolve` is the whole precedence and there is no other input. The
 //! decision is made here, in Rust, and the webview asks for it
 //! (`peer_local_role`); it never decides on its own.
 //!
@@ -86,8 +87,33 @@ pub fn role_path(root: &Path) -> PathBuf {
 /// default that has always applied. The alternative is refusing to start the
 /// peer node over a corrupt one-word file, which trades a recoverable state
 /// for an unrecoverable one.
+///
+/// BUT NOT SILENTLY, except for the one case that is genuinely ordinary.
+/// "Never asked" is `NotFound` and nothing else; a permissions failure or a
+/// busy file is a device that HAS an answer and could not read it, and
+/// falling back to Shelf there turns a configured satchel into something that
+/// serves its library — a side change nobody asked for, from a transient
+/// error, with nothing anywhere saying it happened. The fallback still
+/// applies; it just says so.
 pub fn stored_role(root: &Path) -> Option<Role> {
-    std::fs::read_to_string(role_path(root)).ok()?.parse().ok()
+    let raw = match std::fs::read_to_string(role_path(root)) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(err) => {
+            log::warn!("peer: stored role unreadable, falling back to the default: {err}");
+            return None;
+        }
+    };
+    match raw.parse() {
+        Ok(role) => Some(role),
+        Err(_) => {
+            log::warn!(
+                "peer: stored role is not a word this build knows: {:?}",
+                raw.trim()
+            );
+            None
+        }
+    }
 }
 
 /// Write the reader's answer durably.
@@ -100,7 +126,22 @@ pub fn set_stored_role(root: &Path, role: Role) -> Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, role_word(role))?;
+    /* SYNCED BEFORE THE RENAME, which is the half `std::fs::write` does not
+     * do — and the half this function's own comment claimed by citing
+     * `peers.rs`, which does exactly this (`f.sync_all()` before its rename).
+     * Without it the rename can reach the disk while the bytes behind it have
+     * not, so a crash leaves an EMPTY role file: parsed as "never asked", and
+     * a satchel comes back a shelf. */
+    {
+        use std::io::Write as _;
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(role_word(role).as_bytes())?;
+        file.sync_all()?;
+    }
+    /* `std::fs::rename` REPLACES an existing destination on every platform
+     * this ships to, Windows included — it maps to `MoveFileEx` with
+     * `MOVEFILE_REPLACE_EXISTING` there. Noted because it is the obvious
+     * thing to doubt about a cross-platform atomic replace. */
     if let Err(err) = std::fs::rename(&tmp, &path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(err.into());
@@ -253,6 +294,33 @@ mod tests {
         // a reason to refuse to start the node.
         std::fs::write(role_path(&dir), "hub").unwrap();
         assert_eq!(stored_role(&dir), None);
+
+        // An EMPTY file is the crash-between-write-and-sync shape, and it must
+        // read the same way rather than as some third thing.
+        std::fs::write(role_path(&dir), "").unwrap();
+        assert_eq!(stored_role(&dir), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_role_file_is_on_disk_before_the_rename_names_it() {
+        // The half `std::fs::write` does not do. Without the sync the rename
+        // can land while the bytes behind it have not, and the file that
+        // survives the crash is empty — parsed as "never asked", which turns a
+        // satchel back into a shelf. Asserted through the observable end of
+        // it: after a successful write the file holds the whole word, and no
+        // temp sibling is left behind to be found later.
+        let dir = std::env::temp_dir().join(format!("paper-role-sync-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        set_stored_role(&dir, Role::Satchel).unwrap();
+        assert_eq!(std::fs::read_to_string(role_path(&dir)).unwrap(), "satchel");
+        assert!(
+            !role_path(&dir).with_extension("tmp").exists(),
+            "the temp sibling was renamed, not left"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

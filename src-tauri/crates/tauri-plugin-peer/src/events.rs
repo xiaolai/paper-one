@@ -89,15 +89,19 @@ pub enum TransferState {
 #[serde(rename_all = "camelCase")]
 pub struct TransferProgress {
     pub transfer_id: u64,
-    /// WHICH BOOK'S BYTES THESE ARE — the blob folder from the request.
+    /// Which folder these bytes are going into — from the request.
     ///
-    /// The event used to carry a counter and nothing else, so every surface
-    /// downstream could say "Transfer 1, done" and no more. That is not a
-    /// presentation problem: a progress report nobody can attribute to a book
-    /// cannot be shown ON the book, which is the only place a reader looks for
-    /// it. The folder is already in `BlobRequest` when the fetch starts, and
-    /// `blobFolderOf(bookId)` on the TypeScript side derives the same string —
-    /// so the caller that asked for a download can match its own request.
+    /// INFORMATIONAL, NOT IDENTIFYING, and the distinction cost a defect. The
+    /// event used to carry a counter and nothing else, so a surface could say
+    /// "Transfer 1, done" and no more; the folder was added so a download
+    /// could be attributed to a book. It cannot be: a book's content and its
+    /// cover share one folder — `blobFolderOf` derives the same string for
+    /// both — so a jacket fetched during a download matched the download's
+    /// row and its terminal event cleared it early.
+    ///
+    /// `transfer_id` is what identifies a transfer, and `PeerPort.fetchBlob`
+    /// has always taken a per-request `onProgress` that filters on exactly
+    /// that. Use it. This field is for logs and for a human reading them.
     pub folder: String,
     pub received: u64,
     pub total: u64,

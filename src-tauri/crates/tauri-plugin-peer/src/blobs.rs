@@ -619,8 +619,34 @@ async fn run(
         }
         Err(err) => return Err(err.into()),
     }
-    if let Ok(dir) = std::fs::File::open(target.folder_dir()) {
-        let _ = dir.sync_all();
+    /* THE DIRECTORY SYNC IS BELT-AND-BRACES, AND ITS FAILURE IS NOT FATAL —
+     * stated because the code reads as though nobody thought about it.
+     *
+     * The rename above is the apply point: once it returns, the bytes are
+     * under their final name and every reader finds them. Syncing the
+     * directory is what makes that survive a power cut, and on a filesystem
+     * or platform that refuses the handle it simply cannot be done. Failing
+     * the transfer there would report a download that DID land as failed and
+     * send the caller round again for bytes already on disk — a worse answer
+     * than the small window it would close.
+     *
+     * So the transfer completes and the failure is logged rather than
+     * swallowed: a crash inside that window loses a blob this device has
+     * already emitted `Done` for, and when that happens the log is the only
+     * place the reason will be. */
+    match std::fs::File::open(target.folder_dir()) {
+        Ok(dir) => {
+            if let Err(err) = dir.sync_all() {
+                log::warn!(
+                    "peer: blob landed but its folder could not be synced ({}): {err}",
+                    target.folder()
+                );
+            }
+        }
+        Err(err) => log::warn!(
+            "peer: blob landed but its folder could not be opened to sync ({}): {err}",
+            target.folder()
+        ),
     }
     Ok(())
 }
