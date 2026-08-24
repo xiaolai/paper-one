@@ -42,12 +42,86 @@ function productionSources(dir = CAPABILITIES_ROOT, out = []) {
   return out
 }
 
-/** Strip comments so a doc comment MENTIONING a call is not a call. Block
- *  comments whole; line comments only when `//` follows start or whitespace,
- *  so a `https://` inside a string survives. */
+/**
+ * Strip comments so a doc comment MENTIONING a call is not a call.
+ *
+ * STRING-AWARE, and it has to be. The first version was two regexes, and a
+ * quoted `/*` — in a glob, a URL, a regex written as a string — opened a
+ * comment that ran to the next `*\/` ANYWHERE LATER IN THE FILE, deleting
+ * every line between. Whatever `writeFile` lived in that stretch was invisible
+ * to this gate, which is the one failure a footprint scanner must not have:
+ * it does not report a widened surface, it reports a smaller one, silently.
+ *
+ * So this walks the text once, tracking whether it is inside `'`, `"` or a
+ * template, and only treats `/*` and `//` as comments outside them.
+ */
 function stripComments(text) {
-  return text.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|\s)\/\/.*$/gm, '$1')
+  let out = ''
+  let quote = null
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (quote !== null) {
+      out += ch === '\n' ? ch : ' '
+      if (ch === '\\') {
+        i++
+        continue
+      }
+      if (ch === quote) quote = null
+      continue
+    }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      quote = ch
+      out += ' '
+      continue
+    }
+    if (ch === '/' && text[i + 1] === '*') {
+      const end = text.indexOf('*/', i + 2)
+      const skipped = text.slice(i, end === -1 ? text.length : end + 2)
+      /* Newlines kept so reported line numbers stay true. */
+      out += skipped.replace(/[^\n]/g, ' ')
+      i += skipped.length - 1
+      continue
+    }
+    if (ch === '/' && text[i + 1] === '/') {
+      const end = text.indexOf('\n', i)
+      const skipped = text.slice(i, end === -1 ? text.length : end)
+      out += ' '.repeat(skipped.length)
+      i += skipped.length - 1
+      continue
+    }
+    out += ch
+  }
+  return out
 }
+
+/**
+ * Forms this scanner cannot read, which it must REFUSE rather than pass.
+ *
+ * The call detection is a regex over `receiver.method(`, so a write reached
+ * any other way is invisible to it — and invisible means "not in the
+ * footprint", which reads as "this capability touches nothing". A gate whose
+ * failure mode is a smaller surface than the truth is worse than no gate, so
+ * the two forms that defeat it are named and rejected on sight. A capability
+ * that genuinely needs one can add it here with the reasoning, exactly as the
+ * allowlist works.
+ */
+const UNREADABLE = [
+  {
+    what: 'a write method reached by bracket access',
+    /* `fs["writeFile"](…)` — the string-literal form, which is the realistic
+       way the dotted regex above gets sidestepped.
+       DELIBERATELY NOT `receiver[expr](…)`. That arm was written first and
+       flagged `handlers[0](x)` — an ordinary array call — so it would have
+       refused legitimate code to guard against a form nothing writes. A fully
+       dynamic `fs[name](…)` remains outside what this scan can see; the
+       honest statement is that it is unhandled, not that it is covered. */
+    pattern: /[\w$)\]]\s*\[\s*['"`](?:writeFile|appendFile|removeDir|remove|rename|mkdir)['"`]\s*\]\s*\(/,
+  },
+  {
+    what: 'a write method destructured off its object',
+    pattern: /\b(?:const|let|var)\s*\{[^}]*\b(?:writeFile|appendFile|removeDir|remove|rename|mkdir)\b[^}]*\}\s*=/,
+  },
+]
 
 /** The first argument of a call, given the text after its `(` — walks
  *  brackets so a template literal holding a nested call stays whole. */
@@ -293,6 +367,55 @@ describe('the capability fs/storage footprint (WI-10.1)', () => {
        capability that touches the filesystem is a review, not a silent pass. */
     const unreviewed = actual.filter((entry) => !REVIEWED_CAPABILITIES.includes(ownerOfEntry(entry)))
     expect(unreviewed, 'a capability outside the reviewed set touched fs or storage').toEqual([])
+  })
+
+  it('refuses a capability written in a form it cannot read', () => {
+    /* THE GATE'S OWN BLIND SPOT, named and closed. Call detection is a regex
+       over `receiver.method(`, so a write reached by bracket access or off a
+       destructured binding is invisible — and invisible reads as "this
+       capability touches nothing", which is the one direction a footprint
+       scanner must never be wrong in. */
+    for (const file of productionSources()) {
+      /* THE RAW TEXT, NOT THE STRIPPED ONE. `stripComments` blanks the inside
+         of every string — which is exactly where `fs['writeFile']` keeps its
+         method name, so scanning the stripped text hid the form this guard
+         exists to catch. A comment mentioning one is a false positive worth
+         having: it costs a reworded comment, where the miss costs a silent
+         hole in the footprint. */
+      const text = readFileSync(file, 'utf8')
+      for (const { what, pattern } of UNREADABLE) {
+        const at = text.search(pattern)
+        expect(
+          at,
+          `${path.relative(REPO_ROOT, file)} uses ${what}, which this scan cannot see`,
+        ).toBe(-1)
+      }
+    }
+  })
+
+  it('does not let a quoted /* swallow the code after it', () => {
+    /* The hole this stripper was rewritten for. Two regexes treated a slash-star
+       inside a STRING as a comment opener, so everything up to the next
+       close-comment ANYWHERE LATER IN THE FILE was deleted — taking any
+       writeFile in that stretch out of the footprint without a word.
+       (Written in words rather than in symbols: a literal close-comment in
+       here ends this comment, which is how the first attempt broke.) */
+    const source = [
+      'const glob = "/*.epub"',
+      'await fs.writeFile(SOMEWHERE, bytes)',
+      'const done = true',
+    ].join('\n')
+    const stripped = stripComments(source)
+    expect(stripped).toContain('fs.writeFile')
+    expect(stripped).toContain('const done')
+  })
+
+  it('still strips a real comment, and keeps the line numbers true', () => {
+    const source = ['const a = 1 // fs.writeFile(x)', '/* fs.rename(y) */', 'const b = 2'].join('\n')
+    const stripped = stripComments(source)
+    expect(stripped).not.toContain('writeFile')
+    expect(stripped).not.toContain('rename')
+    expect(stripped.split('\n')).toHaveLength(3)
   })
 
   it('every path constant the allowlist leans on resolves under sync/', () => {

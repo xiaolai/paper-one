@@ -130,8 +130,6 @@ const COVERAGE_EXCLUDE = [
    * and a native import. */
   'src/main.tsx',
   'src/cli/main.ts',
-  'src/vite-env.d.ts',
-  '.types/**',
 ]
 
 /**
