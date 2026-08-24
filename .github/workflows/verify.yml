@@ -37,16 +37,27 @@ jobs:
           workspaces: src-tauri -> target
       - run: pnpm install --frozen-lockfile
       - run: pnpm verify
-      # `sync`, and not by preference: it is the only capability that can be
-      # removed on its own. `peer` is required by `sync`, so `capability:remove
-      # peer` refuses until `sync` goes first — correctly, and loudly.
+      # `companion`, and it is the ONLY capability this can name. The comment
+      # here used to say that of `sync`, and it was wrong: `src/cli/paper.ts`
+      # imports `capabilities/sync` for `openLocalJournal`, `capability:remove`
+      # has never edited a host, and so the typecheck failed on every push.
+      #
+      # Measured: `peer` has three host imports and `sync` one, all in
+      # `src/cli/`; `inference` is required by `companion` and its removal is
+      # refused. That leaves one leaf. "Deletion is an operation" is therefore
+      # a narrower claim than this step has been making — it holds for a
+      # capability no host has reached into, and the CLI has reached into two.
+      # Widening it again means giving the CLI a seam for the sync journal,
+      # which it cannot get by composing sync: sync requires peer, peer is a
+      # Tauri plugin crate, and neither exists in a Node process.
       #
       # This named `example` for months after the capability called `example`
       # was deleted (19bac0e, "Delete the capability that existed to be
       # deleted"). `capability:remove` refused an id the manifest does not
       # declare, so the step failed on every push and the deletion proof proved
-      # nothing the whole time. `verify-without.test.mjs` now asserts that this
-      # argument names a capability the manifest declares AND that nothing
-      # requires it, so the next rename fails in the suite instead of here.
+      # nothing the whole time. `verify-without.test.mjs` now asserts three
+      # things about this argument — the manifest declares it, nothing requires
+      # it, and no host imports it — so the next rename, and the next host
+      # import, fail in the suite instead of here.
       - name: Deletion is an operation (temp checkout)
-        run: pnpm verify:without sync
+        run: pnpm verify:without companion

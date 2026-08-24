@@ -454,6 +454,7 @@
     "scripts/verify-without.test.mjs > digestTree > changes with any byte, any name, and is empty for an absent directory",
     "scripts/verify-without.test.mjs > parseArgs and the CLI > reads the id and --keep, refuses the rest",
     "scripts/verify-without.test.mjs > the workflow names a capability that can actually be removed > ignores a commented, documented, or switched-off proof",
+    "scripts/verify-without.test.mjs > the workflow names a capability that can actually be removed > names only ids no host imports, since removal would leave the import behind",
     "scripts/verify-without.test.mjs > the workflow names a capability that can actually be removed > names only ids the manifest declares, and only ones nothing requires",
     "scripts/verify-without.test.mjs > the workflow names a capability that can actually be removed > runs the deletion proof at all",
     "scripts/verify-without.test.mjs > verifyWithout > fails when the removal touched the kernel, and keeps the copy with --keep",

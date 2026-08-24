@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -199,6 +199,25 @@ describe('parseArgs and the CLI', () => {
  * the id must be a capability the manifest declares, and NOTHING may require
  * it — `capability:remove` refuses to remove a capability another one depends
  * on, so naming `peer` here would fail just as surely as naming a ghost.
+ *
+ * THOSE TWO WERE NOT ENOUGH, and the third is why this step shipped red.
+ * `sync` satisfies both — the manifest declares it, nothing requires it — and
+ * `verify:without sync` still failed on every push, because `src/cli/paper.ts`
+ * imports the capability directly for `openLocalJournal`. `capability:remove`
+ * edits the manifest, the compositions, Cargo, `lib.rs` and the ACL; it has
+ * never known about a host, so the removal succeeds and the TYPECHECK is what
+ * fails, two steps later, in a message that names a module rather than the
+ * argument that doomed it.
+ *
+ * So the third condition: no host may import the capability. `.dependency-
+ * cruiser.cjs` PERMITS composition roots and `src/cli/` to import a capability
+ * index, so this is not a boundary violation to be caught elsewhere — it is a
+ * fact about which capabilities are removable, and it belongs here.
+ *
+ * Measured when this was written: `peer` has three host imports and `sync` one,
+ * all in `src/cli/`; `inference` is required by `companion`. `companion` is the
+ * only capability in the tree that can actually be removed, which is a much
+ * smaller claim than the one this lane was making.
  */
 describe('the workflow names a capability that can actually be removed', () => {
   const WORKFLOW = fileURLToPath(new URL('../.github/workflows/verify.yml', import.meta.url))
@@ -355,6 +374,30 @@ describe('the workflow names a capability that can actually be removed', () => {
         .filter((c) => (c.requires ?? []).includes(id))
         .map((c) => c.id)
       expect(dependents, `verify:without ${id} — ${dependents.join(', ')} require it, so removal is refused`).toEqual([])
+    }
+  })
+
+  /* THE CONDITION THAT WAS MISSING. A host import survives `capability:remove`,
+     so the tree stops typechecking and the lane is red for a reason its own
+     argument check could not see. Sources only: a capability's own directory is
+     about to be deleted, and a composition root is the one place the remover
+     already edits. */
+  it('names only ids no host imports, since removal would leave the import behind', () => {
+    const src = fileURLToPath(new URL('../src', import.meta.url))
+    for (const id of named()) {
+      const own = path.join('capabilities', id) + path.sep
+      const offenders = readdirSync(src, { recursive: true, encoding: 'utf8' })
+        .filter((rel) => /\.tsx?$/.test(rel))
+        .filter((rel) => !rel.startsWith(own) && !/^app[\\/]composition\./.test(rel))
+        .filter((rel) => new RegExp(`from '[^']*capabilities/${id}'`).test(readFileSync(path.join(src, rel), 'utf8')))
+
+      /* In the COPY the capability is gone, so nothing can import it and this
+         is trivially empty — the same shape the manifest check uses. In a
+         checkout it is the real assertion. */
+      expect(
+        offenders,
+        `verify:without ${id} — ${offenders.join(', ')} import it, and capability:remove does not edit hosts`,
+      ).toEqual([])
     }
   })
 })
