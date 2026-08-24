@@ -55,7 +55,13 @@ describe('decideLookUp', () => {
      * fallback was `system`, and the branch below honours a stored choice. So
      * the feature was invisible until the reader found the settings row. */
     it('gives a reader who installed a model the gloss, with nothing stored', () => {
-      expect(decideLookUp(true, true, LOOK_UP_SETTING.fallback)).toBe('gloss')
+      /* REACHES THE GLOSS — not "equals `both`". The requirement is that a
+         reader who just installed a model gets the thing they installed
+         without hunting for a settings row; whether the system dictionary
+         fires alongside it is a separate call, and one that has already been
+         made both ways. Pinning the literal would make this test a second
+         spelling of the default rather than a statement about it. */
+      expect(['gloss', 'both']).toContain(decideLookUp(true, true, LOOK_UP_SETTING.fallback))
     })
 
     /* And the other half of that default: it must not be able to conjure a

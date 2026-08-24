@@ -147,7 +147,7 @@ export function effectiveMode(chosen: LookUpMode, available: readonly LookUpMode
  * something up, and that file is the kernel's. `inference` binds the provider
  * and draws the row; it does not own the question.
  *
- * THE DEFAULT IS `gloss`, AND IT USED TO BE `system`. The old default was
+ * THE DEFAULT IS `both`, AND IT USED TO BE `system`. The old default was
  * justified as making the no-regression rule true "at the storage layer as
  * well as in the code" — but the code alone already makes it true, and
  * unconditionally: `decideLookUp`'s first branch is `if (!gloss) return
@@ -160,9 +160,17 @@ export function effectiveMode(chosen: LookUpMode, available: readonly LookUpMode
  * `system`, and `decideLookUp(true, true, 'system')` honours it. The feature
  * was installed, bound, available — and silent until the reader found a
  * settings row telling them so. A default that hides what was just installed
- * is the wrong default; `system` and `both` remain one cycle away.
+ * is the wrong default.
+ *
+ * `both` RATHER THAN `gloss`, because the two halves fail on different inputs.
+ * A `dict://` lookup of a phrase finds nothing at all — that is the case
+ * `LookUpAction`'s `both` was introduced for — while the gloss answers it; and
+ * the system dictionary is instant and offline where the gloss costs a model
+ * run. Defaulting to one of them would trade a working answer for the other's
+ * blind spot. `system` and `gloss` are each one cycle away for a reader who
+ * wants only one.
  */
-export const LOOK_UP_SETTING: Setting<LookUpMode> = defineSetting('kernel.lookUp', 'gloss', (raw) =>
+export const LOOK_UP_SETTING: Setting<LookUpMode> = defineSetting('kernel.lookUp', 'both', (raw) =>
   isLookUpMode(raw) ? raw : undefined,
 )
 
