@@ -13,6 +13,9 @@ paper-webauth = { path = "../paper-webauth" }
 # The same feature set the app crate takes, for the same reasons written there.
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "ws", "json"] }
 serde = { version = "1", features = ["derive"] }
+# `sync` for the per-socket outbound channel, `rt` because the socket loop is a
+# task. Already in this tree; no new resolution.
+tokio = { version = "1", features = ["sync", "rt", "macros"] }
 
 [dev-dependencies]
 # `ServiceExt::oneshot` drives the router in-process, so the tests exercise the

@@ -45,7 +45,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{FromRequestParts, State};
+use axum::http::request::Parts;
 use axum::http::{header, HeaderValue, Request, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -53,8 +55,9 @@ use axum::routing::post;
 use axum::{Json, Router};
 use paper_webauth::sessions::{Credential, Sessions};
 use paper_webauth::{DeviceAuth, Outcome, Refused};
-use pipe::Pipe;
+use pipe::{Pipe, Push, WebSessionId, OUTBOUND_CAP};
 use serde::Deserialize;
+use tokio::sync::mpsc;
 
 /// The cookie the browser gets, and the only place its name is written.
 pub const SESSION_COOKIE: &str = "paper_session";
@@ -117,6 +120,7 @@ pub fn router(state: Arc<WebHost>) -> Router {
         .route("/api/auth/submit", post(submit))
         .route("/api/auth/session", axum::routing::get(session))
         .route("/api/auth/signout", post(signout))
+        .route("/ws", axum::routing::get(upgrade))
         .layer(middleware::from_fn(policy_headers))
         .with_state(state)
 }
@@ -175,6 +179,49 @@ fn presented(request_headers: &axum::http::HeaderMap) -> Option<Credential> {
     })
 }
 
+/// A request that carries a live credential.
+///
+/// AN EXTRACTOR, NOT A CHECK IN THE HANDLER, and the WebSocket route is why.
+/// `WebSocketUpgrade` is itself an extractor: it rejects a non-upgradable
+/// request with 426 *before* any handler body runs. With the credential check
+/// in the body, an unauthenticated socket request was answered 426 — the
+/// check never executed. Extractors run left to right, so naming this one
+/// first is what makes the refusal happen before anything else looks at the
+/// request.
+///
+/// It also means one implementation for every authenticated route rather than
+/// the same three lines copied per handler.
+pub struct Admitted {
+    pub session: paper_webauth::sessions::SessionId,
+    pub credential: Credential,
+}
+
+impl FromRequestParts<Arc<WebHost>> for Admitted {
+    type Rejection = StatusCode;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<WebHost>,
+    ) -> Result<Self, Self::Rejection> {
+        let credential = presented(&parts.headers).ok_or(StatusCode::UNAUTHORIZED)?;
+        /* BOTH PHASES. `validate` answers about a moment and `admit` re-checks
+         * it; a WebSocket outlives the request that made it, so skipping the
+         * second would reopen finding 7 exactly where it costs most. */
+        let admission = state
+            .sessions
+            .validate(&credential, Instant::now())
+            .map_err(|_| StatusCode::UNAUTHORIZED)?;
+        let session = state
+            .sessions
+            .admit(admission)
+            .map_err(|_| StatusCode::UNAUTHORIZED)?;
+        Ok(Self {
+            session,
+            credential,
+        })
+    }
+}
+
 /// `POST /api/auth/submit` — six digits in, a session cookie out.
 async fn submit(
     State(state): State<Arc<WebHost>>,
@@ -211,19 +258,10 @@ async fn submit(
 }
 
 /// `GET /api/auth/session` — does this browser hold a live credential?
-async fn session(
-    State(state): State<Arc<WebHost>>,
-    request_headers: axum::http::HeaderMap,
-) -> StatusCode {
-    let Some(credential) = presented(&request_headers) else {
-        return StatusCode::UNAUTHORIZED;
-    };
-    match state.sessions.validate(&credential, Instant::now()) {
-        /* The admission is taken and dropped. This endpoint answers a question
-         * and registers nothing, which is exactly what `validate` is for. */
-        Ok(_admission) => StatusCode::NO_CONTENT,
-        Err(_) => StatusCode::UNAUTHORIZED,
-    }
+async fn session(_admitted: Admitted) -> StatusCode {
+    /* The extractor is the whole endpoint: reaching this line means a live
+     * credential, and failing to reach it is already a 401. */
+    StatusCode::NO_CONTENT
 }
 
 /// `POST /api/auth/signout` — revoke this browser's credential.
@@ -251,6 +289,83 @@ async fn signout(
         HeaderValue::from_str(&clear_cookie()).expect("a static cookie string is a valid header"),
     );
     response
+}
+
+/// `GET /ws` — the browser's frame channel.
+///
+/// **The gate is here and nowhere else.** Everything past the upgrade assumes
+/// an admitted socket, so this is the one place a request without a live
+/// credential must be turned away. It runs the two-phase check in full:
+/// `validate` answers about a moment, `admit` re-checks that moment. Skipping
+/// the second would reopen finding 7 on the exact path that matters most,
+/// because a WebSocket outlives the request that created it.
+async fn upgrade(
+    State(state): State<Arc<WebHost>>,
+    admitted: Admitted,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let (outbound, receiver) = mpsc::channel(OUTBOUND_CAP);
+    let Ok(socket) = state
+        .pipe
+        .open(admitted.session, admitted.credential, outbound)
+    else {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    };
+    ws.on_upgrade(move |ws| pump(state, socket, ws, receiver))
+}
+
+/// Move frames both ways until either end stops.
+///
+/// ONE TASK AND A `select!`, rather than a split with two. `axum`'s socket
+/// exposes `recv` and `send` directly, so splitting would mean pulling in a
+/// futures dependency to buy a concurrency the reader does not need: the only
+/// thing a send blocks on is the socket buffer, and a browser that has stopped
+/// draining SHOULD stop being read from. That is backpressure, not a stall.
+async fn pump(
+    state: Arc<WebHost>,
+    socket: WebSessionId,
+    mut ws: WebSocket,
+    mut outbound: mpsc::Receiver<Vec<u8>>,
+) {
+    loop {
+        tokio::select! {
+            /* Ends when the channel closes, which is what `Pipe::close` does by
+             * dropping the sender. No second flag to keep in step. */
+            frame = outbound.recv() => {
+                let Some(frame) = frame else { break };
+                if ws.send(Message::Binary(frame.into())).await.is_err() {
+                    break;
+                }
+            }
+            incoming = ws.recv() => {
+                let Some(Ok(message)) = incoming else { break };
+                let frame = match message {
+                    Message::Binary(bytes) => bytes.to_vec(),
+                    /* TEXT IS NOT THE PROTOCOL. The envelope is binary; a text
+                     * frame is a confused client or a probe, and accepting it
+                     * would be a second encoding for both sides to agree
+                     * about. */
+                    Message::Text(_) => {
+                        state.pipe.close(socket, "text frame");
+                        break;
+                    }
+                    Message::Close(_) => break,
+                    Message::Ping(_) | Message::Pong(_) => continue,
+                };
+                match state.pipe.push(socket, frame) {
+                    Push::Accepted => {}
+                    /* Nothing is dropped. Yielding lets the webview's drain run;
+                     * the frame is retried by the browser because we simply
+                     * stop reading, and TCP does the rest. */
+                    Push::Backpressure => tokio::task::yield_now().await,
+                    Push::TooLarge | Push::Gone => break,
+                }
+            }
+        }
+    }
+
+    state.pipe.close(socket, "socket ended");
+    state.pipe.reap(socket);
 }
 
 #[cfg(test)]
@@ -475,9 +590,13 @@ mod tests {
             .validate(&credential, Instant::now())
             .expect("valid");
         let admitted = state.sessions.admit(admission).expect("admitted");
+        /* `_rx` is bound, not dropped: dropping the receiver closes the
+         * channel, and a later `send` would then say `Gone` for a reason that
+         * has nothing to do with what this test is about. */
+        let (tx, _rx) = tokio::sync::mpsc::channel(crate::pipe::OUTBOUND_CAP);
         let socket = state
             .pipe
-            .open(admitted, credential.clone())
+            .open(admitted, credential.clone(), tx)
             .expect("a live socket");
         assert_eq!(state.pipe.live_count(), 1);
 
@@ -558,6 +677,111 @@ mod tests {
             StatusCode::UNAUTHORIZED
         );
     }
+
+    /// A syntactically valid upgrade request, so the only thing under test is
+    /// the credential check rather than axum's own header rejection.
+    fn upgrade_request(cookie: Option<&str>) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method(Method::GET)
+            .uri("/ws")
+            .header(header::CONNECTION, "Upgrade")
+            .header(header::UPGRADE, "websocket")
+            .header(header::SEC_WEBSOCKET_VERSION, "13")
+            .header(header::SEC_WEBSOCKET_KEY, "dGhlIHNhbXBsZSBub25jZQ==");
+        if let Some(cookie) = cookie {
+            builder = builder.header(header::COOKIE, cookie);
+        }
+        builder.body(Body::empty()).expect("a request")
+    }
+
+    async fn granted_cookie(state: &Arc<WebHost>) -> String {
+        let code = live_code(state);
+        let granted = call(
+            Arc::clone(state),
+            json_post("/api/auth/submit", &format!(r#"{{"code":"{code}"}}"#), None),
+        )
+        .await;
+        granted.headers()[header::SET_COOKIE]
+            .to_str()
+            .expect("ascii")
+            .split(';')
+            .next()
+            .expect("name=value")
+            .to_owned()
+    }
+
+    #[tokio::test]
+    async fn the_socket_refuses_every_request_without_a_live_credential() {
+        /* THE GATE. Everything past the upgrade assumes an admitted socket, and
+         * a WebSocket outlives the request that made it — so a miss here is not
+         * one leaked response but a live channel. */
+        let state = host();
+        for (label, cookie) in [
+            ("no cookie at all", None),
+            ("a nonsense value", Some("paper_session=nope")),
+            ("an empty value", Some("paper_session=")),
+            ("a lookalike name", Some("paper_session_x=anything")),
+        ] {
+            let response = call(Arc::clone(&state), upgrade_request(cookie)).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "the socket opened for {label}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_live_credential_gets_past_the_gate() {
+        /* WHAT THIS CAN AND CANNOT SHOW. `oneshot` has no connection to
+         * upgrade, so axum's own extractor answers 426 however good the
+         * credential is — a 101 is not reachable from this harness.
+         *
+         * What it does show is the thing worth showing: the credential check
+         * runs FIRST and passes, so the request reaches the upgrade machinery
+         * instead of being turned away. A regression that broke the extractor
+         * order would show up here as a 401.
+         *
+         * The real handshake is exercised by the two-device run (WI-18.11). */
+        let state = host();
+        let cookie = granted_cookie(&state).await;
+        let status = call(Arc::clone(&state), upgrade_request(Some(&cookie)))
+            .await
+            .status();
+        assert_ne!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "a live credential was refused"
+        );
+        assert_eq!(
+            status,
+            StatusCode::UPGRADE_REQUIRED,
+            "expected axum's own rejection, meaning the gate passed and the harness cannot upgrade"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_revoked_credential_cannot_open_a_socket() {
+        /* Finding 7 on the path that matters most: the credential was good a
+         * moment ago and the browser still holds the cookie. */
+        let state = host();
+        let cookie = granted_cookie(&state).await;
+        let _ = call(
+            Arc::clone(&state),
+            json_post("/api/auth/signout", "", Some(&cookie)),
+        )
+        .await;
+
+        let response = call(Arc::clone(&state), upgrade_request(Some(&cookie))).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /* NO HTTP-LEVEL TEST FOR THE PER-BROWSER SOCKET BOUND, deliberately.
+     * `oneshot` cannot complete an upgrade, so the handler body never runs and
+     * no socket is ever opened — a test here would assert on a code path it
+     * did not reach. The bound is enforced in `Pipe::open` and tested there
+     * (`one_credential_cannot_hold_more_than_its_share`), which is where it
+     * lives. Writing a green test here would have been worse than none. */
 
     #[tokio::test]
     async fn every_response_carries_the_policy_including_the_failures() {

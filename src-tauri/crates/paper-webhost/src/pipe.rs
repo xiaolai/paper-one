@@ -44,6 +44,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
 use paper_webauth::sessions::{Credential, SessionId};
+use tokio::sync::mpsc;
 
 /// The largest frame this side will accept. The peer transport's number, so a
 /// service answer that fits one wire fits the other.
@@ -57,6 +58,13 @@ pub const MAX_SESSIONS: usize = 64;
 /// Sessions one credential may hold at once. A tab reconnecting can overlap a
 /// not-yet-reaped drop; a browser opening many is refused.
 pub const MAX_SESSIONS_PER_CREDENTIAL: usize = 4;
+/// Frames queued toward one browser before the webview is told to slow down.
+///
+/// Bounded rather than unbounded, and that is the whole point: an unbounded
+/// channel turns a browser that has stopped reading into memory growth on the
+/// shelf, which is the same bug the inbox's byte budget exists to prevent —
+/// only pointing the other way.
+pub const OUTBOUND_CAP: usize = 256;
 
 /// A live browser socket.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
@@ -69,6 +77,22 @@ pub enum OpenRefused {
     TooManySessions,
     /// This credential already holds its share.
     TooManyForCredential,
+}
+
+/// What happened to a frame bound for the browser.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Send {
+    /// Queued for the socket.
+    Sent,
+    /// The browser is not keeping up. Nothing dropped; try again after a wait.
+    Backpressure,
+    /// Over [`MAX_FRAME`]. Refused WITHOUT closing — a frame this big coming
+    /// from our own webview is a bug on this side, not a hostile peer, and
+    /// killing the reader's session over it would hide the bug behind a
+    /// disconnect.
+    TooLarge,
+    /// No such session, or it is closed, or the socket task is gone.
+    Gone,
 }
 
 /// What happened to a frame from the browser.
@@ -91,6 +115,9 @@ struct WebSession {
     admitted: SessionId,
     inbox: VecDeque<Vec<u8>>,
     inbox_bytes: usize,
+    /// Toward the browser. Dropped on close, which ends the socket's write
+    /// task without needing a second signal.
+    outbound: Option<mpsc::Sender<Vec<u8>>>,
     closed: Option<String>,
 }
 
@@ -120,6 +147,7 @@ impl Pipe {
         &self,
         admitted: SessionId,
         credential: Credential,
+        outbound: mpsc::Sender<Vec<u8>>,
     ) -> Result<WebSessionId, OpenRefused> {
         let mut guard = self.inner.lock().expect("pipe mutex poisoned");
         if guard.sessions.len() >= MAX_SESSIONS {
@@ -142,6 +170,7 @@ impl Pipe {
                 admitted,
                 inbox: VecDeque::new(),
                 inbox_bytes: 0,
+                outbound: Some(outbound),
                 closed: None,
             },
         );
@@ -176,6 +205,25 @@ impl Pipe {
         Push::Accepted
     }
 
+    /// A frame from the webview, bound for the browser. Never waits.
+    pub fn send(&self, id: WebSessionId, frame: Vec<u8>) -> Send {
+        let guard = self.inner.lock().expect("pipe mutex poisoned");
+        let Some(session) = guard.sessions.get(&id) else {
+            return Send::Gone;
+        };
+        if frame.len() > MAX_FRAME {
+            return Send::TooLarge;
+        }
+        let Some(outbound) = session.outbound.as_ref() else {
+            return Send::Gone;
+        };
+        match outbound.try_send(frame) {
+            Ok(()) => Send::Sent,
+            Err(mpsc::error::TrySendError::Full(_)) => Send::Backpressure,
+            Err(mpsc::error::TrySendError::Closed(_)) => Send::Gone,
+        }
+    }
+
     /// Up to `max` frames for the webview, oldest first. Never waits.
     pub fn drain(&self, id: WebSessionId, max: usize) -> Vec<Vec<u8>> {
         let mut guard = self.inner.lock().expect("pipe mutex poisoned");
@@ -197,6 +245,10 @@ impl Pipe {
             }
             session.inbox.clear();
             session.inbox_bytes = 0;
+            /* DROPPING THE SENDER IS THE SIGNAL. The socket's write task is
+             * awaiting this channel; closing it ends that task without a
+             * second flag to keep in step. */
+            session.outbound = None;
         }
     }
 
@@ -213,6 +265,7 @@ impl Pipe {
                 session.closed = Some(reason.to_owned());
                 session.inbox.clear();
                 session.inbox_bytes = 0;
+                session.outbound = None;
                 closed.push(*id);
             }
         }
@@ -268,6 +321,13 @@ mod tests {
     use paper_webauth::{DeviceAuth, Outcome};
     use std::time::Instant;
 
+    /// A channel whose receiver is kept alive by the caller. Dropping the
+    /// receiver would make every `send` report `Gone`, which is correct
+    /// behaviour and a confusing test failure.
+    fn wire() -> (mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>) {
+        mpsc::channel(OUTBOUND_CAP)
+    }
+
     /// A real credential and the admission behind it, because `open` should not
     /// be reachable without one.
     fn admitted(sessions: &Sessions) -> (SessionId, Credential) {
@@ -288,7 +348,7 @@ mod tests {
     fn frames_round_trip_oldest_first() {
         let (pipe, sessions) = (Pipe::new(), Sessions::new());
         let (id, credential) = admitted(&sessions);
-        let socket = pipe.open(id, credential).expect("open");
+        let socket = pipe.open(id, credential, wire().0).expect("open");
 
         assert_eq!(pipe.push(socket, b"one".to_vec()), Push::Accepted);
         assert_eq!(pipe.push(socket, b"two".to_vec()), Push::Accepted);
@@ -303,7 +363,7 @@ mod tests {
     fn drain_respects_its_maximum_and_keeps_the_rest() {
         let (pipe, sessions) = (Pipe::new(), Sessions::new());
         let (id, credential) = admitted(&sessions);
-        let socket = pipe.open(id, credential).expect("open");
+        let socket = pipe.open(id, credential, wire().0).expect("open");
         for n in 0..5u8 {
             assert_eq!(pipe.push(socket, vec![n]), Push::Accepted);
         }
@@ -315,7 +375,7 @@ mod tests {
     fn an_oversized_frame_closes_the_session_rather_than_backpressuring() {
         let (pipe, sessions) = (Pipe::new(), Sessions::new());
         let (id, credential) = admitted(&sessions);
-        let socket = pipe.open(id, credential).expect("open");
+        let socket = pipe.open(id, credential, wire().0).expect("open");
 
         assert_eq!(pipe.push(socket, vec![0u8; MAX_FRAME + 1]), Push::TooLarge);
         assert_eq!(
@@ -332,7 +392,7 @@ mod tests {
          * this as backpressure and leave a protocol-violating socket open. */
         let (pipe, sessions) = (Pipe::new(), Sessions::new());
         let (id, credential) = admitted(&sessions);
-        let socket = pipe.open(id, credential).expect("open");
+        let socket = pipe.open(id, credential, wire().0).expect("open");
         while pipe.push(socket, vec![0u8; 64 * 1024]) == Push::Accepted {}
         assert_eq!(pipe.push(socket, vec![0u8; MAX_FRAME + 1]), Push::TooLarge);
     }
@@ -341,7 +401,7 @@ mod tests {
     fn the_byte_budget_backpressures_and_a_drain_clears_it() {
         let (pipe, sessions) = (Pipe::new(), Sessions::new());
         let (id, credential) = admitted(&sessions);
-        let socket = pipe.open(id, credential).expect("open");
+        let socket = pipe.open(id, credential, wire().0).expect("open");
         let chunk = vec![0u8; 1024 * 1024];
 
         let mut accepted = 0;
@@ -367,7 +427,7 @@ mod tests {
          * and would grow the queue without limit. */
         let (pipe, sessions) = (Pipe::new(), Sessions::new());
         let (id, credential) = admitted(&sessions);
-        let socket = pipe.open(id, credential).expect("open");
+        let socket = pipe.open(id, credential, wire().0).expect("open");
         for _ in 0..INBOX_CAP {
             assert_eq!(pipe.push(socket, Vec::new()), Push::Accepted);
         }
@@ -379,10 +439,11 @@ mod tests {
         let (pipe, sessions) = (Pipe::new(), Sessions::new());
         let (id, credential) = admitted(&sessions);
         for _ in 0..MAX_SESSIONS_PER_CREDENTIAL {
-            pipe.open(id, credential.clone()).expect("within the share");
+            pipe.open(id, credential.clone(), wire().0)
+                .expect("within the share");
         }
         assert_eq!(
-            pipe.open(id, credential),
+            pipe.open(id, credential, wire().0),
             Err(OpenRefused::TooManyForCredential)
         );
     }
@@ -393,11 +454,11 @@ mod tests {
         let (id, credential) = admitted(&sessions);
         let mut sockets = Vec::new();
         for _ in 0..MAX_SESSIONS_PER_CREDENTIAL {
-            sockets.push(pipe.open(id, credential.clone()).expect("open"));
+            sockets.push(pipe.open(id, credential.clone(), wire().0).expect("open"));
         }
         pipe.close(sockets[0], "done");
         assert!(
-            pipe.open(id, credential).is_ok(),
+            pipe.open(id, credential, wire().0).is_ok(),
             "a reconnect after a close must not be refused"
         );
     }
@@ -409,9 +470,9 @@ mod tests {
         let (pipe, sessions) = (Pipe::new(), Sessions::new());
         let (mine_id, mine) = admitted(&sessions);
         let (other_id, other) = admitted(&sessions);
-        let a = pipe.open(mine_id, mine.clone()).expect("open");
-        let b = pipe.open(mine_id, mine.clone()).expect("open");
-        let spared = pipe.open(other_id, other).expect("open");
+        let a = pipe.open(mine_id, mine.clone(), wire().0).expect("open");
+        let b = pipe.open(mine_id, mine.clone(), wire().0).expect("open");
+        let spared = pipe.open(other_id, other, wire().0).expect("open");
 
         assert!(sessions.revoke(&mine).is_some());
         let closed = pipe.close_credential(&mine, "revoked");
@@ -431,7 +492,7 @@ mod tests {
          * they were sent by a browser that is no longer trusted. */
         let (pipe, sessions) = (Pipe::new(), Sessions::new());
         let (id, credential) = admitted(&sessions);
-        let socket = pipe.open(id, credential.clone()).expect("open");
+        let socket = pipe.open(id, credential.clone(), wire().0).expect("open");
         assert_eq!(pipe.push(socket, b"queued".to_vec()), Push::Accepted);
         pipe.close_credential(&credential, "revoked");
         assert!(pipe.drain(socket, 10).is_empty());
@@ -441,7 +502,7 @@ mod tests {
     fn close_is_idempotent_and_keeps_the_first_reason() {
         let (pipe, sessions) = (Pipe::new(), Sessions::new());
         let (id, credential) = admitted(&sessions);
-        let socket = pipe.open(id, credential).expect("open");
+        let socket = pipe.open(id, credential, wire().0).expect("open");
         pipe.close(socket, "first");
         pipe.close(socket, "second");
         assert_eq!(pipe.closed_reason(socket).as_deref(), Some("first"));
@@ -451,7 +512,7 @@ mod tests {
     fn a_reaped_session_is_gone_entirely() {
         let (pipe, sessions) = (Pipe::new(), Sessions::new());
         let (id, credential) = admitted(&sessions);
-        let socket = pipe.open(id, credential).expect("open");
+        let socket = pipe.open(id, credential, wire().0).expect("open");
         pipe.close(socket, "done");
         pipe.reap(socket);
         assert_eq!(pipe.push(socket, b"x".to_vec()), Push::Gone);
@@ -466,10 +527,14 @@ mod tests {
         let mut opened = 0;
         while opened < MAX_SESSIONS {
             let (id, credential) = admitted(&sessions);
-            pipe.open(id, credential).expect("under the ceiling");
+            pipe.open(id, credential, wire().0)
+                .expect("under the ceiling");
             opened += 1;
         }
         let (id, credential) = admitted(&sessions);
-        assert_eq!(pipe.open(id, credential), Err(OpenRefused::TooManySessions));
+        assert_eq!(
+            pipe.open(id, credential, wire().0),
+            Err(OpenRefused::TooManySessions)
+        );
     }
 }
