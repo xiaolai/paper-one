@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { LOOK_UP_SETTING } from '../core/gloss'
 import { decideLookUp, isLookUpTerm } from './lookUp'
 
 describe('decideLookUp', () => {
@@ -42,6 +43,28 @@ describe('decideLookUp', () => {
 
     it('falls back to the system dictionary rather than doing nothing', () => {
       expect(decideLookUp(true, true, 'none')).toBe('system')
+    })
+
+    /* THE SHIPPED DEFAULT, ASSERTED THROUGH THE SETTING ITSELF rather than by
+     * repeating the literal — a test that hard-codes `'gloss'` here passes
+     * whatever `LOOK_UP_SETTING.fallback` is changed to, which is precisely
+     * the bug it is here to catch.
+     *
+     * The bug: a reader with a model installed and no stored preference got
+     * Dictionary.app. The gloss was bound and `available` was true; the
+     * fallback was `system`, and the branch below honours a stored choice. So
+     * the feature was invisible until the reader found the settings row. */
+    it('gives a reader who installed a model the gloss, with nothing stored', () => {
+      expect(decideLookUp(true, true, LOOK_UP_SETTING.fallback)).toBe('gloss')
+    })
+
+    /* And the other half of that default: it must not be able to conjure a
+       gloss that is not there. This is the no-regression rule, and it is the
+       reason the default was safe to change at all — the branch never reads
+       the preference when no gloss is bound. */
+    it('still hands to the system dictionary when the default meets no model', () => {
+      expect(decideLookUp(true, false, LOOK_UP_SETTING.fallback)).toBe('system')
+      expect(decideLookUp(false, false, LOOK_UP_SETTING.fallback)).toBe('none')
     })
   })
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { NOT_CONFIGURED, type CompanionProvider } from './companion'
-import { LOOK_UP_MODES, NO_GLOSS, availableModes, effectiveMode, type GlossProvider } from './gloss'
+import { LOOK_UP_MODES, LOOK_UP_SETTING, NO_GLOSS, availableModes, effectiveMode, type GlossProvider } from './gloss'
 import { NO_WORK_LINE, type WorkLine } from './ports'
 import { createKernelServices } from './services'
 import { servicesWith, spyRecorder } from './servicesWorld.testkit'
@@ -216,19 +216,35 @@ describe('the system dictionary', () => {
 })
 
 describe('the look-up mode', () => {
-  it('defaults to the system dictionary, which is what makes the no-regression rule true', () => {
-    expect(servicesWith(spyRecorder().recorder).lookUp()).toBe('system')
+  /* An untouched store reads the SHIPPED default, whatever that is — asserted
+     through the setting rather than against a literal. This used to read
+     `toBe('system')` and carried the comment "which is what makes the
+     no-regression rule true"; both were wrong. The no-regression rule is made
+     true by `decideLookUp`, whose first branch never reads the preference at
+     all, and pinning the literal here meant changing the default broke a test
+     that was only ever describing it. What this file owns is the wiring: an
+     unset store answers with the fallback. `ui/lookUp.test.ts` owns what the
+     fallback then DOES. */
+  it('answers with the shipped default when nothing is stored', () => {
+    expect(servicesWith(spyRecorder().recorder).lookUp()).toBe(LOOK_UP_SETTING.fallback)
   })
 
   it('does nothing when only one mode is available', () => {
     const services = servicesWith(spyRecorder().recorder)
+    const before = services.lookUp()
     /* A dictionary and no gloss: one mode, so the control is not offered and
-       pressing it must not move to a mode that would fail when used. */
+       pressing it must not move to a mode that would fail when used.
+
+       UNCHANGED, not equal to some particular mode. The stored value may well
+       name a mode this machine cannot serve — that is allowed and deliberate
+       (see "A STORED PREFERENCE OUTLIVES THE THING IT NAMES" below), and
+       `decideLookUp` resolves it at the point of use. Asserting a literal here
+       tested the default, not the no-op. */
     services.cycleLookUp(true, false)
-    expect(services.lookUp()).toBe('system')
+    expect(services.lookUp()).toBe(before)
     /* Neither: no modes at all. */
     services.cycleLookUp(false, false)
-    expect(services.lookUp()).toBe('system')
+    expect(services.lookUp()).toBe(before)
   })
 
   it('cycles the whole set when both halves are there, and wraps', () => {

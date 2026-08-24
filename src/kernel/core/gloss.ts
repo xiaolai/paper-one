@@ -147,11 +147,22 @@ export function effectiveMode(chosen: LookUpMode, available: readonly LookUpMode
  * something up, and that file is the kernel's. `inference` binds the provider
  * and draws the row; it does not own the question.
  *
- * The default is `system`, which is what makes the no-regression rule true at
- * the storage layer as well as in the code: a build with nothing installed
- * reads `system` and behaves exactly as it always has.
+ * THE DEFAULT IS `gloss`, AND IT USED TO BE `system`. The old default was
+ * justified as making the no-regression rule true "at the storage layer as
+ * well as in the code" — but the code alone already makes it true, and
+ * unconditionally: `decideLookUp`'s first branch is `if (!gloss) return
+ * dictionary ? 'system' : 'none'`, which never reads the preference at all.
+ * `lookUp.test.ts` pins exactly that with `decideLookUp(true, false, 'gloss')`
+ * → `'system'`. The storage-layer half was belt and braces.
+ *
+ * What the braces cost: a reader who downloaded a 2.3 GB model still got
+ * Dictionary.app, because the stored key is absent, the fallback reads
+ * `system`, and `decideLookUp(true, true, 'system')` honours it. The feature
+ * was installed, bound, available — and silent until the reader found a
+ * settings row telling them so. A default that hides what was just installed
+ * is the wrong default; `system` and `both` remain one cycle away.
  */
-export const LOOK_UP_SETTING: Setting<LookUpMode> = defineSetting('kernel.lookUp', 'system', (raw) =>
+export const LOOK_UP_SETTING: Setting<LookUpMode> = defineSetting('kernel.lookUp', 'gloss', (raw) =>
   isLookUpMode(raw) ? raw : undefined,
 )
 
