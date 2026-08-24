@@ -61,6 +61,12 @@ export const CAPABILITY_UI = Object.freeze({
   code: 'paper-cap-code',
   /** A picture and its caption — a pairing QR, say. */
   figure: 'paper-cap-figure',
+  /**
+   * A QR the theme reaches. Wraps an INLINE `<svg>`, never an `<img>`: a data
+   * URI is opaque to CSS, so the renderer's white card and black modules
+   * survive every theme. See `.paper-cap-qr` in `capability.css`.
+   */
+  qr: 'paper-cap-qr',
 } as const)
 
 /** One of the kernel's capability class names. */

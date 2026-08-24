@@ -89,6 +89,20 @@ pub enum TransferState {
 #[serde(rename_all = "camelCase")]
 pub struct TransferProgress {
     pub transfer_id: u64,
+    /// Which folder these bytes are going into — from the request.
+    ///
+    /// INFORMATIONAL, NOT IDENTIFYING, and the distinction cost a defect. The
+    /// event used to carry a counter and nothing else, so a surface could say
+    /// "Transfer 1, done" and no more; the folder was added so a download
+    /// could be attributed to a book. It cannot be: a book's content and its
+    /// cover share one folder — `blobFolderOf` derives the same string for
+    /// both — so a jacket fetched during a download matched the download's
+    /// row and its terminal event cleared it early.
+    ///
+    /// `transfer_id` is what identifies a transfer, and `PeerPort.fetchBlob`
+    /// has always taken a per-request `onProgress` that filters on exactly
+    /// that. Use it. This field is for logs and for a human reading them.
+    pub folder: String,
     pub received: u64,
     pub total: u64,
     pub state: TransferState,
@@ -174,6 +188,7 @@ mod tests {
             }),
             PeerEvent::Transfer(TransferProgress {
                 transfer_id: 1,
+                folder: "a-book".into(),
                 received: 5,
                 total: 10,
                 state: TransferState::Running,

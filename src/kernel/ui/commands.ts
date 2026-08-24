@@ -386,6 +386,23 @@ export function buildCommands(ctx: KernelCommandContext): Command[] {
     })
   }
 
+  /* REMOVED BOOKS — offered only from the shelf, which is where the reader
+     noticed one missing. `trash.list` and `book.restore` have been services
+     since phase 11; until this there was no way to reach either without a
+     terminal, while the remove confirmation promised recovery on screen.
+     KEYWORDS carry the words a reader actually types. Nobody hunting for a
+     book they deleted searches "trash" first — they search "deleted", or
+     "restore", or "undo". */
+  if (ctx.state.screen === 'library') {
+    commands.push({
+      id: 'library:trash',
+      label: 'Removed books…',
+      group: 'Library',
+      keywords: 'trash deleted removed restore undo recover bin',
+      run: () => ctx.dispatch({ type: 'toggleLayer', layer: 'trashOpen' }),
+    })
+  }
+
   if (ctx.exportMarks) {
     const run = ctx.exportMarks
     commands.push({

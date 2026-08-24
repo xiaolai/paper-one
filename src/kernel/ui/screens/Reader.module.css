@@ -160,6 +160,81 @@
 }
 
 /*
+ * THE BOOK AND ITS MARKS ARE ONE BLEND GROUP, and saying so is what makes a
+ * highlight a highlighter instead of a sticker.
+ *
+ * The Overlayer's bands are painted OVER the glyphs and survive only because
+ * they multiply — see `--overlayer-highlight-blend-mode` in `global.css`. The
+ * band and the words it marks live on opposite sides of an iframe boundary:
+ * the SVG is the iframe's sibling in the paginator's shadow tree. With no
+ * isolation declared, the blend group resolves at whatever ancestor happens to
+ * establish a stacking context, WebKit composites the book's iframe onto its
+ * own layer, and the band ends up with nothing beneath it to darken — so it
+ * composites as `normal` and paints an opaque slab over the marked words.
+ *
+ * NOT VISIBLE TO EITHER SCREENSHOT PATH THAT AN AGENT REACHES FIRST, which is
+ * why it survived: `webview_screenshot` re-renders the webview off the
+ * compositor and applies the blend correctly, so the capture looked right while
+ * the screen was wrong. Only a window-server capture (`scripts/shot-window.sh`)
+ * or the reader's own eyes show it. Measured on the running app, Sage, amber
+ * tint: the screen read #FAE3B5 — the raw fill — against #DBCC94 captured from
+ * the same instant through the webview. The words under it were gone.
+ *
+ * On `foliate-view` rather than `.text` because this element IS the boundary
+ * the group has to span: everything the blend needs — the book's iframe and the
+ * overlay that marks it — is inside its shadow tree, and nothing that has to
+ * escape a stacking context is.
+ */
+.text foliate-view {
+  isolation: isolate;
+}
+
+/*
+ * THE STRIP OUTSIDE THE PAGE IS THE STAGE'S, not a colour anybody stores.
+ *
+ * The book's iframe is narrower than the view by one `--page-margin` at each
+ * edge, so a band down both sides of the page belongs to the paginator. foliate
+ * fills it by COPYING the book document's background into an inline style —
+ * once, when the section loads, and after that only on a `prefers-color-scheme`
+ * change or at the end of `setStyles`. A theme change is none of those: it
+ * reaches the book as custom properties and rebuilds nothing. So the strips
+ * kept the paper of whatever theme the section was built in, and a reader who
+ * went from Sepia to Night got two bright bands down a black page until they
+ * happened to jump to another section.
+ *
+ * TRANSPARENT RATHER THAN A COLOUR, and that is the fix rather than a shortcut.
+ * Naming a colour here would be a THIRD copy of the page — `tokens.css` has
+ * `--surface` and `bookCss` has `BOOK_COLOURS[theme].surface` — and a third
+ * copy is a third thing that can go stale, which is the defect this rule
+ * exists to remove. Unset, the strip shows the reading surface the shell is
+ * already painting behind it, so it cannot disagree with the page: there is
+ * nothing left to disagree with.
+ *
+ * `!important` because foliate's value is an INLINE style, and a `::part` rule
+ * loses to one otherwise. NO JAVASCRIPT IS NEEDED to reach it — `view.js` sets
+ * `exportparts="head,foot,filter"` on the renderer itself, which is what the
+ * fixed-layout rule further down already depends on. Writing that attribute
+ * from here was tried and removed: it landed as `filter` alone, quietly
+ * dropping `head` and `foot` from foliate's own contract to buy nothing.
+ *
+ * A SECOND RULE ON THIS SELECTOR is deliberate rather than an oversight. The
+ * one below §14.5 sets the fixed-layout page's light on the same part, and the
+ * two are different subjects — this is the reflowable page's edge, that is a
+ * PDF's brightness. `part="filter"` is also on the iframe as well as on the
+ * background div, so both rules reach both; the iframe carries no background of
+ * its own, so this changes nothing there. Measured, not assumed.
+ *
+ * The other repair for this was to put the theme in `applySheets`' key so
+ * `setStyles` fires again. It worked, and it flashed the window on every theme
+ * change: the sheet re-parsed carries the `@font-face` rules copied out of the
+ * host, so the book re-resolved its faces each time. Repainting one strip must
+ * not cost a relayout of the book.
+ */
+.text foliate-view::part(filter) {
+  background: transparent !important;
+}
+
+/*
  * In scrolled flow the book element is also the SCROLL PORT, and a scroll port
  * sized to the prose grid puts its scrollbar at the prose grid's edge.
  *

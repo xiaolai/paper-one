@@ -27,11 +27,30 @@ import { isContributedPaneId, type Align, type PageLayout, type PaneId, type Rea
 /* `tagsOpen` is the tag editor as a sheet over the reader — the shelf opens
  * the same editor as a popover, which is not a layer because it is dismissed
  * by its own click-outside and never takes the window. */
-const LAYER_ORDER = ['paletteOpen', 'switcherOpen', 'tagsOpen'] as const
+/* `trashOpen` is the removed-books sheet. It EARNED its place the day the
+   app could remove a book but not un-remove one: `book.restore` and
+   `trash.list` had existed as services and CLI verbs since phase 11, and the
+   remove confirmation promised recovery "for two weeks", while no surface in
+   the app could perform it. A promise printed on screen that only a terminal
+   can keep is not a promise. */
+const LAYER_ORDER = ['paletteOpen', 'switcherOpen', 'tagsOpen', 'trashOpen'] as const
 
 /** Derived from LAYER_ORDER so the action types and the dismiss order cannot
  *  drift apart — adding a layer in one place now fails to compile in the other. */
 export type Layer = (typeof LAYER_ORDER)[number]
+
+/**
+ * Every layer, shut — derived from the one list rather than typed out again.
+ *
+ * `goScreen` used to repeat each field by hand, so `LAYER_ORDER` was the
+ * declared source of truth for the DISMISS ORDER while the closing was a
+ * second list beside it. A layer added to one and not the other compiles, and
+ * the symptom is a sheet about the shelf still hanging over the reader.
+ */
+const ALL_LAYERS_SHUT = Object.fromEntries(LAYER_ORDER.map((layer) => [layer, false])) as Record<
+  Layer,
+  false
+>
 
 /* AT MOST ONE LAYER IS OPEN — enforced in `toggleLayer`, over the whole of
  * LAYER_ORDER. There used to be a second list of "modal" layers beside this
@@ -74,6 +93,8 @@ export interface AppState {
   readonly switcherOpen: boolean
   /** The tag editor over the reader's current book, as a sheet — ⌘T. */
   readonly tagsOpen: boolean
+  /** Removed books, with what is left of their fortnight — see LAYER_ORDER. */
+  readonly trashOpen: boolean
   /** Chrome fades to 0 and returns on pointer-near (§06). */
   readonly chromeOn: boolean
   readonly rulerOn: boolean
@@ -200,6 +221,7 @@ export const initialState: AppState = {
   paletteOpen: false,
   libraryQuery: '',
   switcherOpen: false,
+  trashOpen: false,
   tagsOpen: false,
   chromeOn: false,
   rulerOn: false,
@@ -323,9 +345,10 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
         ...state,
         screen: action.screen,
         pane,
-        switcherOpen: false,
-        paletteOpen: false,
-        tagsOpen: false,
+        /* A SCREEN CHANGE CLOSES EVERY LAYER — all of them, from the list that
+           also decides the dismiss order, so a layer added later cannot be
+           added to one and forgotten in the other. */
+        ...ALL_LAYERS_SHUT,
       }
     }
 

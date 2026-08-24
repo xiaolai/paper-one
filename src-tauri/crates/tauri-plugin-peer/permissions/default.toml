@@ -12,6 +12,7 @@ every session is accepted only from a persisted peer.
 permissions = [
     "allow-peer-status",
     "allow-peer-local-role",
+    "allow-peer-set-local-role",
     "allow-paper-data-root",
     "allow-fs-fsync",
     "allow-peer-list-peers",

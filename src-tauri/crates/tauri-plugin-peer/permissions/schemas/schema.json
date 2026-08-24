@@ -511,6 +511,18 @@
           "markdownDescription": "Denies the peer_set_grants command without any pre-configured scope."
         },
         {
+          "description": "Enables the peer_set_local_role command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-peer-set-local-role",
+          "markdownDescription": "Enables the peer_set_local_role command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the peer_set_local_role command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-peer-set-local-role",
+          "markdownDescription": "Denies the peer_set_local_role command without any pre-configured scope."
+        },
+        {
           "description": "Enables the peer_status command without any pre-configured scope.",
           "type": "string",
           "const": "allow-peer-status",
@@ -523,10 +535,10 @@
           "markdownDescription": "Denies the peer_status command without any pre-configured scope."
         },
         {
-          "description": "The commands a Paper webview needs from the peer plugin: the endpoint's status,\nthe device's role, the storage root, fsync of a file inside that root; the\npaired-peer list with grants; pairing (offer, cancel, confirm, dial-from-URI);\nsessions (ready, connect, send, recv, close) and blob transfers (fetch, hash).\nEvery path the plugin touches is validated to lie inside the data root, and\nevery session is accepted only from a persisted peer.\n\n#### This default permission set includes:\n\n- `allow-peer-status`\n- `allow-peer-local-role`\n- `allow-paper-data-root`\n- `allow-fs-fsync`\n- `allow-peer-list-peers`\n- `allow-peer-forget-peer`\n- `allow-peer-set-grants`\n- `allow-peer-has-grant`\n- `allow-peer-pair-begin`\n- `allow-peer-pair-cancel`\n- `allow-peer-pair-confirm`\n- `allow-peer-pair-from-uri`\n- `allow-peer-ready`\n- `allow-peer-connect`\n- `allow-peer-send`\n- `allow-peer-session-recv`\n- `allow-peer-close`\n- `allow-peer-blob-fetch`\n- `allow-peer-hash-file`",
+          "description": "The commands a Paper webview needs from the peer plugin: the endpoint's status,\nthe device's role, the storage root, fsync of a file inside that root; the\npaired-peer list with grants; pairing (offer, cancel, confirm, dial-from-URI);\nsessions (ready, connect, send, recv, close) and blob transfers (fetch, hash).\nEvery path the plugin touches is validated to lie inside the data root, and\nevery session is accepted only from a persisted peer.\n\n#### This default permission set includes:\n\n- `allow-peer-status`\n- `allow-peer-local-role`\n- `allow-peer-set-local-role`\n- `allow-paper-data-root`\n- `allow-fs-fsync`\n- `allow-peer-list-peers`\n- `allow-peer-forget-peer`\n- `allow-peer-set-grants`\n- `allow-peer-has-grant`\n- `allow-peer-pair-begin`\n- `allow-peer-pair-cancel`\n- `allow-peer-pair-confirm`\n- `allow-peer-pair-from-uri`\n- `allow-peer-ready`\n- `allow-peer-connect`\n- `allow-peer-send`\n- `allow-peer-session-recv`\n- `allow-peer-close`\n- `allow-peer-blob-fetch`\n- `allow-peer-hash-file`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "The commands a Paper webview needs from the peer plugin: the endpoint's status,\nthe device's role, the storage root, fsync of a file inside that root; the\npaired-peer list with grants; pairing (offer, cancel, confirm, dial-from-URI);\nsessions (ready, connect, send, recv, close) and blob transfers (fetch, hash).\nEvery path the plugin touches is validated to lie inside the data root, and\nevery session is accepted only from a persisted peer.\n\n#### This default permission set includes:\n\n- `allow-peer-status`\n- `allow-peer-local-role`\n- `allow-paper-data-root`\n- `allow-fs-fsync`\n- `allow-peer-list-peers`\n- `allow-peer-forget-peer`\n- `allow-peer-set-grants`\n- `allow-peer-has-grant`\n- `allow-peer-pair-begin`\n- `allow-peer-pair-cancel`\n- `allow-peer-pair-confirm`\n- `allow-peer-pair-from-uri`\n- `allow-peer-ready`\n- `allow-peer-connect`\n- `allow-peer-send`\n- `allow-peer-session-recv`\n- `allow-peer-close`\n- `allow-peer-blob-fetch`\n- `allow-peer-hash-file`"
+          "markdownDescription": "The commands a Paper webview needs from the peer plugin: the endpoint's status,\nthe device's role, the storage root, fsync of a file inside that root; the\npaired-peer list with grants; pairing (offer, cancel, confirm, dial-from-URI);\nsessions (ready, connect, send, recv, close) and blob transfers (fetch, hash).\nEvery path the plugin touches is validated to lie inside the data root, and\nevery session is accepted only from a persisted peer.\n\n#### This default permission set includes:\n\n- `allow-peer-status`\n- `allow-peer-local-role`\n- `allow-peer-set-local-role`\n- `allow-paper-data-root`\n- `allow-fs-fsync`\n- `allow-peer-list-peers`\n- `allow-peer-forget-peer`\n- `allow-peer-set-grants`\n- `allow-peer-has-grant`\n- `allow-peer-pair-begin`\n- `allow-peer-pair-cancel`\n- `allow-peer-pair-confirm`\n- `allow-peer-pair-from-uri`\n- `allow-peer-ready`\n- `allow-peer-connect`\n- `allow-peer-send`\n- `allow-peer-session-recv`\n- `allow-peer-close`\n- `allow-peer-blob-fetch`\n- `allow-peer-hash-file`"
         }
       ]
     }

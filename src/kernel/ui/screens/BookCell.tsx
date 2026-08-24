@@ -1,7 +1,8 @@
-import { useMemo, useRef, type DragEvent, type MouseEvent } from 'react'
-import { Check, MoreHorizontal } from 'lucide-react'
+import { useMemo, useRef, useState, type DragEvent, type MouseEvent } from 'react'
+import { Check, CloudDownload, MoreHorizontal } from 'lucide-react'
 import {
-  CANNOT_OPEN,
+  cannotOpenReason,
+  fetchAction,
   allTags,
   canOpen,
   displayTitle,
@@ -92,10 +93,14 @@ export interface BookCellProps {
   readonly onSetFinished: (bookId: string, finished: boolean) => void
   /** Contributed actions, passed through to the menu — see `BookMenu`. */
   readonly actions: readonly BookAction[]
+  /** What a capability says is happening to this book — see `BookRow`, which
+   *  carries the note on why this is not called `status`. */
+  readonly activity: { readonly label: string; readonly fraction?: number } | null
 }
 
 /** How many chips fit on the card's one line before the rest become a count. */
 const CHIPS = 4
+
 
 export function BookCell({
   book,
@@ -117,6 +122,7 @@ export function BookCell({
   onUntagBooks,
   onSetFinished,
   actions,
+  activity,
 }: BookCellProps) {
   const openable = canOpen(book)
   const tags = allTags(book)
@@ -124,7 +130,9 @@ export function BookCell({
   const status = statusOf(book)
   const menuOpen = menuFor === book.bookId
   const editing = tagging === book.bookId
-  /* ANCHORED TO THE CARD, NOT TO THE BUTTON. The ellipsis is a 24px mark at
+  /* ANCHORED TO THE BUTTON, NOT TO THE CARD — the opposite of what this
+   * comment used to open with, and of what the code did before the
+   * measurement below. The ellipsis is a 24px mark at
    * the card's far right; anchored to it, a menu that has to flip to `start`
    * on the first column lands with its left edge on the button's left — 100px
    * in from the cover, hanging in the middle of nothing, and the reader asked
@@ -229,6 +237,8 @@ export function BookCell({
    * list; MEMOIZED, or a fresh `[book]` on every shelf render invalidates
    * every books-keyed memo inside it. */
   const editorBooks = useMemo(() => [book], [book])
+  /* Whether this card's fetch is in flight — see the corner mark below. */
+  const [fetching, setFetching] = useState(false)
 
   return (
     <div
@@ -261,7 +271,7 @@ export function BookCell({
               : `Select ${title}`
             : openable
               ? `Open ${title}`
-              : CANNOT_OPEN
+              : cannotOpenReason(book, actions)
         }
         onClick={onJacketClick}
       >
@@ -276,19 +286,15 @@ export function BookCell({
             covers — that is what a jacket is for — and a title and an author
             printed under every one restated what the artwork already says, at
             a size that could not be read without leaning in and a width that
-            truncated most of them to a fragment. Both live on the button's
-            `title`, so a hover names the book, and the tint carries the title
-            for a book that has no artwork to name it. The switcher lists
-            title and author because a LIST is read by its words; a shelf is
-            not.
+            truncated most of them to a fragment. The TITLE lives on the
+            button's `title`, so a hover names the book, and the tint carries
+            it for a book that has no artwork to name it. The author is not
+            there and does not need to be: a shelf is scanned to find a book
+            already known. The switcher lists both because a LIST is read by
+            its words; a shelf is not.
 
             One thing that used to ride on the author line stays, because it
             is a signal and not a caption: a book Paper has no copy of. */}
-        {!openable && (
-          <span className={styles.noCopy} title={CANNOT_OPEN}>
-            no copy
-          </span>
-        )}
         {/* The selection mark, on the jacket's corner: a check in a filled
             circle, the platform's own vocabulary for "this one is in". Drawn
             only when selected — a hollow circle on every card while selecting
@@ -300,6 +306,85 @@ export function BookCell({
         )}
       </button>
 
+      {/* NOT HERE — AND THE WAY TO FETCH IT, which is one control.
+          A MARK RATHER THAN A CAPTION. This was the words "no copy" in a
+          pill, which at 11px needed a quarter of the jacket to say what a
+          glyph says at 15, on the one surface whose whole purpose is that
+          the artwork is legible. The sentence moved to the `title`, where
+          two lines fit and the remedy fits with them.
+
+          AND IT IS THE DOWNLOAD. A reader who sees "not on this device"
+          wants it on this device, and the cloud is where they will press —
+          Music and Photos taught that gesture, and offering the glyph
+          without it makes the reader go and find the menu instead. It runs
+          the SAME contributed action the menu lists, found by the same rule,
+          so the two cannot come to mean different things.
+
+          OUTSIDE THE OPEN BUTTON, for the reason the meta line below is: a
+          button nested in a button is invalid, and browsers resolve it by
+          dropping the inner one — so the download would simply never fire.
+          `.cell` is the positioned ancestor either way, so it lands in the
+          same corner it did as a child.
+
+          A SPAN WHEN THERE IS NOTHING TO PRESS. On a device with no peer to
+          fetch from, the bytes are gone and re-importing is the repair; a
+          button there would be a control that does nothing. */}
+      {!openable &&
+        (() => {
+          const fetch = fetchAction(book, actions)
+          const said = cannotOpenReason(book, actions)
+          const glyph = <CloudDownload size={ICON.control} strokeWidth={ICON.stroke} aria-hidden />
+          /* The words a screen reader still gets: an `svg` carrying a `title`
+             is announced by neither, and this is the button's whole name. */
+          const words = <span className={styles.srOnly}>{said}</span>
+          return fetch ? (
+            <button
+              type="button"
+              className={styles.noCopy}
+              title={said}
+              /* DISABLED WHILE IT WORKS. Nothing else stopped a second press:
+                 the capability coalesces duplicate downloads now, but a
+                 control that keeps accepting clicks while doing the thing it
+                 was clicked for reads as one that did not hear the first. */
+              disabled={fetching}
+              aria-busy={fetching}
+              onClick={() => {
+                setFetching(true)
+                /* THE ACTION STILL STARTS SYNCHRONOUSLY — deferring it into a
+                   microtask to tidy the error handling would change when a
+                   download begins to buy nothing.
+
+                   BOTH FAILURE SHAPES RELEASE THE CONTROL. `run` is typed
+                   `void | Promise<void>`, so it can fail BEFORE returning
+                   anything, and a synchronous throw never reaches a
+                   `.finally` — which left this button disabled for the life
+                   of the card: the reader's only route to the bytes, dead,
+                   because the failure came too early.
+
+                   REPORTING IS THE ACTION'S JOB, not this button's — sync's
+                   download catches its own failure and sets `degraded`. What
+                   is caught here is only so a capability that breaks that
+                   contract cannot leave the control stuck. */
+                try {
+                  void Promise.resolve(fetch.run(book.bookId))
+                    .catch(() => {})
+                    .finally(() => setFetching(false))
+                } catch {
+                  setFetching(false)
+                }
+              }}
+            >
+              {glyph}
+              {words}
+            </button>
+          ) : (
+            <span className={styles.noCopy} title={said}>
+              {glyph}
+              {words}
+            </span>
+          )
+        })()}
+
       {/* THE META LINE: the progress rule, and the one control that reaches
           everything else. Outside the open button, because a button nested
           in a button is invalid and browsers resolve it by dropping the inner
@@ -310,7 +395,11 @@ export function BookCell({
           a zero-width bar under every unread book is a row of noise — and
           the ellipsis then holds the row's end alone. */}
       <div className={styles.metaRow}>
-        {status !== 'unread' ? (
+        {/* The rule's slot, while something is happening to this book — see the
+            note in `BookRow`: one slot, one meaning at a time. */}
+        {activity ? (
+          <span className={styles.cellActivity}>{activity.label}</span>
+        ) : status !== 'unread' ? (
           <span
             className={styles.progress}
             data-finished={status === 'finished'}

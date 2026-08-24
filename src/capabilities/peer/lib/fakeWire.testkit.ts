@@ -58,7 +58,12 @@ export interface FakeWireOptions {
 
 export interface FakeWire extends PeerWire {
   readonly id: string
+  /** The role the node is RUNNING as. */
   readonly roleOf: PeerRole
+  /** What `setLocalRole` stored, in force only after `restart()`. */
+  readonly pendingRole: PeerRole | null
+  /** The next launch: the stored role becomes the running one. */
+  restart(): void
   /** This device's served blobs: `<folder>/<name>` → bytes. */
   readonly blobs: Map<string, Uint8Array>
   /** Where a fetched blob ALSO lands — wire it to the test's fake fs so
@@ -83,7 +88,11 @@ export async function fakeBlobHash(bytes: Uint8Array): Promise<string> {
 
 class FakeWireImpl implements FakeWire {
   readonly id: string
-  readonly roleOf: PeerRole
+  /* Mutable on the fake alone, so `setLocalRole` can be observed in a test
+     without modelling a relaunch. The wire's own interface keeps it readonly. */
+  roleOf: PeerRole
+  /** Set by `setLocalRole`, in force only after `restart()`. */
+  pendingRole: PeerRole | null = null
   readonly blobs = new Map<string, Uint8Array>()
   landBlob: FakeWire['landBlob'] = null
   serveBlob: FakeWire['serveBlob'] = null
@@ -173,6 +182,29 @@ class FakeWireImpl implements FakeWire {
     return this.roleOf
   }
 
+  /**
+   * STORED FOR THE NEXT LAUNCH, exactly as the plugin does — `status()` keeps
+   * reporting the RUNNING role until `restart()`.
+   *
+   * The fake used to apply it at once, with a comment calling the difference
+   * deliberate. It is not survivable: `refresh()` publishes `status().role`,
+   * so a test could set a role, refresh, watch `snapshot.role` flip, and pass
+   * — proving a live switch the real plugin does not perform, which is the
+   * one thing a fake must never be able to do. `restart()` is the seam a test
+   * uses when it genuinely wants the next launch.
+   */
+  async setLocalRole(role: PeerRole): Promise<void> {
+    this.pendingRole = role
+  }
+
+  /** The next launch: what `setLocalRole` stored becomes what runs. */
+  restart(): void {
+    if (this.pendingRole !== null) {
+      this.roleOf = this.pendingRole
+      this.pendingRole = null
+    }
+  }
+
   async dataRoot(): Promise<string> {
     return `/fake/${this.id}`
   }
@@ -221,9 +253,11 @@ class FakeWireImpl implements FakeWire {
   async pairConfirm(accept: boolean, grants: readonly string[] | undefined, attemptId: string): Promise<WirePeer | null> {
     const pending = this.pending
     if (!pending) throw peerError('noPendingPairing', 'nothing to confirm')
-    /* Mirror the Rust: when an attempt id is supplied it must match the pending
-     * one, so a confirmation bound to a different (pre-played) attempt is
-     * refused without consuming this one. Absent id keeps the old behaviour. */
+    /* Mirror the Rust: the attempt id must match the pending one, so a
+     * confirmation bound to a different (pre-played) attempt is refused
+     * without consuming this one. The id is REQUIRED — an earlier version
+     * allowed it to be absent and this comment still described that path
+     * after the parameter became mandatory. */
     if (attemptId !== pending.attemptId) {
       throw peerError('noPendingPairing', 'confirmation does not match the pending pairing attempt')
     }
@@ -324,7 +358,14 @@ class FakeWireImpl implements FakeWire {
   async blobFetch(request: BlobRequest): Promise<number> {
     const transferId = this.nextTransfer++
     const progress = (state: TransferProgress['state'], received: number, total: number, error?: string) =>
-      this.emit('transfer', { transferId, received, total, state, ...(error === undefined ? {} : { error }) })
+      this.emit('transfer', {
+        transferId,
+        folder: request.folder,
+        received,
+        total,
+        state,
+        ...(error === undefined ? {} : { error }),
+      })
     const remote = this.links.get(request.peerId)
     const task = async (): Promise<void> => {
       const hasSession = [...this.sessions.values()].some((s) => s.open && s.peerId === request.peerId)
@@ -334,6 +375,15 @@ class FakeWireImpl implements FakeWire {
       const bytes = remote.serveBlob ? remote.serveBlob(request.folder, request.name) : (remote.blobs.get(key) ?? null)
       if (bytes === null) throw peerError('blobRefused', 'not-found')
       progress('running', 0, bytes.length)
+      /* SIZE AND DIGEST, exactly as `blobs.rs` does — its check is
+         `size != expected_size || hash != expected`, one refusal for both.
+         The fake verified only the digest, so a caller that passed a size the
+         bytes do not have was accepted here and refused by the real plugin:
+         the TypeScript suites could not catch stale or dishonest size
+         metadata, which is precisely the class the check exists for. */
+      if (bytes.length !== request.expectedSize) {
+        throw peerError('blobHashMismatch', `expected ${request.expectedSize} bytes, got ${bytes.length}`)
+      }
       if ((await fakeBlobHash(bytes)) !== request.expectedHash) throw peerError('blobHashMismatch', 'digest differs')
       this.blobs.set(key, bytes)
       if (this.landBlob) await this.landBlob(request.folder, request.name, bytes)

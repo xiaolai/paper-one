@@ -274,7 +274,7 @@ export const peer: Capability = {
 
     held.port = hasTauri() ? createPeerPort(tauriWire()) : null
     port = held.port
-    held.model = createDevicesModel({ port: held.port, settings: api.settings })
+    held.model = createDevicesModel({ port: held.port })
     model = held.model
     void held.model.refresh()
 

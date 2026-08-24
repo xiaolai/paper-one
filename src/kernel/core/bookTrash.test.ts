@@ -3,8 +3,10 @@ import { folderOf, trashOf } from './bookFolder'
 import {
   TRASH_DAYS,
   emptyExpired,
+  listTrash,
   rescueStrandedMarks,
   restoreBook,
+  timeLeft,
   trashBook,
 } from './bookTrash'
 import { fakeFs } from './fakeFs.testkit'
@@ -443,5 +445,80 @@ describe('a removal interrupted half way', () => {
     expect(fs.store.has(`${folderOf('book_a')}/book.json`)).toBe(true)
     expect(fs.store.has(`${folderOf('book_a')}/content.epub`)).toBe(true)
     expect(fs.store.has(`${folderOf('book_a')}/marks.json`)).toBe(true)
+  })
+})
+
+describe('how long a trashed book has left', () => {
+  /* The words a reader reads next to a Restore button, derived from the same
+     `TRASH_DAYS` the sweep uses — the drift `TRASH_KEPT_FOR` exists to stop. */
+  const now = 1_700_000_000_000
+  const day = 24 * 60 * 60 * 1000
+
+  it('counts the days', () => {
+    expect(timeLeft(now + 13 * day, now)).toBe('13 days left')
+  })
+
+  it('says one day in the singular, because "1 days" is a bug on screen', () => {
+    expect(timeLeft(now + day, now)).toBe('1 day left')
+  })
+
+  it('rounds up, so a book with hours left is not reported as gone', () => {
+    expect(timeLeft(now + 3 * 60 * 60 * 1000, now)).toBe('1 day left')
+  })
+
+  it('names the sweep rather than the calendar once the window has passed', () => {
+    /* `emptyExpired` runs at LAUNCH and never on a timer, so a book whose
+       fortnight ended while the app was open is still restorable. "Today"
+       would promise a deletion that has not been scheduled. */
+    expect(timeLeft(now - day, now)).toBe('Goes at next launch')
+    expect(timeLeft(now, now)).toBe('Goes at next launch')
+  })
+
+  it('says an unreadable entry stays, because the sweep leaves it', () => {
+    expect(timeLeft(null, now)).toBe('Kept')
+  })
+})
+
+describe('a removal stamp that cannot be trusted', () => {
+  /* `Number('')` IS ZERO and `Number.isFinite(0)` is true, so an empty or
+     half-written `.removed` read as the epoch — older than any window — and
+     the sweep DELETED THE BOOK. The contract this file states is the
+     opposite: an unreadable stamp is left alone, because erring towards
+     keeping is the only direction that cannot lose a reader's work. A crash
+     between the folder move and the stamp write is exactly how an empty one
+     occurs, which is the case the old test set missed: it covered a MISSING
+     stamp and a non-numeric one, and both of those already behaved. */
+  const seeded = (stamp: string) =>
+    fakeFs({ 'trash/bk1/book.json': '{"bookId":"bk1"}', 'trash/bk1/.removed': stamp })
+
+  for (const [name, stamp] of [
+    ['empty', ''],
+    ['whitespace', '  \n'],
+    ['zero', '0'],
+    ['negative', '-1'],
+    ['fractional', '1.5'],
+    ['not a number', 'yesterday'],
+  ] as const) {
+    it(`leaves a book whose stamp is ${name}`, async () => {
+      const fs = seeded(stamp)
+      expect(await emptyExpired(fs, Date.now())).toEqual([])
+      expect(await fs.exists('trash/bk1/book.json'), 'the book survived').toBe(true)
+    })
+  }
+
+  it('still sweeps a book whose stamp is a real, expired time', async () => {
+    /* The guard must not have bought safety by never deleting anything. */
+    const fs = seeded(String(Date.now() - (TRASH_DAYS + 1) * 24 * 60 * 60 * 1000))
+    expect(await emptyExpired(fs, Date.now())).toEqual(['bk1'])
+  })
+
+  it('reports an untrustworthy stamp as no time at all, not as 1970', async () => {
+    /* The other half of the same parse. `listTrash` had its own copy of the
+       coercion, where a zero showed as a row removed in 1970 with its
+       fortnight long gone — the surface that REPORTS the deadline disagreeing
+       with the sweep that ENFORCES it. */
+    const rows = await listTrash(seeded(''))
+    expect(rows[0]?.removedAt).toBeNull()
+    expect(rows[0]?.expiresAt).toBeNull()
   })
 })

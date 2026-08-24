@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import type { IndexedBook } from './bookIndex'
+import type { BookAction } from './capability'
 import {
   allTags,
   CANNOT_OPEN,
+  CANNOT_OPEN_FETCHABLE,
+  cannotOpenReason,
   byRecency,
   canOpen,
   inOrder,
@@ -455,7 +458,60 @@ describe('canOpen', () => {
   })
 
   it('has something to say on the row', () => {
-    expect(CANNOT_OPEN).toContain('add the file again')
+    expect(CANNOT_OPEN).toContain('Add the file again')
+  })
+
+  it('says the state first and the remedy second, on two lines', () => {
+    /* The first line never varies, so a reader learns to read only the
+       second. `title` renders the newline; nothing else does the work. */
+    for (const message of [CANNOT_OPEN, CANNOT_OPEN_FETCHABLE]) {
+      const [state, remedy, ...rest] = message.split('\n')
+      expect(state).toBe('No copy on this device.')
+      expect(remedy).toBeTruthy()
+      expect(rest).toEqual([])
+    }
+    expect(CANNOT_OPEN_FETCHABLE).toContain('Download it from your library')
+  })
+
+  describe('and what it tells the reader to do about it', () => {
+    /* THE REMEDY DEPENDS ON WHERE THE BYTES CAN COME FROM. One sentence
+       served both, and on a satchel it was the wrong one: the row said "add
+       the file again" while its own menu offered Download, which needs no
+       original file. A remedy the reader cannot perform reads as a lost
+       book. */
+    const download = (over: Partial<BookAction> = {}): BookAction => ({
+      id: 'sync:download',
+      label: 'Download',
+      fetchesContent: true,
+      run: () => {},
+      ...over,
+    })
+
+    it('says re-import when nothing can fetch the content', () => {
+      /* A shelf holding a record whose bytes were never stored — the case
+         `canOpen` exists for. Re-importing IS the repair there, and
+         `libraryStore`'s re-add path is written against that promise. */
+      expect(cannotOpenReason(entry(), [])).toBe(CANNOT_OPEN)
+    })
+
+    it('says download when a capability offers to bring it down', () => {
+      expect(cannotOpenReason(entry(), [download()])).toBe(CANNOT_OPEN_FETCHABLE)
+    })
+
+    it('respects the same `when` the menu uses', () => {
+      /* The sentence and the menu item are one judgement. An action that
+         would not be LISTED for this book must not change what the tooltip
+         promises — that is the disagreement this whole change removes. */
+      expect(cannotOpenReason(entry(), [download({ when: () => false })])).toBe(CANNOT_OPEN)
+      expect(cannotOpenReason(entry(), [download({ when: () => true })])).toBe(CANNOT_OPEN_FETCHABLE)
+    })
+
+    it('ignores actions that do not bring content', () => {
+      /* Remove, Evict, Tag. Only an action that says so counts, and it says
+         so with a field rather than by wearing a download glyph. */
+      const evict: BookAction = { id: 'sync:evict', label: 'Evict', run: () => {} }
+      expect(cannotOpenReason(entry(), [evict])).toBe(CANNOT_OPEN)
+    })
   })
 })
 

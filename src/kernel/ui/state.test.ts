@@ -644,3 +644,44 @@ describe('contributed panes', () => {
     expect(reducer(shut, { type: 'togglePane' }).pane).toBe('companion')
   })
 })
+
+describe('the layers, and the one list that governs them', () => {
+  /* `trashOpen` arrived with no reducer coverage at all: nothing asserted it
+     was mutually exclusive with the others, that Escape reached it, or that
+     changing screen closed it. The last is the one that would have bitten —
+     `goScreen` used to name each layer by hand, so a new layer could be added
+     to `LAYER_ORDER` (which decides the dismiss order) and forgotten in the
+     closing, leaving a sheet about the shelf hanging over the reader. */
+  const open = (state: AppState, layer: 'paletteOpen' | 'switcherOpen' | 'tagsOpen' | 'trashOpen') =>
+    reducer(state, { type: 'toggleLayer', layer })
+
+  it('opens and closes on the same action', () => {
+    const shown = open(initialState, 'trashOpen')
+    expect(shown.trashOpen).toBe(true)
+    expect(open(shown, 'trashOpen').trashOpen).toBe(false)
+  })
+
+  it('holds at most one open at a time', () => {
+    /* Two at once painted one over the other with Escape closing the wrong
+       one — the reason the "modal layers" list was folded into this one. */
+    const palette = open(initialState, 'paletteOpen')
+    const trash = open(palette, 'trashOpen')
+    expect(trash.trashOpen).toBe(true)
+    expect(trash.paletteOpen).toBe(false)
+  })
+
+  it('lets Escape peel the trash sheet, in the declared order', () => {
+    /* `dismissTop` walks `LAYER_ORDER`, so a layer that never appeared in it
+       would be unreachable by the key every sheet in this app closes on. */
+    const shown = open(initialState, 'trashOpen')
+    expect(reducer(shown, { type: 'dismissTop' }).trashOpen).toBe(false)
+  })
+
+  it('closes every layer on a screen change, including ones added later', () => {
+    for (const layer of ['paletteOpen', 'switcherOpen', 'tagsOpen', 'trashOpen'] as const) {
+      const shown = open(initialState, layer)
+      const moved = reducer(shown, { type: 'goScreen', screen: 'reader' })
+      expect(moved[layer], layer).toBe(false)
+    }
+  })
+})

@@ -24,6 +24,8 @@ import { JOURNAL_DIRTY_PATH, createJournal, type Journal } from './lib/journal'
 import { createLedger, type Ledger, type SyncChannel } from './lib/ledger'
 import { SYNC_SERVICES, parseContentAnswer, type SyncRole } from './lib/protocol'
 import { bindRole, bindScheduler, currentRole, syncNow, syncStatus, unbindRole, unbindScheduler } from './lib/runtime'
+import { createDownloads, describeDownload } from './lib/downloads'
+import { describeArrival, dropArrival, readArrivals, recordArrival, type Arrival } from './lib/arrivals'
 import { createSyncScheduler, type SyncScheduler } from './lib/scheduler'
 import { DEGRADED_DETAIL } from './lib/status'
 import { createStorageModel, dropDownloadSize, recordDownloadSize, type StorageModel } from './ui/storageModel'
@@ -102,6 +104,70 @@ const delegated = (name: string, grant: string): ServiceContribution => ({
   },
 })
 
+/* MODULE-LEVEL, like `syncStatus`, because a `Capability` is a VALUE: its
+ * `bookStatuses` are read once at composition, before any `start` has run, so
+ * the store they read has to exist before the runtime does. */
+const downloads = createDownloads()
+
+/* ARRIVALS, mirrored in memory for the shelf row to read synchronously.
+ * The file is the record; this is what `of` can answer from without awaiting.
+ * Module-level for the reason `downloads` is: `bookStatuses` are read at
+ * composition, before any `start` has run. */
+const arrivals = new Map<string, Arrival>()
+/* WHICH RUNTIME OWNS THE MAP. It is module-level — `bookStatuses` are read at
+   composition, before any `start` — so a teardown and a fresh start share it.
+   An in-flight `readArrivals` from the old lifetime could otherwise publish
+   into the new one, and entries from a shelf run could survive into a satchel
+   run that has no business holding them. Every start takes the next number,
+   claims the map, and only its own reads may write. */
+let arrivalsEpoch = 0
+/* The running capability's diagnostics, so the module-level arrival helpers
+   can REPORT rather than swallow. `pruneArrivals` runs outside `start`'s
+   closure — it is driven by the library subscription — and a `.catch(() => {})`
+   there meant a notice the reader had dismissed came back on the next launch
+   with nothing anywhere saying why. */
+let warn: ((code: string, detail: Record<string, unknown>) => void) | null = null
+const arrivalListeners = new Set<() => void>()
+const arrivalsChanged = () => {
+  for (const listener of [...arrivalListeners]) listener()
+}
+
+/**
+ * Forget the arrivals whose books the reader has now opened.
+ *
+ * OFF THE RENDER PATH, and that is the whole point of it existing. The
+ * clearing used to happen inside `BookStatus.of`, which the shelf calls while
+ * it draws: a render that mutated module state and started a write. This runs
+ * from the library's own change subscription instead — the moment `openedAt`
+ * moves is exactly a library change, so the notice still goes the instant the
+ * book is opened, and nothing about drawing a row can write to disk.
+ *
+ * The disk write is best-effort and the memory drop is not: a failed write
+ * costs a notice that returns once, on the next launch, which is a great deal
+ * better than a render that cannot be repeated safely.
+ */
+function pruneArrivals(books: readonly { bookId: string; openedAt?: number }[]): void {
+  if (arrivals.size === 0) return
+  let dropped = false
+  for (const book of books) {
+    const arrival = arrivals.get(book.bookId)
+    if (arrival === undefined) continue
+    if (describeArrival(arrival, book) !== null) continue
+    arrivals.delete(book.bookId)
+    dropped = true
+    const fs = running?.fs
+    if (fs) {
+      void dropArrival(fs, book.bookId).catch((thrown: unknown) => {
+        warn?.('sync.arrival-drop-failed', {
+          book: book.bookId,
+          message: thrown instanceof Error ? thrown.message : String(thrown),
+        })
+      })
+    }
+  }
+  if (dropped) arrivalsChanged()
+}
+
 const SERVICE_LIST: readonly ServiceContribution[] = Object.values(SYNC_SERVICES).map((service) =>
   delegated(service.name, service.grant),
 )
@@ -123,16 +189,49 @@ async function withShelf<T>(task: (channel: SyncChannel) => Promise<T>): Promise
   }
 }
 
-async function downloadAction(bookId: string): Promise<void> {
+/* IN FLIGHT, BY BOOK. The corner mark on the card and the Download item in
+   the menu both run this, and neither disables itself while it works — so a
+   second press started a second fetch for the same blob folder. The plugin
+   refuses the duplicate transfer, which surfaced as sync going `degraded`
+   over a double-click, and whichever attempt ended first cleared the other's
+   progress row. The second caller now joins the first instead. */
+const downloading = new Map<string, Promise<void>>()
+
+function downloadAction(bookId: string): Promise<void> {
+  const already = downloading.get(bookId)
+  if (already !== undefined) return already
+  const started = runDownload(bookId).finally(() => {
+    downloading.delete(bookId)
+  })
+  downloading.set(bookId, started)
+  return started
+}
+
+async function runDownload(bookId: string): Promise<void> {
   const held = running
   if (!held) return
-  await withShelf(async (channel) => {
-    const { size } = await held.ledger.download(channel, bookId)
-    const fs = held.fs
-    if (fs) await recordDownloadSize(fs, bookId, size).catch(() => {})
-    /* The jacket, best-effort — a cover that will not come costs nothing. */
-    await held.coverCache?.ensure(bookId).catch(() => {})
-  })
+  /* BEFORE the channel opens, not after: the first transfer event can arrive
+     while `download` is still awaiting, and an expectation registered later
+     would drop it. Registering early also makes the row answer the click at
+     once rather than when the first byte lands. */
+  downloads.expect(bookId)
+  try {
+    await withShelf(async (channel) => {
+      const { size } = await held.ledger.download(channel, bookId, (received, total) =>
+        downloads.progress(bookId, received, total),
+      )
+      const fs = held.fs
+      if (fs) await recordDownloadSize(fs, bookId, size).catch(() => {})
+      /* The jacket, best-effort — a cover that will not come costs nothing. */
+      await held.coverCache?.ensure(bookId).catch(() => {})
+    })
+  } finally {
+    /* WHATEVER HAPPENED. A terminal transfer event clears this already, but a
+       download that fails before any event — no session, a refused grant —
+       produces none at all, and a row left saying "Downloading…" forever is
+       worse than the failure it is hiding. */
+    downloads.forget(bookId)
+  }
 }
 
 async function removeDownloadAction(bookId: string): Promise<void> {
@@ -328,11 +427,60 @@ export const sync: Capability = {
     },
   ],
 
+  /* WHAT IS HAPPENING TO A BOOK, in the order a reader needs to hear it.
+   *
+   * The kernel takes the FIRST status that answers, so this list is a
+   * priority. A download is in flight and finishes in a minute; an arrival
+   * note has no deadline and sits there until the book is opened. With the
+   * note first, a re-download of a book that had been pushed here would draw
+   * its provenance instead of its progress for the whole transfer.
+   *
+   * Beside the action that starts it, which is the whole point: the reader
+   * clicks Download in this menu and the answer appears on the row they
+   * clicked, not in a list in Settings.
+   */
+  bookStatuses: [
+    {
+      id: 'sync:downloading',
+      subscribe: downloads.subscribe,
+      of: (book) => {
+        const one = downloads.of(book.bookId)
+        return one === null ? null : describeDownload(one)
+      },
+    },
+    {
+      /* WHERE A BOOK CAME FROM, when it came from somewhere. Announced rather
+       * than gated — see `arrivals.ts` on why the shelf must not hold an
+       * approval queue. It clears itself once the reader opens the book, so
+       * this asks `describeArrival` on every render rather than caching a
+       * decision that `openedAt` can invalidate underneath it. */
+      id: 'sync:arrived',
+      subscribe: (listener) => {
+        arrivalListeners.add(listener)
+        return () => arrivalListeners.delete(listener)
+      },
+      /* PURE. This is asked WHILE THE SHELF RENDERS, so it may only read.
+         It used to delete the in-memory arrival and start a filesystem write
+         from here — a render with side effects, which React is free to run
+         twice, and whose swallowed failure meant a notice the reader had
+         dismissed came back on the next launch. The forgetting moved to
+         `pruneArrivals`, driven by the library's own subscription. */
+      of: (book) => {
+        const arrival = arrivals.get(book.bookId)
+        if (arrival === undefined) return null
+        return describeArrival(arrival, book)
+      },
+    },
+  ],
+
   bookActions: [
     {
       id: 'sync:download',
       label: 'Download',
       icon: 'download',
+      /* The fact the kernel needs for the tooltip on a row it cannot open:
+         this is the repair, not re-importing the original file. */
+      fetchesContent: true,
       /* A satchel's metadata-only row. The kernel's open path still refuses
        * a book with no bytes (`canOpen`); tap-to-open-fetches is C.6 polish
        * — this action is the honest seam today. */
@@ -399,6 +547,10 @@ export const sync: Capability = {
     let unserve: (() => void) | null = null
     let scheduler: SyncScheduler | null = null
     let unregisterSyncNow: (() => void) | null = null
+    let offLibrary: (() => void) | null = null
+    /* The epoch this runtime claimed, so its teardown can tell whether the
+       map is still its own — see the `arrival-prune` step. */
+    let myArrivalsEpoch: number | null = null
     let backfillTimer: ReturnType<typeof setTimeout> | null = null
     let boundRole: object | null = null
     let stopped = false
@@ -422,6 +574,21 @@ export const sync: Capability = {
         if (scheduler !== null) unbindScheduler(scheduler)
       })
       step('syncNow', () => unregisterSyncNow?.())
+      step('arrival-prune', () => {
+        offLibrary?.()
+        /* ONLY IF THE MAP IS STILL OURS. A stop that ran unconditionally
+           cleared it and bumped the epoch even when a NEWER runtime had
+           already claimed both — so a restart wiped the arrivals the new run
+           had just loaded, and invalidated its in-flight read as well. A
+           late-stopping old runtime now leaves the new one alone. */
+        if (myArrivalsEpoch !== null && myArrivalsEpoch === arrivalsEpoch) {
+          arrivalsEpoch++
+          arrivals.clear()
+          arrivalsChanged()
+          warn = null
+        }
+        myArrivalsEpoch = null
+      })
       step('shelf-port', () => unbindShelfPort?.dispose())
       step('serve', () => unserve?.())
       step('backfill', () => {
@@ -561,8 +728,22 @@ export const sync: Capability = {
       })
       if (abortedDuringStart()) throw new Error('sync: start aborted while the role was being read')
       boundRole = bindRole(role)
-      const fetchVerifiedBlob = (peerId: string, folder: string, blob: { name: string; size: number; hash: string }) =>
-        port.fetchBlob({ peerId, folder, name: blob.name, expectedSize: blob.size, expectedHash: blob.hash })
+      /* THE ARRIVALS MAP IS CLAIMED HERE, before the role branch, because
+         `onArrived` is handed to the ledger either way — a satchel that
+         claimed nothing would have had every arrival dropped by the epoch
+         check inside it. Hydration from disk is still the shelf's alone. */
+      myArrivalsEpoch = ++arrivalsEpoch
+      arrivals.clear()
+      const fetchVerifiedBlob = (
+        peerId: string,
+        folder: string,
+        blob: { name: string; size: number; hash: string },
+        onProgress?: (received: number, total: number) => void,
+      ) =>
+        port.fetchBlob(
+          { peerId, folder, name: blob.name, expectedSize: blob.size, expectedHash: blob.hash },
+          onProgress === undefined ? undefined : (event) => onProgress(event.received, event.total),
+        )
       const ledger = createLedger({
         services,
         journal: openJournal,
@@ -571,6 +752,36 @@ export const sync: Capability = {
         role,
         fetchBlob: fetchVerifiedBlob,
         hashFile: (folder, name) => port.hashFile(folder, name),
+        onArrived: (bookId, peerId) =>
+          /* THE NAME, NOT THE ID. "Added from 8e20a13e…" is the same defect
+             this pane spent a day being dug out of. Resolved against the peer
+             record, and falling back to a plain sentence rather than to the
+             id: a book that arrived from a device since revoked still arrived
+             from somewhere, and the reader is owed that much. */
+          /* RETURNED, not fired and forgotten: the ledger awaits this before
+             it acks, so the sender is never told a book landed here while its
+             provenance is still unwritten. */
+          (async () => {
+            const from =
+              (await port.listPeers().catch(() => [])).find((one) => one.id === peerId)?.name ??
+              'another device'
+            /* EPOCH-CHECKED ACROSS THE AWAIT. `listPeers` is IPC, so a
+               session that was still acking when the runtime stopped could
+               land its arrival in a map the next run owns. */
+            if (myArrivalsEpoch === null || myArrivalsEpoch !== arrivalsEpoch) return
+            const arrival: Arrival = { from, at: Date.now() }
+            arrivals.set(bookId, arrival)
+            arrivalsChanged()
+            const fs = services.fs
+            if (fs) {
+              await recordArrival(fs, bookId, arrival).catch((thrown: unknown) => {
+                api.diagnostics.warn('sync.arrival-record-failed', {
+                  book: bookId,
+                  message: thrown instanceof Error ? thrown.message : String(thrown),
+                })
+              })
+            }
+          })(),
       })
       myHandlers = new Map(ledger.services().map((service) => [service.name, service.handler]))
       handlers = myHandlers
@@ -654,6 +865,34 @@ export const sync: Capability = {
          * module-global store, and a previous lifetime's `degraded` must not
          * survive into this one looking current. */
         syncStatus.set({ state: 'idle', detail: null })
+        /* WHAT ARRIVED WHILE NOBODY WAS LOOKING. The shelf is the unattended
+           device, so the notice has to survive a relaunch or it would only
+           ever be seen by a reader who happened to be watching. */
+        if (services.fs) {
+          /* THE SEAM THAT REPLACED A SIDE EFFECT IN RENDER. `openedAt` moving
+             IS a library change, so this fires the moment the reader opens an
+             arrived book — the same instant the old code cleared it from
+             inside `BookStatus.of`, but off the path React may re-run. */
+          warn = (code, detail) => api.diagnostics.warn(code, detail)
+          offLibrary = services.library.subscribe(() => {
+            pruneArrivals(services.library.getSnapshot())
+          })
+          const epoch = myArrivalsEpoch
+          void readArrivals(services.fs)
+            .then((held) => {
+              if (epoch !== arrivalsEpoch || stopped) return
+              for (const [book, arrival] of Object.entries(held)) arrivals.set(book, arrival)
+              arrivalsChanged()
+            })
+            .catch((thrown: unknown) => {
+              /* An unreadable index is not an empty one. The notices are lost
+                 for this run either way, but a silent loss is how a feature
+                 comes to look as though it was never wired. */
+              api.diagnostics.warn('sync.arrivals-read-failed', {
+                message: thrown instanceof Error ? thrown.message : String(thrown),
+              })
+            })
+        }
         unserve = port.onSessionOpen(() => syncStatus.set({ state: 'ok', lastSyncAt: Date.now() }))
       } else {
         const run = async (): Promise<void> => {
@@ -689,6 +928,9 @@ export const sync: Capability = {
             : {}),
         })
         bindScheduler(scheduler)
+        /* THE FEED. A satchel is the side that fetches bytes, so this is the
+           side that has progress to report. Registered with the other
+           satchel-only bindings so it comes off on the same teardown. */
         unregisterSyncNow = registerSyncNow(syncNow)
         scheduler.start()
       }

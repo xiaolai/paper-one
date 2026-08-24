@@ -130,8 +130,6 @@ const COVERAGE_EXCLUDE = [
    * and a native import. */
   'src/main.tsx',
   'src/cli/main.ts',
-  'src/vite-env.d.ts',
-  '.types/**',
 ]
 
 /**
@@ -153,10 +151,32 @@ const COVERAGE_EXCLUDE = [
  *   global            65.24 lines / 65.24 statements / 83.59 functions / 89.14 branches
  *   src/kernel/core   93.51 / 93.51 / 93.14 / 93.85
  *   scripts/lib       99.05 / 99.05 / 100.00 / 95.71
+ *
+ * WOUND AGAIN the same day, and the reason is worth keeping because it will
+ * recur. The library screen had no test that so much as IMPORTED it, and a
+ * file no test loads is reported by the v8 provider as ONE function rather
+ * than its real count. So the first test to render `Library.tsx` did not
+ * lower coverage — it revealed it: the denominator grew by eighty-odd
+ * functions across `Library`, `BookRow`, `BookCell`, `NarrowMenu`,
+ * `TagEditor`, `ToolbarMenu` and `OverlaySheet` at once, and the functions
+ * figure fell more than a point with nothing having become less tested.
+ *
+ * The gate was flattering rather than passing, and no ratchet can see that
+ * about a file nothing imports. `LibraryShelf`, `LibraryBulk`,
+ * `BookMenuActions` and `BookSelection` are what put the covered side back.
+ *
+ * Re-measured 2026-08-23 after those:
+ *   global            70.33 lines / 70.33 statements / 82.72 functions / 88.68 branches
+ *   src/kernel/core   93.86 / 93.86 / 94.03 / 93.61
+ *   scripts/lib       99.07 / 99.07 / 100.00 / 95.76
+ *
+ * Only the two that ROSE past their gate are moved. Functions and branches
+ * measure above the line already and below their previous baseline, and the
+ * rule against lowering is what makes the number mean anything.
  */
 const COVERAGE_THRESHOLDS = {
-  lines: 64.24,
-  statements: 64.24,
+  lines: 69.33,
+  statements: 69.33,
   functions: 82.59,
   branches: 88.14,
   'src/kernel/core/**': { lines: 93, statements: 93, functions: 93, branches: 93 },

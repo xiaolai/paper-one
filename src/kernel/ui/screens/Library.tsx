@@ -27,7 +27,7 @@ import { displayTitle, shelfFor, tagCounts, tagKey } from '../../core/library'
 import type { LibraryOrder } from '../../core/library'
 import { writeBookDrag } from '../../core/bookDrag'
 import type { IndexedBook } from '../../core/bookIndex'
-import type { BookAction } from '../../core/capability'
+import type { BookAction, BookStatus } from '../../core/capability'
 import { TRASH_KEPT_FOR } from '../../core/bookTrash'
 import { withStatus, withUntagged, withoutTag } from '../../core/searchQuery'
 import { moment, onFirstPaint } from '../devTiming'
@@ -142,9 +142,11 @@ export interface LibraryProps {
    * per row by each action's `when`.
    */
   bookActions: readonly BookAction[]
+  /** Transient per-book state from capabilities — see `BookStatus`. */
+  bookStatuses: readonly BookStatus[]
 }
 
-/* The three sorts, as marks. The words were dropped from the toolbar; the
+/* The four sorts, as marks. The words were dropped from the toolbar; the
  * icons were chosen so each is the one thing it could be, since a sort glyph
  * that reads as something else is worse than the word:
  *   Clock          — recency, unambiguously. Not `History`, which says "go
@@ -230,7 +232,59 @@ export function Library({
   libraryQuery,
   onQueryChange,
   bookActions,
+  bookStatuses,
 }: LibraryProps) {
+  /* ONE SUBSCRIPTION FOR THE SHELF, NOT ONE PER ROW.
+   *
+   * A capability's `BookStatus` is pulled — the kernel asks `of` while it
+   * draws and re-asks when the store says something moved. Subscribing per row
+   * would mean 1,962 listeners on a store that is almost always saying "no",
+   * so the screen holds one and re-renders; `of` is required to be cheap for
+   * exactly this reason.
+   *
+   * A counter rather than the value itself: what changed is per-book and the
+   * screen does not know which book, so the honest signal is "ask again". */
+  /* THE VALUE IS NEVER READ — only the setter matters. A counter is the
+     honest signal here: what moved is per-book and the store does not say
+     which book, so the answer is "ask again", and asking again is what a
+     render does. */
+  const [, setStatusTick] = useState(0)
+  useEffect(() => {
+    if (bookStatuses.length === 0) return
+    /* COALESCED, because a transfer publishes per FRAME. Every notification
+       re-renders the shelf and re-asks `of` for every visible row, and a
+       download emits many frames a second — so a single book coming down
+       drove thousands of shelf-wide renders, each of them to move one
+       percentage. A burst inside one tick is one render; nothing is dropped,
+       because the store is pulled and the last read wins either way. */
+    let queued = false
+    const bump = () => {
+      if (queued) return
+      queued = true
+      queueMicrotask(() => {
+        queued = false
+        setStatusTick((n) => n + 1)
+      })
+    }
+    const offs = bookStatuses.map((one) => one.subscribe(bump))
+    return () => {
+      for (const off of offs) off()
+    }
+  }, [bookStatuses])
+  /* A PLAIN FUNCTION. This was a `useCallback` over `[bookStatuses,
+     statusTick]` with a `void statusTick` inside it to force the identity to
+     change — ceremony for a memo nobody consumed, since it is called inline
+     while the shelf renders and never handed to a memoised child. The tick's
+     job is to cause the render; this only has to read fresh state when it
+     does. */
+  const activityOf = (book: IndexedBook) => {
+    for (const one of bookStatuses) {
+      const said = one.of(book)
+      if (said) return said
+    }
+    return null
+  }
+
   const [order, setOrder] = useState<LibraryOrder>('recent')
   /* Alongside `order` rather than in app state: both are how this screen is
      being looked at right now, neither survives a launch, and splitting the
@@ -743,9 +797,11 @@ export function Library({
       {/* THE SELECTION BAR: what is selected, and the two things worth doing
           to many books at once. Between the toolbar and the shelf, where the
           chips are, because it is the same kind of thing — a fact about what
-          the shelf is showing, with a way to act on it. Remove is NOT here:
-          it is the one thing that takes something away, and "Remove 214
-          books" is a ceremony a bar this small should not hold. It says how
+          the shelf is showing, with a way to act on it. Remove IS here, but
+          only as the door to a sheet: it is the one thing that takes
+          something away, and "Remove 214 books" is a ceremony a bar this
+          small cannot hold, so the bar asks and `removingSelection` names
+          every book before anything goes. It says how
           to add more, once, for the reader who arrived by the menu's Select
           and does not know about ⌘. */}
       {selecting && (
@@ -873,14 +929,17 @@ export function Library({
                 type="button"
                 className={styles.removeConfirm}
                 onClick={() => {
-                  /* Captured before anything is removed. `selectedBooks` is
-                     derived from the shelf, and the shelf changes under the
-                     first removal — iterating it directly would drop every
-                     book after the first. */
-                  const going = [...selectedBooks]
+                  /* NO DEFENSIVE COPY. One used to sit here, credited with
+                     stopping the shelf changing under the loop; it cannot,
+                     because `selectedBooks` is a `useMemo` captured by THIS
+                     render's closure and no later render can reach it.
+                     Deleting the spread left `LibraryBulk.test.tsx` green,
+                     which is how the claim was disproved — and a construct
+                     that reads as protection while protecting nothing is
+                     worse than none. */
                   setRemovingSelection(false)
                   clearSelection()
-                  for (const book of going) onRemove(book)
+                  for (const book of selectedBooks) onRemove(book)
                 }}
               >
                 <Trash2 size={ICON.control} strokeWidth={ICON.stroke} />
@@ -1017,6 +1076,7 @@ export function Library({
               onRemove,
               onSetFinished,
               actions: bookActions,
+              activity: activityOf(book),
             }
             return layout === 'list' ? (
               <BookRow key={book.bookId} {...shared} now={now} />

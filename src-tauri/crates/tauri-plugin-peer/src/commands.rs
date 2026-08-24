@@ -21,7 +21,7 @@ use crate::data_root::{checked_target, data_root};
 use crate::error::{Error, Result};
 use crate::pairing::{self, PairOffer, PairStart};
 use crate::peers::PeerRecord;
-use crate::role::{local_role, Role};
+use crate::role::{local_role, set_stored_role, Role};
 use crate::session;
 use crate::state::PeerState;
 
@@ -59,8 +59,23 @@ pub async fn peer_status<R: Runtime>(
 
 /// This device's role, decided in Rust.
 #[tauri::command]
-pub fn peer_local_role() -> Result<Role> {
-    local_role()
+pub fn peer_local_role<R: Runtime>(app: AppHandle<R>) -> Result<Role> {
+    local_role(&data_root(&app)?)
+}
+
+/// Record which side of a pairing this device is, for the next launch.
+///
+/// NOT A LIVE SWITCH, and the name does not pretend to be one. `state.rs`
+/// reads the role when the node starts and `sync` binds it at its own start;
+/// this writes the answer they will read next time. The pane offers it only
+/// while the device is unpaired — where there is nothing yet to reconcile —
+/// and says that a restart applies it.
+///
+/// A phone ignores this by construction: `local_role` lets the build target
+/// win outright, so a stored `shelf` on a mobile build changes nothing.
+#[tauri::command]
+pub fn peer_set_local_role<R: Runtime>(app: AppHandle<R>, role: Role) -> Result<()> {
+    set_stored_role(&data_root(&app)?, role)
 }
 
 /// The storage root, as a string the webview can join paths onto. Exists on

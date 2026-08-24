@@ -17,6 +17,7 @@
  */
 
 import type { IndexedBook } from './bookIndex'
+import type { BookAction } from './capability'
 import { parseQuery, type StatusTerm } from './searchQuery'
 import { fold, normalizeTag, tagKey } from './tags'
 
@@ -540,8 +541,61 @@ export function canOpen(book: IndexedBook): boolean {
   return book.hasContent !== false || Boolean(book.origin)
 }
 
-/** §11: say what happened and what to do, in one line. */
-export const CANNOT_OPEN = 'Paper has no copy of this one — add the file again'
+/**
+ * §11: say what happened and what to do — ONE LINE EACH, and the second line
+ * DEPENDS ON WHERE THE BYTES CAN COME FROM.
+ *
+ * The state is the same wherever the book is: this device has no copy. The
+ * REMEDY is not, and a single sentence used to serve both. On a satchel it
+ * was the wrong one — a metadata-only row told the reader to add the file
+ * again while the same row's menu offered Download, which is the actual
+ * repair and needs no original file at all. A remedy the reader cannot
+ * perform reads as the book being lost.
+ *
+ * TWO LINES, deliberately: the first is what happened and never varies, so a
+ * reader learns to read only the second. `title` renders `\n` as a line
+ * break, which is the whole mechanism — no tooltip component, and it works
+ * the same on the row, the card and the switcher.
+ */
+export const CANNOT_OPEN = 'No copy on this device.\nAdd the file again.'
+
+/** The same state, where a capability can bring the bytes down. */
+export const CANNOT_OPEN_FETCHABLE = 'No copy on this device.\nDownload it from your library.'
+
+/**
+ * The action that would bring this book's content to this device, if any.
+ *
+ * RETURNS THE ACTION, not a flag, because the corner mark on the card RUNS
+ * it: the glyph that says "not here" is the same control that fetches it,
+ * which is the vocabulary every library app has taught readers. A predicate
+ * would have meant finding the action a second time, in the UI, by a rule
+ * that could drift from this one.
+ *
+ * Asks the shelf's own contributed actions — see `BookAction.fetchesContent`
+ * — using the SAME `when` the menu uses to decide what to list. One
+ * judgement, so the sentence, the corner mark and the menu item beneath them
+ * cannot disagree.
+ *
+ * Takes the actions rather than a boolean because the alternative was a
+ * two-line helper living in both `BookRow` and `BookCell`, which is how the
+ * grid and the list come to answer differently about one book.
+ */
+export function fetchAction(
+  book: IndexedBook,
+  actions: readonly BookAction[],
+): BookAction | undefined {
+  return actions.find((one) => one.fetchesContent === true && (one.when?.(book) ?? true))
+}
+
+/** Whether there is one. */
+export function canFetchContent(book: IndexedBook, actions: readonly BookAction[]): boolean {
+  return fetchAction(book, actions) !== undefined
+}
+
+/** Which of the two a surface should show. */
+export function cannotOpenReason(book: IndexedBook, actions: readonly BookAction[]): string {
+  return canFetchContent(book, actions) ? CANNOT_OPEN_FETCHABLE : CANNOT_OPEN
+}
 
 /* AN ALIAS, not a restatement. The literal list lives in `searchQuery`, where
  * the `is:` regex needs it; written out here as well, the two unions were one

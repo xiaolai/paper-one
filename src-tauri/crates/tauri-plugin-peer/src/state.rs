@@ -40,7 +40,7 @@ impl PeerState {
         self.node
             .get_or_try_init(|| async {
                 let root = data_root(app)?;
-                let role = local_role()?;
+                let role = local_role(&root)?;
                 let sink = tauri_sink(app.clone());
                 Node::start(NodeConfig::for_app(root, role, sink)).await
             })
