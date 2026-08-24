@@ -35,14 +35,30 @@
  * to the note, or back from it?
  */
 
-/** The EPUB Structural Semantics namespace, where `epub:type` lives. */
-const OPS = 'http://www.idpf.org/2007/ops'
+/**
+ * ⚠️ **BOTH SPELLINGS OF `epub:type`, and this file used to read only one.**
+ *
+ * `getAttributeNS(OPS, 'type')` is right for a section foliate parsed as XML
+ * and returns `null` for the same markup in one it had to reparse as
+ * `text/html` — where the attribute keeps its literal name in the null
+ * namespace. Invalid XHTML is precisely what sends a book down the HTML path,
+ * so the books most likely to need these semantics were the ones where every
+ * question here answered "no attribute".
+ *
+ * **The tests did not catch it and could not**: `backlink.test.ts`'s helper
+ * parses as `application/xhtml+xml`, and its own header explains why — an HTML
+ * document drops the prefix. So the fixture only ever produced the one shape
+ * the reader could see, and the file's first case asserts the fixture's
+ * namespace precisely because the whole suite is worthless without it.
+ *
+ * `epubSemantics.ts` reads both, in one place, so the next caller does not have
+ * to remember. Recorded as a finding in `docs/plans/phase-16-the-sentence.md`
+ * §B2, where the same trap was met from the other side.
+ */
+import { ariaRoles, epubTypes } from './epubSemantics'
 
-const tokens = (value: string | null): Set<string> =>
-  new Set(value?.split(/\s+/).filter(Boolean) ?? [])
-
-const typesOf = (el: Element): Set<string> => tokens(el.getAttributeNS(OPS, 'type'))
-const rolesOf = (el: Element): Set<string> => tokens(el.getAttribute('role'))
+const typesOf = (el: Element): Set<string> => epubTypes(el)
+const rolesOf = (el: Element): Set<string> => ariaRoles(el)
 
 /**
  * Containers whose contents ARE the note.
