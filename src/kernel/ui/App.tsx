@@ -1570,6 +1570,9 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
              must not have to restart to get Look up back. */
           gloss={services.gloss()}
           lookUpMode={lookUpMode}
+          /* Whether a lookup found a real sentence or fell back — counted,
+             never shown. See `ReaderProps.diagnostics`. */
+          diagnostics={services.diagnostics}
           marks={marks}
           marking={marking}
           bookmarking={bookmarking}

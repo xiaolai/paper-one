@@ -46,6 +46,34 @@ describe('markContext', () => {
     expect(suffix).toBe('y'.repeat(CONTEXT_CHARS))
   })
 
+  /*
+   * §16 E2 — THE STORED BUDGET DOES NOT MOVE, and the number is pinned as a
+   * LITERAL rather than through the constant, because every other case in this
+   * file reads `CONTEXT_CHARS` and would pass at any value it took.
+   *
+   * The pressure to widen it is real and arrives from a plausible direction:
+   * `useGloss` used to spend this field as the sentence a model is asked to
+   * define a word in, and 32 characters a side is far too little for that — the
+   * measured case handed the model 70 characters out of 183, starting mid-word.
+   * The fix (WI-16.4) walks the document for the sentence instead, precisely so
+   * that this stays what it is.
+   *
+   * What widening it would cost: a prefix and a suffix are stored on EVERY mark
+   * and carried in the sync feed, so tripling this triples the annotation
+   * payload of every book on every device — to buy a re-anchoring hint that is
+   * already "enough to disambiguate, short enough to store".
+   */
+  it('stores thirty-two characters a side, which the gloss must not widen', () => {
+    expect(CONTEXT_CHARS).toBe(32)
+
+    const long = 'x'.repeat(200) + 'MARK' + 'y'.repeat(200)
+    const p = oneParagraph(long)
+    const { prefix, suffix } = markContext(p.at(200, 204))
+
+    expect(prefix).toHaveLength(32)
+    expect(suffix).toHaveLength(32)
+  })
+
   it('honours a caller that wants a different amount', () => {
     //           0123456789
     const p = oneParagraph('abcdefghijklmnop')
