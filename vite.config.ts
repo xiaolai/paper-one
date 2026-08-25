@@ -240,6 +240,17 @@ export default defineConfig({
     exclude: [...defaultExclude, '.claude/worktrees/**'],
   },
 
+  /* NO `public/` IN THE WEB BUILD. It holds three sample books — one of them
+   * 3.1 MB — which vite copies verbatim into the output, and that output is
+   * then embedded byte for byte into the shipped binary by
+   * `tauri-plugin-webhost`'s build script. pdf.js's runtime is NOT affected:
+   * it is staged from `vendor/` by `pdfjsAssets()`, deliberately outside
+   * `publicDir` (see that plugin's note).
+   *
+   * A ROOT option, not a `build` one — written under `build` first, where it
+   * is silently ignored and the books shipped anyway. */
+  ...(process.env.TAURI_ENV_PLATFORM === 'web' ? { publicDir: false as const } : {}),
+
   envPrefix: ['VITE_', 'TAURI_ENV_'],
   build: {
     /* THE WEB BUILD HAS ITS OWN ENTRY, and needs one for two reasons that are
@@ -255,8 +266,16 @@ export default defineConfig({
      *
      * So `index.web.html` → `src/main.web.tsx`, selected here rather than by a
      * branch inside either file. */
+    /* A SEPARATE OUTPUT DIRECTORY, and this is not tidiness. Both builds
+     * default to `dist/`, so running one after the other leaves that directory
+     * holding whichever went last — a desktop bundle where the shelf expects a
+     * browser one, or the reverse, with nothing anywhere saying so. They are
+     * different programs and they get different directories. */
     ...(process.env.TAURI_ENV_PLATFORM === 'web'
-      ? { rollupOptions: { input: 'index.web.html' } }
+      ? {
+          outDir: 'dist-web',
+          rollupOptions: { input: 'index.web.html' },
+        }
       : {}),
     // The webview is known at build time: WebKit on macOS/Linux, WebView2 on
     // Windows. Targeting them directly avoids shipping transpiled fallbacks.

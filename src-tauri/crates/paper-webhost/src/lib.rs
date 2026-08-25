@@ -39,11 +39,13 @@
 //! frames, exactly as `tauri-plugin-peer` does. Anything that starts answering
 //! service calls in Rust here is building a second copy of every handler.
 
+pub mod assets;
 pub mod pipe;
 
 use std::sync::Arc;
 use std::time::Instant;
 
+use assets::Asset;
 use axum::body::Body;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{FromRequestParts, State};
@@ -115,12 +117,16 @@ pub struct SubmitBody {
 /// The router, with the policy headers already on it.
 ///
 /// Separate from any binding so the tests drive the real handlers in-process.
-pub fn router(state: Arc<WebHost>) -> Router {
+pub fn router(state: Arc<WebHost>, client: &'static [Asset]) -> Router {
     Router::new()
         .route("/api/auth/submit", post(submit))
         .route("/api/auth/session", axum::routing::get(session))
         .route("/api/auth/signout", post(signout))
         .route("/ws", axum::routing::get(upgrade))
+        /* THE CLIENT LAST, as a fallback. Registered routes are matched first,
+         * so the single-page rule — an unknown path serves the entry document —
+         * cannot shadow `/api` or `/ws`, however a browser spells them. */
+        .fallback(move |uri: axum::http::Uri| async move { assets::serve(client, &uri) })
         .layer(middleware::from_fn(policy_headers))
         .with_state(state)
 }
@@ -406,7 +412,13 @@ mod tests {
     }
 
     async fn call(state: Arc<WebHost>, request: Request<Body>) -> Response {
-        router(state).oneshot(request).await.expect("infallible")
+        /* NO CLIENT in these tests: the endpoints are what is under test, and
+         * embedding a bundle to exercise them would make the suite depend on a
+         * JavaScript build having run. */
+        router(state, assets::NO_CLIENT)
+            .oneshot(request)
+            .await
+            .expect("infallible")
     }
 
     #[tokio::test]

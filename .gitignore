@@ -61,6 +61,9 @@ dev-docs/
 # --- Application build artifacts ---
 node_modules/
 dist/
+# The browser client's bundle, built by `pnpm build:web` and embedded into
+# the shelf by tauri-plugin-webhost's build script.
+dist-web/
 *.tsbuildinfo
 .DS_Store
 

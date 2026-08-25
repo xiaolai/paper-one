@@ -30,6 +30,7 @@
 //! exact failure the bridge's scan produced. `status().port` is `null` and the
 //! Devices pane can say why.
 
+mod client;
 mod commands;
 mod error;
 mod state;
@@ -81,7 +82,9 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                         if let Ok(local) = listener.local_addr() {
                             announce.set_port(local.port());
                         }
-                        if let Err(error) = axum::serve(listener, router(serving)).await {
+                        if let Err(error) =
+                            axum::serve(listener, router(serving, client::CLIENT)).await
+                        {
                             log::error!("webhost: the server stopped: {error}");
                         }
                     }
