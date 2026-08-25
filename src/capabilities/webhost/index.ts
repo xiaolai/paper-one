@@ -1,4 +1,7 @@
+import { createElement } from 'react'
 import type { Capability } from '../../kernel'
+import { BrowsersPane } from './ui/BrowsersPane'
+import { tauriWire, type WebHostWire } from './lib/wire'
 
 /**
  * The `webhost` capability — the shelf's browser client (phase 18).
@@ -40,12 +43,33 @@ import type { Capability } from '../../kernel'
  *
  * ## What is NOT here yet
  *
- * Everything the webview does with the wire: the `Channel` over the frame
- * commands, the remote stores, and the six-digit pane. This registration comes
- * first deliberately, so the checks are watching the capability before it has
- * anything to get wrong.
+ * The `Channel` over the frame commands and the remote stores — everything that
+ * makes a connected browser able to READ. The six-digit pane is here; the
+ * reader it lets in is not.
  */
+/* One wire for the capability's lifetime. Built lazily so that merely importing
+ * this module does not call into a plugin — a composition imports every
+ * capability's index before anything starts. */
+let wire: WebHostWire | null = null
+const wireOf = (): WebHostWire => (wire ??= tauriWire())
+
 export const webhost: Capability = {
   id: 'webhost',
   requires: ['peer'],
+
+  settings: [
+    {
+      id: 'webhost:browsers',
+      /* NOT "Devices". `peer` already contributes that, and the two hold
+       * different things: a device is trusted BY KEY, pairs once and syncs; a
+       * browser is signed in BY CODE, streams everything and keeps nothing.
+       * One word for both would make the first mis-revocation inevitable. */
+      title: 'Browsers',
+      /* After Devices (20), which is the pane a reader looking for this will
+       * try first. A declared number rather than a default, so neither moves
+       * when the other changes its mind. */
+      order: 24,
+      render: () => createElement(BrowsersPane, { wire: wireOf() }),
+    },
+  ],
 }

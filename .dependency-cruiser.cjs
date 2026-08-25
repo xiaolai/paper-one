@@ -124,6 +124,13 @@ const FS_ADAPTERS = [
 const PLUGIN_WIRES = [
   '^src/capabilities/peer/lib/wire\\.ts$',
   '^src/capabilities/inference/lib/plugin\\.ts$',
+  /* The third (phase 18): `tauri-plugin-webhost`'s commands — the six-digit
+   * code the shelf shows, the browsers holding a credential, and the frame pipe
+   * to each. Admitted by the rule's own reasoning above: a second file in ONE
+   * capability is what this list prevents, and a second capability with its own
+   * plugin is not. The crate's `build.rs` carries the matching command list,
+   * and a test in that crate fails when the two disagree. */
+  '^src/capabilities/webhost/lib/wire\\.ts$',
 ]
 
 /** A capability's public entry — the only file under `src/capabilities/<id>/`
