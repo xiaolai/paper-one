@@ -35,17 +35,16 @@ describe('BrowsersPane', () => {
     expect(screen.queryByText('https://studio.tail1234.ts.net/')).toBeNull()
   })
 
-  it('warns that a plain-HTTP address will not hold a sign-in', async () => {
+  it('prints no address at all when there is no HTTPS route', async () => {
     /* MEASURED 2026-08-25 against WebKit: the browser stores the `Secure`
-       session cookie from http://127.0.0.1 and then refuses to SEND it, so the
-       six digits appear to work and the reader lands back on the code screen.
-       The pane says so rather than letting them find out. */
-    const wire = fakeWire({
-      address: async () => ({ kind: 'local-only', url: 'http://localhost:27182/' }),
-    })
+       session cookie from http://127.0.0.1 and then refuses to SEND it. So a
+       plain-HTTP URL is not a lesser answer to "where do I point my browser",
+       it is a wrong one — six digits that appear to work and a reader back on
+       the code screen. The pane offers none. */
+    const wire = fakeWire({ address: async () => ({ kind: 'no-https', port: 27182 }) })
     render(<BrowsersPane wire={wire} />)
-    expect(await screen.findByText('http://localhost:27182/')).toBeTruthy()
-    expect(await screen.findByText(/will not stick/)).toBeTruthy()
+    expect(await screen.findByText(/will not hold a sign-in/)).toBeTruthy()
+    expect(screen.queryByText(/http:\/\//)).toBeNull()
   })
 
   it('reports a failed bind as not running rather than as a missing value', async () => {

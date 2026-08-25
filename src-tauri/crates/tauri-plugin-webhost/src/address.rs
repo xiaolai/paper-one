@@ -27,10 +27,15 @@
 //! `https`, and WebKit makes no localhost exception for transmission even
 //! though it makes one for storage. Every browser on iOS is WebKit.
 //!
-//! So there is no working plain-HTTP path at all, on any machine. `LocalOnly`
-//! is kept because it is a real and distinct situation to be in, but it is
-//! reported as an address that will NOT hold a session rather than as one that
-//! works locally.
+//! So there is no working plain-HTTP path at all, on any machine, and this file
+//! offers none. An earlier version had a `LocalOnly` state printing
+//! `http://localhost:27182/`; it was removed rather than reworded. A URL that
+//! cannot hold a sign-in is not a lesser answer to "where do I point my
+//! browser" — it is a wrong one, and a reader who types six digits into it
+//! watches them appear to work and then lands back on the code screen.
+//!
+//! What is left is two working-toward states and one working one. None of them
+//! prints an address that cannot be used.
 //!
 //! ## What is asked, and of whom
 //!
@@ -61,14 +66,11 @@ pub enum Address {
     /// A tailnet exists and nothing is proxying to this port, so the client is
     /// unreachable from a phone. Carries the command that fixes it.
     NotServed { host: String, command: String },
-    /// No tailnet, and therefore no TLS.
+    /// No tailnet, so no name a browser will trust and no route to make one.
     ///
-    /// The URL loads and the client draws, and then the sign-in does not
-    /// stick: WebKit stores the `Secure` session cookie and refuses to send it
-    /// over `http://`, localhost included (measured — see the header). Carried
-    /// so the pane can say that, rather than leaving a reader to discover it
-    /// by typing six digits that appear to work.
-    LocalOnly { url: String },
+    /// Deliberately carries NO url. The server is listening and the page would
+    /// load; the sign-in would not stick. See the header.
+    NoHttps { port: u16 },
     /// The server never bound; there is nothing to reach.
     Unavailable,
 }
@@ -136,15 +138,13 @@ pub fn resolve(port: Option<u16>) -> Address {
     let Some(port) = port else {
         return Address::Unavailable;
     };
-    let local = Address::LocalOnly {
-        url: format!("http://localhost:{port}/"),
-    };
+    let no_https = Address::NoHttps { port };
 
     let Some(status) = tailscale(&["status", "--json"]) else {
-        return local;
+        return no_https;
     };
     let Some(host) = parse_dns_name(&status) else {
-        return local;
+        return no_https;
     };
 
     let serve = tailscale(&["serve", "status"]).unwrap_or_default();

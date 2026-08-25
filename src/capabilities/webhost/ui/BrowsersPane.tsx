@@ -101,16 +101,20 @@ function AddressBlock({ address }: { readonly address: WebHostAddress | null }) 
         </>
       )
 
-    case 'local-only':
+    case 'no-https':
+      /* NO ADDRESS PRINTED, and that is the whole decision. The server is
+       * listening on {port} and a plain-HTTP page would load — and then the
+       * sign-in would not stick, because a browser stores the `Secure` session
+       * cookie and refuses to send it over `http://`, localhost included.
+       * Offering that URL would have a reader type six digits, watch them
+       * appear to work, and land back on the code screen. */
       return (
-        <>
-          <CopyableCode value={address.url} label="Copy the address" />
-          <div className={ui.hint}>
-            This address loads, and a sign-in will not stick: a browser stores the session cookie
-            over plain HTTP and then refuses to send it. The client needs a name a browser trusts
-            — Tailscale is the cheapest way to get one.
-          </div>
-        </>
+        <div className={ui.hint}>
+          A browser cannot sign in to this shelf yet. It is listening on port {address.port}, but a
+          plain address will not hold a sign-in — the browser keeps the session cookie and then
+          refuses to send it without HTTPS. The client needs a name a browser trusts; Tailscale is
+          the cheapest way to get one.
+        </div>
       )
 
     case 'unavailable':
