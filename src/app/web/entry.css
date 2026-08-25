@@ -52,3 +52,79 @@
   font: inherit;
   font-size: var(--text-ui);
 }
+
+/* The shelf. A LIST, not a grid: the desktop's covers come from a local vault
+   this client does not have, and drawing empty jackets would be worse than
+   drawing none. Sized for a thumb throughout. */
+
+.shelf {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-16);
+  padding: var(--space-24) var(--space-16);
+  padding-bottom: max(var(--space-24), env(safe-area-inset-bottom));
+  max-width: var(--prose-wide);
+  margin: 0 auto;
+}
+
+.shelf-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-12);
+}
+
+.shelf-head h1 {
+  font-size: var(--text-title);
+  font-weight: 500;
+  margin: 0;
+}
+
+.shelf-count {
+  font-size: var(--text-small);
+  color: var(--muted);
+}
+
+/* AMBER, this design system's colour for something the app is telling you.
+   A stale shelf is not an error the reader caused. */
+.shelf-note {
+  font-size: var(--text-small);
+  color: var(--amber);
+  background: var(--amber-bg);
+  border: 1px solid var(--amber-line);
+  border-radius: var(--radius-chip);
+  padding: var(--space-8) var(--space-12);
+  margin: 0;
+  line-height: 1.45;
+}
+
+.shelf-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.shelf-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-12) 0;
+  border-bottom: 1px solid var(--line);
+  /* The platform's touch minimum, even for a row that is not yet tappable —
+     it will be, and a row that grows when the reader opens is a layout that
+     moves under them. */
+  min-height: var(--control-lg);
+  justify-content: center;
+}
+
+.shelf-title {
+  font-size: var(--text-body);
+  color: var(--ink);
+}
+
+.shelf-author {
+  font-size: var(--text-small);
+  color: var(--muted);
+}

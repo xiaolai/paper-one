@@ -106,8 +106,9 @@ function AddressBlock({ address }: { readonly address: WebHostAddress | null }) 
         <>
           <CopyableCode value={address.url} label="Copy the address" />
           <div className={ui.hint}>
-            This machine only. For a phone the shelf needs a name a browser trusts — Tailscale is
-            the cheapest way to get one.
+            This address loads, and a sign-in will not stick: a browser stores the session cookie
+            over plain HTTP and then refuses to send it. The client needs a name a browser trusts
+            — Tailscale is the cheapest way to get one.
           </div>
         </>
       )

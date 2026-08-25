@@ -40,7 +40,7 @@ const ORIGIN = 'http://127.0.0.1:27182'
 const DEFAULT = { width: 393, height: 852 }
 
 function parse(argv) {
-  const out = { file: 'dev-docs/artifacts/client.png', path: '/', ...DEFAULT, dark: false }
+  const out = { file: 'dev-docs/artifacts/client.png', path: '/', ...DEFAULT, dark: false, code: null }
   const rest = []
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
@@ -48,6 +48,7 @@ function parse(argv) {
     else if (arg === '--width') out.width = Number(argv[++i])
     else if (arg === '--height') out.height = Number(argv[++i])
     else if (arg === '--dark') out.dark = true
+    else if (arg === '--code') out.code = argv[++i]
     else rest.push(arg)
   }
   if (rest[0] !== undefined) out.file = rest[0]
@@ -110,6 +111,41 @@ page.on('console', (message) => {
   if (message.type() === 'error') problems.push(`console: ${message.text()}`)
 })
 page.on('pageerror', (error) => problems.push(`page: ${error.message}`))
+
+/* SIGN IN FIRST, when a code is given.
+ *
+ * Without this the tool can only ever photograph the gate — every screen behind
+ * the six digits is unreachable, which is most of the client. The code is
+ * submitted through the same endpoint the client uses, so the cookie the
+ * browser stores is the real one.
+ *
+ * ⚠️ **THIS CANNOT PHOTOGRAPH A CONNECTED STATE OVER PLAIN HTTP**, and the
+ * reason is not this script's. Measured 2026-08-25: WebKit stores the `Secure`
+ * session cookie from `http://127.0.0.1` and then refuses to SEND it, so the
+ * code is accepted, the cookie is in the jar, and every page fetch is still
+ * 401. Every screen behind the six digits needs a TLS origin to reach.
+ *
+ * NAVIGATE FIRST. Posting from `about:blank` gets a 204 and stores nothing:
+ * the cookie has no origin to attach to, so the next load shows the gate again
+ * and the tool reports success. That cost a confusing half hour — the sign-in
+ * looked fine and the screenshot was of a failure.
+ *
+ * Mint a code with the app's Settings → Browsers pane, or the plugin command. */
+if (options.code !== null) {
+  await page.goto(ORIGIN, { waitUntil: 'domcontentloaded' })
+  const response = await page.request.post(`${ORIGIN}/api/auth/submit`, {
+    data: { code: options.code },
+  })
+  if (response.status() !== 204) {
+    console.error(
+      `shot-client: the code was refused (${response.status()}).\n` +
+        '  409 means no code is showing, 410 that it expired, 429 that its five\n' +
+        '  tries are spent, 401 that it was wrong. Show a new one and retry.',
+    )
+    await browser.close()
+    process.exit(4)
+  }
+}
 
 await page.goto(`${ORIGIN}${options.path}`, { waitUntil: 'networkidle' })
 

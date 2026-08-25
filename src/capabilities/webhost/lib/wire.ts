@@ -50,8 +50,9 @@ export type WebHostAddress =
   /** A tailnet exists and nothing proxies to this port, so a phone cannot
    *  reach the client. `command` is the exact line that fixes it. */
   | { readonly kind: 'not-served'; readonly host: string; readonly command: string }
-  /** No tailnet. Works from this machine only — `localhost` is a secure
-   *  context, so the credential is storable there and nowhere else. */
+  /** No tailnet, and therefore no TLS. The page loads and the sign-in does
+   *  NOT stick: WebKit stores the `Secure` cookie and refuses to send it over
+   *  `http://`, localhost included. Measured, not assumed. */
   | { readonly kind: 'local-only'; readonly url: string }
   /** The server never bound; there is nothing to reach. */
   | { readonly kind: 'unavailable' }

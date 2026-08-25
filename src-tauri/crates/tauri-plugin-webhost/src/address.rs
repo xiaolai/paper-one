@@ -13,9 +13,24 @@
 //! address is not a worse answer, it is a broken one, and offering it would be
 //! the pane handing someone a URL that cannot work.
 //!
-//! `http://localhost` is the exception — browsers treat it as a secure context
-//! — which is why the local-only case is still worth printing, and why it is
-//! labelled as reaching nothing but this machine.
+//! ⚠️ **`http://localhost` IS NOT THE EXCEPTION IT LOOKS LIKE, and this file
+//! said it was.** Browsers do treat it as a *secure context*, so the reasoning
+//! seemed to follow. Measured 2026-08-25 against WebKit, it does not:
+//!
+//! ```text
+//!   server, cookie supplied by curl  → 204
+//!   page fetch over http://127.0.0.1 → 401
+//!   ctx.cookies()                    → ['paper_session']
+//! ```
+//!
+//! The cookie is STORED and then never SENT. `Secure` keys on the scheme being
+//! `https`, and WebKit makes no localhost exception for transmission even
+//! though it makes one for storage. Every browser on iOS is WebKit.
+//!
+//! So there is no working plain-HTTP path at all, on any machine. `LocalOnly`
+//! is kept because it is a real and distinct situation to be in, but it is
+//! reported as an address that will NOT hold a session rather than as one that
+//! works locally.
 //!
 //! ## What is asked, and of whom
 //!
@@ -46,8 +61,13 @@ pub enum Address {
     /// A tailnet exists and nothing is proxying to this port, so the client is
     /// unreachable from a phone. Carries the command that fixes it.
     NotServed { host: String, command: String },
-    /// No tailnet. The client works, from this machine only — `localhost` is a
-    /// secure context, so the credential is storable there.
+    /// No tailnet, and therefore no TLS.
+    ///
+    /// The URL loads and the client draws, and then the sign-in does not
+    /// stick: WebKit stores the `Secure` session cookie and refuses to send it
+    /// over `http://`, localhost included (measured — see the header). Carried
+    /// so the pane can say that, rather than leaving a reader to discover it
+    /// by typing six digits that appear to work.
     LocalOnly { url: String },
     /// The server never bound; there is nothing to reach.
     Unavailable,

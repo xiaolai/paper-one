@@ -1,4 +1,4 @@
-import { StrictMode, useCallback, useEffect, useState } from 'react'
+import { StrictMode, useCallback, useEffect, useState, useSyncExternalStore } from 'react'
 import { createRoot } from 'react-dom/client'
 
 /* Fonts are bundled, never fetched — the same rule the desktop entry follows,
@@ -30,6 +30,8 @@ import './app/web/entry.css'
 
 import { PairScreen } from './app/web/PairScreen'
 import { checkSession, type SessionState } from './app/web/session'
+import { connect } from './app/web/channel'
+import { createRemoteBooks, type RemoteBooks } from './app/web/books'
 import { capabilities } from 'virtual:paper-composition'
 /* DIRECTLY, not through `./kernel`. The barrel re-exports modules that import
  * `@tauri-apps`, so importing ANY symbol from it retains them — `assert-bundle`
@@ -63,17 +65,100 @@ import { applyMetrics } from './kernel/core/metrics'
  * placeholder library would be the app describing a feature it does not have.
  */
 
-function ConnectedPlaceholder({ onSignOut }: { readonly onSignOut: () => void }) {
-  /* HONEST RATHER THAN DECORATIVE. This build genuinely has no reader, so it
-   * says so instead of drawing an empty shelf that looks like a failed load.
-   * §07's rule — a control that cannot act is the app describing a feature it
-   * does not have — applies to whole screens too. */
+/**
+ * The shelf, over the channel.
+ *
+ * Opens one channel, reads `book.list` through it, and renders what comes back.
+ * `useSyncExternalStore` is what `libraryStore`'s own hook uses on the desktop
+ * side, for the same reason: the store owns the state and the view is an
+ * adapter over `getSnapshot`/`subscribe`.
+ */
+function Shelf({ onSignOut }: { readonly onSignOut: () => void }) {
+  const [books, setBooks] = useState<RemoteBooks | null>(null)
+  const [failed, setFailed] = useState<string | null>(null)
+
+  useEffect(() => {
+    let live = true
+    let opened: { channel: Awaited<ReturnType<typeof connect>>; store: RemoteBooks } | null = null
+    void connect()
+      .then((channel) => {
+        if (!live) {
+          channel.close()
+          return
+        }
+        const store = createRemoteBooks(channel)
+        opened = { channel, store }
+        setBooks(store)
+      })
+      .catch((thrown: unknown) => {
+        if (live) setFailed(thrown instanceof Error ? thrown.message : String(thrown))
+      })
+    return () => {
+      live = false
+      /* BOTH, and in this order. Disposing first stops a late answer waking a
+       * listener that no longer has anywhere to render; closing after it means
+       * the socket's own close cannot re-enter a store already gone. */
+      opened?.store.dispose()
+      opened?.channel.close()
+    }
+  }, [])
+
+  if (failed !== null) {
+    return (
+      <main className="gate">
+        <h1>Could not open a channel</h1>
+        <p>{failed}</p>
+        <button type="button" onClick={onSignOut}>
+          Disconnect this browser
+        </button>
+      </main>
+    )
+  }
+
+  if (books === null) return null
+  return <ShelfList books={books} onSignOut={onSignOut} />
+}
+
+function ShelfList({ books, onSignOut }: { readonly books: RemoteBooks; readonly onSignOut: () => void }) {
+  const rows = useSyncExternalStore(books.subscribe, books.getSnapshot)
+  const status = useSyncExternalStore(books.subscribe, books.status)
+
   return (
-    <main className="gate">
-      <h1>Connected</h1>
-      <p>
-        This browser is paired with your library. The reading surface is not built yet — this
-        build is the connection and the six-digit screen, nothing further.
+    <main className="shelf">
+      <header className="shelf-head">
+        <h1>Library</h1>
+        <span className="shelf-count">
+          {status === 'loading' ? 'Loading…' : `${rows.length} ${rows.length === 1 ? 'book' : 'books'}`}
+        </span>
+      </header>
+
+      {/* STALE IS SAID, NOT HIDDEN. The books on screen are real and no longer
+          current; a reader deciding whether to trust a progress figure needs to
+          know which. */}
+      {status === 'stale' && (
+        <p className="shelf-note">
+          Your library stopped answering. These are the books as they were — nothing here is
+          current until it is back.
+        </p>
+      )}
+
+      {status === 'failed' && (
+        <p className="shelf-note">Your library is not answering, and nothing was loaded.</p>
+      )}
+
+      <ul className="shelf-list">
+        {rows.map((book) => (
+          <li key={book.id} className="shelf-row">
+            <span className="shelf-title">{book.title === '' ? 'Untitled' : book.title}</span>
+            {book.author !== undefined && <span className="shelf-author">{book.author}</span>}
+          </li>
+        ))}
+      </ul>
+
+      {/* THE READER IS STILL NOT BUILT, and the shelf saying so beats a row
+          that opens nothing. */}
+      <p className="shelf-note">
+        Opening a book is not built yet — this build lists the shelf and no more.
       </p>
       <button type="button" onClick={onSignOut}>
         Disconnect this browser
@@ -124,7 +209,7 @@ function App() {
        * that persists means `unreachable` is about to be shown anyway. */
       return null
     case 'connected':
-      return <ConnectedPlaceholder onSignOut={onSignOut} />
+      return <Shelf onSignOut={onSignOut} />
     case 'unreachable':
       return <Unreachable onRetry={refresh} />
     case 'needs-code':
