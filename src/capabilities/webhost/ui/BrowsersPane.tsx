@@ -110,10 +110,11 @@ function AddressBlock({ address }: { readonly address: WebHostAddress | null }) 
        * appear to work, and land back on the code screen. */
       return (
         <div className={ui.hint}>
-          A browser cannot sign in to this shelf yet. It is listening on port {address.port}, but a
+          A browser cannot sign in to this shelf yet. It is listening on port {address.port}, and a
           plain address will not hold a sign-in — the browser keeps the session cookie and then
-          refuses to send it without HTTPS. The client needs a name a browser trusts; Tailscale is
-          the cheapest way to get one.
+          refuses to send it without HTTPS. Put something in front of this port that terminates TLS
+          on a name your browser trusts. Tailscale, Caddy and Cloudflare Tunnel all do it; which
+          one is yours to pick.
         </div>
       )
 

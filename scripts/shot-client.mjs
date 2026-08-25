@@ -33,14 +33,17 @@ import { mkdir, readdir } from 'node:fs/promises'
 import path from 'node:path'
 import { webkit, devices } from '@playwright/test'
 
-const ORIGIN = 'http://127.0.0.1:27182'
+/* Overridable, because every screen behind the six digits needs TLS to reach —
+ * see the caveat below. `scripts/dev-tls.mjs` puts a throwaway certificate in
+ * front of the shelf; point this at it. */
+const ORIGIN = process.env['PAPER_CLIENT_ORIGIN'] ?? 'http://127.0.0.1:27182'
 /* An iPhone 15's CSS viewport. A desktop window would flatter a layout whose
  * whole point is the phone — the design's own note is that on mobile
  * "adjacency becomes sequence". */
 const DEFAULT = { width: 393, height: 852 }
 
 function parse(argv) {
-  const out = { file: 'dev-docs/artifacts/client.png', path: '/', ...DEFAULT, dark: false, code: null }
+  const out = { file: 'dev-docs/artifacts/client.png', path: '/', ...DEFAULT, dark: false, code: null, cookie: null }
   const rest = []
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
@@ -49,6 +52,7 @@ function parse(argv) {
     else if (arg === '--height') out.height = Number(argv[++i])
     else if (arg === '--dark') out.dark = true
     else if (arg === '--code') out.code = argv[++i]
+    else if (arg === '--cookie') out.cookie = argv[++i]
     else rest.push(arg)
   }
   if (rest[0] !== undefined) out.file = rest[0]
@@ -56,6 +60,14 @@ function parse(argv) {
 }
 
 const options = parse(process.argv.slice(2))
+
+/* The reachability probe below runs in NODE, which validates certificates —
+ * and the dev TLS front is self-signed by design. Disabled only for a LOCAL
+ * https origin, so this can never quiet a real certificate error against a real
+ * host. Playwright is told separately, via `ignoreHTTPSErrors`. */
+if (/^https:\/\/(localhost|127\.0\.0\.1)(:|$)/.test(ORIGIN)) {
+  process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '0'
+}
 
 /* THE SHELF MUST BE RUNNING, and saying so is the whole value of this check.
  * A screenshot of a connection failure looks like a screenshot of a screen. */
@@ -98,9 +110,33 @@ if (served !== undefined && built !== undefined && served !== built) {
 const browser = await webkit.launch()
 const context = await browser.newContext({
   ...devices['iPhone 15'],
+  /* The dev TLS front is self-signed on purpose — it is generated fresh and
+   * thrown away, and no browser will trust it. Ignoring the error here is what
+   * makes the connected screens photographable at all; it says nothing about
+   * how a real phone reaches this shelf, which is the reader's own TLS. */
+  ignoreHTTPSErrors: true,
   viewport: { width: options.width, height: options.height },
   colorScheme: options.dark ? 'dark' : 'light',
 })
+/* A CREDENTIAL OBTAINED ELSEWHERE. A code lives ninety seconds, which is not
+ * long enough to survive minting it through the automation bridge and then
+ * starting a browser — the round trips alone spend it. Submitting the code
+ * with `curl` and passing the cookie here collapses that to one step. */
+if (options.cookie !== null) {
+  const { hostname } = new URL(ORIGIN)
+  await context.addCookies([
+    {
+      name: 'paper_session',
+      value: options.cookie,
+      domain: hostname,
+      path: '/',
+      httpOnly: true,
+      secure: ORIGIN.startsWith('https:'),
+      sameSite: 'Strict',
+    },
+  ])
+}
+
 const page = await context.newPage()
 
 /* Console and page errors are REPORTED, not swallowed. A screenshot of a blank
@@ -119,11 +155,14 @@ page.on('pageerror', (error) => problems.push(`page: ${error.message}`))
  * submitted through the same endpoint the client uses, so the cookie the
  * browser stores is the real one.
  *
- * ⚠️ **THIS CANNOT PHOTOGRAPH A CONNECTED STATE OVER PLAIN HTTP**, and the
- * reason is not this script's. Measured 2026-08-25: WebKit stores the `Secure`
- * session cookie from `http://127.0.0.1` and then refuses to SEND it, so the
- * code is accepted, the cookie is in the jar, and every page fetch is still
- * 401. Every screen behind the six digits needs a TLS origin to reach.
+ * ⚠️ **A CONNECTED STATE NEEDS A TLS ORIGIN**, and the reason is not this
+ * script's. Measured 2026-08-25: WebKit stores the `Secure` session cookie from
+ * `http://127.0.0.1` and then refuses to SEND it, so the code is accepted, the
+ * cookie is in the jar, and every page fetch is still 401.
+ *
+ * Run `node scripts/dev-tls.mjs` and set
+ * `PAPER_CLIENT_ORIGIN=https://localhost:27183`. Certificate errors are ignored
+ * here because that front is self-signed by design.
  *
  * NAVIGATE FIRST. Posting from `about:blank` gets a 204 and stores nothing:
  * the cookie has no origin to attach to, so the next load shows the gate again
@@ -148,6 +187,18 @@ if (options.code !== null) {
 }
 
 await page.goto(`${ORIGIN}${options.path}`, { waitUntil: 'networkidle' })
+
+/* `networkidle` IS NOT ENOUGH once there is a channel. The shelf's books arrive
+ * over a WebSocket, which is not a request and so never makes the page "idle"
+ * or un-idle — the first screenshot of the connected state caught "Loading…"
+ * and would have been read as the shelf being empty.
+ *
+ * Waiting for the word rather than a fixed delay: a fixed delay is either too
+ * short on a slow shelf or wasted on a fast one, and it silently becomes the
+ * former. */
+await page
+  .waitForFunction(() => !document.body.innerText.includes('Loading…'), null, { timeout: 5000 })
+  .catch(() => console.error('shot-client: still loading after 5s — the picture shows that state'))
 
 await mkdir(path.dirname(options.file), { recursive: true })
 await page.screenshot({ path: options.file, fullPage: false })

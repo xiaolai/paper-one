@@ -128,3 +128,19 @@
   font-size: var(--text-small);
   color: var(--muted);
 }
+
+/* THE SHELF'S OWN BUTTON. `.gate button` does not reach here, so this one
+   rendered at 11px in system-ui — buttons inherit neither font nor size, and
+   a rule scoped to one screen leaves every other screen's button bare. Found
+   by looking at it; no check over declarations can see an unstyled control. */
+.shelf button {
+  align-self: flex-start;
+  font: inherit;
+  font-size: var(--text-ui);
+  padding: 0 var(--space-24);
+  min-height: var(--control-lg);
+  border: 1px solid var(--line-3);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--ink);
+}
