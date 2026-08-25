@@ -99,6 +99,39 @@ export function listCrates(root) {
 }
 
 /**
+ * Whether a crate is a TAURI PLUGIN, as opposed to a plain library.
+ *
+ * ASKED OF THE DIRECTORY, not of a list kept here — a list would be a fourth
+ * hand-kept register of the same facts, which is the thing `commands.rs`'s
+ * opening comment exists to warn about.
+ *
+ * A plugin crate has both a `build.rs` (which declares its COMMANDS to Tauri's
+ * codegen) and a `permissions/` directory (its ACL). A library crate has
+ * neither, because it has no commands to declare and nothing to permit:
+ * `paper-webauth` and `paper-webhost` are pure logic, and the plugin that wraps
+ * them is `tauri-plugin-webhost`, which the manifest does claim.
+ *
+ * WHY THIS MATTERS RATHER THAN BEING TIDINESS. Every crate used to be treated
+ * as an unclaimed plugin, so the two libraries printed a note on every single
+ * run saying their "features, registration and grants are not checked" — true
+ * only in the sense that they have none. A note that always prints is a note
+ * nobody reads, and the day a REAL plugin crate goes unclaimed it would have
+ * appeared in the middle of them.
+ */
+export function isPluginCrate(root, name) {
+  const dir = path.join(root, CRATES_DIR, name)
+  const has = (child) => {
+    try {
+      statSync(path.join(dir, child))
+      return true
+    } catch {
+      return false
+    }
+  }
+  return has('build.rs') && has('permissions')
+}
+
+/**
  * The manifest under `root`, parsed and validated, or an error message. The
  * check reads `platforms`, `ts`, `crate` and `permissions` from it, so an
  * invalid manifest cannot be checked against anything.
@@ -132,8 +165,11 @@ export function checkCompositions(root) {
   })
   findings.push(...rust.findings)
   const claimed = new Set(manifest.capabilities.map((entry) => entry.crate).filter((c) => typeof c === 'string'))
+  /* PLUGIN CRATES ONLY. A library crate has no features, registration or
+   * grants for a manifest entry to describe, so noting that they are unchecked
+   * says nothing — see `isPluginCrate`. */
   const notes = listCrates(root)
-    .filter((name) => !claimed.has(name))
+    .filter((name) => !claimed.has(name) && isPluginCrate(root, name))
     .map((name) => `note: ${CRATES_DIR}/${name} is claimed by no manifest entry — its features, registration and grants are not checked`)
   return {
     findings,

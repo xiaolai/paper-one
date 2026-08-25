@@ -112,6 +112,8 @@
     "scripts/check-boundaries.test.mjs > undeclaredRequires > rejects an edge from or to a capability directory the manifest does not list",
     "scripts/check-boundaries.test.mjs > undeclaredRequires > rejects an edge to a capability the importer does not require",
     "scripts/check-compositions.test.mjs > a tree with crates > exit 2 for an invalid manifest, a missing manifest, or bad usage",
+    "scripts/check-compositions.test.mjs > a tree with crates > needs both markers before it calls a crate a plugin",
+    "scripts/check-compositions.test.mjs > a tree with crates > notes an unclaimed PLUGIN crate and says nothing about a library beside it",
     "scripts/check-compositions.test.mjs > a tree with crates > passes when every surface agrees, and notes the unclaimed crate",
     "scripts/check-compositions.test.mjs > a tree with crates > reports drift on each surface as one line, exit 1",
     "scripts/check-compositions.test.mjs > the helpers > read files or null, ACL json recursively (only .json), crates as sorted directories",

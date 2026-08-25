@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
-import { checkCompositions, formatSummary, listCrates, loadManifest, readAclFiles, readOrNull } from './check-compositions.mjs'
+import { checkCompositions, formatSummary, isPluginCrate, listCrates, loadManifest, readAclFiles, readOrNull } from './check-compositions.mjs'
 
 /**
  * `pnpm compositions:check` as a user or CI runs it: the real tree is
@@ -51,7 +51,20 @@ function fixture(over = {}) {
     'src/app/composition.web.ts': 'export const capabilities = []\n',
     'src-tauri/crates/tauri-plugin-peer/Cargo.toml': '[package]\nname = "tauri-plugin-peer"\n',
     'src-tauri/crates/tauri-plugin-mob/Cargo.toml': '[package]\nname = "tauri-plugin-mob"\n',
+    /* AN UNCLAIMED PLUGIN, and it has to LOOK like one or the check is right to
+       ignore it: a plugin crate is recognised by its `build.rs` and its
+       `permissions/`, which is what it means to have commands and an ACL for a
+       manifest entry to describe. Without those two this fixture was asserting
+       a note for something that is not a plugin at all. */
     'src-tauri/crates/tauri-plugin-orphan/Cargo.toml': '[package]\nname = "tauri-plugin-orphan"\n',
+    'src-tauri/crates/tauri-plugin-orphan/build.rs': 'const COMMANDS: &[&str] = &[];\n',
+    'src-tauri/crates/tauri-plugin-orphan/permissions/default.toml': '[default]\npermissions = []\n',
+    /* A PLAIN LIBRARY beside it. No `build.rs`, no `permissions/` — it has no
+       features, registration or grants, so there is nothing for a manifest
+       entry to check and no note to print. `paper-webauth` and `paper-webhost`
+       are the real ones. */
+    'src-tauri/crates/paper-plainlib/Cargo.toml': '[package]\nname = "paper-plainlib"\n',
+    'src-tauri/crates/paper-plainlib/src/lib.rs': 'pub fn nothing() {}\n',
     'src-tauri/Cargo.toml':
       '[dependencies]\ntauri-plugin-peer = { path = "crates/tauri-plugin-peer" }\ntauri-plugin-mob = { path = "crates/tauri-plugin-mob", optional = true }\n[features]\ndefault = ["desktop"]\ndesktop = []\nios = ["dep:tauri-plugin-mob"]\nandroid = []\n',
     'src-tauri/src/lib.rs': 'pub fn run() {\n    tauri::Builder::default()\n        .plugin(tauri_plugin_peer::init())\n        .plugin(tauri_plugin_mob::init())\n        .run(ctx);\n}\n',
@@ -74,7 +87,10 @@ describe('the real tree', () => {
     // runs this suite in a copy with `<id>` gone.
     const manifest = JSON.parse(readFileSync(join(REPO_ROOT, 'capabilities.manifest.json'), 'utf8'))
     const claimed = new Set(manifest.capabilities.map((c) => c.crate).filter(Boolean))
-    const unclaimed = listCrates(REPO_ROOT).filter((name) => !claimed.has(name))
+    /* PLUGIN CRATES ONLY, as the check itself filters. A library crate has no
+       features, registration or grants, so noting that they are unchecked says
+       nothing — and a note that always prints is one nobody reads. */
+    const unclaimed = listCrates(REPO_ROOT).filter((name) => !claimed.has(name) && isPluginCrate(REPO_ROOT, name))
     const { code, out, err } = run([])
     expect(err).toBe('')
     expect(out).toBe(
@@ -94,6 +110,41 @@ describe('a tree with crates', () => {
         'compositions-check: 4 platforms, 2 capabilities, 2 crates checked, 0 findings\n',
     )
     expect(code).toBe(0)
+  })
+
+  /**
+   * A LIBRARY CRATE IS NOT AN UNCHECKED PLUGIN, and the difference is asked of
+   * the directory rather than kept as a list here.
+   *
+   * `paper-webauth` and `paper-webhost` are the real ones: pure logic behind
+   * `tauri-plugin-webhost`, which the manifest does claim. They printed a note
+   * on every run saying their "features, registration and grants are not
+   * checked" — true only in the sense that they have none. A note that always
+   * prints is a note nobody reads, and the day a real plugin crate goes
+   * unclaimed it would have arrived in the middle of them.
+   *
+   * Both halves are asserted, because silencing the note is the easy half and
+   * the worthless one on its own.
+   */
+  it('notes an unclaimed PLUGIN crate and says nothing about a library beside it', () => {
+    const root = fixture()
+    expect(isPluginCrate(root, 'tauri-plugin-orphan')).toBe(true)
+    expect(isPluginCrate(root, 'paper-plainlib')).toBe(false)
+
+    const { out } = run(['--root', root])
+    expect(out).toContain('note: src-tauri/crates/tauri-plugin-orphan')
+    expect(out).not.toContain('paper-plainlib')
+  })
+
+  /* HALF A PLUGIN IS NOT A PLUGIN. Both markers are required: a crate with a
+     `build.rs` and no `permissions/` has no ACL for a manifest entry to
+     describe, and one with permissions and no `build.rs` declares no commands.
+     Asserted so neither half can drift into standing for the whole. */
+  it('needs both markers before it calls a crate a plugin', () => {
+    const buildOnly = fixture({ 'src-tauri/crates/tauri-plugin-orphan/permissions/default.toml': null })
+    expect(isPluginCrate(buildOnly, 'tauri-plugin-orphan')).toBe(false)
+    const permsOnly = fixture({ 'src-tauri/crates/tauri-plugin-orphan/build.rs': null })
+    expect(isPluginCrate(permsOnly, 'tauri-plugin-orphan')).toBe(false)
   })
 
   it('reports drift on each surface as one line, exit 1', () => {
@@ -145,7 +196,7 @@ describe('the helpers', () => {
     expect(readOrNull(root, 'src-tauri/capabilities/notes.txt')).toBe('not json, not read')
     expect(readAclFiles(root).map((f) => f.file)).toEqual(['src-tauri/capabilities/default.json', 'src-tauri/capabilities/mobile/ios.json'])
     expect(readAclFiles(root, 'src-tauri/absent')).toEqual([])
-    expect(listCrates(root)).toEqual(['tauri-plugin-mob', 'tauri-plugin-orphan', 'tauri-plugin-peer'])
+    expect(listCrates(root)).toEqual(['paper-plainlib', 'tauri-plugin-mob', 'tauri-plugin-orphan', 'tauri-plugin-peer'])
     expect(listCrates(join(root, 'nowhere'))).toEqual([])
     expect(loadManifest(root).manifest.capabilities).toHaveLength(2)
     expect(loadManifest(join(root, 'nowhere')).error).toContain('cannot read')
