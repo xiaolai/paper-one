@@ -81,12 +81,7 @@ function AddressBlock({ address }: { readonly address: WebHostAddress | null }) 
   switch (address.kind) {
     case 'https':
       return (
-        <>
-          <code className={ui.code}>{address.url}</code>
-          <div className={ui.actions}>
-            <CopyButton value={address.url} label="Copy the address" />
-          </div>
-        </>
+        <CopyableCode value={address.url} label="Copy the address" />
       )
 
     case 'not-served':
@@ -102,23 +97,17 @@ function AddressBlock({ address }: { readonly address: WebHostAddress | null }) 
             the client over HTTPS — and HTTPS is not optional here, because the browser refuses to
             keep a sign-in from a plain address. Run this once:
           </div>
-          <code className={ui.code}>{address.command}</code>
-          <div className={ui.actions}>
-            <CopyButton value={address.command} label="Copy the command" />
-          </div>
+          <CopyableCode value={address.command} label="Copy the command" />
         </>
       )
 
     case 'local-only':
       return (
         <>
-          <code className={ui.code}>{address.url}</code>
+          <CopyableCode value={address.url} label="Copy the address" />
           <div className={ui.hint}>
             This machine only. For a phone the shelf needs a name a browser trusts — Tailscale is
             the cheapest way to get one.
-          </div>
-          <div className={ui.actions}>
-            <CopyButton value={address.url} label="Copy the address" />
           </div>
         </>
       )
@@ -133,6 +122,28 @@ function AddressBlock({ address }: { readonly address: WebHostAddress | null }) 
         </div>
       )
   }
+}
+
+/**
+ * A copyable string: the value and the button that carries it, on ONE line.
+ *
+ * The button was in a `.paper-cap-actions` row underneath, which put a
+ * free-floating control below a block and left a reader to infer which one it
+ * acted on. There are three of these on this pane — an address, a command, a
+ * code — so "the copy button" was already ambiguous by the time the second
+ * appeared. Attached to its own value, it cannot be.
+ *
+ * `.paper-cap-grow` truncates with an ellipsis, and that is the right trade for
+ * a URL or a command: the whole point of the button is that nobody reads them,
+ * they carry them. The six-digit code is far too short to reach it.
+ */
+function CopyableCode({ value, label }: { readonly value: string; readonly label: string }) {
+  return (
+    <div className={ui.row}>
+      <code className={`${ui.code} ${ui.grow}`}>{value}</code>
+      <CopyButton value={value} label={label} />
+    </div>
+  )
 }
 
 export interface BrowsersPaneProps {
@@ -254,17 +265,16 @@ export function BrowsersPane({ wire, pollMs = POLL_MS }: BrowsersPaneProps) {
         <>
           {/* `paper-cap-code` is the block this design system already uses for
               something meant to be read off the screen and copied by hand. */}
-          <code className={ui.code}>{offer.code}</code>
+          {/* Copyable as well as readable: the browser is often on this same
+              machine while the code is on this same screen, and retyping six
+              digits to move them two inches is the kind of small friction that
+              reads as the app not having thought about it. */}
+          <CopyableCode value={offer.code} label="Copy the code" />
           <div className={ui.hint}>
             Type it into the browser within {remaining}s. It works once, and five wrong tries retire
             it.
           </div>
           <div className={ui.actions}>
-            {/* Copyable as well as readable: the browser is often on this same
-                machine while the code is on this same screen, and retyping six
-                digits to move them two inches is the kind of small friction
-                that reads as the app not having thought about it. */}
-            <CopyButton value={offer.code} label="Copy the code" />
             <button
               type="button"
               className={ui.button}
