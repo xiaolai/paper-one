@@ -261,3 +261,48 @@ export type { ContributedPaneId, KernelPaneId, PageLayout, PaneId, Screen, Side,
  * the app drawn at a size nothing else uses. `ICON.control` is the size every
  * icon inside a control already takes. */
 export { ICON } from './core/metrics'
+
+/* THE ENVELOPE — a service call as bytes, and bytes back.
+ *
+ * It lived in `capabilities/peer/lib/` because that is where its first caller
+ * was, and nothing about it is peer-to-peer: it is a request/response framing
+ * over any ordered byte stream. Phase 18 gave it a second transport (a browser
+ * over a WebSocket) and the misplacement became load-bearing — the browser
+ * client cannot import from `peer`, whose index reaches `@tauri-apps` and does
+ * not exist in a browser.
+ *
+ * So it lives here, where both transports can reach it. `peer/lib/envelope.ts`
+ * re-exports it, which is why nothing in that capability had to change. */
+export {
+  DEFAULT_TIMEOUT_MS,
+  ENVELOPE_ERRORS,
+  ENVELOPE_SERVICE,
+  ENVELOPE_VERSION,
+  FrameTooLarge,
+  HEADER_BYTES,
+  MAX_FRAME_BYTES,
+  MAX_JSON_DEPTH,
+  MAX_PAYLOAD_BYTES,
+  MalformedFrame,
+  ServiceCallError,
+  UNKNOWN_ID,
+  UnsupportedVersion,
+  createClient,
+  createRouter,
+  decodeFrame,
+  encodeFrame,
+  parseFrame,
+  serviceError,
+} from './core/envelope'
+export type {
+  CallOptions,
+  Client,
+  ClientOptions,
+  Frame,
+  FrameKind,
+  Router,
+  RouterConnection,
+  RouterOptions,
+  ServiceError,
+  Timers,
+} from './core/envelope'

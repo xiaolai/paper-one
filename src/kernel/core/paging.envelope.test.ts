@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { PAGE_BYTES, PAGE_ROWS, pages } from '../../../kernel'
+import { PAGE_BYTES, PAGE_ROWS, pages } from './services/paging'
 import { ENVELOPE_VERSION, MAX_PAYLOAD_BYTES, encodeFrame } from './envelope'
 
 /**

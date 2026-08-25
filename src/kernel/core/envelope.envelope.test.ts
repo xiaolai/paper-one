@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { ServiceContribution } from '../../../kernel'
+import type { ServiceContribution } from './capability'
 import {
   DEFAULT_TIMEOUT_MS,
   ENVELOPE_ERRORS,
@@ -915,5 +915,76 @@ describe('hardening against a hostile peer', () => {
     const header = new Uint8Array(HEADER_BYTES + 4)
     new DataView(header.buffer).setUint32(0, MAX_FRAME_BYTES, false)
     expect(() => decodeFrame(header)).toThrow(FrameTooLarge)
+  })
+
+  /* THE TWO PATHS BELOW WERE UNCOVERED, and the envelope's move into the kernel
+     is what surfaced it: under `src/capabilities/**` it was held to a lower bar
+     than kernel code, so 85% branch coverage on a protocol was invisible. The
+     move did not create the gap; it revealed one. */
+
+  describe('a transport that fails', () => {
+    it('disconnects when send throws synchronously rather than hanging the call', async () => {
+      /* A caller whose socket is already dead gets an error, not a promise that
+         never settles. The synchronous throw is the shape a closed WebSocket
+         takes — `send` on a CLOSED socket raises rather than rejecting. */
+      const client = createClient({
+        send: () => {
+          throw new Error('socket is closed')
+        },
+      })
+      await expect(client.call('book.list', {})).rejects.toBeInstanceOf(ServiceCallError)
+    })
+
+    it('reports that disconnection with the transport error code, not a timeout', async () => {
+      /* The distinction a caller acts on: a disconnect is retryable now, a
+         timeout means waiting. Reporting one as the other sends a retry loop
+         to sleep for the timeout it never hit. */
+      const client = createClient({
+        send: () => {
+          throw new Error('socket is closed')
+        },
+      })
+      const failure = await client.call('book.list', {}).catch((e: unknown) => e)
+      expect(failure).toBeInstanceOf(ServiceCallError)
+      expect((failure as ServiceCallError).error.code).not.toBe(ENVELOPE_ERRORS.timeout)
+    })
+  })
+
+  it('remembers a cancel raised before the stream id exists (reentrant transport)', async () => {
+    /* THE RACE THE CODE DOCUMENTS AND NOTHING EXERCISED. A synchronous
+       transport can deliver a stream frame REENTRANTLY — inside `send`, while
+       `begin` is still running and before `streamId` has been assigned. A
+       teardown fired in that window has no id to cancel, so it sets a flag and
+       the cancel goes out once the id lands.
+       
+       Without that, an overflowing stream opened over a synchronous transport
+       is torn down locally and never cancelled on the wire: the server keeps
+       sending into a reader that is gone. */
+    const timers = fakeTimers()
+    const sent: Frame[] = []
+    let client: ReturnType<typeof createClient>
+    client = createClient({
+      timers,
+      maxStreamBytes: 200,
+      send: (bytes) => {
+        const outgoing = decodeFrame(bytes)
+        sent.push(outgoing)
+        /* Answer the request from INSIDE send, which is what a loopback or an
+           in-memory pair does. The body overflows the buffer, so teardown runs
+           before `begin` has returned an id. */
+        if (outgoing.kind === 'req') {
+          client.receive(
+            encodeFrame(frame({ id: outgoing.id, service: outgoing.service, kind: 'stream', body: 'x'.repeat(300) })),
+          )
+        }
+      },
+    })
+
+    const iterator = client.stream('example.ping', null)[Symbol.asyncIterator]()
+    const failure = await iterator.next().catch((e: unknown) => e)
+    expect((failure as ServiceCallError).error.code).toBe(ENVELOPE_ERRORS.overloaded)
+    /* The cancel still reaches the wire, despite there being no id at the
+       moment the teardown decided to send one. */
+    expect(sent.some((f) => f.kind === 'cancel')).toBe(true)
   })
 })

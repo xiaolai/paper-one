@@ -41,7 +41,7 @@ const PROJECTS: readonly Project[] = [
   {
     name: 'kernel-unit',
     include: ['src/kernel/**/*.test.{ts,tsx}', 'src/*.test.{ts,tsx}'],
-    exclude: ['src/kernel/**/*.contract.test.{ts,tsx}'],
+    exclude: ['src/kernel/**/*.contract.test.{ts,tsx}', 'src/kernel/**/*.envelope.test.ts'],
   },
   /* `{ts,tsx}` like every other project's glob. A `.contract.test.tsx`
    matched the broad project instead of this one and ran without the
@@ -50,7 +50,7 @@ const PROJECTS: readonly Project[] = [
   {
     name: 'capabilities',
     include: ['src/capabilities/**/*.test.{ts,tsx}'],
-    exclude: ['src/capabilities/peer/**/*.envelope.test.ts'],
+    exclude: ['src/capabilities/**/*.envelope.test.ts'],
   },
   /* The envelope's own suites, and — since phase 11 — the CLI's client
    * speaking to a router over the fake wire, which is the same protocol under
@@ -58,7 +58,17 @@ const PROJECTS: readonly Project[] = [
    * envelope" is one question. */
   {
     name: 'service-envelope',
-    include: ['src/capabilities/peer/**/*.envelope.test.ts', 'src/cli/**/*.envelope.test.ts'],
+    /* `src/kernel/core/` since phase 18: the envelope moved there when a second
+     * transport needed it, and its suites moved with it. The glob follows the
+     * CODE rather than naming a capability — pinned to `peer/` it silently
+     * dropped both files into `kernel-unit`, where they still ran and this
+     * project quietly became one file. A suite that runs under the wrong
+     * project's settings is the failure the note above this list describes. */
+    include: [
+      'src/kernel/**/*.envelope.test.ts',
+      'src/capabilities/**/*.envelope.test.ts',
+      'src/cli/**/*.envelope.test.ts',
+    ],
   },
   { name: 'hosts', include: ['src/hosts/**/*.test.{ts,tsx}'] },
   {
