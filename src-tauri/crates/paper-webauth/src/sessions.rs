@@ -371,4 +371,40 @@ mod tests {
         auth.begin(now); // the code rotates underneath
         assert_eq!(sessions.attempt_of(&credential), Some(attempt));
     }
+
+    /// `Credential` MUST NOT BE PRINTABLE, and the doc comment saying so is not
+    /// a mechanism.
+    ///
+    /// This is the one string in the system whose appearance in a log is a
+    /// compromise. A derived `Debug` is how it would get there — not because
+    /// somebody logs it deliberately, but because it rides inside something
+    /// else that is logged: a `#[derive(Debug)]` struct that holds one, a
+    /// `.unwrap()` on a `Result<_, Credential>`, an `assert_eq!` in a test.
+    /// Every one of those is a compile error while this holds, and all of them
+    /// become one-line edits the moment it does not.
+    ///
+    /// Rust cannot assert the ABSENCE of a trait impl on stable, so this reads
+    /// the source — the same instrument `tauri-plugin-inference`'s `limits.rs`
+    /// uses on `commands.rs`, and for the same reason: the property is real,
+    /// cheap to break by accident, and silent when broken.
+    #[test]
+    fn the_credential_cannot_be_printed() {
+        let source = include_str!("sessions.rs");
+        let at = source.find("pub struct Credential(").expect(
+            "Credential is gone, or is no longer a tuple struct — this guard cannot see it",
+        );
+        // The derive list immediately above the declaration.
+        let before = &source[..at];
+        let derive_at = before
+            .rfind("#[derive(")
+            .expect("Credential has no derive list at all — check this guard still points at it");
+        let derives = &before[derive_at..];
+        assert!(
+            !derives.contains("Debug"),
+            "Credential derives Debug. It is the one value whose appearance in a \
+             log is a compromise, and Debug is how it gets into one — inside \
+             another struct's derived output, or an unwrap, or an assert. \
+             Use `as_str()` at a call site instead, where the escape is visible."
+        );
+    }
 }

@@ -608,6 +608,8 @@
     "src/app/web/channel.test.ts > connect > tells a listener added after the close about it anyway",
     "src/app/web/channel.test.ts > socketUrl > follows the page: wss from https, ws from http",
     "src/app/web/channel.test.ts > socketUrl > keeps the port, because the shelf is rarely on 443",
+    "src/app/web/channel.test.ts > the credential never rides in the open > never reads document.cookie anywhere in the client",
+    "src/app/web/channel.test.ts > the credential never rides in the open > opens a socket whose URL carries nothing but the path",
     "src/app/web/content.test.ts > fileOf > assembles every chunk, in order, into one file",
     "src/app/web/content.test.ts > fileOf > carries the name it was given, not the shelf’s",
     "src/app/web/content.test.ts > locate > keeps an unmeasurable size as null rather than zero",

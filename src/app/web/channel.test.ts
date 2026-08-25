@@ -1,3 +1,5 @@
+import { readFileSync, readdirSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 import { connect, socketUrl, type SocketLike } from './channel'
 import { ENVELOPE_VERSION, decodeFrame, encodeFrame } from '../../kernel/core/envelope'
@@ -200,5 +202,69 @@ describe('connect', () => {
     channel.close()
     void channel.call('book.list', {}).catch(() => {})
     expect(socket.sent.length).toBe(before)
+  })
+})
+
+/**
+ * THE CREDENTIAL NEVER TRAVELS IN SOMETHING THAT GETS WRITTEN DOWN.
+ *
+ * §6 of the phase plan asks for this explicitly, and it is easy to satisfy by
+ * accident today and lose by accident tomorrow. A URL is logged by every proxy
+ * on the path, appears in a browser's history, and is handed to any page the
+ * reader navigates to next as a `Referer`. A WebSocket subprotocol is a header
+ * that is not treated as a secret by anything.
+ *
+ * The cookie is neither. The browser attaches it to the handshake because the
+ * shelf serves the client same-origin, and this code never touches it — which
+ * is the property the last test here pins, because a client that cannot READ
+ * the credential cannot put it anywhere.
+ */
+describe('the credential never rides in the open', () => {
+  it('opens a socket whose URL carries nothing but the path', async () => {
+    const opened: string[] = []
+    const socket = new FakeSocket()
+    const promise = connect({
+      url: socketUrl({ protocol: 'https:', host: 'shelf.example' }),
+      open: (url) => {
+        opened.push(url)
+        return socket
+      },
+    })
+    /* A tick first: `connect` wires `onopen` after `open` returns, so firing it
+       synchronously would land before anything is listening. */
+    await Promise.resolve()
+    socket.open()
+    const channel = await promise
+    channel.close()
+
+    expect(opened).toEqual(['wss://shelf.example/ws'])
+    /* A query or a fragment is where a token would go if anybody ever decided
+       the cookie was inconvenient. Asserted as absence, so the decision cannot
+       be made quietly. */
+    expect(opened[0]).not.toContain('?')
+    expect(opened[0]).not.toContain('#')
+  })
+
+  /**
+   * The client CANNOT leak what it cannot read.
+   *
+   * `HttpOnly` already puts the cookie out of reach of page script, so this is
+   * belt and braces — but it is the assertion that survives somebody deciding
+   * to "just read the cookie to check whether we're signed in". The honest way
+   * to ask that question is `/api/auth/session`, which is what `session.ts`
+   * does, and it works precisely because the browser attaches the credential
+   * without the page ever seeing it.
+   */
+  it('never reads document.cookie anywhere in the client', () => {
+    const here = new URL('.', import.meta.url)
+    const files = readdirSync(fileURLToPath(here)).filter((name) => /\.tsx?$/.test(name) && !name.includes('.test.'))
+    /* THE LIST MUST NOT BE EMPTY. A glob that matches nothing passes every
+       assertion below it, which is the quietest way for a guard to stop
+       guarding. */
+    expect(files.length).toBeGreaterThan(3)
+    for (const name of files) {
+      const source = readFileSync(fileURLToPath(new URL(name, here)), 'utf8')
+      expect(source, `${name} must not read the session cookie`).not.toContain('document.cookie')
+    }
   })
 })
