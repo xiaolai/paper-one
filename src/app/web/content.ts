@@ -34,6 +34,7 @@ import type { ShelfChannel } from './channel'
 
 /** One chunk, as `content.read` sends it. */
 interface Chunk {
+  readonly bookId: string
   readonly offset: number
   readonly bytes: string
 }
@@ -81,7 +82,8 @@ function chunkOf(item: unknown): Chunk | null {
   if (typeof item !== 'object' || item === null) return null
   const row = item as Record<string, unknown>
   if (typeof row['offset'] !== 'number' || typeof row['bytes'] !== 'string') return null
-  return { offset: row['offset'], bytes: row['bytes'] }
+  if (typeof row['bookId'] !== 'string') return null
+  return { bookId: row['bookId'], offset: row['offset'], bytes: row['bytes'] }
 }
 
 export interface RemoteContent {
@@ -99,8 +101,24 @@ export interface RemoteContent {
 }
 
 export function remoteContent(channel: ShelfChannel): RemoteContent {
-  const collect = async (bookId: string, body: Record<string, unknown>): Promise<Uint8Array[]> => {
+  /**
+   * Every chunk of one read, in order, CHECKED.
+   *
+   * ⚠️ THIS USED TO APPEND IN ARRIVAL ORDER AND IGNORE THE OFFSETS. Each chunk
+   * declares where in the file it starts, and nothing compared that to where
+   * the last one ended — so a gap, a duplicate, a reordering or a chunk from
+   * another book all produced a file that assembled cleanly and was wrong. A
+   * truncated EPUB is a book that will not open; a PDF spliced from two
+   * versions is worse, because it opens.
+   *
+   * The offsets are free to check and they are the only thing that can catch
+   * this, so the stream is refused rather than assembled. Every refusal names
+   * what it expected — a caller debugging one is looking at a wire, and "the
+   * book was corrupt" would send them to the shelf's disk instead.
+   */
+  const collect = async (bookId: string, from: number, body: Record<string, unknown>): Promise<Uint8Array[]> => {
     const parts: Uint8Array[] = []
+    let expected = from
     for await (const page of channel.stream('content.read', { book: bookId, ...body })) {
       /* PAGES, not chunks. Every stream in the service table yields an array of
        * rows; a reader that assumed a bare object worked against one shelf and
@@ -109,8 +127,22 @@ export function remoteContent(channel: ShelfChannel): RemoteContent {
       const items = Array.isArray(page) ? page : [page]
       for (const item of items) {
         const chunk = chunkOf(item)
-        if (chunk === null) continue
-        parts.push(bytesOf(chunk.bytes))
+        /* NOT SKIPPED. A row this cannot read is a protocol disagreement, and
+         * carrying on turns it into a book that is quietly short. */
+        if (chunk === null) {
+          throw new Error(`content.read: ${bookId} sent a page that is not a chunk`)
+        }
+        if (chunk.bookId !== bookId) {
+          throw new Error(`content.read: asked for ${bookId} and got a chunk of ${chunk.bookId}`)
+        }
+        if (chunk.offset !== expected) {
+          throw new Error(
+            `content.read: ${bookId} is not contiguous — expected byte ${expected}, got ${chunk.offset}`,
+          )
+        }
+        const bytes = bytesOf(chunk.bytes)
+        parts.push(bytes)
+        expected += bytes.length
       }
     }
     return parts
@@ -136,11 +168,11 @@ export function remoteContent(channel: ShelfChannel): RemoteContent {
         throw new Error(`content.read: offset and length must not be negative (${offset}, ${length})`)
       }
       if (length === 0) return new Uint8Array(0)
-      return joined(await collect(bookId, { offset, length }))
+      return joined(await collect(bookId, offset, { offset, length }))
     },
 
     fileOf: async (bookId, name) => {
-      const parts = await collect(bookId, {})
+      const parts = await collect(bookId, 0, {})
       /* THE NAME THE BOOK ARRIVED WITH, not the vault's. Every parser Paper
        * uses routes on the EXTENSION, and foliate rejects a name with no
        * suffix as an unsupported type — the same reason `readOwnedBook` takes

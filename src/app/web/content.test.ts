@@ -123,3 +123,70 @@ describe('locate', () => {
     expect(await content.locate('missing')).toEqual({ here: false, ext: null, size: null })
   })
 })
+
+/**
+ * A SHELF THAT MISBEHAVES, one way at a time.
+ *
+ * Every case below assembled cleanly before the offsets were checked, and every
+ * one of them produces a file that is wrong rather than a read that fails. A
+ * truncated EPUB will not open; a PDF spliced from two versions WILL, which is
+ * the worse half.
+ */
+function badShelf(pages: readonly unknown[][]) {
+  const channel: ShelfChannel = {
+    call: async () => ({ bookId: 'one', here: true, ext: 'epub', size: 8 }),
+    stream: () => ({
+      [Symbol.asyncIterator]: async function* () {
+        for (const page of pages) yield page
+      },
+    }),
+    close: () => {},
+    onClosed: () => () => {},
+  }
+  return remoteContent(channel)
+}
+
+const chunk = (offset: number, text: string, bookId = 'one') => ({ bookId, offset, bytes: btoa(text) })
+
+describe('an assembled book is checked, not trusted', () => {
+  it('refuses a gap between chunks', async () => {
+    /* THE QUIET ONE. Four bytes missing from the middle of a book assembles
+       into a file four bytes short, and nothing downstream can tell. */
+    const content = badShelf([[chunk(0, 'abcd')], [chunk(8, 'efgh')]])
+    await expect(content.fileOf('one', 'x.epub')).rejects.toThrow(/not contiguous.*expected byte 4/)
+  })
+
+  it('refuses a chunk that arrives twice', async () => {
+    const content = badShelf([[chunk(0, 'abcd')], [chunk(0, 'abcd')]])
+    await expect(content.fileOf('one', 'x.epub')).rejects.toThrow(/not contiguous/)
+  })
+
+  it('refuses chunks that arrive out of order', async () => {
+    const content = badShelf([[chunk(4, 'efgh')], [chunk(0, 'abcd')]])
+    await expect(content.fileOf('one', 'x.epub')).rejects.toThrow(/not contiguous/)
+  })
+
+  /* A CHUNK OF ANOTHER BOOK. One socket carries every read, so a correlation
+     bug on either side puts one book's bytes inside another's file. */
+  it('refuses a chunk belonging to a different book', async () => {
+    const content = badShelf([[chunk(0, 'abcd')], [chunk(4, 'efgh', 'two')]])
+    await expect(content.fileOf('one', 'x.epub')).rejects.toThrow(/got a chunk of two/)
+  })
+
+  /* NOT SKIPPED. A row this cannot read is a protocol disagreement; carrying on
+     turns it into a book that is quietly short. */
+  it('refuses a page that is not a chunk at all', async () => {
+    const content = badShelf([[chunk(0, 'abcd')], [{ nonsense: true }]])
+    await expect(content.fileOf('one', 'x.epub')).rejects.toThrow(/not a chunk/)
+  })
+
+  /* AND A RANGE STARTS WHERE IT WAS ASKED TO. The first chunk of a ranged read
+     is not at zero, so the check has to begin from the offset requested. */
+  it('checks a ranged read from the offset it asked for', async () => {
+    const good = badShelf([[chunk(16, 'abcd')]])
+    expect(new TextDecoder().decode(await good.readRange('one', 16, 4))).toBe('abcd')
+
+    const wrong = badShelf([[chunk(0, 'abcd')]])
+    await expect(wrong.readRange('one', 16, 4)).rejects.toThrow(/expected byte 16/)
+  })
+})

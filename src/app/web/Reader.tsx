@@ -15,6 +15,8 @@ import {
   stepAt,
 } from '../../kernel/core/metrics'
 import type { RemoteContent } from './content'
+import { browserPositions, type ReadingPositions } from './positions'
+import { tapIntent } from './tapToTurn'
 import styles from './Reader.module.css'
 
 /**
@@ -59,6 +61,8 @@ export interface ReaderProps {
   /** What the shelf called it — the parser routes on this suffix. */
   readonly name: string
   readonly onClose: () => void
+  /** Injected so a test needs no browser storage. */
+  readonly positions?: ReadingPositions
 }
 
 /** What is known about the book while it is being fetched. */
@@ -71,12 +75,30 @@ type Opening =
   | { readonly kind: 'reading'; readonly source: File | { readonly range: object; readonly name: string } }
   | { readonly kind: 'failed'; readonly why: string }
 
-export function Reader({ content, bookId, name, onClose }: ReaderProps) {
+export function Reader({ content, bookId, name, onClose, positions }: ReaderProps) {
+  /* ONE STORE FOR THE LIFE OF THE COMPONENT. Built in a ref rather than on
+   * every render, because `browserPositions` touches `localStorage`, which is a
+   * getter that THROWS in some configurations. */
+  const store = useRef<ReadingPositions | null>(null)
+  store.current ??= positions ?? browserPositions()
+
+  /**
+   * WHERE THIS BOOK WAS LEFT, READ ONCE.
+   *
+   * `FoliateView`'s own note is emphatic: `lastLocation` is read when the book
+   * finishes parsing and must never be depended on, because the value CHANGES
+   * as the reader reads — "a book that reopened every time it did would be a
+   * book that could not be read at all". Captured at mount, in state, so the
+   * prop is stable for as long as the book is open.
+   */
+  const [lastLocation] = useState(() => store.current?.get(bookId) ?? null)
   const [opening, setOpening] = useState<Opening>({ kind: 'locating' })
   const [problem, setProblem] = useState<string | null>(null)
   /* The stage's width decides the measure, and a phone rotates. */
   const [stage, setStage] = useState(() => Math.min(window.innerWidth, 1200))
   const host = useRef<HTMLDivElement | null>(null)
+  /** The reading area, which is wider than the book — see `watchTaps`. */
+  const stageEl = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     const onResize = () => setStage(Math.min(window.innerWidth, 1200))
@@ -136,6 +158,153 @@ export function Reader({ content, bookId, name, onClose }: ReaderProps) {
 
   const ignore = useCallback(() => {}, [])
 
+  /**
+   * THE PAGE TURN, which this surface shipped without.
+   *
+   * `onPageIntent` was a no-op, so a book opened and could not be advanced: a
+   * tap did nothing, a swipe did nothing, the arrow keys did nothing. The
+   * reader looked complete and was a single page — found by trying to turn one,
+   * which no test here could have done.
+   *
+   * The navigator arrives from the session once the book is open, so it lives
+   * in a ref rather than in state: it is not rendered, and setting state on it
+   * would re-render the whole surface the moment a book finished parsing.
+   */
+  /** Removes the last document's tap listeners — see `watchDocument`. */
+  const tapCleanup = useRef<(() => void) | null>(null)
+
+  const navigator = useRef<{
+    next: () => void
+    prev: () => void
+    goLeft: () => void
+    goRight: () => void
+  } | null>(null)
+
+  const takeNavigator = useCallback((_generation: number, next: unknown) => {
+    navigator.current = next as typeof navigator.current
+  }, [])
+
+  /* FOUR INTENTS, TWO PAIRS, and they are not interchangeable. A horizontal
+   * gesture names a SIDE and foliate resolves which page that is from the
+   * book's own direction; a vertical one names a DIRECTION OF TRAVEL, which
+   * needs no resolving — routing it through goLeft/goRight would reverse the
+   * wheel in a right-to-left book. The desktop's reader makes the same
+   * distinction, in the same words. */
+  const turn = useCallback((intent: 'left' | 'right' | 'next' | 'prev') => {
+    const nav = navigator.current
+    if (nav === null) return
+    if (intent === 'left') nav.goLeft()
+    else if (intent === 'right') nav.goRight()
+    else if (intent === 'next') nav.next()
+    else nav.prev()
+  }, [])
+
+  /**
+   * TAP TO TURN, attached to each book document as it loads.
+   *
+   * A page intent reaches `FoliateView` from ONE gesture — the wheel — and a
+   * phone has none. The book is in an iframe, so a tap on it never reaches this
+   * page; `onDocument` hands over the book's own `Document`, which is where the
+   * listener has to go.
+   *
+   * Registered per document and removed when the document goes, because
+   * foliate loads a new one per section and keeps neighbours alive: without the
+   * teardown a book would accumulate a listener per section read.
+   */
+  /**
+   * Attach tap-to-turn to one event target, and hand back the way to remove it.
+   *
+   * TWO TARGETS NEED THIS, which is why it is a function. A book's iframe is
+   * narrower than the stage it sits in — 748px inside 1280px, measured — so a
+   * tap near the screen edge lands on the paginator's margin and never reaches
+   * the book's document at all. Attaching only there meant the most natural
+   * gesture on a phone, a thumb at the very edge, did nothing.
+   *
+   * Events do not cross an iframe boundary, so the two listeners never both
+   * fire for one tap. Each measures against ITS OWN width, and because the book
+   * is centred in the stage the two agree about which side a tap was on.
+   */
+  const watchTaps = useCallback(
+    (
+      target: Document | HTMLElement,
+      widthOf: () => number,
+      selectionOf: () => string,
+    ): (() => void) => {
+      let downAt: { x: number; y: number } | null = null
+      const onDown = (event: Event) => {
+        const pointer = event as PointerEvent
+        downAt = { x: pointer.clientX, y: pointer.clientY }
+      }
+      const onUp = (event: Event) => {
+        const pointer = event as PointerEvent
+        const from = downAt
+        downAt = null
+        const intent = tapIntent({
+          x: pointer.clientX,
+          /* HOW FAR IT TRAVELLED, not where it ended. A drag that begins in the
+           * middle and ends at the edge is a selection, not a page turn. */
+          moved: from === null ? 0 : Math.hypot(pointer.clientX - from.x, pointer.clientY - from.y),
+          width: widthOf(),
+          selected: selectionOf() !== '',
+          /* A LINK WINS. foliate is already handling it, and turning the page
+           * as well would leave the reader somewhere they did not choose. */
+          onControl:
+            (pointer.target as Element | null)?.closest?.('a, button, input, [role="button"]') != null,
+        })
+        if (intent !== null) turn(intent)
+      }
+      target.addEventListener('pointerdown', onDown, { passive: true })
+      target.addEventListener('pointerup', onUp, { passive: true })
+      return () => {
+        target.removeEventListener('pointerdown', onDown)
+        target.removeEventListener('pointerup', onUp)
+      }
+    },
+    [turn],
+  )
+
+  /* THE MARGINS. A tap that misses the book still asked to turn a page. */
+  useEffect(() => {
+    const element = stageEl.current
+    if (element === null) return
+    return watchTaps(
+      element,
+      () => element.clientWidth,
+      () => window.getSelection()?.toString() ?? '',
+    )
+  }, [watchTaps])
+
+  /**
+   * THE BOOK ITSELF. `onDocument` hands over each section's document as it
+   * loads; foliate keeps neighbours alive, so the previous one is released
+   * first or a book accumulates a listener per section read.
+   */
+  const watchDocument = useCallback(
+    (_generation: number, doc: Document | null) => {
+      tapCleanup.current?.()
+      tapCleanup.current = null
+      if (doc === null) return
+      tapCleanup.current = watchTaps(
+        doc,
+        () => doc.documentElement.clientWidth,
+        () => doc.getSelection()?.toString() ?? '',
+      )
+    },
+    [watchTaps],
+  )
+
+
+  /* SAVED ON EVERY RELOCATE, which is every page turn and every resize. The
+   * store refuses a write when the position has not moved, so a turn that lands
+   * on the same CFI costs nothing — and a null cfi never overwrites a good
+   * position, which the fixed-layout renderer would otherwise do. */
+  const remember = useCallback(
+    (_generation: number, position: { cfi: string | null }) => {
+      store.current?.set(bookId, position.cfi)
+    },
+    [bookId],
+  )
+
   if (opening.kind === 'failed') {
     return (
       <main className={styles.screen}>
@@ -164,7 +333,7 @@ export function Reader({ content, bookId, name, onClose }: ReaderProps) {
         </p>
       )}
 
-      <div className={styles.stage}>
+      <div className={styles.stage} ref={stageEl}>
         <FoliateView
           file={opening.kind === 'reading' ? opening.source : null}
           generation={0}
@@ -180,14 +349,14 @@ export function Reader({ content, bookId, name, onClose }: ReaderProps) {
           contrast={stepAt(CONTRAST, CONTRAST.def)}
           animated
           paginated
-          lastLocation={null}
+          lastLocation={lastLocation}
           onToc={ignore}
-          onRelocate={ignore}
-          onDocument={ignore}
+          onRelocate={remember}
+          onDocument={watchDocument}
           onMeta={ignore}
           onCover={ignore}
           onError={(_generation, message) => setProblem(message)}
-          onNavigator={ignore}
+          onNavigator={takeNavigator}
           marks={[]}
           onSelection={ignore}
           onMarkDrawn={ignore}
@@ -195,7 +364,7 @@ export function Reader({ content, bookId, name, onClose }: ReaderProps) {
           onExternalLink={ignore}
           onFootnote={ignore}
           onFileDropped={ignore}
-          onPageIntent={ignore}
+          onPageIntent={turn}
           onFixedLayout={ignore}
           onDirection={ignore}
         />

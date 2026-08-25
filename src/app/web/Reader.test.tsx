@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Reader } from './Reader'
 import type { ContentFacts, RemoteContent } from './content'
+import { readingPositions, type PositionStore } from './positions'
 
 /**
  * WHICH PATH A BOOK TAKES, and what happens when the shelf cannot say.
@@ -38,8 +39,17 @@ function shelf(facts: Partial<ContentFacts>) {
   return { content, readRange, fileOf }
 }
 
-const open = (content: RemoteContent) =>
-  render(<Reader content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} />)
+/** Positions over a store the test owns, so no browser storage is touched. */
+function fakePositions(seed: Record<string, { cfi: string; at: number }> = {}) {
+  let held: string | null = Object.keys(seed).length > 0 ? JSON.stringify(seed) : null
+  const store: PositionStore = { getItem: () => held, setItem: (_k, v) => void (held = v) }
+  return readingPositions(store, () => 1)
+}
+
+const open = (content: RemoteContent, positions = fakePositions()) =>
+  render(
+    <Reader content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={positions} />,
+  )
 
 describe('Reader', () => {
   it('assembles an EPUB into a file, under the name a parser routes on', async () => {
@@ -164,5 +174,159 @@ describe('Reader', () => {
     /* The surface survives the change — the assertion that matters is that the
        listener runs at all, since a throw here would take the reader down. */
     expect(screen.getByRole('banner')).toBeTruthy()
+  })
+
+  /**
+   * A BOOK REOPENS WHERE IT WAS LEFT.
+   *
+   * Kept in the browser rather than on the book's record: the pump grants this
+   * client `readingGrant` and nothing else, so every write in the service table
+   * is refused — deliberately, because a hostile EPUB shares this origin and a
+   * socket it opens carries the reader's session. Widening that for a position
+   * would widen it for `book.set`, which also carries a title and a tag list.
+   *
+   * **The cost is that a position does not sync**, and that is a real
+   * limitation rather than a temporary one.
+   */
+  it('opens a book where it was left', async () => {
+    const positions = fakePositions({ one: { cfi: 'epubcfi(/6/4!/4/2/10)', at: 1 } })
+    const { content } = shelf({ ext: 'epub' })
+    open(content, positions)
+    await screen.findByRole('banner')
+    /* The position survives the open — nothing has overwritten it, which is
+       what a book that reopened on every relocate would do. */
+    expect(positions.get('one')).toBe('epubcfi(/6/4!/4/2/10)')
+  })
+
+  it('starts at the beginning for a book it has never opened', async () => {
+    const positions = fakePositions()
+    const { content } = shelf({ ext: 'epub' })
+    open(content, positions)
+    await screen.findByRole('banner')
+    expect(positions.get('one')).toBeNull()
+  })
+
+  /**
+   * A BOOK THAT CANNOT BE TURNED IS ONE PAGE.
+   *
+   * `onPageIntent` and `onNavigator` were both no-ops when this surface first
+   * shipped, so a book opened and stayed on its first page — a tap, a swipe and
+   * the arrow keys all did nothing. Found by trying to turn a page against the
+   * running shelf, which is the only place it was visible.
+   *
+   * The four intents are two pairs and are not interchangeable: a horizontal
+   * gesture names a SIDE, which foliate resolves against the book's direction,
+   * and a vertical one names a DIRECTION OF TRAVEL. Routing one through the
+   * other reverses the wheel in a right-to-left book.
+   */
+  it('routes each page intent to the navigator it was given', async () => {
+    const { content } = shelf({ ext: 'epub' })
+    const seen: string[] = []
+    const nav = {
+      next: () => seen.push('next'),
+      prev: () => seen.push('prev'),
+      goLeft: () => seen.push('goLeft'),
+      goRight: () => seen.push('goRight'),
+    }
+
+    /* Reach the props FoliateView was handed, which is where the wiring lives —
+       the component itself cannot open a book in jsdom. */
+    const captured: Record<string, unknown> = {}
+    vi.doMock('../../kernel/ui/reader/FoliateView', () => ({
+      FoliateView: (props: Record<string, unknown>) => {
+        Object.assign(captured, props)
+        return null
+      },
+    }))
+    vi.resetModules()
+    const { Reader: Fresh } = await import('./Reader')
+    render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />)
+    await waitFor(() => expect(captured['onNavigator']).toBeTypeOf('function'))
+
+    ;(captured['onNavigator'] as (g: number, n: unknown) => void)(0, nav)
+    const intent = captured['onPageIntent'] as (i: string) => void
+    for (const one of ['left', 'right', 'next', 'prev']) intent(one)
+    expect(seen).toEqual(['goLeft', 'goRight', 'next', 'prev'])
+
+    /* AND AN INTENT BEFORE THE BOOK IS OPEN IS NOT A CRASH. The navigator
+       arrives when the session finishes parsing; a gesture in that window is
+       ordinary, not exceptional. */
+    ;(captured['onNavigator'] as (g: number, n: unknown) => void)(0, null)
+    expect(() => intent('next')).not.toThrow()
+
+    vi.doUnmock('../../kernel/ui/reader/FoliateView')
+    vi.resetModules()
+  })
+
+  /**
+   * TAP TO TURN, on the book's own document.
+   *
+   * A page intent reaches the reader from ONE gesture — the wheel — and a phone
+   * has none: Playwright says "Mouse wheel is not supported in mobile WebKit",
+   * which is the device and not the harness. So the surface shipped a book that
+   * opened and could not be advanced on the one kind of device it is for.
+   *
+   * The book is in an iframe, so the listener has to live on the document
+   * `onDocument` hands over — and be REMOVED when that document goes, because
+   * foliate loads one per section and keeps neighbours alive. Without the
+   * teardown a book accumulates a listener per section read.
+   */
+  it('turns the page from a tap on the book, and lets go of the document after', async () => {
+    const { content } = shelf({ ext: 'epub' })
+    const seen: string[] = []
+    const nav = {
+      next: () => seen.push('next'),
+      prev: () => seen.push('prev'),
+      goLeft: () => seen.push('goLeft'),
+      goRight: () => seen.push('goRight'),
+    }
+
+    const captured: Record<string, unknown> = {}
+    vi.doMock('../../kernel/ui/reader/FoliateView', () => ({
+      FoliateView: (props: Record<string, unknown>) => {
+        Object.assign(captured, props)
+        return null
+      },
+    }))
+    vi.resetModules()
+    const { Reader: Fresh } = await import('./Reader')
+    render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />)
+    await waitFor(() => expect(captured['onDocument']).toBeTypeOf('function'))
+    ;(captured['onNavigator'] as (g: number, n: unknown) => void)(0, nav)
+
+    /* A book document, 300px wide, as foliate would hand one over. */
+    const doc = document.implementation.createHTMLDocument('a section')
+    Object.defineProperty(doc.documentElement, 'clientWidth', { value: 300, configurable: true })
+    const watch = captured['onDocument'] as (g: number, d: Document | null) => void
+    watch(0, doc)
+
+    const tapAt = (x: number, target: Element = doc.body) => {
+      target.dispatchEvent(new PointerEvent('pointerdown', { clientX: x, clientY: 100, bubbles: true }))
+      target.dispatchEvent(new PointerEvent('pointerup', { clientX: x, clientY: 100, bubbles: true }))
+    }
+
+    tapAt(10)
+    tapAt(290)
+    tapAt(150)
+    expect(seen, 'the outer thirds turn, the middle does not').toEqual(['goLeft', 'goRight'])
+
+    /* A LINK WINS — foliate is already handling it, and turning as well would
+       leave the reader somewhere they did not choose. */
+    const link = doc.createElement('a')
+    link.href = '#somewhere'
+    doc.body.append(link)
+    seen.length = 0
+    tapAt(290, link)
+    expect(seen).toEqual([])
+
+    /* AND THE DOCUMENT IS RELEASED. `onDocument(null)` is the teardown; a tap
+       after it must reach nothing. */
+    watch(0, null)
+    seen.length = 0
+    tapAt(10)
+    expect(seen, 'the listener must be gone with the document').toEqual([])
+
+    vi.doUnmock('../../kernel/ui/reader/FoliateView')
+    vi.resetModules()
   })
 })
