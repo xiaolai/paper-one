@@ -78,6 +78,26 @@ const KERNEL_STYLESHEETS = '^src/kernel/ui/styles/.*\\.css$'
  * type-only. It is arithmetic over constants with no dependencies to smuggle. */
 const KERNEL_METRICS = '^src/kernel/core/metrics\\.ts$'
 
+/** The envelope: a service call as bytes, and bytes back.
+ *
+ * It moved into the kernel in phase 18 because a second transport needed it —
+ * nothing about it is peer-to-peer. */
+const KERNEL_ENVELOPE = '^src/kernel/core/envelope\\.ts$'
+
+/** The BROWSER CLIENT: `src/app/web/`, the SPA the shelf serves to a phone.
+ *
+ * It is the one part of this tree that cannot use the kernel's public entry.
+ * That barrel re-exports modules which import `@tauri-apps`, and importing ANY
+ * symbol from it retains them — `assert-bundle` refuses a web bundle carrying
+ * three, and a browser has no such thing to run.
+ *
+ * So it reaches a SHORT, NAMED list of kernel modules directly, and
+ * `web-client-kernel-allowlist` below holds it to that list. Each entry is a
+ * module with no runtime dependencies of its own, which is why reaching it
+ * costs nothing. Adding a fourth should prompt the question this note is
+ * really about: whether the public entry ought to be Tauri-free. */
+const WEB_CLIENT = '^src/app/web/'
+
 /** The kernel's two entries: the React-free public one every capability may
  *  import, and the UI one only a composition root may. */
 const KERNEL_PUBLIC_ENTRY = '^src/kernel/index\\.ts$'
@@ -197,7 +217,7 @@ module.exports = {
         'Outside the kernel, the only kernel module that may be imported is its public entry, ' +
         'src/kernel/index.ts — for a capability, a test under src/app/, anything. The composition ' +
         'roots are judged by composition-root-kernel-entries instead, which adds the UI entry.',
-      from: { path: '^src/', pathNot: ['^src/kernel/', ...COMPOSITION_ROOTS] },
+      from: { path: '^src/', pathNot: ['^src/kernel/', WEB_CLIENT, ...COMPOSITION_ROOTS] },
       to: { path: '^src/kernel/', pathNot: [KERNEL_PUBLIC_ENTRY, KERNEL_TESTKIT_ENTRY] },
     },
     {
@@ -318,6 +338,23 @@ module.exports = {
         'cannot let it through.',
       from: { pathNot: FS_ADAPTERS },
       to: { path: '(^|/)@tauri-apps/plugin-fs(/|$)' },
+    },
+    {
+      name: 'web-client-kernel-allowlist',
+      severity: 'error',
+      comment:
+        'The browser client (src/app/web/) is exempt from kernel-public-entry-only because the ' +
+        "public entry's barrel retains modules that import @tauri-apps, which do not exist in a " +
+        'browser — assert-bundle refuses a web bundle carrying them. This is the rule that keeps ' +
+        'that exemption narrow: it may reach the design-system stylesheets, metrics.ts and ' +
+        'envelope.ts, and nothing else of the kernel. All three have no runtime dependencies of ' +
+        'their own. A fourth entry is a signal that the public entry should be made Tauri-free ' +
+        'instead of routed around.',
+      from: { path: WEB_CLIENT },
+      to: {
+        path: '^src/kernel/',
+        pathNot: [KERNEL_PUBLIC_ENTRY, KERNEL_STYLESHEETS, KERNEL_METRICS, KERNEL_ENVELOPE],
+      },
     },
     {
       name: 'no-tauri-api-outside-peer-wire',
