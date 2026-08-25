@@ -170,9 +170,25 @@ pub enum Outcome {
 ///
 /// The caller MUST bind whatever it issues to `attempt` rather than to any
 /// notion of the current one — see the module header.
+///
+/// ## The field is `pub(crate)`, and that is the whole security property
+///
+/// `Sessions::issue` takes one of these BY VALUE rather than an `AttemptId`,
+/// and its documentation says the type is the proof that six correct digits
+/// arrived. That was false while the field was `pub`: `Offer::attempt` is
+/// public, so any caller could call `begin`, copy the attempt out of the offer
+/// it was handed, build `Granted { attempt }` and get a credential without
+/// submitting anything at all. A capability token anyone can construct is not
+/// a capability token; it is a struct.
+///
+/// `Reservation` beside it was already private, which is what made this
+/// visible — two types with the same job and two different answers.
+///
+/// Nothing outside this crate reads the field; `paper-webhost` passes the
+/// whole value through to `issue` opaquely, which is exactly the intended use.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Granted {
-    pub attempt: AttemptId,
+    pub(crate) attempt: AttemptId,
 }
 
 /// The shelf's device-authorization state: at most one live code.
@@ -563,6 +579,52 @@ mod tests {
         let outcome = restarted.submit(restarted.reserve(now).unwrap(), &digits, now);
         if code_of(&fresh) != digits {
             assert_eq!(outcome, Outcome::Wrong);
+        }
+    }
+
+    /// THE TWO CAPABILITY TOKENS KEEP THEIR FIELDS TO THEMSELVES.
+    ///
+    /// `Reservation` is permission to test the code once; `Granted` is proof
+    /// that six correct digits arrived. Both are handed to a caller that must
+    /// not be able to make another — `Sessions::issue` takes a `Granted` BY
+    /// VALUE precisely so the type carries the authorization.
+    ///
+    /// `Granted::attempt` was `pub`, which made that false. `Offer::attempt` is
+    /// public, so any caller could call `begin`, copy the attempt out of the
+    /// offer, build `Granted { attempt }` and be issued a credential without
+    /// submitting anything. `Reservation` beside it was already private, and
+    /// two types with the same job and two different answers is what a guard is
+    /// for.
+    ///
+    /// Rust cannot assert a field's visibility from inside the crate — every
+    /// field is reachable here, which is the whole difficulty — so this reads
+    /// the source, as `sessions.rs`'s printability guard does.
+    #[test]
+    fn the_capability_tokens_cannot_be_built_by_a_caller() {
+        let source = include_str!("lib.rs");
+        for name in ["Granted", "Reservation"] {
+            let header = format!("pub struct {name} {{");
+            let at = source.find(&header).unwrap_or_else(|| {
+                panic!("{name} is gone, or is no longer a braced struct — this guard cannot see it")
+            });
+            /* AFTER THE OPENING BRACE. Slicing from the declaration includes
+             * `pub struct` itself, so the check matched its own header and
+             * failed on a struct with no public field at all. */
+            let opens = at + header.len();
+            let body_end = source[opens..]
+                .find('}')
+                .unwrap_or_else(|| panic!("{name}'s declaration does not close"));
+            let body = &source[opens..opens + body_end];
+            assert!(
+                !body.trim().is_empty(),
+                "{name} has no fields — is this guard still pointed at the right thing?"
+            );
+            assert!(
+                !body.contains("pub "),
+                "{name} has a public field. It is a capability token: `Sessions::issue` takes a \
+                 `Granted` by value because the TYPE is the proof, and a caller that can build one \
+                 from an `AttemptId` it already holds needs no code at all. Use `pub(crate)`."
+            );
         }
     }
 }

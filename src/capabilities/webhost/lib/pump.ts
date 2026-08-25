@@ -1,4 +1,4 @@
-import { createRouter, type ServiceContribution } from '../../../kernel'
+import { createRouter, readingGrant, type ServiceContribution } from '../../../kernel'
 import type { WebHostWire } from './wire'
 
 /**
@@ -56,12 +56,38 @@ export interface Pump {
 /**
  * Serve the router to every browser that connects, until stopped.
  *
- * **Grants are not checked here.** A browser reaching this point holds a
- * credential the shelf issued and has been admitted; the six digits and the
- * cookie are the gate, and `Sessions::admit` is where a revocation lands. That
- * is a deliberate difference from `peer`, whose peers carry per-peer grants
- * from `peers.json` — a browser has one grant, "signed in", and pretending
- * otherwise would be a permission surface with one value in it.
+ * ## A browser gets ONE grant, and that grant is READ
+ *
+ * Unlike `peer`, whose peers carry per-peer grants from `peers.json`, every
+ * browser here is the same: the six digits and the cookie are the gate, and
+ * `Sessions::admit` is where a revocation lands. Pretending browsers differ
+ * from one another would be a permission surface with one value in it.
+ *
+ * ⚠️ **THAT ARGUMENT USED TO END IN `hasGrant: () => true`, WHICH IS A
+ * DIFFERENT CLAIM.** "Browsers do not differ from each other" says nothing
+ * about what the single grant permits, and the answer was *everything the
+ * shelf composes* — `content.evict`, `book.remove`, `trash.empty`,
+ * `device.forget`, every write in the table. A phone that signed in once could
+ * empty the library.
+ *
+ * It is worse than it sounds, because of who else is in the origin. foliate
+ * renders a book in a same-origin iframe with `allow-same-origin
+ * allow-scripts`, so a hostile EPUB's script shares this page's origin. It
+ * cannot READ the credential — the cookie is `HttpOnly`, and
+ * `rendererIsolation.test.ts` holds that — but it never needed to: it can open
+ * `wss://…/ws` itself and the browser attaches the cookie for it. Withholding
+ * the credential from a book and then handing its socket the whole write
+ * surface defeats the point of withholding it.
+ *
+ * So the grant is `readingGrant` — the kernel's own read/write split, the same
+ * predicate `readServices()` uses, rather than a second list that drifts. The
+ * client asks for `book.list`, `content.locate` and `content.read`, all reads;
+ * the plan's §1 says this is a thin client that streams, and "importing a book
+ * from the phone" is named under what is deliberately not built.
+ *
+ * **The day the browser needs to write** — a reading position, a mark — that is
+ * a decision to take deliberately, by widening this predicate and saying which
+ * verbs and why. It is not a line to delete.
  */
 export function servePipe(options: PumpOptions): Pump {
   const { wire, services } = options
@@ -69,7 +95,11 @@ export function servePipe(options: PumpOptions): Pump {
   const sessionsMs = options.sessionsMs ?? SESSIONS_MS
   const onError = options.onError ?? (() => {})
 
-  const router = createRouter({ services: [...services], hasGrant: () => true })
+  /* THE KERNEL'S OWN SPLIT, not a list kept here. `readServices()` filters the
+   * table with this exact predicate, so a service added to the table lands on
+   * the correct side for the browser without anybody remembering to update a
+   * second register. */
+  const router = createRouter({ services: [...services], hasGrant: (_session, grant) => readingGrant(grant) })
   const live = new Map<number, { connection: ReturnType<typeof router.connect>; stop: () => void }>()
   let stopped = false
 

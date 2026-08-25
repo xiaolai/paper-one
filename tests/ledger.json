@@ -1396,6 +1396,7 @@
     "src/capabilities/sync/ui/storageModel.test.ts > the storage model > the download ledger round-trips and tolerates junk",
     "src/capabilities/sync/ui/storageModel.test.ts > the storage model > throws rather than reading an unreadable ledger as an empty one",
     "src/capabilities/webhost/lib/pump.test.ts > servePipe > carries a real call from a browser to a handler and back",
+    "src/capabilities/webhost/lib/pump.test.ts > servePipe > refuses a write service, and the handler never runs",
     "src/capabilities/webhost/lib/pump.test.ts > servePipe > reports a failure to list sessions rather than throwing into a timer",
     "src/capabilities/webhost/lib/pump.test.ts > servePipe > serves a browser that arrives after it started",
     "src/capabilities/webhost/lib/pump.test.ts > servePipe > serves nothing more after stop",

@@ -40,11 +40,30 @@ function browser(sessionId = 1) {
 
 const PING: ServiceContribution = {
   name: 'example.ping',
-  /* The router checks grants through `hasGrant`, which the pump answers true
-     for — a browser holds one grant, "signed in", and the credential is the
-     gate. The field is still required by the type, so it is stated. */
+  /* A READ grant, and it matters. The pump answers `hasGrant` with the
+     kernel's `readingGrant` predicate, so this service is reachable from a
+     browser and `DESTROY` below is not. */
   grant: 'book:read',
   handler: async (req: unknown) => ({ echoed: req }),
+}
+
+/**
+ * A WRITE service, to prove the browser cannot reach one.
+ *
+ * `content.evict` is the real one this stands for: it deletes a book's bytes,
+ * and it was reachable from any signed-in browser because the pump answered
+ * `hasGrant: () => true`. The handler records being called, because "the
+ * request was refused" and "the request ran and its answer was discarded" look
+ * identical from the client and are opposite facts.
+ */
+const destroyed: unknown[] = []
+const DESTROY: ServiceContribution = {
+  name: 'example.destroy',
+  grant: 'book:write',
+  handler: async (req: unknown) => {
+    destroyed.push(req)
+    return { gone: true }
+  },
 }
 
 /** Let the pump's timers run without waiting on real ones. */
@@ -74,6 +93,45 @@ describe('servePipe', () => {
     const { wire, client } = browser()
     const pump = servePipe({ wire, services: [PING], pollMs: 5, sessionsMs: 10 })
 
+    const answer = client.call('example.ping', { hello: true })
+    await tick()
+    expect(await answer).toEqual({ echoed: { hello: true } })
+
+    pump.stop()
+    vi.useRealTimers()
+  })
+
+  /**
+   * THE GRANT IS READ, AND ONLY READ.
+   *
+   * The pump used to answer `hasGrant: () => true`, on the argument that a
+   * browser holds one grant — "signed in" — and that browsers do not differ
+   * from one another. Both true, and neither says what that single grant
+   * PERMITS: the answer was every service the shelf composes, including
+   * `content.evict`, `book.remove` and `trash.empty`.
+   *
+   * It matters most because of who shares the origin. foliate renders a book
+   * in a same-origin iframe with `allow-same-origin allow-scripts`; a hostile
+   * EPUB cannot read the `HttpOnly` credential, but it can open the socket
+   * itself and the browser attaches the cookie for it.
+   */
+  it('refuses a write service, and the handler never runs', async () => {
+    vi.useFakeTimers()
+    destroyed.length = 0
+    const { wire, client } = browser()
+    const pump = servePipe({ wire, services: [PING, DESTROY], pollMs: 5, sessionsMs: 10 })
+
+    const refused = client.call('example.destroy', { book: 'aaa' }).then(
+      () => 'RESOLVED',
+      (thrown: unknown) => String(thrown),
+    )
+    await tick()
+    expect(await refused).toMatch(/forbidden/i)
+    /* NEVER RAN. A refusal that arrives after the handler did its work is not
+       a refusal — the bytes are already gone. */
+    expect(destroyed).toEqual([])
+
+    /* And a READ still works, so this is a grant check and not a dead pump. */
     const answer = client.call('example.ping', { hello: true })
     await tick()
     expect(await answer).toEqual({ echoed: { hello: true } })
