@@ -892,6 +892,41 @@ mod tests {
         }
     }
 
+    /// THE UPGRADE CARRIES THE PROTOCOL'S OWN CAP.
+    ///
+    /// `Pipe::push` refuses anything over `MAX_FRAME`, but it only sees a
+    /// message axum has already ASSEMBLED — and axum's defaults are 64 MiB per
+    /// message and 16 MiB per frame. Without these two calls the refusal is
+    /// still correct and the memory is still spent, sixteen times the
+    /// protocol's limit, per socket, across `MAX_SESSIONS` of them.
+    ///
+    /// `tests/upgrade.rs` proves the BEHAVIOUR — an oversized message ends the
+    /// socket — and cannot prove the bound: removing these calls leaves that
+    /// test passing unchanged, because `push` closes the socket too. The only
+    /// client-visible difference is which flavour of connection reset arrives,
+    /// which is an OS detail. So the bound is asserted here, against the source,
+    /// the way `tauri-plugin-inference`'s `limits.rs` reads `commands.rs`.
+    #[test]
+    fn the_upgrade_is_bounded_by_the_protocols_own_cap() {
+        let source = include_str!("lib.rs");
+        let at = source
+            .find("async fn upgrade(")
+            .expect("the upgrade handler is gone — this guard cannot see it");
+        let body_end = source[at..]
+            .find("\nasync fn pump(")
+            .expect("the upgrade handler no longer precedes `pump`");
+        let body = &source[at..at + body_end];
+
+        for call in ["max_message_size(MAX_FRAME)", "max_frame_size(MAX_FRAME)"] {
+            assert!(
+                body.contains(call),
+                "the upgrade must set {call}: without it axum assembles up to its own 64 MiB \
+                 default before Pipe::push refuses the frame, which is the memory this cap exists \
+                 to refuse spending"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn the_body_of_a_refusal_says_nothing_about_the_code() {
         let state = host();

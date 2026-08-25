@@ -23,4 +23,11 @@ tokio = { version = "1", features = ["sync", "rt", "macros"] }
 # port. `tower` is already in this tree; only the `util` feature is new.
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
-tokio = { version = "1", features = ["macros", "rt"] }
+# `net` and `rt-multi-thread` are for `upgrade.rs`: an in-process `oneshot`
+# cannot perform a WebSocket handshake, and the handshake is where this surface
+# actually lives. A real listener needs a real reactor.
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "net", "time"] }
+# A REAL CLIENT for the real handshake. Already in this tree — axum's `ws`
+# feature resolves the same 0.28 — so this adds a dev edge, not a dependency.
+tokio-tungstenite = "0.28"
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
