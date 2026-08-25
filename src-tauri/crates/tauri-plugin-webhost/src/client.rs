@@ -84,11 +84,30 @@ mod tests {
             "text/html; charset=utf-8",
         );
         /* And the policy is on it — the layer that a book's HTML in this origin
-         * depends on, applied to the document that loads the client. */
-        assert!(response
+         * depends on, applied to the document that loads the client.
+         *
+         * ASSERTED ON `script-src` SPECIFICALLY. This searched the whole policy
+         * for "unsafe-inline", which was true while nothing needed it and
+         * became wrong the moment a reading surface existed: `style-src` needs
+         * it, and inline CSS cannot execute JavaScript. `script-src` is the
+         * boundary — see `paper_webhost::CONTENT_SECURITY_POLICY` and
+         * `scripts/csp-effect.mjs`, which measures what the shape does in a
+         * real engine rather than asserting what it says. */
+        let policy = response
             .headers()
             .get(axum::http::header::CONTENT_SECURITY_POLICY)
-            .is_some_and(|v| !v.to_str().unwrap_or_default().contains("unsafe-inline")));
+            .expect("a policy on the client document")
+            .to_str()
+            .expect("ascii");
+        let script_src = policy
+            .split(';')
+            .map(str::trim)
+            .find(|part| part.starts_with("script-src"))
+            .expect("a script-src in the policy");
+        assert_eq!(
+            script_src, "script-src 'self'",
+            "the boundary moved: {policy}"
+        );
     }
 
     #[test]

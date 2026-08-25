@@ -74,17 +74,52 @@ pub const SESSION_COOKIE: &str = "paper_session";
 /// put the book in an iframe, and the book is a blob. What matters is that the
 /// frame cannot bring executable script into the parent's origin, which
 /// `script-src` governs and this does not widen.
+///
+/// `style-src`, `font-src` and `worker-src` take `blob:` for the same reason
+/// and on the same terms. foliate rewrites a book's stylesheets and embedded
+/// fonts to object URLs, and pdf.js runs in a worker built from one. Without
+/// them nothing fails loudly: the book renders unstyled, in a fallback face,
+/// and a PDF does not render at all — which reads as a bad book rather than as
+/// our policy.
+///
+/// ⚠️ `frame-ancestors` IS `'self'` AND NOT `'none'`, and the difference is a
+/// book that renders against one that does not.
+///
+/// A blob document INHERITS the embedder's policy. foliate puts every book
+/// document in an iframe as a `blob:` URL, so with `'none'` the book's own
+/// frame has no permitted ancestor and the browser refuses to load it —
+/// "Refused to load blob:… because it does not appear in the frame-ancestors
+/// directive". `'self'` still refuses every OTHER origin, which is the
+/// clickjacking protection this directive is for; what it stops refusing is
+/// this page framing itself.
+///
+/// `media-src` is here for the same reason `font-src` is: a book may carry
+/// audio or video, and it arrives as an object URL like everything else.
+///
+/// `'unsafe-inline'` on `style-src` is the desktop's answer too, and it is not
+/// the boundary: inline CSS cannot execute JavaScript. It is here because the
+/// client's own shell applies one and the page rendered UNSTYLED without it —
+/// found by looking at the page, which is the only way this class of thing is
+/// ever found.
+///
+/// **None of these is `script-src`, and that is the whole argument.**
+/// Measured in WebKit and Chromium (`scripts/csp-effect.mjs`): with
+/// `script-src 'self'`, a book's script does not run — neither an inline one
+/// nor a `<script src>` pointing at an object URL, which is what every book
+/// resource becomes. Widening the three above does not touch that.
 pub const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
      script-src 'self'; \
-     style-src 'self'; \
-     img-src 'self' blob: data:; \
-     font-src 'self'; \
+     style-src 'self' 'unsafe-inline' blob:; \
+     img-src 'self' data: blob:; \
+     media-src 'self' data: blob:; \
+     font-src 'self' data: blob:; \
      connect-src 'self'; \
-     frame-src 'self' blob:; \
+     worker-src 'self' blob:; \
+     frame-src 'self' data: blob:; \
      object-src 'none'; \
      base-uri 'none'; \
      form-action 'none'; \
-     frame-ancestors 'none'";
+     frame-ancestors 'self'";
 
 /// Everything the HTTP surface needs. One live code, and every issued session.
 pub struct WebHost {
@@ -883,11 +918,28 @@ mod tests {
                 .unwrap_or_else(|| panic!("no policy on {}", response.status()))
                 .to_str()
                 .expect("ascii");
-            /* Adversarial suite 8. `rendererIsolation.test.ts` guards the same
-             * three strings for the Tauri build and cannot see this one. */
-            assert!(!csp.contains("unsafe-inline"), "{csp}");
-            assert!(!csp.contains("unsafe-eval"), "{csp}");
-            assert!(!csp.contains("script-src 'self' blob:"), "{csp}");
+            /* Adversarial suite 8, and it is about `script-src` SPECIFICALLY.
+             *
+             * This used to search the WHOLE policy for "unsafe-inline", which
+             * was true while nothing needed it and became wrong the moment a
+             * reading surface existed: `style-src` needs it — the client's own
+             * shell applies an inline stylesheet, and without it the page
+             * renders unstyled — and inline CSS cannot execute JavaScript.
+             *
+             * Plan §6 says what the decision actually is: "`script-src`
+             * excludes `unsafe-inline`, `unsafe-eval` and `blob:`". A check
+             * that guards more than the decision will one day refuse the
+             * decision, which is what happened here.
+             *
+             * `scripts/csp-effect.mjs` measures what this shape DOES: in WebKit
+             * and Chromium a book's script does not run, inline or from an
+             * object URL. */
+            let script_src = csp
+                .split(';')
+                .map(str::trim)
+                .find(|part| part.starts_with("script-src"))
+                .unwrap_or_else(|| panic!("no script-src in {csp}"));
+            assert_eq!(script_src, "script-src 'self'", "the boundary moved: {csp}");
             assert!(csp.contains("object-src 'none'"), "{csp}");
         }
     }

@@ -109,14 +109,37 @@
 .shelf-row {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
-  padding: var(--space-12) 0;
   border-bottom: 1px solid var(--line);
-  /* The platform's touch minimum, even for a row that is not yet tappable —
-     it will be, and a row that grows when the reader opens is a layout that
-     moves under them. */
+}
+
+/* THE WHOLE ROW IS THE TARGET, and it is a button.
+ *
+ * A div with a click handler is not reachable by keyboard and is announced as
+ * text, so a reader using either would find a library they cannot open. The
+ * element carries no button chrome — a shelf row that looked like a form
+ * control would be the client imitating the design system again — but it keeps
+ * the platform's touch minimum, which the row was already reserving before
+ * anything was tappable. */
+.shelf-open {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-12) 0;
   min-height: var(--control-lg);
   justify-content: center;
+  /* Buttons inherit neither font nor colour nor alignment. Every one of these
+     is undoing a default, not choosing a value. */
+  font: inherit;
+  color: inherit;
+  text-align: start;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+.shelf-open:hover .shelf-title {
+  color: var(--accent);
 }
 
 .shelf-title {

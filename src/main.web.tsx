@@ -13,8 +13,10 @@ import '@fontsource/ibm-plex-mono/400.css'
 /* THE DESIGN SYSTEM'S VALUES, and only those. Importing `./kernel/ui` would
  * bring the whole reader — including `appStorage.ts`, `lookUp.ts` and the three
  * other modules that import `@tauri-apps`, none of which exist in a browser. So
- * this entry takes the stylesheet directly and nothing else, until the reader
- * itself is wired (WI-18.7 onward). */
+ * this entry takes the stylesheets directly. The READER itself is reachable now
+ * — `bookVault.ts`'s Tauri binding moved to `vaultFsTauri.ts`, which is what put
+ * `FoliateView` back within a browser's reach — but the UI barrel still is not,
+ * so `Reader.tsx` imports the component rather than the entry. */
 import './kernel/ui/styles/tokens.css'
 /* THE APP'S BASE STYLESHEET. §02's typeface, §07's focus ring and disabled
  * convention, and the resets — all of it app-wide statements this client was
@@ -32,6 +34,8 @@ import { PairScreen } from './app/web/PairScreen'
 import { checkSession, type SessionState } from './app/web/session'
 import { connect } from './app/web/channel'
 import { createRemoteBooks, type RemoteBooks } from './app/web/books'
+import { remoteContent, type RemoteContent } from './app/web/content'
+import { Reader } from './app/web/Reader'
 import { capabilities } from 'virtual:paper-composition'
 /* DIRECTLY, not through `./kernel`. The barrel re-exports modules that import
  * `@tauri-apps`, so importing ANY symbol from it retains them — `assert-bundle`
@@ -58,11 +62,14 @@ import { applyMetrics } from './kernel/core/metrics'
  *
  * ## What this build is, today
  *
- * The gate and nothing behind it. It asks the shelf whether this browser is
- * already connected, and shows the six-digit screen if not. **There is no
- * reader here yet**: the remote stores, the `Channel` over the frame socket and
- * the reading surface are WI-18.7 onward, and pretending otherwise with a
- * placeholder library would be the app describing a feature it does not have.
+ * The gate, the shelf, and a book. It asks whether this browser is connected,
+ * shows six digits if not, lists the library over one channel and opens a book
+ * over the same one.
+ *
+ * **It is a reader and not the app.** There are no settings, no marks, no
+ * search and no reading aloud: those are the desktop's panes, and this build has
+ * no store to keep their state in. Every book opens at the design system's own
+ * defaults, from the same constants `initialState` uses.
  */
 
 /**
@@ -75,6 +82,7 @@ import { applyMetrics } from './kernel/core/metrics'
  */
 function Shelf({ onSignOut }: { readonly onSignOut: () => void }) {
   const [books, setBooks] = useState<RemoteBooks | null>(null)
+  const [content, setContent] = useState<RemoteContent | null>(null)
   const [failed, setFailed] = useState<string | null>(null)
 
   useEffect(() => {
@@ -89,6 +97,10 @@ function Shelf({ onSignOut }: { readonly onSignOut: () => void }) {
         const store = createRemoteBooks(channel)
         opened = { channel, store }
         setBooks(store)
+        /* ONE CHANNEL, both uses. The shelf listing and a book's bytes travel
+         * the same socket, so opening a book costs no second handshake and a
+         * dropped connection takes both down together — which is the truth. */
+        setContent(remoteContent(channel))
       })
       .catch((thrown: unknown) => {
         if (live) setFailed(thrown instanceof Error ? thrown.message : String(thrown))
@@ -115,13 +127,27 @@ function Shelf({ onSignOut }: { readonly onSignOut: () => void }) {
     )
   }
 
-  if (books === null) return null
-  return <ShelfList books={books} onSignOut={onSignOut} />
+  if (books === null || content === null) return null
+  return <ShelfList books={books} content={content} onSignOut={onSignOut} />
 }
 
-function ShelfList({ books, onSignOut }: { readonly books: RemoteBooks; readonly onSignOut: () => void }) {
+function ShelfList({
+  books,
+  content,
+  onSignOut,
+}: {
+  readonly books: RemoteBooks
+  readonly content: RemoteContent
+  readonly onSignOut: () => void
+}) {
   const rows = useSyncExternalStore(books.subscribe, books.getSnapshot)
   const status = useSyncExternalStore(books.subscribe, books.status)
+  const [reading, setReading] = useState<{ bookId: string; name: string } | null>(null)
+  const close = useCallback(() => setReading(null), [])
+
+  if (reading !== null) {
+    return <Reader content={content} bookId={reading.bookId} name={reading.name} onClose={close} />
+  }
 
   return (
     <main className="shelf">
@@ -151,17 +177,28 @@ function ShelfList({ books, onSignOut }: { readonly books: RemoteBooks; readonly
       <ul className="shelf-list">
         {rows.map((book) => (
           <li key={book.bookId} className="shelf-row">
-            <span className="shelf-title">{book.title === '' ? 'Untitled' : book.title}</span>
-            {book.author !== undefined && <span className="shelf-author">{book.author}</span>}
+            {/* A BUTTON, not a div with a click handler. It is reachable by
+                keyboard and announced as something that does something, which a
+                row of text is not. */}
+            <button
+              type="button"
+              className="shelf-open"
+              onClick={() =>
+                setReading({
+                  bookId: book.bookId,
+                  /* THE NAME THE PARSER ROUTES ON. `content.locate` knows the
+                     stored extension and the reader asks it; the title is what
+                     a person recognises, so it carries both. */
+                  name: book.title === '' ? 'book' : book.title,
+                })
+              }
+            >
+              <span className="shelf-title">{book.title === '' ? 'Untitled' : book.title}</span>
+              {book.author !== undefined && <span className="shelf-author">{book.author}</span>}
+            </button>
           </li>
         ))}
       </ul>
-
-      {/* THE READER IS STILL NOT BUILT, and the shelf saying so beats a row
-          that opens nothing. */}
-      <p className="shelf-note">
-        Opening a book is not built yet — this build lists the shelf and no more.
-      </p>
       <button type="button" onClick={onSignOut}>
         Disconnect this browser
       </button>
