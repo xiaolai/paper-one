@@ -1,6 +1,19 @@
 /**
  * The two things a book's bytes need, wherever they are kept.
  *
+ * ## THIS MODULE HAS NO TAURI IN IT, and that is load-bearing
+ *
+ * `tauriVaultFs` used to live here, so importing `extensionFor` — a pure
+ * function over a filename — pulled `@tauri-apps/plugin-fs` in behind it.
+ * `bookFolder` imports that function, the reader imports `bookFolder`, and so
+ * **the entire reader subtree reached the fs plugin through one value import
+ * nothing on that path ever called.** A browser has no such plugin;
+ * `assert-bundle` refuses a web bundle carrying it.
+ *
+ * The binding is `vaultFsTauri.ts` now. This file is the SEAM and the rules —
+ * a filesystem interface, a slice helper, and the closed extension list — and
+ * anything that only needs those pays nothing to reach them.
+ *
  * This module OWNED the layout once — `books/<bookId>.<ext>` at the top level,
  * with `ownBook` writing there and `vaultPath` naming it. A book is a folder
  * now, so the layout moved to `bookFolder` and what is left here is the part
@@ -10,18 +23,6 @@
  * The extension list stays HERE rather than moving with the paths, because it
  * is a security property and not a naming convention — see below.
  */
-
-import {
-  BaseDirectory,
-  SeekMode,
-  exists,
-  mkdir,
-  open as openFile,
-  readFile,
-  remove,
-  rename,
-  writeFile,
-} from '@tauri-apps/plugin-fs'
 
 /** Where copies live, under the app's own data directory. */
 /* `BOOKS_DIR` lives in `bookFolder`, which owns the layout. It was declared
@@ -96,49 +97,6 @@ export async function readRangeOf(
   /* `subarray` would share the buffer with the whole file, keeping every byte
    * of a 300 MB book alive for as long as the caller holds one chunk. */
   return whole.slice(offset, offset + length)
-}
-
-const DIR = { baseDir: BaseDirectory.AppData } as const
-
-export const tauriVaultFs: VaultFs = {
-  readFile: (path) => readFile(path, DIR),
-  writeFile: (path, bytes) => writeFile(path, bytes, DIR),
-  exists: (path) => exists(path, DIR),
-  mkdir: (path) => mkdir(path, { ...DIR, recursive: true }),
-  remove: (path) => remove(path, DIR),
-  rename: (from, to) => rename(from, to, { oldPathBaseDir: DIR.baseDir, newPathBaseDir: DIR.baseDir }),
-  removeDir: (path) => remove(path, { ...DIR, recursive: true }),
-  // A real append, so a journal line costs one write and not a rewrite of
-  // the whole file. The fs plugin's writeFile carries the flag.
-  appendFile: (path, bytes) => writeFile(path, bytes, { ...DIR, append: true }),
-  /* A REAL SEEK, so serving a book to a browser costs one read per slice
-   * rather than one read of the whole book per slice. `fs:allow-open`,
-   * `fs:allow-seek`, `fs:allow-read` and `fs:allow-close` are granted in
-   * `capabilities/default.json`, scoped to `$APPDATA/**` — the same files
-   * `readFile` already reaches, reached a different way.
-   *
-   * The handle is closed in a `finally`: a leaked one holds a descriptor for
-   * the life of the process, and a reader browsing a shelf opens many. */
-  readRange: async (path, offset, length) => {
-    const handle = await openFile(path, { ...DIR, read: true })
-    try {
-      await handle.seek(offset, SeekMode.Start)
-      const buffer = new Uint8Array(length)
-      /* ONE `read` IS NOT A GUARANTEE OF `length` BYTES. It answers what it
-       * has; a short answer at the end of a file is normal, and looping is
-       * what turns "some bytes" into "the slice asked for". */
-      let filled = 0
-      for (;;) {
-        const got = await handle.read(buffer.subarray(filled))
-        if (got === null || got === 0) break
-        filled += got
-        if (filled >= length) break
-      }
-      return buffer.subarray(0, filled)
-    } finally {
-      await handle.close()
-    }
-  },
 }
 
 /**

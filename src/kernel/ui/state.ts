@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useReducer, type Dispatch } from 'react'
 import type { MarkStyle, MarkTint } from '../core/marks'
-import { BRIGHTNESS, CONTRAST, DEFAULT_READING_STYLE, DEFAULT_STEP_IDX, FIGURE_HEIGHTS, FIGURE_WIDTHS, MINIMUM_SIZES, READING_STEPS, SPACING, readingStep, stepIndexForSize, type SpacingScale } from '../core/metrics'
+import { BRIGHTNESS, CONTRAST, DEFAULT_ALIGN, DEFAULT_READING_STYLE, DEFAULT_SPACING, DEFAULT_STEP_IDX, DEFAULT_THEME, DEFAULT_TYPEFACE, FIGURE_HEIGHTS, FIGURE_WIDTHS, MINIMUM_SIZES, READING_STEPS, SPACING, readingStep, stepIndexForSize, type SpacingScale } from '../core/metrics'
 import type { SettingsStore } from '../core/ports'
 import { readKernelPreferences, writeKernelPreferences, type KernelPreferences } from '../core/settings'
 import type { PaneContribution } from '../core/capability'
@@ -211,7 +211,7 @@ export const initialState: AppState = {
    * what it wants.
    */
   screen: 'library',
-  theme: 'paper',
+  theme: DEFAULT_THEME,
   themeFollowsOs: true,
   /* The screen's own panel — `paneFits('library', 'library')` holds, so the
    * seed is a legal state. A reader boot swaps both through `paneFor`. */
@@ -228,17 +228,12 @@ export const initialState: AppState = {
   rulerPinned: false,
   stepIdx: DEFAULT_STEP_IDX,
   // §14's face, and the one the whole reading typography is specified around.
-  typeface: 'literata',
+  typeface: DEFAULT_TYPEFACE,
   /* Every spacing at its own default, which is the book exactly as it reads
      today — a reader who never opens these gets no change. */
-  spacing: {
-    letter: SPACING.letter.def,
-    word: SPACING.word.def,
-    line: SPACING.line.def,
-    paragraph: SPACING.paragraph.def,
-  },
+  spacing: { ...DEFAULT_SPACING },
   /* Justified, which is what the book has always been set as. */
-  align: 'justified',
+  align: DEFAULT_ALIGN,
   /* The theme exactly as designed, until a reader says otherwise. */
   brightness: BRIGHTNESS.def,
   contrast: CONTRAST.def,

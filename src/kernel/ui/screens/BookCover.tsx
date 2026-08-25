@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { coverTintFor } from '../../core/bookAccent'
-import { tauriVaultFs } from '../../core/bookVault'
+import { tauriVaultFs } from '../../core/vaultFsTauri'
 import { coverIn } from '../../core/coverArt'
 import type { IndexedBook } from '../../core/bookIndex'
 

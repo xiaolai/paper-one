@@ -1,4 +1,4 @@
-import type { ReadingStyle } from './uiTypes'
+import type { Align, ReadingStyle, Theme, Typeface } from './uiTypes'
 /**
  * Paper — layout metrics.
  *
@@ -1330,3 +1330,27 @@ export const DEFAULT_READING_STYLE: ReadingStyle = {
   fidelity: 'paper',
 }
 
+/**
+ * How a book is set before any reader has said otherwise.
+ *
+ * These three were literals inside `initialState`, which was fine while the
+ * desktop was the only thing that opened a book. The browser client cannot
+ * reach `state.ts` — that is the app's whole reducer, and the web build reaches
+ * a short named list of kernel modules — so it would have had to write `'paper'`
+ * and `'literata'` and `'justified'` down a second time.
+ *
+ * Two sets of defaults that agree today is the shape every drift in this tree
+ * has taken. They live here instead, beside `SPACING` and `BRIGHTNESS` and the
+ * rest of the design system's numbers, and both builds read the same ones.
+ */
+export const DEFAULT_THEME: Theme = 'paper'
+export const DEFAULT_TYPEFACE: Typeface = 'literata'
+export const DEFAULT_ALIGN: Align = 'justified'
+
+/** Every spacing at its own default — the book exactly as it was designed. */
+export const DEFAULT_SPACING = {
+  letter: SPACING.letter.def,
+  word: SPACING.word.def,
+  line: SPACING.line.def,
+  paragraph: SPACING.paragraph.def,
+} as const

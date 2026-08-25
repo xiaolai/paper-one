@@ -84,6 +84,22 @@ const KERNEL_METRICS = '^src/kernel/core/metrics\\.ts$'
  * nothing about it is peer-to-peer. */
 const KERNEL_ENVELOPE = '^src/kernel/core/envelope\\.ts$'
 
+/** The reader, and the type vocabulary it is configured with.
+ *
+ * The browser client mounts `FoliateView` — the same reader the desktop mounts,
+ * not a second one. That subtree was unreachable from a browser until
+ * `bookVault.ts`'s Tauri binding moved out: `bookFolder` imports `extensionFor`
+ * from it, the reader imports `bookFolder`, and so every module on that path
+ * dragged `@tauri-apps/plugin-fs` in behind it. Measured Tauri-free now, and
+ * `no-tauri-reachable-from-the-web-client` below is what keeps it that way —
+ * a direct-edge rule could not see that reach, and did not.
+ *
+ * `uiTypes.ts` is the vocabulary the reader is configured with — `Theme`,
+ * `Typeface`, `ReadingStyle` and the rest. It has ZERO dependencies of its own,
+ * which is the same test every other entry on this list passes. */
+const KERNEL_READER = '^src/kernel/ui/reader/'
+const KERNEL_UI_TYPES = '^src/kernel/core/uiTypes\\.ts$'
+
 /** The BROWSER CLIENT: `src/app/web/`, the SPA the shelf serves to a phone.
  *
  * It is the one part of this tree that cannot use the kernel's public entry.
@@ -128,7 +144,13 @@ const KERNEL_UI_ENTRY = '^src/kernel/ui/index\\.ts$'
 const FS_ADAPTERS = [
   '^src/kernel/core/bookFiles\\.ts$',
   '^src/kernel/core/bookSizes\\.ts$',
-  '^src/kernel/core/bookVault\\.ts$',
+  /* `bookVault.ts` IS NO LONGER ON THIS LIST, and its absence is the point.
+   * It holds the vault's seam and its rules — `extensionFor`,
+   * `CONTENT_EXTENSIONS`, `readRangeOf` — which `bookFolder` imports and the
+   * reader imports in turn. While the Tauri binding sat beside them, every one
+   * of those importers dragged the fs plugin in behind it, which is what put
+   * the reader out of a browser's reach. The binding is `vaultFsTauri.ts`. */
+  '^src/kernel/core/vaultFsTauri\\.ts$',
   '^src/kernel/ui/appStorage\\.ts$',
   '^src/kernel/ui/tagFiles\\.ts$',
   '^src/kernel/ui/marksFiles\\.ts$',
@@ -361,7 +383,14 @@ module.exports = {
       from: { path: WEB_CLIENT },
       to: {
         path: '^src/kernel/',
-        pathNot: [KERNEL_PUBLIC_ENTRY, KERNEL_STYLESHEETS, KERNEL_METRICS, KERNEL_ENVELOPE],
+        pathNot: [
+          KERNEL_PUBLIC_ENTRY,
+          KERNEL_STYLESHEETS,
+          KERNEL_METRICS,
+          KERNEL_ENVELOPE,
+          KERNEL_READER,
+          KERNEL_UI_TYPES,
+        ],
       },
     },
     {
@@ -387,9 +416,8 @@ module.exports = {
         'caused it. The phase-18 plan names this as a gate and it did not exist: ' +
         '`no-tauri-api-outside-peer-wire` is scoped to src/capabilities/, so src/app/web/ could ' +
         'import @tauri-apps/api/core with `pnpm boundaries` reporting 0 violations. Measured, not ' +
-        'assumed. assert-bundle also refuses such a bundle, but that is a build away; this is the ' +
-        'edge itself, and it names the file. Matched on the package name wherever it resolves, ' +
-        'like the two rules below.',
+        'assumed. This rule matches ONE EDGE; a transitive reach is caught by assert-bundle, which ' +
+        'inspects what actually ships and so cannot be fooled by a type-only import that erases.',
       from: { path: [WEB_CLIENT, '^src/main\\.web\\.tsx$'] },
       to: { path: '(^|/)@tauri-apps/' },
     },

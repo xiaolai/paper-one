@@ -1,5 +1,5 @@
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
-import { tauriVaultFs } from './bookVault'
+import { tauriVaultFs } from './vaultFsTauri'
 import type { DirFs } from './importFolder'
 import { BaseDirectory, readDir, readFile } from '@tauri-apps/plugin-fs'
 import { ACCEPT_FORMATS } from './formats'
