@@ -31,6 +31,7 @@ import {
   type MarkTint,
 } from '../../core/marks'
 import type { BookMeta, ReaderPosition } from '../../core/bookMeta'
+import type { BookSource } from '../../core/formats'
 import { coverFrom } from '../../core/coverArt'
 import { deferSnap } from './wordSnap/deferredSnap'
 import { watchGestureProvenance } from './wordSnap/gestureProvenance'
@@ -583,7 +584,7 @@ export interface SessionDeps {
    * is reported through the same path as a failed open, and so that a session
    * disposed mid-conversion still stops before touching a view.
    */
-  prepare?: (source: File | string) => Promise<unknown>
+  prepare?: (source: BookSource) => Promise<unknown>
   applySettings: (view: View) => void
   /**
    * The reader's settings, as custom properties on ONE document's root.
@@ -871,7 +872,7 @@ export class ReaderSession {
    * at once. The disposal latch is checked between every pair, because each
    * step contains an await the caller can unmount across.
    */
-  async start(source: File | string, deps: SessionDeps): Promise<void> {
+  async start(source: BookSource, deps: SessionDeps): Promise<void> {
     const view = await this.#acquire(deps)
     if (!view) return
 
@@ -1209,7 +1210,7 @@ export class ReaderSession {
   }
 
   /** Parse the source and open it. False means stop — failed or disposed. */
-  async #openBook(view: View, source: File | string, deps: SessionDeps): Promise<boolean> {
+  async #openBook(view: View, source: BookSource, deps: SessionDeps): Promise<boolean> {
     try {
       const target = deps.prepare ? await deps.prepare(source) : source
       // Held so disposal can release it — see `Destroyable`.

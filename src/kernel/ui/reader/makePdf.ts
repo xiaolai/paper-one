@@ -1,9 +1,9 @@
 import * as pdfjs from 'pdfjs-dist'
 import workerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import viewerCss from 'pdfjs-dist/web/pdf_viewer.css?raw'
-import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist'
+import type { PDFDataRangeTransport, PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist'
 import type { TocItem } from 'foliate-js/view.js'
-import { titleFromSource } from '../../core/formats'
+import { isRanged, titleFromSource, type BookSource, type RangedSource } from '../../core/formats'
 import { COVER_WIDTH } from '../../core/coverArt'
 import { createReflowGuard } from './wordSnap/invalidate'
 
@@ -322,9 +322,59 @@ export interface PdfHooks {
   onPagePainted?: () => void
 }
 
-export async function makePdf(file: File | string, hooks: PdfHooks = {}): Promise<PdfBook> {
+/**
+ * A PDF whose bytes are somewhere else (phase 18, WI-18.8).
+ *
+ * The browser client holds no book. `range` is a `PDFDataRangeTransport` over
+ * `content.read`, so pdf.js asks the shelf for the byte ranges of the page it
+ * is rendering and nothing more — the difference between opening a 300 MB
+ * scanned book and downloading one.
+ *
+ * `name` is what the book was called, because pdf.js answers a title from the
+ * document's own metadata and most scanned books have none.
+ */
+export interface RangedPdf extends RangedSource {
+  readonly range: PDFDataRangeTransport
+}
+
+/**
+ * The transport out of a ranged source, checked.
+ *
+ * `formats.ts` types `range` as `object` so that half a megabyte of pdf.js
+ * stays out of every module that asks what a file is; this is the one place
+ * that has already paid for the import, so this is where the type is made
+ * real. It is CHECKED rather than asserted because `getDocument` silently
+ * ignores a `range` that fails its own `instanceof` and then throws "Invalid
+ * parameter object" — true, and about the wrong thing.
+ */
+function transportOf(source: RangedSource): PDFDataRangeTransport {
+  if (source.range instanceof pdfjs.PDFDataRangeTransport) return source.range
+  throw new Error(
+    `Paper: ${source.name} carries a range that is not a PDFDataRangeTransport. ` +
+      'Two copies of pdf.js in the module graph will do this.',
+  )
+}
+
+export async function makePdf(file: BookSource, hooks: PdfHooks = {}): Promise<PdfBook> {
   const task = pdfjs.getDocument({
-    ...(typeof file === 'string' ? { url: file } : { data: await file.arrayBuffer() }),
+    ...(isRanged(file)
+      ? {
+          /* `length` COMES OFF THE TRANSPORT — `getDocument` reads
+           * `src.range.length` and never looks at a `length` beside it, so
+           * passing one here would be a field nothing reads.
+           *
+           * BOTH SWITCHES MATTER. Left at their defaults pdf.js fetches every
+           * remaining byte in the background as soon as the first page is up,
+           * which is the whole file over the wire and the exact cost this
+           * transport exists to avoid. The book still works — which is why
+           * this is easy to leave wrong and never notice. */
+          range: transportOf(file),
+          disableAutoFetch: true,
+          disableStream: true,
+        }
+      : typeof file === 'string'
+        ? { url: file }
+        : { data: await file.arrayBuffer() }),
     cMapUrl: `${ASSET_BASE}cmaps/`,
     cMapPacked: true,
     standardFontDataUrl: `${ASSET_BASE}standard_fonts/`,

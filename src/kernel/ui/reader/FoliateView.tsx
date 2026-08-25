@@ -4,7 +4,7 @@ import type { MarkPainter } from 'foliate-js/overlayer.js'
 import type { Align, ReadingStyle, SpacingIndices, Theme, Typeface } from '../state'
 import type { BookMeta, BookNavigator, ReaderPosition } from '../hooks/useBook'
 import { useFontsReady } from '../fontProbe'
-import { isPdf } from '../../core/formats'
+import { isPdf, isRanged, type BookSource } from '../../core/formats'
 import { applyBookVars, bookSheets, markPalette, noteSheets } from './bookCss'
 import { balanceRects } from './markGeometry'
 import { ReaderSession, type FootnoteRender, type MarkAnchor, type SelectionSnapshot } from './session'
@@ -21,7 +21,12 @@ export interface FoliateViewProps {
    * chances for one to be forgotten at a call site with nothing to say so.
    */
   style: ReadingStyle
-  file: File | string | null
+  /**
+   * A picked or dropped `File`, a URL for a book on disk, or — in the browser
+   * client — a `RangedPdf`, whose bytes stay on the shelf. Null renders the
+   * empty state instead.
+   */
+  file: BookSource | null
   /** Advances on every open; every callback echoes it back so the book store
    *  can drop results from a reader that has since been replaced. */
   generation: number
@@ -587,7 +592,20 @@ export function FoliateView({
          * rather than needing a second reader that has none of them. Loaded
          * lazily: pdf.js is half a megabyte and an EPUB must not pay for it. */
         prepare: async (input) => {
-          if (!isPdf(input)) return input
+          if (!isPdf(input)) {
+            /* ONLY pdf.js CAN READ A TRANSPORT. foliate opens a `File` or a
+             * URL and nothing else, so a ranged source that is not a PDF would
+             * reach `view.open` as a plain object and come back as "this file
+             * could not be opened" — which sends the reader to look at the
+             * book, when the mistake was at the call site. Nothing constructs
+             * one today; this is what keeps that true. */
+            if (isRanged(input)) {
+              throw new Error(
+                `Paper: ${input.name} was given a range transport, and only a PDF can be read through one.`,
+              )
+            }
+            return input
+          }
           const { makePdf } = await import('./makePdf')
           return makePdf(input, {
             // A PDF page has no text until it is painted, and its overlay is

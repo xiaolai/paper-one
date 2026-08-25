@@ -37,6 +37,11 @@
     "core:resources:allow-close",
 
     {
+      "identifier": "fs:allow-stat",
+      "allow": [{ "path": "$APPDATA/**" }]
+    },
+
+    {
       "identifier": "fs:allow-write-file",
       "allow": [{ "path": "$APPDATA/**" }]
     },

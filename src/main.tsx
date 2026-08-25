@@ -28,7 +28,7 @@ import '@fontsource/ibm-plex-mono/500.css'
  * dependency-cruiser the specifier maps to the desktop file
  * (`tsconfig.base.json` `paths`): all three export the same shape.
  * `.dependency-cruiser.cjs` holds this file to exactly these imports. */
-import { buildServices, composeCapabilities, flushBeforeClose, createKernelServices, defaultDiagnostics, kernelApi, serviceClients } from './kernel'
+import { buildServices, composeCapabilities, flushBeforeClose, createKernelServices, defaultDiagnostics, kernelApi, serviceClients, tauriSizePort } from './kernel'
 import {
   App,
   CLOSE_DRAIN_MS,
@@ -216,6 +216,23 @@ async function boot(root: HTMLElement): Promise<void> {
     hasDictionary: hasDictionary(resolvePlatform()),
     diagnostics: defaultDiagnostics(),
   })
+
+  /* WHAT THIS HOST CAN MEASURE, bound here rather than by a capability.
+   *
+   * The other two outward ports belong to capabilities — `peer` binds the
+   * devices, `sync` binds the shelf — because both describe something composed
+   * onto the kernel. A book's size describes the app's OWN data directory, so
+   * it belongs to whoever owns that, which is this file.
+   *
+   * Never bound at all until now, which is why `content.locate` answered
+   * `size: null` in the shipping app for every book while its own
+   * documentation described the field as a measurement. The browser client is
+   * what made it matter: pdf.js's range transport must be told a file's length
+   * before it asks for a byte of it, and a stream cannot supply that.
+   *
+   * Not disposed. It lives exactly as long as the services do, and the app's
+   * data directory does not go away while the app is running. */
+  services.bindSizePort(tauriSizePort)
 
   /* THE CAPABILITIES, composed onto those services — validated, ordered and
    * started before the first render, so the pane and the palette are complete

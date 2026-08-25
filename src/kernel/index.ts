@@ -182,6 +182,12 @@ export {
   trashOf,
 } from './core/bookFolder'
 export { CONTENT_EXTENSIONS, isContentExtension, isKnownExtension } from './core/bookVault'
+/* WHAT THIS HOST CAN MEASURE. Tauri-bound, like `tauriVaultFs` beside it, and
+ * bound by the composition root rather than by a capability — a book's size is
+ * a fact about the app's own data directory, not about anything composed onto
+ * it. Only the Node host ever bound a `SizePort`, so `content.locate.size` was
+ * null in the shipping app for every book. */
+export { tauriSizePort } from './core/bookSizes'
 export type { BookRecord, TagClock, TagClockEntry } from './core/bookFolder'
 export { INDEX_FILE, loadShelf, parseIndex, scanBooks, writeIndex } from './core/bookIndex'
 export type { IndexFs, IndexedBook, ShelfSource } from './core/bookIndex'

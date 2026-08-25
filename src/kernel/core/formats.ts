@@ -13,6 +13,46 @@
 export const ACCEPT_FORMATS = '.epub,.pdf,.mobi,.azw3,.cbz,.fb2,.fbz'
 
 /**
+ * Anything a reader can be pointed at that is not a URL.
+ *
+ * A `File` normally, and since phase 18 also a RANGED source — a book whose
+ * bytes are on the shelf rather than in this browser, opened through a pdf.js
+ * range transport. Both carry a `name`, which is all the routing below needs;
+ * spelling the shape structurally rather than naming pdf.js keeps half a
+ * megabyte of PDF code out of every module that merely asks what a file is.
+ */
+export interface NamedSource {
+  readonly name: string
+}
+
+/**
+ * A source whose BYTES ARE NOT HERE — the browser client's PDF.
+ *
+ * `range` is a `PDFDataRangeTransport`, typed as `object` so this module stays
+ * free of pdf.js (see `NamedSource` above for why that matters). `makePdf`
+ * narrows it to the real type at the one place that has already paid for the
+ * import.
+ */
+export interface RangedSource extends NamedSource {
+  readonly range: object
+}
+
+/**
+ * Whether this source carries a transport instead of bytes.
+ *
+ * ONE PREDICATE, shared, because two consumers must agree: `makePdf` uses it to
+ * choose what to hand `getDocument`, and the reader uses it to REFUSE a ranged
+ * source that is not a PDF. Only pdf.js can read one — foliate opens a `File`
+ * or a URL and nothing else — so a ranged EPUB would reach `view.open` as a
+ * plain object and be reported as a book that could not be opened, which sends
+ * the reader looking at the book.
+ */
+export type BookSource = File | string | RangedSource
+
+export const isRanged = (source: BookSource): source is RangedSource =>
+  typeof source !== 'string' && 'range' in source
+
+/**
  * Which of the two readers a source belongs to.
  *
  * Here rather than in `reader/pdf.ts` because that module imports pdf.js, which
@@ -24,9 +64,14 @@ export const ACCEPT_FORMATS = '.epub,.pdf,.mobi,.azw3,.cbz,.fb2,.fbz'
  * rejected as an unsupported type, an EPUB handed to pdf.js fails to parse, and
  * neither says which reader made the mistake.
  */
-export function isPdf(source: File | string): boolean {
+export function isPdf(source: BookSource): boolean {
   if (typeof source === 'string') return /\.pdf(\?|#|$)/i.test(source)
-  return source.type === 'application/pdf' || /\.pdf$/i.test(source.name)
+  /* `type` IS THE STRONGER SIGNAL and only a `File` has one — a picked file
+   * may be named without an extension and still declare itself a PDF. A ranged
+   * source has a name and no type, so it falls to the suffix, which is what
+   * the shelf stored the book under. */
+  const declared = 'type' in source && source.type === 'application/pdf'
+  return declared || /\.pdf$/i.test(source.name)
 }
 
 /**
@@ -38,7 +83,7 @@ export function isPdf(source: File | string): boolean {
  * `attention-is-all-you-need.pdf?download=1`: the extension still on it,
  * because the pattern that strips it anchors at the end of the string.
  */
-export function titleFromSource(source: File | string): string {
+export function titleFromSource(source: BookSource): string {
   const name =
     typeof source === 'string'
       ? (source.split(/[?#]/)[0] ?? source).split('/').pop() || source

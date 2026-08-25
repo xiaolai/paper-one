@@ -117,9 +117,17 @@ const KERNEL_UI_ENTRY = '^src/kernel/ui/index\\.ts$'
  *  of `core/marksArchive.ts`, dialogs only, no path constructed. That two of
  *  these now exist is the pattern, not an exception to it — an archive is a
  *  pure document module plus a thin file half, and the file half is what goes
- *  on this list. */
+ *  on this list.
+ *
+ *  `bookSizes` is the third of that shape: `sizePortOver` decides what a size
+ *  MEANS — the extension preference order, and the rule that a walk which did
+ *  not finish has no total — and needs no filesystem to be tested, while the
+ *  binding under it is two calls to the plugin. It constructs paths, unlike
+ *  the two archive halves above, but only from `folderOf` and the kernel's
+ *  closed `CONTENT_EXTENSIONS` list; nothing a reader typed reaches it. */
 const FS_ADAPTERS = [
   '^src/kernel/core/bookFiles\\.ts$',
+  '^src/kernel/core/bookSizes\\.ts$',
   '^src/kernel/core/bookVault\\.ts$',
   '^src/kernel/ui/appStorage\\.ts$',
   '^src/kernel/ui/tagFiles\\.ts$',
