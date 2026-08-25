@@ -363,11 +363,23 @@ export async function makePdf(file: BookSource, hooks: PdfHooks = {}): Promise<P
            * `src.range.length` and never looks at a `length` beside it, so
            * passing one here would be a field nothing reads.
            *
-           * BOTH SWITCHES MATTER. Left at their defaults pdf.js fetches every
-           * remaining byte in the background as soon as the first page is up,
-           * which is the whole file over the wire and the exact cost this
-           * transport exists to avoid. The book still works — which is why
-           * this is easy to leave wrong and never notice. */
+           * THE TWO SWITCHES ARE pdf.js's DOCUMENTED PAIRING for range-backed
+           * loading, and they are kept for that reason and not for a measured
+           * one — which is worth stating, because the obvious claim to write
+           * here is false.
+           *
+           * MEASURED 2026-08-25, against a live shelf: a 615 KB, 36-page PDF
+           * opened in 6 ranges and 352 763 bytes — 57% of the file — and the
+           * numbers were IDENTICAL with both switches off, including after
+           * holding the document open for eight seconds to give any background
+           * fetch time to run. So "leave them off and pdf.js pulls the whole
+           * file" is not something this tree has established, and nobody
+           * should repeat it on the strength of this comment.
+           *
+           * What IS established is that the transport is lazy: 57% of a small
+           * article is six chunks around the parts pdf.js needed, and the
+           * fraction falls as the file grows. A large scanned book is the case
+           * that would separate the two settings, and it has not been run. */
           range: transportOf(file),
           disableAutoFetch: true,
           disableStream: true,
