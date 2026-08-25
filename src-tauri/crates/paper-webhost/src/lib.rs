@@ -55,9 +55,9 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use paper_webauth::sessions::{Credential, Sessions};
+use paper_webauth::sessions::{Credential, Sessions, CREDENTIAL_TTL};
 use paper_webauth::{DeviceAuth, Outcome, Refused};
-use pipe::{Pipe, Push, WebSessionId, OUTBOUND_CAP};
+use pipe::{Pipe, Push, WebSessionId, MAX_FRAME, OUTBOUND_CAP};
 use serde::Deserialize;
 use tokio::sync::mpsc;
 
@@ -160,11 +160,19 @@ async fn policy_headers(request: Request<Body>, next: Next) -> Response {
 /// cookie over plain HTTP, which is what turns a missing reverse proxy into a
 /// visible failure. `SameSite=Strict` is the CSRF defence, and every
 /// state-changing endpoint here is a `POST` that reads no form.
+///
+/// `Max-Age` COMES FROM `CREDENTIAL_TTL`, not from arithmetic repeated here.
+/// It was `60 * 60 * 24 * 90` — the same number `paper-webauth` computes for
+/// its own ceiling, written out a second time. Two expirations that agree by
+/// coincidence drift the first time either moves: shorten the server's and a
+/// browser keeps presenting a credential that is already dead; lengthen it and
+/// the cookie disappears from a browser the shelf still considers signed in.
+/// Neither shows up as an error.
 fn set_cookie(credential: &Credential) -> String {
     format!(
         "{SESSION_COOKIE}={}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age={}",
         credential.as_str(),
-        60 * 60 * 24 * 90
+        CREDENTIAL_TTL.as_secs()
     )
 }
 
@@ -317,7 +325,31 @@ async fn upgrade(
     else {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     };
-    ws.on_upgrade(move |ws| pump(state, socket, ws, receiver))
+    /* THE PROTOCOL'S CAP, TOLD TO THE SOCKET ITSELF.
+     *
+     * `Pipe::push` refuses anything over `MAX_FRAME` — but it only sees a
+     * message axum has already ASSEMBLED, and axum's defaults are 64 MiB per
+     * message and 16 MiB per frame. So a browser could make the shelf buffer
+     * sixteen times the protocol's own limit before the refusal fired, per
+     * socket, across `MAX_SESSIONS` of them. The check downstream was real and
+     * the memory was spent upstream of it.
+     *
+     * Set here rather than only in `pipe.rs` because this is where the buffer
+     * is allocated; `Pipe::push` keeps its own check, since the two guard
+     * different things — this one bounds the ASSEMBLY, that one bounds what
+     * reaches the inbox. */
+    let socket_for_failure = socket;
+    let pipe = Arc::clone(&state);
+    ws.max_message_size(MAX_FRAME)
+        .max_frame_size(MAX_FRAME)
+        /* A PIPE RECORD IS OPENED BEFORE THE UPGRADE CAN FAIL, and axum's
+         * default failure callback returns without running anything — so a
+         * client that disconnects mid-handshake left a record nothing would
+         * ever close. `MAX_SESSIONS_PER_CREDENTIAL` is four; four abandoned
+         * handshakes and that credential could open no more sockets, for the
+         * life of the process, with nothing logged. */
+        .on_failed_upgrade(move |_error| pipe.pipe.close(socket_for_failure, "upgrade failed"))
+        .on_upgrade(move |ws| pump(state, socket, ws, receiver))
 }
 
 /// Move frames both ways until either end stops.
@@ -421,6 +453,26 @@ mod tests {
             .expect("infallible")
     }
 
+    /// A six-digit code that is NOT the live one.
+    ///
+    /// A literal cannot promise that. Three tests here submitted `000000` and
+    /// one of them returned success when the generated code happened to match
+    /// — an assertion that skips itself once in a million runs, reporting green
+    /// on the run where it mattered. Rotating one digit is guaranteed wrong and
+    /// costs nothing.
+    fn wrong(code: &str) -> String {
+        code.chars()
+            .enumerate()
+            .map(|(i, c)| {
+                if i == 0 {
+                    char::from_digit((c.to_digit(10).unwrap_or(0) + 1) % 10, 10).unwrap_or('1')
+                } else {
+                    c
+                }
+            })
+            .collect()
+    }
+
     #[tokio::test]
     async fn the_right_code_sets_an_unreadable_cookie() {
         let state = host();
@@ -452,21 +504,37 @@ mod tests {
         );
         assert!(cookie.contains("SameSite=Strict"), "CSRF: {cookie}");
         assert!(cookie.starts_with(SESSION_COOKIE));
+
+        /* ONE LIFETIME, NOT TWO THAT AGREE TODAY. `Max-Age` was arithmetic
+         * repeated here — the same `60 * 60 * 24 * 90` that `CREDENTIAL_TTL`
+         * computes. Either can move without the other, and neither direction
+         * raises: shorten the server's and a browser goes on presenting a
+         * credential that is already dead; lengthen it and the cookie vanishes
+         * from a browser the shelf still thinks is signed in. */
+        assert!(
+            cookie.contains(&format!("Max-Age={}", CREDENTIAL_TTL.as_secs())),
+            "the cookie's lifetime must be the credential's: {cookie}"
+        );
     }
 
     #[tokio::test]
     async fn a_wrong_code_is_unauthorized_and_sets_nothing() {
         let state = host();
-        let _ = live_code(&state);
+        let code = live_code(&state);
         let response = call(
             Arc::clone(&state),
-            json_post("/api/auth/submit", r#"{"code":"000000"}"#, None),
+            json_post(
+                "/api/auth/submit",
+                &format!(r#"{{"code":"{}"}}"#, wrong(&code)),
+                None,
+            ),
         )
         .await;
-        // 1-in-10^6 that the live code really is 000000; the fixture accepts it.
-        if response.status() == StatusCode::NO_CONTENT {
-            return;
-        }
+        /* NO ESCAPE HATCH. This used to submit a literal `000000` and RETURN
+         * SUCCESSFULLY if the live code happened to be that — one run in a
+         * million where the test asserted nothing and reported green. `wrong`
+         * derives a code that cannot be the live one, so the branch is gone
+         * rather than made rarer. */
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert!(response.headers().get(header::SET_COOKIE).is_none());
     }
@@ -488,10 +556,15 @@ mod tests {
     async fn the_sixth_attempt_is_refused_without_testing_the_code() {
         let state = host();
         let code = live_code(&state);
+        /* A CODE THAT CANNOT BE RIGHT. A literal `000000` is the live code once
+        in a million runs, and on that run the first submission SUCCEEDS —
+        so the budget is never spent and the test asserts the opposite of
+        what it is named for, in green. */
+        let miss = wrong(&code);
         for _ in 0..5 {
             let _ = call(
                 Arc::clone(&state),
-                json_post("/api/auth/submit", r#"{"code":"000000"}"#, None),
+                json_post("/api/auth/submit", &format!(r#"{{"code":"{miss}"}}"#), None),
             )
             .await;
         }
@@ -822,12 +895,21 @@ mod tests {
     #[tokio::test]
     async fn the_body_of_a_refusal_says_nothing_about_the_code() {
         let state = host();
-        let _ = live_code(&state);
+        let code = live_code(&state);
         let response = call(
             state,
-            json_post("/api/auth/submit", r#"{"code":"000000"}"#, None),
+            json_post(
+                "/api/auth/submit",
+                &format!(r#"{{"code":"{}"}}"#, wrong(&code)),
+                None,
+            ),
         )
         .await;
+        /* THE STATUS IS ASSERTED FIRST, and that is not padding. With a literal
+        `000000` this test passed when the code happened to match: the answer
+        was 204, whose body is empty by definition, so "a refusal must not
+        describe the code" held over something that was not a refusal. */
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         let body = to_bytes(response.into_body(), 4096).await.expect("a body");
         assert!(body.is_empty(), "a refusal must not describe the code");
     }

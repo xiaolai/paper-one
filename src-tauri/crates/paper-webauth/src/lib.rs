@@ -388,14 +388,27 @@ mod tests {
         assert_eq!(second, Outcome::Stale, "a spent code must not grant twice");
     }
 
+    /// Six digits that are NOT the ones on screen.
+    ///
+    /// A literal cannot promise that, and four tests here submitted `000000`.
+    /// One in a million runs it IS the live code, and on that run the
+    /// submission is GRANTED — so `a_wrong_code_is_wrong` asserts the opposite
+    /// of its name, and the budget tests never spend a budget. Rotating one
+    /// digit is guaranteed wrong and costs nothing.
+    fn wrong_digits(offer: &Offer) -> Vec<u8> {
+        let mut digits = code_of(offer);
+        digits[0] = b'0' + ((digits[0] - b'0') + 1) % 10;
+        digits
+    }
+
     #[test]
     fn a_wrong_code_is_wrong_and_costs_an_attempt() {
         let auth = DeviceAuth::new();
         let now = Instant::now();
-        auth.begin(now);
+        let offer = auth.begin(now);
         assert_eq!(auth.attempts_left(), Some(MAX_ATTEMPTS));
         assert_eq!(
-            auth.submit(auth.reserve(now).unwrap(), b"000000", now),
+            auth.submit(auth.reserve(now).unwrap(), &wrong_digits(&offer), now),
             Outcome::Wrong
         );
         assert_eq!(auth.attempts_left(), Some(MAX_ATTEMPTS - 1));
@@ -426,8 +439,13 @@ mod tests {
         let now = Instant::now();
         let offer = auth.begin(now);
         let digits = code_of(&offer);
+        /* WRONG BY CONSTRUCTION. A literal `000000` is the live code once in a
+        million runs, and on that run the first submission is GRANTED — so
+        the budget is never spent and this test passes having proven the
+        opposite of its name. */
+        let miss = wrong_digits(&offer);
         for _ in 0..MAX_ATTEMPTS {
-            let _ = auth.submit(auth.reserve(now).unwrap(), b"000000", now);
+            let _ = auth.submit(auth.reserve(now).unwrap(), &miss, now);
         }
         /* The RIGHT code, refused — because the refusal happens before any
          * comparison. This is the assertion that distinguishes a real budget
@@ -511,17 +529,22 @@ mod tests {
          * racing one code must consume one budget, not a hundred. */
         let auth = Arc::new(DeviceAuth::new());
         let now = Instant::now();
-        auth.begin(now);
+        let offer = auth.begin(now);
+        /* WRONG BY CONSTRUCTION — see `wrong_digits`. With a literal, one run in
+        a million has a thread GRANT the code, which spends the offer and
+        changes what the surviving threads are racing for. */
+        let miss = Arc::new(wrong_digits(&offer));
         let tested = Arc::new(AtomicUsize::new(0));
 
         std::thread::scope(|scope| {
             for _ in 0..100 {
                 let auth = Arc::clone(&auth);
                 let tested = Arc::clone(&tested);
+                let miss = Arc::clone(&miss);
                 scope.spawn(move || {
                     if let Ok(reservation) = auth.reserve(now) {
                         tested.fetch_add(1, Ordering::SeqCst);
-                        let _ = auth.submit(reservation, b"000000", now);
+                        let _ = auth.submit(reservation, &miss, now);
                     }
                 });
             }
@@ -567,8 +590,9 @@ mod tests {
         let now = Instant::now();
         let offer = auth.begin(now);
         let digits = code_of(&offer);
+        let miss = wrong_digits(&offer);
         for _ in 0..MAX_ATTEMPTS {
-            let _ = auth.submit(auth.reserve(now).unwrap(), b"000000", now);
+            let _ = auth.submit(auth.reserve(now).unwrap(), &miss, now);
         }
         drop(auth);
 
