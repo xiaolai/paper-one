@@ -44,32 +44,98 @@ const valueOf = (flag, fallback) => {
   const at = args.indexOf(flag)
   return at === -1 ? fallback : Number(args[at + 1])
 }
+const textOf = (flag) => {
+  const at = args.indexOf(flag)
+  return at === -1 ? null : args[at + 1]
+}
 const PORT = valueOf('--port', 27183)
 const TARGET = valueOf('--target', 27182)
 
-/* Generated fresh, into a temporary directory, every run. A key that persists
- * is a key somebody eventually trusts. */
-const dir = mkdtempSync(join(tmpdir(), 'paper-dev-tls-'))
-const keyPath = join(dir, 'key.pem')
-const certPath = join(dir, 'cert.pem')
+/**
+ * What this front listens on. LOOPBACK BY DEFAULT, and widening it is a choice
+ * the caller makes out loud.
+ *
+ * A phone cannot reach `127.0.0.1`, so serving one means binding somewhere it
+ * can — a tailnet address, usually. That is a real exposure decision and it is
+ * not the default: the difference between "my shelf is on my tailnet" and "my
+ * shelf is on the café wifi" is which address goes here, and a default of
+ * `0.0.0.0` would make that choice silently.
+ *
+ *   --host 100.x.y.z     the tailnet only
+ *   --host 0.0.0.0       every interface, including the LAN
+ */
+const HOST = textOf('--host') ?? '127.0.0.1'
 
-try {
-  execFileSync(
-    'openssl',
-    [
-      'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
-      '-keyout', keyPath, '-out', certPath,
-      '-days', '1',
-      '-subj', '/CN=localhost',
-      /* `localhost` AND `127.0.0.1`, because a browser matches the name it was
-       * given and the two are not interchangeable to it. */
-      '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1',
-    ],
-    { stdio: 'ignore' },
-  )
-} catch (error) {
-  console.error(`dev-tls: could not generate a certificate with openssl: ${String(error)}`)
+/**
+ * A CERTIFICATE THE CALLER SUPPLIED, or a throwaway one.
+ *
+ * `--cert` and `--key` exist for the case the throwaway cannot serve: **a
+ * phone.** A self-signed certificate is refused by iOS, and the right answer is
+ * not to teach somebody to click past that — clicking past the warning is
+ * clicking past the only thing authenticating the shelf. The right answer is a
+ * certificate the device genuinely trusts, which for a private tailnet means a
+ * CA of your own:
+ *
+ *   brew install mkcert && mkcert -install
+ *   mkcert <your machine's MagicDNS name>
+ *   node scripts/dev-tls.mjs --cert ./<name>.pem --key ./<name>-key.pem
+ *
+ * then install `$(mkcert -CAROOT)/rootCA.pem` on the phone and turn on full
+ * trust for it. That is the opposite of ignoring a warning: a wrong certificate
+ * still fails.
+ *
+ * ⚠️ `tailscale serve` IS NOT AN OPTION ON EVERY TAILNET, whatever the Browsers
+ * pane suggests. It needs Tailscale-operated certificate issuance for a
+ * `.ts.net` name; on a self-hosted Headscale control server `tailscale cert`
+ * answers "your Tailscale account does not support getting TLS certs", and
+ * HTTPS support for `serve` is an open feature request against Headscale.
+ */
+const suppliedCert = textOf('--cert')
+const suppliedKey = textOf('--key')
+if ((suppliedCert === null) !== (suppliedKey === null)) {
+  console.error('dev-tls: --cert and --key go together; supply both or neither')
   process.exit(2)
+}
+
+let keyPath = suppliedKey
+let certPath = suppliedCert
+
+if (certPath === null) {
+  /* Generated fresh, into a temporary directory, every run. A key that persists
+   * is a key somebody eventually trusts. */
+  const dir = mkdtempSync(join(tmpdir(), 'paper-dev-tls-'))
+  keyPath = join(dir, 'key.pem')
+  certPath = join(dir, 'cert.pem')
+
+  try {
+    execFileSync(
+      'openssl',
+      [
+        'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+        '-keyout', keyPath, '-out', certPath,
+        '-days', '1',
+        '-subj', '/CN=localhost',
+        /* `localhost` AND `127.0.0.1`, because a browser matches the name it was
+         * given and the two are not interchangeable to it. */
+        '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1',
+      ],
+      { stdio: 'ignore' },
+    )
+  } catch (error) {
+    console.error(`dev-tls: could not generate a certificate with openssl: ${String(error)}`)
+    process.exit(2)
+  }
+} else {
+  /* READ BOTH BEFORE BINDING, so a wrong path is a message and not a server
+   * that accepts a connection and then cannot complete a handshake. */
+  for (const [flag, path] of [['--cert', certPath], ['--key', keyPath]]) {
+    try {
+      readFileSync(path)
+    } catch {
+      console.error(`dev-tls: cannot read ${flag} ${path}`)
+      process.exit(2)
+    }
+  }
 }
 
 const server = createServer(
@@ -126,7 +192,20 @@ server.on('upgrade', (from, socket, head) => {
   socket.on('error', () => upstream.destroy())
 })
 
-server.listen(PORT, '127.0.0.1', () => {
-  console.log(`dev-tls: https://localhost:${PORT} → http://127.0.0.1:${TARGET}`)
-  console.log('  Self-signed and thrown away on exit. A browser will warn; a phone should not be asked.')
+server.listen(PORT, HOST, () => {
+  /* THE BANNER SAYS WHAT IS ACTUALLY RUNNING. It said "https://localhost" and
+   * "self-signed, a browser will warn" unconditionally — both false the moment
+   * a certificate and a host were supplied, which is exactly the run where
+   * somebody is reading it carefully because a phone is involved. A startup
+   * line that describes a different configuration is worse than none. */
+  const shown = HOST === '127.0.0.1' ? 'localhost' : HOST
+  console.log(`dev-tls: https://${shown}:${PORT} → http://127.0.0.1:${TARGET}`)
+  if (suppliedCert === null) {
+    console.log('  Self-signed and thrown away on exit. A browser will warn; a phone should not be asked.')
+  } else {
+    console.log(`  Serving ${suppliedCert}. A device that trusts its issuer will not warn.`)
+  }
+  if (HOST !== '127.0.0.1') {
+    console.log(`  ⚠️  Reachable from ${HOST === '0.0.0.0' ? 'every interface, including the local network' : 'that address'} — not just this machine.`)
+  }
 })
