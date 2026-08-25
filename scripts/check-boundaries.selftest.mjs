@@ -108,6 +108,21 @@ export const LEGAL_TREE = {
     "import { nodeFs } from '../hosts/node/fs.ts'\n" +
     "import { betaPort } from '../capabilities/beta/index.ts'\n" +
     'export const cli = { kernelThing, nodeFs, betaPort }\n',
+  /* THE THIRD COMPOSITION (phase 18): the BROWSER client, which is the one
+   * part of the tree that cannot use the kernel's public entry — that barrel
+   * re-exports modules importing `@tauri-apps`, which do not exist in a
+   * browser. So it reaches a short NAMED list of kernel modules directly, and
+   * the allowance is pinned here for the same reason the peer wire's and the
+   * CLI's are: if `web-client-kernel-allowlist` ever over-matches, the clean
+   * case fails rather than something subtler later.
+   *
+   * `envelope.ts` is on that list; `other.ts` is not, and is what the refusal
+   * case below reaches for. */
+  'src/kernel/core/envelope.ts': 'export const encodeFrame = () => new Uint8Array()\n',
+  'src/app/web/channel.ts':
+    "import { encodeFrame } from '../../kernel/core/envelope.ts'\nexport const channel = encodeFrame\n",
+  'src/main.web.tsx':
+    "import { channel } from './app/web/channel.ts'\nvoid channel\n",
 }
 
 /**
@@ -280,6 +295,41 @@ export const CASES = [
     from: 'src/capabilities/peer/lib/wire.ts',
     to: /(^|\/)@tauri-apps\/plugin-dialog(\/|$)/,
     expect: ['peer-wire-tauri-api-only'],
+  },
+  /**
+   * THE BROWSER CLIENT'S TWO RULES, neither of which had a case here.
+   *
+   * `no-tauri-in-the-web-client` did not exist at all until it was tested by
+   * hand: `no-tauri-api-outside-peer-wire` is scoped to `src/capabilities/`,
+   * so `src/app/web/` could import `@tauri-apps/api/core` and `pnpm
+   * boundaries` reported 0 violations. There is no Tauri in a browser — the
+   * import resolves at build time, ships, and fails on the reader's phone as
+   * `undefined is not a function`, three layers from its cause.
+   */
+  {
+    name: '@tauri-apps imported by the browser client',
+    files: { 'src/app/web/channel.ts': "import { invoke } from '@tauri-apps/api/core'\nexport const send = invoke\n" },
+    from: 'src/app/web/channel.ts',
+    to: /(^|\/)@tauri-apps\/api(\/|$)/,
+    expect: ['no-tauri-in-the-web-client'],
+  },
+  {
+    name: '@tauri-apps imported by the browser composition root',
+    files: { 'src/main.web.tsx': "import { invoke } from '@tauri-apps/api/core'\nvoid invoke\n" },
+    from: 'src/main.web.tsx',
+    to: /(^|\/)@tauri-apps\/api(\/|$)/,
+    expect: ['no-tauri-in-the-web-client'],
+  },
+  /* And the allow-list rule, which had no case either. The client may reach a
+   * short named list of kernel modules directly — the public entry's barrel
+   * retains modules that import `@tauri-apps` — and this is the edge that
+   * proves the list is a list rather than an open door. */
+  {
+    name: 'the browser client -> a kernel module outside its allow-list',
+    files: { 'src/app/web/books.ts': "import { other } from '../../kernel/core/other.ts'\nexport const books = other\n" },
+    from: 'src/app/web/books.ts',
+    to: 'src/kernel/core/other.ts',
+    expect: ['web-client-kernel-allowlist'],
   },
   {
     name: 'a capability -> a composition root (the whole-composition back door)',

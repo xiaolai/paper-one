@@ -378,6 +378,22 @@ module.exports = {
       to: { path: '(^|/)@tauri-apps/' },
     },
     {
+      name: 'no-tauri-in-the-web-client',
+      severity: 'error',
+      comment:
+        'The browser client and its composition root may not import @tauri-apps/* at all. There is ' +
+        'no Tauri in a browser: the import resolves at build time, ships, and fails at run time on ' +
+        "the reader's phone — as `undefined is not a function`, three layers from the import that " +
+        'caused it. The phase-18 plan names this as a gate and it did not exist: ' +
+        '`no-tauri-api-outside-peer-wire` is scoped to src/capabilities/, so src/app/web/ could ' +
+        'import @tauri-apps/api/core with `pnpm boundaries` reporting 0 violations. Measured, not ' +
+        'assumed. assert-bundle also refuses such a bundle, but that is a build away; this is the ' +
+        'edge itself, and it names the file. Matched on the package name wherever it resolves, ' +
+        'like the two rules below.',
+      from: { path: [WEB_CLIENT, '^src/main\\.web\\.tsx$'] },
+      to: { path: '(^|/)@tauri-apps/' },
+    },
+    {
       name: 'peer-wire-tauri-api-only',
       severity: 'error',
       comment:

@@ -145,3 +145,43 @@ describe('the CLI', () => {
     expect(err).toMatch(/nothing under src\/kernel\/ was cruised/)
   }, 120_000)
 })
+
+/**
+ * EVERY RULE HAS A CASE, enforced rather than requested.
+ *
+ * `.dependency-cruiser.cjs`'s own header says "a rule added here needs a
+ * fixture there" — and nothing checked it. Two rules had none: the browser
+ * client's kernel allow-list, and the rule keeping `@tauri-apps` out of the
+ * web build, which did not exist at all until it was tested by hand. A rule
+ * nobody has watched fail is a comment, which is the sentence the selftest
+ * opens with.
+ *
+ * `REQUIRES_RULE` is checked by `check-boundaries.mjs` over the cruise's JSON
+ * rather than by the cruiser, so it is named here as the one rule whose case
+ * carries it as a value.
+ */
+describe('the rule list and the case list', () => {
+  it('has a case for every rule the cruiser config declares', async () => {
+    const config = await import('../.dependency-cruiser.cjs')
+    const declared = (config.default ?? config).forbidden.map((rule) => rule.name)
+    /* NOT EMPTY. A config that failed to load, or a shape that changed, would
+       make every assertion below vacuous — which is how a completeness check
+       stops checking completeness. */
+    expect(declared.length).toBeGreaterThan(10)
+
+    const covered = new Set(CASES.flatMap((one) => one.expect))
+    const uncovered = declared.filter((name) => !covered.has(name))
+    expect(uncovered, 'every forbidden rule needs a case in check-boundaries.selftest.mjs').toEqual([])
+  })
+
+  /* AND NO CASE NAMES A RULE THAT IS GONE. A case expecting a deleted rule can
+     never pass, but one expecting a RENAMED rule fails for a reason that reads
+     as the edge being legal — which sends the next reader to the wrong file. */
+  it('names no rule the config does not declare', async () => {
+    const config = await import('../.dependency-cruiser.cjs')
+    const declared = new Set((config.default ?? config).forbidden.map((rule) => rule.name))
+    declared.add(REQUIRES_RULE)
+    const unknown = [...new Set(CASES.flatMap((one) => one.expect))].filter((name) => !declared.has(name))
+    expect(unknown, 'a case expects a rule the config no longer has').toEqual([])
+  })
+})
