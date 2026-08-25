@@ -7,7 +7,17 @@ function fakeChannel(answers: () => unknown) {
   let onClosed: ((reason: 'closed' | 'lost' | 'refused') => void) | null = null
   const channel: ShelfChannel = {
     call: async () => answers(),
-    stream: () => ({ [Symbol.asyncIterator]: async function* () {} }),
+    /* `book.list` is a STREAM in the service table, so the fake answers as one.
+       It used to answer `call`, which meant every test agreed with a client
+       that asked the wrong question and got "protocol: stream frame for a
+       plain call" from the real router. */
+    stream: () => ({
+      [Symbol.asyncIterator]: async function* () {
+        const answer = answers()
+        if (Array.isArray(answer)) for (const row of answer) yield row
+        else yield answer
+      },
+    }),
     close: () => {},
     onClosed: (fn) => {
       onClosed = fn
@@ -19,9 +29,12 @@ function fakeChannel(answers: () => unknown) {
   return { channel, drop: () => onClosed?.('lost') }
 }
 
+/* `bookId`, as `services/rows.ts` names it. These fixtures said `id` and so did
+   the parser, so every test agreed with the bug and the shelf rendered nothing.
+   A fixture is only as true as the guess behind it. */
 const TWO = [
-  { id: 'a', title: 'Moby-Dick', author: 'Melville' },
-  { id: 'b', title: 'The Silk Roads' },
+  { bookId: 'a', title: 'Moby-Dick', author: 'Melville' },
+  { bookId: 'b', title: 'The Silk Roads' },
 ]
 
 /** Let the constructor's own refresh settle. */
@@ -31,9 +44,9 @@ describe('parseRows', () => {
   it('drops a row with no id, because React keys on it', () => {
     /* A missing or duplicate key is a rendering bug three screens from its
        cause. Better to lose a malformed row than to render one. */
-    expect(parseRows([{ title: 'no id' }, { id: '', title: 'empty' }, { id: 'a', title: 'A' }])).toEqual([
-      { id: 'a', title: 'A' },
-    ])
+    expect(
+      parseRows([{ title: 'no id' }, { bookId: '', title: 'empty' }, { bookId: 'a', title: 'A' }]),
+    ).toEqual([{ bookId: 'a', title: 'A' }])
   })
 
   it('survives an answer that is not a list at all', () => {
@@ -46,8 +59,8 @@ describe('parseRows', () => {
   })
 
   it('keeps only fields it understands, and omits absent ones', () => {
-    const [row] = parseRows([{ id: 'a', title: 'A', author: 'M', extra: 'ignored', progress: 'x' }])
-    expect(row).toEqual({ id: 'a', title: 'A', author: 'M' })
+    const [row] = parseRows([{ bookId: 'a', title: 'A', author: 'M', extra: 'ignored', progress: 'x' }])
+    expect(row).toEqual({ bookId: 'a', title: 'A', author: 'M' })
   })
 })
 
@@ -58,7 +71,7 @@ describe('createRemoteBooks', () => {
     expect(books.status()).toBe('loading')
     await settled()
     expect(books.status()).toBe('ready')
-    expect(books.getSnapshot().map((b) => b.id)).toEqual(['a', 'b'])
+    expect(books.getSnapshot().map((b) => b.bookId)).toEqual(['a', 'b'])
   })
 
   it('returns THE SAME array until the content changes', async () => {
@@ -80,7 +93,7 @@ describe('createRemoteBooks', () => {
     expect(books.getSnapshot()).toBe(first)
 
     // A different answer must.
-    answer = [...TWO, { id: 'c', title: 'Third' }]
+    answer = [...TWO, { bookId: 'c', title: 'Third' }]
     await books.refresh()
     expect(books.getSnapshot()).not.toBe(first)
     expect(books.getSnapshot()).toHaveLength(3)
@@ -107,7 +120,7 @@ describe('createRemoteBooks', () => {
 
     const woken = vi.fn()
     books.subscribe(woken)
-    answer = [{ id: 'z', title: 'Only' }]
+    answer = [{ bookId: 'z', title: 'Only' }]
     await books.refresh()
     expect(woken).toHaveBeenCalledTimes(1)
   })

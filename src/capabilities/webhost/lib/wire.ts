@@ -64,6 +64,12 @@ export interface BrowserSession {
 
 export interface WebHostWire {
   status(): Promise<WebHostStatus>
+  /** Tell the plugin the webview is serving the router, so frames may flow. */
+  ready(): Promise<void>
+  /** Every frame waiting from one browser. Never waits; empty means nothing. */
+  sessionRecv(session: number): Promise<readonly Uint8Array[]>
+  /** One frame back to a browser. */
+  send(session: number, frame: Uint8Array): Promise<void>
   address(): Promise<WebHostAddress>
   beginCode(): Promise<CodeOffer>
   cancelCode(): Promise<void>
@@ -74,6 +80,16 @@ export interface WebHostWire {
 export function tauriWire(): WebHostWire {
   return {
     status: () => invoke<WebHostStatus>('plugin:webhost|webhost_status'),
+    ready: () => invoke<void>('plugin:webhost|webhost_ready'),
+    sessionRecv: async (session) => {
+      /* Tauri gives these back as number arrays over the IPC boundary; the
+       * envelope wants bytes, and `decodeFrame` on a plain array is a length
+       * check that passes and a header read that does not. */
+      const frames = await invoke<number[][]>('plugin:webhost|webhost_session_recv', { session })
+      return frames.map((frame) => Uint8Array.from(frame))
+    },
+    send: (session, frame) =>
+      invoke<void>('plugin:webhost|webhost_send', { session, frame: Array.from(frame) }),
     address: () => invoke<WebHostAddress>('plugin:webhost|webhost_address'),
     beginCode: () => invoke<CodeOffer>('plugin:webhost|webhost_begin_code'),
     cancelCode: () => invoke<void>('plugin:webhost|webhost_cancel_code'),
@@ -88,6 +104,9 @@ export function fakeWire(overrides: Partial<WebHostWire> = {}): WebHostWire {
   let issued = 0
   return {
     status: async () => ({ pluginVersion: '0.0.0-fake', port: 27182, ready: true }),
+    ready: async () => {},
+    sessionRecv: async () => [],
+    send: async () => {},
     address: async () => ({ kind: 'https', url: 'https://studio.tail1234.ts.net/' }),
     beginCode: async () => {
       issued += 1

@@ -111,6 +111,17 @@ server.on('upgrade', (from, socket, head) => {
     upstreamSocket.pipe(socket)
     socket.pipe(upstreamSocket)
   })
+  /* AN UPGRADE THAT IS REFUSED IS STILL AN ANSWER. The shelf replies 401 to a
+   * socket with no credential, which is not an `upgrade` event — so with only
+   * the handler above, the browser sat in CONNECTING for ever: no open, no
+   * error, no close. That looks exactly like a hung shelf and is not one.
+   *
+   * Relay whatever came back and let the browser see it. */
+  upstream.on('response', (answer) => {
+    const lines = Object.entries(answer.headers).map(([k, v]) => `${k}: ${String(v)}`)
+    socket.write(`HTTP/1.1 ${answer.statusCode} ${answer.statusMessage ?? ''}\r\n${lines.join('\r\n')}\r\n\r\n`)
+    answer.pipe(socket)
+  })
   upstream.on('error', () => socket.destroy())
   socket.on('error', () => upstream.destroy())
 })

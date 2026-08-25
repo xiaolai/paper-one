@@ -35,9 +35,17 @@ import type { ShelfChannel } from './channel'
  * vanished, which is both alarming and false.
  */
 
-/** One book, as `book.list` answers. */
+/** One book, as `book.list` answers.
+ *
+ * **The field is `bookId`, not `id`**, and this said `id` for a day. Every row
+ * was dropped, the shelf rendered "0 books", and nothing failed: not a test,
+ * not a type, not the network. The tests agreed because they were written from
+ * the same assumption — a fixture is only as true as the guess behind it.
+ *
+ * Named exactly as `services/rows.ts` names it, so the next reader can compare
+ * the two without a translation layer in between. */
 export interface BookRow {
-  readonly id: string
+  readonly bookId: string
   readonly title: string
   readonly author?: string
   readonly progress?: number
@@ -60,6 +68,16 @@ export interface RemoteBooks {
   getSnapshot(): readonly BookRow[]
   subscribe(listener: () => void): () => void
   status(): BooksStatus
+  /**
+   * Why the last attempt failed, or null.
+   *
+   * ⚠️ THIS WAS SWALLOWED, and it cost an afternoon. `catch {}` turned every
+   * refusal into the word "failed" — a refused service, a wrong shape, a dead
+   * socket and a timeout all rendered identically, and the shelf said "not
+   * answering" while the shelf was answering perfectly and saying no. A
+   * discarded reason is a debugging session someone else has to repeat.
+   */
+  reason(): string | null
   /** Ask the shelf again. Safe to call at any time. */
   refresh(): Promise<void>
   dispose(): void
@@ -74,9 +92,9 @@ export function parseRows(answer: unknown): readonly BookRow[] {
     const row = item as Record<string, unknown>
     /* A ROW WITHOUT AN ID IS NOT A BOOK. React keys on it and a duplicate or
      * missing key is a rendering bug three screens away from its cause. */
-    if (typeof row['id'] !== 'string' || row['id'] === '') continue
+    if (typeof row['bookId'] !== 'string' || row['bookId'] === '') continue
     rows.push({
-      id: row['id'],
+      bookId: row['bookId'],
       title: typeof row['title'] === 'string' ? row['title'] : '',
       ...(typeof row['author'] === 'string' ? { author: row['author'] } : {}),
       ...(typeof row['progress'] === 'number' ? { progress: row['progress'] } : {}),
@@ -92,7 +110,7 @@ function same(a: readonly BookRow[], b: readonly BookRow[]): boolean {
   return a.every((row, i) => {
     const other = b[i]!
     return (
-      row.id === other.id &&
+      row.bookId === other.bookId &&
       row.title === other.title &&
       row.author === other.author &&
       row.progress === other.progress &&
@@ -104,6 +122,7 @@ function same(a: readonly BookRow[], b: readonly BookRow[]): boolean {
 export function createRemoteBooks(channel: ShelfChannel): RemoteBooks {
   let rows: readonly BookRow[] = []
   let state: BooksStatus = 'loading'
+  let why: string | null = null
   let disposed = false
   const listeners = new Set<() => void>()
 
@@ -126,16 +145,32 @@ export function createRemoteBooks(channel: ShelfChannel): RemoteBooks {
 
   const refresh = async () => {
     if (disposed) return
-    let answer: unknown
+    /* `book.list` IS A STREAM, not a call.
+     *
+     * `serviceTable.ts` declares it `kind: 'stream'` — it answers many rows,
+     * page by page — and asking for it with `call` earns
+     * "protocol: stream frame for a plain call" from the router. The shelf was
+     * answering correctly the whole time and saying no; the client was asking
+     * the wrong question. Found in one run once the refusal stopped being
+     * swallowed, and not before. */
+    const collected: unknown[] = []
     try {
-      answer = await channel.call('book.list', {})
-    } catch {
+      for await (const item of channel.stream('book.list', {})) {
+        /* A page may arrive as one row or as an array of them. Flattened here
+         * so `parseRows` sees one shape whichever the shelf sends. */
+        if (Array.isArray(item)) collected.push(...item)
+        else collected.push(item)
+      }
+    } catch (thrown) {
       if (disposed) return
+      why = thrown instanceof Error ? thrown.message : String(thrown)
       setStatus(rows.length > 0 ? 'stale' : 'failed')
+      publish()
       return
     }
     if (disposed) return
-    const next = parseRows(answer)
+    why = null
+    const next = parseRows(collected)
     /* THE IDENTITY RULE. A new array is published only when the CONTENT
      * changed; an unchanged answer keeps the previous array, so a poll that
      * finds nothing new costs no render. Publishing a fresh array every time
@@ -158,6 +193,7 @@ export function createRemoteBooks(channel: ShelfChannel): RemoteBooks {
       return () => listeners.delete(listener)
     },
     status: () => state,
+    reason: () => why,
     refresh,
     dispose: () => {
       disposed = true

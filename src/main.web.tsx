@@ -143,12 +143,14 @@ function ShelfList({ books, onSignOut }: { readonly books: RemoteBooks; readonly
       )}
 
       {status === 'failed' && (
-        <p className="shelf-note">Your library is not answering, and nothing was loaded.</p>
+        <p className="shelf-note">
+          Nothing could be loaded. {books.reason() ?? 'Your library is not answering.'}
+        </p>
       )}
 
       <ul className="shelf-list">
         {rows.map((book) => (
-          <li key={book.id} className="shelf-row">
+          <li key={book.bookId} className="shelf-row">
             <span className="shelf-title">{book.title === '' ? 'Untitled' : book.title}</span>
             {book.author !== undefined && <span className="shelf-author">{book.author}</span>}
           </li>

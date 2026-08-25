@@ -153,16 +153,72 @@ describe('serving a composed set of services', () => {
     expect(() => served.dispose()).not.toThrow()
   })
 
-  it('hands back the bound host’s own disposer', async () => {
+  it('disposes the bound host’s own disposer, rather than replacing it', async () => {
+    /* This asserted disposer IDENTITY while a slot allowed one host. It is a
+       SET since phase 18 — two transports serve the same services — so the
+       answer is a composite and identity is no longer the thing to check.
+       What it was guarding is unchanged and is checked directly: the host's
+       own disposer runs, and exactly once. Replaced by a no-op it would not. */
     const services = servicesWith(spyRecorder().recorder)
     let disposed = 0
     const own = { dispose: () => void (disposed += 1) }
     services.bindServiceHost(() => own)
 
     const served = await services.serveServices([])
-    expect(served, 'the host’s disposer was replaced').toBe(own)
     served.dispose()
-    expect(disposed).toBe(1)
+    expect(disposed, 'the host’s disposer was replaced').toBe(1)
+  })
+
+  it('serves every bound host, and disposes them all', async () => {
+    /* The reason the slot became a set: `peer` and `webhost` are two transports
+       carrying the SAME services. A service reachable over one wire and not the
+       other would be a difference nothing in the service table describes. */
+    const services = servicesWith(spyRecorder().recorder)
+    const seen: string[] = []
+    const disposed: string[] = []
+    services.bindServiceHost(() => {
+      seen.push('a')
+      return { dispose: () => void disposed.push('a') }
+    })
+    services.bindServiceHost(() => {
+      seen.push('b')
+      return { dispose: () => void disposed.push('b') }
+    })
+
+    const served = await services.serveServices([])
+    expect(seen.sort()).toEqual(['a', 'b'])
+    served.dispose()
+    expect(disposed.sort()).toEqual(['a', 'b'])
+  })
+
+  it('unbinding one host leaves the other serving', async () => {
+    const services = servicesWith(spyRecorder().recorder)
+    const seen: string[] = []
+    const first = services.bindServiceHost(() => {
+      seen.push('a')
+      return { dispose: () => {} }
+    })
+    services.bindServiceHost(() => {
+      seen.push('b')
+      return { dispose: () => {} }
+    })
+
+    first.dispose()
+    await services.serveServices([])
+    expect(seen).toEqual(['b'])
+  })
+
+  it('takes down the hosts that did serve when another returns no disposer', async () => {
+    /* A partial serve left running is the leak the refusal below exists to
+       prevent, arriving by a different door: one host registered handlers and
+       another broke its contract, so nothing ever disposed the first. */
+    const services = servicesWith(spyRecorder().recorder)
+    let disposed = 0
+    services.bindServiceHost(() => ({ dispose: () => void (disposed += 1) }))
+    services.bindServiceHost((() => undefined) as never)
+
+    await expect(services.serveServices([])).rejects.toThrow(/no disposer/)
+    expect(disposed, 'the host that served properly was left running').toBe(1)
   })
 
   it('refuses a bound host that returns no disposer, rather than papering over it', async () => {

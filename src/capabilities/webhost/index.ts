@@ -1,7 +1,8 @@
 import { createElement } from 'react'
-import type { Capability } from '../../kernel'
+import type { Capability, Disposable } from '../../kernel'
 import { BrowsersPane } from './ui/BrowsersPane'
 import { tauriWire, type WebHostWire } from './lib/wire'
+import { servePipe, type Pump } from './lib/pump'
 
 /**
  * The `webhost` capability — the shelf's browser client (phase 18).
@@ -41,11 +42,17 @@ import { tauriWire, type WebHostWire } from './lib/wire'
  * caller appears or when `peer` is next opened; until then this declaration
  * says what is true.
  *
- * ## What is NOT here yet
+ * ## Serving the router
  *
- * The `Channel` over the frame commands and the remote stores — everything that
- * makes a connected browser able to READ. The six-digit pane is here; the
- * reader it lets in is not.
+ * `start()` runs the pump, which is the webview's half of the frame pipe. The
+ * Rust side puts a browser's frames in a session inbox; without something
+ * taking them out, a browser signs in, opens its channel, calls `book.list` and
+ * waits for ever — which is exactly what it did until this was wired.
+ *
+ * Same shape as `peer`: the capability holds the transport and serves the
+ * kernel's own services over it. The difference is what a peer is. `peer`
+ * carries per-peer grants from `peers.json`; a browser has one grant, "signed
+ * in", enforced at the socket by a credential the shelf issued.
  */
 /* One wire for the capability's lifetime. Built lazily so that merely importing
  * this module does not call into a plugin — a composition imports every
@@ -53,9 +60,51 @@ import { tauriWire, type WebHostWire } from './lib/wire'
 let wire: WebHostWire | null = null
 const wireOf = (): WebHostWire => (wire ??= tauriWire())
 
+let pump: Pump | null = null
+
 export const webhost: Capability = {
   id: 'webhost',
   requires: ['peer'],
+
+  start(api, signal): Disposable {
+    /* TEARDOWN REGISTERED BEFORE ANYTHING IS ACQUIRED, the order `peer`'s own
+     * `start` uses: a failure part-way through leaves nothing running. */
+    const stop = () => {
+      pump?.stop()
+      pump = null
+      host?.dispose()
+      host = null
+    }
+    let host: Disposable | null = null
+    if (signal.aborted) return { dispose: stop }
+
+    /* THE KERNEL HANDS THE SERVICES BACK. A capability does not know the
+     * composed set — `registry.ts` calls every bound host once, after every
+     * capability has started, with the whole of it. `peer` binds one too; the
+     * slot became a SET in phase 18 so both transports can carry the same
+     * services, which is what a transport is for. */
+    host = api.services.bindServiceHost(async (services) => {
+      if (signal.aborted || services.length === 0) return { dispose: () => {} }
+      pump = servePipe({
+        wire: wireOf(),
+        services,
+        onError: (thrown) =>
+          api.diagnostics.warn('webhost.pump', {
+            error: thrown instanceof Error ? thrown.message : String(thrown),
+          }),
+      })
+      const running = pump
+      return {
+        dispose: () => {
+          running.stop()
+          if (pump === running) pump = null
+        },
+      }
+    })
+
+    signal.addEventListener('abort', stop, { once: true })
+    return { dispose: stop }
+  },
 
   settings: [
     {
