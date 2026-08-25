@@ -12,7 +12,20 @@ import type { ReadingStyle } from './uiTypes'
  * scroll snapping, the prose spacing and the chrome.
  */
 
-export type Platform = 'macos' | 'windows' | 'linux'
+/**
+ * The platforms the interface draws for.
+ *
+ * `web` is the BROWSER CLIENT (phase 18) — the shelf's own client, served to a
+ * phone. It is a platform here for one reason: `applyMetrics` publishes the
+ * design system's geometry, and without it the client would have to mirror
+ * those constants in a stylesheet of its own. It did, briefly, and that is the
+ * duplicate this member exists to delete — a client IMITATING the design system
+ * rather than using it.
+ *
+ * It has no window, so its titlebar and system zone are zero. Anything else
+ * keyed by platform should ask whether a browser has one before answering.
+ */
+export type Platform = 'macos' | 'windows' | 'linux' | 'web'
 
 /** §03 baseline grid. The reading line box, and the unit prose spacing, the
  *  ruler band and scroll snapping are all multiples of. */
@@ -92,6 +105,10 @@ export const TITLEBAR_H: Record<Platform, number> = {
   macos: 52,
   windows: 44,
   linux: 44,
+  /* A browser tab has no titlebar to overlay, and the client draws none. Zero
+   * rather than 44: a reserved band with nothing in it would push the reading
+   * surface down the screen for a decoration that does not exist. */
+  web: 0,
 }
 
 /**
@@ -110,6 +127,9 @@ export const SYS_ZONE_W: Record<Platform, number> = {
   macos: 82,
   windows: 138,
   linux: 96,
+  /* No window controls to reserve for — the browser draws its own chrome
+   * outside the page entirely. */
+  web: 0,
 }
 
 /** §03 pane tab bar, matching the aside tabs. */

@@ -61,6 +61,23 @@ const COMPOSITION_ROOTS = [
  * rules exist to hold; a `.ts` file there could, so it stays refused. */
 const KERNEL_STYLESHEETS = '^src/kernel/ui/styles/.*\\.css$'
 
+/** The design system's geometry.
+ *
+ * `applyMetrics` publishes `--control-sm`, `--radius-pill` and the rest onto a
+ * root element, and `capability.css` resolves every control's size and shape
+ * from them. `App.tsx` calls it for the desktop build from inside `kernel/ui`.
+ *
+ * The BROWSER root cannot take either sanctioned door. `kernel/ui/index.ts`
+ * pulls five modules that import `@tauri-apps`; so does the public entry, whose
+ * barrel retains them for any symbol taken from it — `assert-bundle` refused a
+ * web bundle carrying three. Without this the client mirrored the constants in
+ * a stylesheet of its own, which is a client IMITATING the design system rather
+ * than using it, and it showed.
+ *
+ * Narrow, and cheap to allow: `metrics.ts` has exactly one import and it is
+ * type-only. It is arithmetic over constants with no dependencies to smuggle. */
+const KERNEL_METRICS = '^src/kernel/core/metrics\\.ts$'
+
 /** The kernel's two entries: the React-free public one every capability may
  *  import, and the UI one only a composition root may. */
 const KERNEL_PUBLIC_ENTRY = '^src/kernel/index\\.ts$'
@@ -197,7 +214,7 @@ module.exports = {
         'UI entry exists because the public entry is React-free and a root has to render App; ' +
         'nothing else may import it, and a root may not reach past either.',
       from: { path: COMPOSITION_ROOTS },
-      to: { path: '^src/kernel/', pathNot: [KERNEL_PUBLIC_ENTRY, KERNEL_UI_ENTRY, KERNEL_STYLESHEETS] },
+      to: { path: '^src/kernel/', pathNot: [KERNEL_PUBLIC_ENTRY, KERNEL_UI_ENTRY, KERNEL_STYLESHEETS, KERNEL_METRICS] },
     },
     {
       name: 'capability-only-via-index',

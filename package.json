@@ -15,6 +15,7 @@
     "build:ios": "node scripts/sync-pdfjs-assets.mjs && TAURI_ENV_PLATFORM=ios vite build",
     "build:android": "node scripts/sync-pdfjs-assets.mjs && TAURI_ENV_PLATFORM=android vite build",
     "build:web": "node scripts/sync-pdfjs-assets.mjs && TAURI_ENV_PLATFORM=web vite build",
+    "shot:client": "node scripts/shot-client.mjs",
     "build:cli": "node scripts/build-cli.mjs",
     "build:all": "pnpm typecheck && pnpm build:desktop && pnpm build:ios && pnpm build:android",
     "preview": "vite preview",
@@ -63,6 +64,7 @@
   },
   "devDependencies": {
     "@hypothesi/tauri-mcp-server": "^0.12.0",
+    "@playwright/test": "^1.62.1",
     "@tauri-apps/cli": "^2.10.1",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/react": "^16.3.2",

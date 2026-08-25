@@ -80,12 +80,18 @@ export function PairScreen({ onConnected, submit = submitCode }: PairScreenProps
   return (
     <form className={styles.screen} onSubmit={onSubmit}>
       <h1 className={styles.title}>Connect to your library</h1>
-      <p className={styles.explain}>
+      <p className="paper-cap-hint">
         On the computer holding your books, open Paper → Settings → Devices, and choose “Show code”.
       </p>
 
+      {/* NO PLACEHOLDER, and its absence is deliberate. `000000` in a code
+          field reads as a typed value rather than a hint — six zeros ARE a
+          possible code — and it left a centred hint beside a caret WebKit
+          parks at the field's left edge, which is what the empty state looked
+          wrong for. An empty field that looks empty says more. */}
+
       <input
-        className={styles.code}
+        className={`paper-cap-field ${styles.code}`}
         value={code}
         onChange={(event) => setCode(normalizeCode(event.target.value))}
         inputMode="numeric"
@@ -96,12 +102,14 @@ export function PairScreen({ onConnected, submit = submitCode }: PairScreenProps
         aria-label="The six-digit code shown on your computer"
         aria-invalid={problem !== null}
         aria-describedby={problem === null ? undefined : 'pair-problem'}
-        placeholder="000000"
         autoFocus
         disabled={busy}
+        data-disabled={busy ? 'true' : undefined}
       />
 
-      <button className={styles.submit} type="submit" disabled={code.length !== 6 || busy}>
+      <button className={`paper-cap-button paper-cap-button-primary ${styles.submit}`} type="submit" disabled={code.length !== 6 || busy}
+        data-disabled={code.length !== 6 || busy ? 'true' : undefined}
+      >
         {busy ? 'Connecting…' : 'Connect'}
       </button>
 

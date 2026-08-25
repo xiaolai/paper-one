@@ -1,13 +1,25 @@
-/* The six-digit screen.
+/* The six-digit screen's LAYOUT, and nothing else.
  *
- * Every value here resolves through the design system's tokens
- * (`src/kernel/ui/styles/tokens.css`) rather than being invented — the same
- * rule `dev-docs/design-tokens.md` states and `tokens.test.ts` enforces for the
- * desktop app. The one exception is the digit field's own width, which is
- * derived from its character count and belongs to nothing else.
+ * ## What is deliberately not here
  *
- * The layout is the mobile design's idiom: one purpose per screen, centred,
- * with the safe-area inset respected so a notched phone does not clip it. */
+ * The field and the button are `.paper-cap-field` and
+ * `.paper-cap-button-primary` from `capability.css` — the published vocabulary
+ * every capability's UI already uses. An earlier draft styled both from scratch
+ * and produced exactly what that stylesheet warns about in its own comment: "A
+ * 10px-radius bordered box next to a fully-rounded pill button, in a pane that
+ * draws no field borders anywhere else. The border is what made it read as a
+ * web form dropped into Paper."
+ *
+ * It also contradicted three app-wide rules in `global.css` without meaning to:
+ * a 2px focus ring where the system draws 3px, `:disabled { opacity: .5 }`
+ * where the system uses `[data-disabled]` at .45, and a button left in
+ * `system-ui` because buttons do not inherit `font-family` and
+ * `.paper-cap-button` is the thing that says `font: inherit`.
+ *
+ * So this file holds the ARRANGEMENT and defers every control to the system.
+ * Anything that feels like it needs a new control here should first check
+ * whether `capability.css` already has one.
+ */
 
 .screen {
   display: flex;
@@ -32,69 +44,60 @@
   margin: 0;
 }
 
-.explain {
-  font-size: var(--text-body);
-  color: var(--muted);
-  margin: 0;
-  max-width: var(--gate-measure);
-  line-height: 1.5;
-}
-
+/* THE FIELD'S SIZE, not its appearance.
+ *
+ * `.paper-cap-field` is built for a row — `flex: 1 1 auto` at `--control-sm`,
+ * filling whatever width the row gives it. This screen has no row: the field is
+ * the one thing on it, and a code is six characters wide whatever the viewport
+ * is. So the flex behaviour is overridden and a width given, and NOTHING about
+ * fill, radius, border or focus is touched. */
 .code {
-  /* Tabular so the six digits do not jump as they are typed. */
+  flex: 0 0 auto;
+  /* FULL WIDTH, not six characters wide.
+   *
+   * Sized to its content the field came out 96px — within a pixel of the
+   * Connect button beneath it, so the two read as a pair of buttons rather than
+   * a field and its action. On a phone the idiom is a stacked full-width
+   * control, which also gives the digits somewhere to go.
+   *
+   * `--prose-narrow` is the design system's narrow measure, so the field never
+   * outgrows the sentence explaining it on a wide screen. */
+  width: 100%;
+  max-width: var(--prose-narrow);
+  height: var(--control-lg);
+  /* The subject of the screen, so the reading size rather than the small one
+   * `.paper-cap-field` uses in a dense settings row. Tabular numerals keep the
+   * digits from shifting as they are typed. */
+  font-size: var(--text-prose);
   font-variant-numeric: tabular-nums;
-  font-family: var(--gate-mono);
-  font-size: var(--text-title);
-  letter-spacing: var(--track-caps-wide);
-  /* Six characters plus the tracking between them — a DERIVATION from the type
-   * token rather than a measured guess, which is what the token guard asks for
-   * (`tokens.test.ts`: "derivations are what this guard wants people to
-   * write"). `7.5 * var(--text-title)` is 7.5em at this font size. */
-  width: calc(7.5 * var(--text-title));
-  padding: var(--space-12) var(--space-8);
   text-align: center;
-  border: 1px solid var(--line-3);
-  border-radius: var(--gate-radius);
-  background: var(--surface);
-  color: var(--ink);
 }
 
-.code:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: var(--space-2);
-}
-
-.code[aria-invalid='true'] {
-  border-color: var(--amber-line);
-}
-
+/* The action, sized for a thumb rather than for a settings row.
+ *
+ * `.paper-cap-button` is `--control-sm`, right in a dense pane and below the
+ * platform's touch minimum on a phone. `--control-lg` IS that minimum, which is
+ * why the design system has it. */
 .submit {
-  font-size: var(--text-ui);
-  padding: var(--space-12) var(--space-24);
-  border: 0;
-  border-radius: var(--gate-radius);
-  background: var(--accent);
-  color: var(--surface);
-  /* The design system's large control, which IS the platform's 44px minimum
-   * touch target — one number, in one place, rather than a second spelling. */
-  min-height: var(--gate-control-h);
+  /* Matched to the field above it: same width, same height, so the pair reads
+   * as one control and its action rather than two things of similar size. */
+  width: 100%;
+  max-width: var(--prose-narrow);
+  height: var(--control-lg);
+  padding: 0 var(--space-24);
+  justify-content: center;
 }
 
-.submit:disabled {
-  opacity: 0.5;
-}
-
-/* AMBER, because that is this design system's colour for "the machine is
- * telling you something", and a refusal is exactly that. It is not red: the
- * reader has not broken anything, and a wrong code is an ordinary event. */
+/* AMBER, this design system's colour for something the app is telling you. Not
+ * red: a wrong code is an ordinary event and the reader has broken nothing. */
 .problem {
   font-size: var(--text-small);
   color: var(--amber);
   background: var(--amber-bg);
   border: 1px solid var(--amber-line);
-  border-radius: var(--gate-radius);
+  border-radius: var(--radius-chip);
   padding: var(--space-8) var(--space-12);
   margin: 0;
-  max-width: var(--gate-measure);
+  max-width: var(--prose-narrow);
   line-height: 1.45;
 }

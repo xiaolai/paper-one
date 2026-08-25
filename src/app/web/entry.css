@@ -1,50 +1,16 @@
 /* The gate screens' shell.
  *
- * ## The three properties declared here, and why they are not tokens
- *
- * Colour and type come from `tokens.css`, which is a stylesheet and is simply
- * imported. GEOMETRY does not: `metrics.ts` publishes `--control-lg`,
- * `--radius-control` and `--prose-narrow` at RUNTIME, from `applyMetrics`,
- * which `App.tsx` calls — and this build does not render `App`.
- *
- * It cannot call it either. `applyMetrics(root, platform)` takes
- * `Platform = 'macos' | 'windows' | 'linux'` and publishes a titlebar height
- * from it; a browser has none of those, and passing one to get the rest would
- * be a lie told to a function that believes it.
- *
- * So these three mirror `metrics.ts`'s constants — CONTROL.lg 44,
- * radius-control 10, PROSE_MAX.narrow 380 — and they are a DUPLICATE, which
- * this repository is otherwise strict about. It is a knowing one, held to three
- * values in one file, because the alternative was a lie or a whole reader.
- *
- * ⚠️ **When the reader is wired (WI-18.7 onward), the browser client needs a
- * real metrics story** — most likely a `Platform` that admits a browser — and
- * these three go away with it. They are not a pattern to copy.
+ * FOUR PROPERTIES USED TO BE DECLARED HERE, mirroring `metrics.ts`'s constants
+ * because `applyMetrics` was unreachable from a browser. They are gone:
+ * `Platform` has a `web` member now and `main.web.tsx` makes the same call
+ * `App.tsx` does, so the client resolves the real geometry rather than a copy
+ * of it. Anything tempted to declare a constant here should ask why the design
+ * system does not already have it.
  */
 
-:root {
-  --gate-control-h: 44px;
-  --gate-radius: 10px;
-  --gate-measure: 380px;
-  /* IBM Plex Mono is bundled by `main.web.tsx`; the fallbacks are for the
-     frame before it loads. */
-  --gate-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
-  /* Instrument Sans is the design system's UI face and is bundled by
-     `main.web.tsx`. Written here rather than as a `var()` fallback: a fallback
-     that is ALWAYS taken is a value pretending to be a token. */
-  --gate-ui: 'Instrument Sans Variable', 'Instrument Sans', system-ui, sans-serif;
-}
-
-html,
-body {
-  margin: 0;
-  background: var(--bg);
-  color: var(--ink);
-  font-family: var(--gate-ui);
-  /* iOS inflates text in landscape unless told not to, which breaks a layout
-   * measured in the design system's type scale. */
-  -webkit-text-size-adjust: 100%;
-}
+/* NO `body` RULE HERE. `global.css` sets the typeface, the size and the ink,
+ * and it is imported by `main.web.tsx` — an earlier draft of this file restated
+ * all three and got the face wrong. */
 
 .gate {
   display: flex;
@@ -68,16 +34,21 @@ body {
   font-size: var(--text-body);
   color: var(--muted);
   margin: 0;
-  max-width: var(--gate-measure);
+  max-width: var(--prose-narrow);
   line-height: 1.5;
 }
 
 .gate button {
   font-size: var(--text-ui);
   padding: var(--space-12) var(--space-24);
-  min-height: var(--gate-control-h);
+  min-height: var(--control-lg);
   border: 1px solid var(--line-3);
-  border-radius: var(--gate-radius);
+  border-radius: var(--radius-control);
   background: var(--surface);
   color: var(--ink);
+  /* Buttons do not inherit `font-family`. `.paper-cap-button` says `font:
+   * inherit` for this reason; these two gate screens use a plain `button`, so
+   * they say it here or render in `system-ui` — which is what they did. */
+  font: inherit;
+  font-size: var(--text-ui);
 }

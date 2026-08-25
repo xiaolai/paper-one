@@ -2,6 +2,7 @@ import { isValidElement, type ReactNode } from 'react'
 import type { PaneContribution, PaneRenderer } from '../core/capability'
 import { resolvePaneId } from '../core/registry'
 import { paneFits, type KernelPaneId, type PaneId, type Screen, type Theme } from './state'
+import type { Platform } from '../core/metrics'
 
 /**
  * The side pane's panels — one registry, for everyone who names them.
@@ -182,6 +183,15 @@ function describe(value: unknown): string {
  * have, for a shortcut the app binds to Ctrl — so the palette and every
  * tooltip were telling some readers to press something that does not exist.
  */
-export function comboFor(combo: string, platform: 'macos' | 'windows' | 'linux'): string {
+/* `Platform`, not the three desktop members it used to name. Widening the type
+ * for the browser client (phase 18) made this the boundary where the two jobs
+ * `Platform` does came apart: it says which OS CHROME to draw, and it said
+ * which KEYBOARD IDIOM to print — and `web` answers the first and not the
+ * second. A browser on a Mac still has a ⌘ key.
+ *
+ * `web` takes the Ctrl branch because the client draws no shortcut anywhere
+ * today. The day it does, it must ask the machine rather than the build
+ * target, and this line is where that will be noticed. */
+export function comboFor(combo: string, platform: Platform): string {
   return platform === 'macos' ? combo : combo.replace('⌘', 'Ctrl+')
 }

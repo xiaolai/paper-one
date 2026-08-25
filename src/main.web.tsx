@@ -16,11 +16,28 @@ import '@fontsource/ibm-plex-mono/400.css'
  * this entry takes the stylesheet directly and nothing else, until the reader
  * itself is wired (WI-18.7 onward). */
 import './kernel/ui/styles/tokens.css'
+/* THE APP'S BASE STYLESHEET. §02's typeface, §07's focus ring and disabled
+ * convention, and the resets — all of it app-wide statements this client was
+ * restating, worse, in a file of its own. `kernel/ui/index.ts` imports these
+ * three the same way for the desktop build. */
+import './kernel/ui/styles/global.css'
+/* PAPER'S CONTROLS, not imitations of them. `.paper-cap-field`,
+ * `.paper-cap-button` and the rest are the published vocabulary every
+ * capability's UI already uses; the client styling its own input is how it came
+ * to look like a web form dropped into Paper. */
+import './kernel/ui/styles/capability.css'
 import './app/web/entry.css'
 
 import { PairScreen } from './app/web/PairScreen'
 import { checkSession, type SessionState } from './app/web/session'
 import { capabilities } from 'virtual:paper-composition'
+/* DIRECTLY, not through `./kernel`. The barrel re-exports modules that import
+ * `@tauri-apps`, so importing ANY symbol from it retains them — `assert-bundle`
+ * refused a web bundle carrying three. `metrics.ts` itself has exactly one
+ * import, type-only, so reaching it costs nothing: it is the design system's
+ * geometry as plain arithmetic. `.dependency-cruiser.cjs` allows this one
+ * module to a composition root, with that reason written beside the rule. */
+import { applyMetrics } from './kernel/core/metrics'
 
 /**
  * THE BROWSER CLIENT'S COMPOSITION ROOT.
@@ -133,6 +150,17 @@ if (capabilities.length > 0) {
       'and this entry does not compose any. Wire composeCapabilities here before adding one.',
   )
 }
+
+/* THE GEOMETRY, before the first render.
+ *
+ * `capability.css` resolves `--control-sm`, `--radius-pill` and the rest from
+ * these; unpublished they are undefined and every control silently loses its
+ * size and shape. `App.tsx` does the same call for the desktop build.
+ *
+ * `'web'` is a real member of `Platform` rather than a lie told to get the
+ * rest: a browser tab has no titlebar and no window controls, and the table
+ * says so with zeros. */
+applyMetrics(document.documentElement, 'web')
 
 const root = document.getElementById('root')
 if (root === null) throw new Error('Paper: no #root to mount into')
