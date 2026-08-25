@@ -64,8 +64,15 @@ pub enum Address {
     /// Reachable from anywhere on the tailnet, over TLS. The working case.
     Https { url: String },
     /// A tailnet exists and nothing is proxying to this port, so the client is
-    /// unreachable from a phone. Carries the command that fixes it.
-    NotServed { host: String, command: String },
+    /// unreachable from a phone.
+    ///
+    /// `command` is the exact line that fixes it — WHEN there is one. It is
+    /// `None` on a tailnet that cannot issue certificates at all, where the
+    /// command would fail with an error that reads like an account problem.
+    NotServed {
+        host: String,
+        command: Option<String>,
+    },
     /// No tailnet, so no name a browser will trust and no route to make one.
     ///
     /// Deliberately carries NO url. The server is listening and the page would
@@ -122,6 +129,41 @@ pub fn parse_dns_name(status_json: &str) -> Option<String> {
     Some(name.to_owned())
 }
 
+/// Whether this tailnet can issue a browser-trusted certificate.
+///
+/// ⚠️ `tailscale serve` IS NOT AVAILABLE ON EVERY TAILNET, and the pane used to
+/// assume it was. Serve terminates TLS with a certificate Tailscale issues for
+/// the `.ts.net` name, so it needs Tailscale's own certificate infrastructure.
+/// Against a self-hosted control server — Headscale — there is none: `tailscale
+/// cert` answers *"your Tailscale account does not support getting TLS certs"*,
+/// and HTTPS support for `serve` is an open feature request against Headscale
+/// rather than a setting.
+///
+/// So the shelf asked a reader to run a command that could not work, and the
+/// failure it produced read like something wrong with their account. Measured
+/// on a Headscale tailnet, 2026-08-26.
+///
+/// `CertDomains` is the tailnet's answer: a list of domains it will issue for,
+/// `null` or absent when it will issue for none. Parsed by hand for the same
+/// reason `parse_dns_name` is — one fact out of a large document, and adding a
+/// JSON dependency to a plugin to read one field is a poor trade.
+pub fn can_issue_certificates(status_json: &str) -> bool {
+    let Some(key) = status_json.find("\"CertDomains\"") else {
+        return false;
+    };
+    let rest = &status_json[key + "\"CertDomains\"".len()..];
+    let Some(colon) = rest.find(':') else {
+        return false;
+    };
+    let value = rest[colon + 1..].trim_start();
+    /* AN EMPTY LIST IS A NO, and so is `null`. Both mean the tailnet will issue
+     * for nothing, and only the presence of an entry means it will. */
+    let Some(without_bracket) = value.strip_prefix('[') else {
+        return false;
+    };
+    !without_bracket.trim_start().starts_with(']')
+}
+
 /// Whether a serve config mentions our loopback port.
 ///
 /// A substring check rather than a parse. `tailscale serve status` prints the
@@ -134,31 +176,46 @@ pub fn serves_port(serve_status: &str, port: u16) -> bool {
 }
 
 /// Resolve the address, asking Tailscale if it is there.
+///
+/// The SHELLING OUT is all that is here; `decide` below is the judgement, so it
+/// can be tested without a tailnet. That split is not decoration: the decision
+/// this makes was wrong for every self-hosted control server and no test could
+/// see it, because the only way in was two subprocesses.
 pub fn resolve(port: Option<u16>) -> Address {
     let Some(port) = port else {
         return Address::Unavailable;
     };
+    let Some(status) = tailscale(&["status", "--json"]) else {
+        return Address::NoHttps { port };
+    };
+    let serve = tailscale(&["serve", "status"]).unwrap_or_default();
+    decide(port, &status, &serve)
+}
+
+/// What the two Tailscale answers mean, with no subprocess in sight.
+pub fn decide(port: u16, status: &str, serve: &str) -> Address {
     let no_https = Address::NoHttps { port };
 
-    let Some(status) = tailscale(&["status", "--json"]) else {
-        return no_https;
-    };
-    let Some(host) = parse_dns_name(&status) else {
+    let Some(host) = parse_dns_name(status) else {
         return no_https;
     };
 
-    let serve = tailscale(&["serve", "status"]).unwrap_or_default();
-    if serves_port(&serve, port) {
+    if serves_port(serve, port) {
         return Address::Https {
             url: format!("https://{host}/"),
         };
     }
     Address::NotServed {
         host: host.clone(),
-        /* THE EXACT COMMAND, not a description of one. A reader who has to
+        /* THE EXACT COMMAND, not a description of one — a reader who has to
          * translate "put a reverse proxy in front of it" into this line is a
-         * reader who will not. */
-        command: format!("tailscale serve --bg http://127.0.0.1:{port}"),
+         * reader who will not.
+         *
+         * But ONLY when it can work. See `can_issue_certificates`: on a
+         * self-hosted control server the command fails with an error about the
+         * reader's account, which is both wrong and unactionable. */
+        command: can_issue_certificates(status)
+            .then(|| format!("tailscale serve --bg http://127.0.0.1:{port}")),
     }
 }
 
@@ -221,5 +278,111 @@ mod tests {
     #[test]
     fn no_port_means_there_is_nothing_to_reach() {
         assert_eq!(resolve(None), Address::Unavailable);
+    }
+
+    /// THE COMMAND IS ONLY OFFERED WHEN IT CAN WORK.
+    ///
+    /// `tailscale serve` terminates TLS with a certificate Tailscale issues for
+    /// the `.ts.net` name, so it needs Tailscale's own certificate
+    /// infrastructure. A self-hosted control server has none: `tailscale cert`
+    /// answers "your Tailscale account does not support getting TLS certs".
+    ///
+    /// The pane printed the command to every tailnet regardless, so a reader on
+    /// Headscale was told to run a line that fails with an error about their
+    /// account — wrong, and unactionable. Measured against a real Headscale
+    /// tailnet, 2026-08-26.
+    #[test]
+    fn a_tailnet_that_cannot_issue_certificates_is_not_told_to_run_serve() {
+        /* What Tailscale's own control server answers with HTTPS enabled. */
+        assert!(can_issue_certificates(
+            r#"{"Self":{},"CertDomains":["tail1234.ts.net"]}"#
+        ));
+
+        /* And the three ways a tailnet says no. `null` is what Headscale
+         * answers; the other two are an empty list and the field being absent
+         * altogether, which older clients do. */
+        for status in [
+            r#"{"Self":{},"CertDomains":null}"#,
+            r#"{"Self":{},"CertDomains":[]}"#,
+            r#"{"Self":{},"CertDomains": [ ]}"#,
+            r#"{"Self":{"DNSName":"studio.example."}}"#,
+        ] {
+            assert!(
+                !can_issue_certificates(status),
+                "should not promise a certificate for {status}"
+            );
+        }
+    }
+
+    /// A NO IS NOT A MAYBE. Anything this cannot read is a tailnet that has not
+    /// said it can issue, and offering the command on a guess is what produced
+    /// the original defect.
+    #[test]
+    fn an_unreadable_answer_is_treated_as_no_certificates() {
+        for status in [
+            "",
+            "{}",
+            "not json at all",
+            r#"{"CertDomains"}"#,
+            r#"{"CertDomains":"#,
+        ] {
+            assert!(!can_issue_certificates(status), "{status:?}");
+        }
+    }
+
+    /// THE DECISION ITSELF, over the two answers Tailscale gives.
+    ///
+    /// `can_issue_certificates` had tests and `resolve` did not, so removing
+    /// the call and offering the command unconditionally left every test green
+    /// — which is exactly the state the pane shipped in. A predicate nothing
+    /// consults is a predicate that is not doing anything.
+    #[test]
+    fn the_decision_offers_a_command_only_to_a_tailnet_that_can_use_it() {
+        let named = r#"{"Self":{"DNSName":"studio.example."},"CertDomains":["example"]}"#;
+        let no_certs = r#"{"Self":{"DNSName":"studio.example."},"CertDomains":null}"#;
+
+        match decide(27182, named, "") {
+            Address::NotServed { command, .. } => {
+                assert_eq!(
+                    command.as_deref(),
+                    Some("tailscale serve --bg http://127.0.0.1:27182")
+                )
+            }
+            other => panic!("expected NotServed, got {other:?}"),
+        }
+
+        match decide(27182, no_certs, "") {
+            Address::NotServed { command, .. } => assert_eq!(
+                command, None,
+                "a tailnet that cannot issue certificates must not be told to run serve"
+            ),
+            other => panic!("expected NotServed, got {other:?}"),
+        }
+    }
+
+    /// AND SERVING WINS OVER EVERYTHING. A tailnet already proxying our port has
+    /// a working address, whatever it says about issuing certificates — the
+    /// certificate is evidently already there.
+    #[test]
+    fn a_served_port_reports_its_url_even_without_cert_domains() {
+        let no_certs = r#"{"Self":{"DNSName":"studio.example."},"CertDomains":null}"#;
+        match decide(
+            27182,
+            no_certs,
+            "https://studio.example/ proxy http://127.0.0.1:27182",
+        ) {
+            Address::Https { url } => assert_eq!(url, "https://studio.example/"),
+            other => panic!("expected Https, got {other:?}"),
+        }
+    }
+
+    /// NO TAILNET NAME IS NO ADDRESS, and carries no URL on purpose: a
+    /// plain-HTTP address loads and then cannot hold a sign-in.
+    #[test]
+    fn no_tailnet_name_reports_no_https() {
+        assert!(matches!(
+            decide(27182, "{}", ""),
+            Address::NoHttps { port: 27182 }
+        ));
     }
 }

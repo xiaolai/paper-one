@@ -35,6 +35,37 @@ describe('BrowsersPane', () => {
     expect(screen.queryByText('https://studio.tail1234.ts.net/')).toBeNull()
   })
 
+  /**
+   * ⚠️ AND IT DOES NOT OFFER A COMMAND THAT CANNOT WORK.
+   *
+   * `tailscale serve` terminates TLS with a certificate Tailscale issues for
+   * the `.ts.net` name, so it needs Tailscale's own certificate
+   * infrastructure. A self-hosted control server has none, and the command
+   * fails with *"your Tailscale account does not support getting TLS certs"* —
+   * an error about an account, shown to a reader who does not have one.
+   *
+   * The pane printed that line to every tailnet, which is the same mistake as
+   * printing a URL because Tailscale happened to be installed: confident,
+   * specific, and wrong for a whole class of reader. Found by running it
+   * against a real Headscale tailnet, 2026-08-26.
+   */
+  it('says what is true when the tailnet cannot issue certificates', async () => {
+    const wire = fakeWire({
+      address: async () => ({
+        kind: 'not-served',
+        host: 'studio.example.internal',
+        command: null,
+      }),
+    })
+    render(<BrowsersPane wire={wire} />)
+    expect(await screen.findByText(/cannot issue certificates/i)).toBeTruthy()
+    /* THE DEAD END IS NOT SHOWN AT ALL. Softening the wording around it would
+       leave a reader with a line to copy that fails. */
+    expect(screen.queryByText(/tailscale serve --bg/)).toBeNull()
+    /* And it names routes that DO work rather than leaving them stuck. */
+    expect(screen.getByText(/certificate authority you run yourself/i)).toBeTruthy()
+  })
+
   it('prints no address at all when there is no HTTPS route', async () => {
     /* MEASURED 2026-08-25 against WebKit: the browser stores the `Secure`
        session cookie from http://127.0.0.1 and then refuses to SEND it. So a

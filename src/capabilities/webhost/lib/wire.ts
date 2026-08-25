@@ -48,8 +48,13 @@ export type WebHostAddress =
   /** Reachable from anywhere on the tailnet, over TLS. The working case. */
   | { readonly kind: 'https'; readonly url: string }
   /** A tailnet exists and nothing proxies to this port, so a phone cannot
-   *  reach the client. `command` is the exact line that fixes it. */
-  | { readonly kind: 'not-served'; readonly host: string; readonly command: string }
+   *  reach the client.
+   *
+   *  `command` is the exact line that fixes it — or NULL, on a tailnet that
+   *  cannot issue certificates at all. `tailscale serve` needs Tailscale's own
+   *  certificate infrastructure; against a self-hosted control server it fails
+   *  with an error about the reader's account, which they do not have. */
+  | { readonly kind: 'not-served'; readonly host: string; readonly command: string | null }
   /** No tailnet, so no name a browser will trust. Carries NO url on purpose:
    *  a plain-HTTP address loads and then cannot hold a sign-in, which is a
    *  wrong answer to "where do I point my browser" rather than a lesser one. */

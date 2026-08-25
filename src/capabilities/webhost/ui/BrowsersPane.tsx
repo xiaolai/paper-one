@@ -90,14 +90,37 @@ function AddressBlock({ address }: { readonly address: WebHostAddress | null }) 
        * would resolve and refuse the connection. Printing it because Tailscale
        * happened to be installed would be a guess dressed as an answer, so the
        * pane gives the command instead of the URL. */
+      /* ⚠️ AND THE COMMAND IS NOT ALWAYS AVAILABLE. `tailscale serve` needs
+       * Tailscale's own certificate infrastructure for the `.ts.net` name; a
+       * self-hosted control server has none, and the command fails with "your
+       * Tailscale account does not support getting TLS certs" — an error about
+       * an account, for a reader who does not have one.
+       *
+       * The pane printed that line to every tailnet regardless, which is the
+       * same shape of mistake as printing a URL because Tailscale happened to
+       * be installed: confident, specific, and wrong for a whole class of
+       * reader. When there is no command, it says what is true and names the
+       * routes that do work rather than inventing one. */
       return (
         <>
           <div className={ui.hint}>
             A phone cannot reach this yet. {address.host} is on your tailnet, but nothing is serving
             the client over HTTPS — and HTTPS is not optional here, because the browser refuses to
-            keep a sign-in from a plain address. Run this once:
+            keep a sign-in from a plain address.
           </div>
-          <CopyableCode value={address.command} label="Copy the command" />
+          {address.command === null ? (
+            <div className={ui.hint}>
+              Your tailnet cannot issue certificates, so <code>tailscale serve</code> will not work
+              here — that is a property of the control server, not of this machine. Two routes do:
+              give the phone a certificate from a certificate authority you run yourself, or put a
+              tunnel in front that brings its own. Paper does not pick one for you.
+            </div>
+          ) : (
+            <>
+              <div className={ui.hint}>Run this once:</div>
+              <CopyableCode value={address.command} label="Copy the command" />
+            </>
+          )}
         </>
       )
 

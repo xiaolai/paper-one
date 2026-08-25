@@ -1452,6 +1452,7 @@
     "src/capabilities/webhost/ui/BrowsersPane.test.tsx > BrowsersPane > refuses to offer a code when the server never bound",
     "src/capabilities/webhost/ui/BrowsersPane.test.tsx > BrowsersPane > refuses to print a tailnet URL that nothing is serving",
     "src/capabilities/webhost/ui/BrowsersPane.test.tsx > BrowsersPane > reports a failed bind as not running rather than as a missing value",
+    "src/capabilities/webhost/ui/BrowsersPane.test.tsx > BrowsersPane > says what is true when the tailnet cannot issue certificates",
     "src/capabilities/webhost/ui/BrowsersPane.test.tsx > BrowsersPane > shows nothing about browsers when none are connected",
     "src/capabilities/webhost/ui/BrowsersPane.test.tsx > BrowsersPane > shows six digits and how long they last",
     "src/capabilities/webhost/ui/BrowsersPane.test.tsx > BrowsersPane > stops showing a code once it has expired",
