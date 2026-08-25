@@ -13,8 +13,10 @@
 
 import {
   BaseDirectory,
+  SeekMode,
   exists,
   mkdir,
+  open as openFile,
   readFile,
   remove,
   rename,
@@ -53,6 +55,47 @@ export interface VaultFs {
    * which is correct and O(n) per append, a price only tests should pay.
    */
   appendFile?: (path: string, bytes: Uint8Array) => Promise<void>
+  /**
+   * A slice of a file, without reading the rest (phase 18).
+   *
+   * OPTIONAL, on the same terms as `appendFile`: a filesystem without it falls
+   * back to `readFile` and a slice, which is correct and **O(n) per slice**.
+   * That price is not one only tests should pay here — `content.read` serves a
+   * book to a browser a slice at a time, so the fallback is O(n²) over the
+   * book, and a 300 MB scanned PDF would be re-read once per megabyte served.
+   *
+   * So: implement it wherever a book's bytes are actually served. The fallback
+   * exists so a fake filesystem in a test need not, and `readRangeOf` below is
+   * the one place that decides which is in use.
+   *
+   * Answers FEWER bytes than asked at the end of the file, and an empty array
+   * past it — the same contract a POSIX read has, and the one a caller
+   * assembling a stream already has to handle.
+   */
+  readRange?: (path: string, offset: number, length: number) => Promise<Uint8Array>
+}
+
+/**
+ * A slice of a file, however this filesystem can manage it.
+ *
+ * ONE PLACE DECIDES. A caller reaching for `fs.readRange ?? readFile-and-slice`
+ * itself is a caller that will get the fallback's bounds subtly wrong — a
+ * negative offset, a length past the end — in a way that only shows on the
+ * last chunk of a large book.
+ */
+export async function readRangeOf(
+  fs: VaultFs,
+  path: string,
+  offset: number,
+  length: number,
+): Promise<Uint8Array> {
+  if (offset < 0 || length < 0) throw new Error(`readRange: offset and length must not be negative (${offset}, ${length})`)
+  if (length === 0) return new Uint8Array(0)
+  if (fs.readRange) return await fs.readRange(path, offset, length)
+  const whole = await fs.readFile(path)
+  /* `subarray` would share the buffer with the whole file, keeping every byte
+   * of a 300 MB book alive for as long as the caller holds one chunk. */
+  return whole.slice(offset, offset + length)
 }
 
 const DIR = { baseDir: BaseDirectory.AppData } as const
@@ -68,6 +111,34 @@ export const tauriVaultFs: VaultFs = {
   // A real append, so a journal line costs one write and not a rewrite of
   // the whole file. The fs plugin's writeFile carries the flag.
   appendFile: (path, bytes) => writeFile(path, bytes, { ...DIR, append: true }),
+  /* A REAL SEEK, so serving a book to a browser costs one read per slice
+   * rather than one read of the whole book per slice. `fs:allow-open`,
+   * `fs:allow-seek`, `fs:allow-read` and `fs:allow-close` are granted in
+   * `capabilities/default.json`, scoped to `$APPDATA/**` — the same files
+   * `readFile` already reaches, reached a different way.
+   *
+   * The handle is closed in a `finally`: a leaked one holds a descriptor for
+   * the life of the process, and a reader browsing a shelf opens many. */
+  readRange: async (path, offset, length) => {
+    const handle = await openFile(path, { ...DIR, read: true })
+    try {
+      await handle.seek(offset, SeekMode.Start)
+      const buffer = new Uint8Array(length)
+      /* ONE `read` IS NOT A GUARANTEE OF `length` BYTES. It answers what it
+       * has; a short answer at the end of a file is normal, and looping is
+       * what turns "some bytes" into "the slice asked for". */
+      let filled = 0
+      for (;;) {
+        const got = await handle.read(buffer.subarray(filled))
+        if (got === null || got === 0) break
+        filled += got
+        if (filled >= length) break
+      }
+      return buffer.subarray(0, filled)
+    } finally {
+      await handle.close()
+    }
+  },
 }
 
 /**

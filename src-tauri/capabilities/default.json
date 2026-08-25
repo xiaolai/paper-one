@@ -29,6 +29,14 @@
     "fs:allow-exists",
 
     {
+      "identifier": "fs:allow-open",
+      "allow": [{ "path": "$APPDATA/**" }]
+    },
+    "fs:allow-seek",
+    "fs:allow-read",
+    "core:resources:allow-close",
+
+    {
       "identifier": "fs:allow-write-file",
       "allow": [{ "path": "$APPDATA/**" }]
     },

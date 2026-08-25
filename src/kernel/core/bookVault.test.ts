@@ -3,6 +3,7 @@ import { BOOKS_DIR, contentPathIn } from './bookFolder'
 import {
   extensionFor,
   readOwnedBook,
+  readRangeOf,
   type VaultFs,
 } from './bookVault'
 
@@ -92,3 +93,73 @@ describe('readOwnedBook', () => {
   })
 })
 
+describe('readRangeOf', () => {
+  const WHOLE = new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+
+  /** A filesystem with no ranged read — the fallback path. */
+  const sliceOnly = {
+    readFile: async () => WHOLE,
+  } as unknown as VaultFs
+
+  /** One that has it, and records what it was asked for. */
+  function ranged() {
+    const asked: { offset: number; length: number }[] = []
+    const fs = {
+      readFile: async () => {
+        throw new Error('readFile must not be reached when readRange exists')
+      },
+      readRange: async (_path: string, offset: number, length: number) => {
+        asked.push({ offset, length })
+        return WHOLE.slice(offset, offset + length)
+      },
+    } as unknown as VaultFs
+    return { fs, asked }
+  }
+
+  it('prefers a real ranged read and never reads the whole file', async () => {
+    /* THE WHOLE POINT of the seam. `content.read` serves a book a slice at a
+       time; falling back per slice is O(n²) over the book, and a 300 MB scanned
+       PDF would be re-read once per megabyte served. The fake's `readFile`
+       throws so a regression cannot pass quietly. */
+    const { fs, asked } = ranged()
+    expect(await readRangeOf(fs, 'x', 3, 4)).toEqual(new Uint8Array([3, 4, 5, 6]))
+    expect(asked).toEqual([{ offset: 3, length: 4 }])
+  })
+
+  it('falls back to reading and slicing when there is no ranged read', async () => {
+    expect(await readRangeOf(sliceOnly, 'x', 2, 3)).toEqual(new Uint8Array([2, 3, 4]))
+  })
+
+  it('answers fewer bytes at the end of the file, not an error', async () => {
+    /* The POSIX contract, and the one a caller assembling a stream already has
+       to handle: a short answer means "that is all there was". */
+    expect(await readRangeOf(sliceOnly, 'x', 8, 100)).toEqual(new Uint8Array([8, 9]))
+  })
+
+  it('answers nothing past the end', async () => {
+    expect(await readRangeOf(sliceOnly, 'x', 50, 10)).toEqual(new Uint8Array(0))
+  })
+
+  it('answers nothing for a zero length, without touching the file', async () => {
+    const never = {
+      readFile: async () => {
+        throw new Error('should not read for a zero-length slice')
+      },
+    } as unknown as VaultFs
+    expect(await readRangeOf(never, 'x', 0, 0)).toEqual(new Uint8Array(0))
+  })
+
+  it('refuses a negative offset or length rather than guessing', async () => {
+    /* `slice` treats a negative index as counting from the END, so a negative
+       offset would quietly answer bytes from the wrong part of the book. */
+    await expect(readRangeOf(sliceOnly, 'x', -1, 4)).rejects.toThrow(/must not be negative/)
+    await expect(readRangeOf(sliceOnly, 'x', 0, -4)).rejects.toThrow(/must not be negative/)
+  })
+
+  it('does not keep the whole file alive behind one slice', async () => {
+    /* `subarray` shares the buffer: holding one chunk of a 300 MB book would
+       hold all 300 MB. `slice` copies. */
+    const got = await readRangeOf(sliceOnly, 'x', 2, 2)
+    expect(got.buffer.byteLength).toBe(2)
+  })
+})
