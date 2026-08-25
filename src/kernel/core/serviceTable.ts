@@ -8,6 +8,7 @@ import type {
   BookDetail,
   BookRow,
   CardRow,
+  ContentChunk,
   ContentLocation,
   EmptiedRow,
   MarkRow,
@@ -57,6 +58,15 @@ import type { ClientContribution } from './capability'
  *     carry them. A second byte path would be a second set of the tests that
  *     one is already held to — a flipped byte, a resumed interruption, a
  *     folder trashed mid-transfer — or, worse, none.
+ *
+ *     ⚠️ `content.read` (phase 18) IS BYTES, and is the deliberate exception.
+ *     It is a READ, not a TRANSFER, and the difference is what makes it safe
+ *     to add: no resume, no partial-file state on disk, no second hash to keep
+ *     honest — integrity comes from the TLS the browser client already
+ *     requires. A browser cannot take the blob path at all (it has no iroh),
+ *     and the alternative was an HTTP byte endpoint, which would exist on one
+ *     transport and not the other. One path, both transports, the properties
+ *     the blob path was tested for either absent or supplied elsewhere.
  *   - `device.pair`. Pairing is a human act with a SAS both people read
  *     aloud, and WI-8.6 recorded what driving it by command costs: `grants`
  *     is optional on the wire, the harness omitted it, an empty grant list
@@ -166,6 +176,10 @@ export const SERVICE_VERBS = [
   'rename',
   'locate',
   'evict',
+  /* `read` is `content.read` (phase 18) — a slice of a book's bytes. The one
+     verb in this table that carries CONTENT rather than a description of it;
+     the note at the head of the file says why that exception is safe. */
+  'read',
   'grant',
   'forget',
   'status',
@@ -292,6 +306,7 @@ export interface WireShapes {
   TrashRow: TrashRow
   TagCount: TagCountRow
   TagChange: TagChange
+  ContentChunk: ContentChunk
   ContentLocation: ContentLocation
   ShelfStatus: ShelfStatus
   DeviceRow: DeviceRow
@@ -664,6 +679,26 @@ const TABLE = [
     summary: 'Hash, size, and whether this shelf holds the bytes — what a caller needs BEFORE opening a blob stream.',
     input: [BOOK_ID],
     output: { many: false, of: 'ContentLocation' },
+  },
+  {
+    name: 'content.read',
+    noun: 'content',
+    verb: 'read',
+    grant: 'book:read',
+    kind: 'stream',
+    summary: "A slice of a book's bytes, base64, in chunks — what a browser reads a book through.",
+    input: [
+      BOOK_ID,
+      { name: 'offset', type: 'number', integer: true, min: 0, doc: 'Where to start, in bytes. Default 0.' },
+      {
+        name: 'length',
+        type: 'number',
+        integer: true,
+        min: 0,
+        doc: 'How many bytes at most. Absent means to the end of the file.',
+      },
+    ],
+    output: { many: true, of: 'ContentChunk', columns: ['bookId', 'offset', 'bytes'] },
   },
   {
     name: 'content.evict',

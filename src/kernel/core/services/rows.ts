@@ -258,6 +258,27 @@ export function trashRow(one: TrashedBook): TrashRow {
 }
 
 /** Where a book's bytes are, as `content.locate` / `content.evict` answer. */
+/**
+ * A slice of a book's bytes (phase 18).
+ *
+ * **Base64, not a byte array.** The envelope's body is JSON, and a `Uint8Array`
+ * through `JSON.stringify` becomes `{"0":80,"1":75,…}` — roughly eleven bytes
+ * on the wire per byte of book. Base64 costs four bytes per three and is one
+ * `atob` to undo.
+ *
+ * `offset` is echoed rather than inferred. A caller assembling a file from a
+ * stream must be able to place a chunk without counting, because a stream that
+ * ends early has to be detectable as short rather than silently truncating the
+ * book.
+ */
+export interface ContentChunk {
+  readonly bookId: string
+  /** Where this slice starts in the file. */
+  readonly offset: number
+  /** The slice, base64. */
+  readonly bytes: string
+}
+
 export interface ContentLocation {
   readonly bookId: string
   /** Whether THIS device holds the bytes. */

@@ -152,6 +152,32 @@ export function nodeIndexFs(root: string): IndexFs {
     appendFile: async (path, bytes) => {
       await appendFile(at(path), bytes)
     },
+    /* A REAL SEEK, for the same reason the Tauri adapter has one: `content.read`
+     * serves a book a slice at a time, and the interface's fallback is O(n) per
+     * slice — quadratic over a book, with a 300 MB scanned PDF re-read once per
+     * megabyte served.
+     *
+     * The handle is closed in a `finally`, because a leaked one holds a
+     * descriptor until the process ends and a CLI serving a shelf opens many.
+     *
+     * `read` answers what it has, not what was asked: a short answer at the end
+     * of a file is normal, so this loops until the slice is full or the file
+     * runs out. */
+    readRange: async (path, offset, length) => {
+      const handle = await open(at(path), 'r')
+      try {
+        const buffer = new Uint8Array(length)
+        let filled = 0
+        while (filled < length) {
+          const { bytesRead } = await handle.read(buffer, filled, length - filled, offset + filled)
+          if (bytesRead === 0) break
+          filled += bytesRead
+        }
+        return buffer.subarray(0, filled)
+      } finally {
+        await handle.close()
+      }
+    },
     readDir: async (path) => {
       const entries = await readdir(at(path), { withFileTypes: true })
       return entries.map((entry) => ({ name: entry.name, isDirectory: entry.isDirectory() }))

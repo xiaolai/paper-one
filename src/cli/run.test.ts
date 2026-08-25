@@ -159,6 +159,7 @@ describe('--json', () => {
       'tag.list': ['tag', 'list'],
       'trash.list': ['trash', 'list'],
       'content.locate': ['content', 'locate', 'aaa'],
+      'content.read': ['content', 'read', 'aaa'],
       'shelf.status': ['shelf', 'status'],
     }
     /* THE LIST IS CHECKED AGAINST THE TABLE, not merely iterated.

@@ -92,7 +92,15 @@ async function serveOverTheWire(grants: readonly string[] = ['book:*', 'mark:*',
   const wires = linkedWires()
   const shelfPort = createPeerPort(wires.shelf)
   const satchelPort = createPeerPort(wires.satchel)
-  const services = createKernelServices({ fs: fakeFs({}), storage: null, initialBooks: books })
+  /* BYTES FOR ONE BOOK, so `content.read` crosses this wire for real rather
+   * than being exempted from it. The envelope is what a browser reads a book
+   * through, and a chunked byte stream is the one service here whose framing
+   * a small fixture would not exercise. */
+  const services = createKernelServices({
+    fs: fakeFs({ 'books/b0000/content.epub': 'PK\u0003\u0004 pretend epub bytes' }),
+    storage: null,
+    initialBooks: books,
+  })
   /* WHAT THE HANDLER ACTUALLY PRODUCED. Cancellation is about work stopping on
    * the SHELF, and nothing here could see that: the assertions were all about
    * the client's own iterator, which a client that never sends `cancel`
@@ -198,6 +206,7 @@ describe('every command, over the envelope', () => {
       'tag.list': ['tag', 'list'],
       'trash.list': ['trash', 'list'],
       'content.locate': ['content', 'locate', 'b0000'],
+      'content.read': ['content', 'read', 'b0000'],
       'shelf.status': ['shelf', 'status'],
     }
     /* Derived from the table, so a read service added without a case here

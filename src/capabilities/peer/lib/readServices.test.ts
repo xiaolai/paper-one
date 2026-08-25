@@ -61,6 +61,10 @@ const REQUEST: Readonly<Record<string, unknown>> = {
   'tag.list': {},
   'trash.list': {},
   'content.locate': { book: 'b0000' },
+  /* A bounded slice, so the case does not depend on how long the fixture's
+     content is. `content.read` refuses when the shelf has no filesystem, which
+     is what this harness gives it — see the case below. */
+  'content.read': { book: 'b0000', offset: 0, length: 16 },
   'shelf.status': {},
   'device.list': {},
 }
@@ -86,6 +90,11 @@ describe('the read services, service by service', () => {
     it(`${descriptor.name} answers over the wire`, async () => {
       const shelf = serveTable({
         books,
+        /* CONTENT FOR ONE BOOK, so `content.read` has bytes to answer with
+           rather than refusing "no content on this shelf". The fake filesystem
+           has no `readRange`, so this also exercises `readRangeOf`'s fallback —
+           the path a test filesystem is expected to take. */
+        files: { 'books/b0000/content.epub': 'PK\u0003\u0004 pretend epub bytes' },
         /* `device.list` and `shelf.sync` need ports; `shelf.status` does not,
          * and answers what it can. Bound here so the happy path of
          * `device.list` is a real answer rather than a refusal. */

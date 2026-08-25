@@ -132,7 +132,12 @@ describe('the service table', () => {
     expect(readingGrant('device:manage')).toBe(false)
     expect(readingGrant('shelf:admin')).toBe(false)
     expect(readServices().length + writeServices().length).toBe(SERVICE_TABLE.length)
-    /* The ten the plan names for WI-11.3, exactly. */
+    /* WRITTEN OUT, so a service cannot become a READ service by accident.
+     * `readServices` splits on the grant alone, so a row whose grant is
+     * mistyped `book:read` when it writes moves silently into the set every
+     * satchel may call. Growing this list is a deliberate edit; not noticing
+     * it grew is the failure. The ten the plan named for WI-11.3, plus
+     * `content.read` (phase 18) — the browser client's byte path. */
     expect(readServices().map((one) => one.name).sort()).toEqual(
       [
         'book.get',
@@ -140,6 +145,7 @@ describe('the service table', () => {
         'book.search',
         'card.list',
         'content.locate',
+        'content.read',
         'device.list',
         'mark.list',
         'shelf.status',
