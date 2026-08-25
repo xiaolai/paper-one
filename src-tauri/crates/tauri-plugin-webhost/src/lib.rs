@@ -30,6 +30,7 @@
 //! exact failure the bridge's scan produced. `status().port` is `null` and the
 //! Devices pane can say why.
 
+mod address;
 mod client;
 mod commands;
 mod error;
@@ -52,6 +53,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
     Builder::new("webhost")
         .invoke_handler(tauri::generate_handler![
             commands::webhost_status,
+            commands::webhost_address,
             commands::webhost_begin_code,
             commands::webhost_cancel_code,
             commands::webhost_sessions,

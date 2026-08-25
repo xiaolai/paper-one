@@ -34,6 +34,28 @@ export interface CodeOffer {
   readonly expiresInMs: number
 }
 
+/**
+ * Where a phone should point its browser, and whether it can get there.
+ *
+ * FOUR STATES, not a string, because the difference between them is what a
+ * reader has to act on. The session cookie is `Secure`, so a plain-HTTP address
+ * is not a worse answer than an HTTPS one — it is a broken one: the browser
+ * takes the six digits, refuses to store the credential, and returns to the
+ * code screen saying nothing. A single `url` field would make that failure
+ * indistinguishable from success until it happened.
+ */
+export type WebHostAddress =
+  /** Reachable from anywhere on the tailnet, over TLS. The working case. */
+  | { readonly kind: 'https'; readonly url: string }
+  /** A tailnet exists and nothing proxies to this port, so a phone cannot
+   *  reach the client. `command` is the exact line that fixes it. */
+  | { readonly kind: 'not-served'; readonly host: string; readonly command: string }
+  /** No tailnet. Works from this machine only — `localhost` is a secure
+   *  context, so the credential is storable there and nowhere else. */
+  | { readonly kind: 'local-only'; readonly url: string }
+  /** The server never bound; there is nothing to reach. */
+  | { readonly kind: 'unavailable' }
+
 /** One browser holding a credential. */
 export interface BrowserSession {
   readonly id: number
@@ -41,6 +63,7 @@ export interface BrowserSession {
 
 export interface WebHostWire {
   status(): Promise<WebHostStatus>
+  address(): Promise<WebHostAddress>
   beginCode(): Promise<CodeOffer>
   cancelCode(): Promise<void>
   sessions(): Promise<readonly BrowserSession[]>
@@ -50,6 +73,7 @@ export interface WebHostWire {
 export function tauriWire(): WebHostWire {
   return {
     status: () => invoke<WebHostStatus>('plugin:webhost|webhost_status'),
+    address: () => invoke<WebHostAddress>('plugin:webhost|webhost_address'),
     beginCode: () => invoke<CodeOffer>('plugin:webhost|webhost_begin_code'),
     cancelCode: () => invoke<void>('plugin:webhost|webhost_cancel_code'),
     sessions: () => invoke<readonly BrowserSession[]>('plugin:webhost|webhost_sessions'),
@@ -63,6 +87,7 @@ export function fakeWire(overrides: Partial<WebHostWire> = {}): WebHostWire {
   let issued = 0
   return {
     status: async () => ({ pluginVersion: '0.0.0-fake', port: 27182, ready: true }),
+    address: async () => ({ kind: 'https', url: 'https://studio.tail1234.ts.net/' }),
     beginCode: async () => {
       issued += 1
       return { code: String(100000 + issued).slice(0, 6), expiresInMs: 90_000 }

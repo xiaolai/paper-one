@@ -255,3 +255,9 @@ export type { Card, CardKind, NewCard } from './core/cards'
 export { KERNEL_PANE_IDS, isContributedPaneId, isKernelPaneId } from './core/uiTypes'
 export type { ContributedPaneId, KernelPaneId, PageLayout, PaneId, Screen, Side, Theme, Typeface } from './core/uiTypes'
 
+
+/* The design system's icon sizes. Exported for a capability's UI: `lucide`
+ * takes a number, and a capability picking its own would be the one control in
+ * the app drawn at a size nothing else uses. `ICON.control` is the size every
+ * icon inside a control already takes. */
+export { ICON } from './core/metrics'

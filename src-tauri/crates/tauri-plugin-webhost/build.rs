@@ -11,6 +11,7 @@
 /// four edits; forgetting one is now a red test rather than a silent hole.
 const COMMANDS: &[&str] = &[
     "webhost_status",
+    "webhost_address",
     "webhost_begin_code",
     "webhost_cancel_code",
     "webhost_sessions",

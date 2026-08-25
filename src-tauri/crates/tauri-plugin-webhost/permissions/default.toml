@@ -12,6 +12,7 @@ frames to the webview, which holds the router.
 """
 permissions = [
     "allow-webhost-status",
+    "allow-webhost-address",
     "allow-webhost-begin-code",
     "allow-webhost-cancel-code",
     "allow-webhost-sessions",

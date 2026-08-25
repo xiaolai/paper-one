@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { CAPABILITY_UI as ui } from '../../../kernel'
-import type { BrowserSession, CodeOffer, WebHostStatus, WebHostWire } from '../lib/wire'
+import { Check, Copy } from 'lucide-react'
+import { CAPABILITY_UI as ui, ICON } from '../../../kernel'
+import type { BrowserSession, CodeOffer, WebHostAddress, WebHostWire } from '../lib/wire'
 
 /**
  * Settings → **Browsers**: the six digits a phone types, and the browsers that
@@ -24,15 +25,114 @@ import type { BrowserSession, CodeOffer, WebHostStatus, WebHostWire } from '../l
 
 /** How often the browser list is re-read while the pane is open. */
 const POLL_MS = 4000
+/** How long a copy button says it worked. */
+const COPIED_MS = 1600
 
-function describePort(status: WebHostStatus | null): string {
-  if (status === null) return 'Checking…'
-  /* A NULL PORT IS A REAL STATE, not a missing value. The plugin binds one
-   * pinned port and does not scan for another, so a port already taken means no
-   * browser can reach this shelf — and saying "not running" is the only way a
-   * reader learns that without reading a log. */
-  if (status.port === null) return 'Not running — the port was already in use'
-  return `Serving on port ${status.port}`
+/**
+ * A button that puts one string on the clipboard and says so.
+ *
+ * An ADDRESS AND A CODE ARE BOTH THINGS TO CARRY SOMEWHERE ELSE — to a phone,
+ * to a message, to a terminal — and retyping either is where the mistakes are.
+ * `.paper-cap-code` already makes them select-all; this is the one-tap version.
+ */
+function CopyButton({ value, label }: { readonly value: string; readonly label: string }) {
+  const [copied, setCopied] = useState(false)
+  useEffect(() => {
+    if (!copied) return
+    const timer = setTimeout(() => setCopied(false), COPIED_MS)
+    return () => clearTimeout(timer)
+  }, [copied])
+  return (
+    <button
+      type="button"
+      className={ui.button}
+      /* The label says WHAT is copied. Three copy buttons can be on this pane
+       * at once — an address, a command, a code — and a screen reader hearing
+       * "Copy" three times has been told nothing. */
+      title={label}
+      aria-label={label}
+      onClick={() => {
+        void navigator.clipboard.writeText(value).then(
+          () => setCopied(true),
+          () => setCopied(false),
+        )
+      }}
+    >
+      {copied ? (
+        <Check size={ICON.control} strokeWidth={ICON.stroke} />
+      ) : (
+        <Copy size={ICON.control} strokeWidth={ICON.stroke} />
+      )}
+    </button>
+  )
+}
+
+/**
+ * The address, in whichever of its four states this shelf is in.
+ *
+ * EACH STATE GETS ITS OWN ANSWER because each has a different fix, and a URL
+ * that cannot work is worse than no URL — the session cookie is `Secure`, so a
+ * browser reaching a plain-HTTP address takes the six digits, refuses to store
+ * the credential, and returns to the code screen with nothing to say.
+ */
+function AddressBlock({ address }: { readonly address: WebHostAddress | null }) {
+  if (address === null) return <div className={ui.hint}>Looking for an address…</div>
+
+  switch (address.kind) {
+    case 'https':
+      return (
+        <>
+          <code className={ui.code}>{address.url}</code>
+          <div className={ui.actions}>
+            <CopyButton value={address.url} label="Copy the address" />
+          </div>
+        </>
+      )
+
+    case 'not-served':
+      /* THE HONEST STATE, and the one most likely to be met. Tailscale is
+       * running and nothing is proxying to this port, so `https://<host>/`
+       * would resolve and refuse the connection. Printing it because Tailscale
+       * happened to be installed would be a guess dressed as an answer, so the
+       * pane gives the command instead of the URL. */
+      return (
+        <>
+          <div className={ui.hint}>
+            A phone cannot reach this yet. {address.host} is on your tailnet, but nothing is serving
+            the client over HTTPS — and HTTPS is not optional here, because the browser refuses to
+            keep a sign-in from a plain address. Run this once:
+          </div>
+          <code className={ui.code}>{address.command}</code>
+          <div className={ui.actions}>
+            <CopyButton value={address.command} label="Copy the command" />
+          </div>
+        </>
+      )
+
+    case 'local-only':
+      return (
+        <>
+          <code className={ui.code}>{address.url}</code>
+          <div className={ui.hint}>
+            This machine only. For a phone the shelf needs a name a browser trusts — Tailscale is
+            the cheapest way to get one.
+          </div>
+          <div className={ui.actions}>
+            <CopyButton value={address.url} label="Copy the address" />
+          </div>
+        </>
+      )
+
+    case 'unavailable':
+      /* The plugin binds ONE pinned port and does not scan for another, so this
+       * is not a transient state that will resolve itself. */
+      return (
+        <div className={ui.hint}>
+          Not running — port 27182 was already in use when Paper started. Quit whatever holds it and
+          reopen Paper.
+        </div>
+      )
+  }
 }
 
 export interface BrowsersPaneProps {
@@ -42,7 +142,7 @@ export interface BrowsersPaneProps {
 }
 
 export function BrowsersPane({ wire, pollMs = POLL_MS }: BrowsersPaneProps) {
-  const [status, setStatus] = useState<WebHostStatus | null>(null)
+  const [address, setAddress] = useState<WebHostAddress | null>(null)
   const [offer, setOffer] = useState<CodeOffer | null>(null)
   const [remaining, setRemaining] = useState(0)
   const [sessions, setSessions] = useState<readonly BrowserSession[]>([])
@@ -50,12 +150,20 @@ export function BrowsersPane({ wire, pollMs = POLL_MS }: BrowsersPaneProps) {
 
   const refresh = useCallback(async () => {
     try {
-      const [next, live] = await Promise.all([wire.status(), wire.sessions()])
-      setStatus(next)
-      setSessions(live)
+      setSessions(await wire.sessions())
     } catch (thrown) {
       setProblem(thrown instanceof Error ? thrown.message : String(thrown))
     }
+  }, [wire])
+
+  /* THE ADDRESS IS ASKED ONCE, not on the poll. Resolving it shells out to
+   * Tailscale twice, and a reader's tailnet does not change every four
+   * seconds. */
+  useEffect(() => {
+    void wire
+      .address()
+      .then(setAddress)
+      .catch((thrown: unknown) => setProblem(thrown instanceof Error ? thrown.message : String(thrown)))
   }, [wire])
 
   useEffect(() => {
@@ -115,19 +223,20 @@ export function BrowsersPane({ wire, pollMs = POLL_MS }: BrowsersPaneProps) {
     [refresh, wire],
   )
 
-  const unavailable = status !== null && status.port === null
+  const unavailable = address !== null && address.kind === 'unavailable'
 
   return (
     <div className={ui.section}>
       <div className={ui.row}>
         <span className={ui.grow}>Browser client</span>
-        <span className={ui.value}>{describePort(status)}</span>
       </div>
 
       <div className={ui.hint}>
-        Read on a phone without installing anything: point its browser at this computer and type a
+        Read on a phone without installing anything: open this address in its browser and type a
         code. The books stay here — a browser reads them over the network and keeps none.
       </div>
+
+      <AddressBlock address={address} />
 
       {offer === null ? (
         <div className={ui.actions}>
@@ -151,6 +260,11 @@ export function BrowsersPane({ wire, pollMs = POLL_MS }: BrowsersPaneProps) {
             it.
           </div>
           <div className={ui.actions}>
+            {/* Copyable as well as readable: the browser is often on this same
+                machine while the code is on this same screen, and retyping six
+                digits to move them two inches is the kind of small friction
+                that reads as the app not having thought about it. */}
+            <CopyButton value={offer.code} label="Copy the code" />
             <button
               type="button"
               className={ui.button}

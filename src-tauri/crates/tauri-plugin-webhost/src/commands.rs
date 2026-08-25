@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use tauri::{command, AppHandle, Runtime, State};
 
+use crate::address::Address;
 use crate::state::WebHostState;
 use crate::Error;
 
@@ -57,6 +58,19 @@ pub async fn webhost_status<R: Runtime>(
         port: state.port(),
         ready: state.is_ready(),
     })
+}
+
+/// Where a phone should point its browser, and whether it can get there.
+///
+/// Asks Tailscale, so it is not instant — a subprocess, twice. Separate from
+/// `webhost_status` for that reason: the pane polls status every few seconds
+/// and asks this once.
+#[command]
+pub async fn webhost_address<R: Runtime>(
+    _app: AppHandle<R>,
+    state: State<'_, Arc<WebHostState>>,
+) -> Result<Address, Error> {
+    Ok(crate::address::resolve(state.port()))
 }
 
 /// Show a new code. Replaces any code already on screen.

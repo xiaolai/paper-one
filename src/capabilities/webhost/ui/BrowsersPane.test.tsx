@@ -10,18 +10,44 @@ afterEach(() => {
 })
 
 describe('BrowsersPane', () => {
-  it('says where the client is served, so a reader can find it', async () => {
+  it('gives an address a phone can actually open, not a port number', async () => {
+    /* A port is true and useless: a reader has to guess a hostname, and every
+     * guess they can make fails silently. */
     render(<BrowsersPane wire={fakeWire()} />)
-    expect(await screen.findByText(/Serving on port 27182/)).toBeTruthy()
+    expect(await screen.findByText('https://studio.tail1234.ts.net/')).toBeTruthy()
+    expect(screen.queryByText(/port 27182/)).toBeNull()
+  })
+
+  it('refuses to print a tailnet URL that nothing is serving', async () => {
+    /* THE STATE MOST LIKELY TO BE MET. Tailscale is running and nothing proxies
+     * to this port, so `https://<host>/` would resolve and refuse the
+     * connection. Printing it because Tailscale is installed would be a guess
+     * dressed as an answer — so the command appears instead of the URL. */
+    const wire = fakeWire({
+      address: async () => ({
+        kind: 'not-served',
+        host: 'studio.tail1234.ts.net',
+        command: 'tailscale serve --bg http://127.0.0.1:27182',
+      }),
+    })
+    render(<BrowsersPane wire={wire} />)
+    expect(await screen.findByText('tailscale serve --bg http://127.0.0.1:27182')).toBeTruthy()
+    expect(screen.queryByText('https://studio.tail1234.ts.net/')).toBeNull()
+  })
+
+  it('says plainly when the address reaches only this machine', async () => {
+    const wire = fakeWire({
+      address: async () => ({ kind: 'local-only', url: 'http://localhost:27182/' }),
+    })
+    render(<BrowsersPane wire={wire} />)
+    expect(await screen.findByText('http://localhost:27182/')).toBeTruthy()
+    expect(await screen.findByText(/This machine only/)).toBeTruthy()
   })
 
   it('reports a failed bind as not running rather than as a missing value', async () => {
-    /* The plugin binds ONE pinned port and does not scan for another, so a port
-     * already in use means no browser can reach this shelf at all. A blank or a
-     * dash would leave a reader with nothing to act on. */
-    const wire = fakeWire({
-      status: async () => ({ pluginVersion: '0', port: null, ready: false }),
-    })
+    /* The plugin binds ONE pinned port and does not scan for another, so this
+     * will not resolve itself. A blank would leave a reader nothing to act on. */
+    const wire = fakeWire({ address: async () => ({ kind: 'unavailable' }) })
     render(<BrowsersPane wire={wire} />)
     expect(await screen.findByText(/Not running/)).toBeTruthy()
   })
@@ -29,12 +55,28 @@ describe('BrowsersPane', () => {
   it('refuses to offer a code when the server never bound', async () => {
     /* §07: a control that cannot act is the app describing a feature it does
      * not have. Six digits nothing can receive is exactly that. */
-    const wire = fakeWire({
-      status: async () => ({ pluginVersion: '0', port: null, ready: false }),
-    })
+    const wire = fakeWire({ address: async () => ({ kind: 'unavailable' }) })
     render(<BrowsersPane wire={wire} />)
     const button = await screen.findByRole('button', { name: 'Show code' })
     await waitFor(() => expect(button.getAttribute('data-disabled')).toBe('true'))
+  })
+
+  it('offers to copy the address, the command and the code — each named', async () => {
+    /* Three copy buttons can be on this pane at once. A screen reader hearing
+     * "Copy" three times has been told nothing, so each says what it carries. */
+    const writeText = vi.fn(async () => {})
+    Object.defineProperty(globalThis.navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    })
+
+    render(<BrowsersPane wire={fakeWire()} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Copy the address' }))
+    expect(writeText).toHaveBeenCalledWith('https://studio.tail1234.ts.net/')
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Show code' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Copy the code' }))
+    expect(writeText).toHaveBeenCalledWith('100001')
   })
 
   it('shows six digits and how long they last', async () => {

@@ -11,6 +11,7 @@ frames to the webview, which holds the router.
 #### This default permission set includes the following:
 
 - `allow-webhost-status`
+- `allow-webhost-address`
 - `allow-webhost-begin-code`
 - `allow-webhost-cancel-code`
 - `allow-webhost-sessions`
@@ -27,6 +28,32 @@ frames to the webview, which holds the router.
 <th>Description</th>
 </tr>
 
+
+<tr>
+<td>
+
+`webhost:allow-webhost-address`
+
+</td>
+<td>
+
+Enables the webhost_address command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`webhost:deny-webhost-address`
+
+</td>
+<td>
+
+Denies the webhost_address command without any pre-configured scope.
+
+</td>
+</tr>
 
 <tr>
 <td>
