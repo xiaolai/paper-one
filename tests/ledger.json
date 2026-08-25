@@ -2515,6 +2515,7 @@
     "src/kernel/core/rendererIsolation.test.ts > the shipped Content Security Policy > exists at all",
     "src/kernel/core/rendererIsolation.test.ts > the shipped Content Security Policy > keeps the development allowances out of the shipped policy",
     "src/kernel/core/rendererIsolation.test.ts > the shipped Content Security Policy > lets script come from exactly one place",
+    "src/kernel/core/rendererIsolation.test.ts > the shipped Content Security Policy > names precisely what the web host will need before it can serve a book",
     "src/kernel/core/rendererIsolation.test.ts > the shipped Content Security Policy > never allows inline or evaluated script",
     "src/kernel/core/rendererIsolation.test.ts > the shipped Content Security Policy > still permits what a book legitimately needs",
     "src/kernel/core/reportFatal.test.ts > explainFatal > caps the depth",
