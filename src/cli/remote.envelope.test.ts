@@ -104,7 +104,24 @@ async function serveOverTheWire(
    * through, and a chunked byte stream is the one service here whose framing
    * a small fixture would not exercise. */
   const services = createKernelServices({
-    fs: fakeFs({ 'books/b0000/content.epub': 'PK\u0003\u0004 pretend epub bytes' }),
+    /* ⚠️ **A BOOK REACHES THE TRASH ONLY IF IT HAS A FOLDER.** `book.remove`
+     * moves the folder aside, and `trash.list` reads what is there — so a row
+     * that exists only in the index is removed from the shelf and leaves
+     * nothing recoverable behind. `b0001` and `b0002` are given records for
+     * that reason: `trash.empty` is the one irreversible verb here and the
+     * case worth testing is a trash that HOLDS something. */
+    fs: fakeFs({
+      'books/b0000/content.epub': 'PK\u0003\u0004 pretend epub bytes',
+      'books/b0001/record.json': JSON.stringify({ title: 'Title 1', addedAt: 1 }),
+      'books/b0002/record.json': JSON.stringify({ title: 'Title 2', addedAt: 2 }),
+      /* ⚠️ **A JACKET, BECAUSE `cover.read` WAS ONLY EVER ASKED ABOUT A BOOK
+       * THAT HAS NONE.** An empty stream is a legitimate answer — most books
+       * have no artwork — and it is also what a `cover.read` that is completely
+       * broken answers. The browser client draws every shelf row through this
+       * service, so the byte path is the one that matters and it had no case at
+       * all. Bytes chosen so the chunking is visible in the assertion. */
+      'books/b0000/cover.jpg': 'JACKETBYTES',
+    }),
     storage: null,
     initialBooks: books,
   })
@@ -214,8 +231,6 @@ describe('every command, over the envelope', () => {
       'trash.list': ['trash', 'list'],
       'content.locate': ['content', 'locate', 'b0000'],
       'content.read': ['content', 'read', 'b0000'],
-      /* Empty is a valid answer — most books have no jacket — so this proves
-         the command crosses the envelope, not that the fixture has artwork. */
       'cover.read': ['cover', 'read', 'b0000'],
       'shelf.status': ['shelf', 'status'],
     }
@@ -234,6 +249,60 @@ describe('every command, over the envelope', () => {
       expect({ name, code: run.code, err: run.err }).toEqual({ name, code: EXIT.ok, err: '' })
       expect(() => JSON.parse(run.out)).not.toThrow()
     }
+
+    /**
+     * ⚠️ **THE LOOP CHECKS EXIT STATUS AND PARSEABILITY, AND THAT IS ALL.**
+     *
+     * A handler that answered `[]` for every service satisfies it. That is
+     * tolerable for eleven services at once — the point of the loop is that
+     * every row of the table crosses the envelope — but not for the ONE whose
+     * framing a small fixture would not exercise, and which the fixture goes
+     * out of its way to seed bytes for.
+     *
+     * `content.read` is a chunked byte stream, and it is how a browser reads a
+     * book. Empty is exactly what it answered before the shelf bound a size
+     * port, and the loop above could not tell the difference.
+     */
+    const read = await overTheWire(shelf, ['content', 'read', 'b0000', '--json'])
+    const chunks = JSON.parse(read.out) as { bookId: string; offset: number; bytes: string }[]
+    expect(chunks.length, 'content.read answered nothing for a book with bytes').toBeGreaterThan(0)
+    const carried = chunks.map((c) => atob(c.bytes)).join('')
+    expect(carried, 'the bytes the shelf holds are not the bytes that crossed').toBe(
+      'PK\u0003\u0004 pretend epub bytes',
+    )
+    /* CONTIGUOUS AND THIS BOOK'S. A gap, a repeat or another book's bytes join
+       into something that decodes and is wrong — see `covers.ts`, where the
+       same shape produced a picture rather than an error. */
+    let at = 0
+    for (const chunk of chunks) {
+      expect(chunk.bookId).toBe('b0000')
+      expect(chunk.offset, 'content.read is not contiguous').toBe(at)
+      at += atob(chunk.bytes).length
+    }
+
+    /**
+     * ⚠️ **`cover.read` WAS ONLY EVER ASKED ABOUT A BOOK WITH NO JACKET.**
+     *
+     * An empty stream is a legitimate answer — most books have none — and it is
+     * also what a `cover.read` that is entirely broken answers. Every shelf row
+     * the browser client draws goes through this service, so the byte path is
+     * the one that matters, and it had no case at all.
+     */
+    const jacket = JSON.parse((await overTheWire(shelf, ['cover', 'read', 'b0000', '--json'])).out) as {
+      bookId: string
+      offset: number
+      bytes: string
+    }[]
+    expect(jacket.length, 'cover.read answered nothing for a book with a jacket').toBeGreaterThan(0)
+    expect(jacket.map((c) => atob(c.bytes)).join('')).toBe('JACKETBYTES')
+    expect(jacket.every((c) => c.bookId === 'b0000')).toBe(true)
+
+    /* AND A BOOK WITH NO JACKET IS STILL AN EMPTY STREAM, not a refusal —
+       otherwise the shelf reports an error per row on a library of two
+       thousand. Both answers, so neither can be mistaken for the other. */
+    const none = await overTheWire(shelf, ['cover', 'read', 'b0001', '--json'])
+    expect(none.code).toBe(EXIT.ok)
+    expect(JSON.parse(none.out)).toEqual([])
   })
 
   it('writes through the wire, and the shelf holds the change', async () => {
@@ -301,7 +370,32 @@ describe('every command, over the envelope', () => {
       removed: true,
     })
 
-    /* content.evict — device-local, and answers what the folder now holds. */
+    /**
+     * ⚠️ **THIS EVICTED A BOOK THAT NEVER HAD BYTES.** `newbook` was created by
+     * `book.add` above and has no content file, so `here: false` was already
+     * true before the command ran — the case proved that evicting nothing
+     * answers "nothing here", which an evict that did nothing at all also
+     * answers. The verb DELETES a reader's downloaded book; the case worth
+     * having is the one where there was something to delete.
+     */
+    expect(
+      JSON.parse((await overTheWire(shelf, ['content', 'locate', 'b0000', '--json'])).out),
+      'the fixture seeds bytes for b0000 — see serveOverTheWire',
+    ).toMatchObject({ bookId: 'b0000', here: true })
+
+    expect(JSON.parse((await overTheWire(shelf, ['content', 'evict', 'b0000', '--json'])).out)).toMatchObject({
+      bookId: 'b0000',
+      here: false,
+    })
+    /* AND THE BYTES ARE ACTUALLY GONE, asked a second way. The verb's own
+       answer is the thing under test, so it cannot also be the evidence. */
+    expect(
+      JSON.parse((await overTheWire(shelf, ['content', 'locate', 'b0000', '--json'])).out),
+      'evict answered "here: false" over a book whose bytes are still there',
+    ).toMatchObject({ bookId: 'b0000', here: false })
+
+    /* AND EVICTING WHAT IS ALREADY GONE IS NOT AN ERROR — idempotent, which is
+       what makes the verb safe to retry. */
     expect(JSON.parse((await overTheWire(shelf, ['content', 'evict', 'newbook', '--json'])).out)).toMatchObject({
       bookId: 'newbook',
       here: false,
@@ -335,13 +429,57 @@ describe('every command, over the envelope', () => {
    * across the wire — the confirmation is not a client-side courtesy. */
   it('holds trash.empty to its count over the wire', async () => {
     const shelf = await serveOverTheWire(['shelf:*', 'book:*'])
+    /**
+     * ⚠️ **THIS RAN AGAINST AN EMPTY TRASH, AND CONFIRMED WITH ZERO.**
+     *
+     * `trash.empty 0` over an empty trash deletes nothing whether the count is
+     * honoured or not, so the one irreversible verb on the shelf was tested
+     * only in the case where being wrong costs nothing. The confirmation exists
+     * for a trash that HOLDS books, and that is the case here now: a wrong
+     * count must refuse while they are still recoverable, and the right one
+     * must name what it destroyed.
+     */
+    expect((await overTheWire(shelf, ['book', 'remove', 'b0001'])).code).toBe(EXIT.ok)
+    expect((await overTheWire(shelf, ['book', 'remove', 'b0002'])).code).toBe(EXIT.ok)
+    const inTrash = JSON.parse((await overTheWire(shelf, ['trash', 'list', '--json'])).out) as unknown[]
+    expect(inTrash, 'two books should be recoverable').toHaveLength(2)
+
+    /* A WRONG COUNT REFUSES, and the books are still there afterwards — which
+       is the whole point of the confirmation and is not what the exit code
+       alone would have proved. */
     const wrong = await overTheWire(shelf, ['trash', 'empty', '3'])
     expect(wrong.code).toBe(EXIT.refused)
     expect(wrong.err).toContain('conflict')
-    expect(JSON.parse((await overTheWire(shelf, ['trash', 'empty', '0', '--json'])).out)).toEqual({
-      emptied: 0,
-      bookIds: [],
-    })
+    expect(
+      JSON.parse((await overTheWire(shelf, ['trash', 'list', '--json'])).out),
+      'a refused empty must leave the trash untouched',
+    ).toHaveLength(2)
+
+    /* AND ZERO REFUSES TOO, over a trash of two: the count is a statement about
+       what the caller believes is there, not a formality. */
+    expect((await overTheWire(shelf, ['trash', 'empty', '0'])).code).toBe(EXIT.refused)
+
+    const emptied = JSON.parse((await overTheWire(shelf, ['trash', 'empty', '2', '--json'])).out) as {
+      emptied: number
+      bookIds: string[]
+    }
+    expect(emptied.emptied).toBe(2)
+    expect([...emptied.bookIds].sort(), 'the answer must name what it destroyed').toEqual(['b0001', 'b0002'])
+    expect(JSON.parse((await overTheWire(shelf, ['trash', 'list', '--json'])).out)).toHaveLength(0)
+    /**
+     * NOT RESTORABLE — and it says so with `restored: false` rather than by
+     * refusing.
+     *
+     * "Irreversible" is the property `trash.empty` exists to be careful about,
+     * and this is the only assertion that states it. The exit code is `ok`
+     * deliberately: asking to restore a book that is not in the trash is a
+     * question with an answer, not an error — and answering it `true` would be
+     * the failure worth catching, because a caller acting on that would show a
+     * reader a book that is gone.
+     */
+    const back = await overTheWire(shelf, ['book', 'restore', 'b0001', '--json'])
+    expect(back.code).toBe(EXIT.ok)
+    expect(JSON.parse(back.out)).toMatchObject({ bookId: 'b0001', restored: false })
   })
 
   it('registers the whole table on the router', async () => {

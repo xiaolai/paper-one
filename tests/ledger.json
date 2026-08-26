@@ -1749,6 +1749,8 @@
     "src/cli/run.test.ts > the grant check on the local path > refuses a command whose grant this process does not hold",
     "src/cli/run.test.ts > the human format > prints an empty answer as `nothing`, not as an empty table",
     "src/cli/run.test.ts > the table, at scale > does not let one long cell widen every other row without bound",
+    "src/cli/run.test.ts > the table, at scale > pads every key to the widest",
+    "src/cli/run.test.ts > the table, at scale > renders an object with more keys than the engine will take as arguments",
     "src/cli/run.test.ts > the table, at scale > renders more rows than the engine will take as arguments",
     "src/cli/run.test.ts > what an audit of the CLI found > exits 2 for a refusal the service judged malformed, not 1",
     "src/cli/run.test.ts > what an audit of the CLI found > exits 2 for a vocabulary the parser can judge, naming the whole set",

@@ -134,7 +134,16 @@ function clip(value: string): string {
 /** One answer as `key: value` lines, in the order the object gives them. */
 export function fields(value: Record<string, unknown>): string {
   const keys = Object.keys(value)
-  const width = Math.max(0, ...keys.map((key) => key.length))
+  /* ⚠️ **`Math.max(0, ...keys.map(…))` PASSES ONE ARGUMENT PER KEY**, and the
+   * engine's argument limit is finite — measured at about 125 000. `table` was
+   * fixed for exactly this and `widest` was extracted for it; this call site
+   * kept the spread, so the same defect survived the fix that named it.
+   *
+   * A row with a hundred thousand keys is not what any service returns today.
+   * That is an argument about the DATA, not about the code: the bound here was
+   * an engine limit nobody chose, reached by an object that is otherwise
+   * perfectly ordinary, and the loop costs nothing. */
+  const width = widest(0, keys)
   return keys.map((key) => `${key.padEnd(width)}  ${cell(value[key])}`.trimEnd()).join('\n')
 }
 
