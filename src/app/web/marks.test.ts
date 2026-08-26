@@ -160,12 +160,32 @@ describe('createRemoteMarks', () => {
     expect(store.allBookmarks.map((m) => m.id)).toEqual(['m2'])
   })
 
-  /* THE SAME ARRAY UNTIL SOMETHING CHANGES. `getSnapshot`'s contract; filtering
-     in the getter would hand React a new array every look and re-render forever. */
+  /**
+   * THE SAME ARRAY UNTIL SOMETHING CHANGES — `getSnapshot`'s contract. Filtering
+   * in the getter hands React a new array every look, and `useSyncExternalStore`
+   * reads it on every render: a new identity is an infinite re-render loop.
+   *
+   * ⚠️ **THIS READ THE GETTER TWICE WITH NOTHING IN BETWEEN**, which is true of
+   * any expression that is not literally `[...x]` — a filter would have had to
+   * run twice within one statement to fail it, and it does not. The contract
+   * has two halves and it tested neither: STABLE across renders, and NEW after
+   * a change. Both are asserted now, either side of a real mutation.
+   */
   it('returns the same array until the marks change', async () => {
-    const store = createRemoteMarks(shelfOf([row()]))
+    const store = createRemoteMarks(shelfOf([row(), row({ id: 'm2' })]))
     await settled()
-    expect(store.all).toBe(store.all)
+    const first = store.all
+    /* ACROSS READS SEPARATED BY OTHER WORK, which is what a render is. */
+    await settled()
+    expect(store.all, 'a fresh array on every look is an infinite re-render').toBe(first)
+    expect(store.allBookmarks).toBe(store.allBookmarks)
+
+    store.remove({ id: 'm1', bookId: 'b1' })
+    /* AND A NEW ONE AFTER A CHANGE. Returning the SAME array while its contents
+       changed is the other half of the contract and the worse failure: React
+       compares by identity and would draw the old list for ever. */
+    expect(store.all, 'the marks changed and the snapshot did not').not.toBe(first)
+    expect(store.all.map((m) => m.id)).toEqual(['m2'])
   })
 
   it('removes optimistically and tells the shelf', async () => {
@@ -186,13 +206,27 @@ describe('createRemoteMarks', () => {
     expect(asked.at(-1)).toEqual({ service: 'mark.set', body: { mark: 'm1', book: 'b1', note: 'mine' } })
   })
 
+  /**
+   * ⚠️ **THE LISTENER WAS SUBSCRIBED BEFORE THE FIRST READ SETTLED**, so it had
+   * already been called by the time the mutation happened — `toHaveBeenCalled`
+   * was satisfied by the initial load, and a store that published nothing on a
+   * change would have passed. The publish under test is the one AFTER the
+   * store is quiet.
+   */
   it('wakes its listeners when the marks change', async () => {
     const store = createRemoteMarks(shelfOf([row()]))
+    await settled()
     const woke = vi.fn()
     store.subscribe(woke)
-    await settled()
+    expect(woke, 'subscribing must not itself publish').not.toHaveBeenCalled()
+
     store.remove({ id: 'm1', bookId: 'b1' })
-    expect(woke).toHaveBeenCalled()
+    expect(woke, 'a change nobody is told about is a list that never redraws').toHaveBeenCalledTimes(1)
+
+    store.setNote({ id: 'm2', bookId: 'b1' }, 'mine')
+    /* A SECOND CHANGE PUBLISHES AGAIN — a store that fires once and goes quiet
+       is the failure a single `toHaveBeenCalled` cannot see. */
+    expect(woke).toHaveBeenCalledTimes(2)
   })
 
   /* A DROPPED CHANNEL DOES NOT EMPTY THE LIST. The marks last seen are real and

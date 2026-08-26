@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PairScreen } from './PairScreen'
 import type { SubmitOutcome } from './session'
@@ -165,7 +165,35 @@ describe('PairScreen', () => {
     fireEvent.click(button())
     expect(submit).toHaveBeenCalledOnce()
     expect(button().textContent).toBe('Connecting…')
-    release()
+
+    /* ⚠️ **THE TEST USED TO END HERE, WITH THE SUBMISSION STILL IN FLIGHT.**
+     * `release()` was the last line and nothing awaited what it caused, so the
+     * state update it triggers landed after the test — outside `act`, which
+     * React warns about, and unasserted, which is the part that matters: the
+     * screen coming BACK from "Connecting…" is what lets a reader try again,
+     * and nothing here checked it did.
+     *
+     * A refused code is the case worth landing on: five attempts is the whole
+     * budget, so a screen stuck on "Connecting…" costs a reader the rest of
+     * theirs. */
+    await act(async () => {
+      release({ kind: 'wrong' })
+    })
+    /* THE SCREEN COMES BACK. The button stays disabled — the field is cleared,
+       so there are not six digits to send — but it must stop saying
+       "Connecting…", and the FIELD must be typeable again, which is the thing
+       that actually lets a reader spend their next attempt. */
+    await waitFor(() =>
+      expect(
+        button().textContent,
+        'a reader left on "Connecting…" cannot try again',
+      ).not.toBe('Connecting…'),
+    )
+    expect(field().disabled, 'the field must take the next code').toBe(false)
+    expect(screen.getByText(/not the code/i), 'and it must say what went wrong').toBeTruthy()
+
+    /* AND THE BUDGET IS INTACT: one press, one attempt, however many clicks. */
+    expect(submit).toHaveBeenCalledOnce()
   })
 
   /**

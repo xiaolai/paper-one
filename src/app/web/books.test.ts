@@ -48,6 +48,26 @@ describe('parseRows', () => {
     expect(kept.map((r) => r.bookId)).toEqual(['a'])
   })
 
+  /**
+   * ⚠️ **THE COMMENT ABOVE NAMES A DUPLICATE AND THE TEST ONLY COVERED
+   * MISSING.** They are not the same failure and only one of them was held.
+   *
+   * React resolves a duplicate key by rendering one element and discarding the
+   * other, so a shelf that sends the same book twice makes a book VANISH from
+   * the shelf — no error, no warning a reader could see, and the cause three
+   * screens away. `marks.ts` and `cards.ts` both pin this; `books.ts` is the
+   * one a reader looks at first.
+   */
+  it('keeps the first of two rows sharing an id', () => {
+    const kept = parseRows([
+      { bookId: 'a', title: 'First' },
+      { bookId: 'b', title: 'Other' },
+      { bookId: 'a', title: 'Second' },
+    ])
+    expect(kept.map((r) => r.bookId)).toEqual(['a', 'b'])
+    expect(kept[0]?.title, 'the first row wins, so the order the shelf sent is kept').toBe('First')
+  })
+
   it('survives an answer that is not a list at all', () => {
     /* A version skew, a proxy error page decoded as JSON, a shelf answering
        something this build does not know. None of them should throw inside a
@@ -203,9 +223,24 @@ describe('createRemoteBooks', () => {
       throw new Error('disconnected')
     })
     const books = createRemoteBooks(channel)
+    /* ⚠️ **SUBSCRIBED BEFORE THE FAILURE**, because the number of publishes is
+     * half of what this path gets wrong. It used to set the status AND publish
+     * unconditionally, so every failure woke every subscriber twice for one
+     * piece of news — invisible to an assertion about `status()`, and a double
+     * render of the whole shelf on a library of two thousand. */
+    const woke = vi.fn()
+    books.subscribe(woke)
     await settled()
     expect(books.status()).toBe('failed')
     expect(books.getSnapshot()).toEqual([])
+    expect(woke, 'one failure is one piece of news').toHaveBeenCalledTimes(1)
+
+    /* AND A SECOND FAILURE PUBLISHES NOTHING AT ALL: the status did not move,
+       so there is nothing to tell anyone. */
+    woke.mockClear()
+    await books.refresh()
+    expect(woke, 'a status that did not change must not re-render the shelf').not.toHaveBeenCalled()
+    expect(books.status()).toBe('failed')
   })
 
   it('goes stale rather than failed when a refresh fails after a good load', async () => {

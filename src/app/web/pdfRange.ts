@@ -92,6 +92,18 @@ export async function pdfRangeTransport(
     private stopped = false
 
     override requestDataRange(begin: number, end: number): void {
+      /* ⚠️ **CHECKED BEFORE THE READ, AND IT USED TO BE CHECKED ONLY AFTER.**
+       *
+       * pdf.js does not stop asking the moment `abort()` returns: a render in
+       * progress can call this afterwards. The `stopped` test lived only in the
+       * `.then`, so the read was still STARTED — bytes pulled over the wire and
+       * decoded for a document that is gone, against a stream budget shared
+       * with the book the reader moved on to. Discarding the answer afterwards
+       * hid it: nothing wrong appeared on screen, and the only cost was work.
+       *
+       * The check after the await stays: this one stops a read that never
+       * begins, that one stops one already in flight. */
+      if (this.stopped) return
       /* `end` IS EXCLUSIVE in pdf.js's contract and `content.read`'s `length`
        * is a count, so the conversion is here and stated. Off by one, this
        * drops the last byte of every range — which corrupts a cross-reference

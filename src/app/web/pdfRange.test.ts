@@ -104,6 +104,27 @@ describe('pdfRangeTransport', () => {
     expect(got.find((one) => one.begin === 8)?.chunk).toBe('89')
   })
 
+  /**
+   * ⚠️ **ABORT WAS COVERED ONLY FOR A READ ALREADY IN FLIGHT.**
+   *
+   * pdf.js does not stop asking the moment `abort()` returns — a render in
+   * progress can call `requestDataRange` after it, and a transport that started
+   * a new read there is doing work for a document that is gone, then delivering
+   * into it. `stopped` is checked after the await and not before, so this was
+   * the half nothing held.
+   */
+  it('starts no new read once it has been aborted', async () => {
+    const { content, asked } = shelf('0123456789')
+    const transport = await pdfRangeTransport(content, 'one', 10, { onFailure: noteFailure() })
+    const got = listen(transport)
+    transport.abort()
+
+    transport.requestDataRange(0, 4)
+    await settle()
+    expect(asked, 'a read was started for a document that is already gone').toEqual([])
+    expect(got).toEqual([])
+  })
+
   /* A READ IN FLIGHT WHEN THE READER CLOSES THE BOOK. Delivering it pushes
      bytes into a document pdf.js has already torn down. */
   it('delivers nothing after abort, even for a read already in flight', async () => {

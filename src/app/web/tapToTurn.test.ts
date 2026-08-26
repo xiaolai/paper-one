@@ -111,18 +111,50 @@ describe('stagePoint', () => {
     expect(stagePoint(318, 28, STAGE_LEFT)).toBe(346)
   })
 
+  /**
+   * ⚠️ **THIS RAN `at(318, 28)` TWICE, WHICH IS THE SAME CALL.** A pure function
+   * asked the same question twice gives the same answer whatever it does, so
+   * the test could not have failed — including against the defect it names. The
+   * one-page and three-page sections never appeared in it at all.
+   *
+   * What differed between them was the DOCUMENT's width: 337px laid out as one
+   * page, 1011px as three. `tapIntent` is handed the STAGE's width now, which
+   * is the same 393 either way — so the two cases are the two widths, and the
+   * assertion is that the stage answer does not depend on which one the
+   * document happens to be.
+   */
   it('gives the same verdict on a one-page and a three-page section', () => {
-    const at = (clientX: number, frameLeft: number) =>
+    const at = (clientX: number, frameLeft: number, width = STAGE_WIDTH) =>
       tapIntent({
         x: stagePoint(clientX, frameLeft, STAGE_LEFT),
         moved: 0,
-        width: STAGE_WIDTH,
+        width,
         selected: false,
         onControl: false,
       })
-    /* Was 'right' then 'left' — the oscillation, in one assertion. */
+    /** The document widths measured on 2026-08-26, kept literal. */
+    const ONE_PAGE = 337
+    const THREE_PAGES = 1011
+
+    /* THE STAGE IS THE SAME EITHER WAY, so the verdict is. */
     expect(at(318, 28)).toBe('right')
     expect(at(318, 28)).toBe('right')
+
+    /* AND THE OLD WAY WOULD HAVE DISAGREED — the oscillation itself, pinned so
+       the regression is recognisable. It judged the DOCUMENT's own `clientX`
+       against the DOCUMENT's width, which is 337 in a one-page section and
+       1011 in a three-page one; the same tap is then past the right third of
+       one and inside the left third of the other. A reader tapping one spot
+       went forward, back, forward, back, and could not get past the first long
+       section of a book. */
+    const inDocument = (clientX: number, width: number) =>
+      tapIntent({ x: clientX, moved: 0, width, selected: false, onControl: false })
+    expect(inDocument(318, ONE_PAGE)).toBe('right')
+    expect(inDocument(318, THREE_PAGES)).toBe('left')
+    expect(
+      inDocument(318, ONE_PAGE),
+      'the two document widths must disagree, or this case proves nothing',
+    ).not.toBe(inDocument(318, THREE_PAGES))
   })
 
   /* THE FRAME SLIDES NEGATIVE within a section. Page two of a three-page

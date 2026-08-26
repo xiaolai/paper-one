@@ -1,4 +1,5 @@
 import { readFileSync, readdirSync } from 'node:fs'
+import { join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 import { connect, socketUrl, type SocketLike } from './channel'
@@ -270,15 +271,35 @@ describe('the credential never rides in the open', () => {
    * without the page ever seeing it.
    */
   it('never reads document.cookie anywhere in the client', () => {
-    const here = new URL('.', import.meta.url)
-    const files = readdirSync(fileURLToPath(here)).filter((name) => /\.tsx?$/.test(name) && !name.includes('.test.'))
-    /* THE LIST MUST NOT BE EMPTY. A glob that matches nothing passes every
-       assertion below it, which is the quietest way for a guard to stop
-       guarding. */
+    /**
+     * ⚠️ **THIS SCANNED ONE DIRECTORY DEEP.** `readdirSync` without recursion
+     * covers `src/app/web/*.ts` and stops — so `shell/` was outside the guard
+     * entirely, and so is every directory added under this client from now on.
+     * A guard that silently excludes half its own subject is worse than none,
+     * because the note above it says the client cannot leak the cookie.
+     */
+    const root = fileURLToPath(new URL('.', import.meta.url))
+    const walk = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+        const at = join(dir, entry.name)
+        if (entry.isDirectory()) return walk(at)
+        return /\.tsx?$/.test(entry.name) && !entry.name.includes('.test.') ? [at] : []
+      })
+    const files = walk(root)
+
+    /* THE LIST MUST NOT BE EMPTY, and it must REACH A SUBDIRECTORY. A walk that
+       matches nothing passes every assertion below it, which is the quietest
+       way for a guard to stop guarding — and one that matches only the top
+       level looks identical to one that recursed. */
     expect(files.length).toBeGreaterThan(3)
-    for (const name of files) {
-      const source = readFileSync(fileURLToPath(new URL(name, here)), 'utf8')
-      expect(source, `${name} must not read the session cookie`).not.toContain('document.cookie')
+    expect(
+      files.some((at) => relative(root, at).includes(sep)),
+      'the scan never left the top directory; a nested module is not covered',
+    ).toBe(true)
+
+    for (const at of files) {
+      const source = readFileSync(at, 'utf8')
+      expect(source, `${relative(root, at)} must not read the session cookie`).not.toContain('document.cookie')
     }
   })
 })
