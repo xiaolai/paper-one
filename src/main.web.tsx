@@ -224,10 +224,32 @@ function ShelfList({
    */
   const [tab, setTab] = useState<Tab>('library')
   const [query, setQuery] = useState('')
+  /**
+   * LEAVING THE READER GOES BACK TO THE SHELF, and does not forget the book.
+   *
+   * ⚠️ This used to `setReading(null)` as well, which made the Reading tab
+   * unreachable in every case it exists for. The tab bar is drawn only OUTSIDE
+   * the reader, so `hasBook` was read exactly when `reading` had just been
+   * cleared — always false — and `TabBar` redirects Reading to Library when it
+   * is. The tab was permanently a second Library button.
+   *
+   * Keeping it is what "Reading" means: the book this reader is in the middle
+   * of. Forgetting one is a separate act, and the effect below is the only
+   * thing that performs it.
+   */
   const close = useCallback(() => {
-    setReading(null)
     setTab('library')
   }, [])
+
+  /* A BOOK THAT LEFT THE SHELF IS NOT STILL BEING READ. `reading` outlives the
+   * reader now (see `close`), so it needs the one thing that ends it: the book
+   * no longer being there. Without this, removing the open book on the shelf
+   * would leave a Reading tab that opens a book the shelf refuses. */
+  useEffect(() => {
+    if (reading === null) return
+    if (rows.length === 0) return
+    if (!rows.some((row) => row.bookId === reading.bookId)) setReading(null)
+  }, [rows, reading])
 
   /* THE SAME ARRAY UNTIL THE ROWS CHANGE. `getSnapshot`'s whole contract is
    * identity stability, and mapping on every render would throw it away — the

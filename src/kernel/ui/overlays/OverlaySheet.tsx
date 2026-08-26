@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode } from 'react'
+import { useEffect, useRef, type ReactNode, type RefObject } from 'react'
 import styles from './Overlay.module.css'
 
 /**
@@ -15,6 +15,23 @@ export interface OverlaySheetProps {
   label: string
   onDismiss: () => void
   children: ReactNode
+  /**
+   * The element whose SIBLINGS are the page behind this dialog.
+   *
+   * ⚠️ **DEFAULTS TO THE SHEET'S OWN PARENT, WHICH IS NOT ALWAYS THE PAGE.**
+   * Inerting "the sheet's siblings" is right when the sheet is rendered
+   * directly into the layer that holds the page — which is how the desktop
+   * mounts it. `app/web/shell/BottomSheet` wraps this in a full-viewport
+   * positioned host, because the sheet positions against its parent and needs
+   * one; so the sheet's only siblings became the scrim, which is excluded, and
+   * NOTHING behind the `aria-modal` dialog was ever made inert. The dialog
+   * announced itself as modal and the shelf underneath stayed tabbable.
+   *
+   * A wrapper that exists for layout should not silently change what a modal
+   * means, and it cannot be removed — it is the positioned ancestor. So the
+   * boundary is stated instead of inferred.
+   */
+  boundary?: RefObject<HTMLElement | null> | undefined
 }
 
 /**
@@ -35,7 +52,7 @@ function visibleFocusable(root: HTMLElement, selector: string): HTMLElement | nu
   return null
 }
 
-export function OverlaySheet({ label, onDismiss, children }: OverlaySheetProps) {
+export function OverlaySheet({ label, onDismiss, children, boundary }: OverlaySheetProps) {
   const sheetRef = useRef<HTMLDivElement>(null)
 
   /**
@@ -67,8 +84,12 @@ export function OverlaySheet({ label, onDismiss, children }: OverlaySheetProps) 
    */
   useEffect(() => {
     const sheet = sheetRef.current
-    const parent = sheet?.parentElement
-    if (!sheet || !parent) return
+    /* THE BOUNDARY DECIDES WHAT "BEHIND" MEANS — see the prop. Without one the
+     * sheet's own parent is the layer, which is true wherever nothing wraps
+     * it. */
+    const inside = boundary?.current ?? sheet
+    const parent = inside?.parentElement
+    if (!sheet || !inside || !parent) return
 
     const previousFocus = document.activeElement as HTMLElement | null
 
@@ -78,7 +99,7 @@ export function OverlaySheet({ label, onDismiss, children }: OverlaySheetProps) 
      * left with the keyboard. `child.contains(sheet)` cannot be true for a
      * sibling; the guard that tested it was unreachable and went. */
     const siblings = Array.from(parent.children).filter(
-      (child) => child !== sheet && !child.hasAttribute('data-overlay-scrim'),
+      (child) => child !== inside && !child.hasAttribute('data-overlay-scrim'),
     )
     const previousInert = siblings.map((child) => (child as HTMLElement).inert)
     for (const child of siblings) (child as HTMLElement).inert = true

@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import { useRef } from 'react'
 import { OverlaySheet } from '../../../kernel/ui/browser'
 import styles from './BottomSheet.module.css'
 
@@ -49,9 +50,25 @@ export interface BottomSheetProps {
 }
 
 export function BottomSheet({ label, height, onDismiss, children, foot }: BottomSheetProps) {
+  /**
+   * WHAT IS BEHIND THIS DIALOG, told to `OverlaySheet` rather than inferred.
+   *
+   * ⚠️ The sheet inerts ITS OWN siblings, which is right wherever it is
+   * rendered straight into the layer holding the page. `.host` below is a
+   * full-viewport positioned wrapper — the sheet positions against its parent
+   * and needs one — so the sheet's only sibling became the scrim, which is
+   * deliberately excluded, and NOTHING behind the `aria-modal` dialog was ever
+   * made inert. The dialog announced itself as modal and the shelf underneath
+   * stayed tabbable and readable to a screen reader.
+   */
+  const host = useRef<HTMLDivElement | null>(null)
   return (
-    <div className={styles.host} style={{ '--sheet-h': `${Math.round(height * 100)}%` } as React.CSSProperties}>
-      <OverlaySheet label={label} onDismiss={onDismiss}>
+    <div
+      ref={host}
+      className={styles.host}
+      style={{ '--sheet-h': `${Math.round(height * 100)}%` } as React.CSSProperties}
+    >
+      <OverlaySheet label={label} onDismiss={onDismiss} boundary={host}>
         <div className={styles.handle} aria-hidden />
         <div className={styles.body}>{children}</div>
         {foot}
