@@ -12,16 +12,16 @@ import {
   FootnotePopover,
   Marginalia,
   SearchPanel,
-  Settings,
   useAppPalette,
   usePrefersDark,
-  offeredFaces,
-  presentFaces,
 } from '../../kernel/ui/browser'
 import { WEB_SETTINGS, browserSettings } from './settings'
-import type { BookMeta, FootnoteRender, SearchHit, SelectionSnapshot, MarkAnchor } from '../../kernel/ui/browser'
+import { useBookSource } from './useBookSource'
+import { useTapToTurn } from './useTapToTurn'
+import { useMarking } from './useMarking'
+import { ReadingSettings } from './shell/ReadingSettings'
+import type { BookMeta, FootnoteRender, SearchHit } from '../../kernel/ui/browser'
 import { externalTarget } from '../../kernel'
-import type { MarkTint } from '../../kernel'
 import type { TocItem } from 'foliate-js/view.js'
 
 import {
@@ -31,14 +31,12 @@ import {
   pageMargins,
   ICON,
   proseGrid,
-  readingStep,
   stepAt,
   stepIndexForSize,
 } from '../../kernel/core/metrics'
 import type { RemoteContent } from './content'
 import { browserPositions, type ReadingPositions } from './positions'
 import type { MarkRef, MarksStore } from './marks'
-import { stagePoint, tapIntent } from './tapToTurn'
 import styles from './Reader.module.css'
 
 /**
@@ -116,38 +114,7 @@ export interface ReaderProps {
   readonly canWrite?: boolean
 }
 
-/**
- * Whether a tap landed on something the page already handles.
- *
- * ⚠️ **THE LIST WAS `a, button, input, [role="button"]`**, and a book is a
- * document a stranger wrote. `<select>`, `<textarea>`, `<summary>`, a media
- * element with controls, anything `contenteditable` and every other ARIA
- * widget role were all absent — so interacting with one of those inside a book
- * turned the page at the same time. Choosing from a dropdown in an embedded
- * form advanced the reader out of it.
- *
- * `closest` walks up, so a tap on a `<span>` inside a `<button>` is caught by
- * the button. `[role]` covers the widget roles as a class rather than by
- * enumeration; a role is only ever put on something meant to be interacted
- * with, and treating one as inert is the direction that turns pages by
- * accident.
- */
-const INTERACTIVE =
-  'a[href], button, input, select, textarea, summary, label, [contenteditable]:not([contenteditable="false"]), audio[controls], video[controls], [role]'
 
-function onInteractive(target: EventTarget | null): boolean {
-  return (target as Element | null)?.closest?.(INTERACTIVE) != null
-}
-
-/** What is known about the book while it is being fetched. */
-type Opening =
-  | { readonly kind: 'locating' }
-  /* A `File` for an EPUB, or a ranged source for a PDF. Spelled structurally
-   * rather than imported: `RangedSource` lives in `formats.ts`, which is not on
-   * the browser client's short list of kernel modules, and the shape is two
-   * fields. `FoliateView` accepts either. */
-  | { readonly kind: 'reading'; readonly source: File | { readonly range: object; readonly name: string } }
-  | { readonly kind: 'failed'; readonly why: string }
 
 export function Reader({ content, bookId, name, onClose, positions, marks = null, titleOf, canWrite = false }: ReaderProps) {
   /* ONE STORE FOR THE LIFE OF THE COMPONENT. Built in a ref rather than on
@@ -177,7 +144,6 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
   useEffect(() => {
     store.current?.touch(bookId)
   }, [bookId])
-  const [opening, setOpening] = useState<Opening>({ kind: 'locating' })
   /**
    * WHAT WENT WRONG, WHERE THE READER IS LOOKING.
    *
@@ -192,6 +158,12 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
    * panel, which uses it for its own "this book never finished parsing" case.
    */
   const [problem, setProblem] = useState<string | null>(null)
+
+  /* WHICH PATH THIS BOOK TAKES — `useBookSource`, which is where the range
+     transport, the whole-file fallback and the unmeasurable-PDF case live. It
+     was two hundred lines of this function and has nothing to do with the rest
+     of it. */
+  const opening = useBookSource(content, bookId, name, setProblem)
   /**
    * ⚠️ **A FOOTNOTE LINK DID NOTHING AT ALL HERE.**
    *
@@ -247,14 +219,9 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
   prefs.current ??= browserSettings()
   const prefsStore = prefs.current
   const settings = useSyncExternalStore(prefsStore.subscribe, prefsStore.getSnapshot)
-  /* The persistence flag needs its OWN subscription — the snapshot above is
-     unchanged by a refused write, so subscribing to it alone would show the
-     notice one change late. See `App.tsx`. */
-  const prefsPersistent = useSyncExternalStore(
-    prefsStore.subscribe,
-    () => prefsStore.persistent,
-    () => prefsStore.persistent,
-  )
+  /* THE PERSISTENCE FLAG AND THE FACES MOVED with the panel that reads them —
+     see `ReadingSettings`, which the You tab mounts too. This subscription
+     stays: the reading surface itself renders from these values. */
   /* READ THROUGH `get`, not out of the snapshot. The snapshot is a bag of
    * unknowns by key; `get` is what applies each setting's own validator, so a
    * value hand-edited into `localStorage` cannot reach the renderer. The
@@ -317,8 +284,6 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
     return marks.subscribe(mine)
   }, [marks, bookId])
 
-  /* The faces this browser actually has. Probed once — it measures text. */
-  const faces = useMemo(() => offeredFaces(presentFaces()), [])
   /* WHICH ENTRY THE READER IS IN. `ReaderPosition` has carried `chapterHref`
    * all along — "labels repeat across a book, hrefs do not" — and this client
    * kept only the CFI. Without it every duplicate label would read as current,
@@ -339,16 +304,6 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
    * opened a book can see where the way back is, and hides on the first turn.
    */
   const [chrome, setChrome] = useState(true)
-  /** What the reader has selected, or null. Drives the selection bar. */
-  const [selection, setSelection] = useState<SelectionSnapshot | null>(null)
-  const [tint, setTint] = useState<MarkTint>('yellow')
-  /**
-   * THE MARKS DRAWN ON THE PAGE. Filled from the store for this book, then
-   * grown as the reader highlights — from the shelf's ANSWER to `mark.add`,
-   * which carries the real id, rather than from a guess made before the
-   * write landed.
-   */
-  const [drawn, setDrawn] = useState<readonly MarkAnchor[]>([])
   const [fraction, setFraction] = useState(0)
   const takeToc = useCallback((_generation: number, next: readonly TocItem[]) => setToc(next), [])
   /* The stage's width decides the measure, and a phone rotates. */
@@ -362,50 +317,6 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
     return () => window.removeEventListener('resize', onResize)
   }, [])
 
-  useEffect(() => {
-    let live = true
-    setOpening({ kind: 'locating' })
-    void (async () => {
-      try {
-        const facts = await content.locate(bookId)
-        if (!live) return
-        if (!facts.here) {
-          setOpening({ kind: 'failed', why: 'Your library does not have this book’s pages.' })
-          return
-        }
-        /* A PDF GOES THROUGH THE TRANSPORT — but only when the shelf could
-         * measure it. pdf.js is told a length before it asks for a byte, and a
-         * shelf that answers `null` has no length to give; falling back to the
-         * whole file is slower and correct, which is the right way round. */
-        /* THE NAME A PARSER ROUTES ON, rebuilt from what the shelf stores.
-         * The shelf sends a TITLE — "Moby-Dick" — and every parser Paper uses
-         * routes on the suffix; foliate rejects a name without one as an
-         * unsupported type. `content.locate` knows the stored extension, which
-         * is exactly what `storedBookName` does on the desktop side. */
-        const filename = facts.ext === null ? name : `${name}.${facts.ext}`
-
-        if (facts.ext === 'pdf' && facts.size !== null) {
-          const { pdfRangeTransport } = await import('./pdfRange')
-          const range = await pdfRangeTransport(content, bookId, facts.size, {
-            onFailure: (cause) =>
-              setProblem(cause instanceof Error ? cause.message : String(cause)),
-          })
-          if (!live) return
-          setOpening({ kind: 'reading', source: { range, name: filename } })
-          return
-        }
-        const file = await content.fileOf(bookId, filename)
-        if (!live) return
-        setOpening({ kind: 'reading', source: file })
-      } catch (thrown) {
-        if (!live) return
-        setOpening({ kind: 'failed', why: thrown instanceof Error ? thrown.message : String(thrown) })
-      }
-    })()
-    return () => {
-      live = false
-    }
-  }, [content, bookId, name])
 
   /* THE SAME ARITHMETIC THE DESKTOP DOES, from the same module — the measure
    * the grid settled on rather than the one the step asked for, because the
@@ -464,9 +375,6 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
    * in a ref rather than in state: it is not rendered, and setting state on it
    * would re-render the whole surface the moment a book finished parsing.
    */
-  /** Removes the last document's tap listeners — see `watchDocument`. */
-  const tapCleanup = useRef<(() => void) | null>(null)
-
   const navigator = useRef<{
     next: () => void
     prev: () => void
@@ -508,6 +416,20 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
     navigator.current?.setFootnoteMount?.(footnoteMount.current, footnoteSpace.current)
   }, [])
 
+  /* MARKING A PASSAGE, and copying one — `useMarking`, which owns the
+     selection, the tint, the marks drawn on the page and the two things a
+     reader can do with a selection. Nothing else in this component touches any
+     of them, which is what made it the one boundary here anybody could draw. */
+  const { selection, setSelection, tint, setTint, drawn, setDrawn, highlight, copySelection } =
+    useMarking({
+      marks,
+      bookId,
+      toc,
+      here,
+      onProblem: setProblem,
+      deselect: useCallback(() => navigator.current?.deselect?.(), []),
+    })
+
   /* FOUR INTENTS, TWO PAIRS, and they are not interchangeable. A horizontal
    * gesture names a SIDE and foliate resolves which page that is from the
    * book's own direction; a vertical one names a DIRECTION OF TRAVEL, which
@@ -523,179 +445,16 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
     else nav.prev()
   }, [])
 
-  /**
-   * TAP TO TURN, attached to each book document as it loads.
-   *
-   * A page intent reaches `FoliateView` from ONE gesture — the wheel — and a
-   * phone has none. The book is in an iframe, so a tap on it never reaches this
-   * page; `onDocument` hands over the book's own `Document`, which is where the
-   * listener has to go.
-   *
-   * Registered per document and removed when the document goes, because
-   * foliate loads a new one per section and keeps neighbours alive: without the
-   * teardown a book would accumulate a listener per section read.
-   */
-  /**
-   * Attach tap-to-turn to one event target, and hand back the way to remove it.
-   *
-   * TWO TARGETS NEED THIS, which is why it is a function. A book's iframe is
-   * narrower than the stage it sits in — 748px inside 1280px, measured — so a
-   * tap near the screen edge lands on the paginator's margin and never reaches
-   * the book's document at all. Attaching only there meant the most natural
-   * gesture on a phone, a thumb at the very edge, did nothing.
-   *
-   * Events do not cross an iframe boundary, so the two listeners never both
-   * fire for one tap. Each measures against ITS OWN width, and because the book
-   * is centred in the stage the two agree about which side a tap was on.
-   */
-  const watchTaps = useCallback(
-    (
-      target: Document | HTMLElement,
-      /** Where the release landed and how wide the page is, both in the
-       *  stage's coordinates — see `stagePoint` for why not the document's. */
-      placeOf: (clientX: number) => { x: number; width: number },
-      selectionOf: () => string,
-    ): (() => void) => {
-      /**
-       * THE ONE POINTER THIS GESTURE BELONGS TO.
-       *
-       * ⚠️ **THREE THINGS WERE WRONG WITH TRACKING A BARE COORDINATE.**
-       *
-       *   - `pointerId` was ignored, so a second finger's `pointerdown`
-       *     overwrote the first's origin. A two-finger pinch to zoom therefore
-       *     measured its travel from the wrong finger and could read as a tap.
-       *   - `pointercancel` was not handled at all. The browser fires it when
-       *     it takes the gesture over — a scroll, a system edge swipe — and no
-       *     `pointerup` follows, so the stale origin sat there waiting to be
-       *     paired with an unrelated release.
-       *   - A `pointerup` with NO matching `pointerdown` was given
-       *     `moved = 0` — a perfect tap. A release that entered the stage from
-       *     outside, or arrived after the listener was attached mid-gesture,
-       *     turned the page.
-       *
-       * Requiring a matching down, keyed on the id, settles all three: an
-       * unmatched release is ignored rather than believed.
-       */
-      let downAt: { id: number; x: number; y: number } | null = null
-      const onDown = (event: Event) => {
-        const pointer = event as PointerEvent
-        /* THE FIRST POINTER WINS, until it is released or cancelled. A second
-           finger is a gesture the browser or foliate owns — a pinch, a
-           two-finger scroll — and letting its press OVERWRITE the first is how
-           the release of the first came to be measured from the second's
-           origin, which reads as a tap wherever the fingers happened to be.
-           `isPrimary` would say the same thing, and is `false` on every
-           synthesized event, so this asks the question the tracking can
-           actually answer. */
-        if (downAt !== null) return
-        downAt = { id: pointer.pointerId, x: pointer.clientX, y: pointer.clientY }
-      }
-      const onCancel = (event: Event) => {
-        const pointer = event as PointerEvent
-        if (downAt?.id === pointer.pointerId) downAt = null
-      }
-      const onUp = (event: Event) => {
-        const pointer = event as PointerEvent
-        const from = downAt
-        downAt = null
-        /* NO MATCHING PRESS, NO TAP. See the note on `downAt`: this used to
-           fall through with `moved = 0`, which is a page turn. */
-        if (from === null || from.id !== pointer.pointerId) return
-        const place = placeOf(pointer.clientX)
-        const intent = tapIntent({
-          x: place.x,
-          /* HOW FAR IT TRAVELLED, not where it ended. A drag that begins in the
-           * middle and ends at the edge is a selection, not a page turn. */
-          moved: Math.hypot(pointer.clientX - from.x, pointer.clientY - from.y),
-          width: place.width,
-          selected: selectionOf() !== '',
-          /* A LINK WINS. foliate is already handling it, and turning the page
-           * as well would leave the reader somewhere they did not choose. */
-          onControl: onInteractive(pointer.target),
-        })
-        if (intent !== null) {
-          /* A TURN HIDES THE CHROME — "hides on scroll", and a tap-turn is
-           * this client's scroll. The bar and footer come back on the next
-           * centre tap. */
-          setChrome(false)
-          turn(intent)
-          return
-        }
-        /* THE MIDDLE THIRD, which `tapIntent` refuses on purpose, is where the
-         * chrome is summoned — §06: "tap centre to show". Only a clean tap:
-         * a drag, a selection or a tap on a link all still do nothing here. */
-        if (
-          place.width > 0 &&
-          !onInteractive(pointer.target) &&
-          selectionOf() === '' &&
-          Math.hypot(pointer.clientX - from.x, pointer.clientY - from.y) <= 10
-        ) {
-          setChrome((was) => !was)
-        }
-      }
-      target.addEventListener('pointerdown', onDown, { passive: true })
-      target.addEventListener('pointerup', onUp, { passive: true })
-      /* THE BROWSER TAKING THE GESTURE OVER. Without this the origin outlives
-         the gesture and waits to be paired with an unrelated release. */
-      target.addEventListener('pointercancel', onCancel, { passive: true })
-      return () => {
-        target.removeEventListener('pointerdown', onDown)
-        target.removeEventListener('pointerup', onUp)
-        target.removeEventListener('pointercancel', onCancel)
-      }
-    },
-    [turn],
-  )
-
-  /* THE MARGINS. A tap that misses the book still asked to turn a page. */
-  useEffect(() => {
-    const element = stageEl.current
-    if (element === null) return
-    return watchTaps(
-      element,
-      /* Already in the stage's coordinates: this listener IS on the stage. */
-      (clientX) => ({ x: clientX - element.getBoundingClientRect().left, width: element.clientWidth }),
-      () => window.getSelection()?.toString() ?? '',
-    )
-  }, [watchTaps])
-
-  /**
-   * THE BOOK ITSELF. `onDocument` hands over each section's document as it
-   * loads; foliate keeps neighbours alive, so the previous one is released
-   * first or a book accumulates a listener per section read.
-   */
-  const watchDocument = useCallback(
-    (_generation: number, doc: Document | null) => {
-      tapCleanup.current?.()
-      tapCleanup.current = null
-      if (doc === null) return
-      tapCleanup.current = watchTaps(
-        doc,
-        /* NOT `doc.documentElement.clientWidth` — that is every column of the
-         * section laid side by side, not the page in front of the reader, and
-         * dividing it into thirds turned the page backwards on every second
-         * tap. `stagePoint` carries the measurement and the numbers. */
-        (clientX) => {
-          const stage = stageEl.current
-          const frame = doc.defaultView?.frameElement
-          if (stage === null || frame == null) {
-            /* No stage or a document that is not framed: fall back to the
-             * document's own box. Wrong for a multi-column section, but this
-             * is the case that should not arise, and a tap that does nothing
-             * is better than one that goes the wrong way. */
-            return { x: clientX, width: doc.documentElement.clientWidth }
-          }
-          const stageBox = stage.getBoundingClientRect()
-          return {
-            x: stagePoint(clientX, frame.getBoundingClientRect().left, stageBox.left),
-            width: stageBox.width,
-          }
-        },
-        () => doc.getSelection()?.toString() ?? '',
-      )
-    },
-    [watchTaps],
-  )
+  /* TURNING A PAGE BY TAPPING — `useTapToTurn`, which holds the wiring: which
+     targets get a listener, which coordinate space each measures in, and how a
+     listener is taken off a document that has gone. A hundred and seventy lines
+     of this function, and nothing else in it reads a pointer event. */
+  const { watchDocument } = useTapToTurn({
+    stage: stageEl,
+    turn,
+    hideChrome: useCallback(() => setChrome(false), []),
+    toggleChrome: useCallback(() => setChrome((was) => !was), []),
+  })
 
 
   /* SAVED ON EVERY RELOCATE, which is every page turn and every resize. The
@@ -719,85 +478,6 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
    * ref at call time rather than closing over it — the navigator arrives after
    * the first render, and a captured null would search nothing forever.
    */
-  /**
-   * HIGHLIGHT, from the selection bar.
-   *
-   * Sent to `mark.add` WITH its recovery context — `prefix` and `suffix` from
-   * the snapshot, `chapter` from the contents — which the wire carries since
-   * phase 19. The highlight is drawn from the shelf's ANSWER, which has the
-   * real id, so nothing on the page claims a mark the shelf never got.
-   */
-  const highlight = useCallback(
-    (note: string) => {
-      const sel = selection
-      if (sel === null || marks === null) return
-      setSelection(null)
-      navigator.current?.deselect?.()
-      void marks
-        .add({
-          bookId,
-          cfi: sel.cfi,
-          sectionIndex: sel.sectionIndex,
-          text: sel.text,
-          prefix: sel.prefix,
-          suffix: sel.suffix,
-          note,
-          tint,
-          chapter: toc.find((entry) => entry.href === here)?.label ?? '',
-        })
-        .catch((cause: unknown) => {
-          /* ⚠️ THE DRAWING USED TO HAPPEN HERE TOO, AND IT WAS THE SECOND TIME.
-           *
-           * `marks.add` puts the new mark in the store and notifies
-           * synchronously, and the effect above rebuilds `drawn` from
-           * `marks.all` on every notification — so by the time this promise
-           * settled the highlight was already on the page. Appending it again
-           * painted every new highlight twice, which on a `fill` tint is
-           * visibly darker than the ones around it.
-           *
-           * The subscription is the single source now. It also handles what
-           * this could not: a mark the shelf CHANGED on the way in, and one
-           * that arrives from anywhere other than this button. */
-          console.error('Paper: the shelf would not keep that highlight', cause)
-        })
-    },
-    [selection, marks, bookId, tint, toc, here],
-  )
-
-  /**
-   * COPY, and what happens when it does not.
-   *
-   * ⚠️ **THIS SWALLOWED THE FAILURE AND CLEARED THE SELECTION ANYWAY.** The
-   * clipboard is absent in a non-secure context and its write can be refused
-   * outright, and both were `catch(() => {})` — so Copy presented as having
-   * worked while the text went nowhere AND the selection, the one thing the
-   * reader could have retried from, was destroyed. Two losses from one
-   * unhandled rejection.
-   *
-   * The selection is cleared only after a write that resolved. A failure says
-   * so and leaves the text highlighted, so the reader can try again or copy it
-   * by hand.
-   */
-  const copySelection = useCallback(() => {
-    const text = selection?.text ?? ''
-    if (text === '') return
-    /* `window.navigator`, spelled out: this file's own `navigator` is the
-     * book navigator ref, and shadowed the global. */
-    const clipboard = window.navigator.clipboard
-    if (clipboard === undefined) {
-      setProblem('This browser will not let a page copy text. Select it and copy it yourself.')
-      return
-    }
-    void clipboard
-      .writeText(text)
-      .then(() => {
-        setProblem(null)
-        setSelection(null)
-      })
-      .catch(() => {
-        setProblem('That could not be copied. The selection is still there — try again.')
-      })
-  }, [selection])
 
   const searchable = useMemo(
     () => ({
@@ -987,30 +667,7 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
                 }}
               />
             )}
-            {tool === 'settings' && (
-              <Settings
-                theme={theme}
-                themeFollowsOs={themeFollowsOs}
-                typeface={typeface}
-                stepIdx={stepIdx}
-                spacing={spacing}
-                align={align}
-                style={readingStyle}
-                offered={faces}
-                sections={[]}
-                persistent={prefsPersistent}
-                onTheme={(next) => {
-                  prefsStore.set(WEB_SETTINGS.theme, next)
-                  prefsStore.set(WEB_SETTINGS.themeFollowsOs, false)
-                }}
-                onFollowOs={() => prefsStore.set(WEB_SETTINGS.themeFollowsOs, !themeFollowsOs)}
-                onTypeface={(next) => prefsStore.set(WEB_SETTINGS.typeface, next)}
-                onStepIdx={(next) => prefsStore.set(WEB_SETTINGS.textSize, readingStep(next).size)}
-                onSpacing={(key, idx) => prefsStore.set(WEB_SETTINGS.spacing, { ...spacing, [key]: idx })}
-                onAlign={(next) => prefsStore.set(WEB_SETTINGS.align, next)}
-                onStyle={(key, value) => prefsStore.set(WEB_SETTINGS.readingStyle, { ...readingStyle, [key]: value })}
-              />
-            )}
+            {tool === 'settings' && <ReadingSettings settings={prefsStore} />}
           </div>
         </BottomSheet>
       )}

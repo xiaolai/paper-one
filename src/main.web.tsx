@@ -36,8 +36,8 @@ import { connect, type ShelfChannel } from './app/web/channel'
 import { asIndexedBook, createRemoteBooks, type RemoteBooks } from './app/web/books'
 import { remoteContent, type RemoteContent } from './app/web/content'
 import { remoteCovers } from './app/web/covers'
-import { createRemoteMarks, type MarksStore } from './app/web/marks'
-import { createRemoteCards, type CardsStore } from './app/web/cards'
+import { useRemoteStores } from './app/web/useRemoteStores'
+import { YouScreen } from './app/web/shell/YouScreen'
 import { TabBar, type Tab } from './app/web/shell/TabBar'
 import { ContinueStrip } from './app/web/shell/ContinueStrip'
 import { Reader } from './app/web/Reader'
@@ -49,10 +49,9 @@ import { capabilities } from 'virtual:paper-composition'
  * geometry as plain arithmetic. `.dependency-cruiser.cjs` allows this one
  * module to a composition root, with that reason written beside the rule. */
 import { applyMetrics } from './kernel/core/metrics'
-import { Cards, Library, Settings, offeredFaces, presentFaces } from './kernel/ui/browser'
-import { WEB_SETTINGS, browserSettings } from './app/web/settings'
-import type { BookAction, Card, IndexedBook } from './kernel'
-import { readingStep, stepIndexForSize } from './kernel/core/metrics'
+import { Cards, Library } from './kernel/ui/browser'
+import { browserSettings } from './app/web/settings'
+import type { BookAction, IndexedBook } from './kernel'
 
 /**
  * The CAPABILITY-supplied entries in a book's row menu — none, here.
@@ -79,7 +78,6 @@ import { readingStep, stepIndexForSize } from './kernel/core/metrics'
 const WEB_BOOK_ACTIONS: readonly BookAction[] = capabilities.flatMap(
   (capability) => capability.bookActions ?? [],
 )
-const EMPTY_CARDS: readonly Card[] = []
 
 /**
  * THE BROWSER CLIENT'S COMPOSITION ROOT.
@@ -303,48 +301,19 @@ function ShelfList({
    * object URL for every visible row on every render. */
   const covers = useMemo(() => remoteCovers(channel), [channel])
 
-  /* ONE MARKS STORE PER CHANNEL. It reads every mark on the shelf on creation
-   * — `mark.list` with no book — so building one per render would re-read the
-   * whole shelf every time anything changed. */
-  const [marks, setMarks] = useState<MarksStore | null>(null)
-  useEffect(() => {
-    const store = createRemoteMarks(channel)
-    setMarks(store)
-    return () => {
-      store.dispose()
-      setMarks(null)
-    }
-  }, [channel])
-  const [cards, setCards] = useState<CardsStore | null>(null)
-  useEffect(() => {
-    const store = createRemoteCards(channel)
-    setCards(store)
-    return () => {
-      store.dispose()
-      setCards(null)
-    }
-  }, [channel])
-  /* Cards re-renders when the store changes; subscribed here so the deck
-   * itself stays a plain-props pane. */
-  const cardRows = useSyncExternalStore(
-    useCallback((l: () => void) => cards?.subscribe(l) ?? (() => {}), [cards]),
-    useCallback(() => cards?.all ?? EMPTY_CARDS, [cards]),
-  )
+  /* THE SHELF'S NOTES AND CARDS — `useRemoteStores`, which builds one of each
+     per channel and disposes them with it. A store outliving its channel goes
+     on refreshing over a socket that has closed. */
+  const { marks, cards, cardRows } = useRemoteStores(channel)
 
   /* THE READER'S PREFERENCES, for the You tab. One store, like `positions`. */
   const prefs = useRef<ReturnType<typeof browserSettings> | null>(null)
   prefs.current ??= browserSettings()
   const prefsStore = prefs.current
   useSyncExternalStore(prefsStore.subscribe, prefsStore.getSnapshot)
-  /* The persistence flag needs its OWN subscription — the snapshot above is
-     unchanged by a refused write, so subscribing to it alone would show the
-     notice one change late. See `App.tsx`. */
-  const prefsPersistent = useSyncExternalStore(
-    prefsStore.subscribe,
-    () => prefsStore.persistent,
-    () => prefsStore.persistent,
-  )
-  const faces = useMemo(() => offeredFaces(presentFaces()), [])
+  /* The PERSISTENCE flag and the faces moved with the panel that reads them —
+     see `YouScreen`. This subscription stays because the shelf itself renders
+     nothing from a preference and only needs the store to exist. */
 
   if (tab === 'reading' && reading !== null) {
     return (
@@ -358,9 +327,6 @@ function ShelfList({
       />
     )
   }
-
-  const theme = prefsStore.get(WEB_SETTINGS.theme)
-  const themeFollowsOs = prefsStore.get(WEB_SETTINGS.themeFollowsOs)
 
   return (
     <div className="web-shell">
@@ -433,42 +399,7 @@ function ShelfList({
         </div>
       )}
 
-      {tab === 'you' && (
-        <div className="web-stage web-screen">
-          <h1 className="web-screen-title">You</h1>
-          <Settings
-            theme={theme}
-            themeFollowsOs={themeFollowsOs}
-            typeface={prefsStore.get(WEB_SETTINGS.typeface)}
-            stepIdx={stepIndexForSize(prefsStore.get(WEB_SETTINGS.textSize))}
-            spacing={prefsStore.get(WEB_SETTINGS.spacing)}
-            align={prefsStore.get(WEB_SETTINGS.align)}
-            style={prefsStore.get(WEB_SETTINGS.readingStyle)}
-            offered={faces}
-            sections={[]}
-            persistent={prefsPersistent}
-            onTheme={(next) => {
-              prefsStore.set(WEB_SETTINGS.theme, next)
-              prefsStore.set(WEB_SETTINGS.themeFollowsOs, false)
-            }}
-            onFollowOs={() => prefsStore.set(WEB_SETTINGS.themeFollowsOs, !themeFollowsOs)}
-            onTypeface={(next) => prefsStore.set(WEB_SETTINGS.typeface, next)}
-            onStepIdx={(next) => prefsStore.set(WEB_SETTINGS.textSize, readingStep(next).size)}
-            onSpacing={(key, idx) =>
-              prefsStore.set(WEB_SETTINGS.spacing, { ...prefsStore.get(WEB_SETTINGS.spacing), [key]: idx })
-            }
-            onAlign={(next) => prefsStore.set(WEB_SETTINGS.align, next)}
-            onStyle={(key, value) =>
-              prefsStore.set(WEB_SETTINGS.readingStyle, { ...prefsStore.get(WEB_SETTINGS.readingStyle), [key]: value })
-            }
-          />
-          {/* DISCONNECT lives under You — it is about this device, which is
-              what the tab is for. */}
-          <button type="button" className="shelf-signout web-signout" onClick={onSignOut}>
-            Disconnect this browser
-          </button>
-        </div>
-      )}
+      {tab === 'you' && <YouScreen settings={prefsStore} onSignOut={onSignOut} />}
 
       <TabBar active={tab} onSelect={setTab} hasBook={reading !== null} />
     </div>
