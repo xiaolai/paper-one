@@ -111,6 +111,26 @@ impl SessionId {
 pub struct Admission {
     credential: Credential,
     generation: u64,
+    /// When this credential stops being good, whatever is holding it.
+    ///
+    /// ⚠️ **EXPIRY WAS CHECKED AT THE HANDSHAKE AND NOWHERE ELSE**, and a
+    /// WebSocket outlives the request that made it. A browser that connected
+    /// on day 89 held an authenticated channel indefinitely: nothing re-read
+    /// `issued_at` once the socket was open, so `CREDENTIAL_TTL` — the whole
+    /// point of which is that a browser forgotten on a borrowed laptop stops
+    /// working ON ITS OWN — bounded only the act of connecting.
+    ///
+    /// Carried out so the caller holding the socket can close it at the
+    /// deadline. `Sessions` cannot: it does not know what a socket is, which
+    /// is the same division `revoke` is documented under.
+    expires_at: Instant,
+}
+
+impl Admission {
+    /// When the credential behind this admission stops being good.
+    pub fn expires_at(&self) -> Instant {
+        self.expires_at
+    }
 }
 
 /// Why an admission or a validation failed.
@@ -190,10 +210,25 @@ impl Sessions {
         Ok(Admission {
             credential: presented.clone(),
             generation,
+            expires_at: session.issued_at + CREDENTIAL_TTL,
         })
     }
 
     /// Register a connection against an admission, re-checking the present.
+    ///
+    /// ⚠️ **THE GENERATION IS `revoke_all`'S ALONE, and it used to be every
+    /// revocation's.** `revoke` bumped it too, so signing one browser out
+    /// rejected an admission ALREADY IN FLIGHT for a completely unrelated
+    /// credential — the second browser's handshake failed, with
+    /// `RevokedMeanwhile`, about a revocation that was not theirs. Failing
+    /// closed is the safe direction, which is exactly why it went unnoticed:
+    /// the reader sees an occasional handshake that has to be retried.
+    ///
+    /// The liveness re-check below is what closes finding 7's window, per
+    /// credential, and it is unaffected. The generation exists for the one
+    /// thing a per-credential check cannot see: `revoke_all` is a statement
+    /// about the WHOLE SET, so an admission taken before it must fail even
+    /// though its own credential is being removed in the same breath.
     pub fn admit(&self, admission: Admission) -> Result<SessionId, Rejected> {
         let guard = self.inner.lock().expect("sessions mutex poisoned");
         /* THE RE-CHECK, which is the whole point of the two-phase shape. */
@@ -216,11 +251,11 @@ impl Sessions {
     /// open socket answering requests.
     pub fn revoke(&self, credential: &Credential) -> Option<SessionId> {
         let mut guard = self.inner.lock().expect("sessions mutex poisoned");
-        let removed = guard.live.remove(credential).map(|s| s.id);
-        if removed.is_some() {
-            guard.generation += 1;
-        }
-        removed
+        /* THE GENERATION IS NOT TOUCHED HERE — see [`Sessions::admit`].
+         * Removing the credential is what fails an in-flight admission for THIS
+         * browser, and bumping the generation as well failed every other
+         * browser's too. */
+        guard.live.remove(credential).map(|s| s.id)
     }
 
     /// Revoke everything. The "this laptop was stolen" button.
@@ -272,8 +307,8 @@ impl Sessions {
             .iter()
             .find(|(_, session)| session.id == id)
             .map(|(credential, _)| credential.clone())?;
+        /* One browser, so no generation bump — see `revoke`. */
         guard.live.remove(&found);
-        guard.generation += 1;
         Some(found)
     }
 
@@ -462,6 +497,52 @@ mod tests {
         let held = sessions.issue(granted(&auth, now), now);
         assert!(sessions.revoke_by_id(SessionId::from_u64(9999)).is_none());
         assert!(sessions.validate(&held, now).is_ok());
+    }
+
+    /// ⚠️ **ONE BROWSER'S REVOCATION MUST NOT FAIL ANOTHER'S HANDSHAKE.**
+    ///
+    /// `revoke` used to bump the generation, and `admit` compares it — so an
+    /// admission already in flight for a completely unrelated credential was
+    /// rejected with `RevokedMeanwhile`, about a revocation that was not
+    /// theirs. It fails CLOSED, which is why it went unnoticed: the reader sees
+    /// an occasional handshake that has to be retried.
+    #[test]
+    fn revoking_one_browser_does_not_fail_anothers_admission_in_flight() {
+        let (auth, sessions, now) = (DeviceAuth::new(), Sessions::new(), Instant::now());
+        let mine = sessions.issue(granted(&auth, now), now);
+        let theirs = sessions.issue(granted(&auth, now), now);
+
+        /* My handshake is under way… */
+        let admission = sessions.validate(&mine, now).expect("valid");
+        /* …and somebody else signs out in the middle of it. */
+        assert!(sessions.revoke(&theirs).is_some());
+
+        assert!(
+            sessions.admit(admission).is_ok(),
+            "another browser signing out is not a revocation of this one"
+        );
+    }
+
+    /// AND THE ADMISSION KNOWS WHEN IT RUNS OUT.
+    ///
+    /// Expiry was checked at the handshake and nowhere else, and a WebSocket
+    /// outlives the request that made it — so a browser connecting on day 89
+    /// held an authenticated channel indefinitely. `Sessions` cannot close a
+    /// socket; it can say when the credential stops being good, which is what
+    /// the caller holding one needs.
+    #[test]
+    fn an_admission_carries_the_credentials_ceiling() {
+        let (auth, sessions, now) = (DeviceAuth::new(), Sessions::new(), Instant::now());
+        let credential = sessions.issue(granted(&auth, now), now);
+
+        let admission = sessions.validate(&credential, now).expect("valid");
+        assert_eq!(admission.expires_at(), now + CREDENTIAL_TTL);
+
+        /* And it is the ISSUE time's ceiling, not the moment of asking — a
+         * credential does not get a fresh ninety days for being presented. */
+        let later = now + Duration::from_secs(60 * 60 * 24);
+        let again = sessions.validate(&credential, later).expect("still valid");
+        assert_eq!(again.expires_at(), now + CREDENTIAL_TTL);
     }
 
     /// `Credential` MUST NOT BE PRINTABLE, and the doc comment saying so is not

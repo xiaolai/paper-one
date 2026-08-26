@@ -377,6 +377,9 @@ impl<S: Sync> FromRequestParts<S> for SameOrigin {
 pub struct Admitted {
     pub session: paper_webauth::sessions::SessionId,
     pub credential: Credential,
+    /// When this credential stops being good — carried so the SOCKET can act
+    /// on it. See `pump`, and `Admission::expires_at`.
+    pub expires_at: Instant,
 }
 
 impl FromRequestParts<Arc<WebHost>> for Admitted {
@@ -394,6 +397,7 @@ impl FromRequestParts<Arc<WebHost>> for Admitted {
             .sessions
             .validate(&credential, Instant::now())
             .map_err(|_| StatusCode::UNAUTHORIZED)?;
+        let expires_at = admission.expires_at();
         let session = state
             .sessions
             .admit(admission)
@@ -401,6 +405,7 @@ impl FromRequestParts<Arc<WebHost>> for Admitted {
         Ok(Self {
             session,
             credential,
+            expires_at,
         })
     }
 }
@@ -519,6 +524,9 @@ async fn upgrade(
     ws: WebSocketUpgrade,
 ) -> Response {
     let (outbound, receiver) = mpsc::channel(OUTBOUND_CAP);
+    /* CARRIED TO THE SOCKET. `admitted` is moved into the closure below, so the
+     * deadline is taken out here — see `pump`. */
+    let expires_at = admitted.expires_at;
     let Ok(socket) = state
         .pipe
         .open(admitted.session, admitted.credential.clone(), outbound)
@@ -577,7 +585,7 @@ async fn upgrade(
          * handshakes and that credential could open no more sockets, for the
          * life of the process, with nothing logged. */
         .on_failed_upgrade(move |_error| pipe.pipe.close(socket_for_failure, "upgrade failed"))
-        .on_upgrade(move |ws| pump(state, socket, ws, receiver))
+        .on_upgrade(move |ws| pump(state, socket, ws, receiver, expires_at))
 }
 
 /// Move frames both ways until either end stops.
@@ -592,7 +600,25 @@ async fn pump(
     socket: WebSessionId,
     mut ws: WebSocket,
     mut outbound: mpsc::Receiver<Vec<u8>>,
+    expires_at: Instant,
 ) {
+    /* THE CREDENTIAL'S OWN DEADLINE, ON THE SOCKET.
+     *
+     * ⚠️ Expiry was checked at the HANDSHAKE and nowhere else, and a WebSocket
+     * outlives the request that made it. A browser connecting on day 89 held an
+     * authenticated channel indefinitely — nothing re-read the credential once
+     * the socket was open — so `CREDENTIAL_TTL` bounded only the act of
+     * connecting. The whole point of an absolute ceiling is that a browser
+     * forgotten on a borrowed laptop stops working on its own, and it did not.
+     *
+     * `tokio::time::Instant` from a `std::time::Instant`: the deadline is a
+     * point, so the remaining duration is what carries across. Saturating,
+     * because a credential can be past its ceiling before this runs. */
+    let remaining = expires_at.saturating_duration_since(Instant::now());
+    let expiry = tokio::time::sleep(tokio::time::Duration::from_secs_f64(
+        remaining.as_secs_f64().min(u32::MAX as f64),
+    ));
+    tokio::pin!(expiry);
     /* THE FRAME THE INBOX REFUSED, HELD RATHER THAN DROPPED.
      *
      * This used to be `Push::Backpressure => yield_now().await`, under a comment
@@ -683,6 +709,12 @@ async fn pump(
         }
 
         tokio::select! {
+            /* THE CREDENTIAL RAN OUT. Closing rather than merely stopping, so
+             * the browser learns and the record is reaped like any other end. */
+            () = &mut expiry => {
+                state.pipe.close(socket, "credential expired");
+                break;
+            }
             /* Ends when the channel closes, which is what `Pipe::close` does by
              * dropping the sender. No second flag to keep in step. */
             frame = outbound.recv() => {
