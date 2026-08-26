@@ -204,8 +204,21 @@ pub fn router(state: Arc<WebHost>, client: &'static [Asset]) -> Router {
         .route("/ws", axum::routing::get(upgrade))
         /* THE CLIENT LAST, as a fallback. Registered routes are matched first,
          * so the single-page rule — an unknown path serves the entry document —
-         * cannot shadow `/api` or `/ws`, however a browser spells them. */
-        .fallback(move |uri: axum::http::Uri| async move { assets::serve(client, &uri) })
+         * cannot shadow `/api` or `/ws`, however a browser spells them.
+         *
+         * ⚠️ AN UNKNOWN `/api` PATH IS A 404 AND USED TO BE THE SPA. The claim
+         * above holds for the routes that EXIST; one that does not fell through
+         * here and was answered with the entry document at status 200. A client
+         * calling an endpoint this build lacks got HTML and a success code and
+         * parsed it as an answer, so a typo in a service path became a mystery
+         * about JSON rather than a 404. `api_missing` below is the scoped
+         * fallback that answers first. */
+        .fallback(move |uri: axum::http::Uri| async move {
+            if uri.path() == "/ws" || uri.path().starts_with("/api/") {
+                return StatusCode::NOT_FOUND.into_response();
+            }
+            assets::serve(client, &uri)
+        })
         .layer(middleware::from_fn(policy_headers))
         .with_state(state)
 }
@@ -434,10 +447,20 @@ async fn submit(
 }
 
 /// `GET /api/auth/session` — does this browser hold a live credential?
-async fn session(_admitted: Admitted) -> StatusCode {
+///
+/// ⚠️ **`no-store`, WHICH IT DID NOT SAY.** This is a cacheable GET, and its
+/// answer is authentication state: a browser or an intervening proxy could
+/// reuse a 204 after a sign-out, or a 401 after signing in, and the client
+/// would show the wrong screen with nothing to explain it. `POST` endpoints are
+/// not cached by default; this one is the exception and has to say so.
+async fn session(_admitted: Admitted) -> Response {
     /* The extractor is the whole endpoint: reaching this line means a live
      * credential, and failing to reach it is already a 401. */
-    StatusCode::NO_CONTENT
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 /// `POST /api/auth/signout` — revoke this browser's credential.
@@ -1411,6 +1434,63 @@ mod tests {
         retry.taken();
         let after = start + std::time::Duration::from_millis(50);
         assert_eq!(retry.deadline(after), after + RETRY);
+    }
+
+    /// AN UNKNOWN `/api` PATH IS A 404, NOT THE CLIENT.
+    ///
+    /// The single-page fallback answered every unmatched path with the entry
+    /// document at status 200 — so a client calling an endpoint this build does
+    /// not have received HTML and a success code and parsed it as an answer. A
+    /// typo in a service path became a mystery about JSON.
+    #[tokio::test]
+    async fn an_unknown_api_path_is_not_the_single_page_app() {
+        let state = host();
+        for path in ["/api/auth/nope", "/api/nothing", "/api/auth/session/extra"] {
+            let response = call(Arc::clone(&state), get(path, None)).await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+        /* AND AN ORDINARY PATH STILL GETS THE CLIENT — with `NO_CLIENT` here
+         * that is the empty-bundle answer rather than a 404, which is what
+         * distinguishes "no route" from "no bundle". */
+        let ordinary = call(Arc::clone(&state), get("/some/reader/route", None)).await;
+        assert_ne!(ordinary.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// THE SESSION CHECK IS NOT CACHEABLE.
+    ///
+    /// It is a GET whose answer is authentication state. Without `no-store` a
+    /// browser or an intervening proxy could reuse a 204 after a sign-out, or a
+    /// 401 after signing in, and the client shows the wrong screen with nothing
+    /// to explain it.
+    #[tokio::test]
+    async fn the_session_check_refuses_to_be_cached() {
+        let state = host();
+        let code = live_code(&state);
+        let response = call(
+            Arc::clone(&state),
+            from_site(
+                json_post("/api/auth/submit", &format!(r#"{{"code":"{code}"}}"#), None),
+                "same-origin",
+            ),
+        )
+        .await;
+        let cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(';').next())
+            .expect("a cookie")
+            .to_owned();
+
+        let session = call(Arc::clone(&state), get("/api/auth/session", Some(&cookie))).await;
+        assert_eq!(session.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            session
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store"),
+        );
     }
 
     #[test]

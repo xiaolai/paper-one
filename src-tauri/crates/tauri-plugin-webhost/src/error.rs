@@ -13,6 +13,16 @@ pub enum Error {
     Backpressure,
     #[error("frame too large")]
     FrameTooLarge,
+    /// A blocking task did not come back — it panicked, or the runtime is
+    /// shutting down.
+    ///
+    /// Distinct from the three above on purpose: those are answers ABOUT a
+    /// session, and a webview acts on each differently. Folding this into
+    /// `NoSuchSession` — which is what it briefly was — would tell the pane a
+    /// browser had gone away because a subprocess helper fell over, and the
+    /// pane would have redrawn its list accordingly.
+    #[error("the command could not be completed")]
+    Internal,
 }
 
 impl Serialize for Error {
@@ -23,6 +33,7 @@ impl Serialize for Error {
             Error::NoSuchSession => "no-such-session",
             Error::Backpressure => "backpressure",
             Error::FrameTooLarge => "frame-too-large",
+            Error::Internal => "internal",
         })
     }
 }

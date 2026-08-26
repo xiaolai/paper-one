@@ -92,19 +92,60 @@ pub fn serve(assets: &'static [Asset], uri: &Uri) -> Response {
         header::CONTENT_TYPE,
         HeaderValue::from_static(asset.content_type),
     );
-    /* THE ENTRY DOCUMENT MUST NEVER BE CACHED. Everything else carries a hash
-     * in its filename, so it can be cached for a year; the entry is what points
-     * at those hashes, and a stale one is a reader running last week's client
-     * against this week's shelf. */
+    /* THE ENTRY DOCUMENT MUST NEVER BE CACHED. It is what points at the hashed
+     * names, and a stale one is a reader running last week's client against
+     * this week's shelf.
+     *
+     * ⚠️ **AND `immutable` IS ONLY TRUE OF A HASHED NAME**, which "everything
+     * else" was not. `dist-web/pdfjs/` is copied in verbatim — the WASM
+     * modules, the CMaps, the standard fonts — under fixed names that change
+     * CONTENT between releases while keeping their spelling. Marked immutable
+     * for a year, a browser that had opened one PDF would go on using the old
+     * decoder against a new client, and refuse to revalidate: the failure is a
+     * scanned book that renders blank, months later, with nothing in the tree
+     * to suggest why.
+     *
+     * A hash is a claim about content, so only a name carrying one may promise
+     * the content will not change. Everything else revalidates — `no-cache` is
+     * not "do not store", it is "ask first", so an unchanged font still costs
+     * a 304 rather than a download. */
     headers.insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static(if asset.path == ENTRY {
             "no-store"
-        } else {
+        } else if is_content_hashed(asset.path) {
             "public, max-age=31536000, immutable"
+        } else {
+            "no-cache"
         }),
     );
     response
+}
+
+/// Whether this name carries a content hash, and so cannot change meaning.
+///
+/// Vite emits `name-B7xK2Qs9.js` — a base-62 digest before the extension,
+/// after a dash. Nothing else in the bundle does: `pdfjs/` is copied in
+/// verbatim under fixed names whose CONTENT changes between releases, which is
+/// exactly the case `immutable` must not be applied to.
+///
+/// Conservative on purpose. A name this does not recognise revalidates, which
+/// costs a 304; a name it recognises wrongly is cached for a year and cannot be
+/// corrected.
+fn is_content_hashed(path: &str) -> bool {
+    let file = path.rsplit('/').next().unwrap_or(path);
+    let Some((stem, _extension)) = file.rsplit_once('.') else {
+        return false;
+    };
+    let Some((_name, digest)) = stem.rsplit_once('-') else {
+        return false;
+    };
+    /* Vite's default is eight characters; requiring a length as well as an
+     * alphabet keeps an ordinary hyphenated name — `pdf-worker.mjs` — out. */
+    digest.len() >= 8
+        && digest
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// The content type for a filename, by extension.
@@ -170,12 +211,22 @@ mod tests {
         content_type: "text/html; charset=utf-8",
         bytes: b"<!doctype html>",
     };
+    /* A REAL VITE NAME. The fixture used `index-ab12.js`, a four-character
+     * digest no build emits — and the length is part of what distinguishes a
+     * content hash from an ordinary hyphenated filename. */
     static SCRIPT: Asset = Asset {
-        path: "/assets/index-ab12.js",
+        path: "/assets/index-B7xK2Qs9.js",
         content_type: "text/javascript; charset=utf-8",
         bytes: b"console.log(1)",
     };
-    static TABLE: &[Asset] = &[INDEX, SCRIPT];
+    /* COPIED IN VERBATIM, under a fixed name whose CONTENT changes between
+     * releases. This is what must not be marked immutable. */
+    static WASM: Asset = Asset {
+        path: "/pdfjs/wasm/openjpeg.wasm",
+        content_type: "application/octet-stream",
+        bytes: b"\0asm",
+    };
+    static TABLE: &[Asset] = &[INDEX, SCRIPT, WASM];
 
     fn get(path: &str) -> Response {
         serve(TABLE, &path.parse::<Uri>().expect("a uri"))
@@ -196,10 +247,49 @@ mod tests {
         /* The pair that matters. A cached entry document is a reader running
          * last week's client against this week's shelf. */
         assert_eq!(
-            get("/assets/index-ab12.js").headers()[header::CACHE_CONTROL],
+            get("/assets/index-B7xK2Qs9.js").headers()[header::CACHE_CONTROL],
             "public, max-age=31536000, immutable"
         );
         assert_eq!(get("/").headers()[header::CACHE_CONTROL], "no-store");
+    }
+
+    /// ⚠️ **`immutable` IS A PROMISE ONLY A HASHED NAME CAN MAKE.**
+    ///
+    /// Everything that was not the entry document got a year and `immutable`.
+    /// `dist-web/pdfjs/` is copied in verbatim — the WASM decoders, the CMaps,
+    /// the standard fonts — under fixed names whose CONTENT changes between
+    /// releases. A browser that had opened one PDF would go on using the old
+    /// decoder against a new client and refuse to revalidate: a scanned book
+    /// that renders blank, months later, with nothing in the tree to explain it.
+    #[test]
+    fn an_unhashed_asset_revalidates_rather_than_promising_it_cannot_change() {
+        assert_eq!(
+            get("/pdfjs/wasm/openjpeg.wasm").headers()[header::CACHE_CONTROL],
+            "no-cache"
+        );
+    }
+
+    /// The rule itself, on the names that actually appear.
+    #[test]
+    fn a_content_hash_is_told_from_an_ordinary_hyphen() {
+        for hashed in [
+            "/assets/index-B7xK2Qs9.js",
+            "/assets/pdf.worker.min-CHFwMXne.mjs",
+            "/assets/index-Cv9DGM9l.css",
+        ] {
+            assert!(is_content_hashed(hashed), "{hashed} carries a digest");
+        }
+        for plain in [
+            "/pdfjs/wasm/openjpeg.wasm",
+            "/pdfjs/standard_fonts/FoxitSans.pfb",
+            "/index.web.html",
+            /* An ordinary hyphenated name, and a digest too short to be one. */
+            "/assets/pdf-worker.mjs",
+            "/assets/index-ab12.js",
+            "/assets/no-extension",
+        ] {
+            assert!(!is_content_hashed(plain), "{plain} carries no digest");
+        }
     }
 
     #[test]

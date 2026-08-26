@@ -5855,6 +5855,7 @@ dependencies = [
  "paper-webauth",
  "paper-webhost",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-plugin",
  "thiserror 2.0.20",

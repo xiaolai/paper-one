@@ -18,6 +18,14 @@ tauri = { version = "2.11.3" }
 paper-webhost = { path = "../paper-webhost" }
 paper-webauth = { path = "../paper-webauth" }
 serde = { version = "1", features = ["derive"] }
+# `tailscale status --json` is a large document and the two facts wanted from it
+# sit inside a NAMED object. Read by hand, the search for `"DNSName"` ran from
+# `"Self"` to the end of the file and returned a PEER's hostname when Self had
+# none — the pane then told the reader to point a browser at another machine.
+# Already compiled (axum's `json` feature and tauri both pull it in), so the
+# "adding a dependency to read one field" trade this replaced was not the trade
+# it looked like.
+serde_json = "1" 
 thiserror = "2"
 log = "0.4"
 tokio = { version = "1", features = ["net", "rt"] }

@@ -85,12 +85,22 @@ pub async fn webhost_status<R: Runtime>(
 /// Asks Tailscale, so it is not instant — a subprocess, twice. Separate from
 /// `webhost_status` for that reason: the pane polls status every few seconds
 /// and asks this once.
+///
+/// ⚠️ **`spawn_blocking`, BECAUSE THE SUBPROCESSES BLOCK.** This ran them
+/// directly on an async worker: a `tailscale` that hangs — a wedged daemon, a
+/// control server that will not answer — occupied that worker until it
+/// returned, and enough concurrent calls would exhaust the pool and stall every
+/// other command in the app. `address::ask` also has a deadline now, so the
+/// blocking thread is not held indefinitely either.
 #[command]
 pub async fn webhost_address<R: Runtime>(
     _app: AppHandle<R>,
     state: State<'_, Arc<WebHostState>>,
 ) -> Result<Address, Error> {
-    Ok(crate::address::resolve(state.port()))
+    let port = state.port();
+    tauri::async_runtime::spawn_blocking(move || crate::address::resolve(port))
+        .await
+        .map_err(|_| Error::Internal)
 }
 
 /// Show a new code. Replaces any code already on screen.

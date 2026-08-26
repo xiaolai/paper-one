@@ -87,12 +87,56 @@ pub enum Address {
 /// A missing binary, a non-zero exit and unreadable output are ONE case on
 /// purpose: each of them means "cannot answer", and telling them apart would
 /// only tempt a caller into reporting a diagnosis it cannot support.
+/// How long a Tailscale invocation may take before it is given up on.
+///
+/// ⚠️ **THERE WAS NO DEADLINE, AND THIS RUNS FROM AN ASYNC COMMAND.** A
+/// `tailscale` that hangs — a wedged daemon, a control server that will not
+/// answer, an NFS-mounted binary on a dead mount — held the calling thread with
+/// no way out. It reaches the runtime through `spawn_blocking` now, so it can
+/// no longer occupy an async worker; the timeout is what stops it occupying a
+/// blocking one for ever.
+///
+/// Five seconds: `tailscale status` answers in milliseconds when the daemon is
+/// up, and a reader watching the Browsers pane will not wait longer than this
+/// to be told there is no tailnet.
+const ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 fn ask(program: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new(program).args(args).output().ok()?;
-    if !output.status.success() {
-        return None;
+    let mut child = Command::new(program)
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+
+    /* WAITED FOR WITH A DEADLINE, and killed past it. `output()` waits for ever
+     * — there is no timeout on it — so a hung `tailscale` was a thread this
+     * process never got back. */
+    let deadline = std::time::Instant::now() + ASK_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return None;
+                }
+                break;
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(_) => return None,
+        }
     }
-    String::from_utf8(output.stdout).ok()
+
+    let mut stdout = child.stdout.take()?;
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut stdout, &mut text).ok()?;
+    Some(text)
 }
 
 /// The `tailscale` binary, wherever it is.
@@ -113,16 +157,20 @@ fn tailscale(args: &[&str]) -> Option<String> {
 
 /// This machine's MagicDNS name, without the trailing dot.
 ///
-/// Parsed out of `tailscale status --json` by hand rather than with a JSON
-/// dependency: one string is wanted from a large document, and the shape
-/// (`"Self": { … "DNSName": "host.tailnet.ts.net." }`) is stable.
+/// ⚠️ **PARSED, AND IT USED TO BE SEARCHED.** The old version found `"Self"`
+/// and then searched from there to the END OF THE DOCUMENT for `"DNSName"` —
+/// so on a tailnet whose `Self` carries no DNS name (MagicDNS off, or a node
+/// that has not been issued one) it returned the first PEER's, and the pane
+/// told the reader to point their browser at somebody else's machine. A `null`
+/// value had the same shape: the next quoted key in the document came back as
+/// a hostname.
+///
+/// `Self.DNSName` is one field of one named object, which is a thing a parser
+/// can express and a substring search cannot.
 pub fn parse_dns_name(status_json: &str) -> Option<String> {
-    let self_at = status_json.find("\"Self\"")?;
-    let key = status_json[self_at..].find("\"DNSName\"")? + self_at;
-    let rest = &status_json[key + "\"DNSName\"".len()..];
-    let open = rest.find('"')? + 1;
-    let close = rest[open..].find('"')? + open;
-    let name = rest[open..close].trim_end_matches('.');
+    let status: serde_json::Value = serde_json::from_str(status_json).ok()?;
+    let name = status.get("Self")?.get("DNSName")?.as_str()?;
+    let name = name.trim_end_matches('.');
     if name.is_empty() {
         return None;
     }
@@ -148,20 +196,20 @@ pub fn parse_dns_name(status_json: &str) -> Option<String> {
 /// reason `parse_dns_name` is — one fact out of a large document, and adding a
 /// JSON dependency to a plugin to read one field is a poor trade.
 pub fn can_issue_certificates(status_json: &str) -> bool {
-    let Some(key) = status_json.find("\"CertDomains\"") else {
+    let Ok(status) = serde_json::from_str::<serde_json::Value>(status_json) else {
         return false;
     };
-    let rest = &status_json[key + "\"CertDomains\"".len()..];
-    let Some(colon) = rest.find(':') else {
-        return false;
-    };
-    let value = rest[colon + 1..].trim_start();
-    /* AN EMPTY LIST IS A NO, and so is `null`. Both mean the tailnet will issue
-     * for nothing, and only the presence of an entry means it will. */
-    let Some(without_bracket) = value.strip_prefix('[') else {
-        return false;
-    };
-    !without_bracket.trim_start().starts_with(']')
+    /* AN EMPTY LIST IS A NO, and so is `null` or absent. Both mean the tailnet
+     * will issue for nothing, and only the presence of an entry means it will.
+     *
+     * Parsed rather than searched, for `parse_dns_name`'s reason: the old
+     * version found the KEY anywhere in the document and read whatever followed
+     * the next colon, which is a different field on any node that happens to
+     * carry one. */
+    status
+        .get("CertDomains")
+        .and_then(|value| value.as_array())
+        .is_some_and(|domains| !domains.is_empty())
 }
 
 /// Whether a serve config mentions our loopback port.
@@ -273,6 +321,71 @@ mod tests {
         assert!(serves_port(serve, 27182));
         assert!(!serves_port(serve, 8080));
         assert!(!serves_port("No serve config", 27182));
+    }
+
+    /// ⚠️ **A PEER'S HOSTNAME IS NOT THIS MACHINE'S.**
+    ///
+    /// `parse_dns_name` found `"Self"` and then searched to the END of the
+    /// document for `"DNSName"`. On a tailnet whose `Self` carries none —
+    /// MagicDNS off, or a node not yet issued one — the first PEER's came back,
+    /// and the pane told the reader to open somebody else's machine.
+    #[test]
+    fn a_self_without_a_dns_name_does_not_borrow_a_peers() {
+        let status = r#"{
+            "Self": { "HostName": "studio" },
+            "Peer": { "n1": { "DNSName": "someone-else.tail1234.ts.net." } }
+        }"#;
+        assert_eq!(parse_dns_name(status), None);
+    }
+
+    /// And a `null` value is absent, not the next string in the file.
+    #[test]
+    fn a_null_dns_name_is_no_name() {
+        let status = r#"{"Self":{"DNSName":null},"Peer":{"n1":{"DNSName":"other.ts.net."}}}"#;
+        assert_eq!(parse_dns_name(status), None);
+    }
+
+    #[test]
+    fn selfs_own_name_is_read_even_with_peers_before_it() {
+        let status = r#"{
+            "Peer": { "n1": { "DNSName": "other.tail1234.ts.net." } },
+            "Self": { "DNSName": "studio.tail1234.ts.net." }
+        }"#;
+        assert_eq!(
+            parse_dns_name(status).as_deref(),
+            Some("studio.tail1234.ts.net")
+        );
+    }
+
+    /// `CertDomains` ANYWHERE used to answer for the tailnet's.
+    #[test]
+    fn a_peers_cert_domains_do_not_answer_for_this_tailnet() {
+        let status = r#"{
+            "Self": { "DNSName": "studio.tail1234.ts.net." },
+            "Peer": { "n1": { "CertDomains": ["other.tail1234.ts.net"] } }
+        }"#;
+        assert!(
+            !can_issue_certificates(status),
+            "a peer's certificate domains say nothing about this account"
+        );
+    }
+
+    #[test]
+    fn the_tailnets_own_cert_domains_answer_yes() {
+        let status = r#"{"Self":{"DNSName":"s.ts.net."},"CertDomains":["s.ts.net"]}"#;
+        assert!(can_issue_certificates(status));
+        let none = r#"{"Self":{"DNSName":"s.ts.net."},"CertDomains":[]}"#;
+        assert!(!can_issue_certificates(none));
+        let null = r#"{"Self":{"DNSName":"s.ts.net."},"CertDomains":null}"#;
+        assert!(!can_issue_certificates(null));
+    }
+
+    /// A document that is not JSON at all answers nothing, rather than
+    /// whatever the search happened to land on.
+    #[test]
+    fn unparseable_status_answers_nothing() {
+        assert_eq!(parse_dns_name("tailscale: command not found"), None);
+        assert!(!can_issue_certificates("tailscale: command not found"));
     }
 
     #[test]
