@@ -119,6 +119,101 @@ describe('the codec', () => {
     expect(decodeFrame(encodeFrame(frame({ body: under }))).body).toBe(under)
   })
 
+  /**
+   * ⚠️ **ENCODING WAS THE ONE PLACE THAT COULD CHANGE A BODY WITHOUT SAYING SO.**
+   *
+   * `parseFrame` checks the five envelope fields and nothing inside `body`, and
+   * `JSON.stringify` does not refuse what it cannot represent — it REWRITES it.
+   * So a handler that returned `1/0` sent a `null` the peer read as "no value",
+   * and a row carrying a nested `undefined` lost the key. Nothing failed
+   * anywhere; the sender believed it had sent what it computed.
+   *
+   * Each case below is a value that survives `JSON.stringify` as something
+   * ELSE, which is why none of them could be caught downstream: `null` is a
+   * legitimate value and an absent key is a legitimate shape.
+   */
+  describe('a body JSON cannot carry unchanged', () => {
+    const refused = (body: unknown, why: RegExp) => {
+      expect(() => encodeFrame(frame({ body })), String(why)).toThrow(MalformedFrame)
+      expect(() => encodeFrame(frame({ body }))).toThrow(why)
+    }
+
+    it('refuses a non-finite number rather than sending null', () => {
+      refused({ ratio: Infinity }, /non-finite/)
+      refused({ ratio: -Infinity }, /non-finite/)
+      refused({ ratio: NaN }, /non-finite/)
+      refused([1, NaN, 3], /non-finite/)
+    })
+
+    it('refuses a nested undefined rather than dropping the key', () => {
+      refused({ title: 'Moby-Dick', author: undefined }, /undefined/)
+      /* IN AN ARRAY IT BECOMES `null`, which is worse: the row is still there
+         and its contents are not what was put in it. */
+      refused([1, undefined, 3], /undefined/)
+    })
+
+    it('refuses a function or a symbol rather than dropping it', () => {
+      refused({ onDone: () => {} }, /function/)
+      refused({ tag: Symbol('x') }, /symbol/)
+    })
+
+    it('refuses a bigint, naming the frame rather than throwing a bare TypeError', () => {
+      refused({ size: 1n }, /bigint|cannot be serialised/)
+    })
+
+    /* AND A CYCLE DOES NOT HANG. The walk assumes an acyclic graph — a visited
+       set would also reject a shared subgraph, which is legitimate — so
+       `JSON.stringify` runs first and proves it. Written the other way round
+       this is an infinite loop in the sender. */
+    it('refuses a body that references itself, promptly', () => {
+      const cyclic: Record<string, unknown> = { title: 'Moby-Dick' }
+      cyclic['self'] = cyclic
+      expect(() => encodeFrame(frame({ body: cyclic }))).toThrow(MalformedFrame)
+    })
+
+    /* A SHARED SUBGRAPH IS NOT A CYCLE, and must still encode. This is what a
+       visited-set cycle check would have broken. */
+    it('encodes a value referenced twice', () => {
+      const shared = { author: 'Melville' }
+      expect(decodeFrame(encodeFrame(frame({ body: { a: shared, b: shared } }))).body).toEqual({
+        a: { author: 'Melville' },
+        b: { author: 'Melville' },
+      })
+    })
+
+    /**
+     * ⚠️ **THE TWO ENDS USED TO DISAGREE ABOUT DEPTH.** `decodeFrame` refuses a
+     * body nested past `MAX_JSON_DEPTH`; `encodeFrame` emitted one happily. So
+     * a sender could produce a frame no conforming peer would accept and hear
+     * about it only as the peer's refusal — a protocol error attributed to the
+     * wrong end of the wire.
+     */
+    it('refuses a body nested deeper than the decoder will accept', () => {
+      let deep: unknown = 'bottom'
+      for (let i = 0; i < MAX_JSON_DEPTH + 4; i++) deep = [deep]
+      expect(() => encodeFrame(frame({ body: deep }))).toThrow(MalformedFrame)
+    })
+
+    it('accepts a body at the depth the decoder accepts', () => {
+      let deep: unknown = 'bottom'
+      /* -2: the envelope itself is one level, and the body's own outermost
+         bracket is another — the limit is on the SERIALISED frame, which is
+         what makes encode and decode the same rule. */
+      for (let i = 0; i < MAX_JSON_DEPTH - 2; i++) deep = [deep]
+      expect(() => decodeFrame(encodeFrame(frame({ body: deep })))).not.toThrow()
+    })
+
+    /* THE ORDINARY BODIES STILL GO. This is the check that stops the paragraph
+       above from being a way to refuse everything. */
+    it('carries a date, an empty object and an empty array', () => {
+      expect(decodeFrame(encodeFrame(frame({ body: { at: new Date(0) } }))).body).toEqual({
+        at: '1970-01-01T00:00:00.000Z',
+      })
+      expect(decodeFrame(encodeFrame(frame({ body: {} }))).body).toEqual({})
+      expect(decodeFrame(encodeFrame(frame({ body: [] }))).body).toEqual([])
+    })
+  })
+
   it('refuses an oversized declared length before decoding anything', () => {
     const header = new Uint8Array(HEADER_BYTES + 4)
     new DataView(header.buffer).setUint32(0, MAX_FRAME_BYTES + 1, false)
@@ -331,6 +426,123 @@ describe('the router', () => {
     expect(h.sent).toEqual([])
     h.timers.advance(1)
     expect(errBody(h.sent[0]).code).toBe(ENVELOPE_ERRORS.timeout)
+  })
+
+  /**
+   * ⚠️ **THE TIMEOUT WAS AN ABSOLUTE DEADLINE, AND A STREAM IS NOT ONE REQUEST.**
+   *
+   * The timer was armed once at dispatch and never touched again, so a
+   * `content.read` still delivering chunks was aborted at 30 seconds — with
+   * bytes moving — on a book too large or a link too slow to finish inside the
+   * window. The reader saw a transport error on a transfer that was working,
+   * and the only remedy was a timeout long enough for the worst case, which is
+   * the same as no timeout at all for everything else.
+   *
+   * The timeout is about SILENCE. A stream frame is not silence.
+   */
+  describe('the idle clock', () => {
+    /** A handler that yields whenever the test says so, forever. */
+    function dripping() {
+      let next: (() => void) | null = null
+      const tick = () =>
+        new Promise<void>((resolve) => {
+          next = resolve
+        })
+      return {
+        /** Let one more chunk out, and let the router write it. */
+        async drip() {
+          const go = next
+          next = null
+          go?.()
+          await settle()
+        },
+        handler: async function* () {
+          for (;;) {
+            yield 'chunk'
+            await tick()
+          }
+        },
+      }
+    }
+
+    it('lets a stream run past the deadline for as long as it is delivering', async () => {
+      const drip = dripping()
+      const h = harness([{ ...ping, handler: drip.handler }], () => true, 1_000)
+      h.send(frame())
+      await settle()
+
+      /* Four windows' worth of wall clock, each one nearly a full timeout —
+         an absolute deadline fails on the first. */
+      for (let round = 0; round < 4; round++) {
+        h.timers.advance(900)
+        expect(
+          h.sent.some((f) => f.kind === 'err'),
+          `the stream was cut off during round ${round} while it was still delivering`,
+        ).toBe(false)
+        await drip.drip()
+      }
+      expect(h.sent.filter((f) => f.kind === 'stream').length).toBeGreaterThan(3)
+    })
+
+    /* AND IT STILL TIMES OUT. An idle clock that never fires is not a timeout —
+       a handler that stops delivering must still be given up on. */
+    it('times out a stream that stops delivering', async () => {
+      const drip = dripping()
+      const h = harness([{ ...ping, handler: drip.handler }], () => true, 1_000)
+      h.send(frame())
+      await settle()
+      h.timers.advance(900)
+      await drip.drip()
+
+      /* Nothing more from the handler. One full window of silence from the last
+         chunk is the whole budget. */
+      h.timers.advance(999)
+      expect(h.sent.some((f) => f.kind === 'err')).toBe(false)
+      h.timers.advance(1)
+      const err = h.sent.find((f) => f.kind === 'err')
+      expect(err, 'a handler that went quiet must still be given up on').toBeDefined()
+      expect(errBody(err).code).toBe(ENVELOPE_ERRORS.timeout)
+      expect(h.connection.inFlight).toBe(0)
+    })
+
+    /* PROGRESS FROM THE PEER COUNTS TOO: an upload streaming chunks IN is a
+       live request, whatever the handler has had time to answer yet. */
+    it('counts an inbound stream frame as progress', async () => {
+      const h = harness(
+        [
+          {
+            ...ping,
+            handler: async (_req, ctx) => {
+              for await (const _item of ctx.input) void _item
+              return 'done'
+            },
+          },
+        ],
+        () => true,
+        1_000,
+      )
+      h.send(frame({ kind: 'req', body: null }))
+      await settle()
+      for (let round = 0; round < 4; round++) {
+        h.timers.advance(900)
+        expect(h.sent.some((f) => f.kind === 'err'), `cut off during round ${round}`).toBe(false)
+        h.send(frame({ kind: 'stream', body: 'up' }))
+        await settle()
+      }
+      h.send(frame({ kind: 'end', body: null }))
+      await settle()
+      expect(h.sent.some((f) => f.kind === 'err')).toBe(false)
+    })
+
+    /* AND THE CLOCK IS ACTUALLY CLEARED when the request settles — a refresh
+       arming a timer for a settled request would leak a handle per chunk. */
+    it('leaves no timer behind when the stream ends', async () => {
+      const h = harness([{ ...ping, handler: async function* () { yield 1; yield 2; yield 3 } }], () => true, 1_000)
+      h.send(frame())
+      await settle()
+      expect(h.sent.some((f) => f.kind === 'end')).toBe(true)
+      expect(h.timers.pending(), 'a refresh armed a clock nothing will clear').toBe(0)
+    })
   })
 
   it('an answered request stops its clock: nothing fires later', async () => {
@@ -605,6 +817,50 @@ describe('the client', () => {
     await settle()
     timers.advance(10)
     expect(((await quick.catch((e: unknown) => e)) as ServiceCallError).error.code).toBe(ENVELOPE_ERRORS.timeout)
+  })
+
+  /**
+   * ⚠️ **THE CLIENT HAD THE SAME ABSOLUTE DEADLINE AS THE ROUTER**, and it
+   * bites the reader first: a `content.read` for a large book, over a phone's
+   * link, failed at 30 seconds with the bytes still arriving. The deadline is
+   * about SILENCE — a stream frame is not silence.
+   */
+  describe('the client’s idle clock', () => {
+    it('lets a stream run past the deadline for as long as frames are arriving', async () => {
+      const timers = fakeTimers()
+      const client = createClient({ send: () => {}, timers, timeoutMs: 1_000 })
+      const read = (async () => {
+        const seen: unknown[] = []
+        for await (const item of client.stream('example.ping', null)) seen.push(item)
+        return seen
+      })()
+      await settle()
+
+      for (let round = 0; round < 4; round++) {
+        timers.advance(900)
+        client.receive(encodeFrame(frame({ id: 'c1', kind: 'stream', body: round })))
+        await settle()
+      }
+      client.receive(encodeFrame(frame({ id: 'c1', kind: 'end', body: null })))
+      expect(await read, 'the stream was cut off while frames were still arriving').toEqual([0, 1, 2, 3])
+      expect(timers.pending(), 'a refresh armed a clock nothing will clear').toBe(0)
+    })
+
+    it('still times out a stream that goes quiet', async () => {
+      const timers = fakeTimers()
+      const client = createClient({ send: () => {}, timers, timeoutMs: 1_000 })
+      const read = (async () => {
+        for await (const _item of client.stream('example.ping', null)) void _item
+      })()
+      await settle()
+      timers.advance(900)
+      client.receive(encodeFrame(frame({ id: 'c1', kind: 'stream', body: 'a' })))
+      await settle()
+
+      timers.advance(1_000)
+      const failure = await read.catch((e: unknown) => e)
+      expect((failure as ServiceCallError).error.code).toBe(ENVELOPE_ERRORS.timeout)
+    })
   })
 
   it('a res arriving after the id was dropped is ignored — the cancel/res race the protocol allows', async () => {

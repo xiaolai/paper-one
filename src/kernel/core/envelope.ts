@@ -199,11 +199,54 @@ export function parseFrame(value: unknown): Frame {
  * A frame as bytes: a 4-byte big-endian length, then the JSON payload.
  * Validates the frame first (a bad frame is refused here, not by the peer)
  * and refuses a payload that, with its header, would exceed the wire cap.
+ *
+ * ## The body is checked too, and it used to be trusted
+ *
+ * ⚠️ **ENCODING WAS THE ONE PLACE THAT COULD CHANGE A BODY WITHOUT SAYING SO.**
+ * `parseFrame` checks the five envelope fields and nothing inside `body`, and
+ * `JSON.stringify` does not refuse what it cannot represent — it REWRITES it.
+ * `Infinity` and `NaN` become `null`; a nested `undefined` or function has its
+ * key dropped, or becomes `null` inside an array. So a handler returning a
+ * ratio that divided by zero sent a `null` the peer read as "no value", and a
+ * row built with an absent optional lost the key entirely. Nothing failed
+ * anywhere: the sender believed it had sent what it computed.
+ *
+ * And the two ends disagreed about depth. `decodeFrame` refuses a body nested
+ * past `MAX_JSON_DEPTH`; `encodeFrame` emitted one happily, so a sender could
+ * produce a frame no conforming peer would accept and learn about it only as
+ * the peer's refusal — a protocol error attributed to the wrong end.
+ *
+ * Both checks run here now, against the SAME text and the same limit the
+ * decoder uses, so what this produces is exactly what a peer will take.
  */
 export function encodeFrame(frame: Frame): Uint8Array {
   const checked = parseFrame(frame)
-  const payload = encoder.encode(JSON.stringify(checked))
+  /* ⚠️ **`JSON.stringify` RUNS FIRST, AND THE ORDER IS LOAD-BEARING.** It is
+   * what detects a CYCLE — properly, which a walk of my own would not: a plain
+   * visited-set also rejects a shared subgraph, which is legitimate and which
+   * `stringify` serialises happily. So the graph is proven acyclic here, and
+   * only then is it walked. Written the other way round, a body holding a
+   * reference to itself hangs the sender forever instead of refusing. */
+  let json: string
+  try {
+    json = JSON.stringify(checked)
+  } catch (cause) {
+    /* A cycle, a bigint, or a `toJSON` that threw. `TypeError` naming neither
+       the frame nor the field is not something a caller can act on. */
+    throw new MalformedFrame(
+      `frame body cannot be serialised as JSON: ${cause instanceof Error ? cause.message : String(cause)}`,
+    )
+  }
+  const payload = encoder.encode(json)
   if (payload.byteLength > MAX_PAYLOAD_BYTES) throw new FrameTooLarge(payload.byteLength)
+  /* THE SAME CHECK, THE SAME LIMIT, on the same text `decodeFrame` would see.
+     Deriving it from the serialised form rather than walking the object is what
+     makes "what encode accepts" and "what decode accepts" one rule rather than
+     two that agree until they do not. */
+  assertBoundedDepth(json, MAX_JSON_DEPTH + 1)
+  /* LAST, and bounded by both checks above: the graph is acyclic and its
+     serialised form is under the wire cap, so this walk terminates. */
+  assertEncodable(checked.body)
   const out = new Uint8Array(HEADER_BYTES + payload.byteLength)
   new DataView(out.buffer).setUint32(0, payload.byteLength, false)
   out.set(payload, HEADER_BYTES)
@@ -252,6 +295,62 @@ function assertFiniteNumbers(root: unknown): void {
       for (const element of value) stack.push(element)
     } else if (value !== null && typeof value === 'object') {
       for (const nested of Object.values(value)) stack.push(nested)
+    }
+  }
+}
+
+/**
+ * Refuse a body JSON cannot carry unchanged.
+ *
+ * `JSON.stringify` does not throw on any of these — it rewrites them, which is
+ * the whole problem: a non-finite number becomes `null`, and `undefined`, a
+ * function or a symbol has its key DROPPED from an object or becomes `null`
+ * inside an array. Each is a silent difference between what a handler returned
+ * and what the peer receives, and none of them can be detected downstream:
+ * `null` is a legitimate value and an absent key is a legitimate shape.
+ *
+ * `bigint` is included for consistency of message rather than of behaviour —
+ * `JSON.stringify` does throw on it, with a `TypeError` naming neither the
+ * frame nor the field.
+ *
+ * Walked iteratively so a deep graph cannot overflow the stack, and it visits
+ * exactly what `JSON.stringify` would: own enumerable properties and array
+ * elements.
+ *
+ * ⚠️ **IT ASSUMES AN ACYCLIC GRAPH, AND ITS CALLER PROVES THAT** by running
+ * `JSON.stringify` first. Detecting cycles here would need a visited set, which
+ * also rejects a SHARED subgraph — legitimate, and something `stringify`
+ * serialises without complaint. Called on a cyclic body directly, this does not
+ * return.
+ */
+function assertEncodable(root: unknown): void {
+  const stack: unknown[] = [root]
+  while (stack.length > 0) {
+    const value = stack.pop()
+    switch (typeof value) {
+      case 'number':
+        if (!Number.isFinite(value)) throw new MalformedFrame('frame body has a non-finite number')
+        break
+      case 'undefined':
+        throw new MalformedFrame('frame body has an undefined value, which JSON drops silently')
+      case 'function':
+        throw new MalformedFrame('frame body has a function, which JSON drops silently')
+      case 'symbol':
+        throw new MalformedFrame('frame body has a symbol, which JSON drops silently')
+      case 'bigint':
+        throw new MalformedFrame('frame body has a bigint, which JSON cannot carry')
+      case 'object':
+        if (value === null) break
+        if (Array.isArray(value)) for (const element of value) stack.push(element)
+        /* `toJSON` REPLACES THE VALUE, and legitimately — a `Date` is the
+           common case. What it returns is what goes on the wire, so that is
+           what is checked. */
+        else if (typeof (value as { toJSON?: unknown }).toJSON === 'function') {
+          stack.push((value as { toJSON: () => unknown }).toJSON())
+        } else for (const nested of Object.values(value)) stack.push(nested)
+        break
+      default:
+        break
     }
   }
 }
@@ -530,6 +629,12 @@ interface InFlight {
   /** True once the peer sent `end`: a `stream` after it is a protocol error. */
   ended: boolean
   timer: unknown
+  /**
+   * Re-arm the idle clock. Called on every frame of progress in either
+   * direction — see the note where it is built. A no-op once the request has
+   * settled, so a late refresh cannot resurrect a cleared timer.
+   */
+  refresh?: () => void
 }
 
 function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
@@ -726,11 +831,36 @@ export function createRouter(options: RouterOptions): Router {
 
         const controller = new AbortController()
         const entry: InFlight = { service: frame.service, grant: service.grant, controller, input: new InputQueue(budget), ended: false, timer: undefined }
-        entry.timer = timers.setTimeout(() => {
+        /**
+         * ⚠️ **THIS WAS AN ABSOLUTE DEADLINE, AND A STREAM IS NOT ONE REQUEST.**
+         *
+         * The timer was armed once at dispatch and never touched again, so a
+         * `content.read` still delivering chunks was aborted at 30 seconds —
+         * mid-flight, with bytes moving, on a book too large or a link too slow
+         * to finish inside the window. The reader saw a transport error on a
+         * transfer that was working, and the only remedy was a timeout long
+         * enough for the worst case, which is the same as no timeout at all for
+         * every other request.
+         *
+         * The timeout exists to catch a handler that has STOPPED answering, and
+         * a stream frame is an answer. So it is armed against SILENCE and reset
+         * by progress — outbound frames below, and inbound `stream` frames from
+         * the peer, which are progress on the request's input.
+         */
+        const expire = () => {
           if (settle(frame.id) === undefined) return
-          controller.abort(serviceError(ENVELOPE_ERRORS.timeout, `no answer within ${timeoutMs} ms`, true))
-          refuse(frame.service, frame.id, serviceError(ENVELOPE_ERRORS.timeout, `no answer within ${timeoutMs} ms`, true))
-        }, timeoutMs)
+          controller.abort(serviceError(ENVELOPE_ERRORS.timeout, `nothing for ${timeoutMs} ms`, true))
+          refuse(frame.service, frame.id, serviceError(ENVELOPE_ERRORS.timeout, `nothing for ${timeoutMs} ms`, true))
+        }
+        /* Only while it is still THIS entry in flight: a stale refresh would
+           re-arm a clock for a request that has already been settled, and the
+           handle would then never be cleared. */
+        entry.refresh = () => {
+          if (inFlight.get(frame.id) !== entry) return
+          timers.clearTimeout(entry.timer)
+          entry.timer = timers.setTimeout(expire, timeoutMs)
+        }
+        entry.timer = timers.setTimeout(expire, timeoutMs)
         globalInFlight++
         inFlight.set(frame.id, entry)
 
@@ -747,6 +877,9 @@ export function createRouter(options: RouterOptions): Router {
               for await (const item of result) {
                 if (!live()) return
                 sendFrame({ v: ENVELOPE_VERSION, service: frame.service, id: frame.id, kind: 'stream', body: item })
+                /* PROGRESS. A chunk delivered is the handler answering, which is
+                   exactly what the idle clock is asking about. */
+                entry.refresh?.()
                 // Backpressure: let this write settle before producing the next.
                 if (sending) await sending
                 if (!live()) return
@@ -848,7 +981,11 @@ export function createRouter(options: RouterOptions): Router {
               }
               if (!entry.input.push(frame.body, wireSize)) {
                 abortAndRefuse(frame.id, serviceError(ENVELOPE_ERRORS.overloaded, 'input queue is full', true))
+                return
               }
+              /* PROGRESS FROM THE PEER. An upload streaming its chunks in is a
+                 live request, whatever the handler has had time to answer. */
+              entry.refresh?.()
               return
             }
             case 'end': {
@@ -939,6 +1076,8 @@ interface Pending {
   readonly resolve: (frame: Frame) => void
   readonly reject: (error: ServiceCallError) => void
   readonly onStream: ((body: unknown, size: number) => void) | null
+  /** Re-arm the idle clock — see where it is built. A no-op once settled. */
+  refresh?: () => void
   timer: unknown
   cleanup: () => void
 }
@@ -1068,7 +1207,21 @@ export function createClient(options: ClientOptions): Client {
         timer: undefined,
         cleanup: () => signal?.removeEventListener('abort', onAbort),
       }
-      entry.timer = timers.setTimeout(() => fail(serviceError(ENVELOPE_ERRORS.timeout, `no answer within ${ms} ms`, true)), ms)
+      /**
+       * ⚠️ **AN IDLE CLOCK, AND IT USED TO BE AN ABSOLUTE DEADLINE.** The same
+       * defect as the router's: a stream still delivering chunks was failed at
+       * the deadline, with bytes moving. See the note on the router's `refresh`
+       * — the timeout is about SILENCE, and a stream frame is not silence.
+       */
+      const armed = () => timers.setTimeout(() => fail(serviceError(ENVELOPE_ERRORS.timeout, `nothing for ${ms} ms`, true)), ms)
+      entry.refresh = () => {
+        /* Only while this is still the pending entry: a refresh after `finish`
+           would arm a timer nothing will ever clear. */
+        if (pending.get(id) !== entry) return
+        timers.clearTimeout(entry.timer)
+        entry.timer = armed()
+      }
+      entry.timer = armed()
       pending.set(id, entry)
       enqueueBytes(reqBytes)
     })
@@ -1201,8 +1354,13 @@ export function createClient(options: ClientOptions): Client {
       }
       switch (frame.kind) {
         case 'stream':
-          if (entry.onStream) entry.onStream(frame.body, wireSize)
-          else {
+          if (entry.onStream) {
+            /* PROGRESS. Refreshed BEFORE delivery, so a consumer that takes a
+               while to handle the item is not itself charged against the clock
+               that is watching the sender. */
+            entry.refresh?.()
+            entry.onStream(frame.body, wireSize)
+          } else {
             finish(frame.id)
             entry.reject(new ServiceCallError(entry.service, serviceError(ENVELOPE_ERRORS.protocol, 'stream frame for a plain call')))
           }
