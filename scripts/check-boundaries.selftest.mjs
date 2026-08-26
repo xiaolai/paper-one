@@ -67,6 +67,9 @@ export const LEGAL_TREE = {
   'src/kernel/testkit.ts': "export { fake } from './core/fake.testkit.ts'\n",
   'src/kernel/core/fake.testkit.ts': 'export const fake = () => null\n',
   'src/kernel/ui/index.ts': "export { App } from './App.ts'\n",
+  /* The BROWSER client's UI entry, beside the native one. Two doors, and the
+     rules below hold each root to its own — see `native-root-not-browser-ui-entry`. */
+  'src/kernel/ui/browser.ts': "export { App } from './App.ts'\n",
   'src/kernel/ui/App.ts': "import { other } from '../core/other.ts'\nexport const App = () => other\n",
   'src/kernel/core/thing.ts': 'export const kernelThing = 1\nexport type KernelType = { n: number }\n',
   'src/kernel/core/other.ts': 'export const other = 2\nexport type OtherType = { m: number }\n',
@@ -420,6 +423,71 @@ export const CASES = [
     from: 'src/main.tsx',
     to: 'src/kernel/core/other.ts',
     expect: ['composition-root-kernel-entries'],
+  },
+  /**
+   * ⚠️ THE TWO UI ENTRIES ARE TWO DOORS, and one allowance used to open both.
+   *
+   * `composition-root-kernel-entries` exempted `src/kernel/ui/index.ts` AND
+   * `src/kernel/ui/browser.ts` for every root alike, so a native root could
+   * import the browser's entry and the browser root could import the
+   * Tauri-bound one. The second is the dangerous direction: `ui/index.ts`
+   * re-exports modules that import `@tauri-apps`, and a barrel retains
+   * everything it names. `assert-bundle` would refuse the bundle afterwards,
+   * for a reason that reads as unrelated.
+   */
+  {
+    name: 'a native composition root -> the BROWSER ui entry',
+    files: {
+      'src/main.tsx': LEGAL_TREE['src/main.tsx'] + "import { App as B } from './kernel/ui/browser.ts'\nvoid B\n",
+    },
+    from: 'src/main.tsx',
+    to: 'src/kernel/ui/browser.ts',
+    expect: ['native-root-not-browser-ui-entry'],
+  },
+  {
+    name: 'the browser composition root -> the NATIVE ui entry',
+    files: {
+      'src/main.web.tsx': LEGAL_TREE['src/main.web.tsx'] + "import { App } from './kernel/ui/index.ts'\nvoid App\n",
+    },
+    from: 'src/main.web.tsx',
+    to: 'src/kernel/ui/index.ts',
+    expect: ['web-root-not-native-ui-entry'],
+  },
+  /* AND EACH ROOT KEEPS ITS OWN, so the two rules above are about crossing
+     over rather than about the entries being unreachable. */
+  {
+    name: 'the browser composition root -> the BROWSER ui entry (allowed)',
+    files: {
+      'src/main.web.tsx': LEGAL_TREE['src/main.web.tsx'] + "import { App as B } from './kernel/ui/browser.ts'\nvoid B\n",
+    },
+    from: 'src/main.web.tsx',
+    to: 'src/kernel/ui/browser.ts',
+    expect: [],
+  },
+  /**
+   * A capability reaching an ENTRY is the same back door as one reaching a
+   * composition file, and the rule's target named only the latter — while its
+   * own comment said "nothing may import src/main.tsx".
+   */
+  {
+    name: 'a capability -> src/main.tsx (the entry back door)',
+    files: {
+      'src/capabilities/alpha/index.ts':
+        LEGAL_TREE['src/capabilities/alpha/index.ts'] + "import '../../main.tsx'\n",
+    },
+    from: 'src/capabilities/alpha/index.ts',
+    to: 'src/main.tsx',
+    expect: ['no-capability-to-composition-root'],
+  },
+  {
+    name: 'a capability -> src/main.web.tsx (the same door, browser side)',
+    files: {
+      'src/capabilities/alpha/index.ts':
+        LEGAL_TREE['src/capabilities/alpha/index.ts'] + "import '../../main.web.tsx'\n",
+    },
+    from: 'src/capabilities/alpha/index.ts',
+    to: 'src/main.web.tsx',
+    expect: ['no-capability-to-composition-root'],
   },
   {
     name: 'capability -> the kernel UI entry',

@@ -38,6 +38,22 @@ const path = require('node:path')
 /** The composition roots: one static composition per platform, and the file
  *  that imports exactly one of them. `composition.contract.test.ts` is NOT one —
  *  the platform list is closed, so the test falls under the ordinary rule. */
+/**
+ * The roots that build a NATIVE app, and the one that builds the browser
+ * client — separately, because they may not reach for each other's UI entry.
+ *
+ * `COMPOSITION_ROOTS` below is their union and stays the subject of every rule
+ * that treats a root as a root. These two exist for the one rule that cannot:
+ * the kernel's UI entries are per-platform, and a single allowance covering
+ * both let a native root import the browser's and the browser root import the
+ * Tauri-bound one.
+ */
+const NATIVE_COMPOSITION_ROOTS = [
+  '^src/app/composition\\.(desktop|ios|android)\\.ts$',
+  '^src/main\\.tsx$',
+]
+const WEB_COMPOSITION_ROOTS = ['^src/app/composition\\.web\\.ts$', '^src/main\\.web\\.tsx$']
+
 const COMPOSITION_ROOTS = [
   '^src/app/composition\\.(desktop|ios|android|web)\\.ts$',
   '^src/main\\.tsx$',
@@ -275,12 +291,35 @@ module.exports = {
       name: 'composition-root-kernel-entries',
       severity: 'error',
       comment:
-        'A composition root (src/app/composition.<platform>.ts, src/main.tsx) may import the kernel ' +
-        "through exactly two files: the public entry and the UI entry, src/kernel/ui/index.ts. The " +
-        'UI entry exists because the public entry is React-free and a root has to render App; ' +
-        'nothing else may import it, and a root may not reach past either.',
+        'A composition root (src/app/composition.<platform>.ts, src/main.tsx, src/main.web.tsx) may ' +
+        'import the kernel through the public entry and ONE UI entry — never past either. Which UI ' +
+        'entry is its platform\'s, and the two rules below draw that line; this one refuses ' +
+        'everything else under src/kernel/.',
       from: { path: COMPOSITION_ROOTS },
       to: { path: '^src/kernel/', pathNot: [KERNEL_PUBLIC_ENTRY, KERNEL_UI_ENTRY, KERNEL_BROWSER_ENTRY, KERNEL_STYLESHEETS, KERNEL_METRICS] },
+    },
+    {
+      name: 'native-root-not-browser-ui-entry',
+      severity: 'error',
+      comment:
+        'A NATIVE composition root may not import src/kernel/ui/browser.ts. That entry exists for ' +
+        'the browser client and grows one export at a time, in the change that mounts it — a ' +
+        "barrel's re-exports evaluate with the barrel, so a native root reaching for it would load " +
+        'and retain surfaces nothing on that platform renders. The two UI entries are two doors, ' +
+        'and the rule above could not tell them apart: it allowed both to every root.',
+      from: { path: NATIVE_COMPOSITION_ROOTS },
+      to: { path: KERNEL_BROWSER_ENTRY },
+    },
+    {
+      name: 'web-root-not-native-ui-entry',
+      severity: 'error',
+      comment:
+        'The BROWSER composition root may not import src/kernel/ui/index.ts. That entry re-exports ' +
+        'modules which import @tauri-apps, and a barrel retains everything it names — which is why ' +
+        'src/kernel/ui/browser.ts exists at all. assert-bundle would refuse the resulting bundle, ' +
+        'but by then the reason reads as unrelated; this says it at the import.',
+      from: { path: WEB_COMPOSITION_ROOTS },
+      to: { path: KERNEL_UI_ENTRY },
     },
     {
       name: 'capability-only-via-index',
@@ -352,7 +391,19 @@ module.exports = {
          * reason `src/main.tsx` is. */
         pathNot: ['^src/main\\.tsx$', '^src/main\\.web\\.tsx$', '\\.(test|testkit)\\.tsx?$'],
       },
-      to: { path: '^src/app/composition\\.(desktop|ios|android|web)\\.ts$' },
+      /* ⚠️ BOTH ENTRIES TOO, not only the composition files. The comment above
+       * states the invariant as "nothing may import src/main.tsx", and the
+       * target did not include it — so a capability could reach an entire
+       * composition through either entry, which is the same exposure by a
+       * different path. `main.web.tsx` is the browser client's and carries the
+       * same weight. */
+      to: {
+        path: [
+          '^src/app/composition\\.(desktop|ios|android|web)\\.ts$',
+          '^src/main\\.tsx$',
+          '^src/main\\.web\\.tsx$',
+        ],
+      },
     },
     {
       name: 'no-circular',
