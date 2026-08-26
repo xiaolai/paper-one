@@ -336,6 +336,14 @@ function ShelfList({
   prefs.current ??= browserSettings()
   const prefsStore = prefs.current
   useSyncExternalStore(prefsStore.subscribe, prefsStore.getSnapshot)
+  /* The persistence flag needs its OWN subscription — the snapshot above is
+     unchanged by a refused write, so subscribing to it alone would show the
+     notice one change late. See `App.tsx`. */
+  const prefsPersistent = useSyncExternalStore(
+    prefsStore.subscribe,
+    () => prefsStore.persistent,
+    () => prefsStore.persistent,
+  )
   const faces = useMemo(() => offeredFaces(presentFaces()), [])
 
   if (tab === 'reading' && reading !== null) {
@@ -438,6 +446,7 @@ function ShelfList({
             style={prefsStore.get(WEB_SETTINGS.readingStyle)}
             offered={faces}
             sections={[]}
+            persistent={prefsPersistent}
             onTheme={(next) => {
               prefsStore.set(WEB_SETTINGS.theme, next)
               prefsStore.set(WEB_SETTINGS.themeFollowsOs, false)

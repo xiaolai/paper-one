@@ -159,14 +159,39 @@ export function createSettingsStore({ storage, migrate = keepValues }: SettingsS
     found && found.version === SETTINGS_VERSION ? found.values : migrate(found)
   const listeners = new Set<() => void>()
 
+  /* WHETHER THE NEXT LAUNCH WILL SEE ANY OF THIS. No storage at all is the
+   * plain case; a storage that has REFUSED a write is the earned one. */
+  let persistent = storage !== null
+
   const persist = () => {
-    if (!storage) return
+    if (!storage || !persistent) return
     const envelope: SettingsEnvelope = { version: SETTINGS_VERSION, values }
-    /* THROWS PAST HERE. `MarkStorage.setItem` signals a failed store by
-     * throwing, and swallowing that would make a settings pane that stops
-     * saving indistinguishable from one that works. The caller — a `set` from
-     * the UI — decides what to say about it. */
-    storage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(envelope))
+    try {
+      storage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(envelope))
+    } catch (cause) {
+      /* ⚠️ **THIS USED TO THROW, AND NOTHING CAUGHT IT.**
+       *
+       * `MarkStorage.setItem` signals a failed store by throwing, and the note
+       * here said the caller would decide what to say about it. No caller
+       * decided. `set` is called from `onClick` handlers and from a loop, and
+       * every multi-field write in the app is a RUN of `set` calls — choosing a
+       * theme writes `theme` then `themeFollowsOs`; `writeKernelPreferences`
+       * writes sixteen. A quota error on the first aborted the rest, so what
+       * survived a launch was a PREFIX of what the reader had chosen: theme
+       * night, "follow the system" still on, and no way to tell.
+       *
+       * Swallowing it would be the other half of the same defect, so it is not
+       * swallowed — it becomes `persistent: false`, published to subscribers,
+       * which the settings pane draws as a sentence. A store that cannot write
+       * is a SESSION store, which is a state this store already has a name for.
+       *
+       * And it stops trying. A quota that is full stays full, and re-throwing
+       * out of every keystroke costs a serialisation of the whole envelope for
+       * an answer that will not have changed. */
+      persistent = false
+      console.error('Paper: settings will not be saved on this device', cause)
+      for (const listener of [...listeners]) listener()
+    }
   }
 
   return {
@@ -205,9 +230,12 @@ export function createSettingsStore({ storage, migrate = keepValues }: SettingsS
       values = { ...values, [setting.key]: value }
       // Listeners first: what is held in memory is the truth the UI shows,
       // whether or not the disk then takes it. Then the write, whose failure
-      // is the caller's to hear about.
+      // becomes `persistent` rather than an exception out of an event handler.
       for (const listener of [...listeners]) listener()
       persist()
+    },
+    get persistent() {
+      return persistent
     },
     subscribe: (listener) => {
       listeners.add(listener)

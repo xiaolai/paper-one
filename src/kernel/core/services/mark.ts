@@ -134,9 +134,16 @@ export function markSet(env: ServiceEnvironment) {
      * rewrite of the row: the stamp is what makes the change merge as newer
      * on a peer, and a record rewritten past it replicates as an edit with no
      * stamp — which loses to everything. */
-    if (note !== undefined) await env.services.marks.updateNote(id, note, bookId)
-    if (colour !== undefined) await env.services.marks.setTint(id, colour, bookId)
-    return markRow(await locate(env, id, bookId))
+    /* ⚠️ THE OWNER IS RESOLVED BEFORE ANYTHING IS WRITTEN. The caller's `book`
+     * is a hint, and it was handed straight to the mutators — which write into
+     * that book's folder. A wrong hint edited the wrong file, changed nothing,
+     * and `locate` below then found the mark under its real book and returned
+     * it as a successful answer: the caller was told the note was written and
+     * it was written nowhere. */
+    const owner = (await locate(env, id, bookId)).bookId
+    if (note !== undefined) await env.services.marks.updateNote(id, note, owner)
+    if (colour !== undefined) await env.services.marks.setTint(id, colour, owner)
+    return markRow(await locate(env, id, owner))
   }
 }
 
@@ -190,6 +197,16 @@ export function markRemove(env: ServiceEnvironment) {
  * Both halves of the snapshot are searched: `all` is annotations and
  * `allBookmarks` is the rest, and a bookmark's note is as editable as a
  * highlight's.
+ */
+/**
+ * The mark with this id, using `bookId` as a HINT about where to look first.
+ *
+ * ⚠️ **THE HINT USED TO BE TRUSTED BY THE MUTATORS.** `markSet` passed the
+ * caller's `book` straight to `updateNote` and `setTint`, which write into that
+ * book's folder — so a wrong hint edited the wrong file, changed nothing, and
+ * then this function found the mark somewhere else and returned it as a
+ * SUCCESSFUL answer. The caller was told the note was written and no note was
+ * written anywhere. See `ownerOf`.
  */
 async function locate(env: ServiceEnvironment, id: string, bookId: string | undefined): Promise<Mark> {
   if (bookId !== undefined) {

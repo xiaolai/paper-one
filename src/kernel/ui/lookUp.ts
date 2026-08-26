@@ -81,9 +81,22 @@ export function decideLookUp(
   return preference === 'none' ? 'system' : preference
 }
 
-/** Whether a term is short enough to be worth looking up at all. */
+/**
+ * Whether a term is short enough to be worth looking up at all.
+ *
+ * ⚠️ **COUNTED IN CODE POINTS, AND IT USED TO BE CODE UNITS.** `String.length`
+ * is UTF-16 units, so an emoji or a CJK extension character counts twice; the
+ * Rust boundary this mirrors (`lib.rs`'s `MAX_LOOKUP`) uses `chars().count()`,
+ * which counts scalars. The two disagreed for any selection containing an
+ * astral character — a passage the native side would happily accept, refused
+ * by the interface before it ever got there, with no explanation available to
+ * a reader who had selected sixty perfectly ordinary-looking characters.
+ *
+ * Two checks of one rule have to be the same rule. `Array.from` iterates by
+ * code point, which is what the comparison needs.
+ */
 export function isLookUpTerm(term: string): boolean {
   const trimmed = term.trim().replace(/\s+/g, ' ')
-  return trimmed !== '' && trimmed.length <= MAX_TERM
+  return trimmed !== '' && Array.from(trimmed).length <= MAX_TERM
 }
 

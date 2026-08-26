@@ -208,8 +208,24 @@ export async function coverUrl(fs: VaultFs, path: string): Promise<string | null
  * channel without `BookCover` learning a second way to exist.
  *
  * `null` means "no jacket", never "not looked yet". The caller draws the tint.
+ *
+ * ## The signal, and the shelf it exists for
+ *
+ * ⚠️ **THERE WAS NO WAY TO CANCEL A COVER**, and the shelf is virtualised. A
+ * cell that scrolled off screen unmounted, revoked whatever URL eventually
+ * arrived, and left the read itself running: over a channel that is a whole
+ * `cover.read` stream — every chunk of a jacket nobody will look at, decoded,
+ * against a byte budget shared with the book being read. A flick through a
+ * library of two thousand rows started hundreds of them and cancelled none.
+ *
+ * Optional because a source may not be able to honour it — a synchronous
+ * filesystem read has nothing to interrupt — but every source must at least
+ * ACCEPT it, and none may hand back a URL for a read that was abandoned. That
+ * last part is what stops an abort from turning into a leak: `BookCover`
+ * revokes what it is given, and a source that resolves after the abort with a
+ * freshly minted URL gives it to nobody.
  */
-export type CoverSource = (bookId: string) => Promise<string | null>
+export type CoverSource = (bookId: string, signal?: AbortSignal) => Promise<string | null>
 
 export async function coverIn(fs: VaultFs, bookId: string): Promise<string | null> {
   return (await coverUrl(fs, coverPathIn(bookId))) ?? coverUrl(fs, legacyCoverPathIn(bookId))

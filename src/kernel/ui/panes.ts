@@ -153,6 +153,21 @@ export function renderContribution(id: string, render: PaneRenderer): ReactNode 
   throw new Error(`pane "${id}" rendered ${describe(value)}, which React cannot show`)
 }
 
+/**
+ * Whether React can show this.
+ *
+ * ⚠️ **IT ACCEPTED ARRAYS AND ELEMENTS AND CALLED THAT `ReactNode`.** React 19
+ * also renders any ITERABLE, a portal, and a promise (`use`), and a capability
+ * returning one of those from `render` was refused by the check and its pane
+ * thrown out — a contribution React would have drawn perfectly, rejected by a
+ * predicate claiming to recognise what React accepts.
+ *
+ * A portal and a promise are objects with a known marker rather than a shape
+ * this can walk, so they are recognised by that. An iterable is walked like an
+ * array, except that walking it CONSUMES a generator — so the guard checks that
+ * one is iterable and does not read it, which is the only safe thing to do with
+ * a value somebody else will render.
+ */
 function isReactNode(value: unknown): value is ReactNode {
   if (value == null) return true
   switch (typeof value) {
@@ -161,8 +176,19 @@ function isReactNode(value: unknown): value is ReactNode {
     case 'boolean':
     case 'bigint':
       return true
-    case 'object':
-      return isValidElement(value) || (Array.isArray(value) && value.every(isReactNode))
+    case 'object': {
+      if (isValidElement(value)) return true
+      if (Array.isArray(value)) return value.every(isReactNode)
+      /* A PORTAL is an element-like object React marks with its own symbol;
+         a PROMISE is what `use` unwraps. Neither can be inspected further
+         without doing the rendering this only means to permit. */
+      const tagged = value as { $$typeof?: symbol; then?: unknown }
+      if (typeof tagged.$$typeof === 'symbol') return true
+      if (typeof tagged.then === 'function') return true
+      /* AN ITERABLE IS NOT READ. Consuming a generator here would leave React
+         nothing to render — the guard would eat the pane it approved. */
+      return typeof (value as { [Symbol.iterator]?: unknown })[Symbol.iterator] === 'function'
+    }
     default:
       return false
   }
@@ -189,9 +215,31 @@ function describe(value: unknown): string {
  * which KEYBOARD IDIOM to print — and `web` answers the first and not the
  * second. A browser on a Mac still has a ⌘ key.
  *
- * `web` takes the Ctrl branch because the client draws no shortcut anywhere
- * today. The day it does, it must ask the machine rather than the build
- * target, and this line is where that will be noticed. */
+ * ⚠️ **THAT DAY ARRIVED AND THIS LINE DID NOT NOTICE.** The note used to end
+ * "`web` takes the Ctrl branch because the client draws no shortcut anywhere
+ * today"; the browser client mounts `Marginalia`, which calls this for its
+ * empty state, so every reader on a Mac in a browser was shown `Ctrl+B` for a
+ * key their machine does not have.
+ *
+ * So `web` asks the MACHINE. That is the distinction the note already drew —
+ * which OS chrome to draw is a build fact, which keyboard is in front of the
+ * reader is not — and it is the only platform where the two can disagree. A
+ * native build IS its platform, so the other three answer from it directly.
+ *
+ * `navigator.platform` is deprecated and still the only thing every engine
+ * agrees on; `userAgentData.platform` is preferred where it exists. Both are
+ * hints rather than facts, and the cost of a wrong one is a hint that names the
+ * wrong modifier — the same cost as today's, minus the certainty of being
+ * wrong on a Mac. */
 export function comboFor(combo: string, platform: Platform): string {
-  return platform === 'macos' ? combo : combo.replace('⌘', 'Ctrl+')
+  const mac = platform === 'macos' || (platform === 'web' && machineIsMac())
+  return mac ? combo : combo.replace('⌘', 'Ctrl+')
+}
+
+/** Whether the keyboard in front of the reader is a Mac's. Browser only. */
+function machineIsMac(): boolean {
+  if (typeof navigator === 'undefined') return false
+  const data = (navigator as { userAgentData?: { platform?: string } }).userAgentData
+  const named = data?.platform ?? navigator.platform ?? navigator.userAgent ?? ''
+  return /mac|iphone|ipad|ipod/i.test(named)
 }

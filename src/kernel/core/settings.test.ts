@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { BRIGHTNESS, CONTRAST, LEGACY_READING_SIZES, READING_STEPS, SPACING, stepIndexForSize } from './metrics'
 import { initialState, preferencesOf } from '../ui/state'
 import {
@@ -368,5 +368,108 @@ describe('carrying the pre-kernel settings file across', () => {
 
   it('does not mistake a versioned envelope with no values for a flat file', () => {
     expect(readingBack({ version: SETTINGS_VERSION })).toEqual(DEFAULTS)
+  })
+})
+
+/* ------------------------------------------------------------------------ */
+/* A storage that refuses to write                                           */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * ⚠️ **A REFUSED WRITE USED TO THROW OUT OF `set`, AND NOTHING CAUGHT IT.**
+ *
+ * Every multi-field write in this app is a RUN of `set` calls — choosing a
+ * theme writes `theme` and then `themeFollowsOs`, and `writeKernelPreferences`
+ * writes sixteen in a loop. A quota error on the first aborted the rest, so
+ * what survived a launch was a PREFIX of what the reader had chosen. And the
+ * only way to find out was the next launch.
+ *
+ * These are the two halves: the batch must complete, and the failure must
+ * become a state the panel can draw.
+ */
+describe('a storage that will not take a write', () => {
+  /* The store reports a refusal to the log as well as to `persistent`. Silenced
+     here so a passing run is quiet; the assertions are on `persistent`. */
+  beforeEach(() => void vi.spyOn(console, 'error').mockImplementation(() => {}))
+  afterEach(() => void vi.restoreAllMocks())
+
+  /** Refuses the `refuseAfter`-th write onwards; records what it did take. */
+  function refusing(refuseAfter: number) {
+    const map = new Map<string, string>()
+    let writes = 0
+    return {
+      map,
+      get writes() {
+        return writes
+      },
+      storage: {
+        getItem: (key: string) => map.get(key) ?? null,
+        setItem: (key: string, value: string) => {
+          writes += 1
+          if (writes > refuseAfter) throw new DOMException('quota', 'QuotaExceededError')
+          map.set(key, value)
+        },
+      },
+    }
+  }
+
+  it('does not throw out of set', () => {
+    const disk = refusing(0)
+    const store = createSettingsStore({ storage: disk.storage })
+    expect(() => store.set(KERNEL_SETTINGS.theme, 'night')).not.toThrow()
+  })
+
+  it('keeps the value in memory, so the reader sees what they chose', () => {
+    const store = createSettingsStore({ storage: refusing(0).storage })
+    store.set(KERNEL_SETTINGS.theme, 'night')
+    expect(store.get(KERNEL_SETTINGS.theme)).toBe('night')
+  })
+
+  it('reports itself as no longer persistent, and publishes that', () => {
+    const store = createSettingsStore({ storage: refusing(0).storage })
+    expect(store.persistent, 'a store over a working storage is persistent').toBe(true)
+    const heard: boolean[] = []
+    store.subscribe(() => heard.push(store.persistent))
+    store.set(KERNEL_SETTINGS.theme, 'night')
+    expect(store.persistent).toBe(false)
+    expect(heard, 'the flip must reach a subscriber, or no panel can draw it').toContain(false)
+  })
+
+  it('is not persistent over no storage at all', () => {
+    expect(createSettingsStore({ storage: null }).persistent).toBe(false)
+  })
+
+  /**
+   * THE BATCH COMPLETES. This is the finding: the loop aborted at the first
+   * refusal and the fields after it were never even attempted, so a `setTheme`
+   * — which changes two — stored one of them.
+   */
+  it('attempts every field of a batch rather than stopping at the first refusal', () => {
+    /* ONE WRITE TAKEN, THEN REFUSED. `set` skips a field whose value has not
+       changed, so this batch is exactly two writes and the second is the one
+       that fails — which is the case that used to abandon the rest. */
+    const disk = refusing(1)
+    const store = createSettingsStore({ storage: disk.storage })
+    expect(() => writeKernelPreferences(store, { ...DEFAULTS, theme: 'night', side: 'left' })).not.toThrow()
+    /* IN MEMORY, EVERY FIELD. What reached the disk is a prefix by definition —
+       the disk stopped taking writes — but nothing was skipped, and the store
+       agrees with itself. */
+    expect(store.get(KERNEL_SETTINGS.theme)).toBe('night')
+    expect(store.get(KERNEL_SETTINGS.side)).toBe('left')
+    expect(store.persistent).toBe(false)
+  })
+
+  /**
+   * AND IT STOPS TRYING. A full quota stays full; re-serialising the whole
+   * envelope on every keystroke to be refused again is work with no answer at
+   * the end of it.
+   */
+  it('stops writing once refused, rather than paying for every keystroke', () => {
+    const disk = refusing(0)
+    const store = createSettingsStore({ storage: disk.storage })
+    store.set(KERNEL_SETTINGS.theme, 'night')
+    store.set(KERNEL_SETTINGS.side, 'left')
+    store.set(KERNEL_SETTINGS.typeface, 'sans')
+    expect(disk.writes, 'one attempt, then it knows').toBe(1)
   })
 })

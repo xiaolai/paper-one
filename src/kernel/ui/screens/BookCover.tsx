@@ -77,7 +77,18 @@ export function BookCover({
     /* NOTHING TO ASK. Without a source there is no jacket to wait for, so the
      * tint is drawn at once rather than after a promise that cannot resolve. */
     if (coverFor === undefined) return
-    void coverFor(at).then((next) => {
+    /* ⚠️ **THE READ USED TO OUTLIVE THE CELL.** Cleanup revoked whatever URL
+     * eventually arrived, which stopped the leak — and left the READ running.
+     * This shelf is virtualised, so a flick through two thousand rows unmounts
+     * hundreds of cells with a jacket in flight, and over a channel each one is
+     * a `cover.read` stream still pulling and decoding chunks nobody will look
+     * at, against a byte budget shared with the book being read.
+     *
+     * Revoking is still here as well, and both are needed: the signal stops
+     * work that has not happened, `revoked` catches a source that had already
+     * finished or that cannot honour a signal at all. */
+    const stop = new AbortController()
+    void coverFor(at, stop.signal).then((next) => {
       if (!next) return
       /* The cell may have been unmounted, or pointed at another book, while the
        * bytes were being read. Revoking immediately rather than setting state is
@@ -92,6 +103,7 @@ export function BookCover({
     })
     return () => {
       revoked = true
+      stop.abort()
       if (mine) URL.revokeObjectURL(mine)
       held.current = null
       setUrl(null)

@@ -71,6 +71,39 @@ describe('browserSettings', () => {
     expect(browserSettings().get(WEB_SETTINGS.theme)).toBe(WEB_SETTINGS.theme.fallback)
   })
 
+  /**
+   * ⚠️ **A BROWSER'S QUOTA IS SMALL AND SHARED**, and `setItem` throwing is the
+   * ordinary way it says so — a Safari private window refuses every write.
+   * `set` used to let that escape into the `onClick` that made it, so the rest
+   * of a two-field handler (theme, then "stop following the system") never ran
+   * and the reader was told nothing at all.
+   */
+  it('degrades to session-only when the browser refuses a write', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.stubGlobal('localStorage', {
+      getItem: () => null,
+      setItem: () => {
+        throw new DOMException('quota', 'QuotaExceededError')
+      },
+    })
+    const settings = browserSettings()
+    expect(settings.persistent, 'a fresh store over a storage is persistent until proven otherwise').toBe(true)
+    expect(() => settings.set(WEB_SETTINGS.theme, 'night')).not.toThrow()
+    expect(settings.get(WEB_SETTINGS.theme), 'the choice must still apply for this session').toBe('night')
+    expect(settings.persistent, 'the panel needs a state to draw, not an exception').toBe(false)
+    /* AND THE SECOND FIELD OF THE SAME HANDLER STILL LANDS. This is the
+       finding: a throw here abandoned it, so a reader who picked Night was left
+       following the system anyway. */
+    settings.set(WEB_SETTINGS.themeFollowsOs, false)
+    expect(settings.get(WEB_SETTINGS.themeFollowsOs)).toBe(false)
+    vi.restoreAllMocks()
+  })
+
+  it('reports a store with no storage as not persistent', () => {
+    vi.stubGlobal('localStorage', undefined)
+    expect(browserSettings().persistent).toBe(false)
+  })
+
   it('still opens with no storage at all, on the defaults', () => {
     vi.stubGlobal('localStorage', undefined)
     const settings = browserSettings()

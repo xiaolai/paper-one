@@ -1,3 +1,4 @@
+import type { CoverSource } from '../../kernel/ui/browser'
 import type { ShelfChannel } from './channel'
 
 /**
@@ -27,8 +28,8 @@ import type { ShelfChannel } from './channel'
  * to the reader, because a shelf that shows a banner per missing jacket is
  * unusable on a library this size.
  */
-export function remoteCovers(channel: ShelfChannel): (bookId: string) => Promise<string | null> {
-  return async (bookId: string): Promise<string | null> => {
+export function remoteCovers(channel: ShelfChannel): CoverSource {
+  return async (bookId: string, signal?: AbortSignal): Promise<string | null> => {
     try {
       /* ⚠️ **THE CHUNKS ARE CHECKED, AND THEY USED TO BE CONCATENATED BLIND.**
        *
@@ -45,7 +46,12 @@ export function remoteCovers(channel: ShelfChannel): (bookId: string) => Promise
        * and the honest answer for bytes this client cannot trust. */
       const parts: Uint8Array[] = []
       let at = 0
-      for await (const page of channel.stream('cover.read', { book: bookId })) {
+      /* ⚠️ **THE SIGNAL IS THE POINT OF THIS BEING A STREAM.** The shelf is
+         virtualised: a cell scrolled past unmounts, and without this the read
+         kept going — every chunk of a jacket nobody will look at, decoded,
+         against the same stream byte budget as the book being read. A flick
+         through two thousand rows started hundreds of these and ended none. */
+      for await (const page of channel.stream('cover.read', { book: bookId }, signal ? { signal } : {})) {
         for (const chunk of page as readonly unknown[]) {
           /* A ROW CARRYING NO BYTES IS SKIPPED, and only that. A shelf a
              version ahead may send a shape this build does not know; it
@@ -74,8 +80,16 @@ export function remoteCovers(channel: ShelfChannel): (bookId: string) => Promise
        * cell an `<img>` that fails to decode, which draws a broken-image glyph
        * where the tint belongs. */
       if (parts.length === 0) return null
+      /* ABANDONED READS MINT NOTHING. `BookCover` revokes what it is GIVEN, so
+         a URL created after the caller walked away belongs to nobody and is
+         held for the life of the document — the exact leak the abort exists to
+         prevent, reintroduced one line later. */
+      if (signal?.aborted) return null
       return URL.createObjectURL(new Blob(parts as BlobPart[]))
     } catch (cause) {
+      /* AN ABORT IS NOT A FAILURE. The caller asked for this; reporting it
+         would put a line in the console for every row a reader scrolls past. */
+      if (signal?.aborted) return null
       console.error(`Paper: could not read the cover for ${bookId}`, cause)
       return null
     }

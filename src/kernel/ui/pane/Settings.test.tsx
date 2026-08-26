@@ -261,3 +261,47 @@ describe('the collapsed groups', () => {
     })
   }
 })
+
+/**
+ * ⚠️ **A PREFERENCE THAT IS NOT BEING SAVED LOOKS EXACTLY LIKE ONE THAT IS**,
+ * right up until the next launch throws it away.
+ *
+ * The store used to report a refused write by THROWING out of `set`, into an
+ * `onClick` that did not catch it. Nothing was drawn, nothing was logged where
+ * a reader would see it, and the rest of a two-field handler never ran. The
+ * refusal is a state now, and this is the sentence it draws — the same one the
+ * Notes and Cards panels draw for the same condition.
+ */
+describe('when the settings are not being saved', () => {
+  const notice = /not being saved/i
+
+  it('says so, and says what it costs', () => {
+    const { props } = full()
+    render(<Settings {...({ ...props, persistent: false } as ComponentProps<typeof Settings>)} />)
+    expect(screen.getByText(notice).textContent).toMatch(/until you close Paper/i)
+  })
+
+  it('says nothing when the store is saving', () => {
+    const { props } = full()
+    render(<Settings {...({ ...props, persistent: true } as ComponentProps<typeof Settings>)} />)
+    expect(screen.queryByText(notice)).toBeNull()
+  })
+
+  /* AND SAYS NOTHING BY DEFAULT. A host with no answer must not accuse a
+     working store — the prop is optional and this is what that means. */
+  it('says nothing when the host does not say', () => {
+    const { props } = full()
+    delete (props as Record<string, unknown>)['persistent']
+    render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
+    expect(screen.queryByText(notice)).toBeNull()
+  })
+
+  /* The controls still work: this is a notice, not a disabled panel. A reader
+     may still want Night for this session. */
+  it('leaves every control usable', () => {
+    const { props, spy } = full()
+    render(<Settings {...({ ...props, persistent: false } as ComponentProps<typeof Settings>)} />)
+    fireEvent.click(screen.getByRole('button', { name: /Night/i }))
+    expect(spy.onTheme).toHaveBeenCalledWith('night')
+  })
+})

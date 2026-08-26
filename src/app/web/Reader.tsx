@@ -219,6 +219,14 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
   prefs.current ??= browserSettings()
   const prefsStore = prefs.current
   const settings = useSyncExternalStore(prefsStore.subscribe, prefsStore.getSnapshot)
+  /* The persistence flag needs its OWN subscription — the snapshot above is
+     unchanged by a refused write, so subscribing to it alone would show the
+     notice one change late. See `App.tsx`. */
+  const prefsPersistent = useSyncExternalStore(
+    prefsStore.subscribe,
+    () => prefsStore.persistent,
+    () => prefsStore.persistent,
+  )
   /* READ THROUGH `get`, not out of the snapshot. The snapshot is a bag of
    * unknowns by key; `get` is what applies each setting's own validator, so a
    * value hand-edited into `localStorage` cannot reach the renderer. The
@@ -935,6 +943,7 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
                 style={readingStyle}
                 offered={faces}
                 sections={[]}
+                persistent={prefsPersistent}
                 onTheme={(next) => {
                   prefsStore.set(WEB_SETTINGS.theme, next)
                   prefsStore.set(WEB_SETTINGS.themeFollowsOs, false)

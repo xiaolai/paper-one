@@ -195,3 +195,101 @@ describe('remoteCovers', () => {
     expect(await lastBlob?.text()).toBe('ok')
   })
 })
+
+/**
+ * ⚠️ **AN ABANDONED COVER USED TO KEEP READING.**
+ *
+ * The shelf is virtualised: a cell scrolled past unmounts, and until
+ * `CoverSource` carried a signal the stream behind it kept pulling and decoding
+ * chunks for a row nobody was looking at — against a byte budget shared with
+ * the book being read. A flick through two thousand rows started hundreds of
+ * these and ended none.
+ *
+ * Nothing on screen shows it, which is why it needs a test: the picture is
+ * right either way, and the only difference is work.
+ */
+describe('a read the caller walked away from', () => {
+  /** A shelf that counts chunks pulled, so "did it stop" is answerable. */
+  function counting(text: string) {
+    const pulled = { chunks: 0 }
+    const channel = {
+      call: async () => null,
+      stream: (_service: string, _body: unknown, options?: { signal?: AbortSignal }) => ({
+        [Symbol.asyncIterator]: async function* () {
+          for (let at = 0; at < text.length; at += 4) {
+            /* A REAL STREAM CHECKS ITS SIGNAL. `envelope.ts`'s client rejects on
+               abort; this stands in for that, and a source that is never handed
+               one cannot do it at all. */
+            if (options?.signal?.aborted) throw new DOMException('aborted', 'AbortError')
+            pulled.chunks += 1
+            yield [{ bookId: 'bk1', offset: at, bytes: btoa(text.slice(at, at + 4)) }]
+          }
+        },
+      }),
+      close: () => {},
+    } as unknown as ShelfChannel
+    return { channel, pulled }
+  }
+
+  it('passes the signal through to the stream', async () => {
+    let seen: AbortSignal | undefined
+    const channel = {
+      call: async () => null,
+      stream: (_s: string, _b: unknown, options?: { signal?: AbortSignal }) => {
+        seen = options?.signal
+        return { [Symbol.asyncIterator]: async function* () {} }
+      },
+      close: () => {},
+    } as unknown as ShelfChannel
+    const stop = new AbortController()
+    await remoteCovers(channel)('bk1', stop.signal)
+    expect(seen, 'a stream given no signal cannot be cancelled').toBe(stop.signal)
+  })
+
+  it('stops pulling chunks once aborted', async () => {
+    const { channel, pulled } = counting('a jacket long enough to arrive in several chunks')
+    const stop = new AbortController()
+    stop.abort()
+    expect(await remoteCovers(channel)('bk1', stop.signal)).toBeNull()
+    expect(pulled.chunks, 'the stream kept reading a cover nobody will look at').toBe(0)
+  })
+
+  /* AND MINTS NOTHING. `BookCover` revokes what it is GIVEN, so a URL created
+     for a read the caller abandoned belongs to nobody and is held for the life
+     of the document — the exact leak the abort exists to prevent. */
+  it('mints no object URL for a read that was abandoned', async () => {
+    const late = new AbortController()
+    const channel = {
+      call: async () => null,
+      stream: () => ({
+        [Symbol.asyncIterator]: async function* () {
+          yield [{ bookId: 'bk1', offset: 0, bytes: btoa('jacket') }]
+          /* Aborted AFTER the bytes are in hand: the ordinary race, where the
+             cell unmounts while the last chunk is being decoded. */
+          late.abort()
+        },
+      }),
+      close: () => {},
+    } as unknown as ShelfChannel
+    expect(await remoteCovers(channel)('bk1', late.signal)).toBeNull()
+    expect(minted, 'a URL nobody can revoke').toHaveLength(0)
+  })
+
+  /* AN ABORT IS NOT A FAILURE. Reporting it would put a line in the console for
+     every row a reader scrolls past — which is how a console stops being read. */
+  it('says nothing to the console about a read it was told to stop', async () => {
+    const { channel } = counting('a jacket')
+    const stop = new AbortController()
+    stop.abort()
+    await remoteCovers(channel)('bk1', stop.signal)
+    expect(console.error).not.toHaveBeenCalled()
+  })
+
+  /* AND IT STILL WORKS WITH NO SIGNAL AT ALL: the parameter is optional, and a
+     caller that does not cancel must not be made to. */
+  it('reads a cover when given no signal', async () => {
+    const { channel, pulled } = counting('a jacket')
+    expect(await remoteCovers(channel)('bk1')).not.toBeNull()
+    expect(pulled.chunks).toBeGreaterThan(0)
+  })
+})

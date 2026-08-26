@@ -657,9 +657,16 @@ export function useAppState(settings: SettingsStore, contributed: ContributedPan
     try {
       writeKernelPreferences(settings, prefs)
     } catch (cause) {
-      // Reported, not fatal: a preference that will not persist is a
-      // preference the reader chooses again next launch, and the store
-      // itself says why (`fileStore` reports a failed disk write).
+      /* THE SHIPPED STORE NO LONGER REACHES HERE. `set` used to throw on a
+       * refused write, and this caught it — which meant the batch had already
+       * been ABANDONED partway through, so what persisted was a prefix of what
+       * the reader chose. `createSettingsStore` reports a refusal through
+       * `persistent` instead, which the Settings panel draws, and the loop
+       * completes.
+       *
+       * The guard stays because `SettingsStore` is a PORT: another
+       * implementation may still throw, and a preference that will not persist
+       * must not take the render down with it. */
       console.error('Paper: could not save a preference', cause)
     }
     /* SPREAD FIELD BY FIELD, not `[settings, prefs]`: `preferencesOf` builds a

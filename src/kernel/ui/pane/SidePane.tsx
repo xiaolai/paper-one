@@ -172,6 +172,8 @@ export interface SidePaneProps {
     readonly sections: readonly SettingsSection[]
     /** Capabilities that did not compose — see `Settings.missing`. */
     readonly missing?: readonly { readonly id: string }[] | undefined
+    /** Whether a choice made in the panel survives a launch — see `Settings.persistent`. */
+    readonly persistent?: boolean | undefined
   }
   /**
    * The panes the composed capabilities contributed. They take the rail
@@ -289,6 +291,7 @@ export function SidePane({
             offered={settings.offered}
             sections={settings.sections}
             missing={settings.missing}
+            persistent={settings.persistent}
             theme={state.theme}
             themeFollowsOs={state.themeFollowsOs}
             pageLayout={state.pageLayout}

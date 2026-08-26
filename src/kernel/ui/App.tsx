@@ -131,6 +131,17 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
     services.settings.subscribe,
     services.settings.getSnapshot,
   )
+  /* ⚠️ A SECOND SUBSCRIPTION, and it is not redundant. `persistent` flips the
+     first time the store's write is REFUSED, and that refusal happens after
+     `values` has already changed and been published — so the snapshot above is
+     byte-identical either side of it, and `useSyncExternalStore` correctly does
+     not re-render. Reading the flag itself is what makes the panel's notice
+     appear on the write that failed rather than on the next one that worked. */
+  const settingsPersistent = useSyncExternalStore(
+    services.settings.subscribe,
+    () => services.settings.persistent,
+    () => services.settings.persistent,
+  )
   /* The status bar's third rung, through the kernel's own port — the kernel
      imports nothing from a capability, so `inference` binds this and App reads
      it here. Null at rest, which is what keeps the bar byte-for-byte what it
@@ -1691,6 +1702,7 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
               offered: offeredHere,
               sections: composition.settings,
               missing: composition.failures,
+              persistent: settingsPersistent,
             }}
             contributed={composition.panes}
           />

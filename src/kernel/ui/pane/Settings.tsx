@@ -142,6 +142,19 @@ export interface SettingsProps {
    * Devices went.
    */
   missing?: readonly { readonly id: string }[] | undefined
+  /**
+   * Whether anything chosen here will still be chosen next launch.
+   *
+   * `false` for a browser with storage switched off, and for a store whose
+   * write has been REFUSED — a full quota, a full disk. Drawn as a sentence
+   * for the same reason the Notes and Cards panels draw theirs: a preference
+   * that is not being saved looks exactly like one that is, right up until the
+   * next launch throws it away.
+   *
+   * Defaults to `true`, so a host that has no answer says nothing rather than
+   * accusing a working store.
+   */
+  persistent?: boolean | undefined
   onTheme: (theme: Theme) => void
   onFollowOs: (follows: boolean) => void
   /**
@@ -308,6 +321,7 @@ export function Settings({
   offered,
   sections,
   missing,
+  persistent = true,
   onTheme,
   onFollowOs,
 
@@ -349,6 +363,16 @@ export function Settings({
      different faces. */
   return (
     <div className={styles.panel}>
+      {/* §11: say what happened and what it costs. Above the groups rather than
+          inside one, because it is true of every control below it. */}
+      {!persistent && (
+        <div className={styles.panelMeta}>
+          <span>
+            These settings are not being saved — this device&apos;s storage is unavailable. They
+            will apply until you close Paper.
+          </span>
+        </div>
+      )}
       <PaneGroup
         title="Appearance"
         open={groupOpen(GROUP.appearance)}
