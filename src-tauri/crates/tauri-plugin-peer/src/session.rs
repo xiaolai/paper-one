@@ -163,7 +163,9 @@ impl Sessions {
         })
     }
 
-    /// Handshakes in flight, for tests and diagnostics.
+    /// Handshakes in flight. The permit count is otherwise unobservable, and
+    /// the bound it enforces is the whole point of [`Handshake`].
+    #[cfg(test)]
     pub fn pending_handshakes(&self) -> usize {
         self.pending.lock().expect("pending lock").values().sum()
     }
@@ -656,8 +658,6 @@ impl Node {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     /// HANDSHAKES IN FLIGHT ARE BOUNDED, not only registered sessions.
     ///
     /// `serve` used to check the allow-list, then await `accept_bi` and

@@ -131,7 +131,18 @@ export function serveTable(options: {
   if (options.devices) services.bindDevicePort(options.devices)
   if (options.shelf) services.bindShelfPort(options.shelf)
   if (options.sizes) services.bindSizePort(options.sizes)
-  let grants: readonly string[] = options.grants ?? ['book:*', 'mark:*', 'card:*', 'device:*', 'shelf:*']
+  /* `blob:*` IS IN THE DEFAULT SET. `content.read` is gated on `blob:read` —
+     the grant the Devices pane shows the reader as "book files" — rather than
+     on `book:read`, so a fixture peer holding every OTHER family would be
+     refused the bytes. A testkit that grants "everything" has to mean it. */
+  let grants: readonly string[] = options.grants ?? [
+    'book:*',
+    'blob:*',
+    'mark:*',
+    'card:*',
+    'device:*',
+    'shelf:*',
+  ]
   const ran: string[] = []
   const built = options.services ?? buildServices({ services })
   const contributions = built.map((one) => ({

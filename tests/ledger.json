@@ -1635,6 +1635,7 @@
     "src/cli/remote.envelope.test.ts > a cancelled command > sends a cancel when the caller breaks out of the loop",
     "src/cli/remote.envelope.test.ts > a cancelled command > sends no cancel for a stream that was read to the end",
     "src/cli/remote.envelope.test.ts > a grant the caller lacks > fails with forbidden and a non-zero exit",
+    "src/cli/remote.envelope.test.ts > a grant the caller lacks > refuses content.read to a peer denied book files, while the rest still works",
     "src/cli/remote.envelope.test.ts > a grant the caller lacks > takes effect on an OPEN session when the shelf narrows the grants",
     "src/cli/remote.envelope.test.ts > every command, over the envelope > answers a req and a stream with what the shelf holds",
     "src/cli/remote.envelope.test.ts > every command, over the envelope > answers every read service the shelf can answer, with the same argv the local caller takes",
