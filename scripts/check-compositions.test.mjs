@@ -57,7 +57,10 @@ function fixture(over = {}) {
        manifest entry to describe. Without those two this fixture was asserting
        a note for something that is not a plugin at all. */
     'src-tauri/crates/tauri-plugin-orphan/Cargo.toml': '[package]\nname = "tauri-plugin-orphan"\n',
-    'src-tauri/crates/tauri-plugin-orphan/build.rs': 'const COMMANDS: &[&str] = &[];\n',
+    /* `tauri_plugin::Builder` is what makes a crate a plugin — the line that
+       generates its command permissions. See `isPluginCrate`. */
+    'src-tauri/crates/tauri-plugin-orphan/build.rs':
+      'const COMMANDS: &[&str] = &[];\nfn main() { tauri_plugin::Builder::new(COMMANDS).build(); }\n',
     'src-tauri/crates/tauri-plugin-orphan/permissions/default.toml': '[default]\npermissions = []\n',
     /* A PLAIN LIBRARY beside it. No `build.rs`, no `permissions/` — it has no
        features, registration or grants, so there is nothing for a manifest
@@ -102,13 +105,33 @@ describe('the real tree', () => {
 })
 
 describe('a tree with crates', () => {
-  it('passes when every surface agrees, and notes the unclaimed crate', () => {
+  /**
+   * ⚠️ **AN UNCLAIMED PLUGIN CRATE IS A FINDING, AND IT USED TO BE A NOTE.**
+   *
+   * The command printed the line and exited 0 — so the crate's Cargo features,
+   * its `.plugin(…::init())` registration and every ACL grant it declares were
+   * checked by nobody, while the gate reported success. That is the exact state
+   * this check exists to make impossible, reached by adding a crate and
+   * forgetting one manifest entry. The note was a description of the hole.
+   */
+  it('refuses an unclaimed plugin crate rather than noting it', () => {
     const root = fixture()
     const { code, out } = run(['--root', root])
-    expect(out).toBe(
-      'note: src-tauri/crates/tauri-plugin-orphan is claimed by no manifest entry — its features, registration and grants are not checked\n' +
-        'compositions-check: 4 platforms, 2 capabilities, 2 crates checked, 0 findings\n',
-    )
+    expect(out).toContain('CRATE_UNCLAIMED')
+    expect(out).toContain('src-tauri/crates/tauri-plugin-orphan')
+    expect(code).toBe(1)
+  })
+
+  it('passes, and says so, once every crate is claimed', () => {
+    /* The same tree with the orphan removed — so the refusal above is about the
+       unclaimed crate and not about the fixture being broken some other way. */
+    const root = fixture({
+      'src-tauri/crates/tauri-plugin-orphan/build.rs': null,
+      'src-tauri/crates/tauri-plugin-orphan/permissions/default.toml': null,
+      'src-tauri/crates/tauri-plugin-orphan/Cargo.toml': null,
+    })
+    const { code, out } = run(['--root', root])
+    expect(out).toContain('0 findings')
     expect(code).toBe(0)
   })
 
@@ -126,25 +149,45 @@ describe('a tree with crates', () => {
    * Both halves are asserted, because silencing the note is the easy half and
    * the worthless one on its own.
    */
-  it('notes an unclaimed PLUGIN crate and says nothing about a library beside it', () => {
+  it('reports an unclaimed PLUGIN crate and says nothing about a library beside it', () => {
     const root = fixture()
     expect(isPluginCrate(root, 'tauri-plugin-orphan')).toBe(true)
     expect(isPluginCrate(root, 'paper-plainlib')).toBe(false)
 
     const { out } = run(['--root', root])
-    expect(out).toContain('note: src-tauri/crates/tauri-plugin-orphan')
+    expect(out).toContain('src-tauri/crates/tauri-plugin-orphan')
     expect(out).not.toContain('paper-plainlib')
   })
 
-  /* HALF A PLUGIN IS NOT A PLUGIN. Both markers are required: a crate with a
-     `build.rs` and no `permissions/` has no ACL for a manifest entry to
-     describe, and one with permissions and no `build.rs` declares no commands.
-     Asserted so neither half can drift into standing for the whole. */
-  it('needs both markers before it calls a crate a plugin', () => {
-    const buildOnly = fixture({ 'src-tauri/crates/tauri-plugin-orphan/permissions/default.toml': null })
-    expect(isPluginCrate(buildOnly, 'tauri-plugin-orphan')).toBe(false)
-    const permsOnly = fixture({ 'src-tauri/crates/tauri-plugin-orphan/build.rs': null })
-    expect(isPluginCrate(permsOnly, 'tauri-plugin-orphan')).toBe(false)
+  /**
+   * ⚠️ **A PLUGIN WITH NO `permissions/` IS STILL A PLUGIN**, and requiring the
+   * directory made this blind to the case most worth finding.
+   *
+   * The test used to demand BOTH `build.rs` and `permissions/`, so a Tauri
+   * plugin whose ACL directory was MISSING — a plugin declaring commands that
+   * nothing grants — was classified as a library crate: no note, no finding,
+   * no check of any kind. The absence of the evidence was read as the absence
+   * of the thing.
+   *
+   * `tauri_plugin::Builder` in `build.rs` is the marker instead. It is the line
+   * that generates the command permissions, and a library crate has no reason
+   * to hold it.
+   */
+  it('calls a crate a plugin on its build script, not on its ACL directory', () => {
+    const noAcl = fixture({ 'src-tauri/crates/tauri-plugin-orphan/permissions/default.toml': null })
+    expect(
+      isPluginCrate(noAcl, 'tauri-plugin-orphan'),
+      'a plugin missing its permissions/ is the case that most needs finding',
+    ).toBe(true)
+
+    const noBuild = fixture({ 'src-tauri/crates/tauri-plugin-orphan/build.rs': null })
+    expect(isPluginCrate(noBuild, 'tauri-plugin-orphan')).toBe(false)
+
+    /* A build script that is not a plugin's is not a plugin's. */
+    const plainBuild = fixture({
+      'src-tauri/crates/tauri-plugin-orphan/build.rs': 'fn main() { println!("cargo:rerun-if-changed=x"); }\n',
+    })
+    expect(isPluginCrate(plainBuild, 'tauri-plugin-orphan')).toBe(false)
   })
 
   it('reports drift on each surface as one line, exit 1', () => {
@@ -171,10 +214,10 @@ describe('a tree with crates', () => {
       'PERMISSION_UNGRANTED',
       'PLUGIN_UNREGISTERED',
       'CRATE_PLATFORMS_DIFFER',
-      'note:',
+      'CRATE_UNCLAIMED',
       'compositions-check:',
     ])
-    expect(lines[lines.length - 1]).toBe('compositions-check: 4 platforms, 2 capabilities, 2 crates checked, 7 findings')
+    expect(lines[lines.length - 1]).toBe('compositions-check: 4 platforms, 2 capabilities, 2 crates checked, 8 findings')
     expect(code).toBe(1)
   })
 
@@ -200,7 +243,9 @@ describe('the helpers', () => {
     expect(listCrates(join(root, 'nowhere'))).toEqual([])
     expect(loadManifest(root).manifest.capabilities).toHaveLength(2)
     expect(loadManifest(join(root, 'nowhere')).error).toContain('cannot read')
-    expect(formatSummary(checkCompositions(root).summary)).toBe('compositions-check: 4 platforms, 2 capabilities, 2 crates checked, 0 findings')
+    /* One finding: the fixture's unclaimed plugin crate, which is a finding
+       now rather than a note — see `refuses an unclaimed plugin crate`. */
+    expect(formatSummary(checkCompositions(root).summary)).toBe('compositions-check: 4 platforms, 2 capabilities, 2 crates checked, 1 findings')
     expect(() => checkCompositions(join(root, 'nowhere'))).toThrow(/cannot read/)
     expect(checkCompositions(REPO_ROOT).findings).toEqual([])
   })
