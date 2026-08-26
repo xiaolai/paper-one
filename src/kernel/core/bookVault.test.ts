@@ -19,23 +19,30 @@ import {
  * one needs the app.
  */
 
+/**
+ * A `VaultFs` over a map.
+ *
+ * ⚠️ **IT CARRIED STATE NOTHING READ.** A `dirs` set that `mkdir` filled and no
+ * assertion looked at, and a `failWrite` hook no test ever set — both left
+ * behind by cases that moved elsewhere. Unused fixture state is worse than
+ * unused code: it reads as coverage, so the next person writing a
+ * write-failure case here believes one already exists.
+ *
+ * `writeFile`, `mkdir`, `rename` and `removeDir` stay because `VaultFs`
+ * requires them. That is a different thing from state kept on the side.
+ */
 function fakeFs(seed: Record<string, Uint8Array> = {}) {
   const files = new Map<string, Uint8Array>(Object.entries(seed))
-  const dirs = new Set<string>()
-  const fs: VaultFs & { files: Map<string, Uint8Array>; dirs: Set<string>; failWrite?: string } = {
+  const fs: VaultFs & { files: Map<string, Uint8Array> } = {
     files,
-    dirs,
     readFile: async (path) => {
       const bytes = files.get(path)
       if (!bytes) throw new Error(`no such file: ${path}`)
       return bytes
     },
-    writeFile: async (path, bytes) => {
-      if (fs.failWrite === path) throw new Error('disk full')
-      files.set(path, bytes)
-    },
+    writeFile: async (path, bytes) => void files.set(path, bytes),
     exists: async (path) => files.has(path),
-    mkdir: async (path) => void dirs.add(path),
+    mkdir: async () => {},
     remove: async (path) => void files.delete(path),
     removeDir: async (path: string) => {
       for (const key of [...files.keys()]) {

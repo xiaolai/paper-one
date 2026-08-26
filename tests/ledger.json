@@ -1984,6 +1984,7 @@
     "src/kernel/core/bookSizes.test.ts > libraryBytes > adds up every file under the books directory, at any depth",
     "src/kernel/core/bookSizes.test.ts > libraryBytes > answers null when a directory would not read, rather than a smaller number",
     "src/kernel/core/bookSizes.test.ts > libraryBytes > answers null when a file inside it would not measure",
+    "src/kernel/core/bookSizes.test.ts > libraryBytes > answers null when the data root itself will not read",
     "src/kernel/core/bookSizes.test.ts > libraryBytes > answers zero for a library that is there and empty",
     "src/kernel/core/bookSizes.test.ts > libraryBytes > asks for root files by a relative name",
     "src/kernel/core/bookSizes.test.ts > libraryBytes > counts what is beside the books as well as the books",

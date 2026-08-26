@@ -74,14 +74,46 @@ const tick = async (times = 6) => {
 }
 
 describe('servePipe', () => {
+  /**
+   * The plugin refuses to deliver frames before the webview says it is serving,
+   * so announcing after the first poll drops whatever a browser sent between.
+   *
+   * ⚠️ **THIS PROVED ONLY THAT `ready` WAS CALLED.** Called is not called
+   * FIRST, and the order is the whole property — `toHaveBeenCalled` is true of
+   * a pump that announced itself after its third poll.
+   *
+   * What happens while readiness is outstanding, and when it rejects, are two
+   * cases of their own further down (`polls nothing until ready resolves`,
+   * `polls nothing at all when ready rejects`). This one is about the ORDER,
+   * which neither of those states.
+   */
   it('tells the plugin it is ready before serving anything', async () => {
-    /* The plugin refuses to deliver frames before the webview says it is
-       serving. Announcing after the first poll would drop whatever a browser
-       sent in between. */
-    const ready = vi.fn(async () => {})
-    const pump = servePipe({ wire: fakeWire({ ready }), services: [] })
-    await Promise.resolve()
-    expect(ready).toHaveBeenCalled()
+    vi.useFakeTimers()
+    let announce!: () => void
+    const order: string[] = []
+    const wire = fakeWire({
+      ready: vi.fn(() => {
+        order.push('ready')
+        return new Promise<void>((resolve) => {
+          announce = resolve
+        })
+      }),
+      sessions: vi.fn(async () => {
+        order.push('sessions')
+        return []
+      }),
+    })
+    const pump = servePipe({ wire, services: [], sessionsMs: 10 })
+
+    /* NOTHING IS POLLED WHILE READINESS IS OUTSTANDING, however long it takes
+       and however many intervals would have elapsed. */
+    await tick()
+    expect(order, 'the pump polled before the plugin said it would deliver').toEqual(['ready'])
+
+    announce()
+    await tick()
+    expect(order[0]).toBe('ready')
+    expect(order.filter((one) => one === 'sessions').length).toBeGreaterThan(0)
     pump.stop()
   })
 

@@ -32,6 +32,16 @@ function ops(files: Record<string, number>, unreadable: readonly string[] = []):
         const rest = key.slice(prefix.length).split('/')
         names.set(rest[0]!, rest.length > 1)
       }
+      /* ⚠️ **A DIRECTORY THAT IS NOT THERE THROWS**, and this used to answer
+       * `[]` for any path at all — so "the library is there and empty" and "the
+       * library does not exist" were the SAME fixture, and the walk's whole
+       * partial-answer rule turns on telling them apart. A real `readDir` on a
+       * missing path rejects.
+       *
+       * The DATA ROOT is the exception and always reads: the app creates it at
+       * boot, so a root that is missing is a different failure from an empty
+       * one and is not what `ops({})` is standing in for. */
+      if (names.size === 0 && path !== '') throw new Error(`no such directory: ${path}`)
       return [...names].map(([name, isDirectory]) => ({ name, isDirectory }))
     },
   }
@@ -104,6 +114,17 @@ describe('libraryBytes', () => {
     /* NOT null. The directory read, and it held nothing — which is a
        measurement, unlike a directory nobody could open. */
     expect(await sizePortOver(ops({})).libraryBytes()).toBe(0)
+  })
+
+  /**
+   * ⚠️ **AND "THERE AND EMPTY" IS NOT "NOT THERE".** The fake used to answer
+   * `[]` for every path, so the case above was satisfied by a filesystem with
+   * no such directory as well as by an empty one — and those must give
+   * different answers: zero is a measurement, and a root nobody can read is
+   * `null`. Told apart at the fixture, so the case above means what it says.
+   */
+  it('answers null when the data root itself will not read', async () => {
+    expect(await sizePortOver(ops({}, [''])).libraryBytes()).toBeNull()
   })
 
   /**
