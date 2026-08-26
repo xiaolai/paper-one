@@ -9,6 +9,7 @@ import { SelectionBar } from './shell/SelectionBar'
 import {
   Contents,
   FoliateView,
+  FootnotePopover,
   Marginalia,
   SearchPanel,
   Settings,
@@ -18,7 +19,7 @@ import {
   presentFaces,
 } from '../../kernel/ui/browser'
 import { WEB_SETTINGS, browserSettings } from './settings'
-import type { BookMeta, SearchHit, SelectionSnapshot, MarkAnchor } from '../../kernel/ui/browser'
+import type { BookMeta, FootnoteRender, SearchHit, SelectionSnapshot, MarkAnchor } from '../../kernel/ui/browser'
 import { externalTarget } from '../../kernel'
 import type { MarkTint } from '../../kernel'
 import type { TocItem } from 'foliate-js/view.js'
@@ -191,6 +192,33 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
    * panel, which uses it for its own "this book never finished parsing" case.
    */
   const [problem, setProblem] = useState<string | null>(null)
+  /**
+   * ⚠️ **A FOOTNOTE LINK DID NOTHING AT ALL HERE.**
+   *
+   * `ReaderSession` intercepts a note's link — `preventDefault`, so foliate does
+   * not navigate — renders the note into a view of its own, and parks that view
+   * off screen until a host says where to put it. This surface passed `ignore`
+   * and never said, so a reader tapping a superscript got: no navigation, no
+   * note, nothing. The extraction had worked and it was rendered a hundred
+   * thousand pixels to the left.
+   *
+   * The desktop's own popover is mounted below rather than a second one written
+   * for this screen: its header spends a page on four measurements — which box
+   * an anchor is measured in, which box the note renders into, why they are not
+   * the same box — and every one of them was got wrong once already.
+   */
+  const [footnote, setFootnote] = useState<FootnoteRender | null>(null)
+  /**
+   * ⚠️ **THE STAGE HAS TO BE STATE, NOT A REF READ DURING RENDER.**
+   *
+   * `stageEl.current` is null on the first render — the ref is attached after
+   * it — and a ref changing does not re-render, so a popover handed
+   * `stage={stageEl.current}` gets null for ever. `FootnotePopover` needs a box
+   * to place against and treats "no stage" as `detached`, which parks the note
+   * off screen: the same invisible note, arrived at a different way. The
+   * desktop's reader holds its stage in state for exactly this reason.
+   */
+  const [stageBox, setStageBox] = useState<HTMLDivElement | null>(null)
   /**
    * THE BOOK'S OWN TABLE OF CONTENTS (WI-19.9).
    *
@@ -447,10 +475,37 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
     goTo: (target: string) => void
     search: (query: string, signal: AbortSignal) => AsyncGenerator<SearchHit>
     deselect?: () => void
+    /* THE NOTE'S OWN VIEW, which the session builds and parks until a host says
+       where to put it. Optional like `deselect`: this ref is declared as the
+       members this surface READS, so a member added here without a use would be
+       a claim about the navigator that nothing checks. */
+    setFootnoteMount?: (mount: HTMLElement | null, within: HTMLElement | null) => void
+    closeFootnote?: () => void
   } | null>(null)
+
+  /**
+   * The box notes render into, HELD AND RE-APPLIED rather than forwarded.
+   *
+   * ⚠️ **THE POPOVER REGISTERS ON MOUNT, WHICH IS BEFORE ANY BOOK IS OPEN** —
+   * so there is no navigator yet and a straight `navigator.current?.…` is a
+   * no-op that silently never happens. The note then renders into the session's
+   * own fallback, off screen, and the popover shows an empty box: the
+   * extraction worked and nobody can see it. `useBook.ts` carries the same two
+   * refs for the same reason, and says so in the same words.
+   */
+  const footnoteMount = useRef<HTMLElement | null>(null)
+  const footnoteSpace = useRef<HTMLElement | null>(null)
+  const takeFootnoteMount = useCallback((mount: HTMLElement | null, within: HTMLElement | null) => {
+    footnoteMount.current = mount
+    footnoteSpace.current = within
+    navigator.current?.setFootnoteMount?.(mount, within)
+  }, [])
 
   const takeNavigator = useCallback((_generation: number, next: unknown) => {
     navigator.current = next as typeof navigator.current
+    /* RE-APPLIED HERE, which is the half a straight forward cannot do: this is
+       the first moment there is anything to tell. */
+    navigator.current?.setFootnoteMount?.(footnoteMount.current, footnoteSpace.current)
   }, [])
 
   /* FOUR INTENTS, TWO PAIRS, and they are not interchangeable. A horizontal
@@ -960,7 +1015,13 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
         </BottomSheet>
       )}
 
-      <div className={styles.stage} ref={stageEl}>
+      <div
+        className={styles.stage}
+        ref={(node) => {
+          stageEl.current = node
+          setStageBox(node)
+        }}
+      >
         <FoliateView
           file={opening.kind === 'reading' ? opening.source : null}
           generation={0}
@@ -989,11 +1050,30 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
           onMarkDrawn={ignore}
           onLink={ignore}
           onExternalLink={followExternalLink}
-          onFootnote={ignore}
+          onFootnote={setFootnote}
           onFileDropped={ignore}
           onPageIntent={turn}
           onFixedLayout={ignore}
           onDirection={ignore}
+        />
+
+        {/* IN THE STAGE, which is the box the session measures a note's anchor
+            against — see `FootnotePopover.onMount`, which is emphatic that the
+            two boxes are different and that deriving one from the other is what
+            broke it. `column` is null here: this client draws no margin notes,
+            so there is nothing beside the measure for a note to hang over. */}
+        <FootnotePopover
+          note={footnote}
+          stage={stageBox}
+          column={null}
+          onMount={takeFootnoteMount}
+          onCopy={copySelection}
+          onDismiss={() => {
+            /* THE SESSION OWNS THE VIEW. Clearing the state alone would leave
+               the note's iframe and renderer alive behind an empty box. */
+            navigator.current?.closeFootnote?.()
+            setFootnote(null)
+          }}
         />
       </div>
     </main>

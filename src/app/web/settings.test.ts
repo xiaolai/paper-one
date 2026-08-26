@@ -123,3 +123,56 @@ describe('browserSettings', () => {
     )
   })
 })
+
+/**
+ * ⚠️ **TWO SCREENS USED TO HOLD TWO STORES OVER ONE `localStorage`.**
+ *
+ * A settings store keeps the WHOLE envelope in memory and writes all of it back
+ * on every change, so two of them diverge the moment either writes. The reader
+ * stays mounted while its tab is hidden: changing the theme in **You** left the
+ * reader's copy holding what it read at mount, and the reader's next write — a
+ * typeface, a text size — persisted that stale envelope over the new theme. A
+ * preference changed on one screen was invisible on the other, then undone.
+ */
+describe('one store per storage', () => {
+  it('hands the same store to both screens', () => {
+    const held: Record<string, string> = {}
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => held[k] ?? null,
+      setItem: (k: string, v: string) => void (held[k] = v),
+    })
+    expect(browserSettings()).toBe(browserSettings())
+  })
+
+  it('does not let one screen’s write erase another’s', () => {
+    const held: Record<string, string> = {}
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => held[k] ?? null,
+      setItem: (k: string, v: string) => void (held[k] = v),
+    })
+    /* Two screens, asking separately — as `ShelfList` and `Reader` do. */
+    const shelf = browserSettings()
+    const reader = browserSettings()
+
+    shelf.set(WEB_SETTINGS.theme, 'night')
+    /* THE READER WRITES SOMETHING ELSE. With two stores this is where the
+       theme went: the reader's envelope predates the change and is written
+       back whole. */
+    reader.set(WEB_SETTINGS.typeface, 'crimson')
+
+    expect(reader.get(WEB_SETTINGS.theme), 'the reader never saw the shelf’s change').toBe('night')
+    const stored = JSON.parse(held['paper.settings.v1'] ?? '{}') as { values?: Record<string, unknown> }
+    expect(stored.values?.['kernel.theme'], 'the reader’s write erased the shelf’s').toBe('night')
+    expect(stored.values?.['kernel.typeface']).toBe('crimson')
+  })
+
+  /* AND A FRESH STORAGE IS A FRESH STORE. A bare module singleton would hand
+     the next test the previous one's values — the same defect, wearing a
+     different hat. */
+  it('gives a different storage its own store', () => {
+    vi.stubGlobal('localStorage', { getItem: () => null, setItem: () => {} })
+    const first = browserSettings()
+    vi.stubGlobal('localStorage', { getItem: () => null, setItem: () => {} })
+    expect(browserSettings()).not.toBe(first)
+  })
+})

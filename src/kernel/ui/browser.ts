@@ -103,6 +103,15 @@ export { OverlaySheet } from './overlays/OverlaySheet'
  * host with `card.list` and no `CardStorage` can mount it. */
 export { Cards } from './pane/Cards'
 
+/* THE NOTE IN PLACE. `ReaderSession` intercepts a footnote link, renders the
+ * note into its own view, and parks that view off screen until a host says
+ * where to put it — so a host that never says leaves footnote links doing
+ * nothing at all, which is what the browser client did. This is the box that
+ * says where, and it is the desktop's own: a second one would be a second set
+ * of the four measurements its header spends a page getting right. */
+export { FootnotePopover } from './reader/FootnotePopover'
+export type { FootnoteRender } from './reader/session'
+
 /* A jacket, or its tint. Takes its source as a prop — see the component. */
 export { BookCover } from './screens/BookCover'
 export type { CoverSource } from '../core/coverArt'

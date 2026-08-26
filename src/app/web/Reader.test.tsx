@@ -855,3 +855,78 @@ describe('Reader', () => {
     vi.resetModules()
   })
 })
+
+/**
+ * ⚠️ **A FOOTNOTE LINK DID NOTHING AT ALL ON THIS SURFACE.**
+ *
+ * `ReaderSession` intercepts a note's link — `preventDefault`, so foliate does
+ * not navigate — renders the note into a view of its own, and parks that view
+ * off screen until a host says where to put it. This surface passed `ignore` to
+ * `onFootnote` and never said, so a reader tapping a superscript got no
+ * navigation, no note, and nothing to dismiss. The extraction had worked and it
+ * was rendered a hundred thousand pixels to the left.
+ */
+describe('a note the reader taps', () => {
+  /* ⚠️ **THE POPOVER MEASURES THE NOTE'S OWN DOCUMENT** — it polls
+   * `view.renderer.getContents()[0].doc.body.scrollHeight` and stays invisible
+   * until that is above zero, because a box sized before the note has laid out
+   * is a box sized wrong. A bare element reports nothing and the note never
+   * appears, which is indistinguishable from the defect under test. */
+  const note = {
+    view: Object.assign(document.createElement('div'), {
+      renderer: { getContents: () => [{ doc: { body: { scrollHeight: 44 } } }] },
+    }),
+    href: 'notes.xhtml#n1',
+    type: 'footnote',
+    at: null,
+  }
+
+  it('is given somewhere to render, and somewhere to be shown', async () => {
+    const { content } = shelf({ ext: 'epub' })
+    const mounts: (HTMLElement | null)[] = []
+    const captured = await withView((Fresh) =>
+      render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />),
+    )
+    await waitFor(() => expect(captured['onNavigator']).toBeTypeOf('function'))
+
+    /* THE SESSION'S SIDE, as the real navigator presents it. */
+    ;(captured['onNavigator'] as (g: number, n: unknown) => void)(0, {
+      next: () => {},
+      prev: () => {},
+      goLeft: () => {},
+      goRight: () => {},
+      goTo: () => {},
+      search: async function* () {},
+      setFootnoteMount: (mount: HTMLElement | null) => mounts.push(mount),
+      closeFootnote: () => mounts.push(null),
+    })
+
+    /* ⚠️ **THE MOUNT IS THE WHOLE FIX.** Without it the session renders the note
+       into its own off-screen fallback and the reader sees nothing — which is
+       exactly what `ignore` produced. */
+    await waitFor(() =>
+      expect(
+        mounts.filter((one) => one !== null).length,
+        'nothing told the session where to render a note',
+      ).toBeGreaterThan(0),
+    )
+  })
+
+  it('is drawn once the session says it has rendered one', async () => {
+    const { content } = shelf({ ext: 'epub' })
+    const captured = await withView((Fresh) =>
+      render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />),
+    )
+    await waitFor(() => expect(captured['onFootnote']).toBeTypeOf('function'))
+
+    /* NOT `ignore`. The prop used to be a function that returns, which is
+       indistinguishable from this one until you look at what appears. */
+    await act(async () => {
+      ;(captured['onFootnote'] as (n: unknown) => void)(note)
+    })
+    expect(
+      document.querySelector('[data-footnote]') ?? screen.queryByRole('dialog'),
+      'the note was rendered and nowhere on this screen shows it',
+    ).not.toBeNull()
+  })
+})

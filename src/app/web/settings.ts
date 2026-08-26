@@ -65,7 +65,41 @@ export function browserStorage(): MarkStorage | null {
   }
 }
 
-/** The reader's preferences, over this browser's own storage. */
+/**
+ * The reader's preferences, over this browser's own storage.
+ *
+ * ## One store per storage, and there used to be one per screen
+ *
+ * ⚠️ **`ShelfList` AND `Reader` EACH BUILT THEIR OWN**, and a settings store
+ * holds the WHOLE envelope in memory and writes all of it back on every change.
+ * So the two diverged the moment either wrote: the reader stays mounted while
+ * its tab is hidden, so changing the theme in **You** left the reader's copy
+ * holding the values it had read at mount — and the reader's next write, a page
+ * turn's worth of nothing or a typeface change, persisted that stale envelope
+ * over the new one. A preference changed on one screen was invisible on the
+ * other and then quietly undone.
+ *
+ * There is one browser and one `localStorage`, so there is one store. Memoised
+ * on the STORAGE's identity rather than as a bare module singleton, because a
+ * test that stubs a fresh `localStorage` is asking about a fresh store — a
+ * singleton would hand it the previous test's values, which is the same defect
+ * wearing a different hat.
+ */
+const stores = new WeakMap<MarkStorage, SettingsStore>()
+/** The session-only store, for a browser that refuses storage entirely.
+ *  `null` has no identity to key a `WeakMap` on, and two of these would
+ *  diverge exactly as the two real ones did. */
+let sessionOnly: SettingsStore | null = null
+
 export function browserSettings(): SettingsStore {
-  return createSettingsStore({ storage: browserStorage() })
+  const storage = browserStorage()
+  if (storage === null) {
+    sessionOnly ??= createSettingsStore({ storage: null })
+    return sessionOnly
+  }
+  const held = stores.get(storage)
+  if (held) return held
+  const made = createSettingsStore({ storage })
+  stores.set(storage, made)
+  return made
 }
