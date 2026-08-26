@@ -3,6 +3,7 @@ import type { Card, CardKind } from './cards'
 import { liveCards } from './cards'
 import { fold } from './library'
 import { cfiOverlaps } from './markMatch'
+import { ARCHIVE_MAX_ROWS } from './importLimits'
 import {
   MARK_KINDS,
   liveMarks,
@@ -322,15 +323,31 @@ export function parseArchive(raw: string): MarksArchive | null {
   const doc = parsed as Record<string, unknown>
   if (doc['version'] !== 1 || !Array.isArray(doc['books'])) return null
   const books: ArchivedMarkBook[] = []
+  /* ⚠️ **A SMALL FILE CAN DESCRIBE A MILLION ROWS**, and only the BYTES were
+   * bounded — one caller up, and only recently. JSON is compact: a few
+   * megabytes of `{"id":"…"}` is hundreds of thousands of objects, and what
+   * costs is BUILDING them, not reading them. Counted across the whole archive
+   * rather than per book, because a hundred thousand books of one mark each is
+   * the same amount of work as one book of a hundred thousand. */
+  let rows = 0
   for (const one of doc['books']) {
     if (typeof one !== 'object' || one === null) continue
+    if (rows >= ARCHIVE_MAX_ROWS) break
     const row = one as Record<string, unknown>
     const marks = Array.isArray(row['marks'])
-      ? row['marks'].map(parseMark).filter((mark): mark is ArchivedMark => mark !== null)
+      ? row['marks']
+          .slice(0, Math.max(0, ARCHIVE_MAX_ROWS - rows))
+          .map(parseMark)
+          .filter((mark): mark is ArchivedMark => mark !== null)
       : []
+    rows += marks.length
     const cards = Array.isArray(row['cards'])
-      ? row['cards'].map(parseCard).filter((card): card is ArchivedCard => card !== null)
+      ? row['cards']
+          .slice(0, Math.max(0, ARCHIVE_MAX_ROWS - rows))
+          .map(parseCard)
+          .filter((card): card is ArchivedCard => card !== null)
       : []
+    rows += cards.length
     if (marks.length === 0 && cards.length === 0) continue
     const bookId = str(row['bookId'], 200)
     const title = str(row['title'], 1000)

@@ -1,3 +1,4 @@
+import { BOOK_MAX_BYTES, tooLarge } from '../../kernel'
 import type { ShelfChannel } from './channel'
 
 /**
@@ -100,7 +101,13 @@ export interface RemoteContent {
   fileOf(bookId: string, name: string): Promise<File>
 }
 
-export function remoteContent(channel: ShelfChannel): RemoteContent {
+/**
+ * @param maxBytes How much of one book this will hold in memory. Injectable so
+ * a test can demonstrate the bound without allocating half a gigabyte to do it
+ * — the first version of that test yielded megabyte pages until the real
+ * ceiling stopped it, which is a slow way to prove a comparison.
+ */
+export function remoteContent(channel: ShelfChannel, maxBytes = BOOK_MAX_BYTES): RemoteContent {
   /**
    * Every chunk of one read, in order, CHECKED.
    *
@@ -119,6 +126,11 @@ export function remoteContent(channel: ShelfChannel): RemoteContent {
   const collect = async (bookId: string, from: number, body: Record<string, unknown>): Promise<Uint8Array[]> => {
     const parts: Uint8Array[] = []
     let expected = from
+    /* THE BACKSTOP for a shelf that could not measure the book — `fileOf`
+     * refuses on the stated size when there is one, and this is what bounds the
+     * case where there is not. Counted as the bytes arrive, so it stops in the
+     * middle rather than after. */
+    let held = 0
     for await (const page of channel.stream('content.read', { book: bookId, ...body })) {
       /* PAGES, not chunks. Every stream in the service table yields an array of
        * rows; a reader that assumed a bare object worked against one shelf and
@@ -135,6 +147,10 @@ export function remoteContent(channel: ShelfChannel): RemoteContent {
         if (chunk.bookId !== bookId) {
           throw new Error(`content.read: asked for ${bookId} and got a chunk of ${chunk.bookId}`)
         }
+        held += chunk.bytes.length
+        if (held > maxBytes) {
+          throw tooLarge(`${bookId}`, held, maxBytes)
+        }
         if (chunk.offset !== expected) {
           throw new Error(
             `content.read: ${bookId} is not contiguous — expected byte ${expected}, got ${chunk.offset}`,
@@ -148,15 +164,18 @@ export function remoteContent(channel: ShelfChannel): RemoteContent {
     return parts
   }
 
+  /** Named, so `fileOf` can ask before it starts collecting. */
+  const locate = async (bookId: string) => {
+    const answer = (await channel.call('content.locate', { book: bookId })) as Record<string, unknown>
+    return {
+      here: answer['here'] === true,
+      ext: typeof answer['ext'] === 'string' ? answer['ext'] : null,
+      size: typeof answer['size'] === 'number' ? answer['size'] : null,
+    }
+  }
+
   return {
-    locate: async (bookId) => {
-      const answer = (await channel.call('content.locate', { book: bookId })) as Record<string, unknown>
-      return {
-        here: answer['here'] === true,
-        ext: typeof answer['ext'] === 'string' ? answer['ext'] : null,
-        size: typeof answer['size'] === 'number' ? answer['size'] : null,
-      }
-    },
+    locate,
 
     readRange: async (bookId, offset, length) => {
       /* REFUSED HERE rather than sent. The service would refuse a negative
@@ -172,6 +191,22 @@ export function remoteContent(channel: ShelfChannel): RemoteContent {
     },
 
     fileOf: async (bookId, name) => {
+      /* ⚠️ **BOUNDED BEFORE THE READ, AND BY WHAT THE SHELF SAID.**
+       *
+       * This collected an ENTIRE book into memory with no ceiling — and it is
+       * the path a phone takes, on a device chosen precisely so a book need not
+       * be downloaded to it. A 300 MB scan, or a shelf answering with something
+       * absurd, exhausted the tab before the `File` was constructed.
+       *
+       * `content.locate` has already answered with the size, so the refusal can
+       * happen before a byte is asked for rather than after most of them have
+       * arrived. `null` means the shelf could not measure it, which is a real
+       * answer — the collector's own running total is the backstop for that
+       * case, inside `collect`. */
+      const facts = await locate(bookId)
+      if (facts.size !== null && facts.size > maxBytes) {
+        throw tooLarge(`${name}`, facts.size, maxBytes)
+      }
       const parts = await collect(bookId, 0, {})
       /* THE NAME THE BOOK ARRIVED WITH, not the vault's. Every parser Paper
        * uses routes on the EXTENSION, and foliate rejects a name with no

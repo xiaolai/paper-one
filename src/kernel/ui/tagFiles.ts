@@ -1,5 +1,6 @@
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog'
-import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs'
+import { readTextFile, stat, writeTextFile } from '@tauri-apps/plugin-fs'
+import { ARCHIVE_MAX_BYTES, tooLarge } from '../core/importLimits'
 import { inTauri } from './inTauri'
 import type { IndexedBook } from '../core/bookIndex'
 import { archiveName, exportTags, parseArchive, type TagArchive } from '../core/tagArchive'
@@ -64,5 +65,13 @@ export async function importTagsFromFile(): Promise<
   })
   const path = typeof chosen === 'string' ? chosen : null
   if (!path) return null
+  /* ⚠️ **THE SIZE IS ASKED BEFORE THE FILE IS READ**, and it used to be asked
+   * never. `readTextFile` takes the whole thing into memory and `parseArchive`
+   * validates afterwards — so a crafted archive, or an ordinary huge one picked
+   * by mistake, exhausted memory or froze the interface before a single field
+   * had been looked at. A bound that runs after the read has not bounded
+   * anything. */
+  const { size } = await stat(path)
+  if (size > ARCHIVE_MAX_BYTES) throw tooLarge('That tags file', size, ARCHIVE_MAX_BYTES)
   return { path, archive: parseArchive(await readTextFile(path)) }
 }

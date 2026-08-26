@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ShelfChannel } from './channel'
+import { BOOK_MAX_BYTES } from '../../kernel'
 import { remoteContent } from './content'
 
 /**
@@ -147,6 +148,86 @@ function badShelf(pages: readonly unknown[][]) {
 }
 
 const chunk = (offset: number, text: string, bookId = 'one') => ({ bookId, offset, bytes: btoa(text) })
+
+/**
+ * ⚠️ **A WHOLE BOOK USED TO BE COLLECTED WITH NO CEILING.**
+ *
+ * `fileOf` is the path a PHONE takes, on a device chosen precisely so a book
+ * need not be downloaded to it — and it read an entire book into memory with
+ * nothing bounding the size. A 300 MB scan, or a shelf answering with something
+ * absurd, exhausted the tab before the `File` was constructed.
+ *
+ * Both halves are here because they answer different failures: the shelf's
+ * stated size refuses BEFORE a byte is asked for, and the running total is what
+ * covers a shelf that could not measure the book — `size: null` is a real
+ * answer, and was for the whole of phase 11.
+ */
+describe('how much of a book this will hold', () => {
+  /* A SMALL CEILING, so the bound can be shown without allocating a real one.
+     The comparison is what is under test, not the number. */
+  const SMALL = 64
+
+  /** A shelf that claims a size without having to produce one. */
+  function claiming(size: number | null, bytes = 'ok') {
+    const channel: ShelfChannel = {
+      call: async () => ({ bookId: 'one', here: true, ext: 'epub', size }),
+      stream: () => ({
+        [Symbol.asyncIterator]: async function* () {
+          yield [{ bookId: 'one', offset: 0, bytes: btoa(bytes) }]
+        },
+      }),
+      close: () => {},
+      onClosed: () => () => {},
+    }
+    return remoteContent(channel)
+  }
+
+  it('refuses a book the shelf says is too large, before reading a byte', async () => {
+    const content = claiming(BOOK_MAX_BYTES + 1)
+    await expect(content.fileOf('one', 'Enormous.epub')).rejects.toThrow(/past the .* this can hold/)
+  })
+
+  it('accepts one the shelf says fits', async () => {
+    const content = claiming(BOOK_MAX_BYTES)
+    await expect(content.fileOf('one', 'Large.epub')).resolves.toBeInstanceOf(File)
+  })
+
+  it('has a real ceiling, not an unreachable one', () => {
+    /* The shipped number, asserted once so the tests below may use a small one
+       without the real bound quietly becoming absent. */
+    expect(BOOK_MAX_BYTES).toBeGreaterThan(0)
+    expect(BOOK_MAX_BYTES).toBeLessThanOrEqual(1024 * 1024 * 1024)
+  })
+
+  /* THE SHELF COULD NOT MEASURE IT — `size: null` is what a shelf with no size
+     port answers, which the desktop app was for the whole of phase 11. The
+     running total is the only bound in that case. */
+  it('stops mid-stream when an unmeasured book runs past the ceiling', async () => {
+    const page = 'x'.repeat(SMALL)
+    let yielded = 0
+    const channel: ShelfChannel = {
+      call: async () => ({ bookId: 'one', here: true, ext: 'epub', size: null }),
+      stream: () => ({
+        [Symbol.asyncIterator]: async function* () {
+          /* Four times the ceiling, and BOUNDED — an endless generator proves
+             the same thing by hanging, which is not a test result. */
+          for (let at = 0; at < SMALL * 4; at += page.length) {
+            yielded += 1
+            yield [{ bookId: 'one', offset: at, bytes: btoa(page) }]
+          }
+        },
+      }),
+      close: () => {},
+      onClosed: () => () => {},
+    }
+    await expect(remoteContent(channel, SMALL).fileOf('one', 'Unmeasured.epub')).rejects.toThrow(
+      /past the .* this can hold/,
+    )
+    /* AND IT STOPPED EARLY, rather than reading everything and complaining
+       afterwards — which is the difference between a bound and a report. */
+    expect(yielded).toBeLessThan(4)
+  })
+})
 
 describe('an assembled book is checked, not trusted', () => {
   it('refuses a gap between chunks', async () => {

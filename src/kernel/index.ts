@@ -168,6 +168,10 @@ export type { GlossContext, GlossProvider, LookUpMode } from './core/gloss'
  * rather than growing a second one that drifts. */
 export { MAX_URL, externalTarget } from './core/externalLink'
 export type { ExternalTarget } from './core/externalLink'
+/* HOW MUCH OF A READER-CHOSEN FILE THIS APP WILL HOLD. Three paths read
+ * something whose size is decided outside the app — a picked archive, a book on
+ * a shelf — and none of them bounded it before reading. See `importLimits`. */
+export { ARCHIVE_MAX_BYTES, ARCHIVE_MAX_ROWS, BOOK_MAX_BYTES, tooLarge } from './core/importLimits'
 export { KERNEL_SETTINGS, SETTINGS_STORAGE_KEY, SETTINGS_VERSION, carryLegacySettings, createSettingsStore, keepValues } from './core/settings'
 export type { KernelPreferences, SettingsEnvelope, SettingsMigration, SettingsStoreOptions } from './core/settings'
 
