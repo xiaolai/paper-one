@@ -3,6 +3,7 @@ import {
   createKernelServices,
   grantCovers,
   recordPath,
+  sizePortOver,
   type BookRecord,
   type IndexedBook,
   type DevicePort,
@@ -81,6 +82,16 @@ export interface ServedShelf {
    * the ones that happen to read a store.
    */
   readonly ran: readonly string[]
+  /**
+   * How many pages a stream service's HANDLER has yielded.
+   *
+   * The observation that makes cancellation assertable. `iterator.return()`
+   * settles the CLIENT's iterable on the spot, whether or not a `cancel` was
+   * ever sent — so "the iterator is done" is true of a client that dropped the
+   * frame, while the generator on the shelf goes on building pages for nobody.
+   * Cancellation is about work stopping HERE, and this is where it can be seen.
+   */
+  pagesOf(name: string): number
 }
 
 /**
@@ -97,7 +108,12 @@ export function serveTable(options: {
    * capability's `start` binds them AFTER the services were built. */
   readonly devices?: DevicePort
   readonly shelf?: ShelfPort
-  readonly sizes?: SizePort
+  /**
+   * The size port to bind. A REAL ONE over the fake filesystem is the default —
+   * see where it is bound. `null` binds none, which is the shape of a host that
+   * cannot measure and is what `shelf.status`'s null-answers cases need.
+   */
+  readonly sizes?: SizePort | null
   readonly services?: readonly ServiceContribution[]
   /** Whether the seeded shelf stands for one that was actually read. */
   readonly shelfRead?: boolean
@@ -130,7 +146,28 @@ export function serveTable(options: {
   })
   if (options.devices) services.bindDevicePort(options.devices)
   if (options.shelf) services.bindShelfPort(options.shelf)
-  if (options.sizes) services.bindSizePort(options.sizes)
+  /**
+   * ⚠️ **NOTHING BOUND A SIZE PORT, SO `content.locate` ANSWERED `size: null`
+   * FOR EVERY BOOK IN EVERY TEST.** Half of that service's answer was therefore
+   * unassertable, which is how the case named "names and measures the same
+   * file" came to check only the name — the measurement it is about was not
+   * available to it.
+   *
+   * A real `sizePortOver` over the fake filesystem is the honest default: it is
+   * the same walk both hosts run, and the fake already answers the two
+   * questions it needs. `options.sizes` still overrides, for the cases that are
+   * about a shelf which cannot measure.
+   */
+  if (options.sizes !== null) {
+    services.bindSizePort(
+      options.sizes ??
+        sizePortOver({
+          bytesAt: async (path) => fs.store.get(path)?.byteLength ?? null,
+          readDir: async (path) =>
+            (await fs.readDir(path)).map((entry) => ({ name: entry.name, isDirectory: entry.isDirectory })),
+        }),
+    )
+  }
   /* `blob:*` IS IN THE DEFAULT SET. `content.read` is gated on `blob:read` —
      the grant the Devices pane shows the reader as "book files" — rather than
      on `book:read`, so a fixture peer holding every OTHER family would be
@@ -144,12 +181,35 @@ export function serveTable(options: {
     'shelf:*',
   ]
   const ran: string[] = []
+  /**
+   * PAGES THE HANDLER ACTUALLY PRODUCED, per service.
+   *
+   * ⚠️ **CANCELLATION IS ABOUT WORK STOPPING ON THE SHELF, AND NOTHING HERE
+   * COULD SEE THAT.** `iterator.return()` marks the CLIENT's iterable done
+   * immediately, so the `next()` after it reports `done` whether or not a
+   * `cancel` was ever sent — a client that dropped the frame on the floor
+   * satisfies the assertion exactly as well as one that sent it, and the
+   * generator on the other side goes on building pages for nobody.
+   *
+   * Counting what the handler yielded is the only way to ask the question the
+   * test is named for. `remote.envelope.test.ts` wraps its handlers the same
+   * way, for the same reason.
+   */
+  const pages = new Map<string, number>()
   const built = options.services ?? buildServices({ services })
   const contributions = built.map((one) => ({
     ...one,
     handler: (req: unknown, ctx: Parameters<ServiceContribution['handler']>[1]) => {
       ran.push(one.name)
-      return one.handler(req, ctx)
+      const answer = one.handler(req, ctx)
+      if (typeof answer !== 'object' || answer === null || !(Symbol.asyncIterator in answer)) return answer
+      const inner = answer as AsyncIterable<unknown>
+      return (async function* () {
+        for await (const page of inner) {
+          pages.set(one.name, (pages.get(one.name) ?? 0) + 1)
+          yield page
+        }
+      })()
     },
   }))
   const router = createRouter({
@@ -180,6 +240,8 @@ export function serveTable(options: {
     client,
     toRouter,
     ran,
+    /** How many pages this service's HANDLER has yielded — see `pages`. */
+    pagesOf: (name: string) => pages.get(name) ?? 0,
     setGrants: (next) => {
       grants = next
       connection.recheckGrants()

@@ -39,7 +39,10 @@ describe('shelf.status', () => {
   })
 
   it('answers with nulls rather than refusing when no port is bound', async () => {
-    const shelf = serveTable({ books: [seedBook('one')] })
+    /* `sizes: null` — no size port, which is what this case is about. The
+       harness binds a real one by default now, because `content.locate`
+       answering `size: null` everywhere made half that service unassertable. */
+    const shelf = serveTable({ books: [seedBook('one')], sizes: null })
     expect(await shelf.client.call('shelf.status', null)).toMatchObject({
       role: null,
       endpointId: null,

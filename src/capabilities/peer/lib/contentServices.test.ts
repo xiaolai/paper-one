@@ -15,10 +15,22 @@ import { FORBIDDEN, refusalCode, seedBook, serveTable } from './serviceTable.tes
 const BYTES = new TextEncoder().encode('the whale')
 
 /** A shelf with one book whose folder holds the named content files. */
-function withContent(names: readonly string[], row: Record<string, unknown> = {}) {
+/**
+ * A shelf holding one book with these content files.
+ *
+ * `bytes` gives a file its own contents. ⚠️ **IT EXISTS BECAUSE THE FILES WERE
+ * ALL THE SAME LENGTH**, which made `size` useless as an assertion: a
+ * `content.locate` that named one file and measured another produced identical
+ * numbers, and that is the defect the two-file case is named for.
+ */
+function withContent(
+  names: readonly string[],
+  bytes: Readonly<Record<string, string>> = {},
+  row: Record<string, unknown> = {},
+) {
   return serveTable({
     books: [seedBook('one', { hasContent: names.length > 0, ...row })],
-    files: Object.fromEntries(names.map((name) => [`books/one/${name}`, 'the whale'])),
+    files: Object.fromEntries(names.map((name) => [`books/one/${name}`, bytes[name] ?? 'the whale'])),
   })
 }
 
@@ -36,11 +48,25 @@ describe('content.locate', () => {
    * files, but it can — and `ext` and `size` picking differently reported one
    * format with the other's byte count. */
   it('names and measures the same file when a folder holds two', async () => {
-    const shelf = withContent(['content.azw3', 'content.epub'])
-    const found = (await shelf.client.call('content.locate', { book: 'one' })) as { ext: string }
+    /* ⚠️ **DIFFERENT LENGTHS, BECAUSE THE SIZE IS HALF THE ASSERTION.** The two
+     * files used to be indistinguishable by byte count, so `ext` and `size`
+     * describing DIFFERENT files — the exact defect this case is named for —
+     * would have produced identical numbers and passed. */
+    const shelf = withContent(['content.azw3', 'content.epub'], {
+      'content.azw3': 'a'.repeat(64),
+      'content.epub': 'e'.repeat(11),
+    })
+    const found = (await shelf.client.call('content.locate', { book: 'one' })) as {
+      ext: string
+      size: number | null
+    }
     /* `CONTENT_EXTENSIONS` order, which is what the size port walks — not
      * lexicographic, which would have said `azw3`. */
     expect(found.ext).toBe('epub')
+    expect(
+      found.size,
+      'the answer named one file and measured the other',
+    ).toBe(11)
   })
 
   /**
@@ -59,7 +85,7 @@ describe('content.locate', () => {
   /* AND AN UNREADABLE ONE IS NOT AN EMPTY ONE. The record's flag is the
    * fallback exactly here, and nowhere else. */
   it('falls back to the record when the folder will not read', async () => {
-    const shelf = withContent(['content.epub'], { ext: 'epub' })
+    const shelf = withContent(['content.epub'], {}, { ext: 'epub' })
     shelf.fs.readDir = async () => {
       throw new Error('EACCES')
     }
