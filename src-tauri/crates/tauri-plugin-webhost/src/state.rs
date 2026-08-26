@@ -16,6 +16,21 @@ pub struct WebHostState {
     /// 0 until the listener binds. An atomic rather than a lock because it is
     /// written once and read by every status call.
     port: AtomicU16,
+    /// Whether the webview has announced that it is serving the router.
+    ///
+    /// ⚠️ **IT GATES NOTHING, AND THE COMMAND CONTRACT SAID IT GATED FRAME
+    /// DELIVERY.** Nothing consults it on admission, on `push`, on `send` or on
+    /// `recv`; it is written once by `webhost_ready` and read only by
+    /// `webhost_status`. Left as a claim it was a permission nobody enforced —
+    /// a reader of `commands.rs` would have believed frames could not reach an
+    /// unready webview, and they always could.
+    ///
+    /// It is kept because it is genuinely useful as STATUS: the Browsers pane
+    /// shows whether the webview has come up, which is a real question with a
+    /// real answer. It is documented as status, and `webhost_ready`'s own
+    /// comment no longer promises more than that. Making it a gate would mean
+    /// deciding what happens to frames that arrive first — buffered, or
+    /// refused — which is a design decision, not a missing line.
     ready: AtomicBool,
 }
 

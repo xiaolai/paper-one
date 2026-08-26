@@ -29,8 +29,15 @@ import { webhost } from '../capabilities/webhost'
  * reading them adjacent is how the split stays legible. Both are DESKTOP
  * ONLY: `lemond` ships for macOS, Windows and Linux and there is no mobile
  * build of it, so the mobile compositions do not list them. */
-/* `webhost` last, and after `peer`, which it declares in `requires` — it needs
- * peer's envelope rather than anything peer-to-peer, and the note in its
- * `index.ts` says why that dependency is honest but misshapen. DESKTOP ONLY: a
- * phone is a satchel, never a shelf, and has nothing to serve. */
+/* `webhost` last, and after `peer`, which it declares in `requires`.
+ *
+ * ⚠️ THE REASON GIVEN HERE WAS "it needs peer's envelope", and the envelope
+ * moved to the kernel in phase 19 — `webhost` imports it from there, like
+ * everything else. What the `requires` still buys is ORDER: `peer` binds the
+ * service host the shelf serves through, and a webhost started before it would
+ * have nothing to hand a browser. Stating the spent reason kept an
+ * unnecessary-looking coupling looking necessary for the wrong cause.
+ *
+ * DESKTOP ONLY: a phone is a satchel, never a shelf, and has nothing to
+ * serve. */
 export const capabilities: readonly Capability[] = [peer, sync, inference, companion, webhost]

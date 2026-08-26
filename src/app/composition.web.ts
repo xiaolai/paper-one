@@ -12,11 +12,18 @@ import type { Capability } from '../kernel'
  * this build is the kernel and the reader, and `assert-bundle` fails it if any
  * capability module reaches the bundle.
  *
- * The client half of the wire — a `Channel` over the frame socket, the remote
- * stores, the six-digit screen — will be a capability of its own and will list
- * `web` in the manifest. This file exists first, empty and checked, so that the
- * machinery is watching before there is anything to get wrong. That is the same
- * order `webhost` was registered in, for the same reason.
+ * ⚠️ THE CLIENT HALF OF THE WIRE IS NOT FUTURE WORK. This said a `Channel`
+ * over the frame socket, the remote stores and the six-digit screen "will be a
+ * capability of its own"; they were written directly under `src/app/web/`
+ * instead, and have been since phase 18. Nothing here composes them, because
+ * they are not a capability — they are this build's own client, reached by
+ * `src/main.web.tsx`.
+ *
+ * That may still be worth changing: a capability would give them a manifest
+ * entry, a declared platform and the bundle assertion that goes with one. It is
+ * a decision nobody has taken, which is different from a plan already made —
+ * and this file existing empty and checked, so the machinery watches before
+ * there is anything to get wrong, remains true either way.
  *
  * ## `web` is a platform here and NOT a Tauri target
  *

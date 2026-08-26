@@ -399,8 +399,12 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
        * looks exercised and never runs. If a non-modal layer ever arrives, it
        * gets its own list and this comment stops being true loudly. */
       if (state[action.layer]) return { ...state, [action.layer]: false }
-      const closed = Object.fromEntries(LAYER_ORDER.map((layer) => [layer, false]))
-      return { ...state, ...closed, [action.layer]: true }
+      /* `ALL_LAYERS_SHUT`, not a second `Object.fromEntries` over the same
+         list. This rebuilt it on every open — the same map, derived the same
+         way, from the same constant, allocated again — and a second derivation
+         of one value is exactly what the note beside that constant was written
+         about. */
+      return { ...state, ...ALL_LAYERS_SHUT, [action.layer]: true }
     }
 
     case 'closeLayer':

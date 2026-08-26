@@ -31,13 +31,19 @@
 //! read it at all, and the browser attaches it to the WebSocket handshake by
 //! itself because the shelf serves the SPA same-origin.
 //!
-//! ## What is NOT here yet
+//! ## What this server does NOT do, which is answer anything
 //!
-//! The frame pipe to the webview, and the embedded SPA. The service router
-//! lives in TypeScript — `serve(services)` is a method on the webview's peer
-//! port — so this server can never answer a service call itself. It will pipe
-//! frames, exactly as `tauri-plugin-peer` does. Anything that starts answering
-//! service calls in Rust here is building a second copy of every handler.
+//! ⚠️ This section used to say the frame pipe and the embedded SPA were "not
+//! here yet". Both are: [`pipe`] is a module of this crate and the router below
+//! serves the embedded client as its fallback. What has not changed is the rule
+//! the section was really about, so it is stated as a rule rather than as a
+//! plan.
+//!
+//! The service router lives in TypeScript — `serve(services)` is a method on
+//! the webview's peer port — so this server can never answer a service call
+//! itself. It pipes frames, exactly as `tauri-plugin-peer` does. **Anything
+//! that starts answering service calls in Rust here is building a second copy
+//! of every handler**, which will drift from the first the day either changes.
 
 pub mod assets;
 pub mod pipe;

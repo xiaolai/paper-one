@@ -151,7 +151,20 @@ export function bookDetail(book: IndexedBook): BookDetail {
     ...bookRow(book),
     positionAt: book.positionAt ?? null,
     finishedAt: book.finishedAt ?? null,
-    tagClock: book.tagClock ?? null,
+    /* ⚠️ **COPIED, NOT HANDED OVER.** This returned the store's own object by
+     * reference, so an in-process caller — the CLI and every local handler go
+     * through these projectors without an envelope in between — could mutate
+     * the live clock outside the write queue. Every other field here is a
+     * primitive and could not; this one is a map, which is the only reason it
+     * was different, and being the only one is what made it easy to miss.
+     *
+     * ONE LEVEL DEEPER THAN THE MAP. Each entry is a record — `{ on, at,
+     * spelling }` — so copying only the outer object hands the caller the same
+     * entry objects and the mutation simply moves down a level. Every field
+     * inside one is a primitive, so this is as deep as it needs to go. */
+    tagClock: book.tagClock
+      ? Object.fromEntries(Object.entries(book.tagClock).map(([tag, stamp]) => [tag, { ...stamp }]))
+      : null,
   }
 }
 
@@ -159,16 +172,20 @@ export function bookDetail(book: IndexedBook): BookDetail {
  * A mark, as `mark.*` answer.
  *
  * The stored row is nearly the wire row — sync pushes whole marks — so this
- * pins the fields a caller is promised and drops four, ALL of them named here
- * because "only the tombstone" was written when only the tombstone was true:
+ * pins the fields a caller is promised and drops TWO:
  *
  *   - `deletedAt` and `updatedAt` are the ledger's stamps. A read model never
  *     shows a tombstone, and a caller reconciling two devices asks sync, not
  *     `mark.list`.
- *   - `prefix` and `suffix` are the text either side of the mark, captured so
- *     a CFI that no longer resolves can be re-found. They are a repair input,
- *     not a display field: publishing them would roughly triple a mark row on
- *     every listing to serve nobody currently asking.
+ *
+ * ⚠️ **`prefix` AND `suffix` ARE PUBLISHED, and this said they were dropped.**
+ * The argument for withholding them — "a repair input, not a display field …
+ * publishing them would roughly triple a mark row to serve nobody currently
+ * asking" — stopped being true in phase 19, when the browser client became a
+ * caller that CAN re-find a mark whose CFI no longer resolves and has no other
+ * way to get the context. They are in the interface below and the projector
+ * copies them; only this paragraph still said otherwise, which is the account
+ * a reader of the wire contract would have trusted.
  */
 export interface MarkRow {
   readonly id: string

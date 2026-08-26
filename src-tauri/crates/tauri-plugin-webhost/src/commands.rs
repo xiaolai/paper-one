@@ -144,7 +144,13 @@ pub async fn webhost_revoke<R: Runtime>(
     Ok(())
 }
 
-/// The webview says it is serving the router, so frames may be delivered.
+/// The webview says it is serving the router.
+///
+/// ⚠️ THIS SAID "so frames may be delivered", which no code enforces. Nothing
+/// consults the flag on admission, on push, on send or on recv — it is written
+/// here and read only by `webhost_status`. It is STATUS, not a gate; see
+/// `WebHostState::ready` for why it stays one and what making it a gate would
+/// actually require deciding.
 #[command]
 pub async fn webhost_ready<R: Runtime>(
     _app: AppHandle<R>,

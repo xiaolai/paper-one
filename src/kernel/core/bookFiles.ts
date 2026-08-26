@@ -88,7 +88,13 @@ export async function pickBooks(): Promise<PickedBook[]> {
 
 
 /**
- * Ask for a FOLDER, and the pieces needed to walk it.
+ * Ask for a FOLDER, and hand back the path chosen.
+ *
+ * ⚠️ It used to say "and the pieces needed to walk it", and it returned those
+ * once: a path together with the seam that reads it. It returns the PATH now
+ * and `importFs` supplies the filesystem separately, which is what let a caller
+ * with its own seam — a test, a host that is not the webview — walk the same
+ * folder. The sentence outlived the shape by a refactor.
  *
  * Returns null when the reader cancelled, which is not an error.
  *

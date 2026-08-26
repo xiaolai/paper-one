@@ -98,14 +98,20 @@ const EMPTY_CARDS: readonly Card[] = []
  *
  * ## What this build is, today
  *
- * The gate, the shelf, and a book. It asks whether this browser is connected,
- * shows six digits if not, lists the library over one channel and opens a book
- * over the same one.
+ * The gate, the shelf, a book, and four tabs. It asks whether this browser is
+ * connected, shows six digits if not, lists the library over one channel and
+ * opens a book over the same one.
  *
- * **It is a reader and not the app.** There are no settings, no marks, no
- * search and no reading aloud: those are the desktop's panes, and this build has
- * no store to keep their state in. Every book opens at the design system's own
- * defaults, from the same constants `initialState` uses.
+ * ⚠️ THIS PARAGRAPH SAID "there are no settings, no marks, no search", and by
+ * the time anyone read it the imports above named all three and the tabs below
+ * rendered them. A description a file has grown past is worse than none: it is
+ * what a reader trusts instead of scrolling.
+ *
+ * **It is a reader and not the app**, and what that now means precisely:
+ * settings live in this browser's own storage rather than the desktop's
+ * reducer; marks and cards are READ over the channel and never written, because
+ * a browser session holds a read grant; and there is no reading aloud, no
+ * ruler, and no local library — every book's bytes stay on the shelf.
  */
 
 /**
