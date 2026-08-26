@@ -167,6 +167,17 @@ describe('serving a composed set of services', () => {
     const served = await services.serveServices([])
     served.dispose()
     expect(disposed, 'the host’s disposer was replaced').toBe(1)
+
+    /* ⚠️ **"EXACTLY ONCE" WAS ASSERTED FROM A SINGLE CALL.** One `dispose()`
+     * cannot tell "runs once per call" from "runs once ever" — and the second
+     * is the property that matters, because a composite disposer is held by a
+     * composition root that may tear down more than once: an unmount and a
+     * shutdown handshake both reach for it. A host disposed twice unregisters
+     * handlers a LATER composition has already bound, and the symptom is a
+     * service that stops answering with nothing in the log. */
+    served.dispose()
+    served.dispose()
+    expect(disposed, 'a second teardown ran the host’s disposer again').toBe(1)
   })
 
   it('serves every bound host, and disposes them all', async () => {

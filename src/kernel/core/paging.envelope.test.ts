@@ -33,18 +33,47 @@ const framed = (page: readonly unknown[]): number =>
   encodeFrame({ v: ENVELOPE_VERSION, kind: 'res', service: 'book.list', id: 'r1', body: page }).byteLength
 
 describe('every page the pager produces can be encoded', () => {
+  /**
+   * ⚠️ **THE "EXACT BYTE BOUNDARY" FIXTURE NEVER REACHED THE BYTE BOUNDARY.**
+   *
+   * A page ends at `PAGE_ROWS` rows OR `PAGE_BYTES`, whichever comes first, and
+   * the rows were about 1 KB each: 200 of them is roughly 200 KB against a
+   * 512 KiB budget, so every page here was capped by the ROW count and the byte
+   * cap was never consulted. The test measured the wrong limit under the right
+   * name, and the off-by-one it exists to catch could not have shown up in it.
+   *
+   * `PAGE_BYTES / PAGE_ROWS` is the row size at which the two caps meet, so a
+   * row comfortably above it makes the byte cap the binding one — and the test
+   * asserts that, rather than assuming it.
+   */
   it('encodes a page filled to the exact byte boundary', async () => {
-    /* Rows sized so the budget is met precisely rather than overshot: the
-     * off-by-one at a boundary is the failure a coarse test cannot see. */
-    const per = 1_000
+    const per = Math.ceil((PAGE_BYTES / PAGE_ROWS) * 4)
     const row = (index: number) => ({ id: index, text: 'x'.repeat(per) })
     const count = Math.ceil(PAGE_BYTES / JSON.stringify(row(0)).length) + 2
     const got = await all(pages(Array.from({ length: count }, (_one, index) => row(index)), signal))
     expect(got.length).toBeGreaterThan(1)
+
+    /* THE BYTE CAP IS THE ONE THAT BIT. A full page here holds far fewer than
+       `PAGE_ROWS` rows — if it held exactly that many, the row cap ended it and
+       this test is measuring the wrong limit again. */
+    const full = got[0]!
+    expect(full.length, 'the row cap ended the page, so the byte cap was never tested').toBeLessThan(PAGE_ROWS)
+    expect(JSON.stringify(full).length).toBeGreaterThan(PAGE_BYTES / 2)
+
     for (const page of got) {
       expect(JSON.stringify(page).length).toBeLessThanOrEqual(PAGE_BYTES)
       expect(framed(page)).toBeLessThanOrEqual(MAX_PAYLOAD_BYTES)
     }
+  })
+
+  /* AND THE ROW CAP STILL BINDS FOR SMALL ROWS, which is the ordinary case: an
+     index row is tens of bytes, so a page of two thousand books ends at 200
+     rows and nowhere near the byte budget. Both limits, so neither can quietly
+     stop working. */
+  it('ends a page of small rows at the row cap', async () => {
+    const got = await all(pages(Array.from({ length: PAGE_ROWS * 2 + 7 }, (_one, id) => ({ id })), signal))
+    expect(got[0]).toHaveLength(PAGE_ROWS)
+    expect(JSON.stringify(got[0]).length).toBeLessThan(PAGE_BYTES)
   })
 
   /**

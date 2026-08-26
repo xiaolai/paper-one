@@ -975,6 +975,69 @@ describe('hardening against a hostile peer', () => {
     expect(built).toEqual(['a', 'b'])
   })
 
+  /**
+   * ⚠️ **THE PER-CONNECTION CAP WAS THE ONLY ONE TESTED**, and it is the one a
+   * hostile peer routes around: `maxInFlight` is per CONNECTION, so N
+   * connections each holding N-1 requests is N×(N-1) live handlers with every
+   * per-connection cap respected. `maxInFlightGlobal` is what bounds that, and
+   * nothing exercised it.
+   *
+   * The refusal must also be the peer's OWN: refusing a connection that is
+   * under its own limit because some other peer filled the shelf is correct —
+   * that is what a shared budget means — and it has to be `overloaded` and
+   * retryable rather than a protocol error, or a well-behaved client treats a
+   * busy shelf as a broken one and stops asking.
+   */
+  it('bounds work across ALL connections, not only within one (H2)', async () => {
+    const timers = fakeTimers()
+    const held: string[] = []
+    const slow: ServiceContribution = {
+      name: 'example.slow',
+      grant: 'example:ping',
+      handler: (req) => new Promise(() => held.push(String(req))),
+    }
+    const router = createRouter({
+      services: [slow],
+      hasGrant: () => true,
+      timers,
+      /* GENEROUS PER CONNECTION, TIGHT OVERALL — so anything refused below is
+         refused by the global budget and could not have been by the local one. */
+      maxInFlight: 10,
+      maxInFlightGlobal: 3,
+    })
+
+    const conns = ['a', 'b', 'c'].map((peer) => {
+      const sent: Frame[] = []
+      return { peer, sent, conn: router.connect(peer, (bytes) => sent.push(decodeFrame(bytes))) }
+    })
+    /* One each: three in flight, which is the whole shelf's budget. */
+    for (const one of conns) {
+      one.conn.receive(encodeFrame(frame({ service: 'example.slow', id: `${one.peer}1`, body: one.peer })))
+    }
+    await settle()
+    expect(held).toEqual(['a', 'b', 'c'])
+
+    /* A FOURTH, on a connection holding ONE of its ten. */
+    conns[0]!.conn.receive(encodeFrame(frame({ service: 'example.slow', id: 'a2', body: 'a2' })))
+    await settle()
+    const refusal = errBody(conns[0]!.sent.find((f) => f.id === 'a2' && f.kind === 'err'))
+    expect(refusal.code, 'a peer under its own cap filled the shelf past the global one').toBe(
+      ENVELOPE_ERRORS.overloaded,
+    )
+    expect(refusal.retryable, 'a busy shelf is not a broken one').toBe(true)
+    expect(held, 'no handler may be built for a refused request').toEqual(['a', 'b', 'c'])
+    expect(conns[0]!.conn.inFlight, 'the refusal must not consume a slot').toBe(1)
+
+    /* AND THE BUDGET IS RELEASED. A cap that never gives a slot back is a shelf
+       that stops answering after its first busy moment — the failure a
+       one-shot test cannot see. */
+    conns[2]!.conn.disconnect()
+    await settle()
+    conns[0]!.conn.receive(encodeFrame(frame({ service: 'example.slow', id: 'a3', body: 'a3' })))
+    await settle()
+    expect(held, 'a disconnected peer must give its slot back').toEqual(['a', 'b', 'c', 'a3'])
+  })
+
   it('bounds queued input by bytes, refusing the overflow and aborting the flooder (H3)', async () => {
     const timers = fakeTimers()
     const sink: ServiceContribution = { name: 'example.sink', grant: 'example:ping', handler: () => new Promise(() => {}) }
@@ -1293,7 +1356,23 @@ describe('hardening against a hostile peer', () => {
       })
       const failure = await client.call('book.list', {}).catch((e: unknown) => e)
       expect(failure).toBeInstanceOf(ServiceCallError)
+      /* ⚠️ **"NOT `timeout`" IS ELEVEN CODES.** `internal`, `malformed` and
+       * `protocol` all satisfy it, and every one of them sends the caller
+       * somewhere different — `internal` reads as a bug on the shelf,
+       * `protocol` as a version skew. The one a caller can act on is
+       * `disconnected`: retryable, now, with a fresh connection.
+       *
+       * The negative assertion stays, because it names the mistake this test
+       * was written about. It is no longer the whole of it. */
+      expect((failure as ServiceCallError).error.code).toBe(ENVELOPE_ERRORS.disconnected)
       expect((failure as ServiceCallError).error.code).not.toBe(ENVELOPE_ERRORS.timeout)
+      /* AND NOT RETRYABLE — pinned because it is the surprising half. `retryable`
+         here means "ask this client again", and this client is finished: `send`
+         threw, so every later call on it rejects `disconnected` too. Retrying
+         is the caller's job with a NEW connection, which the code is what tells
+         them. A flag that said otherwise would send a retry loop at a socket
+         that will never open. */
+      expect((failure as ServiceCallError).error.retryable).toBe(false)
     })
   })
 
