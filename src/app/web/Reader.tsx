@@ -63,17 +63,23 @@ import styles from './Reader.module.css'
  * scanned book and downloading one. `content.locate` says which, and gives the
  * length the transport cannot work without.
  *
- * ## What this surface is NOT
+ * ## What this surface has, and what it has not
  *
- * There are no settings here. The desktop's reader is driven by fifteen values
- * a reader can change and a reducer that persists them; this build has no
- * settings screen and no store to keep them in, so it opens every book at the
- * design system's own defaults — the same constants `initialState` uses, from
- * the same module, so the two cannot drift.
+ * ⚠️ THIS SECTION SAID "there are no settings here" AND "marks, search … are
+ * likewise absent", and by the time anyone read it all three were mounted
+ * below. A description of a surface that has grown past it is worse than none:
+ * it is the thing a reader of this file trusts instead of scrolling.
  *
- * Marks, search, the ruler and reading aloud are likewise absent: they are the
- * desktop's panes, not the reader's. What is here is the book, legible, at the
- * measure it was designed for.
+ * There ARE settings, kept in this browser's own storage rather than the
+ * desktop's reducer — `browserSettings` over `WEB_SETTINGS`, a subset of
+ * `KERNEL_SETTINGS`, so the two cannot disagree about what a theme may be. The
+ * tools sheet carries four tabs: highlights, search, contents and settings.
+ * Marks are read through the shelf's `mark.list`.
+ *
+ * What is genuinely absent: the RULER, reading aloud, and every mark MUTATION
+ * — a browser session holds a read grant, so `canWrite` is false and the
+ * highlight, note and delete controls are not drawn. Stats too: nothing here
+ * measures reading time.
  */
 
 export interface ReaderProps {
@@ -107,6 +113,29 @@ export interface ReaderProps {
    * otherwise, and the selection bar draws Copy alone.
    */
   readonly canWrite?: boolean
+}
+
+/**
+ * Whether a tap landed on something the page already handles.
+ *
+ * ⚠️ **THE LIST WAS `a, button, input, [role="button"]`**, and a book is a
+ * document a stranger wrote. `<select>`, `<textarea>`, `<summary>`, a media
+ * element with controls, anything `contenteditable` and every other ARIA
+ * widget role were all absent — so interacting with one of those inside a book
+ * turned the page at the same time. Choosing from a dropdown in an embedded
+ * form advanced the reader out of it.
+ *
+ * `closest` walks up, so a tap on a `<span>` inside a `<button>` is caught by
+ * the button. `[role]` covers the widget roles as a class rather than by
+ * enumeration; a role is only ever put on something meant to be interacted
+ * with, and treating one as inert is the direction that turns pages by
+ * accident.
+ */
+const INTERACTIVE =
+  'a[href], button, input, select, textarea, summary, label, [contenteditable]:not([contenteditable="false"]), audio[controls], video[controls], [role]'
+
+function onInteractive(target: EventTarget | null): boolean {
+  return (target as Element | null)?.closest?.(INTERACTIVE) != null
 }
 
 /** What is known about the book while it is being fetched. */
@@ -148,6 +177,19 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
     store.current?.touch(bookId)
   }, [bookId])
   const [opening, setOpening] = useState<Opening>({ kind: 'locating' })
+  /**
+   * WHAT WENT WRONG, WHERE THE READER IS LOOKING.
+   *
+   * ⚠️ This was consumed by `SearchPanel` alone — a pane behind a centre tap
+   * and a tab. So a dropped channel, a range read that failed, or a renderer
+   * that could not open the book left a BLANK PAGE with the explanation folded
+   * inside a panel nobody had reason to open. The one failure this surface
+   * cannot afford to be quiet about is the one where there is nothing to look
+   * at.
+   *
+   * It is drawn on the reading surface now, and still handed to the search
+   * panel, which uses it for its own "this book never finished parsing" case.
+   */
   const [problem, setProblem] = useState<string | null>(null)
   /**
    * THE BOOK'S OWN TABLE OF CONTENTS (WI-19.9).
@@ -275,7 +317,6 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
   const takeToc = useCallback((_generation: number, next: readonly TocItem[]) => setToc(next), [])
   /* The stage's width decides the measure, and a phone rotates. */
   const [stage, setStage] = useState(() => Math.min(window.innerWidth, 1200))
-  const host = useRef<HTMLDivElement | null>(null)
   /** The reading area, which is wider than the book — see `watchTaps`. */
   const stageEl = useRef<HTMLDivElement | null>(null)
 
@@ -452,27 +493,62 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
       placeOf: (clientX: number) => { x: number; width: number },
       selectionOf: () => string,
     ): (() => void) => {
-      let downAt: { x: number; y: number } | null = null
+      /**
+       * THE ONE POINTER THIS GESTURE BELONGS TO.
+       *
+       * ⚠️ **THREE THINGS WERE WRONG WITH TRACKING A BARE COORDINATE.**
+       *
+       *   - `pointerId` was ignored, so a second finger's `pointerdown`
+       *     overwrote the first's origin. A two-finger pinch to zoom therefore
+       *     measured its travel from the wrong finger and could read as a tap.
+       *   - `pointercancel` was not handled at all. The browser fires it when
+       *     it takes the gesture over — a scroll, a system edge swipe — and no
+       *     `pointerup` follows, so the stale origin sat there waiting to be
+       *     paired with an unrelated release.
+       *   - A `pointerup` with NO matching `pointerdown` was given
+       *     `moved = 0` — a perfect tap. A release that entered the stage from
+       *     outside, or arrived after the listener was attached mid-gesture,
+       *     turned the page.
+       *
+       * Requiring a matching down, keyed on the id, settles all three: an
+       * unmatched release is ignored rather than believed.
+       */
+      let downAt: { id: number; x: number; y: number } | null = null
       const onDown = (event: Event) => {
         const pointer = event as PointerEvent
-        downAt = { x: pointer.clientX, y: pointer.clientY }
+        /* THE FIRST POINTER WINS, until it is released or cancelled. A second
+           finger is a gesture the browser or foliate owns — a pinch, a
+           two-finger scroll — and letting its press OVERWRITE the first is how
+           the release of the first came to be measured from the second's
+           origin, which reads as a tap wherever the fingers happened to be.
+           `isPrimary` would say the same thing, and is `false` on every
+           synthesized event, so this asks the question the tracking can
+           actually answer. */
+        if (downAt !== null) return
+        downAt = { id: pointer.pointerId, x: pointer.clientX, y: pointer.clientY }
+      }
+      const onCancel = (event: Event) => {
+        const pointer = event as PointerEvent
+        if (downAt?.id === pointer.pointerId) downAt = null
       }
       const onUp = (event: Event) => {
         const pointer = event as PointerEvent
         const from = downAt
         downAt = null
+        /* NO MATCHING PRESS, NO TAP. See the note on `downAt`: this used to
+           fall through with `moved = 0`, which is a page turn. */
+        if (from === null || from.id !== pointer.pointerId) return
         const place = placeOf(pointer.clientX)
         const intent = tapIntent({
           x: place.x,
           /* HOW FAR IT TRAVELLED, not where it ended. A drag that begins in the
            * middle and ends at the edge is a selection, not a page turn. */
-          moved: from === null ? 0 : Math.hypot(pointer.clientX - from.x, pointer.clientY - from.y),
+          moved: Math.hypot(pointer.clientX - from.x, pointer.clientY - from.y),
           width: place.width,
           selected: selectionOf() !== '',
           /* A LINK WINS. foliate is already handling it, and turning the page
            * as well would leave the reader somewhere they did not choose. */
-          onControl:
-            (pointer.target as Element | null)?.closest?.('a, button, input, [role="button"]') != null,
+          onControl: onInteractive(pointer.target),
         })
         if (intent !== null) {
           /* A TURN HIDES THE CHROME — "hides on scroll", and a tap-turn is
@@ -487,18 +563,22 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
          * a drag, a selection or a tap on a link all still do nothing here. */
         if (
           place.width > 0 &&
-          !(pointer.target as Element | null)?.closest?.('a, button, input, [role="button"]') &&
+          !onInteractive(pointer.target) &&
           selectionOf() === '' &&
-          (from === null || Math.hypot(pointer.clientX - from.x, pointer.clientY - from.y) <= 10)
+          Math.hypot(pointer.clientX - from.x, pointer.clientY - from.y) <= 10
         ) {
           setChrome((was) => !was)
         }
       }
       target.addEventListener('pointerdown', onDown, { passive: true })
       target.addEventListener('pointerup', onUp, { passive: true })
+      /* THE BROWSER TAKING THE GESTURE OVER. Without this the origin outlives
+         the gesture and waits to be paired with an unrelated release. */
+      target.addEventListener('pointercancel', onCancel, { passive: true })
       return () => {
         target.removeEventListener('pointerdown', onDown)
         target.removeEventListener('pointerup', onUp)
+        target.removeEventListener('pointercancel', onCancel)
       }
     },
     [turn],
@@ -602,28 +682,58 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
           tint,
           chapter: toc.find((entry) => entry.href === here)?.label ?? '',
         })
-        .then((made) => {
-          /* A highlight, by construction — `add` posts `kind: 'highlight'` —
-           * so the narrowing here is a statement of what was asked for. */
-          if (made === null) return
-          const kind = made.kind
-          if (kind === 'bookmark') return
-          setDrawn((was) => [
-            ...was,
-            { cfi: made.cfi, sectionIndex: made.sectionIndex, kind, tint: made.tint, style: made.style },
-          ])
+        .catch((cause: unknown) => {
+          /* ⚠️ THE DRAWING USED TO HAPPEN HERE TOO, AND IT WAS THE SECOND TIME.
+           *
+           * `marks.add` puts the new mark in the store and notifies
+           * synchronously, and the effect above rebuilds `drawn` from
+           * `marks.all` on every notification — so by the time this promise
+           * settled the highlight was already on the page. Appending it again
+           * painted every new highlight twice, which on a `fill` tint is
+           * visibly darker than the ones around it.
+           *
+           * The subscription is the single source now. It also handles what
+           * this could not: a mark the shelf CHANGED on the way in, and one
+           * that arrives from anywhere other than this button. */
+          console.error('Paper: the shelf would not keep that highlight', cause)
         })
     },
     [selection, marks, bookId, tint, toc, here],
   )
 
+  /**
+   * COPY, and what happens when it does not.
+   *
+   * ⚠️ **THIS SWALLOWED THE FAILURE AND CLEARED THE SELECTION ANYWAY.** The
+   * clipboard is absent in a non-secure context and its write can be refused
+   * outright, and both were `catch(() => {})` — so Copy presented as having
+   * worked while the text went nowhere AND the selection, the one thing the
+   * reader could have retried from, was destroyed. Two losses from one
+   * unhandled rejection.
+   *
+   * The selection is cleared only after a write that resolved. A failure says
+   * so and leaves the text highlighted, so the reader can try again or copy it
+   * by hand.
+   */
   const copySelection = useCallback(() => {
     const text = selection?.text ?? ''
     if (text === '') return
     /* `window.navigator`, spelled out: this file's own `navigator` is the
      * book navigator ref, and shadowed the global. */
-    void window.navigator.clipboard?.writeText(text).catch(() => {})
-    setSelection(null)
+    const clipboard = window.navigator.clipboard
+    if (clipboard === undefined) {
+      setProblem('This browser will not let a page copy text. Select it and copy it yourself.')
+      return
+    }
+    void clipboard
+      .writeText(text)
+      .then(() => {
+        setProblem(null)
+        setSelection(null)
+      })
+      .catch(() => {
+        setProblem('That could not be copied. The selection is still there — try again.')
+      })
   }, [selection])
 
   const searchable = useMemo(
@@ -663,13 +773,23 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
     )
   }
 
+  /* NO `ref` ON THE MAIN ELEMENT. One was held here and its value never read —
+   * a handle kept for a use that never arrived, which reads to the next person
+   * as something depending on it. */
   return (
-    <main className={styles.screen} ref={host}>
+    <main className={styles.screen}>
       {/* THE CHROME, and only the way back and the title — no controls. The
           mockup's Reader has a hidden tab bar, a progress foot and nothing
           else: every pixel of chrome is a pixel of page lost at 393px. Tools
           come from a centre tap. */}
-      <header className={styles.bar} data-visible={chrome}>
+      {/* ⚠️ `inert`, NOT ONLY TRANSPARENT.
+          `data-visible='false'` sets `opacity: 0` and `pointer-events: none`,
+          which stops a finger and stops nothing else: the Shelf and Tools
+          buttons stayed in the tab order and stayed in the accessibility tree,
+          so a keyboard reader tabbed into invisible controls and a screen
+          reader announced a bar that is not there. `inert` removes both, and
+          the browser restores them when it goes. */}
+      <header className={styles.bar} data-visible={chrome} inert={!chrome}>
         <button className="paper-cap-button" type="button" onClick={onClose}>
           ‹ Shelf
         </button>
@@ -692,6 +812,20 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
           <List size={ICON.control} strokeWidth={ICON.stroke} />
         </button>
       </header>
+
+      {/* WHAT WENT WRONG, ON THE PAGE. See the note on `problem`: this used to
+          reach `SearchPanel` alone, so a dropped channel or a failed range read
+          left a blank page with its explanation folded inside a pane nobody had
+          reason to open. `role="alert"` because it arrives after the reader has
+          already started looking at nothing. */}
+      {problem !== null && (
+        <div className={styles.problem} role="alert">
+          <span>{problem}</span>
+          <button className="paper-cap-button" type="button" onClick={() => setProblem(null)}>
+            Dismiss
+          </button>
+        </div>
+      )}
 
       <ProgressFooter fraction={fraction} visible={chrome && selection === null} />
 

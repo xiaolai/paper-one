@@ -691,6 +691,7 @@
     "src/app/web/Reader.test.tsx > Reader > re-measures when the window changes size",
     "src/app/web/Reader.test.tsx > Reader > reports a failure to locate rather than rendering an empty reader",
     "src/app/web/Reader.test.tsx > Reader > routes each page intent to the navigator it was given",
+    "src/app/web/Reader.test.tsx > Reader > says on the page when the renderer reports a failure",
     "src/app/web/Reader.test.tsx > Reader > says so plainly when the shelf does not have the pages",
     "src/app/web/Reader.test.tsx > Reader > starts at the beginning for a book it has never opened",
     "src/app/web/Reader.test.tsx > Reader > surfaces a failed range read instead of leaving the page blank",

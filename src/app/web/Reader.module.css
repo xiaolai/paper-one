@@ -126,6 +126,29 @@
   pointer-events: none;
 }
 
+/* WHAT WENT WRONG, ON THE PAGE.
+   Above the footer and below the bar, so it does not cover either. It is not
+   part of the chrome's show/hide: an explanation of a blank page has to be
+   visible whether or not the reader has tapped the centre. */
+.problem {
+  position: absolute;
+  left: var(--space-4);
+  right: var(--space-4);
+  bottom: var(--space-10);
+  z-index: 3;
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  justify-content: space-between;
+  font-size: var(--text-ui);
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  padding: var(--space-4);
+  box-shadow: var(--shadow-card);
+}
+
 /* THE TOOLS SHEET — the desktop side pane as one sheet, tabs at its foot.
    The body scrolls; the rail does not. */
 .toolBody {

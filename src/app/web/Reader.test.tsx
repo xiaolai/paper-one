@@ -533,6 +533,45 @@ describe('Reader', () => {
    * foliate loads one per section and keeps neighbours alive. Without the
    * teardown a book accumulates a listener per section read.
    */
+  /**
+   * ⚠️ **A FAILURE THE READER CANNOT SEE IS A BLANK PAGE.**
+   *
+   * `problem` reached `SearchPanel` alone — a pane behind a centre tap and a
+   * tab — so a dropped channel or a range read that failed left the reading
+   * surface empty with its explanation folded inside a panel nobody had reason
+   * to open. The one failure this surface cannot afford to be quiet about is
+   * the one where there is nothing to look at.
+   */
+  it('says on the page when the renderer reports a failure', async () => {
+    const { content } = shelf({ ext: 'epub' })
+    const captured: Record<string, unknown> = {}
+    vi.doMock('../../kernel/ui/reader/FoliateView', () => ({
+      FoliateView: (props: Record<string, unknown>) => {
+        Object.assign(captured, props)
+        return null
+      },
+    }))
+    vi.resetModules()
+    const { Reader: Fresh } = await import('./Reader')
+    render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />)
+    await waitFor(() => expect(captured['onError']).toBeTypeOf('function'))
+
+    expect(screen.queryByRole('alert')).toBeNull()
+    act(() => {
+      ;(captured['onError'] as (g: number, m: string) => void)(0, 'the shelf stopped answering')
+    })
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toContain('the shelf stopped answering')
+
+    /* AND IT CAN BE PUT AWAY, so a transient failure does not sit over the book
+       for the rest of the session. */
+    fireEvent.click(screen.getByRole('button', { name: /dismiss/i }))
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull())
+
+    vi.doUnmock('../../kernel/ui/reader/FoliateView')
+    vi.resetModules()
+  })
+
   it('turns the page from a tap on the book, and lets go of the document after', async () => {
     const { content } = shelf({ ext: 'epub' })
     const seen: string[] = []
@@ -580,6 +619,61 @@ describe('Reader', () => {
     seen.length = 0
     tapAt(290, link)
     expect(seen).toEqual([])
+
+    /**
+     * ⚠️ **A RELEASE WITH NO PRESS IS NOT A TAP**, and it used to be the best
+     * possible one: `moved` fell back to `0`, which is a clean tap in the
+     * middle of the target it landed on. A release that entered the stage from
+     * outside, or arrived after the listener was attached mid-gesture, turned
+     * the page.
+     */
+    seen.length = 0
+    doc.body.dispatchEvent(new PointerEvent('pointerup', { clientX: 10, clientY: 100, bubbles: true }))
+    expect(seen, 'a pointerup with no matching pointerdown must do nothing').toEqual([])
+
+    /**
+     * AND A SECOND FINGER DOES NOT STEAL THE FIRST'S ORIGIN.
+     *
+     * The press was tracked as a bare coordinate, so a second `pointerdown`
+     * overwrote it — and the first finger's release was then measured from the
+     * second's position. A pinch that happens to end near an edge read as a
+     * tap there.
+     */
+    seen.length = 0
+    doc.body.dispatchEvent(
+      new PointerEvent('pointerdown', { pointerId: 1, clientX: 150, clientY: 100, bubbles: true }),
+    )
+    doc.body.dispatchEvent(
+      new PointerEvent('pointerdown', { pointerId: 2, clientX: 290, clientY: 100, bubbles: true }),
+    )
+    doc.body.dispatchEvent(
+      new PointerEvent('pointerup', { pointerId: 2, clientX: 290, clientY: 100, bubbles: true }),
+    )
+    expect(seen, "the second finger's release is not the first finger's tap").toEqual([])
+
+    /* `pointercancel` IS THE BROWSER TAKING THE GESTURE OVER, and no
+       `pointerup` follows it — so an origin left behind waits to be paired with
+       an unrelated release. */
+    seen.length = 0
+    doc.body.dispatchEvent(
+      new PointerEvent('pointerdown', { pointerId: 3, clientX: 290, clientY: 100, bubbles: true }),
+    )
+    doc.body.dispatchEvent(new PointerEvent('pointercancel', { pointerId: 3, bubbles: true }))
+    doc.body.dispatchEvent(
+      new PointerEvent('pointerup', { pointerId: 3, clientX: 290, clientY: 100, bubbles: true }),
+    )
+    expect(seen, 'a cancelled gesture must not turn the page').toEqual([])
+
+    /* AND THE CONTROLS A BOOK MAY CARRY. The list was `a, button, input,
+       [role="button"]`; a book is a document a stranger wrote, and choosing
+       from a `<select>` inside one turned the page at the same time. */
+    seen.length = 0
+    for (const tag of ['select', 'textarea', 'summary']) {
+      const control = doc.createElement(tag)
+      doc.body.append(control)
+      tapAt(290, control)
+    }
+    expect(seen, 'interacting with a control must not also turn the page').toEqual([])
 
     /* AND THE DOCUMENT IS RELEASED. `onDocument(null)` is the teardown; a tap
        after it must reach nothing. */
