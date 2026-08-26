@@ -392,7 +392,7 @@ pub(crate) async fn serve(node: Arc<Node>, conn: Connection) {
     };
     let refuse = |reason: &str| conn.close(VarInt::from_u32(CODE_PROTOCOL), reason.as_bytes());
 
-    let Ok(Ok((mut send, mut recv))) = timeout(HELLO_TIMEOUT, conn.accept_bi()).await else {
+    let Ok(Ok((send, mut recv))) = timeout(HELLO_TIMEOUT, conn.accept_bi()).await else {
         refuse("bad-hello");
         return;
     };
@@ -408,10 +408,6 @@ pub(crate) async fn serve(node: Arc<Node>, conn: Connection) {
         conn.close(VarInt::from_u32(CODE_REFUSED), b"role-mismatch");
         return;
     }
-    if write_json(&mut send, &welcome(node.role())).await.is_err() {
-        refuse("bad-hello");
-        return;
-    }
     // A test seam for the forget-vs-admission window (finding H5): pause here,
     // after the hello and before registration, so a test can forget the peer
     // in exactly the window the finding describes.
@@ -421,7 +417,36 @@ pub(crate) async fn serve(node: Arc<Node>, conn: Connection) {
         conn.close(VarInt::from_u32(CODE_REFUSED), b"too-many-sessions");
         return;
     }
-    establish(&node, conn, send, recv, remote, role, false, hello).await;
+    /* ⚠️ **`welcome` USED TO GO OUT BEFORE ANY OF THE GATES BELOW**, and the
+     * welcome is what the dialer treats as "we are connected".
+     *
+     * `establish` still has two ways to refuse after this point: the ATOMIC
+     * capacity gate — the early `at_capacity` above is advisory, and a racing
+     * handshake can take the last slot between the two — and the trust recheck
+     * that closes the forget-vs-admission window. Either of those refusing left
+     * the dialer holding a welcome it had already read: it ran its own checks,
+     * registered locally, emitted `SessionOpen` and returned a session id, for a
+     * connection this side had closed. A session that exists on exactly one of
+     * two machines, reported as success to the one that will never hear from it.
+     *
+     * So the welcome is written LAST, through the registered session's own send
+     * stream, and it means what it says: this side has admitted you. A refusal
+     * before it closes the connection with a reason, which is the path
+     * `connect` already reads through `closed_reason`. */
+    let Some(session) = establish(&node, conn, send, recv, remote, role, false, hello).await else {
+        return;
+    };
+    if write_json(&mut *session.send.lock().await, &welcome(node.role()))
+        .await
+        .is_err()
+    {
+        /* UNWOUND, not left standing. The dialer never got the welcome, so it
+         * will time out and error; a session registered here for a peer that
+         * does not believe it has one is the same phantom in the other
+         * direction. */
+        session.close_with("bad-hello");
+        node.sessions.remove(session.id);
+    }
 }
 
 // ── dial side ─────────────────────────────────────────────────────────────
@@ -528,7 +553,24 @@ async fn establish(
         return None;
     }
     let addrs = remote_addrs(node, peer).await;
-    let _ = node.peers().touch_seen(&peer.to_string(), addrs);
+    /* ⚠️ **THIS RESULT USED TO BE DISCARDED.** `touch_seen` writes the peer's
+     * `last_seen_at` and its address hints to disk, and the hints are what the
+     * NEXT dial tries first — in the order they are given. A failed write
+     * therefore does not just lose a timestamp: it leaves the stored hints as
+     * they were, so a peer that moved networks keeps being dialled at addresses
+     * that can only time out, and the reconnect gets slower every time until it
+     * stops working.
+     *
+     * Not fatal — the session in hand is fine, and refusing it over a failed
+     * bookkeeping write would trade a working connection for a tidy disk. But
+     * silent is what made it undiagnosable: the symptom is "reconnecting is
+     * slow", which points nowhere near a file that would not write. */
+    if let Err(error) = node.peers().touch_seen(&peer.to_string(), addrs) {
+        log::warn!(
+            "peer: could not record where {peer} was last seen: {error}. \
+             This session is unaffected; the next dial may use stale addresses."
+        );
+    }
     node.emit(PeerEvent::SessionOpen(SessionOpen {
         session_id: session.id,
         peer_id: peer.to_string(),
@@ -1088,7 +1130,8 @@ mod tests {
             .collect();
         let sender = {
             let satchel_node = satchel.node.clone();
-            let payloads = payloads.clone();
+            /* MOVED, NOT CLONED. `payloads` is never read again on this side,
+            and cloning it deep-copies 24 MiB for nothing. */
             tokio::spawn(async move {
                 for p in &payloads {
                     satchel_node.session_send(satchel_sid, p).await.unwrap();
@@ -1096,16 +1139,55 @@ mod tests {
             })
         };
 
-        // Let the reader fill to the budget and stall on backpressure.
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let buffered = shelf_session.inbox_bytes();
+        /* ⚠️ **THIS WAS A FIXED 500 ms SLEEP, AND IT PROVED NOTHING — AND THE
+         * FIRST REWRITE OF IT PROVED NOTHING EITHER.**
+         *
+         * The sleep: on a slow runner fewer than 8 MiB may have arrived, and
+         * then both bounds hold trivially — a nearly-empty inbox is under the
+         * budget and is also less than 24 MiB. The test passed without the cap
+         * ever being reached.
+         *
+         * The first rewrite polled until `inbox_bytes() >= INBOX_BYTE_CAP` and
+         * then asserted once. That is worse than it looks: WITHOUT a byte cap
+         * the inbox passes through 8 MiB on its way to 24, so the loop exits at
+         * the first sample above the line and the single assertion lands in the
+         * one window where an unbounded inbox is still within budget. Removing
+         * the cap left it green. Measured, not reasoned about.
+         *
+         * What makes it exact is checking the invariant on EVERY sample rather
+         * than once, and treating a finished sender as the failure it is. With
+         * the cap the sender CANNOT finish — 24 MiB against an 8 MiB budget
+         * with nothing draining — so the loop runs to its deadline with the
+         * bound holding throughout. Without it, the sender completes and the
+         * inbox holds all 24 MiB, and both of those are caught wherever the
+         * sampling happens to fall. */
+        const HELD_FOR: Duration = Duration::from_secs(3);
+        let watch_until = tokio::time::Instant::now() + HELD_FOR;
+        let mut reached_cap = false;
+        while tokio::time::Instant::now() < watch_until {
+            let buffered = shelf_session.inbox_bytes();
+            reached_cap |= buffered >= INBOX_BYTE_CAP;
+            assert!(
+                buffered <= INBOX_BYTE_CAP + crate::frame::MAX_FRAME as usize,
+                "buffered {buffered} bytes is over the budget plus one frame"
+            );
+            /* A SENDER THAT FINISHED put all 24 MiB somewhere, and the only
+            somewhere is this inbox. It is the unambiguous form of the same
+            failure, and it does not depend on catching the buffer at its
+            peak. */
+            assert!(
+                !sender.is_finished(),
+                "the sender finished with nothing draining: {} MiB went somewhere unbounded",
+                (FRAMES as usize * FRAME) / (1024 * 1024)
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        /* AND THE CAP WAS ACTUALLY REACHED. Without this the assertions above
+        are satisfied by an inbox that received nothing at all — which is the
+        original defect wearing the new loop's clothes. */
         assert!(
-            buffered <= INBOX_BYTE_CAP + crate::frame::MAX_FRAME as usize,
-            "buffered {buffered} bytes is over the budget plus one frame"
-        );
-        assert!(
-            buffered < (FRAMES as usize) * FRAME,
-            "the reader admitted everything ({buffered}); the cap did nothing"
+            reached_cap,
+            "the inbox never reached its budget in {HELD_FOR:?}; nothing here exercised backpressure"
         );
 
         // Drain it all, in order — nothing was dropped.
@@ -1208,7 +1290,30 @@ mod tests {
         shelf.node.forget_peer(&satchel.id()).unwrap();
         release_tx.send(()).unwrap();
 
-        let _ = dial.await.unwrap();
+        /* ⚠️ **THE DIALER'S ANSWER USED TO BE DISCARDED, AND IT WAS WRONG.**
+         *
+         * `welcome` went out before the acceptor's gates, so the dialer read it,
+         * ran its own checks, registered locally, emitted `SessionOpen` and
+         * returned a session ID — for a connection the shelf had just refused. A
+         * session that exists on exactly one of two machines, reported as
+         * SUCCESS to the one that will never hear from it. `let _ =` is what let
+         * that sit here in a test written about this exact window.
+         *
+         * The welcome is written last now, through the registered session, so it
+         * means "this side has admitted you". A refusal closes the connection
+         * with a reason and the dialer gets it. */
+        let refused = dial
+            .await
+            .unwrap()
+            .expect_err("the dialer was told it had a session the shelf had already refused");
+        assert!(
+            matches!(refused.kind(), "sessionRefused" | "timeout"),
+            "{refused}"
+        );
+        assert!(
+            satchel.node.sessions.for_peer(shelf.node.id()).is_empty(),
+            "the dialer registered a session for a connection that was refused"
+        );
         assert!(
             shelf.node.sessions.for_peer(satchel.node.id()).is_empty(),
             "a forgotten peer keeps no live session on the shelf"

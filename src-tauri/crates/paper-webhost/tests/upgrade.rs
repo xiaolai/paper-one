@@ -68,9 +68,23 @@ async fn shelf() -> Shelf {
     );
     let app = router(Arc::clone(&state), NO_CLIENT);
     /* DETACHED. The server outlives each request and dies with the test's
-     * runtime, which is what a `#[tokio::test]` gives us for free. */
+     * runtime, which is what a `#[tokio::test]` gives us for free.
+     *
+     * ⚠️ **THE SERVE ERROR USED TO BE DISCARDED** — `let _ = axum::serve(..)`.
+     * A server that failed to start, or died mid-test, then presented as
+     * connection errors and timeouts in whichever case happened to run next, and
+     * every one of those reads as a finding about the code under test. The
+     * panic names the real cause where it happens.
+     *
+     * A CLEAN SHUTDOWN IS NOT ONE OF THESE. `axum::serve` returns `Ok` only when
+     * it is asked to stop, and nothing here asks: the runtime is torn down under
+     * it at the end of the test, which cancels this task rather than resolving
+     * it. So any completion at all is unexpected, and both arms say so. */
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        match axum::serve(listener, app).await {
+            Ok(()) => panic!("the test server stopped on its own; nothing asked it to"),
+            Err(error) => panic!("the test server failed: {error}"),
+        }
     });
     Shelf { state, origin }
 }
@@ -293,10 +307,32 @@ async fn a_frame_the_browser_sends_lands_in_the_inbox() {
         .await
         .expect("send");
 
+    /* ⚠️ **THE FRAMES USED TO BE DRAINED INSIDE THE PREDICATE AND THROWN AWAY.**
+     *
+     * `!drain(id, 8).is_empty()` asserts that SOMETHING arrived and then
+     * discards it — so the one thing this file exists to check, that the bytes
+     * the browser sent are the bytes the shelf holds, was never checked. A frame
+     * truncated, reordered or replaced by the pipe would have passed. And the
+     * drain is destructive, so there was nothing left to look at afterwards
+     * even if someone wanted to. */
+    let mut got: Vec<Vec<u8>> = Vec::new();
     until("the frame to arrive", || {
-        !shelf.state.pipe.drain(id, 8).is_empty()
+        got.extend(
+            shelf
+                .state
+                .pipe
+                .drain(id, 8)
+                .into_iter()
+                .map(|f| f.to_vec()),
+        );
+        !got.is_empty()
     })
     .await;
+    assert_eq!(
+        got,
+        vec![b"a frame".to_vec()],
+        "the bytes the browser sent are not the bytes the shelf holds"
+    );
 }
 
 #[tokio::test]
