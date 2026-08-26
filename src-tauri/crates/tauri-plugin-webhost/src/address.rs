@@ -255,11 +255,38 @@ pub fn serves_port(serve_status: &str, port: u16) -> bool {
         let Some((left, right)) = line.split_once(" proxy ") else {
             return false;
         };
-        if !targets.iter().any(|target| right.contains(target.as_str())) {
+        if !targets.iter().any(|target| mentions(right, target)) {
             return false;
         }
         root_path(left.trim())
     })
+}
+
+/// Whether `text` names `target` as a whole port, not as a prefix of one.
+///
+/// ⚠️ **A BARE `contains` MATCHES A LONGER PORT.** Asking about `2718` while
+/// something serves `27182` found `127.0.0.1:2718` inside `127.0.0.1:27182` and
+/// said yes — so the pane would print a URL for a handler belonging to a
+/// different app. Both are valid ports and both are five characters or fewer,
+/// so this is reachable rather than theoretical. Found by an independent review
+/// of this very function, after the root-path fix above.
+///
+/// A port ends where a digit stops. Anything else after it — a slash, a space,
+/// the end of the line — is the next thing.
+fn mentions(text: &str, target: &str) -> bool {
+    let mut from = 0;
+    while let Some(at) = text[from..].find(target) {
+        let end = from + at + target.len();
+        let next_is_digit = text[end..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_digit());
+        if !next_is_digit {
+            return true;
+        }
+        from = from + at + target.len();
+    }
+    false
 }
 
 /// Whether the left-hand side of a handler line addresses the ROOT.
@@ -430,6 +457,26 @@ mod tests {
         /* And the app that IS at the root reads as served, so the check has not
         simply become "no". */
         assert!(serves_port(serve, 9000));
+    }
+
+    /// ⚠️ **A LONGER PORT IS NOT OUR PORT.** `contains` found `127.0.0.1:2718`
+    /// inside `127.0.0.1:27182` and said yes, so asking about one port while
+    /// something serves a port it happens to prefix printed a URL for somebody
+    /// else's handler. Both are valid ports. Found by an independent review of
+    /// this function after the root-path fix, which is the argument for having
+    /// asked for one.
+    #[test]
+    fn a_longer_port_is_not_our_port() {
+        let serve = "https://studio.example/ proxy http://127.0.0.1:27182";
+        assert!(serves_port(serve, 27182));
+        assert!(
+            !serves_port(serve, 2718),
+            "port 2718 matched a handler serving 27182"
+        );
+        assert!(!serves_port(serve, 271));
+        /* AND THE OTHER END: a port that is a SUFFIX must not match either —
+        `7182` inside `:27182` is caught by the colon in the target. */
+        assert!(!serves_port(serve, 7182));
     }
 
     /// A NAME THAT MENTIONS THE PORT IS NOT A HANDLER. Tailscale prints
