@@ -30,6 +30,8 @@ export const STEPS = Object.freeze([
   { name: 'architecture:check', cmd: 'pnpm', args: ['architecture:check'] },
   { name: 'compositions:check', cmd: 'pnpm', args: ['compositions:check'] },
   { name: 'css:check', cmd: 'pnpm', args: ['css:check'] },
+  { name: 'css:tokens', cmd: 'pnpm', args: ['css:tokens'] },
+  { name: 'browser:check', cmd: 'pnpm', args: ['browser:check'] },
   { name: 'directives:check', cmd: 'pnpm', args: ['directives:check'] },
   /* THE FEATURE-LEDGER GATE IS GONE, and this note is what is left of it.
    * It read `dev-docs/feature-ledger.md` and `dev-docs/library-ledger.md` and checked
@@ -70,6 +72,21 @@ export const STEPS = Object.freeze([
   { name: 'typecheck', cmd: 'pnpm', args: ['typecheck'] },
   { name: 'test:coverage', cmd: 'pnpm', args: ['test:coverage'] },
   { name: 'build', cmd: 'pnpm', args: ['build'] },
+  /* THE BROWSER CLIENT IS A THIRD BUILD, and until phase 18 nothing here ran
+   * it. `build` is the DESKTOP bundle: a different Vite config, a different
+   * entry (`src/main.web.tsx`), a different composition root, and its own
+   * `assert-bundle` pass that refuses a transitive `@tauri-apps` import. None
+   * of that is exercised by `pnpm build`.
+   *
+   * WHAT THAT COST, precisely: `dist-web/` is gitignored, and
+   * `tauri-plugin-webhost/build.rs` deliberately compiles with an EMPTY asset
+   * set when it is absent. So the browser client could stop compiling, the
+   * Rust host would still build, `pnpm verify` would still be green, and the
+   * first symptom would be a phone served a 503 by a release nobody suspected.
+   * Two gates each doing their job, and the gap between them invisible to both.
+   *
+   * It costs ~2s on a warm tree. */
+  { name: 'build:web', cmd: 'pnpm', args: ['build:web'] },
   /* THE CLI IS A SECOND BUILD, and it is gitignored — so nothing else in this
    * list would notice it stop compiling. `bin/paper.mjs` is what
    * `scripts/sync-scenario.sh` runs and what `package.json`'s `bin` points at;
@@ -165,10 +182,25 @@ export function parseArgs(argv, steps = STEPS) {
       i++
     } else return { error: `unknown argument ${JSON.stringify(arg)}` }
   }
-  if (list) return { list: true }
+  /* `--list` USED TO WIN SILENTLY. `--list --only build` printed every step and
+     ran nothing, which reads as "here is what I am about to do" and is not. A
+     selector the reader typed and this ignored is the shape worth refusing. */
+  if (list) {
+    if (from !== undefined || only !== undefined) {
+      return { error: '--list cannot be combined with --from or --only' }
+    }
+    return { list: true }
+  }
   let selected = [...steps]
   if (from !== undefined) selected = selected.slice(selected.findIndex((s) => s.name === from))
   if (only !== undefined) selected = selected.filter((s) => s.name === only)
+  /* AN EMPTY SELECTION IS AN ERROR, NOT A PASS. `--from build --only typecheck`
+     names two real steps and intersects to nothing, and this used to print
+     "all 0 steps passed" and exit 0 — a gate reporting success having verified
+     literally nothing, which is the worst failure a gate has. */
+  if (selected.length === 0) {
+    return { error: `--from ${JSON.stringify(from)} and --only ${JSON.stringify(only)} select no steps; --only must name a step at or after --from` }
+  }
   return { steps: selected }
 }
 

@@ -331,6 +331,26 @@ export const DEFAULT_MAX_IN_FLIGHT = 256
 export const DEFAULT_MAX_IN_FLIGHT_GLOBAL = 1024
 /** The byte budget for all of one connection's queued (not-yet-consumed) input. */
 export const DEFAULT_MAX_QUEUED_BYTES = 16 * 1024 * 1024
+/**
+ * The byte budget for one connection's queued (not-yet-written) OUTPUT.
+ *
+ * ⚠️ **The input side had a budget from the start and the output side had
+ * none**, which is the asymmetry worth naming rather than the number. Sends are
+ * serialised through one promise chain (see `enqueueBytes`); while a write is
+ * pending, every later frame is captured in a closure on that chain and nothing
+ * bounded how many. A peer that stops draining its socket — or simply a slow
+ * one — grows the shelf's heap by whatever the router decides to say next.
+ *
+ * And saying something takes no grant. An unknown service name produces an
+ * `err` refusal, which is the cheapest possible request to send and still
+ * allocates a frame on the chain. `hasGrant` guards the HANDLERS, not the
+ * refusals, so the lever needs no permission at all.
+ *
+ * The same 16 MiB as the input budget, and deliberately: both hold encoded
+ * frames of the same protocol for the same connection, and two ceilings that
+ * differ invite a question with no answer.
+ */
+export const DEFAULT_MAX_OUTBOUND_BYTES = 16 * 1024 * 1024
 
 export interface RouterOptions {
   /** The services this side answers for — the composition's, usually. */
@@ -350,6 +370,11 @@ export interface RouterOptions {
   readonly maxInFlightGlobal?: number
   /** Byte budget for one connection's queued input frames. */
   readonly maxQueuedBytes?: number
+  /**
+   * Byte budget for one connection's queued OUTPUT frames — see
+   * [`DEFAULT_MAX_OUTBOUND_BYTES`]. Exceeding it disconnects the peer.
+   */
+  readonly maxOutboundBytes?: number
   readonly timers?: Timers
 }
 
@@ -537,6 +562,7 @@ export function createRouter(options: RouterOptions): Router {
   const maxInFlight = positiveLimit('maxInFlight', options.maxInFlight ?? DEFAULT_MAX_IN_FLIGHT)
   const maxInFlightGlobal = positiveLimit('maxInFlightGlobal', options.maxInFlightGlobal ?? DEFAULT_MAX_IN_FLIGHT_GLOBAL)
   const maxQueuedBytes = positiveLimit('maxQueuedBytes', options.maxQueuedBytes ?? DEFAULT_MAX_QUEUED_BYTES)
+  const maxOutboundBytes = positiveLimit('maxOutboundBytes', options.maxOutboundBytes ?? DEFAULT_MAX_OUTBOUND_BYTES)
   const hasGrant = options.hasGrant
   let globalInFlight = 0
 
@@ -551,19 +577,54 @@ export function createRouter(options: RouterOptions): Router {
        * idle and the transport is synchronous (a test), the write runs
        * inline; the first async write starts a chain the rest await. */
       let sending: Promise<unknown> | null = null
+      /**
+       * Bytes handed to the chain and not yet written.
+       *
+       * ⚠️ **THE INPUT SIDE HAD A BUDGET AND THIS SIDE HAD NOTHING.** Every
+       * frame queued while a write is pending is captured in a closure on
+       * `sending`, and the chain grew as long as the peer let it. A peer that
+       * stops reading — or one on a slow link — turns whatever the router
+       * decides to say into unbounded heap on the shelf.
+       *
+       * Saying something takes no grant, either: an unknown service name
+       * produces an `err` refusal, which is the cheapest request there is and
+       * still allocates a frame here. `hasGrant` protects the HANDLERS, not the
+       * refusals, so the lever needed no permission.
+       */
+      let outboundBytes = 0
       const onSendError = () => {
         if (open) disconnect()
       }
       const enqueueBytes = (bytes: Uint8Array) => {
         if (!open) return
+        /* OVER BUDGET IS A DISCONNECT, not a drop. Dropping a frame would leave
+         * the peer waiting on a request this side believes it answered — the
+         * exact silent-loss shape the transport is built to avoid. A peer that
+         * has let 16 MiB pile up is not reading, and closing is both honest and
+         * what frees the memory. */
+        if (outboundBytes + bytes.length > maxOutboundBytes) {
+          disconnect()
+          return
+        }
+        outboundBytes += bytes.length
+        const written = () => {
+          outboundBytes = Math.max(0, outboundBytes - bytes.length)
+        }
         if (sending) {
-          sending = sending.then(() => (open ? send(bytes) : undefined)).catch(onSendError)
+          sending = sending
+            .then(() => (open ? send(bytes) : undefined))
+            .then(written, (cause: unknown) => {
+              written()
+              onSendError()
+              return cause
+            })
           return
         }
         let result: unknown
         try {
           result = send(bytes)
         } catch {
+          written()
           onSendError()
           return
         }
@@ -571,7 +632,18 @@ export function createRouter(options: RouterOptions): Router {
           /* Normalised first: a PromiseLike without `.catch` would throw
            * HERE, synchronously, and skip the disconnect the error path
            * owes the connection. */
-          sending = Promise.resolve(result).catch(onSendError)
+          sending = Promise.resolve(result).then(written, (cause: unknown) => {
+            written()
+            onSendError()
+            return cause
+          })
+        } else {
+          /* A SYNCHRONOUS SINK HAS ALREADY WRITTEN IT. Leaving the reservation
+           * standing here would make the budget a one-way ratchet for every
+           * test sink and every transport that returns a plain value — the
+           * connection would close after 16 MiB of perfectly delivered
+           * frames. */
+          written()
         }
       }
 

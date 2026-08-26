@@ -1,3 +1,4 @@
+import type { BookRow, IndexedBook } from '../../kernel'
 import type { ShelfChannel } from './channel'
 
 /**
@@ -44,13 +45,26 @@ import type { ShelfChannel } from './channel'
  *
  * Named exactly as `services/rows.ts` names it, so the next reader can compare
  * the two without a translation layer in between. */
-export interface BookRow {
-  readonly bookId: string
-  readonly title: string
-  readonly author?: string
-  readonly progress?: number
-  readonly finished?: boolean
-}
+export type { BookRow }
+
+/**
+ * ⚠️ **THE ROW IS THE KERNEL'S TYPE, IMPORTED — not a copy of it.**
+ *
+ * This was a hand-written interface with FIVE fields while the wire sent
+ * EIGHTEEN. `services/rows.ts` had been carrying `tags`, `subjects`, `series`,
+ * `addedAt`, `openedAt`, `format` and `hasContent` all along, and `parseRows`
+ * dropped every one of them on the floor. The shelf could not filter by tag,
+ * sort by when a book was added, or say "this one will not open" — not because
+ * the shelf did not know, but because the client threw the answer away and
+ * nobody could see it doing so.
+ *
+ * A restated type cannot notice that. Importing the real one means the two
+ * cannot disagree at all: add a field to the wire and this file stops
+ * compiling until `parseRows` decides what to do with it, which is the
+ * conversation that should happen. That is strictly stronger than a test
+ * comparing two field lists, and it is available only because WI-19.1 made
+ * `src/kernel/index.ts` importable from a browser at all.
+ */
 
 /** What the store can say about itself. */
 export type BooksStatus =
@@ -83,6 +97,18 @@ export interface RemoteBooks {
   dispose(): void
 }
 
+/* NULL FOR ANYTHING THAT IS NOT THE EXPECTED TYPE, never a coerced value. This
+ * parses somebody else's JSON: a number where a string belongs is a shelf
+ * disagreeing with this client about the wire, and `String(x)` would hide that
+ * behind a plausible-looking row. */
+const str = (v: unknown): string | null => (typeof v === 'string' ? v : null)
+const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+const strings = (v: unknown): readonly string[] =>
+  Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
+
+/** The formats `services/rows.ts` can send. Anything else reads as unknown. */
+const FORMATS = new Set(['epub', 'pdf', 'mobi', 'azw3', 'cbz', 'fb2', 'fbz', 'bin'])
+
 /** The rows out of a `book.list` answer, ignoring anything unrecognised. */
 export function parseRows(answer: unknown): readonly BookRow[] {
   if (!Array.isArray(answer)) return []
@@ -95,14 +121,33 @@ export function parseRows(answer: unknown): readonly BookRow[] {
     if (typeof row['bookId'] !== 'string' || row['bookId'] === '') continue
     rows.push({
       bookId: row['bookId'],
-      title: typeof row['title'] === 'string' ? row['title'] : '',
-      ...(typeof row['author'] === 'string' ? { author: row['author'] } : {}),
-      ...(typeof row['progress'] === 'number' ? { progress: row['progress'] } : {}),
-      ...(typeof row['finished'] === 'boolean' ? { finished: row['finished'] } : {}),
+      title: str(row['title']) ?? '',
+      author: str(row['author']) ?? '',
+      series: str(row['series']),
+      seriesIndex: num(row['seriesIndex']),
+      publisher: str(row['publisher']),
+      published: str(row['published']),
+      languages: strings(row['languages']),
+      subjects: strings(row['subjects']),
+      tags: strings(row['tags']),
+      position: str(row['position']),
+      progress: num(row['progress']) ?? 0,
+      finished: row['finished'] === true,
+      addedAt: num(row['addedAt']),
+      openedAt: num(row['openedAt']),
+      format: FORMATS.has(row['format'] as string) ? (row['format'] as BookRow['format']) : null,
+      contentHash: str(row['contentHash']),
+      /* THREE STATES, NOT TWO. `hasContent` is present / absent / never
+       * measured, and `?? false` would collapse the third into "absent" — a
+       * definite answer this client has no grounds to give. */
+      hasContent: typeof row['hasContent'] === 'boolean' ? row['hasContent'] : null,
     })
   }
   return rows
 }
+
+const sameList = (a: readonly string[], b: readonly string[]): boolean =>
+  a.length === b.length && a.every((x, i) => x === b[i])
 
 /** True when two snapshots say the same thing. */
 function same(a: readonly BookRow[], b: readonly BookRow[]): boolean {
@@ -113,8 +158,24 @@ function same(a: readonly BookRow[], b: readonly BookRow[]): boolean {
       row.bookId === other.bookId &&
       row.title === other.title &&
       row.author === other.author &&
+      row.series === other.series &&
+      row.seriesIndex === other.seriesIndex &&
+      row.publisher === other.publisher &&
+      row.published === other.published &&
+      sameList(row.languages, other.languages) &&
+      sameList(row.subjects, other.subjects) &&
+      /* TAGS ARE THE ONE MOST LIKELY TO CHANGE ALONE. Comparing the array by
+       * reference would make a re-tag invisible to the shelf, which is the
+       * exact bug `getSnapshot`'s stability contract invites. */
+      sameList(row.tags, other.tags) &&
+      row.position === other.position &&
       row.progress === other.progress &&
-      row.finished === other.finished
+      row.finished === other.finished &&
+      row.addedAt === other.addedAt &&
+      row.openedAt === other.openedAt &&
+      row.format === other.format &&
+      row.contentHash === other.contentHash &&
+      row.hasContent === other.hasContent
     )
   })
 }
@@ -200,5 +261,42 @@ export function createRemoteBooks(channel: ShelfChannel): RemoteBooks {
       unsubscribeClosed()
       listeners.clear()
     },
+  }
+}
+
+/**
+ * A wire row as the shelf screen wants it.
+ *
+ * `screens/Library.tsx` takes `IndexedBook[]` — `BookRecord` plus an id — and
+ * the wire sends `BookRow`. The two carry the SAME FACTS and disagree only
+ * about how they spell "absent": the record uses optional fields, the wire uses
+ * `null`, because a field that is missing from JSON and a field that is
+ * explicitly empty are different answers on a wire and the same answer in
+ * TypeScript.
+ *
+ * ⚠️ **`hasContent` KEEPS ITS THIRD STATE.** Present, absent, and never
+ * measured. `IndexedBook.hasContent` is `boolean | undefined` and that is
+ * exactly the right shape for it: `undefined` is "nobody has looked", which is
+ * what a browser can honestly say about a file on another machine's disk.
+ * Coercing it to `false` would make the shelf claim every book is missing.
+ */
+export function asIndexedBook(row: BookRow): IndexedBook {
+  return {
+    bookId: row.bookId,
+    title: row.title,
+    author: row.author,
+    ...(row.series !== null ? { series: row.series } : {}),
+    ...(row.seriesIndex !== null ? { seriesIndex: row.seriesIndex } : {}),
+    ...(row.publisher !== null ? { publisher: row.publisher } : {}),
+    ...(row.published !== null ? { published: row.published } : {}),
+    languages: row.languages,
+    subjects: row.subjects,
+    tags: row.tags,
+    position: row.position,
+    progress: row.progress,
+    finished: row.finished,
+    ...(row.addedAt !== null ? { addedAt: row.addedAt } : {}),
+    ...(row.openedAt !== null ? { openedAt: row.openedAt } : {}),
+    ...(row.hasContent !== null ? { hasContent: row.hasContent } : {}),
   }
 }

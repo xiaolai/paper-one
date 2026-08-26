@@ -116,11 +116,11 @@ const OPEN_AT_REST: readonly string[] = [GROUP.appearance, GROUP.text, GROUP.pag
 export interface SettingsProps {
   theme: Theme
   themeFollowsOs: boolean
-  pageLayout: PageLayout
-  rulerOn: boolean
-  scrollbarOn: boolean
-  progressLineOn: boolean
-  side: Side
+  pageLayout?: PageLayout | undefined
+  rulerOn?: boolean | undefined
+  scrollbarOn?: boolean | undefined
+  progressLineOn?: boolean | undefined
+  side?: Side | undefined
   /** Index into §09's seven reading steps — see `core/metrics`. */
   stepIdx: number
   typeface: Typeface
@@ -144,11 +144,25 @@ export interface SettingsProps {
   missing?: readonly { readonly id: string }[] | undefined
   onTheme: (theme: Theme) => void
   onFollowOs: (follows: boolean) => void
-  onPageLayout: (layout: PageLayout) => void
-  onToggleRuler: () => void
-  onToggleScrollbar: () => void
-  onToggleProgressLine: () => void
-  onSide: (side: Side) => void
+  /**
+   * ⚠️ THE SEVEN OPTIONAL SETTERS BELOW, and why absence is the right signal.
+   *
+   * A host that cannot do the thing does not pass its setter, and the row is
+   * not drawn — the same convention as `onAddBooks` on the shelf, `cards` in
+   * Marginalia and `onSystemLookUp` in the reader. The browser client mounts
+   * this pane and has no reading ruler, no scroll port it owns, no side pane
+   * (a 393px screen has no side), and no brightness or contrast filter; drawing
+   * those rows would name features that host will never have.
+   *
+   * GATED ON THE SETTER, never on the value. A composition root passes all
+   * seven, so nothing about the desktop's pane changes — the only caller that
+   * loses a row is one that never had the feature.
+   */
+  onPageLayout?: ((layout: PageLayout) => void) | undefined
+  onToggleRuler?: (() => void) | undefined
+  onToggleScrollbar?: (() => void) | undefined
+  onToggleProgressLine?: (() => void) | undefined
+  onSide?: ((side: Side) => void) | undefined
   onStepIdx: (idx: number) => void
   spacing: SpacingIndices
   onSpacing: (key: SpacingKey, idx: number) => void
@@ -157,10 +171,10 @@ export interface SettingsProps {
   /** WI-14.4's fifteen — see `ReadingStyle`. */
   style: ReadingStyle
   onStyle: <K extends ReadingStyleKey>(key: K, value: ReadingStyle[K]) => void
-  brightness: number
-  onBrightness: (idx: number) => void
-  contrast: number
-  onContrast: (idx: number) => void
+  brightness?: number | undefined
+  onBrightness?: ((idx: number) => void) | undefined
+  contrast?: number | undefined
+  onContrast?: ((idx: number) => void) | undefined
   onTypeface: (typeface: Typeface) => void
 }
 
@@ -281,11 +295,14 @@ function ToggleRow({
 export function Settings({
   theme,
   themeFollowsOs,
-  pageLayout,
-  rulerOn,
-  scrollbarOn,
-  progressLineOn,
-  side,
+  /* DEFAULTS FOR THE SEVEN, so a host that passes neither setter nor value
+     still renders. `pageLayout` needs one even when its own row is hidden: the
+     ruler and scrollbar rows read it to decide whether they apply at all. */
+  pageLayout = 'paginated',
+  rulerOn = false,
+  scrollbarOn = false,
+  progressLineOn = true,
+  side = 'right',
   stepIdx,
   typeface,
   offered,
@@ -293,6 +310,7 @@ export function Settings({
   missing,
   onTheme,
   onFollowOs,
+
   onPageLayout,
   onToggleRuler,
   onToggleScrollbar,
@@ -305,9 +323,9 @@ export function Settings({
   onAlign,
   style,
   onStyle,
-  brightness,
+  brightness = 0,
   onBrightness,
-  contrast,
+  contrast = 0,
   onContrast,
   onTypeface,
 }: SettingsProps) {
@@ -378,8 +396,12 @@ export function Settings({
           message undoes the reading setting. Both start at the theme untouched
           and only take away, and nothing either produces can go under 4.5:1;
           see `adjustPalette`. */}
-      <StepRow label="Brightness" scale={BRIGHTNESS} value={brightness} onChange={onBrightness} />
-      <StepRow label="Contrast" scale={CONTRAST} value={contrast} onChange={onContrast} />
+      {onBrightness !== undefined && (
+        <StepRow label="Brightness" scale={BRIGHTNESS} value={brightness} onChange={onBrightness} />
+      )}
+      {onContrast !== undefined && (
+        <StepRow label="Contrast" scale={CONTRAST} value={contrast} onChange={onContrast} />
+      )}
       </PaneGroup>
 
       {/* TEXT, not "Reading" — everything in this panel is about reading, so
@@ -691,24 +713,26 @@ export function Settings({
         onToggle={() => toggleGroup(GROUP.page)}
       >
 
-      <CycleRow
-        label="Flow"
-        states={PAGE_LAYOUTS}
-        value={pageLayout}
-        labels={FLOW_LABELS}
-        onChange={onPageLayout}
-      />
+      {onPageLayout !== undefined && (
+        <CycleRow
+          label="Flow"
+          states={PAGE_LAYOUTS}
+          value={pageLayout}
+          labels={FLOW_LABELS}
+          onChange={onPageLayout}
+        />
+      )}
 
       {/* §06: the ruler row appears only in scrolled flow — hidden, not
           disabled, because paged has no lines to advance. */}
-      {pageLayout === 'scrolled' && (
+      {pageLayout === 'scrolled' && onToggleRuler !== undefined && (
         <ToggleRow label="Reading ruler" on={rulerOn} onChange={onToggleRuler} />
       )}
 
       {/* Same rule as the ruler: shown only where it means something. A paged
           book has no scroll port, so the row would name a bar that does not
           exist in that flow whichever way it was set. */}
-      {pageLayout === 'scrolled' && (
+      {pageLayout === 'scrolled' && onToggleScrollbar !== undefined && (
         <ToggleRow
           label="Scrollbar"
           on={scrollbarOn}
@@ -721,19 +745,23 @@ export function Settings({
           the same quantity whether the book is scrolled or paged — `fraction`
           arrives on relocate either way — so a row that vanished in paged flow
           would be hiding a working feature. */}
-      <ToggleRow
-        label="Progress rule"
-        on={progressLineOn}
-        onChange={onToggleProgressLine}
-        labels={SHOWN_HIDDEN}
-      />
+      {onToggleProgressLine !== undefined && (
+        <ToggleRow
+          label="Progress rule"
+          on={progressLineOn}
+          onChange={onToggleProgressLine}
+          labels={SHOWN_HIDDEN}
+        />
+      )}
 
       {/* STILL NO HEADING OF ITS OWN, for the reason it never had one: a
           section is a promise of more than one thing in it, and "Side pane"
           over a single "Position" takes two lines to say what one says. What
           it lacked was a group to belong to, not a heading — it is in Page's
           now, and the row still carries its whole name. */}
-      <CycleRow label="Side pane position" states={SIDES} value={side} labels={SIDE_LABELS} onChange={onSide} />
+      {onSide !== undefined && (
+        <CycleRow label="Side pane position" states={SIDES} value={side} labels={SIDE_LABELS} onChange={onSide} />
+      )}
       </PaneGroup>
 
       {/* The contributed sections — a capability's own settings surface,

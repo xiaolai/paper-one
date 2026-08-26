@@ -26,8 +26,16 @@ export { App } from './App'
 export type { AppProps } from './App'
 
 /* Boot: the store, the filesystem, the shelf, the migration and the sweep. */
-export { inTauri, openAppStorage } from './appStorage'
+export { openAppStorage } from './appStorage'
+export { inTauri } from './inTauri'
 export { libraryFs } from '../core/bookFiles'
+/* HERE RATHER THAN ON THE PUBLIC ENTRY, which is React-free AND, since
+ * WI-19.1, browser-safe. `tauriSizePort` is a platform binding, so exporting it
+ * from `src/kernel/index.ts` made all 54 of that barrel's modules unbundlable
+ * for a browser — one export, and a bespoke lint rule written to route around
+ * it. This entry is already Tauri-bound by design and is the root's second
+ * door, which is the same reason `libraryFs` sits on the line above. */
+export { tauriSizePort } from '../core/bookSizesTauri'
 export { loadShelf } from '../core/bookIndex'
 export type { IndexedBook } from '../core/bookIndex'
 export { emptyExpired } from '../core/bookTrash'

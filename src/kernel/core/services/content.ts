@@ -1,5 +1,5 @@
 import type { IndexedBook } from '../bookIndex'
-import { contentPathIn, folderOf } from '../bookFolder'
+import { contentPathIn, coverPathIn, legacyCoverPathIn, folderOf } from '../bookFolder'
 import { CONTENT_EXTENSIONS, readRangeOf } from '../bookVault'
 import { CONTENT_BLOB_NAMES, REMOVABLE_BLOB_NAMES, type RemovableBlobName } from '../ports'
 import { findBook as find, type ServiceEnvironment } from './environment'
@@ -174,6 +174,79 @@ export function contentRead(env: ServiceEnvironment) {
       at += slice.length
       sent += slice.length
       if (slice.length < take) return
+    }
+  }
+}
+
+/**
+ * A book's jacket, in chunks (phase 19, WI-19.8).
+ *
+ * ## Why a service and not a port
+ *
+ * `BookCover` takes a `CoverSource` — "a URL for this book, or null" — and the
+ * desktop binds it over the local vault. A browser has no vault, so without
+ * this the whole shelf draws tinted rectangles. Making the component reachable
+ * was WI-19.7; giving it BYTES is this.
+ *
+ * ## Two names, and the older one is not a mistake
+ *
+ * `cover.jpg` is where a jacket lives; `cover.webp` is where it lived in a
+ * library written before that name was made honest. `coverIn` on the desktop
+ * checks both and so does this — a shelf that answered "no cover" for every
+ * book imported before the rename would look exactly like a shelf of books
+ * with no artwork.
+ *
+ * ## Absent is NOT a refusal
+ *
+ * Most books have no jacket. An empty stream says so, and the client draws its
+ * tint; a `notFound` would make the ordinary case an error and fill a log with
+ * it. That is the opposite of `content.read`, where no bytes means the book
+ * cannot be opened and silence would be a lie.
+ */
+const EMPTY = new Uint8Array(0)
+
+export function coverRead(env: ServiceEnvironment) {
+  return async function* (req: unknown): AsyncIterable<readonly ContentChunk[]> {
+    const input = readInput(descriptorOf('cover.read'), req)
+    const bookId = reqStr(input, 'book')
+    /* THE BOOK MUST EXIST, even though a missing cover does not refuse. The
+     * distinction is the point: "no such book" is a caller's mistake and "no
+     * jacket" is an ordinary fact about a book. */
+    find(env, bookId)
+
+    const fs = env.services.fs
+    if (fs === null) throw refuse(SERVICE_ERRORS.unsupported, 'this shelf cannot read bytes')
+
+    let at = 0
+    for (const path of [coverPathIn(bookId), legacyCoverPathIn(bookId)]) {
+      /* ⚠️ A MISSING FILE THROWS, it does not read as empty — `readRangeOf`
+       * hands the filesystem's own error up, and `content.read` never meets
+       * that because `blobNames` has already confirmed the file is there.
+       * There is no such list for a cover, and MOST BOOKS HAVE NO JACKET: the
+       * first version of this turned every one of them into
+       * `cover.read: internal: the service failed`, once per row, on a shelf of
+       * 1 961.
+       *
+       * A real I/O error is swallowed with it, and that is the deliberate
+       * trade: for a jacket, "not there" and "cannot be read" have the same
+       * answer — the tint — and making the ordinary case an error to preserve
+       * a distinction nothing acts on is the worse bargain. Only the PROBE is
+       * forgiving; once the file has answered once, a later failure is real
+       * and is allowed to throw. */
+      const head = await readRangeOf(fs, path, 0, CHUNK_BYTES).catch(() => EMPTY)
+      /* NOTHING AT THIS NAME. Try the older one; if that is empty too the
+       * stream ends and the book simply has no jacket. */
+      if (head.length === 0) continue
+      yield [{ bookId, offset: 0, bytes: base64Of(head) }]
+      at = head.length
+      if (head.length < CHUNK_BYTES) return
+      for (;;) {
+        const slice = await readRangeOf(fs, path, at, CHUNK_BYTES)
+        if (slice.length === 0) return
+        yield [{ bookId, offset: at, bytes: base64Of(slice) }]
+        at += slice.length
+        if (slice.length < CHUNK_BYTES) return
+      }
     }
   }
 }

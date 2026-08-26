@@ -65,6 +65,9 @@ const REQUEST: Readonly<Record<string, unknown>> = {
      content is. `content.read` refuses when the shelf has no filesystem, which
      is what this harness gives it — see the case below. */
   'content.read': { book: 'b0000', offset: 0, length: 16 },
+  /* NO RANGE. A cover is drawn whole or not at all, so `cover.read` takes only
+     the book — see its row in the table. */
+  'cover.read': { book: 'b0000' },
   'shelf.status': {},
   'device.list': {},
 }
@@ -94,7 +97,13 @@ describe('the read services, service by service', () => {
            rather than refusing "no content on this shelf". The fake filesystem
            has no `readRange`, so this also exercises `readRangeOf`'s fallback —
            the path a test filesystem is expected to take. */
-        files: { 'books/b0000/content.epub': 'PK\u0003\u0004 pretend epub bytes' },
+        files: {
+          'books/b0000/content.epub': 'PK\u0003\u0004 pretend epub bytes',
+          /* AND A JACKET, so `cover.read` has bytes to answer with. Its empty
+             answer is the ORDINARY case — most books have none — so a fixture
+             without one would make this case pass while proving nothing. */
+          'books/b0000/cover.jpg': '\u00ff\u00d8\u00ff pretend jpeg bytes',
+        },
         /* `device.list` and `shelf.sync` need ports; `shelf.status` does not,
          * and answers what it can. Bound here so the happy path of
          * `device.list` is a real answer rather than a refusal. */

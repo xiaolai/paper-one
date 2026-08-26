@@ -31,12 +31,31 @@ const config = JSON.parse(
   }
 }
 
-/** The directives of one policy, by name. */
+/**
+ * The directives of one policy, by name.
+ *
+ * ⚠️ **THE FIRST OCCURRENCE WINS, AND THIS USED TO KEEP THE LAST.** CSP says a
+ * repeated directive name is ignored after the first, so a browser handed
+ * `script-src *; script-src 'self'` runs anything — while a parser that
+ * overwrote as it went would report `'self'` and every assertion below would
+ * pass. That is a policy this test would call safe and a browser would not.
+ *
+ * A duplicate is refused outright rather than silently resolved. Both policies
+ * here are authored by hand in one place each; a repeat is a mistake, and the
+ * honest thing to do with a mistake in a security boundary is stop.
+ */
 function directives(policy: string): Record<string, string[]> {
   const out: Record<string, string[]> = {}
   for (const part of policy.split(';')) {
     const [name, ...values] = part.trim().split(/\s+/)
-    if (name) out[name] = values
+    if (!name) continue
+    if (name in out) {
+      throw new Error(
+        `duplicate CSP directive ${name}: a browser honours the FIRST and ignores the rest, ` +
+          'so the two spellings cannot both be what this policy means',
+      )
+    }
+    out[name] = values
   }
   return out
 }
@@ -185,15 +204,28 @@ describe('the shipped Content Security Policy', () => {
      * every directive in EITHER policy, and a new one has to be classified
      * deliberately — as shared, or as a named difference.
      */
-    const DELIBERATELY_DIFFERENT: Readonly<Record<string, string>> = {
-      /* Tauri's own IPC origin, which does not exist in a browser. */
-      'connect-src': 'the desktop talks to ipc:; the browser talks to its shelf',
+    /**
+     * ⚠️ EACH EXCEPTION NAMES WHAT THE SERVED POLICY MUST BE, not merely that
+     * it differs.
+     *
+     * This was a map of directive to REASON, and the only assertion made about
+     * an exempt directive was that it was not equal to the desktop's. So
+     * `connect-src *`, `base-uri *` or `frame-ancestors *` would all have
+     * passed — each of them differs from the desktop, which was the entire
+     * test. An exemption list that says "this one is allowed to be anything"
+     * is the shape of hole worth closing in a policy comparison.
+     */
+    const DELIBERATELY_DIFFERENT: Readonly<Record<string, readonly string[]>> = {
+      /* Tauri's own IPC origin, which does not exist in a browser. The browser
+         talks to its own shelf and nowhere else — including the book's frame,
+         which inherits this. */
+      'connect-src': ["'self'"],
       /* The served page is stricter, and can afford to be: it has no base tag. */
-      'base-uri': 'the served policy forbids a base tag outright',
+      'base-uri': ["'none'"],
       /* The desktop is a window, not a frame, so it has no ancestors to refuse.
          The served page is reachable over the network and does — but `'self'`
          rather than `'none'`, because a book's blob frame inherits this. */
-      'frame-ancestors': 'only the served page can be framed by anything',
+      'frame-ancestors': ["'self'"],
     }
 
     const everything = [...new Set([...Object.keys(shipped), ...Object.keys(served)])].sort()
@@ -209,13 +241,19 @@ describe('the shipped Content Security Policy', () => {
       ).toEqual(new Set(shipped[directive] ?? []))
     }
 
-    /* AND THE NAMED DIFFERENCES ARE REAL ONES. An entry that stopped differing
-       would be an exemption nobody needs, sitting there ready to hide the next
-       real difference in the same directive. */
-    for (const [directive, why] of Object.entries(DELIBERATELY_DIFFERENT)) {
+    /* AND EACH NAMED DIFFERENCE IS THE VALUE IT IS SUPPOSED TO BE. */
+    for (const [directive, expected] of Object.entries(DELIBERATELY_DIFFERENT)) {
+      expect(
+        served[directive] ?? [],
+        `${directive}: the served policy is exempt from matching the desktop, which makes this \
+the ONLY thing asserting what it actually is`,
+      ).toEqual([...expected])
+      /* AND IT STILL DIFFERS. An exemption that stopped being needed is one
+         sitting there ready to hide the next real difference in the same
+         directive. */
       expect(
         new Set(served[directive] ?? []),
-        `${directive} no longer differs — remove it from the list (${why})`,
+        `${directive} no longer differs from the desktop — remove it from the list`,
       ).not.toEqual(new Set(shipped[directive] ?? []))
     }
     /* THE BOUNDARY IS NOT PART OF WHAT WAS WIDENED. Asserted here as well as

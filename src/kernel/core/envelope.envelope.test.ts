@@ -733,6 +733,97 @@ describe('hardening against a hostile peer', () => {
     expect(conn.inFlight).toBe(0)
   })
 
+  /**
+   * THE OUTPUT SIDE HAS A BUDGET TOO, and until now only the input side did.
+   *
+   * Sends are serialised through one promise chain. While a write is pending,
+   * every later frame is captured in a closure on that chain — and nothing
+   * counted them. A peer that stops draining, or one on a slow link, turns
+   * whatever this router decides to say into unbounded heap on the shelf.
+   *
+   * The lever needs no grant. An unknown service name produces an `err`
+   * refusal, which is the cheapest request there is and still allocates a frame
+   * on the chain; `hasGrant` guards the handlers, not the refusals.
+   *
+   * Over budget DISCONNECTS rather than dropping: a dropped frame leaves the
+   * peer waiting on a request this side believes it answered, which is the
+   * silent-loss shape the whole transport exists to avoid.
+   */
+  it('bounds queued OUTPUT by bytes, disconnecting a peer that has stopped reading (H3b)', async () => {
+    const timers = fakeTimers()
+    /* ONE WRITE HELD OPEN, the shape of a peer whose socket buffer is full.
+       Everything after it queues on the send chain. */
+    /* Held in an object rather than a `let`: TypeScript narrows a `let`
+       assigned only inside a Promise executor to `never` at the call below. */
+    const gate = { release: () => {} }
+    const held = new Promise<void>((resolve) => {
+      gate.release = resolve
+    })
+    let sends = 0
+    let first = true
+    const conn = createRouter({
+      services: [],
+      hasGrant: () => true,
+      timers,
+      maxOutboundBytes: 600,
+    }).connect('peer-a', () => {
+      sends += 1
+      if (first) {
+        first = false
+        return held
+      }
+      return undefined
+    })
+
+    /* UNKNOWN SERVICE: no grant, no handler, and an `err` frame back each time
+       — the cheapest possible way to make this side allocate. */
+    const FLOOD = 200
+    for (let i = 0; i < FLOOD; i++) {
+      conn.receive(encodeFrame(frame({ service: 'nobody.home', id: `r${i}`, body: null })))
+    }
+    await settle()
+
+    /* Let the held write finish and drain whatever the chain still holds. THIS
+       is the assertion that needed the release: while the transport is stuck,
+       a router with no budget and one with a budget look identical — both have
+       written exactly once. The difference is how much they were still holding,
+       and that only becomes visible when the chain runs. */
+    gate.release()
+    await settle()
+
+    expect(sends).toBeLessThan(FLOOD)
+    /* AND THE CONNECTION IS SHUT, not merely behind. A later request is
+       answered by nothing at all. */
+    const before = sends
+    conn.receive(encodeFrame(frame({ service: 'nobody.home', id: 'after', body: null })))
+    await settle()
+    expect(sends).toBe(before)
+  })
+
+  it('does not leak the budget through a synchronous transport (H3c)', async () => {
+    /* THE RESERVATION HAS TO BE RELEASED ON EVERY PATH. A sink that returns a
+       plain value has already written the frame; if only the async path
+       released, the budget would be a one-way ratchet and the connection would
+       close after `maxOutboundBytes` of perfectly delivered frames. Small
+       budget, many more bytes than it, all of them delivered. */
+    const timers = fakeTimers()
+    const sent: Frame[] = []
+    const conn = createRouter({
+      services: [],
+      hasGrant: () => true,
+      timers,
+      maxOutboundBytes: 500,
+    }).connect('peer-a', (bytes) => {
+      sent.push(decodeFrame(bytes))
+    })
+
+    for (let i = 0; i < 100; i++) {
+      conn.receive(encodeFrame(frame({ service: 'nobody.home', id: `r${i}`, body: null })))
+    }
+    await settle()
+    expect(sent).toHaveLength(100)
+  })
+
   it('serialises awaited sends so stream order survives a slow transport (H4)', async () => {
     const timers = fakeTimers()
     const gen: ServiceContribution = {

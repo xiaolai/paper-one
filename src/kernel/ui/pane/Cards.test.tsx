@@ -90,3 +90,35 @@ describe('a card made from no passage', () => {
     expect(row('made from nothing').hasAttribute('disabled')).toBe(true)
   })
 })
+
+/**
+ * A SESSION THAT MAY ONLY READ CARDS IS DRAWN AS ONE.
+ *
+ * `discard` was a required member of the narrowed `cards` prop, so the browser
+ * client had to supply one — and it calls `card.remove`, which is `card:write`.
+ * A browser session holds `readingGrant` alone (`webhost/lib/pump.ts`), so
+ * every discard was refused after the card had already been removed
+ * optimistically: the reader watched it vanish and reappear, which reads as the
+ * shelf being broken rather than as a permission.
+ */
+describe('a read-only host', () => {
+  it('draws no discard control when the host supplied no discard', () => {
+    render(
+      <Cards
+        cards={{ all: [CARD()], persistent: true }}
+        bookId="open-book"
+        onGoTo={vi.fn()}
+      />,
+    )
+    /* The card is still there to read — read-only, not absent. */
+    expect(screen.getByRole('button', { name: /who narrates/i })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /discard card/i })).toBeNull()
+  })
+
+  /* Pinned so the guard above cannot be met by removing the control for every
+     host, which would take the desktop's discard with it. */
+  it('still draws it for a host that supplied one', () => {
+    draw([CARD()])
+    expect(screen.getByRole('button', { name: /discard card/i })).toBeTruthy()
+  })
+})

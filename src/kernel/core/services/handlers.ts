@@ -2,7 +2,7 @@ import type { ServiceContribution, ServiceHandler } from '../capability'
 import { SERVICE_TABLE, readingGrant, type ServiceDescriptor, type ServiceName } from '../serviceTable'
 import { bookAdd, bookGet, bookList, bookRemove, bookRestore, bookSearch, bookSet } from './book'
 import { cardAdd, cardList, cardRemove } from './card'
-import { contentEvict, contentLocate, contentRead } from './content'
+import { contentEvict, contentLocate, contentRead, coverRead } from './content'
 import { deviceForget, deviceGrant, deviceList } from './device'
 import type { ServiceEnvironment } from './environment'
 import { markAdd, markList, markRemove, markSet } from './mark'
@@ -68,6 +68,7 @@ const HANDLERS: Readonly<Record<ServiceName, HandlerFactory>> = {
 
   'content.locate': contentLocate,
   'content.read': contentRead,
+  'cover.read': coverRead,
   'content.evict': contentEvict,
 
   'device.list': deviceList,

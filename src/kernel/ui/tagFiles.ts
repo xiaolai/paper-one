@@ -1,6 +1,6 @@
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog'
 import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs'
-import { inTauri } from './appStorage'
+import { inTauri } from './inTauri'
 import type { IndexedBook } from '../core/bookIndex'
 import { archiveName, exportTags, parseArchive, type TagArchive } from '../core/tagArchive'
 

@@ -64,6 +64,13 @@ use tokio::sync::mpsc;
 /// The cookie the browser gets, and the only place its name is written.
 pub const SESSION_COOKIE: &str = "paper_session";
 
+/// How long the pump waits before re-offering a frame the inbox refused.
+///
+/// Well under the webview's own 40 ms drain poll, so capacity is claimed
+/// promptly once it appears; far enough from zero that a full inbox costs a few
+/// wakeups a second rather than a spinning core. See `pump`.
+const RETRY: std::time::Duration = std::time::Duration::from_millis(4);
+
 /// The policy that stands between a shared book and everything else.
 ///
 /// `script-src 'self'` with no `'unsafe-inline'`, no `'unsafe-eval'` and no
@@ -228,6 +235,83 @@ fn presented(request_headers: &axum::http::HeaderMap) -> Option<Credential> {
     })
 }
 
+/// A request the browser itself says came from the page this shelf serves.
+///
+/// ## What `SameSite=Strict` does not cover
+///
+/// The cookie's `SameSite=Strict` is described above as "the CSRF defence", and
+/// for a cross-*site* page it is. It says nothing about a hostile page on the
+/// same site — and this shelf's public name is a tailnet one, `<host>.<tailnet>
+/// .ts.net`, where every other machine on the tailnet is a sibling subdomain.
+/// Whether those count as one site is a Public Suffix List question, decided in
+/// a file this repository does not own and can change without notice. A
+/// boundary that depends on someone else's list is not a boundary.
+///
+/// `/ws` had no check at all, which mattered more than the endpoints did: a
+/// WebSocket outlives the request that made it, so a handshake that succeeds
+/// once yields a read channel over the whole library — the shelf, the marks,
+/// the cards, the book bytes — for as long as the socket is held.
+///
+/// ## Why Fetch Metadata rather than comparing `Origin` to `Host`
+///
+/// This server binds loopback behind a proxy it knows nothing about, so it does
+/// not know its own public origin: `Host` here may be `127.0.0.1:<port>` while
+/// the browser's `Origin` is the tailnet name. Comparing them would either
+/// reject every real request or require configuration that can silently drift.
+/// `Sec-Fetch-Site` is computed by the browser, cannot be set by page script,
+/// and needs nothing from the deployment.
+///
+/// ## The absent case is allowed on purpose
+///
+/// A request carrying neither `Sec-Fetch-Site` nor `Origin` did not come from a
+/// page context in a browser that implements either — so it cannot be the
+/// attack this exists for. CSRF is a browser attack: it spends a credential the
+/// browser attaches by itself. Something that is not a browser has no cookie to
+/// spend, and is stopped by [`Admitted`] rather than by this. Failing closed
+/// here would buy nothing and would break every non-browser caller.
+pub struct SameOrigin;
+
+impl<S: Sync> FromRequestParts<S> for SameOrigin {
+    type Rejection = StatusCode;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        if let Some(site) = parts
+            .headers
+            .get("sec-fetch-site")
+            .and_then(|value| value.to_str().ok())
+        {
+            /* `same-site` IS REFUSED, and it is the whole reason this exists.
+             * `cross-site` was never going to arrive with a Strict cookie;
+             * `same-site` is the sibling tailnet host, and it would. */
+            return if site == "same-origin" {
+                Ok(Self)
+            } else {
+                Err(StatusCode::FORBIDDEN)
+            };
+        }
+        /* No Fetch Metadata: fall back to `Origin` against `Host`. Only useful
+         * when the two are comparable, which behind a proxy they may not be —
+         * so a mismatch is refused and an absent `Origin` is allowed, per the
+         * note above. */
+        let Some(origin) = parts
+            .headers
+            .get(header::ORIGIN)
+            .and_then(|value| value.to_str().ok())
+        else {
+            return Ok(Self);
+        };
+        let host = parts
+            .headers
+            .get(header::HOST)
+            .and_then(|value| value.to_str().ok());
+        let authority = origin.split_once("://").map(|(_, rest)| rest);
+        match (authority, host) {
+            (Some(a), Some(h)) if a == h => Ok(Self),
+            _ => Err(StatusCode::FORBIDDEN),
+        }
+    }
+}
+
 /// A request that carries a live credential.
 ///
 /// AN EXTRACTOR, NOT A CHECK IN THE HANDLER, and the WebSocket route is why.
@@ -272,7 +356,13 @@ impl FromRequestParts<Arc<WebHost>> for Admitted {
 }
 
 /// `POST /api/auth/submit` — six digits in, a session cookie out.
+///
+/// `SameOrigin` FIRST, before the body is even read: a same-site page that
+/// could POST here would spend the shelf's five attempts on codes of its own
+/// choosing, and the reader — who is looking at the six digits on their own
+/// screen — would find them already used.
 async fn submit(
+    _same_origin: SameOrigin,
     State(state): State<Arc<WebHost>>,
     Json(body): Json<SubmitBody>,
 ) -> Result<Response, StatusCode> {
@@ -319,6 +409,7 @@ async fn session(_admitted: Admitted) -> StatusCode {
 /// was revoked: a caller who can ask cannot use the answer to learn whether
 /// some other credential exists.
 async fn signout(
+    _same_origin: SameOrigin,
     State(state): State<Arc<WebHost>>,
     request_headers: axum::http::HeaderMap,
 ) -> Response {
@@ -348,7 +439,21 @@ async fn signout(
 /// `validate` answers about a moment, `admit` re-checks that moment. Skipping
 /// the second would reopen finding 7 on the exact path that matters most,
 /// because a WebSocket outlives the request that created it.
+///
+/// ⚠️ **`SameOrigin` COMES FIRST, and until phase 18's audit there was nothing
+/// in that position at all.** Holding a live credential was the only question
+/// asked, and `SameSite=Strict` was trusted to decide who could ask it — which
+/// covers a cross-site page and says nothing about a same-site one. The shelf's
+/// public name is a tailnet subdomain with siblings, so "same site" is a
+/// Public Suffix List question this repository does not get to answer. And the
+/// prize is larger here than on any other route: a socket that opens once is a
+/// read channel over the entire library until it is closed.
+///
+/// Extractors run left to right, which is the same ordering argument the note
+/// on [`Admitted`] makes about `WebSocketUpgrade` — a check that runs after the
+/// upgrade extractor does not run at all.
 async fn upgrade(
+    _same_origin: SameOrigin,
     State(state): State<Arc<WebHost>>,
     admitted: Admitted,
     ws: WebSocketUpgrade,
@@ -356,10 +461,38 @@ async fn upgrade(
     let (outbound, receiver) = mpsc::channel(OUTBOUND_CAP);
     let Ok(socket) = state
         .pipe
-        .open(admitted.session, admitted.credential, outbound)
+        .open(admitted.session, admitted.credential.clone(), outbound)
     else {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     };
+
+    /* REGISTER, THEN RE-CHECK — the third phase, and the one the two in
+     * `Sessions` cannot supply.
+     *
+     * `Admitted` runs `validate` then `admit`, which closes the window between
+     * asking and being told. It does not close the window between being told
+     * and this socket EXISTING. A revocation landing in there does both of its
+     * halves — forgets the credential, then closes every socket that credential
+     * holds — and finds no socket, because `Pipe::open` had not run yet. A
+     * moment later it runs, and the browser the reader just revoked is holding
+     * a live authenticated channel while the Browsers pane says it is gone.
+     *
+     * The order here is what makes it airtight, and it is the same order
+     * `Sessions::admit` uses: the socket is registered FIRST, so a revocation
+     * after this point is guaranteed to find it. Only then do we ask whether
+     * the credential is still good. Either the revocation precedes the check
+     * and we refuse, or it follows the registration and `close_credential`
+     * reaches us. There is no third arrangement. */
+    if state
+        .sessions
+        .validate(&admitted.credential, Instant::now())
+        .is_err()
+    {
+        state.pipe.close(socket, "revoked before registration");
+        state.pipe.reap(socket);
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
     /* THE PROTOCOL'S CAP, TOLD TO THE SOCKET ITSELF.
      *
      * `Pipe::push` refuses anything over `MAX_FRAME` — but it only sees a
@@ -400,13 +533,126 @@ async fn pump(
     mut ws: WebSocket,
     mut outbound: mpsc::Receiver<Vec<u8>>,
 ) {
+    /* THE FRAME THE INBOX REFUSED, HELD RATHER THAN DROPPED.
+     *
+     * This used to be `Push::Backpressure => yield_now().await`, under a comment
+     * asserting "nothing is dropped… the frame is retried by the browser because
+     * we simply stop reading, and TCP does the rest." Every clause of that is
+     * wrong, and it is wrong in the direction that looks right.
+     *
+     * By the time `push` refuses, `ws.recv()` has already returned the message:
+     * it was reassembled, ACKed at the TCP layer, and moved into `frame`, a
+     * local that the match arm then dropped. TCP retransmits bytes the peer did
+     * not acknowledge; these were acknowledged. The browser has no idea the
+     * frame went nowhere and will never send it again. What was lost is one
+     * request or one response of a binary envelope — silently, under load only,
+     * which is the hardest possible shape to catch in the field.
+     *
+     * Holding it makes the claim true: the next loop iteration retries this
+     * frame and does not read another until it lands. Not reading IS the
+     * backpressure the comment wanted; it just has to happen with the frame
+     * still in hand. */
+    let mut pending: Option<Vec<u8>> = None;
+    /* WHEN the held frame is next offered. Absolute, so a busy outbound arm
+     * cannot push it further away — see the note in the loop. */
+    let mut retry_at: Option<tokio::time::Instant> = None;
+
     loop {
+        /* WHILE A FRAME IS HELD: stop reading the socket, keep writing to it,
+         * and retry on a TIMER.
+         *
+         * All three parts are load-bearing, and the first draft of this fix got
+         * the third wrong. It retried under `yield_now()`, which yields to the
+         * scheduler and comes straight back — so between the inbox filling and
+         * the webview's next drain (a 40 ms poll from the TypeScript side) this
+         * task spun at full speed, re-pushing a frame it had just been told
+         * there was no room for. Holding the frame fixed the data loss and
+         * bought a busy-wait.
+         *
+         * The timer is what makes waiting cheap. `RETRY` is well under the
+         * webview's poll interval, so capacity is taken up promptly once it
+         * appears, and the cost while full is a handful of wakeups a second
+         * rather than a core.
+         *
+         * ⚠️ THE OUTBOUND ARM STAYS LIVE, which the first draft also lost: it
+         * `continue`d past the `select!` entirely, so a full INBOX stalled
+         * traffic in the opposite direction — a browser reading a book stopped
+         * receiving it because of something it had SENT. The two directions are
+         * independent and have to stay that way.
+         *
+         * A drain notification from `Pipe` would be tighter still. It is not
+         * here because it would put a `Notify` on every session for a saving
+         * measured in milliseconds on a path that is already the slow one. */
+        if pending.is_some() {
+            /* AN ABSOLUTE DEADLINE, NOT A FRESH `sleep(RETRY)` EACH TIME.
+             *
+             * `select!` builds its futures anew on every pass, so a relative
+             * sleep restarts from zero whenever the OTHER arm wins. A browser
+             * being sent a book keeps `outbound.recv()` ready, the timer was
+             * therefore re-armed faster than it could ever elapse, and the held
+             * frame was never retried for as long as the stream lasted — the
+             * data loss this whole path exists to prevent, arrived at through
+             * starvation instead of through dropping. `sleep_until` is
+             * cancel-safe against the same instant: rebuilding it changes
+             * nothing about when it fires. */
+            let deadline = *retry_at.get_or_insert_with(|| tokio::time::Instant::now() + RETRY);
+            tokio::select! {
+                frame = outbound.recv() => {
+                    let Some(frame) = frame else { break };
+                    if state.pipe.closed_reason(socket).is_some() {
+                        break;
+                    }
+                    let len = frame.len();
+                    let sent = ws.send(Message::Binary(frame.into())).await;
+                    state.pipe.drained(socket, len);
+                    if sent.is_err() {
+                        break;
+                    }
+                }
+                () = tokio::time::sleep_until(deadline) => {
+                    retry_at = None;
+                    let frame = pending.take().expect("checked immediately above");
+                    match state.pipe.push(socket, frame) {
+                        Push::Accepted => {}
+                        Push::Backpressure(frame) => pending = Some(frame),
+                        Push::TooLarge | Push::Gone => break,
+                    }
+                }
+            }
+            continue;
+        }
+
         tokio::select! {
             /* Ends when the channel closes, which is what `Pipe::close` does by
              * dropping the sender. No second flag to keep in step. */
             frame = outbound.recv() => {
                 let Some(frame) = frame else { break };
-                if ws.send(Message::Binary(frame.into())).await.is_err() {
+                /* A REVOCATION MUST NOT BE OUTRUN BY THE QUEUE.
+                 *
+                 * `Pipe::close` revokes by dropping the sender, and the comment
+                 * on the channel says that "ends the socket's write task
+                 * without needing a second signal". It ends it EVENTUALLY:
+                 * tokio's mpsc delivers everything already buffered before
+                 * `recv` reports the close. Up to `OUTBOUND_BYTE_CAP` of book
+                 * bytes were therefore written to a browser after the reader
+                 * had revoked it — the one moment they had said they did not
+                 * want that browser reading.
+                 *
+                 * Asking the pipe is the second signal, and it has to be here
+                 * rather than only at the top of the loop: `recv` is what
+                 * yields, so the close can land while this arm is waiting. */
+                if state.pipe.closed_reason(socket).is_some() {
+                    break;
+                }
+                /* THE BUDGET IS FREED HERE, because this is where the queue
+                 * actually shortens. `Pipe::send` counts bytes in; the channel
+                 * itself counts only messages, so without this call the byte
+                 * budget fills once and never empties, and every browser
+                 * eventually stops being sent anything. */
+                let len = frame.len();
+                let sent = ws.send(Message::Binary(frame.into())).await;
+                state.pipe.drained(socket, len);
+                if sent.is_err() {
                     break;
                 }
             }
@@ -427,10 +673,11 @@ async fn pump(
                 };
                 match state.pipe.push(socket, frame) {
                     Push::Accepted => {}
-                    /* Nothing is dropped. Yielding lets the webview's drain run;
-                     * the frame is retried by the browser because we simply
-                     * stop reading, and TCP does the rest. */
-                    Push::Backpressure => tokio::task::yield_now().await,
+                    /* Held, not dropped — see the note on `pending`. */
+                    Push::Backpressure(frame) => {
+                        pending = Some(frame);
+                        tokio::task::yield_now().await;
+                    }
                     Push::TooLarge | Push::Gone => break,
                 }
             }
@@ -476,6 +723,14 @@ mod tests {
     fn live_code(state: &WebHost) -> String {
         let offer = state.auth.begin(Instant::now());
         String::from_utf8(offer.code.digits().to_vec()).expect("ascii digits")
+    }
+
+    /// The same request, tagged with the `Sec-Fetch-Site` a browser would send.
+    fn from_site(mut request: Request<Body>, site: &str) -> Request<Body> {
+        request
+            .headers_mut()
+            .insert("sec-fetch-site", site.parse().expect("an ascii token"));
+        request
     }
 
     async fn call(state: Arc<WebHost>, request: Request<Body>) -> Response {
@@ -958,6 +1213,125 @@ mod tests {
     /// client-visible difference is which flavour of connection reset arrives,
     /// which is an OS detail. So the bound is asserted here, against the source,
     /// the way `tauri-plugin-inference`'s `limits.rs` reads `commands.rs`.
+    /// THE STATE-CHANGING ENDPOINTS REFUSE A PAGE THAT IS NOT OURS.
+    ///
+    /// `SameSite=Strict` is documented above as "the CSRF defence", and against
+    /// a cross-site page it is. It says nothing about a same-site one, and this
+    /// shelf's public name is a tailnet subdomain whose siblings may or may not
+    /// count as the same site depending on the Public Suffix List — a file this
+    /// repository does not own. Both endpoints are worth the check for
+    /// different reasons: a forced `signout` is a denial of service the reader
+    /// cannot explain, and a forged `submit` burns the five attempts guarding
+    /// the six digits the reader is at that moment reading off their screen.
+    #[tokio::test]
+    async fn a_same_site_page_cannot_sign_out_or_spend_the_attempts() {
+        let state = host();
+        let code = live_code(&state);
+
+        for site in ["same-site", "cross-site"] {
+            let response = call(
+                Arc::clone(&state),
+                from_site(json_post("/api/auth/signout", "", None), site),
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "signout from {site} must be refused"
+            );
+
+            let response = call(
+                Arc::clone(&state),
+                from_site(
+                    json_post("/api/auth/submit", &format!(r#"{{"code":"{code}"}}"#), None),
+                    site,
+                ),
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "submit from {site} must be refused"
+            );
+        }
+
+        /* AND THE ATTEMPTS WERE NEVER SPENT. The refusal has to happen before
+         * `reserve`, or a forged POST still costs the reader a try each time —
+         * a rate limit an attacker can drain is not one. The right code still
+         * works, which is the proof. */
+        let response = call(
+            Arc::clone(&state),
+            from_site(
+                json_post("/api/auth/submit", &format!(r#"{{"code":"{code}"}}"#), None),
+                "same-origin",
+            ),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::NO_CONTENT,
+            "the shelf's own page must still be able to sign in"
+        );
+    }
+
+    /// THE `Origin` FALLBACK, which no test reached.
+    ///
+    /// `SameOrigin` prefers Fetch Metadata and falls back to comparing `Origin`
+    /// against `Host` when a client sends no `Sec-Fetch-Site`. The integration
+    /// suite drives a tungstenite client, which sends neither header, so the
+    /// whole fallback — including its refusal — was unexercised. In-process is
+    /// the right place for it: the branch is about headers, not sockets.
+    #[tokio::test]
+    async fn a_mismatched_origin_is_refused_when_there_is_no_fetch_metadata() {
+        let state = host();
+        let code = live_code(&state);
+
+        let with = |origin: Option<&str>, host_header: Option<&str>| {
+            let mut request =
+                json_post("/api/auth/submit", &format!(r#"{{"code":"{code}"}}"#), None);
+            if let Some(origin) = origin {
+                request
+                    .headers_mut()
+                    .insert(header::ORIGIN, origin.parse().expect("ascii"));
+            }
+            if let Some(host_header) = host_header {
+                request
+                    .headers_mut()
+                    .insert(header::HOST, host_header.parse().expect("ascii"));
+            }
+            request
+        };
+
+        /* A DIFFERENT AUTHORITY IS REFUSED. */
+        let response = call(
+            Arc::clone(&state),
+            with(Some("https://evil.example"), Some("studio.tail1234.ts.net")),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        /* An `Origin` with no comparable `Host` is refused too: the pair is the
+         * only thing this branch can judge, and half of it is not evidence. */
+        let response = call(Arc::clone(&state), with(Some("https://evil.example"), None)).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        /* THE MATCHING PAIR IS ADMITTED, so the refusals above are about the
+         * mismatch and not about the fallback refusing everything. */
+        let response = call(
+            Arc::clone(&state),
+            with(
+                Some("https://studio.tail1234.ts.net"),
+                Some("studio.tail1234.ts.net"),
+            ),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::NO_CONTENT,
+            "the shelf's own page, identified by Origin alone, must still sign in"
+        );
+    }
+
     #[test]
     fn the_upgrade_is_bounded_by_the_protocols_own_cap() {
         let source = include_str!("lib.rs");

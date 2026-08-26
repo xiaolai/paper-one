@@ -114,7 +114,10 @@ pub struct Node {
     endpoint: Endpoint,
     peers: Mutex<PeerStore>,
     pub(crate) pairing: PairingState,
-    pub(crate) sessions: Sessions,
+    /* `Arc`, so a pending-handshake permit can hold the registry it must
+     * release into — see `session::Handshake`. Derefs transparently, so every
+     * `node.sessions.x()` call site is unchanged. */
+    pub(crate) sessions: Arc<Sessions>,
     pub(crate) transfers: Transfers,
     /// Caps concurrent blob-serve tasks so a peer cannot open unbounded streams.
     pub(crate) blob_serve_limit: Arc<Semaphore>,
@@ -267,7 +270,7 @@ impl Node {
             endpoint: endpoint.clone(),
             peers: Mutex::new(peers),
             pairing: PairingState::default(),
-            sessions: Sessions::default(),
+            sessions: Arc::new(Sessions::default()),
             transfers: Transfers::default(),
             blob_serve_limit: Arc::new(Semaphore::new(MAX_BLOB_STREAMS)),
             blob_idle_timeout_ms: AtomicU64::new(BLOB_IDLE_TIMEOUT_MS),

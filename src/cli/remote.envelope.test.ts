@@ -88,7 +88,14 @@ const open: Shelf[] = []
  * own peer record, which is where the plugin keeps it and where the router
  * asks. Narrowing it later and re-asking is what the revocation case does.
  */
-async function serveOverTheWire(grants: readonly string[] = ['book:*', 'mark:*', 'card:*', 'shelf:*']): Promise<Shelf> {
+/* `blob:*` IS IN THE DEFAULT SET, and its absence was a finding. `content.read`
+ * is gated on `blob:read` — the grant the Devices pane renders as "book files"
+ * — rather than on `book:read`, so a peer told it cannot have the files cannot
+ * stream them either. This fixture is a peer that CAN, which is what the
+ * whole-table sweep below needs; `a_peer_denied_book_files` is the other half. */
+async function serveOverTheWire(
+  grants: readonly string[] = ['book:*', 'blob:*', 'mark:*', 'card:*', 'shelf:*'],
+): Promise<Shelf> {
   const wires = linkedWires()
   const shelfPort = createPeerPort(wires.shelf)
   const satchelPort = createPeerPort(wires.satchel)
@@ -207,6 +214,9 @@ describe('every command, over the envelope', () => {
       'trash.list': ['trash', 'list'],
       'content.locate': ['content', 'locate', 'b0000'],
       'content.read': ['content', 'read', 'b0000'],
+      /* Empty is a valid answer — most books have no jacket — so this proves
+         the command crosses the envelope, not that the fixture has artwork. */
+      'cover.read': ['cover', 'read', 'b0000'],
       'shelf.status': ['shelf', 'status'],
     }
     /* Derived from the table, so a read service added without a case here
@@ -355,6 +365,35 @@ describe('a grant the caller lacks', () => {
     /* And the one it DOES hold still works, so the refusal is about the
      * grant rather than about the session. */
     expect((await overTheWire(shelf, ['mark', 'list', 'b0000'])).code).toBe(EXIT.ok)
+  })
+
+  /**
+   * A PEER DENIED "BOOK FILES" CANNOT STREAM THE BOOK.
+   *
+   * `describeGrants` shows `blob:read` to the reader as "book files" and shows
+   * a peer without it as having only "Books, highlights, reading position".
+   * `content.read` was gated on `book:read`, so that peer was told it could not
+   * have the files and could stream every byte of every one of them. The
+   * sentence in the pane was the boundary a reader was actually reading.
+   *
+   * The positive half matters as much as the negative: `book.list` still works,
+   * so this is a refusal about the FILES and not a peer that lost everything.
+   */
+  it('refuses content.read to a peer denied book files, while the rest still works', async () => {
+    const shelf = await serveOverTheWire(['book:*', 'mark:*', 'card:*', 'shelf:*'])
+
+    const bytes = await overTheWire(shelf, ['content', 'read', 'b0000'])
+    expect(bytes.code).toBe(EXIT.refused)
+    expect(bytes.err).toContain('forbidden')
+
+    /* Everything the pane DOES promise this peer. */
+    expect((await overTheWire(shelf, ['book', 'list'])).code).toBe(EXIT.ok)
+    expect((await overTheWire(shelf, ['content', 'locate', 'b0000'])).code).toBe(EXIT.ok)
+
+    /* And granting the file permission is what turns it on — so the refusal is
+       about `blob:read` and not about something else being absent. */
+    await shelf.shelfPort.setGrants(shelf.satchelId, ['book:*', 'blob:read'])
+    expect((await overTheWire(shelf, ['content', 'read', 'b0000'])).code).toBe(EXIT.ok)
   })
 
   it('takes effect on an OPEN session when the shelf narrows the grants', async () => {

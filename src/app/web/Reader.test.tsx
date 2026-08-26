@@ -259,6 +259,268 @@ describe('Reader', () => {
   })
 
   /**
+   * THE THREE SHEETS, and the rule that only one is open.
+   *
+   * Contents, Search and Notes all cover the reading surface, so a second
+   * opened over the first would leave the reader two dismissals from the book.
+   * The Notes control is drawn only when this host HAS marks — absent, not
+   * disabled, like every other capability this client lacks.
+   */
+  it('opens one sheet at a time, and offers Notes only when there are marks', async () => {
+    const { content } = shelf({ ext: 'epub' })
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe(): void {}
+        unobserve(): void {}
+        disconnect(): void {}
+      },
+    )
+
+    const removed: { id: string; bookId: string }[] = []
+    const marks = {
+      all: [
+        {
+          id: 'm1',
+          bookId: 'one',
+          cfi: 'epubcfi(/6/2)',
+          sectionIndex: 0,
+          text: 'the whale',
+          prefix: '',
+          suffix: '',
+          note: '',
+          kind: 'highlight',
+          tint: 'yellow',
+          style: 'fill',
+          chapter: 'One',
+          createdAt: 1,
+        },
+      ],
+      allBookmarks: [],
+      persistent: true,
+      remove: (m: { id: string; bookId: string }) => removed.push(m),
+      setNote: () => {},
+      loadAll: () => {},
+      subscribe: () => () => {},
+      refresh: () => {},
+      dispose: () => {},
+    }
+
+    const captured: Record<string, unknown> = {}
+    vi.doMock('../../kernel/ui/reader/FoliateView', () => ({
+      FoliateView: (props: Record<string, unknown>) => {
+        Object.assign(captured, props)
+        return null
+      },
+    }))
+    vi.resetModules()
+    const { Reader: Fresh } = await import('./Reader')
+    render(
+      <Fresh
+        content={content}
+        bookId="one"
+        name="Moby-Dick"
+        onClose={vi.fn()}
+        positions={fakePositions()}
+        marks={marks as never}
+        titleOf={() => 'Another'}
+      />,
+    )
+    await waitFor(() => expect(captured['onToc']).toBeTypeOf('function'))
+    ;(captured['onToc'] as (g: number, t: unknown) => void)(0, [{ label: 'One', href: 'c1.xhtml' }])
+    ;(captured['onMeta'] as (g: number, m: unknown) => void)(0, { title: 'Moby-Dick' })
+
+    /* ONE SHEET, WITH TABS. The chrome carries a single control — Tools —
+       and Contents, Search and Notes are tabs at the sheet's foot. Switching a
+       tab swaps the body; there is no second sheet to leave open. */
+    fireEvent.click(await screen.findByRole('button', { name: 'Tools' }))
+    expect(screen.queryByRole('button', { name: 'One' })).not.toBeNull()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Search' }))
+    expect(screen.queryByRole('button', { name: 'One' })).toBeNull()
+    expect(screen.queryByLabelText('Search this book')).not.toBeNull()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Notes' }))
+    expect(screen.queryByLabelText('Search this book')).toBeNull()
+
+    vi.doUnmock('../../kernel/ui/reader/FoliateView')
+    vi.resetModules()
+    vi.unstubAllGlobals()
+  })
+
+  /* NO MARKS, NO CONTROL. A host without them draws no Notes button rather
+     than a disabled one — the convention this client uses everywhere. */
+  it('draws no Notes control when this host has no marks', async () => {
+    const { content } = shelf({ ext: 'epub' })
+    render(<Reader content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />)
+    await waitFor(() => expect(screen.queryByRole('button', { name: '‹ Shelf' })).not.toBeNull())
+    fireEvent.click(screen.getByRole('button', { name: 'Tools' }))
+    expect(screen.queryByRole('button', { name: 'Notes' })).toBeNull()
+  })
+
+  /**
+   * THE READING PREFERENCES (WI-19.9).
+   *
+   * Mounted rather than rebuilt: `pane/Settings.tsx` with seven of its setters
+   * omitted, so a host with no ruler, no side pane and no brightness filter
+   * draws none of those rows. What it writes goes through the KERNEL'S OWN
+   * settings store over `localStorage` — the real keys and the real validators,
+   * not a second definition of what a theme may be.
+   */
+  it('applies the reader’s stored preferences, and writes a change back', async () => {
+    const { content } = shelf({ ext: 'epub' })
+    /* jsdom HAS NO `ResizeObserver`, and `Settings`' groups measure themselves
+       to animate open. A stub that observes nothing is enough: this test is
+       about what the pane WRITES, not about how tall it is. */
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe(): void {}
+        unobserve(): void {}
+        disconnect(): void {}
+      },
+    )
+    const store: Record<string, string> = {}
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => store[k] ?? null,
+      setItem: (k: string, v: string) => {
+        store[k] = v
+      },
+    })
+
+    const captured: Record<string, unknown> = {}
+    vi.doMock('../../kernel/ui/reader/FoliateView', () => ({
+      FoliateView: (props: Record<string, unknown>) => {
+        Object.assign(captured, props)
+        return null
+      },
+    }))
+    vi.resetModules()
+    const { Reader: Fresh } = await import('./Reader')
+    render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />)
+    await waitFor(() => expect(captured['theme']).toBeTypeOf('string'))
+
+    /* THE STORED VALUES REACH THE BOOK, which is the whole point of storing
+       them — a preference the renderer never sees is a preference nobody has. */
+    expect(captured['theme']).toBe('paper')
+    expect(captured['typeface']).toBeTypeOf('string')
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Tools' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Reading' }))
+    fireEvent.click(await screen.findByRole('button', { name: /Night/i }))
+
+    /* AN EXPLICIT PICK TURNS OFF OS FOLLOWING — `state.ts` states the rule for
+       the desktop, and without it here the chosen theme was overridden on the
+       next render and the control did nothing you could see. */
+    const written = JSON.parse(store['paper.settings.v1'] ?? '{}') as {
+      values?: Record<string, unknown>
+    }
+    expect(written.values?.['kernel.theme']).toBe('night')
+    expect(written.values?.['kernel.themeFollowsOs']).toBe(false)
+    await waitFor(() => expect(captured['theme']).toBe('night'))
+
+    /* THE SEVEN THIS HOST CANNOT ACT ON ARE NOT DRAWN. A row for a reading
+       ruler that is not mounted would be a control that cannot act. */
+    expect(screen.queryByText('Reading ruler')).toBeNull()
+    expect(screen.queryByText('Side pane position')).toBeNull()
+    expect(screen.queryByText('Brightness')).toBeNull()
+
+    /* EVERY OTHER ROW WRITES SOMETHING. Each is a separate inline setter on
+       this surface — typeface, size, alignment, spacing, the reading style —
+       and a setter that stopped writing would change nothing on screen, so
+       only the store can say. Clicking them all is what proves none is inert.
+       ⚠️ SCOPED TO THE SHEET, and the GROUP SUMMARIES are skipped. The bar's
+       own icons are buttons too, and clicking one closes the sheet — every row
+       after it is then detached and nothing is written. So is clicking a
+       summary, which collapses its group. Both look identical to a pane of
+       dead controls. */
+    const before = JSON.stringify(store)
+    const sheet = document.querySelector('[role="dialog"]')
+    const rows = [...(sheet?.querySelectorAll('button') ?? [])].filter(
+      (b) =>
+        !/^(appearance|text|spacing|paragraphs|blocks|figures|page)$/i.test((b.textContent ?? '').trim()),
+    )
+    expect(rows.length).toBeGreaterThan(5)
+    for (const one of rows) {
+      if (one.isConnected) fireEvent.click(one)
+    }
+    expect(JSON.stringify(store)).not.toBe(before)
+
+    vi.doUnmock('../../kernel/ui/reader/FoliateView')
+    vi.resetModules()
+    vi.unstubAllGlobals()
+  })
+
+  /**
+   * THE TABLE OF CONTENTS (WI-19.9).
+   *
+   * `FoliateView` has raised `onToc` all along and this client passed `ignore`,
+   * so a reader on a phone could move through a book one page at a time and no
+   * other way. The pane is the kernel's own `pane/Contents.tsx` — 61 lines,
+   * browser-safe, mounted rather than reimplemented.
+   */
+  it('offers the book’s contents, and goes where one is chosen', async () => {
+    const { content } = shelf({ ext: 'epub' })
+    const went: string[] = []
+    const nav = {
+      next: () => {},
+      prev: () => {},
+      goLeft: () => {},
+      goRight: () => {},
+      goTo: (target: string) => went.push(target),
+    }
+
+    const captured: Record<string, unknown> = {}
+    vi.doMock('../../kernel/ui/reader/FoliateView', () => ({
+      FoliateView: (props: Record<string, unknown>) => {
+        Object.assign(captured, props)
+        return null
+      },
+    }))
+    vi.resetModules()
+    const { Reader: Fresh } = await import('./Reader')
+    render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />)
+    await waitFor(() => expect(captured['onToc']).toBeTypeOf('function'))
+
+    /* NO CONTENTS, NO TAB. A book that declares none gets no Contents tab in
+       the tools sheet — an absent capability is an absent control, never a
+       disabled one. The sheet itself is still reachable: Search and Reading
+       need no contents. */
+    fireEvent.click(await screen.findByRole('button', { name: 'Tools' }))
+    expect(screen.queryByRole('button', { name: 'Contents' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Tools' }))
+
+    ;(captured['onNavigator'] as (g: number, n: unknown) => void)(0, nav)
+    ;(captured['onToc'] as (g: number, t: unknown) => void)(0, [
+      { label: 'Chapter One', href: 'c1.xhtml' },
+      { label: 'Chapter Two', href: 'c2.xhtml' },
+    ])
+    ;(captured['onRelocate'] as (g: number, p: unknown) => void)(0, {
+      cfi: 'epubcfi(/6/2)',
+      chapterHref: 'c1.xhtml',
+    })
+
+    /* The reader's chrome has ONE control — Tools — and Contents is the first
+       tab of the sheet it opens, so opening Tools lands on the contents. */
+    fireEvent.click(await screen.findByRole('button', { name: 'Tools' }))
+
+    /* WHICH ENTRY IS CURRENT comes from `chapterHref`, not the label: labels
+       repeat across a book and matching on them marks every duplicate. */
+    const one = await screen.findByRole('button', { name: 'Chapter One' })
+    expect(one.getAttribute('data-current')).toBe('true')
+    expect(screen.getByRole('button', { name: 'Chapter Two' }).getAttribute('data-current')).toBe('false')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Chapter Two' }))
+    expect(went).toEqual(['c2.xhtml'])
+    /* AND THE SHEET CLOSES. It covers the book, so leaving it open after a
+       choice would hide the page the reader just asked for. */
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Chapter Two' })).toBeNull())
+
+    vi.doUnmock('../../kernel/ui/reader/FoliateView')
+    vi.resetModules()
+  })
+
+  /**
    * TAP TO TURN, on the book's own document.
    *
    * A page intent reaches the reader from ONE gesture — the wheel — and a phone

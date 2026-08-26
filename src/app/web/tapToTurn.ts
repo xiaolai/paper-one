@@ -70,6 +70,44 @@ export const TAP_SLOP = 10
  */
 export const EDGE = 1 / 3
 
+/**
+ * Where a tap landed, in the STAGE's coordinates rather than the book
+ * document's.
+ *
+ * ## Why this is not just `event.clientX`
+ *
+ * A book document is not one page wide. foliate lays a section out in columns
+ * and makes the iframe as wide as ALL of them, then clips it and slides it
+ * sideways to show one page at a time. So a section that paginates into three
+ * pages has `documentElement.clientWidth === 1011` while the reader is looking
+ * at 337 of it.
+ *
+ * Judge a tap against that number and the thirds are drawn across a strip two
+ * thirds of which is off-screen. Measured 2026-08-26, one tap at screen x=346,
+ * `clientX` 318 in every case:
+ *
+ * | Section | `clientWidth` | Right edge begins | Verdict |
+ * |---|---|---|---|
+ * | one page  | 337  | 225 | `right` ✓ |
+ * | three pages | 1011 | 674 | `left` ✗ |
+ *
+ * The reader tapped the same spot twice and went forward, then back, forever —
+ * every second tap undid the one before it, so a book could not be read past
+ * its first long section. `tapIntent` was right each time; it was being told
+ * the wrong page.
+ *
+ * ## The mapping
+ *
+ * `clientX` is relative to the frame's own viewport, and the frame's offset
+ * within the stage is negative once it has slid — page 2 of that section sits
+ * at −309. Adding them gives the position on screen, which is the only basis
+ * both listeners can agree on. The stage's width is then the page's width,
+ * because the stage IS what the reader can see.
+ */
+export function stagePoint(clientX: number, frameLeft: number, stageLeft: number): number {
+  return clientX + frameLeft - stageLeft
+}
+
 /** The page turn a release asks for, or null. */
 export function tapIntent(tap: Tap): TapIntent | null {
   if (tap.selected || tap.onControl) return null

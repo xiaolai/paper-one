@@ -82,8 +82,24 @@ impl Credential {
 }
 
 /// A live browser session.
+///
+/// DURABLE, unlike a socket id: it identifies the CREDENTIAL, so it survives a
+/// browser closing its tab and reconnecting. That is what makes it the right
+/// thing to show a reader who is deciding what to revoke.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct SessionId(u64);
+
+impl SessionId {
+    /// The number, for a wire that has no newtypes.
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+
+    /// Rebuild from a number a caller sent back. Does not imply it is live.
+    pub fn from_u64(id: u64) -> Self {
+        Self(id)
+    }
+}
 
 /// The right to register a connection, valid only against the state that
 /// produced it.
@@ -224,6 +240,41 @@ impl Sessions {
             .live
             .get(credential)
             .map(|s| s.attempt.clone())
+    }
+
+    /// Every credential this shelf has issued and not revoked, by session id.
+    ///
+    /// ⚠️ **THIS IS THE LIST A READER REVOKES FROM, and there was none.** The
+    /// Browsers pane enumerated live SOCKETS instead, which is a different set:
+    /// a browser that signed in and then closed its tab holds a credential good
+    /// for [`CREDENTIAL_TTL`] — ninety days — and has no socket, so it did not
+    /// appear, and there was no way to cut it off. It simply came back.
+    ///
+    /// Sorted, so the pane's order does not depend on hash iteration.
+    pub fn live_sessions(&self) -> Vec<SessionId> {
+        let guard = self.inner.lock().expect("sessions mutex poisoned");
+        let mut ids: Vec<SessionId> = guard.live.values().map(|s| s.id).collect();
+        ids.sort_by_key(|id| id.0);
+        ids
+    }
+
+    /// Revoke by durable session id, returning the credential it removed so the
+    /// caller can close whatever channel that credential is holding.
+    ///
+    /// The credential escapes here for the same reason [`Credential::as_str`]
+    /// exists: the caller has a second half of the revocation to perform and
+    /// cannot do it without one. It does not implement `Debug`, so it cannot
+    /// ride into a log on the way.
+    pub fn revoke_by_id(&self, id: SessionId) -> Option<Credential> {
+        let mut guard = self.inner.lock().expect("sessions mutex poisoned");
+        let found = guard
+            .live
+            .iter()
+            .find(|(_, session)| session.id == id)
+            .map(|(credential, _)| credential.clone())?;
+        guard.live.remove(&found);
+        guard.generation += 1;
+        Some(found)
     }
 
     pub fn live_count(&self) -> usize {
@@ -370,6 +421,47 @@ mod tests {
 
         auth.begin(now); // the code rotates underneath
         assert_eq!(sessions.attempt_of(&credential), Some(attempt));
+    }
+
+    /// A BROWSER THAT IS NOT CONNECTED IS STILL A BROWSER, and the shelf had
+    /// no way to name one.
+    ///
+    /// The Browsers pane listed live SOCKETS. A browser that signs in and then
+    /// closes its tab holds a credential for [`CREDENTIAL_TTL`] — ninety days —
+    /// and holds no socket, so it was absent from the only list there was and
+    /// could not be revoked. It simply reconnected. The credential outlives the
+    /// socket by design; the list has to outlive it too.
+    #[test]
+    fn a_credential_is_listable_and_revocable_with_no_socket_involved() {
+        let (auth, sessions, now) = (DeviceAuth::new(), Sessions::new(), Instant::now());
+        let away = sessions.issue(granted(&auth, now), now);
+        let other = sessions.issue(granted(&auth, now), now);
+
+        /* Nothing here has ever had a socket — that is the whole point. */
+        let listed = sessions.live_sessions();
+        assert_eq!(listed.len(), 2, "both credentials are listed");
+
+        let id = sessions
+            .validate(&away, now)
+            .and_then(|admission| sessions.admit(admission))
+            .expect("live");
+        let removed = sessions.revoke_by_id(id).expect("revoke by durable id");
+        assert_eq!(removed.as_str(), away.as_str(), "the right credential");
+
+        assert_eq!(sessions.validate(&away, now).err(), Some(Rejected::Unknown));
+        assert_eq!(sessions.live_sessions().len(), 1, "and only that one");
+        assert!(
+            sessions.validate(&other, now).is_ok(),
+            "revoking one browser must not log the others out"
+        );
+    }
+
+    #[test]
+    fn revoking_an_id_that_is_not_live_changes_nothing() {
+        let (auth, sessions, now) = (DeviceAuth::new(), Sessions::new(), Instant::now());
+        let held = sessions.issue(granted(&auth, now), now);
+        assert!(sessions.revoke_by_id(SessionId::from_u64(9999)).is_none());
+        assert!(sessions.validate(&held, now).is_ok());
     }
 
     /// `Credential` MUST NOT BE PRINTABLE, and the doc comment saying so is not

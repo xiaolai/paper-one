@@ -35,7 +35,7 @@
 import { createServer } from 'node:https'
 import { request } from 'node:http'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -107,6 +107,31 @@ if (certPath === null) {
   keyPath = join(dir, 'key.pem')
   certPath = join(dir, 'cert.pem')
 
+  /* AND THROWN AWAY AT THE END, which "generated fresh every run" did not
+     previously include. The directory outlived the process, so every run left a
+     private key on disk in `$TMPDIR` — readable, valid for a day, and
+     accumulating one per run. A throwaway key nobody throws away is just a key
+     with a short expiry, and the argument above for generating it fresh is
+     precisely the argument for removing it.
+
+     On the ordinary exit and on the signals a terminal actually sends. `SIGKILL`
+     and a crash still leak, which is what `$TMPDIR` cleanup is for; these cover
+     everything a reader does on purpose. */
+  const sweep = () => {
+    try {
+      rmSync(dir, { recursive: true, force: true })
+    } catch {
+      /* Best effort at teardown — a failure here must not mask the exit. */
+    }
+  }
+  process.on('exit', sweep)
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+    process.on(signal, () => {
+      sweep()
+      process.exit(130)
+    })
+  }
+
   try {
     execFileSync(
       'openssl',
@@ -172,8 +197,25 @@ server.on('upgrade', (from, socket, head) => {
   upstream.on('upgrade', (answer, upstreamSocket, upstreamHead) => {
     const lines = Object.entries(answer.headers).map(([k, v]) => `${k}: ${String(v)}`)
     socket.write(`HTTP/1.1 101 Switching Protocols\r\n${lines.join('\r\n')}\r\n\r\n`)
-    if (upstreamHead.length > 0) socket.unshift(upstreamHead)
-    if (head.length > 0) upstreamSocket.unshift(head)
+    /* EACH HEAD GOES THE WAY IT WAS ALREADY TRAVELLING, and this was backwards.
+     *
+     * `head` is what the CLIENT sent after its upgrade request; `upstreamHead`
+     * is what the SHELF sent after its 101. Both are bytes already in flight
+     * toward the other side. The code `unshift`ed them, which pushes data back
+     * onto a stream's READABLE side — so `socket.unshift(upstreamHead)` made
+     * the client's socket read the shelf's bytes as though the client had sent
+     * them, and `socket.pipe(upstreamSocket)` then forwarded them straight back
+     * to the shelf. Each head travelled to the end it came from.
+     *
+     * It is invisible almost always: both heads are usually empty, because a
+     * browser waits for the 101 before sending a frame. It bites exactly when a
+     * client is quick enough to send its first frame with the handshake — and
+     * then the channel's first message is lost and mirrored, which reads as the
+     * shelf being broken.
+     *
+     * Written BEFORE the pipes, so the bytes keep their place in the stream. */
+    if (upstreamHead.length > 0) socket.write(upstreamHead)
+    if (head.length > 0) upstreamSocket.write(head)
     upstreamSocket.pipe(socket)
     socket.pipe(upstreamSocket)
   })

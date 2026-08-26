@@ -137,10 +137,51 @@ PROBE = """<?xml version="1.0" encoding="UTF-8"?>
         return false;
       });
 
+      // ⚠️ READING THE CREDENTIAL WAS NEVER THE ONLY ROUTE, and for a while it
+      // was the only one probed. `HttpOnly` stops a script SEEING the cookie
+      // and does nothing to stop the browser ATTACHING it: a book that can run
+      // can `fetch` an authenticated endpoint, or open the frame socket, and be
+      // answered as the reader without ever learning the value. A fixture that
+      // only tried to read it would have reported "REACHED NOTHING" about a
+      // book with the whole read surface in its hands.
+      //
+      // Asynchronous, so the verdict is written once these settle. Nothing
+      // destructive is attempted — the point is whether the shelf ANSWERS.
+      var pending = 2;
+      function settled() { if (--pending <= 0) show(); }
+
+      try {
+        fetch('/api/auth/session', { credentials: 'include' })
+          .then(function (r) { if (r.status !== 401) reached.push('authenticated fetch (' + r.status + ')'); })
+          .catch(function () { /* blocked or refused counts as safe */ })
+          .then(settled, settled);
+      } catch (e) { settled() }
+
+      try {
+        var proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+        var sock = new WebSocket(proto + location.host + '/ws');
+        var done = false;
+        var finish = function (ok) {
+          if (done) return;
+          done = true;
+          if (ok) reached.push('authenticated websocket');
+          try { sock.close() } catch (e) {}
+          settled();
+        };
+        sock.onopen = function () { finish(true) };
+        sock.onerror = function () { finish(false) };
+        sock.onclose = function () { finish(false) };
+        setTimeout(function () { finish(false) }, 3000);
+      } catch (e) { settled() }
+
       var el = document.getElementById('paper-isolation-verdict');
-      el.textContent = reached.length
-        ? 'REACHED: ' + reached.join(', ')
-        : 'SCRIPT RAN, REACHED NOTHING';
+      function show() {
+        el.textContent = reached.length
+          ? 'REACHED: ' + reached.join(', ')
+          : 'SCRIPT RAN, REACHED NOTHING';
+      }
+      // Say what is known now, in case neither asynchronous probe ever settles.
+      show();
     ]]></script>
   </body>
 </html>

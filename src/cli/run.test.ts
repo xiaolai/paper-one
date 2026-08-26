@@ -160,6 +160,12 @@ describe('--json', () => {
       'trash.list': ['trash', 'list'],
       'content.locate': ['content', 'locate', 'aaa'],
       'content.read': ['content', 'read', 'aaa'],
+      /* The fixture book has no jacket, and that is fine: `cover.read` answers
+         an EMPTY stream for a book with no artwork rather than refusing, so
+         `[]` is a valid JSON document and the exit code is still 0. That is
+         precisely the behaviour worth pinning — the first version of the
+         service made this case an internal error. */
+      'cover.read': ['cover', 'read', 'aaa'],
       'shelf.status': ['shelf', 'status'],
     }
     /* THE LIST IS CHECKED AGAINST THE TABLE, not merely iterated.

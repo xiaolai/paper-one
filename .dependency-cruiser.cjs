@@ -84,34 +84,37 @@ const KERNEL_METRICS = '^src/kernel/core/metrics\\.ts$'
  * nothing about it is peer-to-peer. */
 const KERNEL_ENVELOPE = '^src/kernel/core/envelope\\.ts$'
 
-/** The reader, and the type vocabulary it is configured with.
- *
- * The browser client mounts `FoliateView` — the same reader the desktop mounts,
- * not a second one. That subtree was unreachable from a browser until
- * `bookVault.ts`'s Tauri binding moved out: `bookFolder` imports `extensionFor`
- * from it, the reader imports `bookFolder`, and so every module on that path
- * dragged `@tauri-apps/plugin-fs` in behind it. Measured Tauri-free now, and
- * `no-tauri-reachable-from-the-web-client` below is what keeps it that way —
- * a direct-edge rule could not see that reach, and did not.
- *
- * `uiTypes.ts` is the vocabulary the reader is configured with — `Theme`,
- * `Typeface`, `ReadingStyle` and the rest. It has ZERO dependencies of its own,
- * which is the same test every other entry on this list passes. */
-const KERNEL_READER = '^src/kernel/ui/reader/'
+/* THE BROWSER UI ENTRY (WI-19.4), which REPLACED a whole-directory reach.
+ * This was `KERNEL_READER = '^src/kernel/ui/reader/'` — the client could import
+ * any of the twenty-odd modules under `ui/reader/` by path, and did. An entry
+ * is a door with a list on it; a directory prefix is a hole the shape of a
+ * directory. `scripts/check-browser-safe.mjs` pins the entry browser-safe, so
+ * what is behind this door is guaranteed rather than hoped. */
+const KERNEL_BROWSER_ENTRY = '^src/kernel/ui/browser\\.ts$'
+/** The type vocabulary the reader is configured with — `Theme`, `Typeface`,
+ *  `ReadingStyle` and the rest. ZERO dependencies of its own, which is the test
+ *  every leaf on this list passes. */
 const KERNEL_UI_TYPES = '^src/kernel/core/uiTypes\\.ts$'
 
 /** The BROWSER CLIENT: `src/app/web/`, the SPA the shelf serves to a phone.
  *
- * It is the one part of this tree that cannot use the kernel's public entry.
- * That barrel re-exports modules which import `@tauri-apps`, and importing ANY
- * symbol from it retains them — `assert-bundle` refuses a web bundle carrying
- * three, and a browser has no such thing to run.
+ * ⚠️ **THIS USED TO BE AN EXEMPTION AND IS NOW A PAIR OF DOORS.** The old rule,
+ * `web-client-kernel-allowlist`, existed because the kernel's public entry
+ * re-exported modules importing `@tauri-apps` — so the client could not use it
+ * and reached five named modules directly instead, one of them an entire
+ * DIRECTORY (`ui/reader/`). Its own comment asked the right question: "a fourth
+ * entry is a signal that the public entry should be made Tauri-free instead of
+ * routed around." There were five.
  *
- * So it reaches a SHORT, NAMED list of kernel modules directly, and
- * `web-client-kernel-allowlist` below holds it to that list. Each entry is a
- * module with no runtime dependencies of its own, which is why reaching it
- * costs nothing. Adding a fourth should prompt the question this note is
- * really about: whether the public entry ought to be Tauri-free. */
+ * WI-19.1 made it Tauri-free — one export, `tauriSizePort`, was the whole
+ * cause — so `web-client-kernel-entries` below now mirrors
+ * `composition-root-kernel-entries`: the public entry, plus a React door
+ * (`ui/browser.ts`) the client may mount surfaces from, plus the same two
+ * dependency-free leaves a root gets.
+ *
+ * The client is NOT folded into `kernel-public-entry-only`. That rule is for
+ * capabilities, which have no business importing React; this client's whole
+ * job is to render it. */
 const WEB_CLIENT = '^src/app/web/'
 
 /** The kernel's two entries: the React-free public one every capability may
@@ -143,7 +146,13 @@ const KERNEL_UI_ENTRY = '^src/kernel/ui/index\\.ts$'
  *  closed `CONTENT_EXTENSIONS` list; nothing a reader typed reaches it. */
 const FS_ADAPTERS = [
   '^src/kernel/core/bookFiles\\.ts$',
-  '^src/kernel/core/bookSizes\\.ts$',
+  /* `bookSizes.ts` IS NO LONGER ON THIS LIST, for exactly the reason
+   * `bookVault.ts` is not, below. It holds `sizePortOver` — a pure walk over
+   * two callbacks — and while the binding sat eleven lines beneath it, the
+   * kernel's PUBLIC ENTRY re-exported `tauriSizePort` and so could not be
+   * bundled for a browser at all. One export, 54 modules. The binding is
+   * `bookSizesTauri.ts`. */
+  '^src/kernel/core/bookSizesTauri\\.ts$',
   /* `bookVault.ts` IS NO LONGER ON THIS LIST, and its absence is the point.
    * It holds the vault's seam and its rules — `extensionFor`,
    * `CONTENT_EXTENSIONS`, `readRangeOf` — which `bookFolder` imports and the
@@ -271,7 +280,7 @@ module.exports = {
         'UI entry exists because the public entry is React-free and a root has to render App; ' +
         'nothing else may import it, and a root may not reach past either.',
       from: { path: COMPOSITION_ROOTS },
-      to: { path: '^src/kernel/', pathNot: [KERNEL_PUBLIC_ENTRY, KERNEL_UI_ENTRY, KERNEL_STYLESHEETS, KERNEL_METRICS] },
+      to: { path: '^src/kernel/', pathNot: [KERNEL_PUBLIC_ENTRY, KERNEL_UI_ENTRY, KERNEL_BROWSER_ENTRY, KERNEL_STYLESHEETS, KERNEL_METRICS] },
     },
     {
       name: 'capability-only-via-index',
@@ -370,16 +379,18 @@ module.exports = {
       to: { path: '(^|/)@tauri-apps/plugin-fs(/|$)' },
     },
     {
-      name: 'web-client-kernel-allowlist',
+      name: 'web-client-kernel-entries',
       severity: 'error',
       comment:
-        'The browser client (src/app/web/) is exempt from kernel-public-entry-only because the ' +
-        "public entry's barrel retains modules that import @tauri-apps, which do not exist in a " +
-        'browser — assert-bundle refuses a web bundle carrying them. This is the rule that keeps ' +
-        'that exemption narrow: it may reach the design-system stylesheets, metrics.ts and ' +
-        'envelope.ts, and nothing else of the kernel. All three have no runtime dependencies of ' +
-        'their own. A fourth entry is a signal that the public entry should be made Tauri-free ' +
-        'instead of routed around.',
+        'The browser client (src/app/web/) reaches the kernel through ENTRIES, the same way a ' +
+        'composition root does: the public entry, and src/kernel/ui/browser.ts for the React ' +
+        'surfaces it mounts — plus the design-system stylesheets, metrics.ts, envelope.ts and ' +
+        'uiTypes.ts, which are leaves with no runtime dependencies of their own. This replaced ' +
+        'web-client-kernel-allowlist, an EXEMPTION that existed only because the public entry was ' +
+        'not Tauri-free; it listed five modules, one of them the whole ui/reader/ directory. ' +
+        'WI-19.1 removed the cause (one export, tauriSizePort), so the exemption became a door. ' +
+        'The client is deliberately not folded into kernel-public-entry-only: that rule is for ' +
+        'capabilities, which must not import React, and rendering React is this client\'s job.',
       from: { path: WEB_CLIENT },
       to: {
         path: '^src/kernel/',
@@ -388,7 +399,7 @@ module.exports = {
           KERNEL_STYLESHEETS,
           KERNEL_METRICS,
           KERNEL_ENVELOPE,
-          KERNEL_READER,
+          KERNEL_BROWSER_ENTRY,
           KERNEL_UI_TYPES,
         ],
       },

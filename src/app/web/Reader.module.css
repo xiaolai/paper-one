@@ -1,11 +1,36 @@
 /* The reading surface, in a browser.
  *
+ * ⚠️ EVERY CUSTOM PROPERTY HERE IS ONE THE DESIGN SYSTEM DEFINES. Five of them
+ * were not: `--rule`, `--type-ui`, `--ink-muted`, `--space-3`, `--surface-sunken`
+ * — names invented while writing this file, each of which CSS resolves to
+ * nothing at all and reports nowhere. The bar had no border, the title no size
+ * and no colour, the banner no background, and no horizontal padding, which is
+ * why the book's title ran into the edge of a phone.
+ *
+ * `scripts/check-css-tokens.mjs` is what stops that recurring: an undefined
+ * custom property is silent, and silence is the one failure a stylesheet cannot
+ * report.
+ *
  * Every value here resolves from the design system's custom properties —
  * `applyMetrics` publishes them onto the root before the first render. Nothing
  * in this file invents a colour, a radius or a height; a number written down
  * here is a number that disagrees with the desktop the next time either moves.
  */
 
+/* THE SAFE AREA, which this screen was the only one to ignore.
+ *
+ * `index.web.html` sets `viewport-fit=cover` so the reader can reach the edges
+ * of a notched phone — which means the insets are non-zero and every screen has
+ * to account for them. `entry.css` and `PairScreen.module.css` do. This one did
+ * not, so on a real iPhone the way back and the book's title sat UNDER the
+ * Dynamic Island and the last line of the page ran under the home indicator.
+ *
+ * Invisible in a simulated viewport: Playwright's iPhone device descriptor sets
+ * the size and the pixel ratio and reports every inset as zero. Found by
+ * reading on the actual phone, which is what WI-18.11 is for.
+ *
+ * Padded on the CONTAINER rather than on the bar and the stage separately, so a
+ * screen added later inherits it instead of rediscovering this. */
 .screen {
   position: fixed;
   inset: 0;
@@ -13,17 +38,36 @@
   flex-direction: column;
   background: var(--surface);
   color: var(--ink);
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  /* LEFT AND RIGHT MATTER IN LANDSCAPE, where the notch moves to one side and
+     the rounded corners cut the text column. A reader turns a phone sideways to
+     read; it is not the rare case. */
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
 }
 
 /* THE BAR IS THE ONLY CHROME. A phone has no window controls to line up with
    and no room to spare, so it carries the way back and the book's name and
    nothing else. */
+/* THE BAR IS THE ONLY CHROME, and it has to be reachable with a thumb.
+ *
+ * It measured 28px tall on an iPhone — the platform's touch minimum is 44 — and
+ * the way back was clipped top and bottom by a bar shorter than the control
+ * inside it. `--space-2` is literally two pixels — the tokens are values, not
+ * steps of a scale, and reading them as "step 2" is how a bar ends up with 2px
+ * of padding. `--space-3` did not exist at all, so the horizontal padding was
+ * nothing, which is why a title ran into the edge of the screen.
+ *
+ * `min-height` rather than a fixed height, so a longer title that wraps is not
+ * cut off. */
 .bar {
   display: flex;
   align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-2) var(--space-3);
-  border-bottom: 1px solid var(--rule);
+  gap: var(--space-12);
+  padding: var(--space-8) var(--space-16);
+  min-height: var(--control-lg);
+  border-bottom: 1px solid var(--line);
   flex: 0 0 auto;
 }
 
@@ -35,8 +79,8 @@
 }
 
 .title {
-  font: var(--type-ui);
-  color: var(--ink-muted);
+  font-size: var(--text-ui);
+  color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -51,11 +95,11 @@
 
 .problem {
   margin: 0;
-  padding: var(--space-2) var(--space-3);
-  font: var(--type-ui);
+  padding: var(--space-8) var(--space-16);
+  font-size: var(--text-ui);
   color: var(--ink);
-  background: var(--surface-sunken);
-  border-bottom: 1px solid var(--rule);
+  background: var(--wash);
+  border-bottom: 1px solid var(--line);
   flex: 0 0 auto;
 }
 
@@ -67,4 +111,67 @@
   flex: 1 1 auto;
   min-height: 0;
   position: relative;
+}
+
+/* CHROME HIDES, §06: "Hides on scroll, tap centre to show." The bar goes
+   with the footer; a turn hides both and a centre tap brings both back.
+   Opacity, not display — a bar that leaves the layout would make the page
+   reflow under the reader's thumb. */
+.bar {
+  transition: opacity var(--motion-chrome);
+}
+
+.bar[data-visible='false'] {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* THE TOOLS SHEET — the desktop side pane as one sheet, tabs at its foot.
+   The body scrolls; the rail does not. */
+.toolBody {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: var(--space-8) var(--space-16);
+}
+
+/* 56px in the mockup, a hairline above, `--surface` so it reads as the
+   sheet's own edge rather than as content. Each tab 40px, the active one on
+   `--wash` in the accent. */
+.toolTabs {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  /* `--control-lg` plus a 12px lip, the mockup's 56 — the rail is a control
+     that contains controls, which is what `lg` is for. */
+  height: calc(var(--control-lg) + var(--space-12));
+  padding: 0 var(--space-10);
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.toolTab {
+  flex: 1 1 0;
+  display: grid;
+  place-items: center;
+  height: calc(var(--control-sm) + var(--space-12));
+  border: 0;
+  border-radius: var(--radius-control);
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.toolTab[aria-pressed='true'] {
+  background: var(--wash);
+  color: var(--accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bar {
+    transition: none;
+  }
 }

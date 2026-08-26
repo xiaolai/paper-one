@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Check, Copy } from 'lucide-react'
 import { CAPABILITY_UI as ui, ICON } from '../../../kernel'
-import type { BrowserSession, CodeOffer, WebHostAddress, WebHostWire } from '../lib/wire'
+import type { Browser, CodeOffer, WebHostAddress, WebHostWire } from '../lib/wire'
 
 /**
  * Settings → **Browsers**: the six digits a phone types, and the browsers that
@@ -185,12 +185,20 @@ export function BrowsersPane({ wire, pollMs = POLL_MS }: BrowsersPaneProps) {
   const [address, setAddress] = useState<WebHostAddress | null>(null)
   const [offer, setOffer] = useState<CodeOffer | null>(null)
   const [remaining, setRemaining] = useState(0)
-  const [sessions, setSessions] = useState<readonly BrowserSession[]>([])
+  const [browsers, setBrowsers] = useState<readonly Browser[]>([])
   const [problem, setProblem] = useState<string | null>(null)
 
+  /* THE BROWSERS, NOT THE SOCKETS.
+   *
+   * This polled `wire.sessions()`, which is the live-socket list the webview's
+   * pump serves. A browser that signed in and then closed its tab holds a
+   * credential for ninety days and no socket — so it was absent from this pane
+   * entirely, and the reader could not revoke it. It simply reconnected. The
+   * one list that mattered for a security decision was the one that could not
+   * express "this phone is still paired". */
   const refresh = useCallback(async () => {
     try {
-      setSessions(await wire.sessions())
+      setBrowsers(await wire.browsers())
     } catch (thrown) {
       setProblem(thrown instanceof Error ? thrown.message : String(thrown))
     }
@@ -318,23 +326,33 @@ export function BrowsersPane({ wire, pollMs = POLL_MS }: BrowsersPaneProps) {
         </>
       )}
 
-      {sessions.length > 0 && (
+      {browsers.length > 0 && (
         <>
           <div className={ui.row}>
-            <span className={ui.grow}>Connected browsers</span>
-            <span className={ui.value}>{sessions.length}</span>
+            {/* "Paired", not "Connected" — the list is what may come back, and
+                calling it Connected was the label that made a browser away from
+                its socket look like one that had been forgotten. */}
+            <span className={ui.grow}>Paired browsers</span>
+            <span className={ui.value}>{browsers.length}</span>
           </div>
-          {sessions.map((session) => (
-            <div className={ui.row} key={session.id}>
-              <span className={ui.grow}>Browser {session.id}</span>
+          {browsers.map((browser) => (
+            <div className={ui.row} key={browser.id}>
+              <span className={ui.grow}>
+                Browser {browser.id}
+                {browser.connected ? '' : ' — away'}
+              </span>
               {/* Destructive and coloured rather than filled — `capability.css`
-                  says a filled red block in a settings list reads as an alarm. */}
+                  says a filled red block in a settings list reads as an alarm.
+
+                  "Revoke", not "Disconnect": it takes the credential away, so a
+                  browser that is away right now does not come back either. The
+                  old word described the visible half of what it did. */}
               <button
                 type="button"
                 className={`${ui.button} ${ui.buttonDanger}`}
-                onClick={() => void revoke(session.id)}
+                onClick={() => void revoke(browser.id)}
               >
-                Disconnect
+                Revoke
               </button>
             </div>
           ))}

@@ -4,8 +4,31 @@ import { ICON } from '../../core/metrics'
 import type { Book, SearchHit } from '../hooks/useBook'
 import styles from './SidePane.module.css'
 
+/**
+ * What searching a book actually needs — five fields, not the whole `Book`.
+ *
+ * WHY THIS IS NARROWED. The prop was `Book`, an interface of two dozen members
+ * covering opening, closing, marks, footnotes and speech. This pane reads five
+ * of them, and declaring the other nineteen made it mountable only by a host
+ * that could produce a whole reading session. The browser client has a
+ * navigator with `search` and `goTo` and knows what it opened; it could satisfy
+ * the five and not the twenty-four.
+ *
+ * Written as indexed access into `Book` rather than restated, so the two cannot
+ * drift: change `search`'s signature and this fails to compile with it. Every
+ * existing caller passes a `Book` and still type-checks — a narrower prop
+ * accepts a wider argument, which is the whole point.
+ */
+export interface SearchableBook {
+  readonly source: Book['source']
+  readonly meta: Book['meta']
+  readonly error: Book['error']
+  readonly search: Book['search']
+  readonly goTo: Book['goTo']
+}
+
 export interface SearchPanelProps {
-  book: Book
+  book: SearchableBook
 }
 
 /** Long enough that typing does not start a full-book scan per keystroke. */

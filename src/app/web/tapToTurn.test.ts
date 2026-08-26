@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { EDGE, TAP_SLOP, tapIntent, type Tap } from './tapToTurn'
+import { EDGE, TAP_SLOP, stagePoint, tapIntent, type Tap } from './tapToTurn'
 
 /**
  * When a tap is a page turn, and — more importantly — when it is not.
@@ -79,5 +79,68 @@ describe('tapIntent', () => {
     expect(answers).toEqual(['left', 'right'])
     expect(answers).not.toContain('next')
     expect(answers).not.toContain('prev')
+  })
+})
+
+/**
+ * `stagePoint`: the tap is judged against the page the reader can SEE.
+ *
+ * THE BUG THIS EXISTS FOR, with its measurements. A book document is not one
+ * page wide — foliate lays a section out in columns, makes the iframe as wide
+ * as all of them, and slides it to show one page at a time. So the same tap,
+ * at screen x=346 and `clientX` 318 every time, was judged against 337px in a
+ * one-page section and 1011px in a three-page one:
+ *
+ *   337 → the right third begins at 225 → 318 is a forward turn
+ *  1011 → the LEFT third runs to 337    → 318 is a backward turn
+ *
+ * So a reader tapping the same spot went forward, back, forward, back, and
+ * could not get past the first long section of a book. `tapIntent` was correct
+ * every time; it was being handed the wrong page.
+ *
+ * These numbers are the ones measured on 2026-08-26 against a real EPUB, kept
+ * literal so the regression is recognisable rather than paraphrased.
+ */
+describe('stagePoint', () => {
+  const STAGE_LEFT = 0
+  const STAGE_WIDTH = 393
+
+  it('puts the measured tap in the same place whatever the section', () => {
+    /* Frame offset 28 both times: each turn crossed into a new section and
+       landed on its first page, so only the document's width differed. */
+    expect(stagePoint(318, 28, STAGE_LEFT)).toBe(346)
+  })
+
+  it('gives the same verdict on a one-page and a three-page section', () => {
+    const at = (clientX: number, frameLeft: number) =>
+      tapIntent({
+        x: stagePoint(clientX, frameLeft, STAGE_LEFT),
+        moved: 0,
+        width: STAGE_WIDTH,
+        selected: false,
+        onControl: false,
+      })
+    /* Was 'right' then 'left' — the oscillation, in one assertion. */
+    expect(at(318, 28)).toBe('right')
+    expect(at(318, 28)).toBe('right')
+  })
+
+  /* THE FRAME SLIDES NEGATIVE within a section. Page two of a three-page
+     section sits at -309, and `clientX` grows by exactly as much, so the tap
+     stays where the reader put it. This is the case the old code could not
+     express at all. */
+  it('follows the frame as it slides within a section', () => {
+    expect(stagePoint(318, 28, STAGE_LEFT)).toBe(346)
+    expect(stagePoint(655, -309, STAGE_LEFT)).toBe(346)
+    expect(stagePoint(992, -646, STAGE_LEFT)).toBe(346)
+  })
+
+  it('subtracts a stage that does not start at the window edge', () => {
+    expect(stagePoint(318, 28, 40)).toBe(306)
+  })
+
+  /* A tap on the stage itself is already in this basis: no frame, no offset. */
+  it('is the identity when there is nothing to offset', () => {
+    expect(stagePoint(200, 0, 0)).toBe(200)
   })
 })

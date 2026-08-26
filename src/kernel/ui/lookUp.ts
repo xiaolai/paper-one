@@ -1,5 +1,4 @@
-import { invoke } from '@tauri-apps/api/core'
-import { inTauri } from './appStorage'
+import { inTauri } from './inTauri'
 import type { Platform } from '../core/metrics'
 
 /**
@@ -53,7 +52,7 @@ export function hasDictionary(platform: Platform): boolean {
  * point past which the feature cannot work anyway. A headword and a short
  * phrase both fit comfortably.
  */
-const MAX_TERM = 120
+export const MAX_TERM = 120
 
 /** What a Look up gesture should actually do. */
 export type LookUpAction = 'system' | 'gloss' | 'both' | 'none'
@@ -88,17 +87,3 @@ export function isLookUpTerm(term: string): boolean {
   return trimmed !== '' && trimmed.length <= MAX_TERM
 }
 
-/**
- * Hand a passage to the system dictionary.
- *
- * Resolves when the request has been made, NOT when anything has been shown:
- * what happens after `open` is the system's, and there is nothing to report
- * back. It rejects only when the command itself could not run, which the caller
- * turns into a notice — a lookup that silently did nothing is the failure this
- * whole path is easiest to get wrong in.
- */
-export async function lookUp(term: string): Promise<void> {
-  const trimmed = term.trim().replace(/\s+/g, ' ')
-  if (trimmed === '' || trimmed.length > MAX_TERM) return
-  await invoke('look_up', { term: trimmed })
-}

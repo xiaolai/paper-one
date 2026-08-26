@@ -1,0 +1,263 @@
+// @vitest-environment jsdom
+import type { ComponentProps } from 'react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { Settings } from './Settings'
+import { DEFAULT_ALIGN, DEFAULT_READING_STYLE, DEFAULT_SPACING, DEFAULT_STEP_IDX, DEFAULT_THEME } from '../../core/metrics'
+import { offeredFaces } from '../../core/typefaces'
+
+/**
+ * What the reading panel writes, and — the part that had no test at all —
+ * WHICH ROWS IT DRAWS.
+ *
+ * WHY THIS FILE DID NOT EXIST BEFORE. The pane is thirty-seven functions and
+ * had no direct test; mounting it in the browser client is what surfaced that,
+ * because loading it put thirty-two uncovered functions on the books at once.
+ * A pane this size with no test is one where a row can stop firing its setter
+ * and nothing says so.
+ *
+ * Seven of its setters became optional in phase 19 so a host that cannot act on
+ * a row does not draw it — the browser has no reading ruler, no scroll port it
+ * owns, no side pane on a 393px screen, and no brightness filter. **Gated on
+ * the setter, never on the value**, so a composition root that passes all seven
+ * sees exactly what it saw before. Both halves are asserted here: the full
+ * pane draws every row, and the narrow one draws none of the seven.
+ */
+
+afterEach(() => {
+  cleanup()
+  vi.unstubAllGlobals()
+})
+
+beforeEach(() => {
+  /* jsdom has no `ResizeObserver`, and the groups measure themselves to
+     animate open. Observing nothing is enough — this is about what the pane
+     writes, not how tall it is. */
+  vi.stubGlobal(
+    'ResizeObserver',
+    class {
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    },
+  )
+})
+
+/** Every value and setter — a composition root's call. */
+function full(over: Record<string, unknown> = {}) {
+  const spy = {
+    onTheme: vi.fn(),
+    onFollowOs: vi.fn(),
+    onTypeface: vi.fn(),
+    onStepIdx: vi.fn(),
+    onSpacing: vi.fn(),
+    onAlign: vi.fn(),
+    onStyle: vi.fn(),
+    onPageLayout: vi.fn(),
+    onToggleRuler: vi.fn(),
+    onToggleScrollbar: vi.fn(),
+    onToggleProgressLine: vi.fn(),
+    onSide: vi.fn(),
+    onBrightness: vi.fn(),
+    onContrast: vi.fn(),
+  }
+  const props = {
+    theme: DEFAULT_THEME,
+    themeFollowsOs: false,
+    typeface: 'literata',
+    stepIdx: DEFAULT_STEP_IDX,
+    spacing: DEFAULT_SPACING,
+    align: DEFAULT_ALIGN,
+    style: DEFAULT_READING_STYLE,
+    offered: offeredFaces(new Set(['Literata'])),
+    sections: [],
+    pageLayout: 'scrolled' as const,
+    rulerOn: false,
+    scrollbarOn: false,
+    progressLineOn: true,
+    side: 'right' as const,
+    brightness: 4,
+    contrast: 4,
+    ...spy,
+    ...over,
+  }
+  return { props, spy }
+}
+
+/** What a browser passes: the seven it cannot act on are simply absent. */
+function narrow() {
+  const { props, spy } = full()
+  for (const key of [
+    'onPageLayout',
+    'onToggleRuler',
+    'onToggleScrollbar',
+    'onToggleProgressLine',
+    'onSide',
+    'onBrightness',
+    'onContrast',
+  ]) {
+    delete (props as Record<string, unknown>)[key]
+  }
+  return { props, spy }
+}
+
+describe('what it writes', () => {
+  it('reports a theme the reader picked', () => {
+    const { props, spy } = full()
+    render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
+    fireEvent.click(screen.getByRole('button', { name: /Night/i }))
+    expect(spy.onTheme).toHaveBeenCalledWith('night')
+  })
+
+  it('reports a change to following the system', () => {
+    const { props, spy } = full()
+    render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
+    fireEvent.click(screen.getByText('Follow system appearance').closest('button')!)
+    expect(spy.onFollowOs).toHaveBeenCalled()
+  })
+
+  it('reports a larger and a smaller type size', () => {
+    const { props, spy } = full()
+    render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
+    const steppers = screen.getAllByRole('button', { name: /larger|smaller/i })
+    for (const one of steppers) fireEvent.click(one)
+    expect(spy.onStepIdx).toHaveBeenCalled()
+  })
+})
+
+describe('which rows it draws', () => {
+  /* A COMPOSITION ROOT SEES EVERY ROW. This is the half that guards the
+     desktop: the seven became optional, and a mistake in that change would
+     take a row off the desktop's pane silently. */
+  it('draws all seven when every setter is passed', () => {
+    const { props } = full()
+    render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
+    for (const label of [
+      'Flow',
+      'Reading ruler',
+      'Scrollbar',
+      'Progress rule',
+      'Side pane position',
+      'Brightness',
+      'Contrast',
+    ]) {
+      expect(screen.queryByText(label), `${label} should be drawn`).not.toBeNull()
+    }
+  })
+
+  /* AND A HOST THAT CANNOT ACT DRAWS NONE OF THEM. Absent, not disabled: a
+     disabled row names a feature the host will never have. */
+  it('draws none of the seven when their setters are absent', () => {
+    const { props } = narrow()
+    render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
+    for (const label of [
+      'Flow',
+      'Reading ruler',
+      'Scrollbar',
+      'Progress rule',
+      'Side pane position',
+      'Brightness',
+      'Contrast',
+    ]) {
+      expect(screen.queryByText(label), `${label} should not be drawn`).toBeNull()
+    }
+  })
+
+  /* THE ROWS IT CAN ACT ON ARE STILL THERE — the narrowing must not take the
+     pane's whole point with it. */
+  it('still draws the rows a browser can act on', () => {
+    const { props } = narrow()
+    render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
+    expect(screen.queryByText('Follow system appearance')).not.toBeNull()
+    expect(screen.queryByText('Alignment')).not.toBeNull()
+    expect(screen.queryByRole('button', { name: /Night/i })).not.toBeNull()
+  })
+})
+
+/**
+ * EVERY CONTROL, CLICKED.
+ *
+ * The pane is thirty-seven functions and almost all of them are a row's own
+ * handler — an inline arrow that reads one value and calls one setter. Sampling
+ * three of those leaves the rest able to stop working silently, which is the
+ * exact failure a pane this size invites: nothing renders differently when a
+ * handler is wrong, it just stops writing.
+ *
+ * So this opens every collapsed group and clicks every control it finds, then
+ * asserts that the setters fired. It is deliberately not assertion-per-row —
+ * the rows' individual meanings are the design system's, not this file's — but
+ * it does prove that no control is inert.
+ */
+describe('every control', () => {
+  it('reaches a setter — no visible row is inert', () => {
+    const { props, spy } = full()
+    const { container } = render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
+
+    /* ⚠️ THE GROUPS ARE NOT TOGGLED FIRST. An earlier version clicked every
+       summary to open the collapsed groups — which also CLOSED `Appearance`
+       and `Text`, the two that are open by default, so the rows it then
+       collected were gone and not one setter fired. Clicking what is visible
+       is both simpler and what a reader can actually reach. */
+    /* ⚠️ AND THE GROUP SUMMARIES ARE SKIPPED. The first button in the pane is
+       `APPEARANCE`'s own summary; clicking it COLLAPSES the group, which
+       detaches every button collected after it — so the remaining clicks land
+       on nodes no longer in the document and not one setter fires. That is
+       what "only nothing fired" meant, and it looked exactly like a pane of
+       dead controls. */
+    const rows = [...container.querySelectorAll('button')].filter(
+      (b) => !/^(appearance|text|spacing|paragraphs|blocks|figures|page)$/i.test((b.textContent ?? '').trim()),
+    )
+    expect(rows.length).toBeGreaterThan(8)
+    for (const one of rows) {
+      if (one.isConnected) fireEvent.click(one)
+    }
+
+    /* NOT "some setter fired" — a single assertion would pass with most of the
+       pane inert, which is the failure a pane this size invites: nothing
+       renders differently when a handler is wrong, it just stops writing. */
+    const fired = Object.entries(spy).filter(([, fn]) => fn.mock.calls.length > 0)
+    expect(fired.length, `only ${fired.map(([k]) => k).join(', ') || 'nothing'} fired`).toBeGreaterThanOrEqual(4)
+  })
+})
+
+/**
+ * THE COLLAPSED GROUPS, one at a time.
+ *
+ * `Spacing`, `Paragraphs`, `Blocks` and `Figures` start closed, and a closed
+ * group renders no rows — so a pane test that clicks what is visible never
+ * reaches them, and every handler in them can stop writing without a word.
+ * That is most of this pane.
+ *
+ * ⚠️ OPENED ONE AT A TIME, RE-QUERYING AFTER EACH. Toggling several summaries
+ * in a row closes the ones that were already open and detaches the buttons
+ * collected before — every subsequent click then lands on a node no longer in
+ * the document and writes nothing, which looks exactly like a pane of dead
+ * controls. That is a trap this file fell into twice.
+ */
+describe('the collapsed groups', () => {
+  for (const group of ['Spacing', 'Paragraphs', 'Blocks', 'Figures']) {
+    it(`writes something from ${group}`, () => {
+      const { props, spy } = full()
+      const { container } = render(<Settings {...(props as ComponentProps<typeof Settings>)} />)
+
+      const summary = [...container.querySelectorAll('button')].find(
+        (b) => (b.textContent ?? '').trim().toLowerCase() === group.toLowerCase(),
+      )
+      expect(summary, `${group} should have a summary to open`).toBeDefined()
+      fireEvent.click(summary!)
+
+      /* RE-QUERIED AFTER THE TOGGLE — the rows did not exist a moment ago. */
+      const rows = [...container.querySelectorAll('button')].filter(
+        (b) =>
+          !/^(appearance|text|spacing|paragraphs|blocks|figures|page)$/i.test((b.textContent ?? '').trim()),
+      )
+      expect(rows.length, `${group} should render rows when open`).toBeGreaterThan(0)
+      for (const one of rows) {
+        if (one.isConnected) fireEvent.click(one)
+      }
+
+      const fired = Object.entries(spy).filter(([, fn]) => fn.mock.calls.length > 0)
+      expect(fired.length, `${group} wrote nothing`).toBeGreaterThan(0)
+    })
+  }
+})

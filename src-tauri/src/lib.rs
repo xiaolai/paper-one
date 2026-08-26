@@ -207,8 +207,27 @@ const MAX_URL: usize = 2048;
 /// side already refused everything but http and https, and a check that only
 /// exists on the caller's side is not a boundary.
 ///
-/// NO SHELL IS INVOLVED — the URL is one `arg`, so it reaches `open` through
-/// `execve` as a single element and nothing in it is ever parsed as syntax.
+/// NO SHELL IS INVOLVED, and on Windows that took a second look. The URL is one
+/// `arg`, so on macOS and Linux it reaches `open`/`xdg-open` through `execve` as
+/// a single element and nothing in it is ever parsed as syntax.
+///
+/// ⚠️ **Windows had a hole here and the sentence above was what hid it.** The
+/// launcher was `cmd /c start "" <url>`, and `cmd.exe` re-parses its command
+/// line with its own grammar *after* Rust has quoted the argument. Rust quotes
+/// only for `CommandLineToArgvW` — it adds quotes when an argument contains a
+/// space, a tab or a quote, and `&` is none of those. So an allowed
+/// `https://example.org/?x=1&calc` arrived at `cmd` unquoted, `&` separated two
+/// commands, and the second one ran. Every character of that URL passed the
+/// allowlist; the scheme check was never the thing that failed.
+///
+/// `rundll32 url.dll,FileProtocolHandler` is the shell-free equivalent: it is
+/// spawned directly through `CreateProcessW`, so there is no second grammar to
+/// smuggle a separator past. Spaces cannot arrive either — every character up
+/// to and including `U+0020` is refused above, before this runs.
+///
+/// `no_shell_launches_the_link` reads this function's source and fails if `cmd`
+/// comes back. The property is invisible from macOS, where every test of this
+/// module runs, and it was silent for as long as it existed.
 #[tauri::command]
 fn open_external(url: String) -> Result<(), String> {
     let trimmed = url.trim();
@@ -229,10 +248,14 @@ fn open_external(url: String) -> Result<(), String> {
         let mut command = std::process::Command::new("open");
         #[cfg(target_os = "linux")]
         let mut command = std::process::Command::new("xdg-open");
+        /* NOT `cmd /c start`. See the note above: `cmd` re-parses what Rust
+         * already quoted, and `&` in a perfectly ordinary query string became a
+         * command separator. `rundll32` is spawned directly, so the URL stays
+         * one argument the whole way down. */
         #[cfg(target_os = "windows")]
         let mut command = {
-            let mut c = std::process::Command::new("cmd");
-            c.args(["/c", "start", ""]);
+            let mut c = std::process::Command::new("rundll32.exe");
+            c.arg("url.dll,FileProtocolHandler");
             c
         };
         command
@@ -615,5 +638,44 @@ mod open_external_tests {
     #[test]
     fn the_scheme_check_is_case_insensitive() {
         assert!(open_external("JavaScript:alert(1)".into()).is_err());
+    }
+
+    /// THE LAUNCHER MUST NOT BE A SHELL, and no test above can see that.
+    ///
+    /// Every test in this module runs on the developer's machine, which is
+    /// macOS, so the Windows branch is not merely untested — it is not even
+    /// compiled. It held `cmd /c start "" <url>` for as long as it existed.
+    /// `cmd.exe` re-parses its command line after Rust has quoted the argument,
+    /// and Rust quotes only for `CommandLineToArgvW`: it adds quotes for a
+    /// space, a tab or a quote, and `&` is none of those. `https://example.org/
+    /// ?x=1&calc` therefore reached `cmd` unquoted, `&` split it in two, and the
+    /// tail ran as a command. Every character of that URL passed the allowlist.
+    ///
+    /// The refusal tests could not catch it because nothing was refused. So this
+    /// reads the source instead — the same instrument `sessions.rs` uses to hold
+    /// `Credential` to not deriving `Debug`, and for the same reason: the
+    /// property is real, cheap to undo by accident, and silent once undone.
+    #[test]
+    fn no_shell_launches_the_link() {
+        let source = include_str!("lib.rs");
+        let at = source
+            .find("fn open_external(url: String)")
+            .expect("open_external is gone or renamed — this guard cannot see it");
+        let rest = &source[at..];
+        let end = rest
+            .find("\n}\n")
+            .expect("open_external has no closing brace at column 0");
+        let body = &rest[..end];
+
+        for shell in ["cmd", "powershell", "pwsh", "sh", "bash", "start"] {
+            assert!(
+                !body.contains(&format!("Command::new(\"{shell}")),
+                "open_external spawns `{shell}`. A shell re-parses the URL after \
+                 Rust has quoted it, and an ordinary `&` in a query string then \
+                 separates two commands — which is exactly how `cmd /c start` \
+                 turned an allowed https link into arbitrary execution. Spawn the \
+                 launcher directly instead."
+            );
+        }
     }
 }

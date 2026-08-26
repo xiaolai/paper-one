@@ -128,7 +128,27 @@ async fn sign_in(shelf: &Shelf, code: &str) -> String {
 type Client = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 /// Open `/ws` carrying `cookie`, exactly as a browser does.
+///
+/// ⚠️ "Exactly as a browser does" was not true, and the gap was load-bearing.
+/// tungstenite sends no Fetch Metadata, so every case here arrived with no
+/// `Sec-Fetch-Site` — which is precisely the shape the shelf must allow (see
+/// `SameOrigin`), so the whole suite would have stayed green with the
+/// same-origin check absent, which for a while it was. The helper now sends
+/// what a real browser sends; [`connect_from`] is how a test says otherwise.
 async fn connect(shelf: &Shelf, cookie: Option<&str>) -> Result<Client, String> {
+    connect_from(shelf, cookie, Some("same-origin")).await
+}
+
+/// [`connect`], with the browser's `Sec-Fetch-Site` chosen by the caller.
+///
+/// `None` means "send no Fetch Metadata at all" — a non-browser client, which
+/// is allowed, because CSRF is a browser attack and something that is not a
+/// browser has no ambient cookie to spend.
+async fn connect_from(
+    shelf: &Shelf,
+    cookie: Option<&str>,
+    site: Option<&str>,
+) -> Result<Client, String> {
     let mut request = format!("ws://{}/ws", shelf.origin)
         .into_client_request()
         .expect("a ws request");
@@ -136,6 +156,11 @@ async fn connect(shelf: &Shelf, cookie: Option<&str>) -> Result<Client, String> 
         request
             .headers_mut()
             .insert("cookie", cookie.parse().expect("an ascii cookie"));
+    }
+    if let Some(site) = site {
+        request
+            .headers_mut()
+            .insert("sec-fetch-site", site.parse().expect("an ascii token"));
     }
     match tokio_tungstenite::connect_async(request).await {
         Ok((socket, _response)) => Ok(socket),
@@ -193,6 +218,48 @@ async fn a_signed_in_browser_appears_in_live_ids_while_its_socket_is_open() {
     assert!(shelf.state.pipe.credential_of(ids[0]).is_some());
 
     drop(socket);
+}
+
+/// A LIVE CREDENTIAL IS NOT ENOUGH; THE PAGE ASKING MUST BE OURS.
+///
+/// The cookie is `SameSite=Strict`, which was doing the whole job here and only
+/// covers a cross-*site* page. This shelf's public name is `<host>.<tailnet>.ts
+/// .net`; whether a sibling tailnet host is the same site is decided by the
+/// Public Suffix List, which this repository neither owns nor tracks. A page on
+/// such a host would send `Sec-Fetch-Site: same-site` and — before this — get a
+/// socket, which is a read channel over the entire library for as long as it
+/// holds it.
+///
+/// All four cases together, because the absent one is an ALLOW and pinning it
+/// beside the refusals is what stops someone "fixing" it into a refusal that
+/// breaks every non-browser caller.
+#[tokio::test]
+async fn only_a_same_origin_page_may_open_the_socket() {
+    let shelf = shelf().await;
+    let code = live_code(&shelf);
+    let cookie = sign_in(&shelf, &code).await;
+
+    for site in ["same-site", "cross-site", "none"] {
+        let refused = connect_from(&shelf, Some(&cookie), Some(site)).await;
+        assert!(
+            refused.is_err(),
+            "Sec-Fetch-Site: {site} must not open a socket, credential or no credential"
+        );
+    }
+
+    /* No Fetch Metadata is ALLOWED and that is deliberate: it is not a browser
+     * page context, so it cannot be spending a cookie the browser attached by
+     * itself. `Admitted` is what stands in its way, and it already did. */
+    let plain = connect_from(&shelf, Some(&cookie), None).await;
+    assert!(
+        plain.is_ok(),
+        "a non-browser client with a real credential is not CSRF and must still connect"
+    );
+    drop(plain);
+
+    let ours = connect_from(&shelf, Some(&cookie), Some("same-origin")).await;
+    assert!(ours.is_ok(), "the shelf's own page must connect");
+    drop(ours);
 }
 
 #[tokio::test]
@@ -291,6 +358,82 @@ async fn revoking_a_credential_closes_the_socket_the_browser_is_holding() {
     })
     .await;
 }
+
+/// A REVOKED BROWSER RECEIVES NOTHING THAT WAS ALREADY QUEUED FOR IT.
+///
+/// The test above proves the socket closes, and it reads to `Close` or an error
+/// while ignoring every binary frame on the way — so it passed unchanged while
+/// the shelf wrote up to `OUTBOUND_BYTE_CAP` of book bytes to a browser the
+/// reader had just revoked. "It closed eventually" and "it stopped being sent
+/// things" are different claims and only the second one is the promise.
+///
+/// The mechanism: `Pipe::close` revokes by dropping the outbound sender, and
+/// tokio's mpsc hands the receiver everything already buffered BEFORE it
+/// reports the close. The pump therefore went on writing queued frames for as
+/// long as the queue lasted.
+#[tokio::test]
+async fn a_revoked_browser_is_sent_nothing_that_was_already_queued() {
+    let shelf = shelf().await;
+    let code = live_code(&shelf);
+    let cookie = sign_in(&shelf, &code).await;
+    let mut socket = connect(&shelf, Some(&cookie)).await.expect("a socket");
+    until("the session", || shelf.state.pipe.live_count() == 1).await;
+    let id = shelf.state.pipe.live_ids()[0];
+
+    /* Queue a pile of frames the browser has not read yet — a book being
+     * streamed is exactly this shape. */
+    const SECRET: &[u8] = b"book bytes the reader revoked access to";
+    for _ in 0..32 {
+        shelf.state.pipe.send(id, SECRET.to_vec());
+    }
+
+    let credential = shelf
+        .state
+        .pipe
+        .credential_of(id)
+        .expect("the credential behind the socket");
+    shelf.state.sessions.revoke(&credential);
+    shelf.state.pipe.close_credential(&credential, "signed out");
+
+    /* Read everything the client is given until the socket ends. Any binary
+     * frame arriving here arrived AFTER the revocation. */
+    let mut after_revocation = 0;
+    let _ = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(message) = socket.next().await {
+            match message {
+                Ok(Message::Binary(bytes)) if bytes == SECRET => after_revocation += 1,
+                Ok(Message::Close(_)) | Err(_) => break,
+                _ => {}
+            }
+        }
+    })
+    .await;
+
+    assert_eq!(
+        after_revocation, 0,
+        "a revoked browser must be sent nothing more; dropping the sender only ends the \
+         channel AFTER tokio has delivered everything already buffered, so the queue has to \
+         be checked rather than trusted to empty itself"
+    );
+}
+
+/* ⚠️ **THE RETRY DEADLINE HAS NO TEST HERE, AND THAT IS A KNOWN GAP.**
+ *
+ * `pump` re-offers a held frame on an ABSOLUTE deadline (`sleep_until`) rather
+ * than a fresh `sleep(RETRY)`, because `select!` rebuilds its futures on every
+ * pass: a relative sleep restarts from zero whenever the outbound arm wins, so
+ * a shelf that is streaming would never retry the frame at all.
+ *
+ * A test was written for it and DELETED, which is worth recording. It filled
+ * the inbox, kept a producer pushing frames toward the browser, sent a sentinel
+ * and waited for it — and it passed against the defect. The producer cannot be
+ * made to outpace the pump reliably: between bursts `outbound.recv()` goes
+ * pending, the relative timer gets its 4 ms, and the sentinel arrives. Keeping
+ * it would have added a case that looks like coverage and distinguishes
+ * nothing, which is the exact shape this suite's own audit found fifty times.
+ *
+ * What would actually cover it is a fake clock inside the pump, or a drain
+ * notification replacing the timer altogether. Neither is here yet. */
 
 #[tokio::test]
 async fn a_revoked_credential_cannot_open_a_second_socket() {
@@ -406,7 +549,7 @@ async fn backpressure_is_not_a_protocol_violation() {
     for _ in 0..(paper_webhost::pipe::INBOX_CAP + 8) {
         if matches!(
             shelf.state.pipe.push(id, vec![0_u8; 16]),
-            Push::Backpressure
+            Push::Backpressure(_)
         ) {
             saw_backpressure = true;
             break;
@@ -417,6 +560,67 @@ async fn backpressure_is_not_a_protocol_violation() {
         shelf.state.pipe.live_count(),
         1,
         "backpressure must not close the session — it is a busy shelf, not a bad client"
+    );
+    drop(socket);
+}
+
+/// A FRAME THAT ARRIVES AT A FULL INBOX MUST STILL ARRIVE.
+///
+/// The test above fills the inbox with `Pipe::push` from the test's own thread,
+/// which is the shelf's side of the wire. That proves the *pipe* pushes back,
+/// and it is blind to the thing that was actually broken: `pump` matched
+/// `Push::Backpressure`, yielded, and let the frame — already read off the
+/// socket, already ACKed — go out of scope. A comment above that line explained
+/// that the browser would retransmit it. Nothing retransmits an application
+/// message the receiver has consumed.
+///
+/// So the sentinel here goes through the REAL socket, into a REAL full inbox,
+/// and the assertion is that it eventually lands once the webview drains — not
+/// that a variant was returned. That is the difference between testing the
+/// component and testing the loop that uses it, and only the second one fails
+/// against the old `pump`.
+#[tokio::test]
+async fn a_frame_that_meets_a_full_inbox_is_delivered_after_the_drain() {
+    let shelf = shelf().await;
+    let code = live_code(&shelf);
+    let cookie = sign_in(&shelf, &code).await;
+    let mut socket = connect(&shelf, Some(&cookie)).await.expect("a socket");
+    until("the session", || shelf.state.pipe.live_count() == 1).await;
+    let id = shelf.state.pipe.live_ids()[0];
+
+    /* Fill the inbox to its byte budget from this side, so the next frame off
+     * the socket meets a closed door. */
+    let filler = vec![0_u8; 1024 * 1024];
+    while matches!(shelf.state.pipe.push(id, filler.clone()), Push::Accepted) {}
+
+    const SENTINEL: &[u8] = b"the frame that must not vanish";
+    socket
+        .send(Message::Binary(SENTINEL.to_vec().into()))
+        .await
+        .expect("the client can always write; the shelf simply stops reading");
+
+    /* Give the pump every chance to lose it before the drain — this is the
+     * window the old code dropped the frame in. */
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    /* Now be the webview: drain, which frees the budget the pump is waiting on. */
+    let mut seen = 0;
+    for _ in 0..200 {
+        for frame in shelf.state.pipe.drain(id, 64) {
+            if frame == SENTINEL {
+                seen += 1;
+            }
+        }
+        if seen > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    assert_eq!(
+        seen, 1,
+        "the frame the inbox refused must be retried and delivered exactly once, \
+         not dropped while the pump waits for a retransmission that never comes"
     );
     drop(socket);
 }

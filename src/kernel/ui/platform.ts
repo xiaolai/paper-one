@@ -61,6 +61,23 @@ export function isTauri(): boolean {
   return '__TAURI_INTERNALS__' in window
 }
 
+const DARK = '(prefers-color-scheme: dark)'
+
+/**
+ * A media query, or null where there is no `matchMedia` to ask.
+ *
+ * ⚠️ THESE HOOKS THREW during render in any environment without it, which is
+ * not a hypothetical: jsdom has no `matchMedia`, so the first component test to
+ * mount something using one failed with `window.matchMedia is not a function`
+ * — at the `useState` initialiser, before anything could catch it. A hook that
+ * reports an OPTIONAL system preference must not be able to take a render down;
+ * the honest answer where the question cannot be asked is "no preference
+ * stated", which is what both defaults below say.
+ */
+function match(query: string): MediaQueryList | null {
+  return typeof window.matchMedia === 'function' ? window.matchMedia(query) : null
+}
+
 /**
  * Whether the reader has asked their system for less movement.
  *
@@ -74,9 +91,10 @@ export function isTauri(): boolean {
  */
 export function usePrefersReducedMotion(): boolean {
   const query = '(prefers-reduced-motion: reduce)'
-  const [reduce, setReduce] = useState(() => window.matchMedia(query).matches)
+  const [reduce, setReduce] = useState(() => match(query)?.matches ?? false)
   useEffect(() => {
-    const media = window.matchMedia(query)
+    const media = match(query)
+    if (media === null) return
     const onChange = (e: MediaQueryListEvent) => setReduce(e.matches)
     media.addEventListener('change', onChange)
     /* Re-read after subscribing, not only before. The lazy initialiser runs
@@ -94,11 +112,10 @@ export function usePrefersReducedMotion(): boolean {
  * default, with an explicit override in Settings.
  */
 export function usePrefersDark(): boolean {
-  const [dark, setDark] = useState(
-    () => window.matchMedia('(prefers-color-scheme: dark)').matches,
-  )
+  const [dark, setDark] = useState(() => match(DARK)?.matches ?? false)
   useEffect(() => {
-    const query = window.matchMedia('(prefers-color-scheme: dark)')
+    const query = match(DARK)
+    if (query === null) return
     const onChange = (e: MediaQueryListEvent) => setDark(e.matches)
     query.addEventListener('change', onChange)
     return () => query.removeEventListener('change', onChange)

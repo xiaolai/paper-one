@@ -62,9 +62,29 @@ export type WebHostAddress =
   /** The server never bound; there is nothing to reach. */
   | { readonly kind: 'unavailable' }
 
-/** One browser holding a credential. */
+/**
+ * One live SOCKET, for the pump.
+ *
+ * ⚠️ NOT what the Browsers pane lists — see [`Browser`]. These ids address
+ * `sessionRecv` and `send`, and they exist only while a tab is open.
+ */
 export interface BrowserSession {
   readonly id: number
+}
+
+/**
+ * One browser holding a credential, connected or not.
+ *
+ * DISTINCT FROM `BrowserSession`, and the distinction is why this exists. The
+ * pane used to list live sockets, so a browser that signed in and closed its
+ * tab vanished from it — while its credential stayed good for ninety days, and
+ * the reader had no way to cut it off before it came back. What a reader means
+ * by "that phone" is the authorization, not the socket it happens to hold.
+ */
+export interface Browser {
+  readonly id: number
+  /** Whether it is connected right now. Shown, not enforced. */
+  readonly connected: boolean
 }
 
 export interface WebHostWire {
@@ -78,7 +98,11 @@ export interface WebHostWire {
   address(): Promise<WebHostAddress>
   beginCode(): Promise<CodeOffer>
   cancelCode(): Promise<void>
+  /** The live sockets — the pump's list. */
   sessions(): Promise<readonly BrowserSession[]>
+  /** Every browser holding a credential — the pane's list. */
+  browsers(): Promise<readonly Browser[]>
+  /** Cut one off, by its DURABLE id from `browsers` — not a socket id. */
   revoke(id: number): Promise<void>
 }
 
@@ -99,6 +123,7 @@ export function tauriWire(): WebHostWire {
     beginCode: () => invoke<CodeOffer>('plugin:webhost|webhost_begin_code'),
     cancelCode: () => invoke<void>('plugin:webhost|webhost_cancel_code'),
     sessions: () => invoke<readonly BrowserSession[]>('plugin:webhost|webhost_sessions'),
+    browsers: () => invoke<readonly Browser[]>('plugin:webhost|webhost_browsers'),
     revoke: (id) => invoke<void>('plugin:webhost|webhost_revoke', { id }),
   }
 }
@@ -106,6 +131,7 @@ export function tauriWire(): WebHostWire {
 /** An in-memory wire, for driving the pane with no plugin and no app. */
 export function fakeWire(overrides: Partial<WebHostWire> = {}): WebHostWire {
   let live: BrowserSession[] = []
+  let paired: Browser[] = []
   let issued = 0
   return {
     status: async () => ({ pluginVersion: '0.0.0-fake', port: 27182, ready: true }),
@@ -119,7 +145,13 @@ export function fakeWire(overrides: Partial<WebHostWire> = {}): WebHostWire {
     },
     cancelCode: async () => {},
     sessions: async () => live,
+    browsers: async () => paired,
     revoke: async (id) => {
+      /* BOTH LISTS, because that is what the real one does: the credential is
+         forgotten and every socket it holds is closed. A fake that dropped only
+         the socket would let a test pass over the exact gap this pair exists to
+         close. */
+      paired = paired.filter((browser) => browser.id !== id)
       live = live.filter((session) => session.id !== id)
     },
     ...overrides,

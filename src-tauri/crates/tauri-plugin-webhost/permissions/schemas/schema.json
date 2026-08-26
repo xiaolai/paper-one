@@ -319,6 +319,18 @@
           "markdownDescription": "Denies the webhost_begin_code command without any pre-configured scope."
         },
         {
+          "description": "Enables the webhost_browsers command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-webhost-browsers",
+          "markdownDescription": "Enables the webhost_browsers command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the webhost_browsers command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-webhost-browsers",
+          "markdownDescription": "Denies the webhost_browsers command without any pre-configured scope."
+        },
+        {
           "description": "Enables the webhost_cancel_code command without any pre-configured scope.",
           "type": "string",
           "const": "allow-webhost-cancel-code",
@@ -403,10 +415,10 @@
           "markdownDescription": "Denies the webhost_status command without any pre-configured scope."
         },
         {
-          "description": "The commands a Paper webview needs from the webhost plugin: the server's\nstatus and bound port; showing and cancelling the six-digit code a human types\ninto a browser; listing and revoking paired browsers; and the frame pipe\n(ready, send, recv) between a browser's socket and the service router.\n\nThe server binds loopback only and answers no service call itself — it carries\nframes to the webview, which holds the router.\n\n#### This default permission set includes:\n\n- `allow-webhost-status`\n- `allow-webhost-address`\n- `allow-webhost-begin-code`\n- `allow-webhost-cancel-code`\n- `allow-webhost-sessions`\n- `allow-webhost-revoke`\n- `allow-webhost-ready`\n- `allow-webhost-send`\n- `allow-webhost-session-recv`",
+          "description": "The commands a Paper webview needs from the webhost plugin: the server's\nstatus and bound port; showing and cancelling the six-digit code a human types\ninto a browser; listing and revoking paired browsers; and the frame pipe\n(ready, send, recv) between a browser's socket and the service router.\n\nThe server binds loopback only and answers no service call itself — it carries\nframes to the webview, which holds the router.\n\n#### This default permission set includes:\n\n- `allow-webhost-status`\n- `allow-webhost-address`\n- `allow-webhost-begin-code`\n- `allow-webhost-cancel-code`\n- `allow-webhost-sessions`\n- `allow-webhost-browsers`\n- `allow-webhost-revoke`\n- `allow-webhost-ready`\n- `allow-webhost-send`\n- `allow-webhost-session-recv`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "The commands a Paper webview needs from the webhost plugin: the server's\nstatus and bound port; showing and cancelling the six-digit code a human types\ninto a browser; listing and revoking paired browsers; and the frame pipe\n(ready, send, recv) between a browser's socket and the service router.\n\nThe server binds loopback only and answers no service call itself — it carries\nframes to the webview, which holds the router.\n\n#### This default permission set includes:\n\n- `allow-webhost-status`\n- `allow-webhost-address`\n- `allow-webhost-begin-code`\n- `allow-webhost-cancel-code`\n- `allow-webhost-sessions`\n- `allow-webhost-revoke`\n- `allow-webhost-ready`\n- `allow-webhost-send`\n- `allow-webhost-session-recv`"
+          "markdownDescription": "The commands a Paper webview needs from the webhost plugin: the server's\nstatus and bound port; showing and cancelling the six-digit code a human types\ninto a browser; listing and revoking paired browsers; and the frame pipe\n(ready, send, recv) between a browser's socket and the service router.\n\nThe server binds loopback only and answers no service call itself — it carries\nframes to the webview, which holds the router.\n\n#### This default permission set includes:\n\n- `allow-webhost-status`\n- `allow-webhost-address`\n- `allow-webhost-begin-code`\n- `allow-webhost-cancel-code`\n- `allow-webhost-sessions`\n- `allow-webhost-browsers`\n- `allow-webhost-revoke`\n- `allow-webhost-ready`\n- `allow-webhost-send`\n- `allow-webhost-session-recv`"
         }
       ]
     }

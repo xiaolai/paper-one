@@ -174,4 +174,86 @@ describe('readingPositions', () => {
 
     expect(positions.get('favourite')).toBe('cfi-new')
   })
+
+  /**
+   * RE-OPENING AT THE SAME PLACE IS ALSO READING IT.
+   *
+   * The test above changes the cfi, so it exercises "moved recently" and not
+   * "read recently" — and `set` used to return early when the cfi matched,
+   * without touching `at`. A reader who opens a favourite, reads a page and
+   * comes back to the same line reports the same cfi every time, so the book
+   * they had open kept the timestamp of the last time they turned a page in it,
+   * aged past the cap, and was evicted out from under them.
+   *
+   * Same cfi, deliberately. That is the whole difference from the case above.
+   */
+  it('re-opening a book at the SAME place saves it from eviction too', () => {
+    const { store } = fakeStore()
+    let clock = 0
+    const positions = readingPositions(store, () => ++clock)
+
+    positions.set('favourite', 'cfi-same')
+    for (let i = 0; i < 400; i += 1) positions.set(`book-${i}`, `cfi-${i}`)
+    /* `touch`, not `set` — the reader opened it and has not moved yet, which is
+       exactly the case `set` cannot see. */
+    positions.touch('favourite')
+    for (let i = 400; i < 600; i += 1) positions.set(`book-${i}`, `cfi-${i}`)
+
+    expect(positions.get('favourite')).toBe('cfi-same')
+  })
+
+  it('touching a book it has never seen writes nothing', () => {
+    /* Opening a book for the first time is `set`'s job: there is no position to
+       refresh, and inventing one would put a row with no cfi in the store. */
+    const setItem = vi.fn()
+    let held: string | null = null
+    const store: PositionStore = {
+      getItem: () => held,
+      setItem: (_k, v) => {
+        held = v
+        setItem(v)
+      },
+    }
+    readingPositions(store).touch('never-opened')
+    expect(setItem).not.toHaveBeenCalled()
+  })
+
+  /**
+   * A BOOK ID IS A KEY FROM STORAGE, AND STORAGE IS NOT TRUSTED INPUT.
+   *
+   * `JSON.parse` makes `__proto__` a real own property — it does not invoke the
+   * setter. Assigning it onto a plain `{}` a moment later DOES: the map's
+   * prototype is replaced and the key becomes non-own. `Object.entries` in
+   * `write` then cannot see it, so the row is silently dropped the next time
+   * anything else is written, while `get` keeps answering from the prototype
+   * until then. A position that reads back correctly and vanishes on the next
+   * unrelated write is the worst shape this could take.
+   *
+   * The round trip is the assertion, not the reading: reading alone passes
+   * either way, which is what makes this worth writing down.
+   */
+  describe('a book id that collides with an object\'s own machinery', () => {
+    for (const hostile of ['__proto__', 'constructor', 'toString']) {
+      it(`keeps a position stored under "${hostile}" across a later write`, () => {
+        const { store } = fakeStore(
+          `{"${hostile}":{"cfi":"cfi-hostile","at":1},"real":{"cfi":"cfi-real","at":2}}`,
+        )
+        const positions = readingPositions(store, () => 3)
+
+        expect(positions.get(hostile)).toBe('cfi-hostile')
+        /* An unrelated write is what re-serialises the map. */
+        positions.set('another', 'cfi-another')
+        expect(positions.get(hostile), `${hostile} must survive a re-serialisation`).toBe('cfi-hostile')
+        expect(positions.get('real')).toBe('cfi-real')
+      })
+    }
+
+    it('answers null for inherited names nothing ever stored', () => {
+      const { store } = fakeStore()
+      const positions = readingPositions(store)
+      for (const name of ['constructor', 'toString', 'hasOwnProperty', '__proto__']) {
+        expect(positions.get(name), `${name} is not a stored position`).toBeNull()
+      }
+    })
+  })
 })

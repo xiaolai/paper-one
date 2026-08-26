@@ -8,7 +8,13 @@
     "outDir": ".types/app",
     "tsBuildInfoFile": ".types/app.tsbuildinfo"
   },
-  "files": ["src/main.tsx", "src/vite-env.d.ts"],
+  // `src/main.web.tsx` IS THE BROWSER CLIENT'S COMPOSITION ROOT and was absent
+  // from this list, so `pnpm typecheck` never saw it — not its session and
+  // channel wiring, not its ACL list, not its tab composition. A second entry
+  // is easy to add to the bundler and easy to forget here, and the two failures
+  // look nothing alike: the build kept working, and the types were simply never
+  // checked. It went in with a real error in it.
+  "files": ["src/main.tsx", "src/main.web.tsx", "src/vite-env.d.ts"],
   "include": ["src/app/**/*"],
   "exclude": ["src/app/**/*.test.ts", "src/app/**/*.test.tsx"],
   "references": [{ "path": "./tsconfig.kernel.json" }, { "path": "./tsconfig.capabilities.json" }]

@@ -252,7 +252,9 @@ function PlaceRow({
   now: number
   reachable: boolean
   onGoTo?: (target: JumpTarget) => void
-  onDelete: (bookmark: Bookmark) => void
+  /* Optional for the panel's reason: a session with only `mark:read` draws no
+     bin here either. See `MarginaliaProps.onDeleteBookmark`. */
+  onDelete?: ((bookmark: Bookmark) => void) | undefined
 }) {
   /* `bookmarkFrom` collapses the whitespace before storing, so this is already
      done for anything written since that landed. It stays for the rows written
@@ -280,27 +282,77 @@ function PlaceRow({
       </button>
       <div className={styles.noteSource}>
         <span>{relativeTime(bookmark.createdAt, now)}</span>
-        <button
-          type="button"
-          className={styles.noteDelete}
-          title="Remove this bookmark"
-          /* NAMES THE PLACE. Several bookmarks in one chapter are explicitly
-             supported, so the chapter alone does not tell two of them apart;
-             the remembered line is what does. */
-          aria-label={`Remove this bookmark — ${line || chapter}`}
-          onClick={() => onDelete(bookmark)}
-        >
-          <Trash2 size={ICON.inline} strokeWidth={ICON.stroke} />
-        </button>
+        {onDelete && (
+          <button
+            type="button"
+            className={styles.noteDelete}
+            title="Remove this bookmark"
+            /* NAMES THE PLACE. Several bookmarks in one chapter are explicitly
+               supported, so the chapter alone does not tell two of them apart;
+               the remembered line is what does. */
+            aria-label={`Remove this bookmark — ${line || chapter}`}
+            onClick={() => onDelete(bookmark)}
+          >
+            <Trash2 size={ICON.inline} strokeWidth={ICON.stroke} />
+          </button>
+        )}
       </div>
     </>
   )
 }
 
 export interface MarginaliaProps {
-  marks: MarksView
-  /** Where a mark becomes a made thing — §15's line between note and card. */
-  cards: CardsView
+  /**
+   * What browsing marks needs — five members, not all fourteen of `MarksView`.
+   *
+   * NARROWED for the same reason `SearchPanel`'s `book` was: this pane reads
+   * `all`, `allBookmarks`, `persistent`, `loadAll` and `setNote`, and declaring
+   * the other nine made it mountable only by a host that owns a `MarkStorage`.
+   * The browser client has a channel and `mark.list`, which is enough for these
+   * and not for the fourteen.
+   *
+   * ⚠️ `remove` WAS IN THIS LIST AND IS NOT CALLED ANYWHERE IN THIS FILE. The
+   * panel deletes through `onDelete`, deliberately — the note beside that prop
+   * explains why calling `marks.remove` straight left the highlight drawn on
+   * the page. So the member was a requirement on every host with no behaviour
+   * behind it, which is exactly the coupling the narrowing was for.
+   *
+   * Indexed access into `MarksView` rather than restated, so the two cannot
+   * drift, and every existing caller passes a whole `MarksView` and still
+   * type-checks — a narrower prop accepts a wider argument.
+   */
+  marks: {
+    readonly all: MarksView['all']
+    readonly allBookmarks: MarksView['allBookmarks']
+    readonly persistent: MarksView['persistent']
+    /**
+     * ⚠️ OPTIONAL, AND ABSENT MEANS THE NOTE IS READ-ONLY.
+     *
+     * `setNote` reaches `mark.set`, which the table gates on `mark:write`. The
+     * browser client holds one grant and it is a READ one, so the call is
+     * refused every time — and the host that serves a browser explains at
+     * length why widening that is a decision and not a line to delete.
+     *
+     * Requiring it here meant the browser had to pass one, so every row offered
+     * "Add a note", accepted the typing, and threw it away on commit. The
+     * reader loses the note they just wrote and is told nothing. Not drawing
+     * the editor is the accurate rendering of a session that may read marks.
+     */
+    readonly setNote?: MarksView['setNote'] | undefined
+    /* Called on mount. On the desktop this is one read PER BOOK, which is why
+     * the pane pays for it only when opened; over a channel `mark.list` with no
+     * book is a single call, so a browser host's `loadAll` is cheap. */
+    readonly loadAll: MarksView['loadAll']
+  }
+  /**
+   * Where a mark becomes a made thing — §15's line between note and card.
+   *
+   * OPTIONAL, AND ABSENT MEANS THE CONTROL IS NOT DRAWN. `make` is synchronous
+   * and hands a `Card` straight back; a host whose cards live behind a channel
+   * cannot answer that shape, and a stub returning a fabricated card would put
+   * a made thing on screen that the shelf never received.
+   */
+  cards?: CardsView | undefined
   /** The open book, so its marks can be shown first. Null when none is open. */
   bookId: string | null
   /**
@@ -310,10 +362,15 @@ export interface MarginaliaProps {
    * annotation and its cached Range exactly where they were: the note vanished
    * from this list while its highlight stayed on the text, and the margin went
    * on showing it, until something else happened to force a redraw.
+   *
+   * OPTIONAL for the reason `marks.setNote` is: deletion is `mark:write`, which
+   * a browser session never holds. Absent, no delete control is drawn on either
+   * a mark or a bookmark — the two travel together because a panel that can
+   * delete one and not the other is a distinction no reader could explain.
    */
-  onDelete: (mark: Annotation) => void
+  onDelete?: ((mark: Annotation) => void) | undefined
   /** Takes a bookmark off, from any book — routed by id through the store. */
-  onDeleteBookmark: (bookmark: Bookmark) => void
+  onDeleteBookmark?: ((bookmark: Bookmark) => void) | undefined
   /** Which keyboard this reader has, so the empty state names a real key. */
   platform: Platform
   /** Injected so a test can assert an age without waiting for one to pass. */
@@ -623,12 +680,20 @@ export function Marginalia({
             <span className={styles.noteBody}>{mark.text}</span>
           </button>
 
-          {editing === mark.id ? (
+          {/* WITHOUT `setNote` THE NOTE IS TEXT, not a control. Offering the
+              editor to a session that cannot write means the reader types a
+              note, commits it, and watches it disappear — the refusal arrives
+              after the editor has closed. A row with no note simply shows
+              nothing, which is true: there is no note, and this reader cannot
+              add one here. */}
+          {marks.setNote === undefined ? (
+            mark.note ? <div className={styles.noteComment}>{mark.note}</div> : null
+          ) : editing === mark.id ? (
             <NoteEditor
               initial={mark.note}
               /* THE MARK, not its id — this list is cross-book, and a note
                  edited on another book's row was written to the open one. */
-              onCommit={(value) => marks.setNote(mark, value)}
+              onCommit={(value) => marks.setNote?.(mark, value)}
               onDone={() => setEditing(null)}
             />
           ) : (
@@ -647,24 +712,30 @@ export function Marginalia({
               {/* Notes stay raw; cards are made. This is the only place the
                   one becomes the other, which is what keeps the distinction
                   §15 draws visible rather than nominal. */}
-              <button
-                type="button"
-                className={styles.noteDelete}
-                aria-label="Make a card"
-                title="Make a card"
-                onClick={() => cards.make(cardFromMark(mark))}
-              >
-                <Layers size={ICON.inline} strokeWidth={ICON.stroke} />
-              </button>
-              <button
-                type="button"
-                className={styles.noteDelete}
-                aria-label="Delete mark"
-                title="Delete mark"
-                onClick={() => onDelete(mark)}
-              >
-                <Trash2 size={ICON.inline} strokeWidth={ICON.stroke} />
-              </button>
+              {cards !== undefined && (
+                <button
+                  type="button"
+                  className={styles.noteDelete}
+                  aria-label="Make a card"
+                  title="Make a card"
+                  onClick={() => cards.make(cardFromMark(mark))}
+                >
+                  <Layers size={ICON.inline} strokeWidth={ICON.stroke} />
+                </button>
+              )}
+              {/* Not drawn without `onDelete` — see the prop. A disabled bin
+                  would claim the mark is deletable and merely not now. */}
+              {onDelete && (
+                <button
+                  type="button"
+                  className={styles.noteDelete}
+                  aria-label="Delete mark"
+                  title="Delete mark"
+                  onClick={() => onDelete(mark)}
+                >
+                  <Trash2 size={ICON.inline} strokeWidth={ICON.stroke} />
+                </button>
+              )}
             </span>
           </div>
           </>

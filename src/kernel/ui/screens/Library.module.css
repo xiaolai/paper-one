@@ -433,6 +433,58 @@
   }
 }
 
+/* A PHONE, which is a different problem from a narrow window.
+ *
+ * The rule above is sized against 720px and its own comment says so. At 393 —
+ * an iPhone 15's CSS viewport — the six tracks reserve `--row-thumb` 22 +
+ * `--col-progress` 104 + `--col-when` 82 + `--control-sm` 28, plus five
+ * `--space-14` gaps and 40px of list padding either side. That is 306px of
+ * furniture in 393px of screen, leaving the title about 39. A book title in
+ * thirty-nine pixels is not a shelf.
+ *
+ * So the two DATA columns go and the two text columns stay. Progress and the
+ * date are what a reader scans a shelf for least, and the title is what they
+ * scan for always — the same judgement the 860 rule makes about the author,
+ * one step further. Progress is not lost: it is on the book's own row in the
+ * reader, which is where somebody deciding whether to carry on looks anyway.
+ *
+ * Measured after this rule: the title gets 271px at 393. */
+@media (max-width: 600px) {
+  .library {
+    --shelf-pad-x: var(--space-16);
+  }
+
+  .list {
+    --list-cols:
+      var(--row-thumb) minmax(0, 1fr) 0
+      0 0 var(--control-sm);
+    /* THE LIST'S OWN PADDING, which is a literal `--space-40` rather than
+       `--shelf-pad-x` and so does not follow the rule above. Eighty pixels of
+       the three hundred and ninety-three go to margins otherwise. */
+    padding: 0 var(--space-16) var(--space-24);
+  }
+
+  /* The gap is five times over, once per track boundary — 70px at
+     `--space-14`, which is a fifth of the screen spent on nothing. */
+  .rowOpen {
+    gap: var(--space-8);
+  }
+
+  /* SAME TECHNIQUE AS ABOVE — the track goes to zero and the element stays, so
+     nothing slides a column left. See that comment; it is the trap this file
+     has already paid for once. */
+  .rowAuthor,
+  .rowProgress,
+  .rowWhen {
+    padding: 0;
+    /* ⚠️ `.rowProgress` NEEDS THIS AND THE OTHER TWO DO NOT. They are text
+       cells that already carry `overflow: hidden` to ellipsise; `.rowProgress`
+       is a flex box with a bar in it and clips nothing. Zero its track without
+       this and the bar is drawn outside its column, across the title. */
+    overflow: hidden;
+  }
+}
+
 /* `flex: 0 0 auto` because the body is a flex column now: a grid of two
    thousand rows would otherwise be shrunk to the height of the box that is
    supposed to scroll it, and nothing would move. */

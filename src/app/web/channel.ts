@@ -143,9 +143,21 @@ export async function connect(options: ConnectOptions = {}): Promise<ShelfChanne
   socket.onmessage = (event) => {
     if (!(event.data instanceof ArrayBuffer)) {
       /* TEXT IS NOT THE PROTOCOL, and the shelf closes a socket that sends it.
-       * Ignoring rather than throwing: an exception in a socket callback has
-       * nowhere to go, and the shelf has already decided this connection is
-       * over. */
+       *
+       * ⚠️ THIS USED TO `return`, on the reasoning that the shelf had already
+       * decided the connection was over. It has — but the CLOSE has not arrived
+       * yet, and until it does every request already in flight goes on waiting.
+       * They then fail one by one at the 30s envelope timeout, which the reader
+       * sees as the shelf hanging rather than as a connection that ended. And
+       * if the frame came from something that is not our shelf, no close is
+       * coming at all.
+       *
+       * A peer that has broken the envelope's one rule is a peer this side
+       * cannot reason about, so the channel is declared lost at once and the
+       * socket closed from here. `shut` settles every pending call with a
+       * transport error, which is what turns a silent wait into a message. */
+      shut('lost')
+      socket.close()
       return
     }
     try {

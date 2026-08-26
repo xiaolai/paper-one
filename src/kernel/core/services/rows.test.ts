@@ -200,7 +200,13 @@ describe('markRow', () => {
    * field, and publishing them would roughly triple a mark row on every
    * listing to serve nobody currently asking.
    */
-  it('drops the stamps and the re-find context, and says so by its keys', () => {
+  /* THE RE-FIND CONTEXT IS ON THE WIRE NOW (phase 19). This test used to pin
+     its ABSENCE, and that absence was a defect: a mark made over the wire was
+     born without the words either side of it, so the day its CFI stopped
+     resolving it could not be found again — while a desktop-made mark could.
+     The browser client is the first real producer of marks over this wire,
+     which is what made the gap matter. Only the stamps are dropped now. */
+  it('carries the re-find context and drops only the stamps, and says so by its keys', () => {
     expect(Object.keys(markRow(MARK)).sort()).toEqual([
       'bookId',
       'cfi',
@@ -209,8 +215,10 @@ describe('markRow', () => {
       'id',
       'kind',
       'note',
+      'prefix',
       'sectionIndex',
       'style',
+      'suffix',
       'text',
       'tint',
     ])

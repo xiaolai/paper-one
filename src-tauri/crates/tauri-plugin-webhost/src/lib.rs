@@ -57,6 +57,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::webhost_begin_code,
             commands::webhost_cancel_code,
             commands::webhost_sessions,
+            commands::webhost_browsers,
             commands::webhost_revoke,
             commands::webhost_ready,
             commands::webhost_send,

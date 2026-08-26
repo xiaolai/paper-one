@@ -198,6 +198,19 @@ export async function coverUrl(fs: VaultFs, path: string): Promise<string | null
  * `cover.webp` costs one extra `readFile` that misses, for books imported
  * before today, once per cell.
  */
+/**
+ * Where a jacket comes from, as far as a VIEW is concerned.
+ *
+ * A component drawing a cover needs "a URL for this book, or null" and nothing
+ * else. It should not know what a `VaultFs` is, which is why this is a function
+ * and not a filesystem: the desktop binds `coverIn` over the real vault, and a
+ * browser — which has no vault — can bind something that fetches over its
+ * channel without `BookCover` learning a second way to exist.
+ *
+ * `null` means "no jacket", never "not looked yet". The caller draws the tint.
+ */
+export type CoverSource = (bookId: string) => Promise<string | null>
+
 export async function coverIn(fs: VaultFs, bookId: string): Promise<string | null> {
   return (await coverUrl(fs, coverPathIn(bookId))) ?? coverUrl(fs, legacyCoverPathIn(bookId))
 }

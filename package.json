@@ -36,6 +36,8 @@
     "architecture:check": "node scripts/architecture-check.mjs",
     "compositions:check": "node scripts/check-compositions.mjs",
     "css:check": "node scripts/check-dead-css.mjs",
+    "css:tokens": "node scripts/check-css-tokens.mjs",
+    "browser:check": "node scripts/check-browser-safe.mjs",
     "directives:check": "node scripts/check-inert-directives.mjs",
     "docs:notices": "node scripts/write-third-party-notices.mjs",
     "capability:remove": "node scripts/capability-remove.mjs",

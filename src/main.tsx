@@ -28,7 +28,7 @@ import '@fontsource/ibm-plex-mono/500.css'
  * dependency-cruiser the specifier maps to the desktop file
  * (`tsconfig.base.json` `paths`): all three export the same shape.
  * `.dependency-cruiser.cjs` holds this file to exactly these imports. */
-import { buildServices, composeCapabilities, flushBeforeClose, createKernelServices, defaultDiagnostics, kernelApi, serviceClients, tauriSizePort } from './kernel'
+import { buildServices, composeCapabilities, flushBeforeClose, createKernelServices, defaultDiagnostics, kernelApi, serviceClients } from './kernel'
 import {
   App,
   CLOSE_DRAIN_MS,
@@ -50,6 +50,7 @@ import {
   timed,
   watchFs,
   type IndexedBook,
+  tauriSizePort,
 } from './kernel/ui'
 import { armShutdownInBackground } from './app/shutdown'
 import { capabilities } from 'virtual:paper-composition'

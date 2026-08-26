@@ -2,7 +2,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BrowsersPane } from './BrowsersPane'
-import { fakeWire, type BrowserSession } from '../lib/wire'
+import { fakeWire, type Browser } from '../lib/wire'
 
 afterEach(() => {
   cleanup()
@@ -149,28 +149,54 @@ describe('BrowsersPane', () => {
     expect(cancelCode).toHaveBeenCalled()
   })
 
-  it('lists connected browsers and disconnects one', async () => {
-    let live: BrowserSession[] = [{ id: 1 }, { id: 2 }]
+  it('lists paired browsers and revokes one', async () => {
+    let paired: Browser[] = [
+      { id: 1, connected: true },
+      { id: 2, connected: true },
+    ]
     const revoke = vi.fn(async (id: number) => {
-      live = live.filter((session) => session.id !== id)
+      paired = paired.filter((browser) => browser.id !== id)
     })
-    render(<BrowsersPane wire={fakeWire({ sessions: async () => live, revoke })} />)
+    render(<BrowsersPane wire={fakeWire({ browsers: async () => paired, revoke })} />)
 
     expect(await screen.findByText('Browser 1')).toBeTruthy()
     expect(await screen.findByText('Browser 2')).toBeTruthy()
 
-    fireEvent.click(screen.getAllByRole('button', { name: 'Disconnect' })[0]!)
+    fireEvent.click(screen.getAllByRole('button', { name: 'Revoke' })[0]!)
     expect(revoke).toHaveBeenCalledWith(1)
     await waitFor(() => expect(screen.queryByText('Browser 1')).toBeNull())
     expect(screen.getByText('Browser 2')).toBeTruthy()
   })
 
-  it('shows nothing about browsers when none are connected', async () => {
+  /**
+   * A BROWSER THAT IS AWAY IS STILL A BROWSER, and this pane could not say so.
+   *
+   * It listed live SOCKETS. A phone that signed in and closed the tab holds a
+   * credential for ninety days and no socket, so it vanished from the only list
+   * there was — and the reader had no way to cut it off before it reconnected.
+   * "Revoke this browser" was only possible while the browser happened to be
+   * looking.
+   */
+  it('lists a browser that is not connected, and can revoke it', async () => {
+    const revoke = vi.fn(async () => {})
+    render(
+      <BrowsersPane
+        wire={fakeWire({ browsers: async () => [{ id: 7, connected: false }], revoke })}
+      />,
+    )
+
+    expect(await screen.findByText(/Browser 7/)).toBeTruthy()
+    expect(screen.getByText(/away/)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Revoke' }))
+    expect(revoke).toHaveBeenCalledWith(7)
+  })
+
+  it('shows nothing about browsers when none are paired', async () => {
     /* An empty list with a heading over it is a pane describing a feature the
      * reader is not using. */
     render(<BrowsersPane wire={fakeWire()} />)
     await screen.findByRole('button', { name: 'Show code' })
-    expect(screen.queryByText('Connected browsers')).toBeNull()
+    expect(screen.queryByText('Paired browsers')).toBeNull()
   })
 
   it('surfaces a refusal from the plugin rather than swallowing it', async () => {

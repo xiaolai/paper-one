@@ -53,38 +53,6 @@
   font-size: var(--text-ui);
 }
 
-/* The shelf. A LIST, not a grid: the desktop's covers come from a local vault
-   this client does not have, and drawing empty jackets would be worse than
-   drawing none. Sized for a thumb throughout. */
-
-.shelf {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-16);
-  padding: var(--space-24) var(--space-16);
-  padding-bottom: max(var(--space-24), env(safe-area-inset-bottom));
-  max-width: var(--prose-wide);
-  margin: 0 auto;
-}
-
-.shelf-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-12);
-}
-
-.shelf-head h1 {
-  font-size: var(--text-title);
-  font-weight: 500;
-  margin: 0;
-}
-
-.shelf-count {
-  font-size: var(--text-small);
-  color: var(--muted);
-}
-
 /* AMBER, this design system's colour for something the app is telling you.
    A stale shelf is not an error the reader caused. */
 .shelf-note {
@@ -98,72 +66,132 @@
   line-height: 1.45;
 }
 
-.shelf-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-}
+/* THE CLIENT'S OWN BUTTON. `.gate button` does not reach here, so without this
+   it renders at 11px in system-ui — buttons inherit neither font nor size.
+   Found by looking at it; no check over declarations can see an unstyled
+   control.
 
-.shelf-row {
-  display: flex;
-  flex-direction: column;
-  border-bottom: 1px solid var(--line);
-}
+   ⚠️ AND IT IS A CLASS, NOT A DESCENDANT SELECTOR. It was `.shelf button`,
+   which was correct while the shelf held exactly one button — and captured all
+   1 961 of them the day each row became one, drawing every book as a giant pill
+   with its border through the title. `.shelf button` is (0,1,1) and the row's
+   own class was (0,1,0), so the row's `background: none; border: 0` lost.
 
-/* THE WHOLE ROW IS THE TARGET, and it is a button.
- *
- * A div with a click handler is not reachable by keyboard and is announced as
- * text, so a reader using either would find a library they cannot open. The
- * element carries no button chrome — a shelf row that looked like a form
- * control would be the client imitating the design system again — but it keeps
- * the platform's touch minimum, which the row was already reserving before
- * anything was tappable. */
-.shelf-open {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  width: 100%;
-  padding: var(--space-12) 0;
-  min-height: var(--control-lg);
-  justify-content: center;
-  /* Buttons inherit neither font nor colour nor alignment. Every one of these
-     is undoing a default, not choosing a value. */
+   A descendant selector over an element TYPE is a rule about a shape of DOM,
+   and the DOM changed underneath it. The hand-rolled shelf is gone now
+   (WI-19.7) and this is the last of its classes. */
+.shelf-signout {
+  flex: 0 0 auto;
   font: inherit;
-  color: inherit;
-  text-align: start;
-  background: none;
-  border: 0;
-  cursor: pointer;
-}
-
-.shelf-open:hover .shelf-title {
-  color: var(--accent);
-}
-
-.shelf-title {
-  font-size: var(--text-body);
-  color: var(--ink);
-}
-
-.shelf-author {
   font-size: var(--text-small);
-  color: var(--muted);
-}
-
-/* THE SHELF'S OWN BUTTON. `.gate button` does not reach here, so this one
-   rendered at 11px in system-ui — buttons inherit neither font nor size, and
-   a rule scoped to one screen leaves every other screen's button bare. Found
-   by looking at it; no check over declarations can see an unstyled control. */
-.shelf button {
-  align-self: flex-start;
-  font: inherit;
-  font-size: var(--text-ui);
-  padding: 0 var(--space-24);
-  min-height: var(--control-lg);
+  padding: 0 var(--space-12);
+  /* `--control-sm`, not `--control-lg`. It shares a line with the title now,
+     and a full-size pill there would read as the shelf's primary action —
+     which disconnecting the browser is the opposite of. Still a real touch
+     target: `--control-sm` is the design system's own compact minimum. */
+  min-height: var(--control-sm);
   border: 1px solid var(--line-3);
   border-radius: var(--radius-pill);
   background: var(--surface);
-  color: var(--ink);
+  color: var(--muted);
+}
+
+/* THE BROWSER CLIENT'S SHELL, around the kernel's own screens (WI-19.7).
+ *
+ * `screens/Library.tsx` is `position: absolute; inset: 0` — it expects to fill
+ * a positioned ancestor, which on the desktop is `WindowShell`. A browser has
+ * no window chrome, so without `.web-stage` it fills the VIEWPORT and covers
+ * anything this client draws beside it: the first attempt put the stale notice
+ * and the disconnect button underneath the shelf, invisible.
+ *
+ * The safe-area insets are here rather than on the screen because they are a
+ * fact about this HOST, not about the shelf. A desktop window has no notch. */
+/* THE INSET BELONGS TO WHATEVER IS AT THE EDGE — NOT TO THE SHELL.
+ *
+ * This had `padding-bottom: env(safe-area-inset-bottom)`, and the tab bar has
+ * the same inset inside itself, so on a phone with a home indicator the inset
+ * was applied TWICE: the shell lifted the whole bar off the bottom edge, and
+ * the bar padded itself again. The result was a 34px band of `body` colour
+ * under the tab bar, saved to the Home Screen — wash, not surface, which is
+ * how it was diagnosed from a screenshot: the shell had no background, so
+ * the gap showed the page behind it.
+ *
+ * Same rule the reader's progress foot already follows: the element that
+ * touches the glass owns the inset, once. The shell reaches the glass and
+ * paints it, so nothing can show through even if a screen ends short. */
+.web-shell {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  background: var(--surface);
+}
+
+.web-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-8);
+  padding: var(--space-8) var(--space-16);
+  /* `max`, NOT the inset alone: on a phone with no notch the inset is 0 and the
+     button would touch the edge of the glass. */
+  padding-top: max(var(--space-8), env(safe-area-inset-top));
+  padding-left: max(var(--space-16), env(safe-area-inset-left));
+  padding-right: max(var(--space-16), env(safe-area-inset-right));
+}
+
+/* THE POSITIONED ANCESTOR the shelf anchors to. `min-height: 0` because a flex
+   child's default `min-height: auto` refuses to shrink below its content, and
+   a shelf of 1 961 rows would push the shell taller than the screen. */
+/* A FLEX COLUMN, not just a flex item. `.web-stage-list` inside it is
+   `flex: 1 1 auto`, and a flex item with no flex container to grow in has
+   no height at all — the shelf under the Continue strip collapsed to zero
+   and 1 961 books were in the DOM and nowhere on screen. Found by looking:
+   the probe counted rows, and rows it could count. */
+.web-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* THE TAB SCREENS — Cards and You. A full-width surface with a 30px serif
+   title, from the mockup; the shelf's own toolbar takes the Library's. */
+.web-screen {
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: 0 var(--space-20) var(--space-24);
+  padding-top: max(var(--space-8), env(safe-area-inset-top));
+}
+
+.web-screen-title {
+  margin: 0 0 var(--space-14);
+  font-size: var(--text-title);
+  font-weight: 400;
+  letter-spacing: var(--track-tight);
+}
+
+/* The shelf, below the Continue strip. `Library` is `position: absolute;
+   inset: 0` and needs a positioned box of its own that the strip does not
+   sit inside. */
+.web-stage-list {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* THE DISCONNECT, at the foot of You. `.shelf-signout` gives it the pill;
+   this gives it room and takes it off the shelf's compact size — under You
+   it is the screen's one action, not a chip beside a title. */
+.web-signout {
+  align-self: flex-start;
+  margin-top: var(--space-24);
+  min-height: var(--control-lg);
+  padding: 0 var(--space-20);
+  font-size: var(--text-ui);
 }

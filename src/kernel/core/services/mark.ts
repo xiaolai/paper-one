@@ -103,13 +103,16 @@ export function markAdd(env: ServiceEnvironment) {
        * wrong for every other; a caller that knows says so. */
       sectionIndex: num(input, 'section') ?? 0,
       text: str(input, 'text') ?? '',
-      prefix: '',
-      suffix: '',
+      /* From the wire since phase 19; empty when the caller did not know. See
+       * the table row — a mark with no context is one that cannot be found
+       * again once its CFI stops resolving. */
+      prefix: str(input, 'prefix') ?? '',
+      suffix: str(input, 'suffix') ?? '',
       note: str(input, 'note') ?? '',
       kind,
       tint,
       style: 'fill',
-      chapter: '',
+      chapter: str(input, 'chapter') ?? '',
     })
     await env.services.marks.add(mark)
     return markRow(mark)

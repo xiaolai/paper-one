@@ -21,7 +21,7 @@ import {
 } from '../../core/metrics'
 import { bookAccent } from '../../core/bookAccent'
 import { citation, type Source } from '../../core/citation'
-import { decideLookUp, hasDictionary, isLookUpTerm, lookUp } from '../lookUp'
+import { decideLookUp, hasDictionary, isLookUpTerm } from '../lookUp'
 import { NO_GLOSS, type GlossProvider, type LookUpMode } from '../../core/gloss'
 import { NOOP_DIAGNOSTICS, type Diagnostics } from '../../core/ports'
 import { askGloss, useGloss } from '../hooks/useGloss'
@@ -67,6 +67,17 @@ export interface ReaderProps {
    * test.
    */
   gloss?: GlossProvider
+  /**
+   * Hand a term to the SYSTEM dictionary, when this host has one.
+   *
+   * A PROP RATHER THAN AN IMPORT, and that is what makes this screen bundlable
+   * for a browser. The implementation is one `invoke`, so importing it put the
+   * whole eighty-module reading surface behind `@tauri-apps` — see
+   * `lookUpTauri.ts`. The desktop passes the real one; a browser passes
+   * nothing and the control is absent, which is byte for byte what already
+   * happens on Windows and Linux, where `hasDictionary` is false.
+   */
+  onSystemLookUp?: (term: string) => Promise<void>
   /** The reader's stored `Look up` preference. */
   lookUpMode?: LookUpMode
   /**
@@ -179,6 +190,7 @@ export function Reader({
   book,
   gloss: glossProvider = NO_GLOSS,
   lookUpMode = 'system',
+  onSystemLookUp,
   diagnostics = NOOP_DIAGNOSTICS,
   marks,
   marking,
@@ -242,7 +254,17 @@ export function Reader({
      decide it: the platform's dictionary, whether a gloss is bound, and the
      reader's preference. `decideLookUp` is the rule; this is where it lands. */
   const gloss = useGloss(glossProvider)
-  const lookUpAction = decideLookUp(hasDictionary(platform), glossProvider.available, lookUpMode)
+  /* `onSystemLookUp !== undefined` IS PART OF THE QUESTION, not a guard bolted
+     on. `hasDictionary` asks whether this PLATFORM has a dictionary; whether
+     this screen was handed the means to reach it is a different fact, and after
+     WI-19.3 they can differ — a browser is given no binding. Drawing a control
+     that cannot act is the failure `hasDictionary` exists to prevent, so the
+     two are answered together. */
+  const lookUpAction = decideLookUp(
+    onSystemLookUp !== undefined && hasDictionary(platform),
+    glossProvider.available,
+    lookUpMode,
+  )
   /* THE SENTENCE, or today's answer (WI-16.4). `askGloss` walks the document
      for the sentence the term really sits in and falls back to the
      32-character window when it cannot vouch for one — so the worst outcome is
@@ -877,7 +899,7 @@ export function Reader({
                                it — and the reader's next act is usually to mark
                                the word they have just understood. */
                             if (lookUpAction === 'system' || lookUpAction === 'both') {
-                              void lookUp(term).catch((cause: unknown) => {
+                              void onSystemLookUp?.(term).catch((cause: unknown) => {
                                 console.error('Paper: could not look that up', cause)
                                 setNotice('That could not be looked up.')
                               })

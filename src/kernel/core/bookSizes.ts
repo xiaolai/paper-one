@@ -1,11 +1,18 @@
-import { BaseDirectory, stat, readDir } from '@tauri-apps/plugin-fs'
 import { BOOKS_DIR, folderOf } from './bookFolder'
 import { CONTENT_EXTENSIONS } from './bookVault'
 import type { SizePort } from './ports'
 
 /**
- * What the app can measure, over the Tauri filesystem plugin — the kernel's
- * `SizePort` (phase 11), on the desktop side (phase 18).
+ * How a `SizePort` measures a library — the kernel's `SizePort` (phase 11), as
+ * a walk over two callbacks and nothing else (phase 19).
+ *
+ * ⚠️ **THE TAURI BINDING IS `bookSizesTauri.ts`, and it is a separate FILE on
+ * purpose.** It used to be the last eleven lines of this one, under a comment
+ * claiming it was separated — which was true of the functions and false of the
+ * module. The import graph resolves files, so importing `sizePortOver` pulled
+ * `@tauri-apps/plugin-fs` behind it, and through `src/kernel/index.ts`'s
+ * re-export of `tauriSizePort` that made the kernel's whole public entry
+ * Tauri-bound. See that file's header for what it cost.
  *
  * ## Why this did not exist until now
  *
@@ -51,11 +58,14 @@ import type { SizePort } from './ports'
 /**
  * The two questions a size port asks of a filesystem.
  *
- * SEPARATED FROM THE TAURI BINDING for the same reason `readRangeOf` is
- * separated from `tauriVaultFs`: the walk below has real logic in it — an
- * extension preference order and a partial-answer rule — and none of that is
- * testable through a plugin that only exists inside a webview. The binding is
- * two lines; the logic is the rest of this file and has a test.
+ * SEPARATED FROM THE TAURI BINDING — into `bookSizesTauri.ts`, a different
+ * file — for the same reason `readRangeOf` is separated from `tauriVaultFs`:
+ * the walk below has real logic in it, an extension preference order and a
+ * partial-answer rule, and none of that is testable through a plugin that only
+ * exists inside a webview.
+ *
+ * A host that can measure implements these two; a host that cannot does not
+ * import this module's binding, because there is nothing here to import.
  */
 export interface SizeOps {
   /** Bytes at one path, or null when it is not a file that could be measured. */
@@ -115,26 +125,3 @@ export function sizePortOver(ops: SizeOps): SizePort {
     },
   }
 }
-
-const DIR = { baseDir: BaseDirectory.AppData } as const
-
-/**
- * `stat` over the plugin.
- *
- * NULL, NEVER ZERO, for a file that is not there. "Nobody can say" and "empty"
- * are different answers, and every caller of this port has to be able to tell
- * them apart before deciding whether a book's bytes are here.
- */
-const tauriSizeOps: SizeOps = {
-  bytesAt: async (path) => {
-    try {
-      const info = await stat(path, DIR)
-      return info.isFile ? info.size : null
-    } catch {
-      return null
-    }
-  },
-  readDir: (path) => readDir(path, DIR),
-}
-
-export const tauriSizePort: SizePort = sizePortOver(tauriSizeOps)

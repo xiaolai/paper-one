@@ -44,9 +44,8 @@ describe('parseRows', () => {
   it('drops a row with no id, because React keys on it', () => {
     /* A missing or duplicate key is a rendering bug three screens from its
        cause. Better to lose a malformed row than to render one. */
-    expect(
-      parseRows([{ title: 'no id' }, { bookId: '', title: 'empty' }, { bookId: 'a', title: 'A' }]),
-    ).toEqual([{ bookId: 'a', title: 'A' }])
+    const kept = parseRows([{ title: 'no id' }, { bookId: '', title: 'empty' }, { bookId: 'a', title: 'A' }])
+    expect(kept.map((r) => r.bookId)).toEqual(['a'])
   })
 
   it('survives an answer that is not a list at all', () => {
@@ -58,9 +57,69 @@ describe('parseRows', () => {
     }
   })
 
-  it('keeps only fields it understands, and omits absent ones', () => {
+  it('keeps only fields it understands, and refuses a value of the wrong type', () => {
     const [row] = parseRows([{ bookId: 'a', title: 'A', author: 'M', extra: 'ignored', progress: 'x' }])
-    expect(row).toEqual({ bookId: 'a', title: 'A', author: 'M' })
+    expect(row).toMatchObject({ bookId: 'a', title: 'A', author: 'M' })
+    expect(row).not.toHaveProperty('extra')
+    /* `progress: 'x'` IS NOT 0-BY-COERCION. A number where a string belongs is
+       a shelf disagreeing with this client about the wire; `Number(x)` would
+       hide that behind a plausible row. It falls back to the field's own
+       default, and the default is documented rather than inferred. */
+    expect(row?.progress).toBe(0)
+  })
+
+  /**
+   * EVERY FIELD THE WIRE SENDS SURVIVES THE PARSE.
+   *
+   * This is the regression that mattered: the client's row had FIVE fields
+   * while `services/rows.ts` sent EIGHTEEN, so `tags`, `subjects`, `series`,
+   * `addedAt`, `openedAt`, `format` and `hasContent` arrived and were dropped
+   * on the floor. The shelf could not filter by tag or sort by date — not
+   * because the shelf did not know, but because this function threw the answer
+   * away, silently, and the type agreed with it.
+   */
+  it('keeps every field the wire carries', () => {
+    const wire = {
+      bookId: 'a',
+      title: 'A',
+      author: 'M',
+      series: 'S',
+      seriesIndex: 2,
+      publisher: 'P',
+      published: '2020',
+      languages: ['en'],
+      subjects: ['history'],
+      tags: ['unread'],
+      position: 'epubcfi(/6/2)',
+      progress: 0.5,
+      finished: true,
+      addedAt: 111,
+      openedAt: 222,
+      format: 'epub',
+      contentHash: 'h',
+      hasContent: true,
+    }
+    expect(parseRows([wire])[0]).toEqual(wire)
+  })
+
+  /* THREE STATES, NOT TWO. `hasContent` is present / absent / never measured,
+     and collapsing the third into "absent" reads as a definite answer this
+     client has no grounds to give — a satchel deciding whether to offer
+     Download cares about the difference. */
+  it('keeps hasContent unmeasured rather than calling it absent', () => {
+    expect(parseRows([{ bookId: 'a', title: 'A' }])[0]?.hasContent).toBeNull()
+    expect(parseRows([{ bookId: 'a', hasContent: false }])[0]?.hasContent).toBe(false)
+    expect(parseRows([{ bookId: 'a', hasContent: 'yes' }])[0]?.hasContent).toBeNull()
+  })
+
+  it('refuses a format it does not know', () => {
+    expect(parseRows([{ bookId: 'a', format: 'epub' }])[0]?.format).toBe('epub')
+    expect(parseRows([{ bookId: 'a', format: 'docx' }])[0]?.format).toBeNull()
+  })
+
+  it('keeps only the strings out of a list, rather than the list or nothing', () => {
+    expect(parseRows([{ bookId: 'a', tags: ['x', 7, null, 'y'] }])[0]?.tags).toEqual(['x', 'y'])
+    expect(parseRows([{ bookId: 'a', tags: 'x' }])[0]?.tags).toEqual([])
   })
 })
 

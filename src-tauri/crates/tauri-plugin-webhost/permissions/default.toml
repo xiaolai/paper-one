@@ -16,6 +16,7 @@ permissions = [
     "allow-webhost-begin-code",
     "allow-webhost-cancel-code",
     "allow-webhost-sessions",
+    "allow-webhost-browsers",
     "allow-webhost-revoke",
     "allow-webhost-ready",
     "allow-webhost-send",

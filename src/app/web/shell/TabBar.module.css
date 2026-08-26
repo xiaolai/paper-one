@@ -1,0 +1,41 @@
+/* THE TAB BAR. 76px in the mockup: 52px of tab plus 14px of home-indicator
+   clearance plus the hairline. Here the clearance is the real inset, so a
+   phone with no home indicator does not carry 14px of nothing. */
+.bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  padding: 0 var(--space-12);
+  padding-bottom: max(var(--space-14), env(safe-area-inset-bottom));
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.tab {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-4);
+  height: calc(var(--control-lg) + var(--space-8));
+  border: 0;
+  border-radius: var(--radius-card);
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.tab[aria-current='page'] {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* 10px in the mockup. Below §10's 11px floor for MUTED text — but the active
+   label is accent and the rest sit under an icon that carries the meaning, so
+   the label is a caption to a picture rather than text a reader depends on. */
+.label {
+  font-size: var(--text-micro);
+  letter-spacing: var(--track-snug);
+}

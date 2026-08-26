@@ -332,3 +332,76 @@ describe('content.read', () => {
     expect(locked.ran).not.toContain('content.read')
   })
 })
+
+/**
+ * `cover.read` — a book's jacket, and the ordinary case where there is none.
+ *
+ * THE DEFECT THIS FILE EXISTS TO PIN. `readRangeOf` hands the filesystem's own
+ * error up for a file that is not there; `content.read` never meets that,
+ * because `blobNames` has confirmed the file first. There is no such list for a
+ * cover and **most books have no jacket**, so the first version of this service
+ * answered `cover.read: internal: the service failed` for every one of them —
+ * measured against a real library, once per visible row.
+ *
+ * A refusal is not a picture. The shelf draws a tint for a book with no
+ * artwork, and it must reach that state without an error.
+ */
+async function coverChunks(shelf: ReturnType<typeof serveTable>, book: string): Promise<Chunk[]> {
+  const out: Chunk[] = []
+  for await (const page of shelf.client.stream('cover.read', { book })) out.push(...(page as Chunk[]))
+  return out
+}
+
+describe('cover.read', () => {
+  it('streams the jacket a folder holds', async () => {
+    const shelf = withContent(['content.epub', 'cover.jpg'])
+    const got = await coverChunks(shelf, 'one')
+    expect(new TextDecoder().decode(assembled(got))).toBe('the whale')
+    expect(got[0]).toMatchObject({ bookId: 'one', offset: 0 })
+  })
+
+  /* THE ORDINARY CASE, and the one that was an internal error. */
+  it('answers nothing — not a refusal — for a book with no jacket', async () => {
+    const shelf = withContent(['content.epub'])
+    await expect(coverChunks(shelf, 'one')).resolves.toEqual([])
+  })
+
+  it('answers nothing for a book whose folder is empty', async () => {
+    const shelf = withContent([])
+    await expect(coverChunks(shelf, 'one')).resolves.toEqual([])
+  })
+
+  /* THE OLDER NAME IS NOT A MISTAKE. `cover.webp` is where a jacket lived in a
+     library written before `cover.jpg` was made honest; a shelf that answered
+     "no cover" for every book imported before the rename would look exactly
+     like a shelf of books with no artwork. */
+  it('falls back to the legacy name', async () => {
+    const shelf = withContent(['content.epub', 'cover.webp'])
+    expect(new TextDecoder().decode(assembled(await coverChunks(shelf, 'one')))).toBe('the whale')
+  })
+
+  it('prefers the current name when a folder holds both', async () => {
+    const shelf = serveTable({
+      books: [seedBook('one', { hasContent: true })],
+      files: { 'books/one/cover.jpg': 'current', 'books/one/cover.webp': 'legacy' },
+    })
+    expect(new TextDecoder().decode(assembled(await coverChunks(shelf, 'one')))).toBe('current')
+  })
+
+  /* A MISSING BOOK IS STILL A REFUSAL. "No such book" is a caller's mistake;
+     "no jacket" is an ordinary fact about a book, and collapsing the two would
+     make a typo in a book id look like a book with no artwork. */
+  it('refuses a book the shelf does not have', async () => {
+    const shelf = withContent(['content.epub'])
+    expect(refusalCode(await coverChunks(shelf, 'nope').catch((e: unknown) => e))).toBe('not-found')
+  })
+
+  it('is a read service, so a read-only grant reaches it', async () => {
+    const shelf = serveTable({
+      books: [seedBook('one', { hasContent: true })],
+      files: { 'books/one/cover.jpg': 'the whale' },
+      grants: ['book:read'],
+    })
+    expect((await coverChunks(shelf, 'one')).length).toBeGreaterThan(0)
+  })
+})

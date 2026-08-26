@@ -70,6 +70,40 @@ const CODE_PROTOCOL: u32 = 2;
 pub struct Sessions {
     inner: Mutex<HashMap<u64, Arc<Session>>>,
     next: AtomicU64,
+    /// Handshakes that have passed the allow-list and not yet registered or
+    /// been refused. See [`Sessions::begin_handshake`].
+    pending: Mutex<HashMap<EndpointId, usize>>,
+}
+
+/// A handshake in flight, counted from before the first await until it is
+/// dropped. Releasing is the `Drop`, so no path can forget it.
+///
+/// ⚠️ **THE CAPS USED TO BE CHECKED AFTER THE HELLO, WHICH IS AFTER TWO
+/// UNBOUNDED WAITS.** `serve` checked the allow-list, then awaited `accept_bi`
+/// and `read_json`, each with a 30-second deadline, and only then asked
+/// `at_capacity`. So an allowed peer — or a compromised one, which is the case
+/// this is for — could open connections as fast as QUIC would carry them and
+/// park a task in that window for a minute each. `MAX_SESSIONS` bounded what
+/// could be REGISTERED and nothing bounded what could be waiting.
+///
+/// Taking the permit before the first await is the whole fix: the same two caps
+/// now bound handshakes in flight as well as sessions, so the worst case is
+/// twice the cap rather than however many the network can deliver.
+pub(crate) struct Handshake {
+    peer: EndpointId,
+    sessions: Arc<Sessions>,
+}
+
+impl Drop for Handshake {
+    fn drop(&mut self) {
+        let mut pending = self.sessions.pending.lock().expect("pending lock");
+        if let Some(count) = pending.get_mut(&self.peer) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                pending.remove(&self.peer);
+            }
+        }
+    }
 }
 
 impl Sessions {
@@ -101,6 +135,37 @@ impl Sessions {
     pub fn at_capacity(&self, peer: EndpointId) -> bool {
         let inner = self.inner.lock().expect("sessions lock");
         over_caps(&inner, peer)
+    }
+
+    /// Claim a slot for a handshake ABOUT to start, or refuse.
+    ///
+    /// Called immediately after the allow-list check and BEFORE the first
+    /// await — see [`Handshake`] for what that ordering is worth. Counts
+    /// pending handshakes against the same two caps as registered sessions,
+    /// including the sessions already open, so a peer at its session limit
+    /// cannot also hold a queue of half-finished ones.
+    pub(crate) fn begin_handshake(self: &Arc<Self>, peer: EndpointId) -> Option<Handshake> {
+        let mut pending = self.pending.lock().expect("pending lock");
+        let inner = self.inner.lock().expect("sessions lock");
+        let pending_total: usize = pending.values().sum();
+        let pending_here = pending.get(&peer).copied().unwrap_or(0);
+        let open_here = inner.values().filter(|s| s.peer_id == peer).count();
+        if inner.len() + pending_total >= MAX_SESSIONS
+            || open_here + pending_here >= MAX_SESSIONS_PER_PEER
+        {
+            return None;
+        }
+        drop(inner);
+        *pending.entry(peer).or_insert(0) += 1;
+        Some(Handshake {
+            peer,
+            sessions: Arc::clone(self),
+        })
+    }
+
+    /// Handshakes in flight, for tests and diagnostics.
+    pub fn pending_handshakes(&self) -> usize {
+        self.pending.lock().expect("pending lock").values().sum()
     }
 
     pub fn get(&self, id: u64) -> Option<Arc<Session>> {
@@ -313,6 +378,16 @@ pub(crate) async fn serve(node: Arc<Node>, conn: Connection) {
         conn.close(VarInt::from_u32(CODE_REFUSED), b"not-ready");
         return;
     }
+    /* THE PERMIT, BEFORE THE FIRST AWAIT. Everything below this line waits on
+     * the network with a 30-second deadline; the capacity check used to be
+     * AFTER all of it, so an allowed peer could park an unbounded number of
+     * tasks in that window. See `Handshake`. Held for the rest of this
+     * function and released by `Drop` on every path out, including the
+     * refusals. */
+    let Some(_handshake) = node.sessions.begin_handshake(remote) else {
+        conn.close(VarInt::from_u32(CODE_REFUSED), b"too-many-sessions");
+        return;
+    };
     let refuse = |reason: &str| conn.close(VarInt::from_u32(CODE_PROTOCOL), reason.as_bytes());
 
     let Ok(Ok((mut send, mut recv))) = timeout(HELLO_TIMEOUT, conn.accept_bi()).await else {
@@ -581,6 +656,74 @@ impl Node {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// HANDSHAKES IN FLIGHT ARE BOUNDED, not only registered sessions.
+    ///
+    /// `serve` used to check the allow-list, then await `accept_bi` and
+    /// `read_json` — each with a 30-second deadline — and ask `at_capacity`
+    /// only afterwards. So an allowed peer could open connections as fast as
+    /// QUIC delivered them and park a task in that window for a minute each;
+    /// `MAX_SESSIONS` bounded what could be REGISTERED and nothing at all
+    /// bounded what could be waiting.
+    ///
+    /// The permit is taken before the first await and released by `Drop`, so
+    /// this exercises the counter directly: the awaits themselves need a real
+    /// endpoint, and what went wrong was the ORDER, not the network.
+    #[test]
+    fn a_peer_cannot_park_unbounded_handshakes_before_the_caps_are_checked() {
+        let sessions = Arc::new(Sessions::default());
+        /* A REAL KEY. `EndpointId` is an ed25519 public key and refuses
+         * arbitrary bytes, so `from_bytes([7; 32])` does not build one. */
+        let peer = iroh::SecretKey::from_bytes(&[7u8; 32]).public();
+
+        /* Its whole share, and not one more — with no session ever registered,
+         * which is exactly the state the old code could not refuse from. */
+        let held: Vec<_> = (0..MAX_SESSIONS_PER_PEER)
+            .map(|_| {
+                sessions
+                    .begin_handshake(peer)
+                    .expect("within this peer's share")
+            })
+            .collect();
+        assert_eq!(sessions.pending_handshakes(), MAX_SESSIONS_PER_PEER);
+        assert!(
+            sessions.begin_handshake(peer).is_none(),
+            "a peer at its share must be refused BEFORE the hello, not after it"
+        );
+
+        /* AND THE SHARE COMES BACK. A permit that leaked would make the cap a
+         * one-way ratchet — a peer refused for the life of the process after
+         * four ordinary connections. */
+        drop(held);
+        assert_eq!(sessions.pending_handshakes(), 0);
+        assert!(sessions.begin_handshake(peer).is_some());
+    }
+
+    /// And one peer's queue cannot starve the whole host.
+    #[test]
+    fn pending_handshakes_are_bounded_across_every_peer() {
+        let sessions = Arc::new(Sessions::default());
+        let mut held = Vec::new();
+        /* Distinct peers, each well inside its own per-peer share, so the only
+         * thing that can refuse them is the GLOBAL bound. */
+        for i in 0..(MAX_SESSIONS / MAX_SESSIONS_PER_PEER) + 2 {
+            let mut raw = [0u8; 32];
+            raw[0] = (i % 256) as u8;
+            raw[1] = (i / 256) as u8;
+            let peer = iroh::SecretKey::from_bytes(&raw).public();
+            for _ in 0..MAX_SESSIONS_PER_PEER {
+                if let Some(permit) = sessions.begin_handshake(peer) {
+                    held.push(permit);
+                }
+            }
+        }
+        assert_eq!(
+            sessions.pending_handshakes(),
+            MAX_SESSIONS,
+            "the global cap bounds handshakes in flight, however many peers ask"
+        );
+    }
 
     /// A proxy's synthesised address is not an endpoint, and dialling one can
     /// only time out — ahead of the addresses that would have worked, since
@@ -967,13 +1110,31 @@ mod tests {
 
         // Drain it all, in order — nothing was dropped.
         let mut got: Vec<Bytes> = Vec::new();
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        // A LIVENESS GUARD, NOT THE ASSERTION — and it is generous on purpose.
+        //
+        // What this test asserts is above and below: the inbox stays inside its
+        // BYTE budget, the cap actually bit, and all 24 frames arrive in order
+        // and intact. None of that is a statement about speed. This deadline
+        // exists only so the loop cannot spin forever if delivery wedges, since
+        // Rust's harness has no per-test timeout of its own.
+        //
+        // It was 20s, and it fired: moving 24 MiB through a session takes
+        // longer than that on a loaded machine, so the run failed with "all
+        // frames within 20s" while every property under test held. That is a
+        // false negative about wall-clock contention, and chasing it would mean
+        // re-running until the box was quiet.
+        //
+        // Raising it does not weaken anything — no assertion moved. A genuine
+        // wedge never completes, so 120s catches it just as surely as 20s did,
+        // and only a real hang can reach it.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
         while got.len() < FRAMES as usize {
             let batch = shelf.node.session_recv(shelf_sid, 8).unwrap();
             if batch.is_empty() {
                 assert!(
                     tokio::time::Instant::now() < deadline,
-                    "all frames within 20s"
+                    "delivery wedged: {} of {FRAMES} frames after 120s",
+                    got.len()
                 );
                 tokio::time::sleep(Duration::from_millis(5)).await;
                 continue;

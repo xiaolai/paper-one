@@ -2,6 +2,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, relative } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { BREAKPOINT, VIEWPORT_MIN } from '../../core/metrics'
 
 /**
  * THE GUARD. Tokenizing a stylesheet is a morning's work; keeping it tokenized
@@ -111,10 +112,10 @@ function scan(file: string): Offence[] {
 
 /* The width breakpoints, which a stylesheet has to write out — see `BREAKPOINT`.
  * Kept in step by assertion, since they cannot be kept in step by reference. */
-const BREAKPOINTS = [860, 720]
+const BREAKPOINTS = [860, 720, 600]
 
 describe('the layout changes width at agreed places', () => {
-  it('uses no breakpoint that is not one of the two', () => {
+  it('uses no breakpoint that is not one of the three', () => {
     const strays: string[] = []
     for (const file of stylesheets(SRC)) {
       const src = readFileSync(file, 'utf8')
@@ -126,10 +127,30 @@ describe('the layout changes width at agreed places', () => {
     expect(strays, `\nBreakpoints not in \`BREAKPOINT\`:\n  ${strays.join('\n  ')}\n`).toEqual([])
   })
 
-  /* A width query that reacts to something no window can be is a rule that
-   * never runs — and it looks exactly like one that does. */
-  it('has no breakpoint below the window’s own minimum', () => {
-    for (const px of BREAKPOINTS) expect(px).toBeGreaterThanOrEqual(720)
+  /**
+   * A width query that reacts to something no VIEWPORT can be is a rule that
+   * never runs — and it looks exactly like one that does.
+   *
+   * ⚠️ **THE FLOOR WAS 720, THE DESKTOP WINDOW'S MINIMUM**, and that was right
+   * while every host was a window. Phase 18 serves this app to a phone, where
+   * the viewport is 393 — so a 720 floor would have refused the one breakpoint
+   * a phone actually needs, on the grounds that no window is that narrow. The
+   * floor is now the narrowest viewport, not the narrowest window.
+   *
+   * `min` stays in the list because it is still the width every desktop layout
+   * is tested at; it is simply no longer the bottom of the range.
+   */
+  it('has no breakpoint below the narrowest viewport', () => {
+    for (const px of BREAKPOINTS) expect(px).toBeGreaterThanOrEqual(VIEWPORT_MIN)
+  })
+
+  /* The list is the same one `metrics.ts` publishes, in the same order it
+     declares them. Two copies exist because a media query cannot read a custom
+     property; this is what stops them drifting. */
+  it('lists exactly the breakpoints the design system declares', () => {
+    expect([...BREAKPOINTS].sort((a, b) => b - a)).toEqual(
+      Object.values(BREAKPOINT).sort((a, b) => b - a),
+    )
   })
 })
 

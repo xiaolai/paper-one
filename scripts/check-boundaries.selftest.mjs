@@ -108,16 +108,18 @@ export const LEGAL_TREE = {
     "import { nodeFs } from '../hosts/node/fs.ts'\n" +
     "import { betaPort } from '../capabilities/beta/index.ts'\n" +
     'export const cli = { kernelThing, nodeFs, betaPort }\n',
-  /* THE THIRD COMPOSITION (phase 18): the BROWSER client, which is the one
-   * part of the tree that cannot use the kernel's public entry — that barrel
-   * re-exports modules importing `@tauri-apps`, which do not exist in a
-   * browser. So it reaches a short NAMED list of kernel modules directly, and
-   * the allowance is pinned here for the same reason the peer wire's and the
-   * CLI's are: if `web-client-kernel-allowlist` ever over-matches, the clean
-   * case fails rather than something subtler later.
+  /* THE THIRD COMPOSITION (phase 18, reshaped in phase 19): the BROWSER client.
+   * It reaches the kernel through ENTRIES now — the public entry and
+   * `ui/browser.ts` — plus a few dependency-free leaves, exactly as a
+   * composition root does. It used to hold an EXEMPTION instead, because the
+   * public entry was not Tauri-free; WI-19.1 removed that cause.
    *
-   * `envelope.ts` is on that list; `other.ts` is not, and is what the refusal
-   * case below reaches for. */
+   * The allowance is pinned here for the same reason the peer wire's and the
+   * CLI's are: if `web-client-kernel-entries` ever over-matches, the clean case
+   * fails rather than something subtler later.
+   *
+   * `envelope.ts` is a permitted leaf; `other.ts` is not, and is what the
+   * refusal case below reaches for. */
   'src/kernel/core/envelope.ts': 'export const encodeFrame = () => new Uint8Array()\n',
   'src/app/web/channel.ts':
     "import { encodeFrame } from '../../kernel/core/envelope.ts'\nexport const channel = encodeFrame\n",
@@ -320,16 +322,30 @@ export const CASES = [
     to: /(^|\/)@tauri-apps\/api(\/|$)/,
     expect: ['no-tauri-in-the-web-client'],
   },
-  /* And the allow-list rule, which had no case either. The client may reach a
-   * short named list of kernel modules directly — the public entry's barrel
-   * retains modules that import `@tauri-apps` — and this is the edge that
-   * proves the list is a list rather than an open door. */
+  /* And the client's entry rule, which had no case either. The client reaches
+   * the kernel through named ENTRIES, and this is the edge that proves they are
+   * doors rather than an open directory — the failure the old allow-list
+   * actually had, where `^src/kernel/ui/reader/` let twenty-odd modules
+   * through as one entry. */
   {
-    name: 'the browser client -> a kernel module outside its allow-list',
+    name: 'the browser client -> a kernel module that is not one of its entries',
     files: { 'src/app/web/books.ts': "import { other } from '../../kernel/core/other.ts'\nexport const books = other\n" },
     from: 'src/app/web/books.ts',
     to: 'src/kernel/core/other.ts',
-    expect: ['web-client-kernel-allowlist'],
+    expect: ['web-client-kernel-entries'],
+  },
+  /* THE DIRECTORY, specifically. `ui/browser.ts` is an entry; `ui/reader/` is
+   * not, and reaching past the door into the room behind it is the thing this
+   * rule was reshaped to forbid. */
+  {
+    name: 'the browser client -> past its entry into ui/reader/',
+    files: {
+      'src/kernel/ui/reader/FoliateView.tsx': 'export const FoliateView = () => null\n',
+      'src/app/web/Reader.tsx': "import { FoliateView } from '../../kernel/ui/reader/FoliateView.tsx'\nexport const R = FoliateView\n",
+    },
+    from: 'src/app/web/Reader.tsx',
+    to: 'src/kernel/ui/reader/FoliateView.tsx',
+    expect: ['web-client-kernel-entries'],
   },
   {
     name: 'a capability -> a composition root (the whole-composition back door)',

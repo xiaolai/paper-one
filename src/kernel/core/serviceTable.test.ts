@@ -137,7 +137,9 @@ describe('the service table', () => {
      * mistyped `book:read` when it writes moves silently into the set every
      * satchel may call. Growing this list is a deliberate edit; not noticing
      * it grew is the failure. The ten the plan named for WI-11.3, plus
-     * `content.read` (phase 18) — the browser client's byte path. */
+     * `content.read` (phase 18) — the browser client's byte path — and
+     * `cover.read` (phase 19), which is what lets that client draw jackets
+     * instead of tinted rectangles. */
     expect(readServices().map((one) => one.name).sort()).toEqual(
       [
         'book.get',
@@ -146,6 +148,7 @@ describe('the service table', () => {
         'card.list',
         'content.locate',
         'content.read',
+        'cover.read',
         'device.list',
         'mark.list',
         'shelf.status',

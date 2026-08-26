@@ -186,14 +186,28 @@ describe('connect', () => {
     expect(socket.closedByUs).toBe(true)
   })
 
-  it('ignores a text frame rather than throwing inside a socket callback', async () => {
-    /* The shelf closes a socket that sends text, so this connection is already
-       over. An exception here would have nowhere to go. */
+  /**
+   * A TEXT FRAME ENDS THE CHANNEL, and this test used to require the opposite.
+   *
+   * It asserted `heard` was empty — that a peer breaking the envelope's one
+   * rule was simply ignored — on the reasoning that "the shelf closes a socket
+   * that sends text, so this connection is already over". The shelf does. But
+   * the CLOSE has not arrived yet, and until it does every request in flight
+   * goes on waiting, then fails one at a time at the 30s envelope timeout. The
+   * reader sees a shelf that hangs rather than a connection that ended. And if
+   * the frame came from something that is not our shelf, no close is coming.
+   *
+   * Same treatment as the malformed-bytes case immediately above, for the same
+   * stated reason: the only honest thing a transport can do is stop.
+   */
+  it('ends the channel on a text frame rather than waiting for a close that may not come', async () => {
     const { socket, channel } = await connected()
     const heard: string[] = []
     channel.onClosed((r) => heard.push(r))
+    /* Still no throw — an exception in a socket callback has nowhere to go. */
     expect(() => socket.onmessage?.call(null, { data: 'hello' })).not.toThrow()
-    expect(heard).toEqual([])
+    expect(heard).toEqual(['lost'])
+    expect(socket.closedByUs).toBe(true)
   })
 
   it('sends nothing after the channel is closed', async () => {

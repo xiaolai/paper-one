@@ -40,8 +40,22 @@ export interface BookMenuProps {
   /** Whether this book is in the shelf's selection, and the way to change that. */
   readonly selected: boolean
   readonly onToggleSelect: (bookId: string) => void
-  readonly onRemove: (book: IndexedBook) => void
-  readonly onSetFinished: (bookId: string, finished: boolean) => void
+  /**
+   * ⚠️ THE WRITES ARE OPTIONAL, AND ABSENT MEANS THE ITEM IS NOT DRAWN.
+   *
+   * `onRemove` reaches `book.remove` and `onSetFinished` reaches `book.set`;
+   * `setTagging` opens an editor that calls `tag.add` / `tag.remove`. All four
+   * are writes, and the browser client's session holds exactly one grant, and
+   * it is a READ one. Every one of them was therefore refused after the shelf
+   * had already applied it optimistically, so a book removed on a phone came
+   * back a moment later with nothing said.
+   *
+   * A menu whose every item undoes itself is worse than a shorter menu.
+   */
+  readonly onRemove?: ((book: IndexedBook) => void) | undefined
+  readonly onSetFinished?: ((bookId: string, finished: boolean) => void) | undefined
+  /** Whether this host can edit tags at all; false hides the Tags… item. */
+  readonly canTag?: boolean | undefined
   /** The caller's one way to close — see `useRowMenu`. */
   readonly closeMenu: () => void
   /** The caller's item class, so each surface keeps its own menu styling. */
@@ -67,6 +81,7 @@ export function BookMenu({
   onToggleSelect,
   onRemove,
   onSetFinished,
+  canTag = true,
   closeMenu,
   itemClass,
   actions,
@@ -75,6 +90,7 @@ export function BookMenu({
   const offered = actions.filter((action) => action.when?.(book) ?? true)
   return (
     <>
+      {onSetFinished && (
       <button
         type="button"
         role="menuitem"
@@ -97,6 +113,8 @@ export function BookMenu({
             : 'Mark as unread'
           : 'Mark as finished'}
       </button>
+      )}
+      {canTag && (
       <button
         type="button"
         role="menuitem"
@@ -112,6 +130,7 @@ export function BookMenu({
             two things the editor does and hid the other. */}
         Tags…
       </button>
+      )}
       {/* SELECT, in words. ⌘-click selects a card, and a reader who has never
           ⌘-clicked a shelf has no way to find that out; this row is how they
           do. Once one is selected the bar above the shelf says the rest. */}
@@ -162,34 +181,36 @@ export function BookMenu({
           the one thing here that takes something away. The confirm used to be a
           red pill grown over the neighbouring control; inside a menu it is a
           row that changes its words, and it collides with nothing. */}
-      <button
-        type="button"
-        role="menuitem"
-        className={itemClass}
-        data-danger="true"
-        data-confirming={armed}
-        aria-label={
-          armed
-            ? `Remove ${title} — the file you imported is kept, and this is recoverable for ${TRASH_KEPT_FOR}`
-            : `Remove ${title}`
-        }
-        title={
-          armed
-            ? `The file you imported is untouched. Your tags, place and notes are recoverable for ${TRASH_KEPT_FOR}.`
-            : 'Remove from the library'
-        }
-        onClick={() => {
-          if (armed) {
-            closeMenu()
-            onRemove(book)
-          } else {
-            setConfirming(book.bookId)
+      {onRemove && (
+        <button
+          type="button"
+          role="menuitem"
+          className={itemClass}
+          data-danger="true"
+          data-confirming={armed}
+          aria-label={
+            armed
+              ? `Remove ${title} — the file you imported is kept, and this is recoverable for ${TRASH_KEPT_FOR}`
+              : `Remove ${title}`
           }
-        }}
-      >
-        <Trash2 size={ICON.control} strokeWidth={ICON.stroke} />
-        {armed ? 'Remove? — click again' : 'Remove from library'}
-      </button>
+          title={
+            armed
+              ? `The file you imported is untouched. Your tags, place and notes are recoverable for ${TRASH_KEPT_FOR}.`
+              : 'Remove from the library'
+          }
+          onClick={() => {
+            if (armed) {
+              closeMenu()
+              onRemove(book)
+            } else {
+              setConfirming(book.bookId)
+            }
+          }}
+        >
+          <Trash2 size={ICON.control} strokeWidth={ICON.stroke} />
+          {armed ? 'Remove? — click again' : 'Remove from library'}
+        </button>
+      )}
     </>
   )
 }

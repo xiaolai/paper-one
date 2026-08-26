@@ -48,6 +48,26 @@ pub struct BrowserSession {
     pub id: u64,
 }
 
+/// A browser that holds a credential, whether or not it is connected.
+///
+/// DISTINCT FROM `BrowserSession`, and the distinction is the whole point. That
+/// one is a live SOCKET, addressed by `webhost_session_recv` and `webhost_send`
+/// and gone the moment a tab closes. This is the AUTHORIZATION — the thing a
+/// reader means when they say "that phone" — and it lasts until it is revoked
+/// or expires.
+///
+/// They were one list. A browser that signed in and closed its tab therefore
+/// disappeared from the Browsers pane while its credential stayed good for
+/// ninety days, and there was no way to cut it off before it reconnected.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Browser {
+    pub id: u64,
+    /// Whether it is holding a socket right now. Shown, not enforced: a browser
+    /// that is away is still a browser that can come back.
+    pub connected: bool,
+}
+
 #[command]
 pub async fn webhost_status<R: Runtime>(
     _app: AppHandle<R>,
@@ -91,6 +111,7 @@ pub async fn webhost_cancel_code<R: Runtime>(
     Ok(())
 }
 
+/// The live SOCKETS — what the webview's pump serves. Not the revocation list.
 #[command]
 pub async fn webhost_sessions<R: Runtime>(
     _app: AppHandle<R>,
@@ -99,7 +120,20 @@ pub async fn webhost_sessions<R: Runtime>(
     Ok(state.sessions())
 }
 
+/// Every browser holding a credential — what the Browsers pane lists.
+#[command]
+pub async fn webhost_browsers<R: Runtime>(
+    _app: AppHandle<R>,
+    state: State<'_, Arc<WebHostState>>,
+) -> Result<Vec<Browser>, Error> {
+    Ok(state.browsers())
+}
+
 /// Cut off one browser: forget its credential and close its sockets.
+///
+/// Takes the DURABLE id from `webhost_browsers`, not a socket id from
+/// `webhost_sessions` — revoking by socket could only reach a browser that
+/// happened to be connected at that moment.
 #[command]
 pub async fn webhost_revoke<R: Runtime>(
     _app: AppHandle<R>,

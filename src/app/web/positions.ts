@@ -65,6 +65,17 @@ export interface ReadingPositions {
   get(bookId: string): string | null
   /** Remember where this book is now. Safe to call on every page turn. */
   set(bookId: string, cfi: string | null): void
+  /**
+   * This book is being read NOW — refresh its place in the eviction order
+   * without moving its position. Called when a book is opened.
+   *
+   * `at` orders eviction and `set` only writes it when the cfi changes, so
+   * without this it meant "last moved" rather than "last read": a reader who
+   * reopens a favourite at the same line never refreshed it, and the book they
+   * had open could age past the cap and be evicted. A no-op for a book with no
+   * stored position — opening a book for the first time is `set`'s job.
+   */
+  touch(bookId: string): void
   /** Forget one book — for a book the shelf no longer has. */
   forget(bookId: string): void
 }
@@ -75,6 +86,9 @@ export interface PositionStore {
   setItem(key: string, value: string): void
 }
 
+/** A map with no prototype — see the note in `read`. */
+const empty = (): Record<string, Stored> => Object.create(null) as Record<string, Stored>
+
 /** The stored map, or an empty one for anything unreadable. */
 function read(store: PositionStore): Record<string, Stored> {
   let raw: string | null
@@ -82,13 +96,26 @@ function read(store: PositionStore): Record<string, Stored> {
     raw = store.getItem(KEY)
   } catch {
     /* Reading can throw too — Safari's private mode has done exactly this. */
-    return {}
+    return empty()
   }
-  if (raw === null) return {}
+  if (raw === null) return empty()
   try {
     const parsed: unknown = JSON.parse(raw)
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {}
-    const out: Record<string, Stored> = {}
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return empty()
+    /* NO PROTOTYPE, because a book id is a KEY FROM STORAGE and storage is not
+     * trusted input. `__proto__` is a perfectly valid string and assigning to
+     * it on an object literal does not create an entry — it REPLACES the
+     * object's prototype. A row under that key therefore vanished on read, and
+     * a hostile or merely corrupt store could reach every later lookup on this
+     * map through the prototype it had just installed. `constructor` and
+     * `toString` are the same shape one step down: `bookId in all` and
+     * `all[bookId]` both answer for keys nothing ever wrote.
+     *
+     * `Object.create(null)` has no prototype to replace and no inherited names
+     * to collide with, which settles all three at once. `Object.entries` and
+     * `Object.fromEntries` below are already own-property-only, so the write
+     * path needs nothing further. */
+    const out: Record<string, Stored> = Object.create(null) as Record<string, Stored>
     for (const [bookId, value] of Object.entries(parsed as Record<string, unknown>)) {
       if (typeof value !== 'object' || value === null) continue
       const row = value as Record<string, unknown>
@@ -103,7 +130,7 @@ function read(store: PositionStore): Record<string, Stored> {
     /* NOT REPAIRED, NOT CLEARED. A store this cannot parse is one something
      * else may own; overwriting it would be this module deciding that. Reading
      * as empty loses positions and nothing else. */
-    return {}
+    return empty()
   }
 }
 
@@ -143,8 +170,37 @@ export function readingPositions(
        * nothing — so the previous one stands, which is the better answer. */
       if (cfi === null || cfi === '') return
       const all = read(store)
+      /* AN UNCHANGED CFI STILL REFRESHES `at`, and returning early did not.
+       *
+       * `at` is what eviction sorts on, so it has to mean "last read" and not
+       * "last MOVED". A reader who opens a favourite, reads a page, and comes
+       * back to the same place reports the same cfi — so the book they are
+       * actually reading kept the timestamp of the last time they turned a
+       * page in it, aged past the cap, and was evicted while open. The write is
+       * skipped only when neither field would change. */
       if (all[bookId]?.cfi === cfi) return
       write({ ...all, [bookId]: { cfi, at: now() } })
+    },
+
+    touch: (bookId) => {
+      /* RECENCY IS NOT THE SAME QUESTION AS POSITION, and `at` had to answer
+       * both. It orders eviction, so it has to mean "last read"; `set` only
+       * writes it when the cfi CHANGES, so it actually meant "last moved".
+       *
+       * A reader who opens a favourite, reads a page, and comes back to the
+       * same line reports the same cfi every time — so the book they had open
+       * kept the timestamp of the last page turn, aged past the cap, and was
+       * evicted while they were reading it.
+       *
+       * A separate verb rather than making `set` always write, deliberately.
+       * `set` runs on every relocate the renderer raises, many of which report
+       * an unchanged cfi; writing on each would put a `localStorage`
+       * serialisation of up to 500 entries in the page-turn path for no new
+       * information. This runs once, when a book is opened. */
+      const all = read(store)
+      const held = all[bookId]
+      if (held === undefined) return
+      write({ ...all, [bookId]: { cfi: held.cfi, at: now() } })
     },
 
     forget: (bookId) => {

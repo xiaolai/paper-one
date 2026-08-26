@@ -176,6 +176,10 @@ export interface MarkRow {
   readonly cfi: string
   readonly sectionIndex: number
   readonly text: string
+  /** The words either side of `text` — the mark's recovery context. Empty
+   *  when the mark was made by a caller that did not know them. */
+  readonly prefix: string
+  readonly suffix: string
   readonly note: string
   readonly kind: MarkRowKind
   readonly tint: MarkRowTint
@@ -191,6 +195,8 @@ export function markRow(mark: Mark): MarkRow {
     cfi: mark.cfi,
     sectionIndex: mark.sectionIndex,
     text: mark.text,
+    prefix: mark.prefix,
+    suffix: mark.suffix,
     note: mark.note,
     kind: mark.kind,
     tint: mark.tint,

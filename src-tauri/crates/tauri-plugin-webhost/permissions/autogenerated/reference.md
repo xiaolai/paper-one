@@ -15,6 +15,7 @@ frames to the webview, which holds the router.
 - `allow-webhost-begin-code`
 - `allow-webhost-cancel-code`
 - `allow-webhost-sessions`
+- `allow-webhost-browsers`
 - `allow-webhost-revoke`
 - `allow-webhost-ready`
 - `allow-webhost-send`
@@ -77,6 +78,32 @@ Enables the webhost_begin_code command without any pre-configured scope.
 <td>
 
 Denies the webhost_begin_code command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`webhost:allow-webhost-browsers`
+
+</td>
+<td>
+
+Enables the webhost_browsers command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`webhost:deny-webhost-browsers`
+
+</td>
+<td>
+
+Denies the webhost_browsers command without any pre-configured scope.
 
 </td>
 </tr>
