@@ -221,15 +221,84 @@ pub fn can_issue_certificates(status_json: &str) -> bool {
         .is_some_and(|domains| !domains.is_empty())
 }
 
-/// Whether a serve config mentions our loopback port.
+/// Whether a serve config proxies our loopback port **at the root**.
 ///
-/// A substring check rather than a parse. `tailscale serve status` prints the
-/// proxy target verbatim (`http://127.0.0.1:27182`), and the question here is
-/// only "is our port behind this name" — a wrong answer in the strict direction
-/// costs a hint that says to run a command already run, which is recoverable.
+/// ⚠️ **THIS WAS A SUBSTRING SEARCH OVER THE WHOLE DOCUMENT**, and the answer it
+/// gives is what decides whether the pane prints a URL. `tailscale serve status`
+/// lists every handler a node has:
+///
+/// ```text
+/// https://studio.tail1234.ts.net (tailnet only)
+/// |-- /       proxy http://127.0.0.1:9000
+/// |-- /books  proxy http://127.0.0.1:27182
+/// ```
+///
+/// Our port is mentioned, so the old check said yes — and the pane printed
+/// `https://studio.tail1234.ts.net/`, which reaches whatever is at `/`. That is
+/// exactly the failure the not-served branch exists to prevent, stated in its
+/// own comment: *"printing it because Tailscale happened to be installed would
+/// be a guess dressed as an answer"*. A wrong answer here is not a recoverable
+/// hint; it is an address the reader will type and that will not work.
+///
+/// So the PATH is read as well as the target, and only `/` counts. Still a
+/// line scan rather than a JSON parse — `serve status` has no `--json` — but the
+/// two facts it needs are on one line and in a fixed order.
+///
+/// The strict direction remains the safe one: a layout this cannot read costs a
+/// hint telling the reader to run a command they have already run, which they
+/// can see is done.
 pub fn serves_port(serve_status: &str, port: u16) -> bool {
-    serve_status.contains(&format!("127.0.0.1:{port}"))
-        || serve_status.contains(&format!("localhost:{port}"))
+    let targets = [format!("127.0.0.1:{port}"), format!("localhost:{port}")];
+    serve_status.lines().any(|line| {
+        /* A HANDLER LINE HAS A TARGET AND A PATH, in that order, separated by
+         * the verb. Anything without ` proxy ` is a header, a blank, or prose. */
+        let Some((left, right)) = line.split_once(" proxy ") else {
+            return false;
+        };
+        if !targets.iter().any(|target| right.contains(target.as_str())) {
+            return false;
+        }
+        root_path(left.trim())
+    })
+}
+
+/// Whether the left-hand side of a handler line addresses the ROOT.
+///
+/// ⚠️ **TWO FORMATS, AND ONLY ONE OF THEM IS THE TREE.** `tailscale serve
+/// status` prints a single root handler flat:
+///
+/// ```text
+/// https://studio.example/ proxy http://127.0.0.1:27182
+/// ```
+///
+/// and anything more as a tree under the name:
+///
+/// ```text
+/// https://studio.tail1234.ts.net (tailnet only)
+/// |-- /       proxy http://127.0.0.1:9000
+/// |-- /books  proxy http://127.0.0.1:27182
+/// ```
+///
+/// A parser that knew only the tree form reported the ordinary single-handler
+/// case — the one nearly every reader has — as NOT SERVED, which is a hint
+/// telling them to run a command they have already run. Caught by an existing
+/// test using the flat fixture, which is the argument for having had one.
+fn root_path(left: &str) -> bool {
+    if let Some(rest) = left.strip_prefix("|--") {
+        return rest.trim() == "/";
+    }
+    /* THE FLAT FORM IS A URL, and its path is what follows the host. `https://`
+     * is fixed here rather than parsed: `serve` only ever prints a TLS name,
+     * and the alternative is a URL crate for one field. */
+    let Some(after_scheme) = left.split_once("://").map(|(_, rest)| rest) else {
+        return false;
+    };
+    match after_scheme.split_once('/') {
+        /* `https://host/` — the root, and the only path that serves it. */
+        Some((_host, path)) => path.is_empty(),
+        /* `https://host` with no slash at all is the same address. */
+        None => true,
+    }
 }
 
 /// Resolve the address, asking Tailscale if it is there.
@@ -335,6 +404,72 @@ mod tests {
         assert!(serves_port(serve, 27182));
         assert!(!serves_port(serve, 8080));
         assert!(!serves_port("No serve config", 27182));
+        /* `localhost` is the same answer spelled differently, and Tailscale
+        prints whatever the reader typed. */
+        assert!(serves_port(
+            "https://studio.tail1234.ts.net (tailnet only)\n|-- / proxy http://localhost:27182\n",
+            27182
+        ));
+    }
+
+    /// ⚠️ **OUR PORT ON A SUBPATH IS NOT OUR PORT AT THE ROOT.**
+    ///
+    /// This was a substring search over the whole document, so any mention
+    /// counted — and the answer decides whether the pane prints
+    /// `https://<host>/`. With another app at `/` and Paper at `/books`, that
+    /// URL reaches the other app: a working-looking address that serves
+    /// somebody else, which is precisely what the not-served branch exists to
+    /// avoid printing.
+    #[test]
+    fn a_handler_on_a_subpath_does_not_serve_the_root() {
+        let serve = "https://studio.tail1234.ts.net (tailnet only)\n                     |-- /      proxy http://127.0.0.1:9000\n                     |-- /books proxy http://127.0.0.1:27182\n";
+        assert!(
+            !serves_port(serve, 27182),
+            "a handler at /books was read as serving the address the pane prints"
+        );
+        /* And the app that IS at the root reads as served, so the check has not
+        simply become "no". */
+        assert!(serves_port(serve, 9000));
+    }
+
+    /// A NAME THAT MENTIONS THE PORT IS NOT A HANDLER. Tailscale prints
+    /// service names and node names too, and the old check counted any of them.
+    #[test]
+    fn a_mention_outside_a_handler_line_is_not_a_serve() {
+        assert!(!serves_port(
+            "svc:app-127.0.0.1:27182 (tailnet only)\n",
+            27182
+        ));
+        assert!(!serves_port(
+            "# note: we used to serve http://127.0.0.1:27182\n",
+            27182
+        ));
+    }
+
+    /// ⚠️ **TWO FORMATS, AND THE TREE IS THE RARER ONE.** A single root handler
+    /// prints flat, with the path inside the URL; anything more prints as a
+    /// tree. A parser that knew only the tree reported the ordinary case as not
+    /// served — a hint telling the reader to run a command already run. Caught
+    /// by an existing test using the flat fixture, which is the argument for
+    /// having had one.
+    #[test]
+    fn both_shapes_of_serve_status_are_read() {
+        /* Flat, which is what nearly every reader has. */
+        assert!(serves_port(
+            "https://studio.example/ proxy http://127.0.0.1:27182",
+            27182
+        ));
+        assert!(serves_port(
+            "https://studio.example proxy http://127.0.0.1:27182",
+            27182
+        ));
+        /* Flat AND on a subpath — the same mistake in the other format. */
+        assert!(!serves_port(
+            "https://studio.example/books proxy http://127.0.0.1:27182",
+            27182
+        ));
+        /* Tree, root. */
+        assert!(serves_port("|-- / proxy http://127.0.0.1:27182", 27182));
     }
 
     /// ⚠️ **A PEER'S HOSTNAME IS NOT THIS MACHINE'S.**
