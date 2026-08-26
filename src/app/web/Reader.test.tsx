@@ -506,7 +506,32 @@ describe('Reader', () => {
         disconnect(): void {}
       },
     )
-    const store: Record<string, string> = {}
+    /**
+     * ⚠️ **SEEDED WITH VALUES THAT ARE NOT THE DEFAULTS.**
+     *
+     * This started EMPTY and then asserted `theme === 'paper'` and a typeface of
+     * "any string" — which are `KERNEL_SETTINGS`' own fallbacks. So the read
+     * half was satisfied by a `Reader` that never opened the store at all: the
+     * whole persistence path could be deleted and it stayed green. A stored
+     * preference is only stored if a DIFFERENT value comes back.
+     */
+    const store: Record<string, string> = {
+      'paper.settings.v1': JSON.stringify({
+        version: 1,
+        values: {
+          'kernel.theme': 'sepia',
+          /* ⚠️ OFF, DELIBERATELY. `themeFollowsOs` defaults to TRUE and, when
+             on, the applied theme is chosen from `prefers-color-scheme` rather
+             than from the stored value — so a stored theme is invisible until
+             the reader has picked one explicitly. That is correct behaviour and
+             it is also what makes this assertion about the store rather than
+             about the OS. */
+          'kernel.themeFollowsOs': false,
+          'kernel.typeface': 'crimson',
+          'kernel.align': 'ragged',
+        },
+      }),
+    }
     vi.stubGlobal('localStorage', {
       getItem: (k: string) => store[k] ?? null,
       setItem: (k: string, v: string) => {
@@ -527,9 +552,12 @@ describe('Reader', () => {
     await waitFor(() => expect(captured['theme']).toBeTypeOf('string'))
 
     /* THE STORED VALUES REACH THE BOOK, which is the whole point of storing
-       them — a preference the renderer never sees is a preference nobody has. */
-    expect(captured['theme']).toBe('paper')
-    expect(captured['typeface']).toBeTypeOf('string')
+       them — a preference the renderer never sees is a preference nobody has.
+       Each one is a value the defaults do not produce, so a reader that never
+       consulted the store answers differently. */
+    expect(captured['theme'], 'the stored theme never reached the book').toBe('sepia')
+    expect(captured['typeface'], 'the stored typeface never reached the book').toBe('crimson')
+    expect(captured['align'], 'the stored alignment never reached the book').toBe('ragged')
 
     fireEvent.click(await screen.findByRole('button', { name: 'Tools' }))
     fireEvent.click(await screen.findByRole('button', { name: 'Reading' }))
