@@ -97,14 +97,39 @@ export async function submitCode(code: string, fetcher: typeof fetch = fetch): P
   }
 }
 
-export async function signOut(fetcher: typeof fetch = fetch): Promise<void> {
+/**
+ * Whether the shelf actually forgot this browser.
+ *
+ * ⚠️ **`signOut` RETURNED `void` AND SWALLOWED EVERYTHING**, including a
+ * non-204 answer. The credential lives in an `HttpOnly` cookie, so JavaScript
+ * cannot clear it: if the POST does not reach the shelf, or the shelf refuses
+ * it, the credential stays good for its full ninety days — while the screen
+ * returns to the gate and every appearance is of having signed out. A reader
+ * who signs out on a borrowed laptop has been told something untrue about
+ * where their library is.
+ *
+ * The screen still clears either way: the shelf is the authority and this
+ * browser has nothing left to show. What changes is that the caller can SAY
+ * so, and point at the one place that can finish the job — the Browsers pane
+ * on the shelf, which revokes by durable id whether or not the browser is
+ * connected.
+ */
+export type SignOutResult = { readonly kind: 'signed-out' } | { readonly kind: 'still-paired'; readonly why: string }
+
+export async function signOut(fetcher: typeof fetch = fetch): Promise<SignOutResult> {
+  let response: Response
   try {
-    await fetcher('/api/auth/signout', { ...SAME_ORIGIN, method: 'POST' })
-  } catch {
-    /* A sign-out that cannot reach the shelf still has to clear this screen.
-     * The shelf keeps the credential until it hears otherwise, which is the
-     * safe direction to fail: the human can revoke from the shelf itself. */
+    response = await fetcher('/api/auth/signout', { ...SAME_ORIGIN, method: 'POST' })
+  } catch (cause) {
+    return { kind: 'still-paired', why: cause instanceof Error ? cause.message : String(cause) }
   }
+  /* 204 IS THE ONLY YES. The endpoint is idempotent and answers 204 whether or
+     not anything was revoked, so any other status is the shelf declining — a
+     403 from the same-origin check, say — and not a sign-out. */
+  if (response.status !== 204) {
+    return { kind: 'still-paired', why: `the shelf answered ${response.status}` }
+  }
+  return { kind: 'signed-out' }
 }
 
 /** Only the six digits, and never more than six. */

@@ -484,9 +484,25 @@ function App() {
 
   useEffect(refresh, [refresh])
 
+  /**
+   * WHAT A FAILED SIGN-OUT LOOKS LIKE, which was nothing.
+   *
+   * The credential is an `HttpOnly` cookie, so this page cannot clear it. If
+   * the POST does not reach the shelf — or the shelf declines it — the
+   * credential stays good for its full ninety days while this screen returns to
+   * the gate and every appearance is of having signed out. On a borrowed
+   * laptop that is the one thing the reader most needs to be told.
+   *
+   * The screen still clears: the shelf is the authority and there is nothing
+   * left here to show. What is added is saying so, and naming the one place
+   * that can finish it.
+   */
+  const [signOutFailed, setSignOutFailed] = useState<string | null>(null)
+
   const onSignOut = useCallback(() => {
     void import('./app/web/session').then(async ({ signOut }) => {
-      await signOut()
+      const result = await signOut()
+      setSignOutFailed(result.kind === 'still-paired' ? result.why : null)
       refresh()
     })
   }, [refresh])
@@ -502,7 +518,20 @@ function App() {
     case 'unreachable':
       return <Unreachable onRetry={refresh} />
     case 'needs-code':
-      return <PairScreen onConnected={refresh} />
+      return (
+        <>
+          {/* THE SIGN-OUT THAT DID NOT HAPPEN. Shown on the gate because that
+              is where a reader lands after pressing it, and where "you are
+              still paired" is the correction they need. */}
+          {signOutFailed !== null && (
+            <div className="gate-notice" role="alert">
+              Signed out here, but the shelf did not confirm it ({signOutFailed}). This browser may
+              still be paired — revoke it from Settings → Browsers on the shelf itself.
+            </div>
+          )}
+          <PairScreen onConnected={refresh} />
+        </>
+      )
   }
 }
 

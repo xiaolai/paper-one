@@ -239,13 +239,32 @@ export function nodeTextFs(root: string): FileSystem {
        * hundred-and-first copy will not clarify. */
       const target = at(to)
       let destination = target
-      for (let n = 1; n <= 100; n += 1) {
+      /* ⚠️ THE LAST CANDIDATE WAS NEVER TESTED. The loop assigned
+       * `${target}.${n}` and then EXITED, so a run that reached `n === 100`
+       * finished holding `.100` without ever asking whether it existed — and
+       * the POSIX `rename` below replaces its destination. The one path whose
+       * whole purpose is not to destroy an earlier quarantine destroyed one,
+       * in exactly the case that means something has gone badly wrong.
+       *
+       * `found` is what turns "the search ran out" into a refusal. A
+       * hundred-and-first copy clarifies nothing; overwriting the hundredth
+       * clarifies less. */
+      let found = false
+      for (let n = 0; n <= 100; n += 1) {
+        if (n > 0) destination = `${target}.${n}`
         try {
           await access(destination, constants.F_OK)
         } catch {
+          found = true
           break
         }
-        destination = `${target}.${n}`
+      }
+      if (!found) {
+        throw new Error(
+          `cannot quarantine ${path}: ${target} and .1 through .100 all exist. ` +
+            'Something is producing corrupt files faster than they can be looked at; ' +
+            'move the existing quarantines aside before this can continue.',
+        )
       }
       await rename(at(path), destination)
     },

@@ -77,10 +77,40 @@ describe('submitCode', () => {
 })
 
 describe('signOut', () => {
-  it('does not throw when the shelf cannot be reached', async () => {
-    /* The screen still has to clear. The shelf keeps the credential until it
-     * hears otherwise, which is the safe direction to fail. */
-    await expect(signOut(failing)).resolves.toBeUndefined()
+  /**
+   * ⚠️ **A SIGN-OUT THAT DID NOT REACH THE SHELF IS NOT A SIGN-OUT**, and this
+   * used to return `undefined` for both outcomes.
+   *
+   * The credential is an `HttpOnly` cookie, so nothing on the page can clear
+   * it. If the POST fails — or the shelf declines it — the credential stays
+   * good for its full ninety days while the screen returns to the gate and
+   * every appearance is of having signed out. On a borrowed laptop that is
+   * exactly the thing the reader must not be told wrongly.
+   *
+   * It still does not throw: the screen clears either way, because the shelf is
+   * the authority and this browser has nothing left to show. What changed is
+   * that the caller can say so.
+   */
+  it('says it is still paired when the shelf cannot be reached', async () => {
+    const result = await signOut(failing)
+    expect(result.kind).toBe('still-paired')
+  })
+
+  /* 204 IS THE ONLY YES. The endpoint is idempotent and answers 204 whether or
+     not anything was revoked, so anything else is the shelf declining — a 403
+     from the same-origin check, say — and not a sign-out. */
+  it('says it is still paired when the shelf answers anything but 204', async () => {
+    for (const status of [200, 401, 403, 500]) {
+      const answered = (async () => new Response(null, { status })) as unknown as typeof fetch
+      const result = await signOut(answered)
+      expect(result.kind, `status ${status}`).toBe('still-paired')
+      if (result.kind === 'still-paired') expect(result.why).toContain(String(status))
+    }
+  })
+
+  it('says it signed out on a 204', async () => {
+    const ok = (async () => new Response(null, { status: 204 })) as unknown as typeof fetch
+    expect((await signOut(ok)).kind).toBe('signed-out')
   })
 })
 

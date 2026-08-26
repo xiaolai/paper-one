@@ -221,6 +221,61 @@ describe('serving a composed set of services', () => {
     expect(disposed, 'the host that served properly was left running').toBe(1)
   })
 
+  /**
+   * ⚠️ **A HOST THAT THREW TOOK THE OTHERS' DISPOSERS WITH IT.**
+   *
+   * `serveServices` used `Promise.all`, which rejects on the first rejection
+   * and DISCARDS the other results — so a host that had already registered its
+   * handlers was left running with nothing holding its disposer. Exactly the
+   * partial serve the "returned no disposer" case above was written to
+   * prevent, arriving by the one door that check could not see.
+   */
+  it('takes down the hosts that did serve when another THROWS', async () => {
+    const services = servicesWith(spyRecorder().recorder)
+    let disposed = 0
+    services.bindServiceHost(() => ({ dispose: () => void (disposed += 1) }))
+    services.bindServiceHost(() => {
+      throw new Error('this transport could not start')
+    })
+
+    await expect(services.serveServices([])).rejects.toThrow(/could not start/)
+    expect(disposed, 'the host that served properly was left running').toBe(1)
+  })
+
+  it('takes them down when another host REJECTS asynchronously', async () => {
+    const services = servicesWith(spyRecorder().recorder)
+    let disposed = 0
+    services.bindServiceHost(() => ({ dispose: () => void (disposed += 1) }))
+    services.bindServiceHost(async () => {
+      await Promise.resolve()
+      throw new Error('the socket refused')
+    })
+
+    await expect(services.serveServices([])).rejects.toThrow(/socket refused/)
+    expect(disposed).toBe(1)
+  })
+
+  /**
+   * DISPOSAL IS IDEMPOTENT — `Disposable` says so, and the composite did not.
+   *
+   * A second call ran every child again, so a caller disposing defensively (a
+   * teardown path and an unmount, say) double-disposed every host beneath it.
+   * The children are not required to tolerate that and the contract does not
+   * ask them to.
+   */
+  it('runs each host disposer exactly once, however often it is disposed', async () => {
+    const services = servicesWith(spyRecorder().recorder)
+    const counts = { first: 0, second: 0 }
+    services.bindServiceHost(() => ({ dispose: () => void (counts.first += 1) }))
+    services.bindServiceHost(() => ({ dispose: () => void (counts.second += 1) }))
+
+    const served = await services.serveServices([])
+    served.dispose()
+    served.dispose()
+    served.dispose()
+    expect(counts).toEqual({ first: 1, second: 1 })
+  })
+
   it('refuses a bound host that returns no disposer, rather than papering over it', async () => {
     const services = servicesWith(spyRecorder().recorder)
     services.bindServiceHost((() => undefined) as never)

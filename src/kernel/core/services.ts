@@ -606,7 +606,23 @@ export function createKernelServices({
       /* EVERY host gets the same list. They are transports, and a service
        * reachable over one wire and not another would be a difference nothing
        * in this table describes. */
-      const served = await Promise.all([...serviceHosts].map(async (host) => await host(list)))
+      /* ⚠️ `Promise.all` LOST THE DISPOSERS OF EVERY HOST THAT SUCCEEDED.
+       *
+       * It rejects on the first rejection and discards the other results, so a
+       * second host that had already registered its handlers was left running
+       * with nothing holding its disposer — the exact partial-serve leak the
+       * check below was written to prevent, arriving by the one door that check
+       * could not see. `allSettled` keeps them all, so the unwind can be
+       * complete whichever way a host failed. */
+      const settled = await Promise.allSettled([...serviceHosts].map(async (host) => await host(list)))
+      const served = settled.map((one) => (one.status === 'fulfilled' ? one.value : undefined))
+      const thrown = settled.find((one) => one.status === 'rejected')
+      if (thrown !== undefined && thrown.status === 'rejected') {
+        for (const one of served) {
+          if (typeof (one as Disposable | undefined)?.dispose === 'function') one?.dispose()
+        }
+        throw thrown.reason
+      }
 
       /* ⚠️ A BOUND HOST RETURNING NO DISPOSER IS A DEFECT IN THAT HOST, and it
        * has to be told so where it happens rather than at the next restart.
@@ -622,14 +638,22 @@ export function createKernelServices({
       const bad = served.findIndex((one) => typeof (one as Disposable | undefined)?.dispose !== 'function')
       if (bad !== -1) {
         for (const one of served) {
-          if (typeof (one as Disposable | undefined)?.dispose === 'function') one.dispose()
+          if (typeof (one as Disposable | undefined)?.dispose === 'function') one?.dispose()
         }
         throw new Error(`serveServices: a bound service host returned no disposer (host ${bad + 1} of ${served.length})`)
       }
 
+      /* ONCE, HOWEVER OFTEN IT IS CALLED. `Disposable` says disposal is
+       * idempotent and this ran every child again on a second call — so a
+       * caller that disposed defensively (a teardown path and an unmount, say)
+       * double-disposed every host beneath it. The children are not required to
+       * tolerate that, and the contract does not ask them to. */
+      let disposed = false
       return {
         dispose: () => {
-          for (const one of served) one.dispose()
+          if (disposed) return
+          disposed = true
+          for (const one of served) one?.dispose()
         },
       }
     },

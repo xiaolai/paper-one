@@ -38,6 +38,24 @@
   line-height: 1.5;
 }
 
+/* THE SIGN-OUT THAT DID NOT HAPPEN.
+ *
+ * A sign-out this page cannot confirm leaves the credential live on the shelf
+ * for its full ninety days — the cookie is HttpOnly, so nothing here can clear
+ * it. The gate is where the reader lands after pressing it, and this is the
+ * correction they need before they walk away from a borrowed laptop. */
+.gate-notice {
+  font-size: var(--text-body);
+  color: var(--ink);
+  background: var(--wash);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  padding: var(--space-4);
+  margin: 0 0 var(--space-6);
+  max-width: var(--prose-narrow);
+  line-height: 1.5;
+}
+
 .gate button {
   font-size: var(--text-ui);
   padding: var(--space-12) var(--space-24);

@@ -286,7 +286,33 @@ export async function keepCover(
     const small = await downscaleCover(cover)
     if (!small) return false
     await fs.mkdir(folderOf(bookId))
-    await fs.writeFile(coverPathIn(bookId), new Uint8Array(await small.arrayBuffer()))
+    /* ⚠️ WRITTEN BESIDE, THEN RENAMED INTO PLACE.
+     *
+     * This wrote straight to the final path, and the existence check above
+     * treats ANY file at that path as a finished cover. So a write interrupted
+     * by a full disk, a crash or a quit left a truncated file that every later
+     * call accepted — the jacket is permanently broken and the pass that exists
+     * to regenerate it declines to, because something is already there.
+     *
+     * A rename over the same filesystem is atomic: the final path either does
+     * not exist or holds a complete file. The temporary is cleaned up when the
+     * write fails, so a failure leaves nothing behind either. */
+    const bytes = new Uint8Array(await small.arrayBuffer())
+    const finished = coverPathIn(bookId)
+    const partial = `${finished}.writing`
+    try {
+      await fs.writeFile(partial, bytes)
+      await fs.rename(partial, finished)
+    } catch (cause) {
+      /* Best effort: the write is what failed, and a leftover `.writing` is
+         inert — nothing reads that name. */
+      try {
+        await fs.remove(partial)
+      } catch {
+        /* nothing to undo */
+      }
+      throw cause
+    }
     return true
   } catch (cause) {
     console.error('Paper: could not keep the cover', cause)
