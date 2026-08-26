@@ -50,10 +50,10 @@
 //! browser cannot keep answering on a socket it already had.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use paper_webauth::sessions::{Credential, SessionId};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 
 /// The largest frame this side will accept. The peer transport's number, so a
 /// service answer that fits one wire fits the other.
@@ -162,6 +162,9 @@ struct WebSession {
     /// Toward the browser. Dropped on close, which ends the socket's write
     /// task without needing a second signal.
     outbound: Option<mpsc::Sender<Vec<u8>>>,
+    /// Woken when a frame lands in `inbox`, so a reader can WAIT for one
+    /// rather than ask again in a moment. See [`Pipe::wait_for_frames`].
+    arrived: Arc<Notify>,
     /// Bytes handed to `outbound` and not yet reported drained by the pump.
     ///
     /// The channel counts messages, so this is the only place the SIZE of what
@@ -194,6 +197,10 @@ fn abandon(session: &mut WebSession, reason: &str) -> usize {
     if session.closed.is_none() {
         session.closed = Some(reason.to_owned());
     }
+    /* WAKE A WAITER SO IT SEES THE CLOSE. Without this a `wait_for_frames`
+     * already parked on this session sits out its whole timeout before
+     * noticing, which turns a revocation into a delay. */
+    session.arrived.notify_one();
     session.inbox.clear();
     session.inbox_bytes = 0;
     let freed = session.outbound_bytes;
@@ -249,6 +256,7 @@ impl Pipe {
                 admitted,
                 inbox: VecDeque::new(),
                 inbox_bytes: 0,
+                arrived: Arc::new(Notify::new()),
                 outbound: Some(outbound),
                 outbound_bytes: 0,
                 closed: None,
@@ -284,6 +292,10 @@ impl Pipe {
         }
         session.inbox_bytes += frame.len();
         session.inbox.push_back(frame);
+        /* WAKE ANYONE WAITING. `Notify` stores one permit, so a wake that
+         * arrives between a drain finding nothing and the waiter awaiting is
+         * kept rather than lost. */
+        session.arrived.notify_one();
         Push::Accepted
     }
 
@@ -381,6 +393,50 @@ impl Pipe {
         let out: Vec<Vec<u8>> = session.inbox.drain(..take).collect();
         session.inbox_bytes -= out.iter().map(Vec::len).sum::<usize>();
         out
+    }
+
+    /// Wait until this session has a frame, or until `timeout` passes, then
+    /// drain up to `max`.
+    ///
+    /// ⚠️ **THIS EXISTS BECAUSE THE WEBVIEW WAS ASKING TWENTY-FIVE TIMES A
+    /// SECOND, PER SESSION, TO BE TOLD "NOTHING".** `drain` returns
+    /// immediately, so the TypeScript pump polled it every 40 ms — at the
+    /// host's own `MAX_SESSIONS` that is 1,600 IPC round trips a second before
+    /// a single byte of useful traffic.
+    ///
+    /// A longer poll interval was the obvious answer and is the wrong one: the
+    /// interval bounds how long a reader waits for the FIRST frame of a
+    /// request they have just made by tapping the page, so lengthening it
+    /// trades idle CPU for exactly the latency that is felt. Waiting instead
+    /// gives both — the call returns the instant a frame arrives, and costs one
+    /// IPC per `timeout` while nothing is happening.
+    ///
+    /// The mutex is never held across the await: the `Notify` is cloned out
+    /// under the guard and the guard is dropped before waiting.
+    pub async fn wait_for_frames(
+        &self,
+        id: WebSessionId,
+        max: usize,
+        timeout: std::time::Duration,
+    ) -> Vec<Vec<u8>> {
+        let arrived = {
+            let guard = self.inner.lock().expect("pipe mutex poisoned");
+            let Some(session) = guard.sessions.get(&id) else {
+                return Vec::new();
+            };
+            /* ALREADY WAITING FRAMES SHORT-CIRCUIT, so a busy session never
+             * pays the wait at all. */
+            if !session.inbox.is_empty() || session.closed.is_some() {
+                drop(guard);
+                return self.drain(id, max);
+            }
+            Arc::clone(&session.arrived)
+        };
+        /* The timeout is what makes this a poll rather than a subscription: a
+         * session closed while we wait wakes nobody, and the caller has to come
+         * back and see that for itself. */
+        let _ = tokio::time::timeout(timeout, arrived.notified()).await;
+        self.drain(id, max)
     }
 
     /// Close one socket. Idempotent; the first reason is the one kept.
@@ -807,6 +863,95 @@ mod tests {
 
         pipe.close_credential(&credential, "revoked");
         assert_eq!(pipe.outbound_bytes_total(), 0);
+    }
+
+    /// WAITING RETURNS THE MOMENT A FRAME LANDS, and not before.
+    ///
+    /// The webview asked every 40 ms per session to be told "nothing" — 1,600
+    /// IPC round trips a second at `MAX_SESSIONS`, before any real traffic. A
+    /// longer interval was the wrong trade: it bounds how long a reader waits
+    /// for the first frame of a request they have just made. Waiting keeps that
+    /// latency and removes the idle cost.
+    #[tokio::test]
+    async fn waiting_returns_as_soon_as_a_frame_arrives() {
+        let (pipe, sessions) = (Arc::new(Pipe::new()), Sessions::new());
+        let (id, credential) = admitted(&sessions);
+        let socket = pipe.open(id, credential, wire().0).expect("open");
+
+        /* Nothing waiting: the call parks rather than answering empty. */
+        let waiter = {
+            let pipe = Arc::clone(&pipe);
+            tokio::spawn(async move {
+                pipe.wait_for_frames(socket, usize::MAX, std::time::Duration::from_secs(5))
+                    .await
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(
+            !waiter.is_finished(),
+            "an empty inbox must be waited on, not answered"
+        );
+
+        pipe.push(socket, b"a frame".to_vec());
+        let frames = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("the push should have woken the waiter")
+            .expect("the task");
+        assert_eq!(frames, vec![b"a frame".to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn waiting_does_not_wait_at_all_when_frames_are_already_there() {
+        let (pipe, sessions) = (Pipe::new(), Sessions::new());
+        let (id, credential) = admitted(&sessions);
+        let socket = pipe.open(id, credential, wire().0).expect("open");
+        pipe.push(socket, b"already here".to_vec());
+
+        /* A busy session must never pay the wait. The timeout is long enough
+         * that returning at all proves the short circuit ran. */
+        let frames = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            pipe.wait_for_frames(socket, usize::MAX, std::time::Duration::from_secs(30)),
+        )
+        .await
+        .expect("a session with frames must answer at once");
+        assert_eq!(frames, vec![b"already here".to_vec()]);
+    }
+
+    /// AND A CLOSE WAKES THE WAITER, or a revocation becomes a delay.
+    #[tokio::test]
+    async fn closing_wakes_a_waiting_reader() {
+        let (pipe, sessions) = (Arc::new(Pipe::new()), Sessions::new());
+        let (id, credential) = admitted(&sessions);
+        let socket = pipe.open(id, credential, wire().0).expect("open");
+
+        let waiter = {
+            let pipe = Arc::clone(&pipe);
+            tokio::spawn(async move {
+                pipe.wait_for_frames(socket, usize::MAX, std::time::Duration::from_secs(30))
+                    .await
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        pipe.close(socket, "revoked");
+
+        let frames = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("the close should have woken the waiter")
+            .expect("the task");
+        assert!(frames.is_empty());
+    }
+
+    /// …and a timeout answers empty rather than hanging for ever.
+    #[tokio::test]
+    async fn waiting_gives_up_after_its_timeout() {
+        let (pipe, sessions) = (Pipe::new(), Sessions::new());
+        let (id, credential) = admitted(&sessions);
+        let socket = pipe.open(id, credential, wire().0).expect("open");
+        let frames = pipe
+            .wait_for_frames(socket, usize::MAX, std::time::Duration::from_millis(30))
+            .await;
+        assert!(frames.is_empty());
     }
 
     #[test]

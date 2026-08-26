@@ -123,11 +123,20 @@ export function servePipe(options: PumpOptions): Pump {
             try {
               frames = await wire.sessionRecv(session)
             } catch (thrown) {
-              /* The session is gone, or the plugin refused. Either way this
-               * loop has nothing left to read; reporting instead of retrying
-               * keeps a dead session from spinning. */
+              /* ⚠️ **ABORTING LEFT THE SESSION IN `live`, WHICH MADE IT
+               * PERMANENT.** This loop stopped and reported, and the record
+               * stayed — so the next `reconcile` saw the id as already open and
+               * did nothing, for the life of the app. A transient IPC failure
+               * therefore stopped serving that browser for ever, while the
+               * plugin went on reporting its socket and buffering its frames.
+               *
+               * Dropping the record is what makes recovery possible: the next
+               * reconciliation finds an id the webview is not serving and opens
+               * it again. `close` is safe to call from in here — it stops this
+               * loop, which is already aborting. */
               aborted = true
               onError(thrown)
+              close(session)
               return
             }
             if (frames.length === 0) break
@@ -142,17 +151,57 @@ export function servePipe(options: PumpOptions): Pump {
       }
     }
 
-    const timer = setInterval(() => void loop(), pollMs)
+    /**
+     * THE LOOP IS DRIVEN BY THE ANSWER, NOT BY A TIMER.
+     *
+     * ⚠️ `setInterval(loop, 40)` asked the plugin twenty-five times a second,
+     * per session, to be told "nothing" — 1,600 IPC round trips a second at the
+     * host's own `MAX_SESSIONS`, before a byte of real traffic.
+     *
+     * Lengthening the interval was the obvious answer and is the wrong one: it
+     * bounds how long a reader waits for the first frame of a request they have
+     * just made by tapping the page, so it trades idle CPU for exactly the
+     * latency that is felt. `webhost_session_recv` WAITS now — up to a second —
+     * so the call returns the instant a frame lands and costs one round trip
+     * per second while nothing is happening.
+     *
+     * `pollMs` survives as the gap between one pass and the next, which is
+     * about not spinning if the plugin ever answers instantly; the waiting is
+     * done on the other side.
+     */
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const again_ = async () => {
+      if (aborted) return
+      await loop()
+      if (aborted) return
+      timer = setTimeout(() => void again_(), pollMs)
+    }
+    void again_()
     return {
       stop: () => {
         aborted = true
-        clearInterval(timer)
+        if (timer !== undefined) clearTimeout(timer)
       },
     }
   }
 
   const open = (session: number) => {
-    const connection = router.connect(String(session), (bytes) => wire.send(session, bytes))
+    /* ⚠️ **A REJECTED SEND USED TO STRAND THE SESSION.** `createRouter`
+     * disconnects its own connection when the transport errors, and nothing
+     * else happened: the record stayed in `live`, the plugin went on reporting
+     * the socket, and reconciliation saw an id it believed was already served.
+     * Every later request drained into a router connection that had hung up —
+     * answered by nobody, no error, no retry.
+     *
+     * Removing the record here is the same recovery the drain path takes: the
+     * next reconciliation finds an unserved id and opens it again. */
+    const connection = router.connect(String(session), (bytes) =>
+      wire.send(session, bytes).catch((thrown: unknown) => {
+        onError(thrown)
+        close(session)
+        throw thrown
+      }),
+    )
     const { stop } = drain(session)
     live.set(session, { connection, stop })
   }
@@ -183,15 +232,25 @@ export function servePipe(options: PumpOptions): Pump {
     for (const id of [...live.keys()]) if (!now.has(id)) close(id)
   }
 
-  /* READY FIRST. The plugin refuses to deliver frames before the webview says
-   * it is serving; announcing after the first poll would drop whatever a
-   * browser sent in between. */
+  /* READY FIRST — AND THE TIMER TOO.
+   *
+   * The plugin refuses to deliver frames before the webview says it is serving;
+   * announcing after the first poll would drop whatever a browser sent in
+   * between. That was the stated order, and only the FIRST reconcile obeyed it:
+   * `setInterval` was armed on the line below, unconditionally, so a poll could
+   * land before `ready` resolved — and went on polling for ever if `ready`
+   * REJECTED, which is the case where the plugin will never deliver anything at
+   * all. The interval is armed by the readiness, so the ordering is structural
+   * rather than a race that usually goes the right way. */
+  let sessionsTimer: ReturnType<typeof setInterval> | undefined
   void wire
     .ready()
-    .then(() => reconcile())
+    .then(() => {
+      if (stopped) return
+      sessionsTimer = setInterval(() => void reconcile(), sessionsMs)
+      return reconcile()
+    })
     .catch(onError)
-
-  const sessionsTimer = setInterval(() => void reconcile(), sessionsMs)
 
   return {
     get serving() {
@@ -199,7 +258,7 @@ export function servePipe(options: PumpOptions): Pump {
     },
     stop: () => {
       stopped = true
-      clearInterval(sessionsTimer)
+      if (sessionsTimer !== undefined) clearInterval(sessionsTimer)
       for (const id of [...live.keys()]) close(id)
     },
   }

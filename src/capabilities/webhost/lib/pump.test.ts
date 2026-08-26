@@ -203,6 +203,108 @@ describe('servePipe', () => {
     vi.useRealTimers()
   })
 
+  /**
+   * ⚠️ **A TRANSIENT FAILURE USED TO BE PERMANENT.**
+   *
+   * The drain aborted and reported, and the record stayed in `live` — so the
+   * next reconciliation saw the id as already served and did nothing, for the
+   * life of the app. One IPC hiccup stopped serving that browser for ever,
+   * while the plugin went on reporting its socket and buffering its frames.
+   *
+   * The test above pins that a DEAD session stops spinning. This pins the other
+   * half: a session that recovers is served again.
+   */
+  it('serves a session again after a transient recv failure', async () => {
+    vi.useFakeTimers()
+    const onError = vi.fn()
+    let fail = true
+    let reads = 0
+    const wire = fakeWire({
+      sessions: async () => [{ id: 1 }],
+      sessionRecv: async () => {
+        if (fail) throw new Error('one hiccup')
+        reads += 1
+        return []
+      },
+    })
+    const pump = servePipe({ wire, services: [PING], pollMs: 5, sessionsMs: 10, onError })
+    await tick()
+    expect(onError, 'the failure was not reported').toHaveBeenCalled()
+
+    /* THE RECOVERY IS THE ASSERTION. The plugin still reports the session, so
+       once reads succeed again the pump must be reading it — which it cannot be
+       if the failed record was left in `live`, because reconciliation would see
+       an id it believed was already served and do nothing, for ever.
+
+       Retrying happens at the RECONCILE cadence, not the poll cadence, so a
+       permanently dead session costs one attempt per sweep rather than a spin —
+       which is what `stops reading a session whose recv keeps failing` pins. */
+    fail = false
+    reads = 0
+    await tick(10)
+    expect(reads, 'a session that recovered was never read again').toBeGreaterThan(0)
+
+    pump.stop()
+    vi.useRealTimers()
+  })
+
+  /**
+   * READINESS GATES THE POLL, and it only gated the FIRST one.
+   *
+   * `setInterval` was armed unconditionally on the line after `ready()`, so a
+   * poll could land before the plugin had been told the webview was serving —
+   * the exact ordering the comment there promises — and went on polling for
+   * ever if `ready` REJECTED, which is the case where the plugin will never
+   * deliver anything at all.
+   */
+  it('polls nothing until ready resolves', async () => {
+    vi.useFakeTimers()
+    let release: (() => void) | undefined
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const sessions = vi.fn(async () => [] as { id: number }[])
+    const pump = servePipe({
+      wire: fakeWire({ ready: () => held, sessions }),
+      services: [],
+      pollMs: 5,
+      sessionsMs: 10,
+    })
+
+    await tick(10)
+    expect(sessions, 'a poll landed before the plugin was told we were serving').not.toHaveBeenCalled()
+
+    release?.()
+    await tick(4)
+    expect(sessions).toHaveBeenCalled()
+    pump.stop()
+    vi.useRealTimers()
+  })
+
+  it('polls nothing at all when ready rejects', async () => {
+    vi.useFakeTimers()
+    const onError = vi.fn()
+    const sessions = vi.fn(async () => [] as { id: number }[])
+    const pump = servePipe({
+      wire: fakeWire({
+        ready: async () => {
+          throw new Error('the plugin is not there')
+        },
+        sessions,
+      }),
+      services: [],
+      pollMs: 5,
+      sessionsMs: 10,
+      onError,
+    })
+
+    await tick(10)
+    expect(onError).toHaveBeenCalled()
+    expect(sessions, 'polling a plugin that will never deliver is a timer nobody stops').not.toHaveBeenCalled()
+    pump.stop()
+    vi.useRealTimers()
+  })
+
   it('reports a failure to list sessions rather than throwing into a timer', async () => {
     vi.useFakeTimers()
     const onError = vi.fn()

@@ -132,10 +132,26 @@ impl WebHostState {
         }
     }
 
-    pub fn recv(&self, session: u64) -> Vec<Vec<u8>> {
+    /// How long `recv` waits for a frame before answering "nothing yet".
+    ///
+    /// Long enough that an idle session costs one round trip a second rather
+    /// than twenty-five; short enough that a webview which has stopped caring
+    /// is not held for a noticeable time. See `Pipe::wait_for_frames`.
+    const RECV_WAIT: std::time::Duration = std::time::Duration::from_millis(1000);
+
+    pub async fn recv(&self, session: u64) -> Vec<Vec<u8>> {
         /* Everything waiting, not a page of it. The webview drains in a loop
          * until it gets an empty answer, exactly as it does for the peer
-         * plugin, so a cap here would only add a round trip. */
-        self.host.pipe.drain(WebSessionId(session), usize::MAX)
+         * plugin, so a cap here would only add a round trip.
+         *
+         * ⚠️ IT WAITS NOW. This returned immediately, so the webview asked
+         * every 40 ms per session to be told "nothing" — 1,600 IPC round trips
+         * a second at the host's own session cap, before any real traffic.
+         * Waiting rather than lengthening the interval keeps the latency of the
+         * first frame of a request the reader has just made. */
+        self.host
+            .pipe
+            .wait_for_frames(WebSessionId(session), usize::MAX, Self::RECV_WAIT)
+            .await
     }
 }

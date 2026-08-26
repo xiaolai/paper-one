@@ -165,15 +165,24 @@ pub async fn webhost_send<R: Runtime>(
     state.send(session, frame)
 }
 
-/// Every frame waiting from one browser. Never waits; an empty answer means
-/// "nothing right now", exactly as the peer plugin's `session_recv` does.
+/// Every frame waiting from one browser.
+///
+/// ⚠️ **IT WAITS UP TO A SECOND**, unlike the peer plugin's `session_recv`, and
+/// the difference is deliberate. This one used to return immediately, so the
+/// webview asked every 40 ms per session to be told "nothing" — 1,600 IPC round
+/// trips a second at the host's own session cap, before a byte of real traffic.
+///
+/// Lengthening the interval was the obvious answer and the wrong one: the
+/// interval bounds how long a reader waits for the first frame of a request
+/// they have just made by tapping the page. Waiting here keeps that latency and
+/// removes the idle cost. An empty answer still means "nothing right now".
 #[command]
 pub async fn webhost_session_recv<R: Runtime>(
     _app: AppHandle<R>,
     state: State<'_, Arc<WebHostState>>,
     session: u64,
 ) -> Result<Vec<Vec<u8>>, Error> {
-    Ok(state.recv(session))
+    Ok(state.recv(session).await)
 }
 
 #[cfg(test)]
