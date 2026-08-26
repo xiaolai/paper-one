@@ -26,7 +26,67 @@ import { readingPositions, type PositionStore } from './positions'
 const globals = globalThis as { DOMMatrix?: unknown }
 globals.DOMMatrix ??= class {}
 
-afterEach(cleanup)
+/**
+ * ⚠️ **EVERY ELEMENT HAS A BOX**, and in jsdom none of them do.
+ *
+ * `useRowMenu` closes a menu whose anchor is `detached` — off screen, where its
+ * items would stay focusable and exposed to assistive technology while nobody
+ * can see them. jsdom answers every `getBoundingClientRect` with zeros, so
+ * every anchor is detached and **no menu in this repository can be opened by a
+ * test without this**: it opens and shuts inside the same commit, which reads
+ * exactly like a control that does not work.
+ *
+ * That cost an hour and a reproduction in isolation. `LibraryShelf.test.tsx`
+ * carries the same stub for the same reason.
+ */
+Element.prototype.getBoundingClientRect = function (): DOMRect {
+  return { x: 40, y: 40, top: 40, left: 40, right: 140, bottom: 72, width: 100, height: 32, toJSON: () => ({}) } as DOMRect
+}
+
+/**
+ * ⚠️ **WHAT `Reader` HANDS THE READER, CAPTURED — AND IT USED TO BE INVISIBLE.**
+ *
+ * `FoliateView` mounts a custom element and cannot render in jsdom, so several
+ * tests below could only look at the surrounding chrome. That chrome is present
+ * from the first frame, which made a whole class of assertion VACUOUS: "the
+ * banner exists" was true before the decision under test had been made, and
+ * true if it was never made at all. Three tests in this file asserted exactly
+ * that and would have passed with the feature deleted.
+ *
+ * The decision is a PROP. `withView` mounts a fresh `Reader` over a stand-in
+ * that records what it is given — the same idiom the page-intent tests below
+ * already use, hoisted here so the source can be asserted rather than inferred.
+ */
+async function withView(
+  render_: (Fresh: typeof Reader) => void,
+): Promise<Record<string, unknown>> {
+  const captured: Record<string, unknown> = {}
+  vi.doMock('../../kernel/ui/reader/FoliateView', () => ({
+    FoliateView: (props: Record<string, unknown>) => {
+      Object.assign(captured, props)
+      /* EVERY SOURCE, not just the last: the decision is "which one did it ever
+         hand over", and a re-render with `file: null` would otherwise erase the
+         answer. */
+      ;(captured['sources'] as unknown[]).push(props['file'])
+      return null
+    },
+  }))
+  captured['sources'] = []
+  vi.resetModules()
+  const { Reader: Fresh } = await import('./Reader')
+  render_(Fresh)
+  return captured
+}
+
+/** The sources a captured view was handed, ignoring the empty ones. */
+const sourcesOf = (captured: Record<string, unknown>) =>
+  (captured['sources'] as unknown[]).filter((f) => f !== null)
+
+afterEach(() => {
+  cleanup()
+  vi.doUnmock('../../kernel/ui/reader/FoliateView')
+  vi.resetModules()
+})
 
 function shelf(facts: Partial<ContentFacts>) {
   const readRange = vi.fn(async () => new Uint8Array(0))
@@ -110,17 +170,38 @@ describe('Reader', () => {
    */
   it('gives a measured PDF a range transport and never fetches it whole', async () => {
     const { content, fileOf, readRange } = shelf({ ext: 'pdf', size: 614907 })
-    open(content)
-    /* The transport reports the length pdf.js needs before it asks for a byte,
-       so its presence is observable without rendering anything. */
-    await waitFor(() => expect(screen.getByRole('banner')).toBeTruthy())
-    await waitFor(() => expect(fileOf).not.toHaveBeenCalled())
-    expect(readRange).not.toHaveBeenCalled()
+    const captured = await withView((Fresh) =>
+      render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />),
+    )
+
+    /* ⚠️ **THIS USED TO ASSERT THAT THE BANNER EXISTED**, which is true from the
+     * first frame and true if no transport were ever built. What the work item
+     * is about is the SOURCE the reader is handed: a `{ range, name }` and not a
+     * `File`. That is a prop, so it can be looked at. */
+    await waitFor(() => expect(sourcesOf(captured)).toHaveLength(1))
+    const source = sourcesOf(captured)[0] as { range?: unknown; name?: string }
+    expect(source.range, 'a measured PDF must reach the reader as a range transport').toBeDefined()
+    expect(source.name, 'named so pdf.js routes on the suffix').toBe('Moby-Dick.pdf')
+    expect(source, 'a File here is the whole-download fallback').not.toBeInstanceOf(File)
+
+    /* AND THE FILE WAS NEVER FETCHED. Falling back would work, and would
+       download a 300 MB scanned book to show page one. */
+    expect(fileOf).not.toHaveBeenCalled()
+    expect(readRange, 'nothing has asked for a page yet').not.toHaveBeenCalled()
   })
 
-  /* A RANGE READ THAT FAILS HAS NOWHERE TO GO in pdf.js — it has an
-     `onDataRange` and no `onError` — so without surfacing it the book stops on
-     a blank page for ever. */
+  /**
+   * A RANGE READ THAT FAILS HAS NOWHERE TO GO in pdf.js — it has an
+   * `onDataRange` and no `onError` — so without surfacing it the book stops on
+   * a blank page for ever.
+   *
+   * ⚠️ **THIS USED TO BUILD ITS OWN TRANSPORT AND EXERCISE THAT**, which tests
+   * `pdfRange.ts` (already covered by its own file) and says nothing about the
+   * one here. `Reader` supplies the `onFailure` that turns a dead transport into
+   * something the reader can see, and a test that builds a second transport
+   * would pass with `Reader`'s handler deleted. The transport under test is the
+   * one `Reader` handed over.
+   */
   it('surfaces a failed range read instead of leaving the page blank', async () => {
     const failing = {
       locate: async (): Promise<ContentFacts> => ({ here: true, ext: 'pdf', size: 64 }),
@@ -129,17 +210,18 @@ describe('Reader', () => {
       },
       fileOf: async () => new File([], 'x.pdf'),
     } as unknown as RemoteContent
-    open(failing)
-    await waitFor(() => expect(screen.getByRole('banner')).toBeTruthy())
+    const captured = await withView((Fresh) =>
+      render(<Fresh content={failing} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />),
+    )
+    await waitFor(() => expect(sourcesOf(captured)).toHaveLength(1))
 
-    /* Ask the transport for a range, as pdf.js would. */
-    const { pdfRangeTransport } = await import('./pdfRange')
-    const problems: unknown[] = []
-    const transport = await pdfRangeTransport(failing, 'one', 64, {
-      onFailure: (cause) => problems.push(cause),
-    })
-    transport.requestDataRange(0, 8)
-    await waitFor(() => expect(problems).toHaveLength(1))
+    /* READER'S OWN TRANSPORT, asked for a range as pdf.js would. */
+    const source = sourcesOf(captured)[0] as { range: { requestDataRange: (a: number, b: number) => void } }
+    act(() => source.range.requestDataRange(0, 8))
+
+    /* THE READER IS TOLD. `Reader`'s `onFailure` sets `problem`, which reaches
+       the reading surface — a message, not a blank page waiting for ever. */
+    expect(await screen.findByText(/the shelf went away/i)).toBeTruthy()
   })
 
   it('goes back to the shelf, from the reader and from a book it could not open', async () => {
@@ -163,17 +245,44 @@ describe('Reader', () => {
   /* A PHONE ROTATES, and the measure is derived from the stage's width. A
      reader that kept the portrait measure in landscape would set the page to
      half the screen and leave the rest white. */
+  /**
+   * A PHONE ROTATES, and the measure is derived from the stage's width. A
+   * reader that kept the portrait measure in landscape would set the page to
+   * half the screen and leave the rest white.
+   *
+   * ⚠️ **THIS USED TO ASSERT THAT THE BANNER SURVIVED.** The banner is present
+   * from the first frame and survives anything that does not throw — so the
+   * test passed with the resize listener removed, which is the only thing it
+   * claimed to be about. The measure is a PROP, and a prop can be compared.
+   */
   it('re-measures when the window changes size', async () => {
     const { content } = shelf({ ext: 'epub' })
-    open(content)
-    await screen.findByRole('banner')
+    const captured = await withView((Fresh) =>
+      render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />),
+    )
+    await waitFor(() => expect(captured['measure']).toBeTypeOf('number'))
+    const portrait = captured['measure'] as number
+
+    /* NARROWER, deliberately. A measure has a MAXIMUM — `proseGrid` will not
+       set a line wider than the step's ideal however much room there is — so
+       widening the window is the direction in which nothing is supposed to
+       happen, and a test that asserted a change there would be asserting the
+       opposite of the typography. Narrowing is where the stage binds. */
     act(() => {
-      Object.defineProperty(window, 'innerWidth', { value: 380, configurable: true })
+      Object.defineProperty(window, 'innerWidth', { value: 360, configurable: true })
       window.dispatchEvent(new Event('resize'))
     })
-    /* The surface survives the change — the assertion that matters is that the
-       listener runs at all, since a throw here would take the reader down. */
-    expect(screen.getByRole('banner')).toBeTruthy()
+
+    await waitFor(() =>
+      expect(
+        captured['measure'],
+        'the measure did not follow the window; the page keeps its old width',
+      ).not.toBe(portrait),
+    )
+    /* AND IT FOLLOWED THE RIGHT WAY. Asserting only "it changed" would pass on
+       a measure that grew when the window shrank. */
+    expect(captured['measure'] as number).toBeLessThan(portrait)
+    expect(captured['measure'] as number).toBeLessThanOrEqual(360)
   })
 
   /**
@@ -191,18 +300,35 @@ describe('Reader', () => {
   it('opens a book where it was left', async () => {
     const positions = fakePositions({ one: { cfi: 'epubcfi(/6/4!/4/2/10)', at: 1 } })
     const { content } = shelf({ ext: 'epub' })
-    open(content, positions)
-    await screen.findByRole('banner')
-    /* The position survives the open — nothing has overwritten it, which is
-       what a book that reopened on every relocate would do. */
+    const captured = await withView((Fresh) =>
+      render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={positions} />),
+    )
+    await waitFor(() => expect(sourcesOf(captured)).toHaveLength(1))
+
+    /* ⚠️ **THIS USED TO CHECK ONLY THAT STORAGE WAS NOT OVERWRITTEN**, which is
+     * true of a `Reader` that never reads the store at all — the feature could
+     * be deleted and the test would stay green. Restoring a position means
+     * HANDING IT TO THE READER, and that is a prop. */
+    expect(
+      captured['lastLocation'],
+      'a stored position that never reaches the reader is a position nobody has',
+    ).toBe('epubcfi(/6/4!/4/2/10)')
+    /* AND STILL NOT OVERWRITTEN: a book that re-read the store on every
+       relocate would be a book that could not be read at all. */
     expect(positions.get('one')).toBe('epubcfi(/6/4!/4/2/10)')
   })
 
   it('starts at the beginning for a book it has never opened', async () => {
     const positions = fakePositions()
     const { content } = shelf({ ext: 'epub' })
-    open(content, positions)
-    await screen.findByRole('banner')
+    const captured = await withView((Fresh) =>
+      render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={positions} />),
+    )
+    await waitFor(() => expect(sourcesOf(captured)).toHaveLength(1))
+    /* NULL, not a stale cfi from another book: `lastLocation` is what foliate
+       navigates to, and a wrong one opens the book somewhere it has never
+       been. */
+    expect(captured['lastLocation']).toBeNull()
     expect(positions.get('one')).toBeNull()
   })
 
@@ -425,26 +551,69 @@ describe('Reader', () => {
     expect(screen.queryByText('Side pane position')).toBeNull()
     expect(screen.queryByText('Brightness')).toBeNull()
 
-    /* EVERY OTHER ROW WRITES SOMETHING. Each is a separate inline setter on
-       this surface — typeface, size, alignment, spacing, the reading style —
-       and a setter that stopped writing would change nothing on screen, so
-       only the store can say. Clicking them all is what proves none is inert.
-       ⚠️ SCOPED TO THE SHEET, and the GROUP SUMMARIES are skipped. The bar's
-       own icons are buttons too, and clicking one closes the sheet — every row
-       after it is then detached and nothing is written. So is clicking a
-       summary, which collapses its group. Both look identical to a pane of
-       dead controls. */
-    const before = JSON.stringify(store)
-    const sheet = document.querySelector('[role="dialog"]')
-    const rows = [...(sheet?.querySelectorAll('button') ?? [])].filter(
-      (b) =>
-        !/^(appearance|text|spacing|paragraphs|blocks|figures|page)$/i.test((b.textContent ?? '').trim()),
+    /**
+     * EVERY SETTING THIS SURFACE OFFERS WRITES ITS OWN KEY.
+     *
+     * ⚠️ **THIS USED TO CLICK EVERY CONTROL AND CHECK THAT THE STORE CHANGED
+     * AT ALL.** One working setter satisfies that, and the theme click above
+     * has already written — so the assertion was true before this block ran.
+     * Six of the seven setters could have been inert and it would have passed.
+     *
+     * Each is a SEPARATE inline setter on this surface, and a setter that
+     * stopped writing changes nothing on screen, so only the store can say. The
+     * keys are named one at a time.
+     *
+     * ⚠️ SCOPED TO THE SHEET, and the GROUP SUMMARIES are skipped. The bar's own
+     * icons are buttons too, and clicking one closes the sheet — every row after
+     * it is then detached and nothing is written. So is clicking a summary,
+     * which collapses its group. Both look identical to a pane of dead
+     * controls.
+     */
+    const sheet = () => document.querySelector('[role="dialog"]')
+    const GROUPS = /^(appearance|text|spacing|paragraphs|blocks|figures|page)$/i
+    /* ⚠️ **THE GROUPS OPEN FIRST, and the sweep used to skip them entirely.**
+     * A collapsed group renders no rows, so `kernel.spacing` — which lives
+     * under one — had no control to click and was never written. Skipping the
+     * summaries was right for the SWEEP (clicking one collapses it and detaches
+     * every row after it) and wrong as a way to reach what is inside them. */
+    for (const summary of [...(sheet()?.querySelectorAll('button') ?? [])]) {
+      if (GROUPS.test((summary.textContent ?? '').trim()) && summary.getAttribute('aria-expanded') !== 'true') {
+        fireEvent.click(summary)
+      }
+    }
+    const rows = [...(sheet()?.querySelectorAll('button') ?? [])].filter(
+      (b) => !GROUPS.test((b.textContent ?? '').trim()),
     )
     expect(rows.length).toBeGreaterThan(5)
+    /* ⚠️ **THE TYPEFACE IS A MENU, NOT A ROW**, and it is held out of the sweep.
+     * `FacePicker` is a button that OPENS a list, and the list does not exist
+     * until it is clicked — so a snapshot of the sheet's buttons cannot contain
+     * a face to pick. Worse, clicking it mid-sweep opens a menu that the NEXT
+     * row's click then dismisses, so the sweep left it shut and wrote nothing.
+     * The old assertion ("the store changed at all") was already satisfied by
+     * the theme click above and never noticed. Found by naming the keys. */
+    const opener = screen.getByRole('button', { name: /^Typeface:/ })
+    fireEvent.click(opener)
+    const faces = screen.getAllByRole('menuitemradio')
+    const other = faces.find((f) => f.getAttribute('aria-checked') !== 'true')
+    expect(other, 'the face menu offered nothing to change to').toBeDefined()
+    fireEvent.click(other!)
+
     for (const one of rows) {
-      if (one.isConnected) fireEvent.click(one)
+      if (one !== opener && one.isConnected) fireEvent.click(one)
     }
-    expect(JSON.stringify(store)).not.toBe(before)
+
+    const keysWritten = () =>
+      Object.keys(
+        (JSON.parse(store['paper.settings.v1'] ?? '{}') as { values?: Record<string, unknown> }).values ?? {},
+      )
+    /* THE SEVEN `WEB_SETTINGS` DECLARES, derived rather than listed — a setting
+       added to that table with no control here fails this rather than being
+       noticed later by a reader whose choice does nothing. */
+    const { WEB_SETTINGS } = await import('./settings')
+    for (const setting of Object.values(WEB_SETTINGS)) {
+      expect(keysWritten(), `nothing ever wrote ${setting.key}`).toContain(setting.key)
+    }
 
     vi.doUnmock('../../kernel/ui/reader/FoliateView')
     vi.resetModules()
