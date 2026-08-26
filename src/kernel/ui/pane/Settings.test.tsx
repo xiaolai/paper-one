@@ -24,10 +24,59 @@ import { offeredFaces } from '../../core/typefaces'
  * pane draws every row, and the narrow one draws none of the seven.
  */
 
+/**
+ * ⚠️ **EVERY ELEMENT HAS A BOX**, and in jsdom none of them do.
+ *
+ * `useRowMenu` closes a menu whose anchor is `detached` — off screen, where its
+ * items would stay focusable and exposed to assistive technology while nobody
+ * can see them. jsdom answers every `getBoundingClientRect` with zeros, so the
+ * anchor is always detached and the typeface menu **opens and shuts inside one
+ * commit**: no click can ever reach a face. That reads exactly like a control
+ * that does not work, which is why `onTypeface` sat unfired here without
+ * anyone noticing. `LibraryShelf.test.tsx` carries the same stub.
+ */
+Element.prototype.getBoundingClientRect = function (): DOMRect {
+  return { x: 40, y: 40, top: 40, left: 40, right: 140, bottom: 72, width: 100, height: 32, toJSON: () => ({}) } as DOMRect
+}
+
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
 })
+
+/** Open every collapsed group, then click every row that is not a summary. */
+const GROUPS = /^(appearance|text|spacing|paragraphs|blocks|figures|page)$/i
+
+function sweep(container: HTMLElement): void {
+  /* ⚠️ **THE GROUPS OPEN ONE AT A TIME, RE-QUERYING AFTER EACH.** Toggling
+   * several summaries in a row closes the ones already open and detaches the
+   * buttons collected before; every later click then lands on a node no longer
+   * in the document and writes nothing, which looks exactly like a pane of dead
+   * controls. This file fell into that twice. */
+  for (;;) {
+    const shut = [...container.querySelectorAll('button')].find(
+      (b) => GROUPS.test((b.textContent ?? '').trim()) && b.getAttribute('aria-expanded') !== 'true',
+    )
+    if (!shut) break
+    fireEvent.click(shut)
+  }
+  /* THE TYPEFACE IS A MENU, NOT A ROW, and it is driven separately: clicking it
+     mid-sweep opens a list that the next row's click dismisses, so it writes
+     nothing and looks inert. */
+  const opener = screen.queryByRole('button', { name: /^Typeface:/ })
+  if (opener) {
+    fireEvent.click(opener)
+    const other = screen
+      .queryAllByRole('menuitemradio')
+      .find((f) => f.getAttribute('aria-checked') !== 'true')
+    if (other) fireEvent.click(other)
+  }
+  for (const one of [...container.querySelectorAll('button')]) {
+    if (one !== opener && !GROUPS.test((one.textContent ?? '').trim()) && one.isConnected) {
+      fireEvent.click(one)
+    }
+  }
+}
 
 beforeEach(() => {
   /* jsdom has no `ResizeObserver`, and the groups measure themselves to
@@ -204,19 +253,27 @@ describe('every control', () => {
        on nodes no longer in the document and not one setter fires. That is
        what "only nothing fired" meant, and it looked exactly like a pane of
        dead controls. */
-    const rows = [...container.querySelectorAll('button')].filter(
-      (b) => !/^(appearance|text|spacing|paragraphs|blocks|figures|page)$/i.test((b.textContent ?? '').trim()),
-    )
-    expect(rows.length).toBeGreaterThan(8)
-    for (const one of rows) {
-      if (one.isConnected) fireEvent.click(one)
-    }
+    expect(
+      [...container.querySelectorAll('button')].filter((b) => !GROUPS.test((b.textContent ?? '').trim())).length,
+    ).toBeGreaterThan(8)
+    sweep(container)
 
-    /* NOT "some setter fired" — a single assertion would pass with most of the
-       pane inert, which is the failure a pane this size invites: nothing
-       renders differently when a handler is wrong, it just stops writing. */
-    const fired = Object.entries(spy).filter(([, fn]) => fn.mock.calls.length > 0)
-    expect(fired.length, `only ${fired.map(([k]) => k).join(', ') || 'nothing'} fired`).toBeGreaterThanOrEqual(4)
+    /**
+     * ⚠️ **EVERY SETTER, NAMED — AND THIS USED TO BE "AT LEAST FOUR".**
+     *
+     * `>= 4` out of seventeen is a threshold, and a threshold on a count is the
+     * thing this pane invites: nothing renders differently when a handler is
+     * wrong, it just stops writing. Thirteen setters could have gone silent and
+     * this stayed green. It also hid a real one — `onTypeface` never fired at
+     * all, because the face menu cannot open without a layout box.
+     *
+     * Derived from `spy` rather than listed, so a setter added to the pane with
+     * no control fails this rather than being discovered by a reader whose
+     * choice does nothing.
+     */
+    for (const [name, fn] of Object.entries(spy)) {
+      expect(fn.mock.calls.length, `${name} never fired: its row is inert`).toBeGreaterThan(0)
+    }
   })
 })
 
@@ -235,6 +292,24 @@ describe('every control', () => {
  * controls. That is a trap this file fell into twice.
  */
 describe('the collapsed groups', () => {
+  /**
+   * WHICH SETTER EACH GROUP OWNS.
+   *
+   * ⚠️ **THE ASSERTION USED TO BE "SOMETHING FIRED".** Every one of these tests
+   * clicked EVERY button in the whole panel, including the rows of the groups
+   * that are open at rest — so `onTheme` firing satisfied "Figures wrote
+   * something", and every handler inside Figures could have been inert. Four
+   * tests, none of them about the group it names.
+   *
+   * Named per group, so the test fails where the defect is.
+   */
+  const OWNS: Record<string, readonly string[]> = {
+    Spacing: ['onSpacing'],
+    Paragraphs: ['onStyle'],
+    Blocks: ['onStyle'],
+    Figures: ['onStyle'],
+  }
+
   for (const group of ['Spacing', 'Paragraphs', 'Blocks', 'Figures']) {
     it(`writes something from ${group}`, () => {
       const { props, spy } = full()
@@ -246,18 +321,35 @@ describe('the collapsed groups', () => {
       expect(summary, `${group} should have a summary to open`).toBeDefined()
       fireEvent.click(summary!)
 
-      /* RE-QUERIED AFTER THE TOGGLE — the rows did not exist a moment ago. */
-      const rows = [...container.querySelectorAll('button')].filter(
-        (b) =>
-          !/^(appearance|text|spacing|paragraphs|blocks|figures|page)$/i.test((b.textContent ?? '').trim()),
-      )
+      /**
+       * ⚠️ **ONLY THIS GROUP'S ROWS, AND THE SWEEP USED TO CLICK THE WHOLE
+       * PANEL.** A setter belonging to an always-open group then satisfied the
+       * assertion below, and the group the test is named after was never
+       * exercised at all.
+       *
+       * Scoped through `aria-controls`, which `PaneGroup` already sets to the
+       * id of the body it opens. Diffing the rows by LABEL was the first
+       * attempt and is wrong: a stepper's "larger"/"smaller" appear in more
+       * than one group, so the group's own rows were filtered out as
+       * pre-existing and nothing was clicked.
+       */
+      const bodyId = summary!.getAttribute('aria-controls')
+      expect(bodyId, `${group}'s summary should name the body it opens`).toBeTruthy()
+      const body = container.querySelector(`#${CSS.escape(bodyId!)}`)
+      expect(body, `${group} should render a body when open`).not.toBeNull()
+
+      const rows = [...(body?.querySelectorAll('button') ?? [])]
       expect(rows.length, `${group} should render rows when open`).toBeGreaterThan(0)
       for (const one of rows) {
         if (one.isConnected) fireEvent.click(one)
       }
 
-      const fired = Object.entries(spy).filter(([, fn]) => fn.mock.calls.length > 0)
-      expect(fired.length, `${group} wrote nothing`).toBeGreaterThan(0)
+      for (const name of OWNS[group] ?? []) {
+        expect(
+          spy[name as keyof typeof spy].mock.calls.length,
+          `${group} never reached ${name}: its rows are inert`,
+        ).toBeGreaterThan(0)
+      }
     })
   }
 })
