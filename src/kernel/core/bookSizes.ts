@@ -1,4 +1,4 @@
-import { BOOKS_DIR, folderOf } from './bookFolder'
+import { folderOf } from './bookFolder'
 import { CONTENT_EXTENSIONS } from './bookVault'
 import type { SizePort } from './ports'
 
@@ -74,6 +74,23 @@ export interface SizeOps {
   readDir(path: string): Promise<readonly { readonly name: string; readonly isDirectory: boolean }[]>
 }
 
+/**
+ * Where `libraryBytes` starts walking: the DATA ROOT, not `books/`.
+ *
+ * ⚠️ **THIS WALKED `books/` AND THE PORT PROMISES THE WHOLE LIBRARY.** The Node
+ * host's own implementation walked the data root — the same contract, answered
+ * two ways — so `shelf.status.bytes` depended on which host you asked, and the
+ * desktop's answer silently omitted `index.json`, the store, the sync metadata
+ * and everything in the trash. A reader deciding whether to evict a book was
+ * shown a number smaller than what was actually on their disk, and the gap grew
+ * with exactly the things they could not see.
+ *
+ * There is one walk now and both hosts run it — see `nodeSizePort`, which is
+ * this function over Node's `stat` and `readdir`. Two copies of one contract is
+ * how they came to disagree.
+ */
+const DATA_ROOT = ''
+
 /** A `SizePort` over any filesystem that can answer those two. */
 export function sizePortOver(ops: SizeOps): SizePort {
   return {
@@ -110,7 +127,10 @@ export function sizePortOver(ops: SizeOps): SizePort {
           return
         }
         for (const entry of entries) {
-          const child = `${path}/${entry.name}`
+          /* ROOT-SAFE. At the root `path` is empty, and joining with a slash
+             would build `/index.json` — an ABSOLUTE path, which resolves
+             outside the data directory rather than inside it. */
+          const child = path === DATA_ROOT ? entry.name : `${path}/${entry.name}`
           if (entry.isDirectory) {
             await walk(child)
             continue
@@ -120,7 +140,7 @@ export function sizePortOver(ops: SizeOps): SizePort {
           else total += size
         }
       }
-      await walk(BOOKS_DIR)
+      await walk(DATA_ROOT)
       return whole ? total : null
     },
   }

@@ -55,7 +55,19 @@ const tauriSizeOps: SizeOps = {
       return null
     }
   },
-  readDir: (path) => readDir(path, DIR),
+  /**
+   * ⚠️ **THE EMPTY PATH IS THE DATA ROOT, AND THE PLUGIN WILL NOT TAKE IT.**
+   *
+   * `libraryBytes` walks from `''` — the data directory itself — because the
+   * port promises the whole library and `books/` is only part of it. The plugin
+   * joins its argument onto the base directory, and an empty segment is not a
+   * path it resolves; `'.'` is the same directory spelled in a way it accepts.
+   *
+   * Written as a mapping here rather than as a special case in the walk,
+   * because the walk is shared with the Node host — where `''` is exactly what
+   * `path.resolve` wants and `'.'` would be the odd spelling.
+   */
+  readDir: (path) => readDir(path === '' ? '.' : path, DIR),
 }
 
 export const tauriSizePort: SizePort = sizePortOver(tauriSizeOps)

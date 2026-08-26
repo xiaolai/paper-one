@@ -165,12 +165,42 @@ export function extensionFor(name: string): ContentExtension {
  * The vault names files by content hash so two copies cannot collide; every
  * parser Paper uses routes on the EXTENSION, and foliate rejects a name with no
  * suffix as an unsupported type. So the name is rebuilt from the record each
- * time a stored book is opened — by the reader, and now by the enrichment pass
- * as well. Two copies of this reconstruction is one of them keeping a different
+ * time a stored book is opened — by the reader, and by the enrichment pass as
+ * well. Two copies of this reconstruction is one of them keeping a different
  * fallback when the rule changes.
+ *
+ * ## `ext`, then `format`, and only then a guess
+ *
+ * ⚠️ **THIS READ `ext` ALONE AND DEFAULTED THE REST TO `epub`**, and `ext` is
+ * DEVICE-LOCAL: it says how THIS device named its copy, and a record that
+ * arrived over sync deliberately does not carry it. What travels is `format`.
+ *
+ * So a PDF downloaded from another device had `format: 'pdf'`, no `ext`, and
+ * its bytes on disk as `content.pdf` — and this answered `Title.epub`, which
+ * `contentPathIn` turned into `books/<id>/content.epub`. The file was right
+ * there under its real name and the reader reported it missing. Every
+ * replicated non-EPUB was unopenable on the device that received it, and the
+ * defect scaled with how well sync worked.
+ *
+ * Both are VALIDATED rather than interpolated. The extension goes into a path;
+ * `KNOWN_EXTENSIONS` exists because `book.../../../../etc/passwd` yields a
+ * segment that walks out of the vault, and a value read back from a record is
+ * no more trustworthy than a filename. An unrecognised one falls through to the
+ * next source rather than being sanitised.
+ *
+ * `epub` remains the last resort — the overwhelmingly common case for a record
+ * from before either field was written — but it is now reached only when
+ * neither field says anything, rather than whenever `ext` happened to be absent.
  */
-export function storedBookName(entry: { title?: string; ext?: string }): string {
-  return `${entry.title || 'book'}.${entry.ext || 'epub'}`
+export function storedBookName(entry: { title?: string; ext?: string; format?: string }): string {
+  const named = entry.ext !== undefined && isKnownExtension(entry.ext) ? entry.ext : undefined
+  const travelled = entry.format !== undefined && isKnownExtension(entry.format) ? entry.format : undefined
+  /* `bin` IS DELIBERATELY NOT ACCEPTED from either. It is the vault's inert
+     fallback for bytes nothing recognises, and handing a parser `Title.bin`
+     names a type no parser routes on — so a record stored as `bin` lands on
+     `epub` here, which is the same guess the reader would have made and at
+     least opens something. */
+  return `${entry.title || 'book'}.${named ?? travelled ?? 'epub'}`
 }
 
 /** Read a book Paper owns back as a `File`, ready for the reader. */

@@ -1,7 +1,17 @@
 import { constants } from 'node:fs'
 import { access, appendFile, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
-import { CONTENT_EXTENSIONS, folderOf, type FileSystem, type IndexFs, type SizePort } from '../../kernel'
+import {
+  CONTENT_EXTENSIONS,
+  folderOf,
+  /* THE PURE WALK, not a second copy of it — see the barrel's note. The TAURI
+     binding is deliberately not exported there; this walk is, because both
+     hosts must run the same one. */
+  sizePortOver,
+  type FileSystem,
+  type IndexFs,
+  type SizePort,
+} from '../../kernel'
 
 /**
  * The kernel's two filesystem seams, over `node:fs` (phase 11, WI-11.2).
@@ -377,6 +387,24 @@ export function nodeSizePort(root: string): SizePort {
       return null
     }
   }
+  /**
+   * ⚠️ **`libraryBytes` USED TO BE A SECOND COPY OF THE WALK**, and the two
+   * copies answered different questions: this one walked the data root, the
+   * kernel's walked `books/`. So `shelf.status.bytes` depended on which host
+   * you asked, and the desktop's answer omitted `index.json`, the store, the
+   * sync metadata and the trash.
+   *
+   * One walk now, in `bookSizes.ts`, run over Node's `stat` and `readdir`.
+   * `contentBytes` stays here because it has a real difference — see below.
+   */
+  const shared = sizePortOver({
+    bytesAt,
+    readDir: async (path: string) =>
+      (await readdir(under(root, path), { withFileTypes: true })).map((entry) => ({
+        name: entry.name,
+        isDirectory: entry.isDirectory(),
+      })),
+  })
   return {
     bytesAt,
     contentBytes: async (bookId) => {
@@ -393,38 +421,7 @@ export function nodeSizePort(root: string): SizePort {
       }
       return null
     },
-    libraryBytes: async () => {
-      let total = 0
-      let whole = true
-      const walk = async (path: string): Promise<void> => {
-        let entries: { name: string; directory: boolean }[]
-        try {
-          entries = (await readdir(under(root, path), { withFileTypes: true })).map((entry) => ({
-            name: entry.name,
-            directory: entry.isDirectory(),
-          }))
-        } catch {
-          /* A directory that will not read makes the total INCOMPLETE, and an
-           * incomplete total must not be reported as an exact one: the whole
-           * point of `null` in this port is "nobody can say", and a number
-           * that is quietly short is worse than no number — a reader would
-           * believe their library is smaller than it is. */
-          whole = false
-          return
-        }
-        for (const entry of entries) {
-          const at = path === '' ? entry.name : `${path}/${entry.name}`
-          if (entry.directory) await walk(at)
-          else {
-            const size = await bytesAt(at)
-            if (size === null) whole = false
-            else total += size
-          }
-        }
-      }
-      await walk('')
-      return whole ? total : null
-    },
+    libraryBytes: shared.libraryBytes,
   }
 }
 

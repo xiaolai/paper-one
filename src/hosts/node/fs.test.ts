@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve, win32 } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { CONTENT_EXTENSIONS } from '../../kernel'
+import { BOOKS_ONLY_BYTES, LIBRARY_FIXTURE, LIBRARY_FIXTURE_BYTES } from '../../kernel/testkit'
 import { appPresence, makeDataDir, nodeIndexFs, nodeSizePort, nodeTextFs, under } from './fs'
 
 /**
@@ -330,6 +331,30 @@ describe('nodeTextFs', () => {
 })
 
 describe('nodeSizePort', () => {
+  /**
+   * ⚠️ **HALF OF A CONFORMANCE PAIR.** `src/kernel/core/bookSizesTauri.test.ts`
+   * asks the Tauri binding the same question over the same fixture, and both
+   * are held to `LIBRARY_FIXTURE_BYTES`.
+   *
+   * `libraryBytes` used to be a SECOND COPY of the kernel's walk, and the two
+   * copies answered different questions: this one started at the data root, the
+   * kernel's at `books/`. So `shelf.status.bytes` depended on which host you
+   * asked, and a test of each copy on its own could never have caught it —
+   * both were internally consistent. See `librarySizes.testkit.ts`.
+   */
+  it('measures the same library the same way every other host does', async () => {
+    const root = await freshRoot()
+    const fs = nodeIndexFs(root)
+    for (const [path, size] of Object.entries(LIBRARY_FIXTURE)) {
+      const slash = path.lastIndexOf('/')
+      if (slash > 0) await fs.mkdir(path.slice(0, slash))
+      await fs.writeFile(path, new Uint8Array(size))
+    }
+    const bytes = await nodeSizePort(root).libraryBytes()
+    expect(bytes).toBe(LIBRARY_FIXTURE_BYTES)
+    expect(bytes, 'this is the answer the books/-only walk gave').not.toBe(BOOKS_ONLY_BYTES)
+  })
+
   it('measures a book’s content file and the library whole', async () => {
     const root = await freshRoot()
     const fs = nodeIndexFs(root)

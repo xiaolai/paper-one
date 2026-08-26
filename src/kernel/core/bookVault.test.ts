@@ -3,6 +3,7 @@ import { BOOKS_DIR, contentPathIn } from './bookFolder'
 import {
   extensionFor,
   readOwnedBook,
+  storedBookName,
   readRangeOf,
   type VaultFs,
 } from './bookVault'
@@ -161,5 +162,78 @@ describe('readRangeOf', () => {
        hold all 300 MB. `slice` copies. */
     const got = await readRangeOf(sliceOnly, 'x', 2, 2)
     expect(got.buffer.byteLength).toBe(2)
+  })
+})
+
+/**
+ * `storedBookName` — the reconstruction that decides which file gets opened.
+ *
+ * ⚠️ **IT READ `ext` ALONE AND DEFAULTED THE REST TO `epub`.** `ext` is
+ * DEVICE-LOCAL — it says how THIS device named its copy — and a record that
+ * arrived over sync deliberately does not carry it. What travels is `format`.
+ *
+ * So a PDF downloaded from another device had `format: 'pdf'`, no `ext`, and
+ * its bytes on disk as `content.pdf` — and this answered `Title.epub`, which
+ * `contentPathIn` turned into `content.epub`. The file was right there under
+ * its real name and the reader reported it missing. Every replicated non-EPUB
+ * was unopenable on the device that received it, and the defect got worse the
+ * better sync worked.
+ */
+describe('storedBookName', () => {
+  it('uses the device-local extension when there is one', () => {
+    expect(storedBookName({ title: 'Moby-Dick', ext: 'epub' })).toBe('Moby-Dick.epub')
+    expect(storedBookName({ title: 'Scan', ext: 'pdf' })).toBe('Scan.pdf')
+  })
+
+  /* THE REGRESSION. A replicated record carries `format` and no `ext`. */
+  it('falls back to the replicated format for a downloaded book', () => {
+    const downloaded = { title: 'A Scanned Report', format: 'pdf' }
+    expect(storedBookName(downloaded)).toBe('A Scanned Report.pdf')
+    expect(
+      contentPathIn('bk1', storedBookName(downloaded)),
+      'the path the reader opens must be the one the bytes were written to',
+    ).toBe(`${BOOKS_DIR}/bk1/content.pdf`)
+  })
+
+  it('resolves every replicated format to its own name, not to epub', () => {
+    for (const format of ['pdf', 'mobi', 'azw3', 'cbz', 'fb2', 'fbz'] as const) {
+      expect(storedBookName({ title: 'Book', format }), format).toBe(`Book.${format}`)
+    }
+  })
+
+  /* `ext` WINS. It is how this device actually named the file, and `format` is
+     only what the bytes are — on a device that stored a PDF under a different
+     name, the path has to follow the disk. */
+  it('prefers the device-local extension over the travelled format', () => {
+    expect(storedBookName({ title: 'Book', ext: 'pdf', format: 'epub' })).toBe('Book.pdf')
+  })
+
+  /**
+   * ⚠️ **NEITHER FIELD IS INTERPOLATED UNCHECKED.** The result goes into a
+   * path, and `KNOWN_EXTENSIONS` exists because a segment like `../../..`
+   * walks out of the vault. A value read back from a record on disk is no more
+   * trustworthy than a filename off the network.
+   */
+  it('refuses an extension that is not one of the known formats', () => {
+    for (const bad of ['../../../etc/passwd', 'exe', 'json', '', 'EPUB/../x']) {
+      expect(storedBookName({ title: 'Book', ext: bad }), bad).toBe('Book.epub')
+      expect(storedBookName({ title: 'Book', format: bad }), bad).toBe('Book.epub')
+    }
+  })
+
+  /* `bin` IS THE VAULT'S INERT FALLBACK, and no parser routes on it — so a
+     record stored as `bin` lands on the same guess the reader would make. */
+  it('does not name a file after the inert fallback', () => {
+    expect(storedBookName({ title: 'Book', ext: 'bin' })).toBe('Book.epub')
+    expect(storedBookName({ title: 'Book', format: 'bin' })).toBe('Book.epub')
+  })
+
+  it('falls back to a title when a record has none', () => {
+    expect(storedBookName({ format: 'pdf' })).toBe('book.pdf')
+    expect(storedBookName({ title: '', format: 'pdf' })).toBe('book.pdf')
+  })
+
+  it('still answers epub for a record from before either field existed', () => {
+    expect(storedBookName({ title: 'Walden' })).toBe('Walden.epub')
   })
 })

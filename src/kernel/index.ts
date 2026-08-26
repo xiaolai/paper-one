@@ -208,12 +208,18 @@ export { CONTENT_EXTENSIONS, isContentExtension, isKnownExtension } from './core
  * The binding now lives in `core/bookSizesTauri.ts` and the composition root
  * imports it directly, which is the right shape anyway: a book's size is a fact
  * about the app's own data directory, so the root binds it, not a capability
- * and not this barrel. `sizePortOver` — the pure walk — stays importable from
- * `core/bookSizes` by anyone.
+ * and not this barrel. `sizePortOver` — the PURE WALK — is exported below, and
+ * that is the whole point of the split: it has real logic in it (an extension
+ * preference order, a partial-answer rule, a root-safe join) and every host
+ * should run THAT rather than a copy of it. The Node host kept its own copy
+ * until one of them started at `books/` and the other at the data root, and
+ * `shelf.status.bytes` came to depend on which host you asked.
  *
  * `scripts/check-browser-safe.mjs` pins this entry as browser-safe. Re-adding a
  * platform-bound export here fails that gate rather than being discovered
  * months later by a bundle that will not build. */
+export { sizePortOver } from './core/bookSizes'
+export type { SizeOps } from './core/bookSizes'
 export type { BookRecord, TagClock, TagClockEntry } from './core/bookFolder'
 export { INDEX_FILE, loadShelf, parseIndex, scanBooks, writeIndex } from './core/bookIndex'
 export type { IndexFs, IndexedBook, ShelfSource } from './core/bookIndex'

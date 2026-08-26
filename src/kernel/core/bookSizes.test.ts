@@ -12,16 +12,24 @@ import { sizePortOver, type SizeOps } from './bookSizes'
  * unknown rather than smaller.
  */
 
-/** A filesystem of `path → bytes`, with named paths that refuse to be read. */
+/**
+ * A filesystem of `path → bytes`, with named paths that refuse to be read.
+ *
+ * ⚠️ **`''` IS THE DATA ROOT, and this fake could not express it.** The prefix
+ * test was `startsWith(\`${path}/\`)`, which at the root is `startsWith('/')`
+ * and matches nothing — so a walk from the root read as an EMPTY library. The
+ * fake agreed with the defect it was standing in for.
+ */
 function ops(files: Record<string, number>, unreadable: readonly string[] = []): SizeOps {
   return {
     bytesAt: async (path) => (path in files ? files[path]! : null),
     readDir: async (path) => {
       if (unreadable.includes(path)) throw new Error(`refused: ${path}`)
+      const prefix = path === '' ? '' : `${path}/`
       const names = new Map<string, boolean>()
       for (const key of Object.keys(files)) {
-        if (!key.startsWith(`${path}/`)) continue
-        const rest = key.slice(path.length + 1).split('/')
+        if (!key.startsWith(prefix)) continue
+        const rest = key.slice(prefix.length).split('/')
         names.set(rest[0]!, rest.length > 1)
       }
       return [...names].map(([name, isDirectory]) => ({ name, isDirectory }))
@@ -96,5 +104,43 @@ describe('libraryBytes', () => {
     /* NOT null. The directory read, and it held nothing — which is a
        measurement, unlike a directory nobody could open. */
     expect(await sizePortOver(ops({})).libraryBytes()).toBe(0)
+  })
+
+  /**
+   * ⚠️ **THIS WALKED `books/`, AND THE PORT PROMISES THE WHOLE LIBRARY.**
+   *
+   * The Node host's own implementation walked the DATA ROOT — the same contract
+   * answered two ways, in two copies of one walk — so `shelf.status.bytes`
+   * depended on which host you asked. The desktop's answer silently omitted
+   * `index.json`, the flat store, the sync metadata and everything in the
+   * trash, and a reader deciding whether to evict a book was shown a number
+   * smaller than what was on their disk.
+   */
+  it('counts what is beside the books as well as the books', async () => {
+    const port = sizePortOver(
+      ops({
+        [`${FOLDER}/content.epub`]: 100,
+        'index.json': 7,
+        'store.json': 3,
+        'trash/one/content.epub': 40,
+        'sync/peers.json': 2,
+      }),
+    )
+    expect(await port.libraryBytes(), 'a total that omits everything but books/ is not a library total').toBe(152)
+  })
+
+  /* ROOT-SAFE JOIN. At the root the walk must not build `/index.json`, which is
+     an ABSOLUTE path resolving outside the data directory entirely. */
+  it('asks for root files by a relative name', async () => {
+    const asked: string[] = []
+    const port = sizePortOver({
+      bytesAt: async (path) => {
+        asked.push(path)
+        return 1
+      },
+      readDir: async (path) => (path === '' ? [{ name: 'index.json', isDirectory: false }] : []),
+    })
+    expect(await port.libraryBytes()).toBe(1)
+    expect(asked, 'a leading slash escapes the data directory').toEqual(['index.json'])
   })
 })
