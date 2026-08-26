@@ -60,10 +60,21 @@ function listen(transport: Awaited<ReturnType<typeof pdfRangeTransport>>) {
 /** Let the in-flight read and its `.then` settle. */
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
 
+/**
+ * `onFailure` for a test that is not about failure.
+ *
+ * ⚠️ IT IS REQUIRED, and it used to be optional — which put the silent hang
+ * this transport exists to prevent back into the DEFAULT shape of the API.
+ * These tests wrote the shortest thing that compiled, which was the broken one.
+ * Spelling it out is the point: a caller with nothing useful to say still has
+ * to say so out loud.
+ */
+const noteFailure = () => vi.fn()
+
 describe('pdfRangeTransport', () => {
   it('carries the length pdf.js needs before it reads a byte', async () => {
     const { content } = shelf('%PDF-1.7 and so on')
-    expect((await pdfRangeTransport(content, 'one', 18)).length).toBe(18)
+    expect((await pdfRangeTransport(content, 'one', 18, { onFailure: noteFailure() })).length).toBe(18)
   })
 
   /**
@@ -74,7 +85,7 @@ describe('pdfRangeTransport', () => {
    */
   it('converts pdf.js’s exclusive end into a length', async () => {
     const { content, asked } = shelf('0123456789')
-    const transport = await pdfRangeTransport(content, 'one', 10)
+    const transport = await pdfRangeTransport(content, 'one', 10, { onFailure: noteFailure() })
     const got = listen(transport)
     transport.requestDataRange(2, 6)
     await settle()
@@ -84,7 +95,7 @@ describe('pdfRangeTransport', () => {
 
   it('serves several ranges at once, each labelled with its own start', async () => {
     const { content } = shelf('0123456789')
-    const transport = await pdfRangeTransport(content, 'one', 10)
+    const transport = await pdfRangeTransport(content, 'one', 10, { onFailure: noteFailure() })
     const got = listen(transport)
     transport.requestDataRange(0, 2)
     transport.requestDataRange(8, 10)
@@ -97,7 +108,7 @@ describe('pdfRangeTransport', () => {
      bytes into a document pdf.js has already torn down. */
   it('delivers nothing after abort, even for a read already in flight', async () => {
     const { content, release } = shelf('0123456789', { hold: true })
-    const transport = await pdfRangeTransport(content, 'one', 10)
+    const transport = await pdfRangeTransport(content, 'one', 10, { onFailure: noteFailure() })
     const got = listen(transport)
     transport.requestDataRange(0, 4)
     transport.abort()

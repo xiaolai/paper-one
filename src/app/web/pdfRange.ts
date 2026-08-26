@@ -33,6 +33,10 @@ import type { RemoteContent } from './content'
  * which is the single worst way for a network failure to present. `onFailure`
  * exists for that: the reader is told, and can say so.
  *
+ * ⚠️ It is REQUIRED. It was optional, and an optional remedy for a silent hang
+ * is a silent hang with a note beside it — the default shape of the API was the
+ * broken one. See `PdfRangeOptions`.
+ *
  * ## Why the import is inside the function
  *
  * pdf.js is half a megabyte, and this module would otherwise pull it into the
@@ -44,10 +48,20 @@ import type { RemoteContent } from './content'
 
 export interface PdfRangeOptions {
   /**
-   * Called when a range read rejects. See the header — without this the
-   * failure is silent and terminal.
+   * Called when a range read rejects.
+   *
+   * ⚠️ **REQUIRED, AND IT WAS OPTIONAL.** The header above explains at length
+   * that `PDFDataRangeTransport` has no `onError`, so a rejected read delivers
+   * nothing and pdf.js waits forever for a chunk that is not coming — a book
+   * hanging on a blank page with no error anywhere. This callback is the entire
+   * remedy for that, and making it optional put the hang back in the DEFAULT
+   * API: the shape a caller reaches for first was the broken one.
+   *
+   * A caller with nothing useful to say still has to say so out loud. There is
+   * no correct silent handling of this, which is what a required parameter
+   * means.
    */
-  readonly onFailure?: (cause: unknown) => void
+  readonly onFailure: (cause: unknown) => void
 }
 
 /**
@@ -60,7 +74,9 @@ export async function pdfRangeTransport(
   content: RemoteContent,
   bookId: string,
   size: number,
-  options: PdfRangeOptions = {},
+  /* NO DEFAULT. `= {}` made the silent-and-terminal case the one a caller got
+     by writing the shortest thing that compiled. */
+  options: PdfRangeOptions,
 ): Promise<PDFDataRangeTransport> {
   /* THE SAME MODULE INSTANCE `makePdf` will use. `getDocument` accepts a range
    * transport only when it passes `instanceof PDFDataRangeTransport`, so a
@@ -89,7 +105,7 @@ export async function pdfRangeTransport(
         .catch((cause: unknown) => {
           if (this.stopped) return
           this.stopped = true
-          options.onFailure?.(cause)
+          options.onFailure(cause)
         })
     }
 

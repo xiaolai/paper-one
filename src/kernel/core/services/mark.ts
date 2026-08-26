@@ -51,6 +51,15 @@ export function markList(env: ServiceEnvironment) {
       if (ctx.signal.aborted) return
       let marks: readonly Mark[]
       if (bookId === undefined) {
+        /* ⚠️ **`loadAll` CANNOT BE INTERRUPTED, AND IT IS THE SLOW PART.** It is
+         * a SHARED store operation — one read per book folder, then a publish
+         * to every subscriber — so its result belongs to the whole app rather
+         * than to this request, and there is nothing here that could
+         * legitimately abandon it halfway. On a two-thousand-book shelf it is
+         * seconds.
+         *
+         * What CAN be abandoned is everything after it, which is why the signal
+         * is read again below rather than only at the top. */
         await env.services.marks.loadAll()
         /* BOTH HALVES. The snapshot splits annotations from bookmarks at the
          * one door every subscriber reads through — `all` is annotations
@@ -63,6 +72,14 @@ export function markList(env: ServiceEnvironment) {
         knownBook(env, bookId)
         marks = liveMarks(await env.services.marks.forBook(bookId))
       }
+      /* ⚠️ **CHECKED AFTER THE READ, AND IT USED TO BE CHECKED ONLY BEFORE IT.**
+       * The read is where the seconds go on a whole-shelf list, so a `cancel`
+       * that arrives during it is the ordinary case rather than a race — and
+       * the sort below is `O(n log n)` over every mark on the shelf, with a
+       * `markRow` allocation each, all of it for a peer that has stopped
+       * listening. `pages` refuses to SEND any of it, which is why this was
+       * invisible: the work was done and thrown away. */
+      if (ctx.signal.aborted) return
       /* By book, then by the kernel's OWN comparator. A CFI does not order
        * lexically: two from different spine items address positions in
        * different documents and are not comparable as strings at all, so a

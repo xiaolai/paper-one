@@ -583,8 +583,21 @@ export interface SessionDeps {
    * It happens HERE rather than at the call site so that a conversion failure
    * is reported through the same path as a failed open, and so that a session
    * disposed mid-conversion still stops before touching a view.
+   *
+   * ⚠️ **REQUIRED, AND IT WAS OPTIONAL.** `start` takes a `BookSource`, which
+   * has included `RangedSource` since the browser client learned to read a PDF
+   * over the wire — and a `RangedSource` is a plain object carrying a pdf.js
+   * transport. With no `prepare`, `#openBook` cast it `as File | string` and
+   * handed it to `view.open`, which sniffs a type it does not have and answers
+   * "this file could not be opened": a message that sends the reader to look at
+   * the book when the mistake was at the call site.
+   *
+   * The pass-through is one line, so requiring it costs a caller nothing and
+   * makes the cast below provably safe. Optional dependencies whose absence
+   * recreates the failure they exist to prevent are not defaults — see
+   * `applyVars` just below, which is required for the same reason.
    */
-  prepare?: (source: BookSource) => Promise<unknown>
+  prepare: (source: BookSource) => Promise<unknown>
   applySettings: (view: View) => void
   /**
    * The reader's settings, as custom properties on ONE document's root.
@@ -1212,7 +1225,10 @@ export class ReaderSession {
   /** Parse the source and open it. False means stop — failed or disposed. */
   async #openBook(view: View, source: BookSource, deps: SessionDeps): Promise<boolean> {
     try {
-      const target = deps.prepare ? await deps.prepare(source) : source
+      /* REQUIRED — see `SessionDeps.prepare`. The cast at `view.open` below is
+         only sound because something has converted whatever this was into
+         something foliate accepts. */
+      const target = await deps.prepare(source)
       // Held so disposal can release it — see `Destroyable`.
       if (target !== source && destroyable(target)) {
         /* Unless disposal already happened while the PDF was being parsed, in
@@ -2413,6 +2429,27 @@ export class ReaderSession {
       this.#sections.clear()
       this.#rendered.clear()
       this.#painters = null
+      /**
+       * ⚠️ **THE OPEN NOTE USED TO SURVIVE THE BOOK.**
+       *
+       * A footnote is rendered into its own `View` — a second foliate view with
+       * its own iframe, renderer and listeners — and it is mounted OUTSIDE
+       * `#host` whenever `setFootnoteMount` has been given somewhere to put it,
+       * which is how the reader draws notes in the gloss strip. So
+       * `#host.replaceChildren()` below did not remove it: closing a book with
+       * a note open left that note on screen, over the next book, with a live
+       * iframe and a renderer behind it. One per book opened.
+       *
+       * BEFORE the host is cleared, and independently of it — the release must
+       * not depend on where the note happened to be mounted, which is the
+       * assumption that made this invisible.
+       */
+      quietly('footnote view', () => this.#releaseFootnoteView())
+      this.#footnoteAt = null
+      /* AND THE HOST IS TOLD. `#disposed` is already true, so `closeFootnote`
+         would skip this — and a host left holding a `FootnoteRender` for a
+         session that is gone draws a note nothing can close. */
+      quietly('onFootnote', () => this.#cb.onFootnote(null))
       const prepared = this.#prepared
       this.#prepared = null
       if (prepared) destroyQuietly(prepared)
