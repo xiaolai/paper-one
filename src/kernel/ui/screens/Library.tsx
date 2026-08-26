@@ -37,6 +37,7 @@ import { useRowMenu } from '../hooks/useRowMenu'
 import { VIRTUALISE_ABOVE, gridWindow } from '../../core/virtualGrid'
 import { OverlaySheet } from '../overlays/OverlaySheet'
 import { BookCell, type SelectMode } from './BookCell'
+import type { CoverSource } from '../../core/coverArt'
 import { BookRow } from './BookRow'
 import { TagEditor } from './TagEditor'
 import editorStyles from './TagEditor.module.css'
@@ -70,11 +71,42 @@ const REMOVE_NAMED = 5
 
 export interface LibraryProps {
   books: readonly IndexedBook[]
+  /**
+   * Where a jacket comes from — a function, not a filesystem.
+   *
+   * ⚠️ This screen used to reach the vault THROUGH `BookCover`, which imported
+   * `tauriVaultFs` directly. One import, and the whole shelf — virtualisation,
+   * search, tag chips, sort — was impossible to bundle for a browser. It is a
+   * prop now, so a host that has no vault simply does not pass one and every
+   * cover draws its tint.
+   */
+  coverFor?: CoverSource | undefined
+  /**
+   * How the shelf opens — the reader can still switch.
+   *
+   * `grid` on the desktop, where there is room for a wall of jackets. A phone
+   * opens as a `list` because at 393px a grid fits two columns, and two
+   * columns of 1 961 books is a great deal of scrolling to find one title.
+   *
+   * ⚠️ The original reason was different and is now spent: a browser had no
+   * covers at all, so its grid was identical tinted rectangles pretending to be
+   * artwork. `cover.read` (WI-19.8) fixed that. Density is why it stays.
+   */
+  defaultLayout?: LibraryLayout | undefined
   platform: Platform
   /** Open a row. Takes the ENTRY, not a url: a book can be reopened from a
    *  stored path as well, and only the caller knows how to read one. */
   onOpen: (entry: IndexedBook) => void
-  onAddBooks: () => void
+  /**
+   * Take books off this machine, or nothing when the host has none to take.
+   *
+   * OPTIONAL, AND ABSENT MEANS THE CONTROL IS NOT DRAWN — the same convention
+   * as `bookActions` for a row and `onSystemLookUp` for the reader. A browser
+   * has no local filesystem, so a `+` wired to a no-op would be the shelf
+   * offering something it cannot do; a DISABLED `+` would be little better,
+   * because it names a feature this host will never have.
+   */
+  onAddBooks?: (() => void) | undefined
   /**
    * Take a book off the shelf.
    *
@@ -83,22 +115,29 @@ export interface LibraryProps {
    * and the marks and the reading position survive — they are keyed by content,
    * so adding the book again finds them waiting.
    */
-  onRemove: (entry: IndexedBook) => void
+  onRemove?: ((entry: IndexedBook) => void) | undefined
   /**
    * Add tags to books, and take one off them — the editor's two verbs, over one
    * book or a selection. Publisher subjects are fixed; only the reader's own
    * tags move.
    */
-  onTagBooks: (bookIds: readonly string[], tags: readonly string[]) => void
-  onUntagBooks: (bookIds: readonly string[], tag: string) => void
+  onTagBooks?: ((bookIds: readonly string[], tags: readonly string[]) => void) | undefined
+  onUntagBooks?: ((bookIds: readonly string[], tag: string) => void) | undefined
   /** The last tag removal and the way back — for the SELECTION editor, which is
-   *  the one on this screen that can take a tag off many books at once. */
-  lastRemoval: { readonly tag: string; readonly bookIds: readonly string[] } | null
-  onUndoRemoveTag: () => void
+   *  the one on this screen that can take a tag off many books at once.
+   *
+   *  OPTIONAL WITH THE REST OF TAGGING. They are the tag editor's undo, and the
+   *  editor is not drawn for a host that supplies no `onTagBooks`/`onUntagBooks`
+   *  — so requiring them made a read-only host carry an undo for a removal it
+   *  could never perform. */
+  lastRemoval?: { readonly tag: string; readonly bookIds: readonly string[] } | null | undefined
+  onUndoRemoveTag?: (() => void) | undefined
   /** The reader's judgement that a book is done. */
-  onSetFinished: (bookId: string, finished: boolean) => void
-  /** Add a whole folder — see `importFolder`. */
-  onAddFolder: () => void
+  onSetFinished?: ((bookId: string, finished: boolean) => void) | undefined
+  /** Add a whole folder — see `onAddBooks`; absent for the same reasons.
+   *  (Two doc comments sat here, the first naming `importFolder`, which this
+   *  prop has not been called since it was renamed.) */
+  onAddFolder?: (() => void) | undefined
   /**
    * Live import progress, or null when none is running.
    *
@@ -174,7 +213,7 @@ const ORDERS: readonly ToolbarOption<LibraryOrder>[] = [
  * Neither is a fallback for the other, so both are offered rather than one
  * being a density setting on the other.
  */
-type LibraryLayout = 'grid' | 'list'
+export type LibraryLayout = 'grid' | 'list'
 
 /* THERE IS NO LAYOUTS TABLE. A registry earns its place when a list has to be
  * rendered from it; with two mutually exclusive values the toggle names both in
@@ -214,6 +253,8 @@ function FilterChip({
 
 export function Library({
   books,
+  coverFor,
+  defaultLayout = 'grid',
   platform,
   onOpen,
   onAddBooks,
@@ -234,6 +275,12 @@ export function Library({
   bookActions,
   bookStatuses,
 }: LibraryProps) {
+  /* TAGGING TAKES BOTH VERBS OR NEITHER. The editor adds and removes in one
+     surface, so a host that supplied one and not the other would draw a panel
+     half of which does nothing. Computed once, used by the bulk bar and handed
+     to every row. */
+  const canTag = Boolean(onTagBooks && onUntagBooks)
+
   /* ONE SUBSCRIPTION FOR THE SHELF, NOT ONE PER ROW.
    *
    * A capability's `BookStatus` is pulled — the kernel asks `of` while it
@@ -289,7 +336,7 @@ export function Library({
   /* Alongside `order` rather than in app state: both are how this screen is
      being looked at right now, neither survives a launch, and splitting the
      two across two homes would be one of them for no reason. */
-  const [layout, setLayout] = useState<LibraryLayout>('grid')
+  const [layout, setLayout] = useState<LibraryLayout>(defaultLayout)
   /* WHICH ONE IS OPEN, not two booleans. This was a boolean when the sort menu
      was the only thing on the toolbar that opened — the comment here said as
      much, and said what would bring the union back. The narrow menu brought it
@@ -738,15 +785,17 @@ export function Library({
               and "Add folder" sat at equal weight and made the reader classify
               files-or-folder before a picker had opened; the folder route moved
               to where its moment is, the empty state below and ⌘K. */}
-          <button
-            type="button"
-            className={styles.add}
-            onClick={onAddBooks}
-            title="Add books…"
-            aria-label="Add books"
-          >
-            <Plus size={ICON.control} strokeWidth={ICON.stroke} />
-          </button>
+          {onAddBooks !== undefined && (
+            <button
+              type="button"
+              className={styles.add}
+              onClick={onAddBooks}
+              title="Add books…"
+              aria-label="Add books"
+            >
+              <Plus size={ICON.control} strokeWidth={ICON.stroke} />
+            </button>
+          )}
           {/* ONLY WHAT IS ACTIVE. This strip used to also offer the eight most
               used tags to click into — discovery — and it was the weak version
               of that: capped at eight, and it vanished the moment a filter
@@ -815,6 +864,7 @@ export function Library({
           <span className={styles.selectionHint}>
             {platform === 'macos' ? '⌘' : 'Ctrl'}-click to add · ⇧-click for a run
           </span>
+          {canTag && (
           <button
             ref={bulkAnchor}
             type="button"
@@ -827,6 +877,8 @@ export function Library({
             <Tag size={ICON.control} strokeWidth={ICON.stroke} />
             Tags…
           </button>
+          )}
+          {onSetFinished && (
           <button
             type="button"
             className={styles.selectionAction}
@@ -840,10 +892,12 @@ export function Library({
                 mixed selection this is the only label that is true of all. */}
             {finishedAll ? 'Mark as unfinished' : 'Mark as finished'}
           </button>
+          )}
           {/* THE DOOR TO THE CEREMONY, NOT THE ACT — which is what the
               trailing ellipsis has always meant, and why this can sit on a bar
               the plan said was too small to hold a removal. Nothing goes
               anywhere until the sheet is answered. */}
+          {onRemove && (
           <button
             type="button"
             className={styles.selectionRemove}
@@ -854,6 +908,7 @@ export function Library({
             <Trash2 size={ICON.control} strokeWidth={ICON.stroke} />
             Remove…
           </button>
+          )}
           <button
             type="button"
             className={styles.selectionDone}
@@ -873,14 +928,16 @@ export function Library({
               role="dialog"
               aria-label={`Tags for ${selectedBooks.length} selected books`}
             >
-              <TagEditor
-                books={selectedBooks}
-                shelfTags={shelfTags}
-                onAdd={onTagBooks}
-                onRemove={onUntagBooks}
-                lastRemoval={lastRemoval}
-                onUndoRemove={onUndoRemoveTag}
-              />
+              {onTagBooks && onUntagBooks && (
+                <TagEditor
+                  books={selectedBooks}
+                  shelfTags={shelfTags}
+                  onAdd={onTagBooks}
+                  onRemove={onUntagBooks}
+                  lastRemoval={lastRemoval ?? null}
+                  onUndoRemove={onUndoRemoveTag ?? (() => {})}
+                />
+              )}
             </div>
           )}
         </div>
@@ -939,7 +996,7 @@ export function Library({
                      worse than none. */
                   setRemovingSelection(false)
                   clearSelection()
-                  for (const book of selectedBooks) onRemove(book)
+                  for (const book of selectedBooks) onRemove?.(book)
                 }}
               >
                 <Trash2 size={ICON.control} strokeWidth={ICON.stroke} />
@@ -986,8 +1043,18 @@ export function Library({
                        you open appear here" was written when Paper opened onto the
                        reader and this screen was somewhere you arrived later — it
                        described a consequence rather than telling a first-time
-                       reader what to do, and it is now the first thing they see. */
-                    'Add a book, or a folder of them — everything you highlight and tag stays with it.'
+                       reader what to do, and it is now the first thing they see.
+
+                       ⚠️ AND ONLY WHEN THERE IS A BUTTON TO POINT AT. Both import
+                       routes are optional; the browser client supplies neither,
+                       because a phone is a satchel and the books live on the
+                       shelf. It still read "Add a book, or a folder of them" over
+                       an empty space — an instruction with no control anywhere on
+                       screen to follow it with, which is the same defect the note
+                       below this one was written about, in the other direction. */
+                    onAddBooks !== undefined || onAddFolder !== undefined
+                    ? 'Add a book, or a folder of them — everything you highlight and tag stays with it.'
+                    : 'Nothing on the shelf yet. Books added on the shelf itself appear here.'
               : 'Try a different search, or clear the filter.'}
           </div>
           {/* THE FOLDER ROUTE, at the moment it is actually wanted — and only
@@ -995,7 +1062,15 @@ export function Library({
               covers "nothing matches your search", where an import offer is a
               non sequitur, and `shelfUnread`, where the shelf could not be READ
               and adding to it is the last thing to suggest. */}
-          {books.length === 0 && !shelfUnread && importing === null && (
+          {/* AND ONLY WHEN THERE IS A BUTTON TO PUT IN IT. Both routes are
+              optional and the browser client supplies neither, so this rendered
+              an empty flex row carrying its own gap and margin — a band of blank
+              space under the copy, which reads as something that failed to
+              load. */}
+          {books.length === 0 &&
+            !shelfUnread &&
+            importing === null &&
+            (onAddBooks !== undefined || onAddFolder !== undefined) && (
             <div className={styles.emptyActions}>
               {/* BOTH ROUTES IN. The copy above says "Add a book, or a folder
                   of them" — and with an empty library the toolbar that holds
@@ -1004,32 +1079,36 @@ export function Library({
                   with. The empty state is the one moment both belong at equal
                   weight: a first-time reader has not chosen files-or-folder
                   yet, and this is where they choose. */}
-              <button
-                type="button"
-                className={styles.emptyImport}
-                onClick={onAddBooks}
-                disabled={importing !== null}
-                data-disabled={importing !== null}
-              >
-                <Plus size={ICON.control} strokeWidth={ICON.stroke} />
-                Add books…
-              </button>
-              <button
-                type="button"
-                className={styles.emptyImport}
-                onClick={onAddFolder}
-                disabled={importing !== null}
+              {onAddBooks !== undefined && (
+                <button
+                  type="button"
+                  className={styles.emptyImport}
+                  onClick={onAddBooks}
+                  disabled={importing !== null}
+                  data-disabled={importing !== null}
+                >
+                  <Plus size={ICON.control} strokeWidth={ICON.stroke} />
+                  Add books…
+                </button>
+              )}
+              {onAddFolder !== undefined && (
+                <button
+                  type="button"
+                  className={styles.emptyImport}
+                  onClick={onAddFolder}
+                  disabled={importing !== null}
                 /* BOTH, because they do different jobs and the app's convention
                    is the attribute. `disabled` stops the click; `data-disabled`
                    is what `global.css` styles on — so with only the first, the
                    button refused at full opacity with a pointer cursor, looking
                    exactly as available as it does when it works. `TitleBar`
                    sets both on its own controls; this set one. */
-                data-disabled={importing !== null}
-              >
-                <FolderPlus size={ICON.control} strokeWidth={ICON.stroke} />
-                Import a folder…
-              </button>
+                  data-disabled={importing !== null}
+                >
+                  <FolderPlus size={ICON.control} strokeWidth={ICON.stroke} />
+                  Import a folder…
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -1059,6 +1138,7 @@ export function Library({
              * view. */
             const shared = {
               book,
+              coverFor,
               menuFor,
               setMenuFor,
               confirming,
@@ -1070,11 +1150,11 @@ export function Library({
               selecting,
               onSelect: select,
               onDragStart: startDrag,
-              onTagBooks,
-              onUntagBooks,
+              ...(onTagBooks ? { onTagBooks } : {}),
+              ...(onUntagBooks ? { onUntagBooks } : {}),
               onOpen,
-              onRemove,
-              onSetFinished,
+              ...(onRemove ? { onRemove } : {}),
+              ...(onSetFinished ? { onSetFinished } : {}),
               actions: bookActions,
               activity: activityOf(book),
             }

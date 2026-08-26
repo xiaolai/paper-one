@@ -21,7 +21,38 @@ type Filter = 'All' | CardKind
 const FILTERS: readonly Filter[] = ['All', ...CARD_KINDS]
 
 export interface CardsProps {
-  cards: CardsView
+  /**
+   * The three members this pane reads — not all seven of `CardsView`.
+   *
+   * NARROWED the way `SearchPanel`'s `book` and `Marginalia`'s `marks` were:
+   * indexed access into the original, so the two cannot drift and every
+   * existing caller still passes a whole `CardsView`. A host with a channel and
+   * `card.list` can satisfy three; it cannot satisfy `make`, which is
+   * synchronous and hands a `Card` straight back.
+   *
+   * ⚠️ **`discard` IS OPTIONAL, because one host cannot supply it truthfully.**
+   *
+   * The narrowing above stops one member short. A host with a channel and
+   * `card.list` satisfies `all` and `persistent` — and `discard` calls
+   * `card.remove`, which is `card:write`. The browser client holds exactly one
+   * grant and it is a READ one — the host that serves a browser composes the
+   * kernel's own read/write split, and says at length why widening it is a
+   * decision. So every `card.remove` it sends is refused, always, by design.
+   *
+   * Requiring it did not make the browser able to discard; it made the browser
+   * pass a function that could not work. The card vanished optimistically, the
+   * refusal came back, and it reappeared — a delete button that undoes itself,
+   * which reads as a bug in the shelf rather than as a permission.
+   *
+   * Absent, the control is not drawn. That is the honest rendering of "this
+   * session may read cards and not change them", and it is the same shape
+   * `onGoTo` and `onShelf` already use here.
+   */
+  cards: {
+    readonly all: CardsView['all']
+    readonly persistent: CardsView['persistent']
+    readonly discard?: CardsView['discard'] | undefined
+  }
   bookId: string | null
   /**
    * Whether a book is on the shelf, and so can be opened at all.
@@ -122,14 +153,20 @@ export function Cards({ cards, bookId, onShelf, onGoTo }: CardsProps) {
 
           <div className={styles.noteSource}>
             <span>{card.source || 'No source'}</span>
-            <button
-              type="button"
-              className={styles.noteDelete}
-              aria-label="Discard card"
-              onClick={() => cards.discard(card.id)}
-            >
-              <Trash2 size={ICON.inline} strokeWidth={ICON.stroke} />
-            </button>
+            {/* NOT DRAWN WITHOUT `discard`. A disabled button would still say
+                "you could discard this, but not now", which is false — the
+                browser client can never discard a card. Absence is the accurate
+                statement. */}
+            {cards.discard && (
+              <button
+                type="button"
+                className={styles.noteDelete}
+                aria-label="Discard card"
+                onClick={() => cards.discard?.(card.id)}
+              >
+                <Trash2 size={ICON.inline} strokeWidth={ICON.stroke} />
+              </button>
+            )}
           </div>
         </div>
       ))}

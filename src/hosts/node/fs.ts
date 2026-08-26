@@ -1,7 +1,17 @@
 import { constants } from 'node:fs'
 import { access, appendFile, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
-import { CONTENT_EXTENSIONS, folderOf, type FileSystem, type IndexFs, type SizePort } from '../../kernel'
+import {
+  CONTENT_EXTENSIONS,
+  folderOf,
+  /* THE PURE WALK, not a second copy of it — see the barrel's note. The TAURI
+     binding is deliberately not exported there; this walk is, because both
+     hosts must run the same one. */
+  sizePortOver,
+  type FileSystem,
+  type IndexFs,
+  type SizePort,
+} from '../../kernel'
 
 /**
  * The kernel's two filesystem seams, over `node:fs` (phase 11, WI-11.2).
@@ -152,6 +162,32 @@ export function nodeIndexFs(root: string): IndexFs {
     appendFile: async (path, bytes) => {
       await appendFile(at(path), bytes)
     },
+    /* A REAL SEEK, for the same reason the Tauri adapter has one: `content.read`
+     * serves a book a slice at a time, and the interface's fallback is O(n) per
+     * slice — quadratic over a book, with a 300 MB scanned PDF re-read once per
+     * megabyte served.
+     *
+     * The handle is closed in a `finally`, because a leaked one holds a
+     * descriptor until the process ends and a CLI serving a shelf opens many.
+     *
+     * `read` answers what it has, not what was asked: a short answer at the end
+     * of a file is normal, so this loops until the slice is full or the file
+     * runs out. */
+    readRange: async (path, offset, length) => {
+      const handle = await open(at(path), 'r')
+      try {
+        const buffer = new Uint8Array(length)
+        let filled = 0
+        while (filled < length) {
+          const { bytesRead } = await handle.read(buffer, filled, length - filled, offset + filled)
+          if (bytesRead === 0) break
+          filled += bytesRead
+        }
+        return buffer.subarray(0, filled)
+      } finally {
+        await handle.close()
+      }
+    },
     readDir: async (path) => {
       const entries = await readdir(at(path), { withFileTypes: true })
       return entries.map((entry) => ({ name: entry.name, isDirectory: entry.isDirectory() }))
@@ -213,13 +249,32 @@ export function nodeTextFs(root: string): FileSystem {
        * hundred-and-first copy will not clarify. */
       const target = at(to)
       let destination = target
-      for (let n = 1; n <= 100; n += 1) {
+      /* ⚠️ THE LAST CANDIDATE WAS NEVER TESTED. The loop assigned
+       * `${target}.${n}` and then EXITED, so a run that reached `n === 100`
+       * finished holding `.100` without ever asking whether it existed — and
+       * the POSIX `rename` below replaces its destination. The one path whose
+       * whole purpose is not to destroy an earlier quarantine destroyed one,
+       * in exactly the case that means something has gone badly wrong.
+       *
+       * `found` is what turns "the search ran out" into a refusal. A
+       * hundred-and-first copy clarifies nothing; overwriting the hundredth
+       * clarifies less. */
+      let found = false
+      for (let n = 0; n <= 100; n += 1) {
+        if (n > 0) destination = `${target}.${n}`
         try {
           await access(destination, constants.F_OK)
         } catch {
+          found = true
           break
         }
-        destination = `${target}.${n}`
+      }
+      if (!found) {
+        throw new Error(
+          `cannot quarantine ${path}: ${target} and .1 through .100 all exist. ` +
+            'Something is producing corrupt files faster than they can be looked at; ' +
+            'move the existing quarantines aside before this can continue.',
+        )
       }
       await rename(at(path), destination)
     },
@@ -332,6 +387,24 @@ export function nodeSizePort(root: string): SizePort {
       return null
     }
   }
+  /**
+   * ⚠️ **`libraryBytes` USED TO BE A SECOND COPY OF THE WALK**, and the two
+   * copies answered different questions: this one walked the data root, the
+   * kernel's walked `books/`. So `shelf.status.bytes` depended on which host
+   * you asked, and the desktop's answer omitted `index.json`, the store, the
+   * sync metadata and the trash.
+   *
+   * One walk now, in `bookSizes.ts`, run over Node's `stat` and `readdir`.
+   * `contentBytes` stays here because it has a real difference — see below.
+   */
+  const shared = sizePortOver({
+    bytesAt,
+    readDir: async (path: string) =>
+      (await readdir(under(root, path), { withFileTypes: true })).map((entry) => ({
+        name: entry.name,
+        isDirectory: entry.isDirectory(),
+      })),
+  })
   return {
     bytesAt,
     contentBytes: async (bookId) => {
@@ -348,38 +421,7 @@ export function nodeSizePort(root: string): SizePort {
       }
       return null
     },
-    libraryBytes: async () => {
-      let total = 0
-      let whole = true
-      const walk = async (path: string): Promise<void> => {
-        let entries: { name: string; directory: boolean }[]
-        try {
-          entries = (await readdir(under(root, path), { withFileTypes: true })).map((entry) => ({
-            name: entry.name,
-            directory: entry.isDirectory(),
-          }))
-        } catch {
-          /* A directory that will not read makes the total INCOMPLETE, and an
-           * incomplete total must not be reported as an exact one: the whole
-           * point of `null` in this port is "nobody can say", and a number
-           * that is quietly short is worse than no number — a reader would
-           * believe their library is smaller than it is. */
-          whole = false
-          return
-        }
-        for (const entry of entries) {
-          const at = path === '' ? entry.name : `${path}/${entry.name}`
-          if (entry.directory) await walk(at)
-          else {
-            const size = await bytesAt(at)
-            if (size === null) whole = false
-            else total += size
-          }
-        }
-      }
-      await walk('')
-      return whole ? total : null
-    },
+    libraryBytes: shared.libraryBytes,
   }
 }
 

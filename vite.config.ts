@@ -240,11 +240,53 @@ export default defineConfig({
     exclude: [...defaultExclude, '.claude/worktrees/**'],
   },
 
+  /* NO `public/` IN THE WEB BUILD. It holds three sample books — one of them
+   * 3.1 MB — which vite copies verbatim into the output, and that output is
+   * then embedded byte for byte into the shipped binary by
+   * `tauri-plugin-webhost`'s build script. pdf.js's runtime is NOT affected:
+   * it is staged from `vendor/` by `pdfjsAssets()`, deliberately outside
+   * `publicDir` (see that plugin's note).
+   *
+   * A ROOT option, not a `build` one — written under `build` first, where it
+   * is silently ignored and the books shipped anyway. */
+  ...(process.env.TAURI_ENV_PLATFORM === 'web' ? { publicDir: false as const } : {}),
+
   envPrefix: ['VITE_', 'TAURI_ENV_'],
   build: {
+    /* THE WEB BUILD HAS ITS OWN ENTRY, and needs one for two reasons that are
+     * both structural rather than stylistic.
+     *
+     * `index.html` carries an inline script for the first-paint hint, which
+     * would need `script-src 'unsafe-inline'` — exactly what the web host's
+     * policy refuses, because a book's HTML runs in that origin
+     * (`rendererIsolation.test.ts`). And `src/main.tsx` arms a shutdown
+     * handshake with the Rust shell, tears down the sync journal, and migrates
+     * a legacy library: all dead in a browser, and all reached through imports
+     * that would pull `@tauri-apps` into the bundle.
+     *
+     * So `index.web.html` → `src/main.web.tsx`, selected here rather than by a
+     * branch inside either file. */
+    /* A SEPARATE OUTPUT DIRECTORY, and this is not tidiness. Both builds
+     * default to `dist/`, so running one after the other leaves that directory
+     * holding whichever went last — a desktop bundle where the shelf expects a
+     * browser one, or the reverse, with nothing anywhere saying so. They are
+     * different programs and they get different directories. */
+    ...(process.env.TAURI_ENV_PLATFORM === 'web'
+      ? {
+          outDir: 'dist-web',
+          rollupOptions: { input: 'index.web.html' },
+        }
+      : {}),
     // The webview is known at build time: WebKit on macOS/Linux, WebView2 on
     // Windows. Targeting them directly avoids shipping transpiled fallbacks.
-    target: process.env.TAURI_ENV_PLATFORM === 'windows' ? 'chrome105' : 'safari13',
+    // A browser build is served to an unknown phone, so it targets the oldest
+    // engine worth supporting rather than the one this machine happens to run.
+    target:
+      process.env.TAURI_ENV_PLATFORM === 'windows'
+        ? 'chrome105'
+        : process.env.TAURI_ENV_PLATFORM === 'web'
+          ? 'safari16'
+          : 'safari13',
     minify: process.env.TAURI_ENV_DEBUG ? false : 'esbuild',
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
   },

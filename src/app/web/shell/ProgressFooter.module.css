@@ -1,0 +1,56 @@
+/* The reader's foot. Padding 18/28/22 from the mockup; the gradient is what
+   keeps the last line of the page from ending at a hard edge. */
+.foot {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: var(--z-chrome);
+  display: flex;
+  align-items: center;
+  gap: var(--space-10);
+  padding: var(--space-16) var(--space-28);
+  padding-bottom: max(var(--space-24), env(safe-area-inset-bottom));
+  font-size: var(--text-caption);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  background: linear-gradient(to bottom, transparent, var(--surface) 40%);
+  transition: opacity var(--motion-chrome);
+  pointer-events: none;
+}
+
+/* CHROME HIDES, §06: "Hides on scroll, tap centre to show." The footer is
+   part of the chrome and goes with it. */
+.foot[data-visible='false'] {
+  opacity: 0;
+}
+
+.pct {
+  flex: 0 0 auto;
+}
+
+.track {
+  flex: 1 1 auto;
+  /* `--track-w`, the reader's own progress rule — 3, not the mockup's 2.
+     One quantity, one thickness, wherever it is drawn. */
+  height: var(--track-w);
+  border-radius: var(--radius-pill);
+  background: var(--line);
+  position: relative;
+  overflow: hidden;
+}
+
+.fill {
+  position: absolute;
+  background: var(--line-3);
+}
+
+.left {
+  flex: 0 0 auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .foot {
+    transition: none;
+  }
+}

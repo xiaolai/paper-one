@@ -6,7 +6,7 @@ import { SERVICE_NAMES, SERVICE_TABLE, readServices, readingGrant, serviceDescri
 import { openNodeServices, type NodeHost } from '../hosts/node/services'
 import { FIXTURE, FIXTURE_FILES } from '../hosts/node/fixture.testkit'
 import { localCaller } from './caller'
-import { render, table } from './format'
+import { fields, render, table } from './format'
 import { paper } from './paper'
 import { EXIT, commandList, runCommand } from './run'
 
@@ -159,6 +159,13 @@ describe('--json', () => {
       'tag.list': ['tag', 'list'],
       'trash.list': ['trash', 'list'],
       'content.locate': ['content', 'locate', 'aaa'],
+      'content.read': ['content', 'read', 'aaa'],
+      /* The fixture book has no jacket, and that is fine: `cover.read` answers
+         an EMPTY stream for a book with no artwork rather than refusing, so
+         `[]` is a valid JSON document and the exit code is still 0. That is
+         precisely the behaviour worth pinning — the first version of the
+         service made this case an internal error. */
+      'cover.read': ['cover', 'read', 'aaa'],
       'shelf.status': ['shelf', 'status'],
     }
     /* THE LIST IS CHECKED AGAINST THE TABLE, not merely iterated.
@@ -475,6 +482,30 @@ describe('the table, at scale', () => {
   it('renders more rows than the engine will take as arguments', () => {
     const rows = Array.from({ length: 200_000 }, (_one, index) => ({ id: `m${index}`, text: 'x' }))
     expect(() => table(descriptor, rows)).not.toThrow()
+  })
+
+  /**
+   * ⚠️ **AND SO DOES `fields`, WHICH THE FIX ABOVE MISSED.**
+   *
+   * `table` was repaired and `widest` extracted for it; `fields` kept
+   * `Math.max(0, ...keys.map(…))` — the same spread, the same engine limit,
+   * one function down. A defect that has been named and fixed once is exactly
+   * the one worth grepping the surface for, and this is the second instance.
+   *
+   * `render` sends any single-object answer here, so the path is live.
+   */
+  it('renders an object with more keys than the engine will take as arguments', () => {
+    const wide = Object.fromEntries(
+      Array.from({ length: 200_000 }, (_one, index) => [`key${index}`, 'x']),
+    )
+    expect(() => fields(wide)).not.toThrow()
+  })
+
+  /* AND IT STILL PADS. The bound must not have been bought by dropping the
+     alignment the function exists for. */
+  it('pads every key to the widest', () => {
+    const lines = fields({ id: 'm0', aVeryLongKeyName: 'x' }).split('\n')
+    expect(lines[0]?.indexOf('m0')).toBe(lines[1]?.indexOf('x'))
   })
 
   /**

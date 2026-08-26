@@ -1,0 +1,90 @@
+/* THE CONTINUE STRIP. Three covers, `2 / 3`, a 3px accent rule clipped to the
+   progress. Padding 4/20/12 from the mockup. */
+.strip {
+  flex: 0 0 auto;
+  padding: var(--space-4) var(--space-20) var(--space-12);
+  padding-top: max(var(--space-8), env(safe-area-inset-top));
+}
+
+.heading {
+  margin: 0 0 var(--space-12);
+  font-size: var(--text-caption);
+  font-weight: 600;
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.row {
+  display: flex;
+  gap: var(--space-12);
+}
+
+.item {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.jacket {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 2 / 3;
+  border-radius: var(--radius-chip);
+  overflow: hidden;
+  box-shadow: var(--shadow-card);
+}
+
+.cover {
+  position: absolute;
+  inset: 0;
+}
+
+.rule {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: var(--track-w);
+  background: var(--accent);
+}
+
+.title {
+  padding-top: var(--space-8);
+  font-size: var(--text-small);
+  font-weight: 600;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pct {
+  padding-top: var(--space-2);
+  font-size: var(--text-caption);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The fallback title inside a tinted jacket — small, clamped, in the corner
+   the mockup's Listening cover puts it. */
+.coverTitle {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  overflow: hidden;
+  padding: var(--space-8);
+  font-size: var(--text-caption);
+  line-height: 1.3;
+  color: var(--ink-2);
+}

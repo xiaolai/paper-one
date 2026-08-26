@@ -156,6 +156,22 @@ export { NOT_CONFIGURED, NOT_CONFIGURED_REASON, UNKNOWN_CITATION_NOTE } from './
 export type { AnswerEnd, AskContext, AskPassage, Citation, CompanionProvider } from './core/companion'
 export { LOOK_UP_LABELS, LOOK_UP_MODES, LOOK_UP_SETTING, NO_GLOSS, availableModes, effectiveMode, isLookUpMode } from './core/gloss'
 export type { GlossContext, GlossProvider, LookUpMode } from './core/gloss'
+/* WHAT A BOOK'S LINK MAY DO TO THE HOST, decided once and in one place.
+ *
+ * foliate hands any link whose scheme leaves the package to `globalThis.open`
+ * unless the embedder cancels the event, and `epub.js`'s idea of "external" is
+ * every scheme but `blob:` — so `javascript:` and `data:` take the same branch.
+ * The desktop reader has cancelled that event and consulted this since the
+ * `open_external` work; the BROWSER reader passed a no-op handler, which
+ * cancels nothing, so the fallback ran with whatever a stranger's zip put in
+ * the href. Pure and already browser-safe, so the client uses the same rule
+ * rather than growing a second one that drifts. */
+export { MAX_URL, externalTarget } from './core/externalLink'
+export type { ExternalTarget } from './core/externalLink'
+/* HOW MUCH OF A READER-CHOSEN FILE THIS APP WILL HOLD. Three paths read
+ * something whose size is decided outside the app — a picked archive, a book on
+ * a shelf — and none of them bounded it before reading. See `importLimits`. */
+export { ARCHIVE_MAX_BYTES, ARCHIVE_MAX_ROWS, BOOK_MAX_BYTES, tooLarge } from './core/importLimits'
 export { KERNEL_SETTINGS, SETTINGS_STORAGE_KEY, SETTINGS_VERSION, carryLegacySettings, createSettingsStore, keepValues } from './core/settings'
 export type { KernelPreferences, SettingsEnvelope, SettingsMigration, SettingsStoreOptions } from './core/settings'
 
@@ -182,6 +198,28 @@ export {
   trashOf,
 } from './core/bookFolder'
 export { CONTENT_EXTENSIONS, isContentExtension, isKnownExtension } from './core/bookVault'
+/* ⚠️ `tauriSizePort` IS NOT RE-EXPORTED HERE, and that absence is load-bearing.
+ *
+ * It was, from `./core/bookSizes` — and because that module also held the
+ * `@tauri-apps/plugin-fs` binding, this entry, which every capability imports,
+ * could not be bundled for a browser. One export made 54 modules unreachable
+ * and earned a bespoke dependency-cruiser rule to route around it.
+ *
+ * The binding now lives in `core/bookSizesTauri.ts` and the composition root
+ * imports it directly, which is the right shape anyway: a book's size is a fact
+ * about the app's own data directory, so the root binds it, not a capability
+ * and not this barrel. `sizePortOver` — the PURE WALK — is exported below, and
+ * that is the whole point of the split: it has real logic in it (an extension
+ * preference order, a partial-answer rule, a root-safe join) and every host
+ * should run THAT rather than a copy of it. The Node host kept its own copy
+ * until one of them started at `books/` and the other at the data root, and
+ * `shelf.status.bytes` came to depend on which host you asked.
+ *
+ * `scripts/check-browser-safe.mjs` pins this entry as browser-safe. Re-adding a
+ * platform-bound export here fails that gate rather than being discovered
+ * months later by a bundle that will not build. */
+export { sizePortOver } from './core/bookSizes'
+export type { SizeOps } from './core/bookSizes'
 export type { BookRecord, TagClock, TagClockEntry } from './core/bookFolder'
 export { INDEX_FILE, loadShelf, parseIndex, scanBooks, writeIndex } from './core/bookIndex'
 export type { IndexFs, IndexedBook, ShelfSource } from './core/bookIndex'
@@ -248,9 +286,67 @@ export type { TrashFs } from './core/bookTrash'
 export type { ContentExtension, KnownExtension, VaultFs } from './core/bookVault'
 
 /* The vocabulary. */
-export { createMark, liveMarks, markStamp, mergeMarks, validMarks } from './core/marks'
-export type { Mark, MarkKind, MarkStorage, NewMark } from './core/marks'
-export { CARDS_STORAGE_KEY, cardStamp, liveCards, mergeCards, parseCards } from './core/cards'
+/* THE CLOSED DOMAINS, exported so a client can VALIDATE a wire row against
+ * them rather than casting. Reading somebody else's JSON and trusting `kind`
+ * to be one of three strings is how an unknown value reaches a switch with no
+ * case for it — see `app/web/wireRow.ts`. */
+export { MARK_KINDS, MARK_STYLES, MARK_TINTS } from './core/marks'
+export type { MarkStyle } from './core/marks'
+export { createMark, isAnnotation, isBookmark, liveMarks, markStamp, mergeMarks, validMarks } from './core/marks'
+export type { Annotation, Bookmark, Mark, MarkKind, MarkStorage, MarkTint, NewMark } from './core/marks'
+export { CARD_KINDS, CARDS_STORAGE_KEY, cardStamp, liveCards, mergeCards, parseCards } from './core/cards'
 export type { Card, CardKind, NewCard } from './core/cards'
 export { KERNEL_PANE_IDS, isContributedPaneId, isKernelPaneId } from './core/uiTypes'
 export type { ContributedPaneId, KernelPaneId, PageLayout, PaneId, Screen, Side, Theme, Typeface } from './core/uiTypes'
+
+
+/* The design system's icon sizes. Exported for a capability's UI: `lucide`
+ * takes a number, and a capability picking its own would be the one control in
+ * the app drawn at a size nothing else uses. `ICON.control` is the size every
+ * icon inside a control already takes. */
+export { ICON } from './core/metrics'
+
+/* THE ENVELOPE — a service call as bytes, and bytes back.
+ *
+ * It lived in `capabilities/peer/lib/` because that is where its first caller
+ * was, and nothing about it is peer-to-peer: it is a request/response framing
+ * over any ordered byte stream. Phase 18 gave it a second transport (a browser
+ * over a WebSocket) and the misplacement became load-bearing — the browser
+ * client cannot import from `peer`, whose index reaches `@tauri-apps` and does
+ * not exist in a browser.
+ *
+ * So it lives here, where both transports can reach it. `peer/lib/envelope.ts`
+ * re-exports it, which is why nothing in that capability had to change. */
+export {
+  DEFAULT_TIMEOUT_MS,
+  ENVELOPE_ERRORS,
+  ENVELOPE_SERVICE,
+  ENVELOPE_VERSION,
+  FrameTooLarge,
+  HEADER_BYTES,
+  MAX_FRAME_BYTES,
+  MAX_JSON_DEPTH,
+  MAX_PAYLOAD_BYTES,
+  MalformedFrame,
+  ServiceCallError,
+  UNKNOWN_ID,
+  UnsupportedVersion,
+  createClient,
+  createRouter,
+  decodeFrame,
+  encodeFrame,
+  parseFrame,
+  serviceError,
+} from './core/envelope'
+export type {
+  CallOptions,
+  Client,
+  ClientOptions,
+  Frame,
+  FrameKind,
+  Router,
+  RouterConnection,
+  RouterOptions,
+  ServiceError,
+  Timers,
+} from './core/envelope'

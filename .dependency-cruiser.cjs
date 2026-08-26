@@ -38,7 +38,100 @@ const path = require('node:path')
 /** The composition roots: one static composition per platform, and the file
  *  that imports exactly one of them. `composition.contract.test.ts` is NOT one —
  *  the platform list is closed, so the test falls under the ordinary rule. */
-const COMPOSITION_ROOTS = ['^src/app/composition\\.(desktop|ios|android)\\.ts$', '^src/main\\.tsx$']
+/**
+ * The roots that build a NATIVE app, and the one that builds the browser
+ * client — separately, because they may not reach for each other's UI entry.
+ *
+ * `COMPOSITION_ROOTS` below is their union and stays the subject of every rule
+ * that treats a root as a root. These two exist for the one rule that cannot:
+ * the kernel's UI entries are per-platform, and a single allowance covering
+ * both let a native root import the browser's and the browser root import the
+ * Tauri-bound one.
+ */
+const NATIVE_COMPOSITION_ROOTS = [
+  '^src/app/composition\\.(desktop|ios|android)\\.ts$',
+  '^src/main\\.tsx$',
+]
+const WEB_COMPOSITION_ROOTS = ['^src/app/composition\\.web\\.ts$', '^src/main\\.web\\.tsx$']
+
+const COMPOSITION_ROOTS = [
+  '^src/app/composition\\.(desktop|ios|android|web)\\.ts$',
+  '^src/main\\.tsx$',
+  /* The BROWSER client's root (phase 18). A second root rather than a branch
+   * inside `main.tsx`: that file arms a shutdown handshake with the Rust
+   * shell, tears down the sync journal and migrates a legacy library, and the
+   * imports carrying those pull `@tauri-apps` into a bundle served to a
+   * phone. `assert-bundle` refuses a web bundle that reaches one. */
+  '^src/main\\.web\\.tsx$',
+]
+
+/** The design system's stylesheets.
+ *
+ * A composition root reaches these DIRECTLY only because the browser root
+ * cannot take the ordinary path: `src/kernel/ui/index.ts` imports them, and it
+ * also reaches `appStorage.ts` and four other modules that import
+ * `@tauri-apps`, which do not exist in a browser.
+ *
+ * Narrow on purpose — `.css` under `styles/` and nothing else. A stylesheet
+ * carries no imports and cannot smuggle a dependency past the boundary these
+ * rules exist to hold; a `.ts` file there could, so it stays refused. */
+const KERNEL_STYLESHEETS = '^src/kernel/ui/styles/.*\\.css$'
+
+/** The design system's geometry.
+ *
+ * `applyMetrics` publishes `--control-sm`, `--radius-pill` and the rest onto a
+ * root element, and `capability.css` resolves every control's size and shape
+ * from them. `App.tsx` calls it for the desktop build from inside `kernel/ui`.
+ *
+ * The BROWSER root cannot take either sanctioned door. `kernel/ui/index.ts`
+ * pulls five modules that import `@tauri-apps`; so does the public entry, whose
+ * barrel retains them for any symbol taken from it — `assert-bundle` refused a
+ * web bundle carrying three. Without this the client mirrored the constants in
+ * a stylesheet of its own, which is a client IMITATING the design system rather
+ * than using it, and it showed.
+ *
+ * Narrow, and cheap to allow: `metrics.ts` has exactly one import and it is
+ * type-only. It is arithmetic over constants with no dependencies to smuggle. */
+const KERNEL_METRICS = '^src/kernel/core/metrics\\.ts$'
+
+/** The envelope: a service call as bytes, and bytes back.
+ *
+ * It moved into the kernel in phase 18 because a second transport needed it —
+ * nothing about it is peer-to-peer. */
+const KERNEL_ENVELOPE = '^src/kernel/core/envelope\\.ts$'
+
+/* THE BROWSER UI ENTRY (WI-19.4), which REPLACED a whole-directory reach.
+ * This was `KERNEL_READER = '^src/kernel/ui/reader/'` — the client could import
+ * any of the twenty-odd modules under `ui/reader/` by path, and did. An entry
+ * is a door with a list on it; a directory prefix is a hole the shape of a
+ * directory. `scripts/check-browser-safe.mjs` pins the entry browser-safe, so
+ * what is behind this door is guaranteed rather than hoped. */
+const KERNEL_BROWSER_ENTRY = '^src/kernel/ui/browser\\.ts$'
+/** The type vocabulary the reader is configured with — `Theme`, `Typeface`,
+ *  `ReadingStyle` and the rest. ZERO dependencies of its own, which is the test
+ *  every leaf on this list passes. */
+const KERNEL_UI_TYPES = '^src/kernel/core/uiTypes\\.ts$'
+
+/** The BROWSER CLIENT: `src/app/web/`, the SPA the shelf serves to a phone.
+ *
+ * ⚠️ **THIS USED TO BE AN EXEMPTION AND IS NOW A PAIR OF DOORS.** The old rule,
+ * `web-client-kernel-allowlist`, existed because the kernel's public entry
+ * re-exported modules importing `@tauri-apps` — so the client could not use it
+ * and reached five named modules directly instead, one of them an entire
+ * DIRECTORY (`ui/reader/`). Its own comment asked the right question: "a fourth
+ * entry is a signal that the public entry should be made Tauri-free instead of
+ * routed around." There were five.
+ *
+ * WI-19.1 made it Tauri-free — one export, `tauriSizePort`, was the whole
+ * cause — so `web-client-kernel-entries` below now mirrors
+ * `composition-root-kernel-entries`: the public entry, plus a React door
+ * (`ui/browser.ts`) the client may mount surfaces from, plus the same two
+ * dependency-free leaves a root gets.
+ *
+ * The client is NOT folded into `kernel-public-entry-only`. That rule is for
+ * capabilities, which have no business importing React; this client's whole
+ * job is to render it. */
+const WEB_CLIENT = '^src/app/web/'
 
 /** The kernel's two entries: the React-free public one every capability may
  *  import, and the UI one only a composition root may. */
@@ -59,10 +152,30 @@ const KERNEL_UI_ENTRY = '^src/kernel/ui/index\\.ts$'
  *  of `core/marksArchive.ts`, dialogs only, no path constructed. That two of
  *  these now exist is the pattern, not an exception to it — an archive is a
  *  pure document module plus a thin file half, and the file half is what goes
- *  on this list. */
+ *  on this list.
+ *
+ *  `bookSizes` is the third of that shape: `sizePortOver` decides what a size
+ *  MEANS — the extension preference order, and the rule that a walk which did
+ *  not finish has no total — and needs no filesystem to be tested, while the
+ *  binding under it is two calls to the plugin. It constructs paths, unlike
+ *  the two archive halves above, but only from `folderOf` and the kernel's
+ *  closed `CONTENT_EXTENSIONS` list; nothing a reader typed reaches it. */
 const FS_ADAPTERS = [
   '^src/kernel/core/bookFiles\\.ts$',
-  '^src/kernel/core/bookVault\\.ts$',
+  /* `bookSizes.ts` IS NO LONGER ON THIS LIST, for exactly the reason
+   * `bookVault.ts` is not, below. It holds `sizePortOver` — a pure walk over
+   * two callbacks — and while the binding sat eleven lines beneath it, the
+   * kernel's PUBLIC ENTRY re-exported `tauriSizePort` and so could not be
+   * bundled for a browser at all. One export, 54 modules. The binding is
+   * `bookSizesTauri.ts`. */
+  '^src/kernel/core/bookSizesTauri\\.ts$',
+  /* `bookVault.ts` IS NO LONGER ON THIS LIST, and its absence is the point.
+   * It holds the vault's seam and its rules — `extensionFor`,
+   * `CONTENT_EXTENSIONS`, `readRangeOf` — which `bookFolder` imports and the
+   * reader imports in turn. While the Tauri binding sat beside them, every one
+   * of those importers dragged the fs plugin in behind it, which is what put
+   * the reader out of a browser's reach. The binding is `vaultFsTauri.ts`. */
+  '^src/kernel/core/vaultFsTauri\\.ts$',
   '^src/kernel/ui/appStorage\\.ts$',
   '^src/kernel/ui/tagFiles\\.ts$',
   '^src/kernel/ui/marksFiles\\.ts$',
@@ -86,6 +199,13 @@ const FS_ADAPTERS = [
 const PLUGIN_WIRES = [
   '^src/capabilities/peer/lib/wire\\.ts$',
   '^src/capabilities/inference/lib/plugin\\.ts$',
+  /* The third (phase 18): `tauri-plugin-webhost`'s commands — the six-digit
+   * code the shelf shows, the browsers holding a credential, and the frame pipe
+   * to each. Admitted by the rule's own reasoning above: a second file in ONE
+   * capability is what this list prevents, and a second capability with its own
+   * plugin is not. The crate's `build.rs` carries the matching command list,
+   * and a test in that crate fails when the two disagree. */
+  '^src/capabilities/webhost/lib/wire\\.ts$',
 ]
 
 /** A capability's public entry — the only file under `src/capabilities/<id>/`
@@ -152,7 +272,7 @@ module.exports = {
         'Outside the kernel, the only kernel module that may be imported is its public entry, ' +
         'src/kernel/index.ts — for a capability, a test under src/app/, anything. The composition ' +
         'roots are judged by composition-root-kernel-entries instead, which adds the UI entry.',
-      from: { path: '^src/', pathNot: ['^src/kernel/', ...COMPOSITION_ROOTS] },
+      from: { path: '^src/', pathNot: ['^src/kernel/', WEB_CLIENT, ...COMPOSITION_ROOTS] },
       to: { path: '^src/kernel/', pathNot: [KERNEL_PUBLIC_ENTRY, KERNEL_TESTKIT_ENTRY] },
     },
     {
@@ -171,12 +291,35 @@ module.exports = {
       name: 'composition-root-kernel-entries',
       severity: 'error',
       comment:
-        'A composition root (src/app/composition.<platform>.ts, src/main.tsx) may import the kernel ' +
-        "through exactly two files: the public entry and the UI entry, src/kernel/ui/index.ts. The " +
-        'UI entry exists because the public entry is React-free and a root has to render App; ' +
-        'nothing else may import it, and a root may not reach past either.',
+        'A composition root (src/app/composition.<platform>.ts, src/main.tsx, src/main.web.tsx) may ' +
+        'import the kernel through the public entry and ONE UI entry — never past either. Which UI ' +
+        'entry is its platform\'s, and the two rules below draw that line; this one refuses ' +
+        'everything else under src/kernel/.',
       from: { path: COMPOSITION_ROOTS },
-      to: { path: '^src/kernel/', pathNot: [KERNEL_PUBLIC_ENTRY, KERNEL_UI_ENTRY] },
+      to: { path: '^src/kernel/', pathNot: [KERNEL_PUBLIC_ENTRY, KERNEL_UI_ENTRY, KERNEL_BROWSER_ENTRY, KERNEL_STYLESHEETS, KERNEL_METRICS] },
+    },
+    {
+      name: 'native-root-not-browser-ui-entry',
+      severity: 'error',
+      comment:
+        'A NATIVE composition root may not import src/kernel/ui/browser.ts. That entry exists for ' +
+        'the browser client and grows one export at a time, in the change that mounts it — a ' +
+        "barrel's re-exports evaluate with the barrel, so a native root reaching for it would load " +
+        'and retain surfaces nothing on that platform renders. The two UI entries are two doors, ' +
+        'and the rule above could not tell them apart: it allowed both to every root.',
+      from: { path: NATIVE_COMPOSITION_ROOTS },
+      to: { path: KERNEL_BROWSER_ENTRY },
+    },
+    {
+      name: 'web-root-not-native-ui-entry',
+      severity: 'error',
+      comment:
+        'The BROWSER composition root may not import src/kernel/ui/index.ts. That entry re-exports ' +
+        'modules which import @tauri-apps, and a barrel retains everything it names — which is why ' +
+        'src/kernel/ui/browser.ts exists at all. assert-bundle would refuse the resulting bundle, ' +
+        'but by then the reason reads as unrelated; this says it at the import.',
+      from: { path: WEB_COMPOSITION_ROOTS },
+      to: { path: KERNEL_UI_ENTRY },
     },
     {
       name: 'capability-only-via-index',
@@ -239,10 +382,28 @@ module.exports = {
         'capability-requires-declared judges only direct capability-to-capability edges. And the rule ' +
         'covers every module, not just capabilities, so a capability cannot launder the edge through ' +
         'a shared intermediary either — and one PLATFORM root cannot import another, which would ' +
-        'braid two platforms\' capability graphs. Only src/main.tsx (the entry choosing its root) and ' +
-        'tests are exempt.',
-      from: { path: '^src/', pathNot: ['^src/main\\.tsx$', '\\.(test|testkit)\\.tsx?$'] },
-      to: { path: '^src/app/composition\\.(desktop|ios|android)\\.ts$' },
+        'braid two platforms\' capability graphs. Only the two entries that choose a root — ' +
+        'src/main.tsx and src/main.web.tsx — and tests are exempt.',
+      from: {
+        path: '^src/',
+        /* Both entries choose a root, and neither may be reached FROM one —
+         * `src/main.web.tsx` is the browser client's, exempt for exactly the
+         * reason `src/main.tsx` is. */
+        pathNot: ['^src/main\\.tsx$', '^src/main\\.web\\.tsx$', '\\.(test|testkit)\\.tsx?$'],
+      },
+      /* ⚠️ BOTH ENTRIES TOO, not only the composition files. The comment above
+       * states the invariant as "nothing may import src/main.tsx", and the
+       * target did not include it — so a capability could reach an entire
+       * composition through either entry, which is the same exposure by a
+       * different path. `main.web.tsx` is the browser client's and carries the
+       * same weight. */
+      to: {
+        path: [
+          '^src/app/composition\\.(desktop|ios|android|web)\\.ts$',
+          '^src/main\\.tsx$',
+          '^src/main\\.web\\.tsx$',
+        ],
+      },
     },
     {
       name: 'no-circular',
@@ -269,6 +430,32 @@ module.exports = {
       to: { path: '(^|/)@tauri-apps/plugin-fs(/|$)' },
     },
     {
+      name: 'web-client-kernel-entries',
+      severity: 'error',
+      comment:
+        'The browser client (src/app/web/) reaches the kernel through ENTRIES, the same way a ' +
+        'composition root does: the public entry, and src/kernel/ui/browser.ts for the React ' +
+        'surfaces it mounts — plus the design-system stylesheets, metrics.ts, envelope.ts and ' +
+        'uiTypes.ts, which are leaves with no runtime dependencies of their own. This replaced ' +
+        'web-client-kernel-allowlist, an EXEMPTION that existed only because the public entry was ' +
+        'not Tauri-free; it listed five modules, one of them the whole ui/reader/ directory. ' +
+        'WI-19.1 removed the cause (one export, tauriSizePort), so the exemption became a door. ' +
+        'The client is deliberately not folded into kernel-public-entry-only: that rule is for ' +
+        'capabilities, which must not import React, and rendering React is this client\'s job.',
+      from: { path: WEB_CLIENT },
+      to: {
+        path: '^src/kernel/',
+        pathNot: [
+          KERNEL_PUBLIC_ENTRY,
+          KERNEL_STYLESHEETS,
+          KERNEL_METRICS,
+          KERNEL_ENVELOPE,
+          KERNEL_BROWSER_ENTRY,
+          KERNEL_UI_TYPES,
+        ],
+      },
+    },
+    {
       name: 'no-tauri-api-outside-peer-wire',
       severity: 'error',
       comment:
@@ -279,6 +466,21 @@ module.exports = {
         'above). One file per plugin, so the set of command names is auditable in one place. ' +
         'Matched on the package name wherever it resolves, like the fs rule.',
       from: { path: '^src/capabilities/', pathNot: PLUGIN_WIRES },
+      to: { path: '(^|/)@tauri-apps/' },
+    },
+    {
+      name: 'no-tauri-in-the-web-client',
+      severity: 'error',
+      comment:
+        'The browser client and its composition root may not import @tauri-apps/* at all. There is ' +
+        'no Tauri in a browser: the import resolves at build time, ships, and fails at run time on ' +
+        "the reader's phone — as `undefined is not a function`, three layers from the import that " +
+        'caused it. The phase-18 plan names this as a gate and it did not exist: ' +
+        '`no-tauri-api-outside-peer-wire` is scoped to src/capabilities/, so src/app/web/ could ' +
+        'import @tauri-apps/api/core with `pnpm boundaries` reporting 0 violations. Measured, not ' +
+        'assumed. This rule matches ONE EDGE; a transitive reach is caught by assert-bundle, which ' +
+        'inspects what actually ships and so cannot be fooled by a type-only import that erases.',
+      from: { path: [WEB_CLIENT, '^src/main\\.web\\.tsx$'] },
       to: { path: '(^|/)@tauri-apps/' },
     },
     {

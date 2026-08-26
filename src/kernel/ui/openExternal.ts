@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import { inTauri } from './appStorage'
+import { inTauri } from './inTauri'
 import { externalTarget } from '../core/externalLink'
 
 /**

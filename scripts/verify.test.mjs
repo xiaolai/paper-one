@@ -14,17 +14,33 @@ import { STEPS, parseArgs, runSteps, spawnStep } from './verify.mjs'
 const SCRIPT = fileURLToPath(new URL('./verify.mjs', import.meta.url))
 
 describe('the steps', () => {
-  it('are the plan\'s, in order: manifest, compositions, dead CSS, inert directives, the feature ledger, boundaries (and the test-project check and the test ledger), types, coverage, build, the CLI bundle, then Cargo', () => {
+  it('are the plan\'s, in order: manifest, compositions, dead CSS, undefined CSS tokens, browser safety, inert directives, boundaries (and the test-project check and the test ledger), types, coverage, the desktop build, the browser build, the CLI bundle, then Cargo', () => {
     /* THE CHEAP STATIC CHECKS COME FIRST, before the ones that spend a minute
-       compiling — `css:check` and `directives:check` are a walk of `src` and
-       answer in milliseconds, so failing there costs the reader nothing. Both
-       were added after three orphaned CSS rules and seven suppression comments
-       for a linter this repo has never had were found by hand; a class found
-       twice by hand is a class that needs a check rather than a third fix. */
+       compiling — `css:check`, `css:tokens` and `directives:check` are a walk of
+       `src` and answer in milliseconds, so failing there costs the reader
+       nothing. All three were added after the same kind of discovery: three
+       orphaned CSS rules, seven suppression comments for a linter this repo has
+       never had, and five invented custom properties on the browser client's
+       reading surface. A class found twice by hand is a class that needs a
+       check rather than a third fix.
+
+       `css:check` and `css:tokens` ask different questions and neither implies
+       the other: one asks whether a RULE can be reached, the other whether a
+       VALUE resolves. A stylesheet can be entirely live and still style
+       nothing, because an undefined custom property is dropped in silence.
+
+       `browser:check` is here rather than later because it is the same shape:
+       a walk of `src` that answers in milliseconds. It holds the modules this
+       repository deliberately made browser-safe TO that, and the failure it
+       catches is silent in every other gate — one careless import re-blocks a
+       subtree, and nothing says so until `assert-bundle` refuses a bundle for
+       a reason that reads as unrelated. */
     expect(STEPS.map((s) => s.name)).toEqual([
       'architecture:check',
       'compositions:check',
       'css:check',
+      'css:tokens',
+      'browser:check',
       'directives:check',
       'boundaries',
       'test:projects',
@@ -32,6 +48,7 @@ describe('the steps', () => {
       'typecheck',
       'test:coverage',
       'build',
+      'build:web',
       'build:cli',
       'cargo metadata --locked',
       'cargo fmt --check',
@@ -52,6 +69,14 @@ describe('the steps', () => {
        luck rather than like a deleted flag. See the note beside the step. */
     expect(STEPS.find((s) => s.name === 'cargo test --workspace').args.slice(-2)).toEqual(['--', '--test-threads=1'])
     expect(STEPS.find((s) => s.name === 'build').args).toEqual(['build'])
+    /* `build` IS THE DESKTOP BUNDLE ONLY, and the browser client is a separate
+     * Vite config, entry and composition root with its own bundle assertion.
+     * `dist-web/` is gitignored and `tauri-plugin-webhost/build.rs` compiles
+     * with an empty asset set when it is missing, so without this step the
+     * browser client can stop building while every other gate stays green and
+     * the release ships a host that answers 503. */
+    expect(STEPS.find((s) => s.name === 'build:web').args).toEqual(['build:web'])
+    expect(STEPS.map((s) => s.name).indexOf('build:web')).toBeGreaterThan(STEPS.map((s) => s.name).indexOf('typecheck'))
     /* The CLI's bundle is gitignored, so no other step here would notice it
      * stop compiling — and `bin/paper.mjs` is what `sync-scenario.sh` runs. */
     expect(STEPS.find((s) => s.name === 'build:cli').args).toEqual(['build:cli'])
@@ -99,13 +124,30 @@ describe('spawnStep', () => {
 describe('parseArgs', () => {
   it('selects steps with --from and --only, lists with --list, refuses the rest', () => {
     expect(parseArgs([]).steps.map((s) => s.name)).toEqual(STEPS.map((s) => s.name))
-    expect(parseArgs(['--from', 'build']).steps.map((s) => s.name)).toEqual(['build', 'build:cli', 'cargo metadata --locked', 'cargo fmt --check', 'cargo clippy -D warnings', 'cargo test --workspace'])
+    expect(parseArgs(['--from', 'build']).steps.map((s) => s.name)).toEqual(['build', 'build:web', 'build:cli', 'cargo metadata --locked', 'cargo fmt --check', 'cargo clippy -D warnings', 'cargo test --workspace'])
     expect(parseArgs(['--only', 'boundaries']).steps.map((s) => s.name)).toEqual(['boundaries'])
     expect(parseArgs(['--from', 'build', '--only', 'cargo fmt --check']).steps.map((s) => s.name)).toEqual(['cargo fmt --check'])
     expect(parseArgs(['--list'])).toEqual({ list: true })
     expect(parseArgs(['--from'])).toEqual({ error: '--from needs a step name' })
     expect(parseArgs(['--only', 'nope'])).toEqual({ error: 'no step named "nope"; see --list' })
     expect(parseArgs(['--wat'])).toEqual({ error: 'unknown argument "--wat"' })
+  })
+
+  /* A GATE THAT VERIFIES NOTHING MUST NOT EXIT 0. Both selectors name real
+     steps, so neither is rejected on its own; their intersection is empty and
+     the run used to print "all 0 steps passed". Green having done nothing looks
+     exactly like green having done everything, which is the whole failure. */
+  it('refuses a selection that resolves to no steps', () => {
+    const empty = parseArgs(['--from', 'build', '--only', 'typecheck'])
+    expect(empty.steps).toBeUndefined()
+    expect(empty.error).toMatch(/select no steps/)
+  })
+
+  /* `--list` used to win silently, so `--list --only build` printed the whole
+     list and ran nothing while looking like a plan for the one step asked for. */
+  it('refuses --list combined with a selector rather than ignoring it', () => {
+    expect(parseArgs(['--list', '--only', 'build'])).toEqual({ error: '--list cannot be combined with --from or --only' })
+    expect(parseArgs(['--from', 'build', '--list'])).toEqual({ error: '--list cannot be combined with --from or --only' })
   })
 })
 

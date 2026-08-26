@@ -31,24 +31,78 @@ const config = JSON.parse(
   }
 }
 
-/** The directives of one policy, by name. */
+/**
+ * The directives of one policy, by name.
+ *
+ * ⚠️ **THE FIRST OCCURRENCE WINS, AND THIS USED TO KEEP THE LAST.** CSP says a
+ * repeated directive name is ignored after the first, so a browser handed
+ * `script-src *; script-src 'self'` runs anything — while a parser that
+ * overwrote as it went would report `'self'` and every assertion below would
+ * pass. That is a policy this test would call safe and a browser would not.
+ *
+ * A duplicate is refused outright rather than silently resolved. Both policies
+ * here are authored by hand in one place each; a repeat is a mistake, and the
+ * honest thing to do with a mistake in a security boundary is stop.
+ */
 function directives(policy: string): Record<string, string[]> {
   const out: Record<string, string[]> = {}
   for (const part of policy.split(';')) {
     const [name, ...values] = part.trim().split(/\s+/)
-    if (name) out[name] = values
+    if (!name) continue
+    if (name in out) {
+      throw new Error(
+        `duplicate CSP directive ${name}: a browser honours the FIRST and ignores the rest, ` +
+          'so the two spellings cannot both be what this policy means',
+      )
+    }
+    out[name] = values
   }
   return out
 }
+
+/**
+ * The policy the WEB HOST serves, read from the Rust source that serves it.
+ *
+ * ⚠️ THIS TEST WAS STRUCTURALLY BLIND TO THE BROWSER BUILD. Everything above
+ * reads `tauri.conf.json` — a file a browser build never opens. The web host
+ * sends headers of its own, and until this was added nothing asserted them:
+ * the boundary existed, the test protecting it could not see the new target,
+ * and it stayed green either way.
+ *
+ * Parsed out of `lib.rs` rather than copied here, because a copy is a second
+ * policy that agrees with the first until somebody edits one. Rust's `\` line
+ * continuation eats the newline and the indent that follows it, so the join
+ * below reproduces exactly the string the compiler builds.
+ */
+function servedPolicy(): string {
+  const source = readFileSync(
+    fileURLToPath(new URL('../../../src-tauri/crates/paper-webhost/src/lib.rs', import.meta.url)),
+    'utf8',
+  )
+  const at = source.indexOf('pub const CONTENT_SECURITY_POLICY')
+  if (at < 0) throw new Error('CONTENT_SECURITY_POLICY is gone from paper-webhost — this test cannot see the policy')
+  const opened = source.indexOf('"', at)
+  const closed = source.indexOf('";', opened + 1)
+  if (opened < 0 || closed < 0) throw new Error('CONTENT_SECURITY_POLICY is no longer a plain string literal')
+  return source.slice(opened + 1, closed).replace(/\\\s*\n\s*/g, '')
+}
+
+const SERVED = servedPolicy()
 
 const POLICIES: [string, string | null | undefined][] = [
   ['csp', config.app.security?.csp],
   ['devCsp', config.app.security?.devCsp],
 ]
 
+/** Every policy whose job is to stand between a book and this origin. */
+const BOUNDARY_POLICIES: [string, string | null | undefined][] = [
+  ...POLICIES,
+  ['webhost', SERVED],
+]
+
 describe('the shipped Content Security Policy', () => {
   it('exists at all', () => {
-    for (const [name, policy] of POLICIES) {
+    for (const [name, policy] of BOUNDARY_POLICIES) {
       expect(policy, `${name} must be set — foliate's own README says not to run without one`)
         .toBeTruthy()
     }
@@ -58,7 +112,7 @@ describe('the shipped Content Security Policy', () => {
    * EPUB's inline <script> from executing; `'unsafe-inline'` there would hand
    * every shared book the run of the application's origin. */
   it('never allows inline or evaluated script', () => {
-    for (const [name, policy] of POLICIES) {
+    for (const [name, policy] of BOUNDARY_POLICIES) {
       const scriptSrc = directives(policy ?? '')['script-src']
       expect(scriptSrc, `${name} must name script-src explicitly`).toBeDefined()
       expect(scriptSrc, `${name} script-src must not allow inline`).not.toContain("'unsafe-inline'")
@@ -70,7 +124,7 @@ describe('the shipped Content Security Policy', () => {
   /* A missing default-src means every directive not listed falls back to "any",
    * which makes the listed ones a decoration. */
   it('closes what it does not name', () => {
-    for (const [name, policy] of POLICIES) {
+    for (const [name, policy] of BOUNDARY_POLICIES) {
       const d = directives(policy ?? '')
       expect(d['default-src'], `${name} needs a default-src`).toEqual(["'self'"])
       expect(d['object-src'], `${name} should refuse plugins outright`).toEqual(["'none'"])
@@ -82,7 +136,7 @@ describe('the shipped Content Security Policy', () => {
    * these does not fail loudly — the book renders unstyled, in a fallback face,
    * with no pictures, which reads as a bad EPUB rather than as our mistake. */
   it('still permits what a book legitimately needs', () => {
-    for (const [name, policy] of POLICIES) {
+    for (const [name, policy] of BOUNDARY_POLICIES) {
       const d = directives(policy ?? '')
       expect(d['frame-src'], `${name}: book documents are blob URLs`).toContain('blob:')
       expect(d['img-src'], `${name}: book images are blobs`).toContain('blob:')
@@ -100,9 +154,112 @@ describe('the shipped Content Security Policy', () => {
    * fine to every other assertion in this file while letting a book run script
    * from an object URL — which is precisely how a book's own resources arrive. */
   it('lets script come from exactly one place', () => {
-    for (const [name, policy] of POLICIES) {
+    for (const [name, policy] of BOUNDARY_POLICIES) {
       expect(directives(policy ?? '')['script-src'], `${name}`).toEqual(["'self'"])
     }
+  })
+
+  /**
+   * THE SERVED POLICY NOW LETS A BOOK RENDER, and this is the ratchet that was
+   * here paying off rather than a rule being relaxed.
+   *
+   * It used to assert the exact SHORTFALL — `worker-src blob:`, `style-src
+   * blob:`, `font-src blob:` all absent — because the browser build had no
+   * reading surface and least privilege says a policy should not permit what
+   * nothing uses. The reading surface landed, that test failed, and naming the
+   * three directives is what it was for: without them nothing fails loudly, the
+   * book renders unstyled in a fallback face with no pictures and a PDF does not
+   * render at all, which reads as a bad book rather than as our policy.
+   *
+   * The served policy is folded into `still permits what a book legitimately
+   * needs` above, so it is now held to the same standard as the other two
+   * rather than to a list of its own.
+   *
+   * WHAT DID NOT MOVE IS `script-src`, and that is the whole argument. It is
+   * asserted as an exact set three tests up, for all three policies, and
+   * `scripts/csp-effect.mjs` measures what that shape DOES: in WebKit and
+   * Chromium a book's script does not run — neither inline nor from an object
+   * URL, which is what every book resource becomes.
+   */
+  it('lets the web host serve a book without letting it run code', () => {
+    const served = directives(SERVED)
+    const shipped = directives(config.app.security?.csp ?? '')
+
+    /**
+     * THE TWO POLICIES AGREE, DIRECTIVE FOR DIRECTIVE, except where they are
+     * deliberately different — and the exceptions are named here rather than
+     * being whatever the diff happens to be.
+     *
+     * THIS IS THE THIRD VERSION OF THIS ASSERTION AND THE FIRST HONEST ONE.
+     * The first looked for `blob:` in three directives; the served policy was
+     * also missing `'unsafe-inline'` on `style-src`, so the client rendered
+     * unstyled. The second compared five named directives; the served policy
+     * also had `frame-ancestors 'none'`, which a blob document INHERITS — so
+     * the book's own frame had no permitted ancestor and would not load at all,
+     * and `media-src` was absent so a book with audio would have failed later.
+     *
+     * Both were found by looking at the page. A check that compares only what
+     * somebody thought to list cannot find what they did not, and the list gets
+     * shorter than the policy every time the policy grows. So this compares
+     * every directive in EITHER policy, and a new one has to be classified
+     * deliberately — as shared, or as a named difference.
+     */
+    /**
+     * ⚠️ EACH EXCEPTION NAMES WHAT THE SERVED POLICY MUST BE, not merely that
+     * it differs.
+     *
+     * This was a map of directive to REASON, and the only assertion made about
+     * an exempt directive was that it was not equal to the desktop's. So
+     * `connect-src *`, `base-uri *` or `frame-ancestors *` would all have
+     * passed — each of them differs from the desktop, which was the entire
+     * test. An exemption list that says "this one is allowed to be anything"
+     * is the shape of hole worth closing in a policy comparison.
+     */
+    const DELIBERATELY_DIFFERENT: Readonly<Record<string, readonly string[]>> = {
+      /* Tauri's own IPC origin, which does not exist in a browser. The browser
+         talks to its own shelf and nowhere else — including the book's frame,
+         which inherits this. */
+      'connect-src': ["'self'"],
+      /* The served page is stricter, and can afford to be: it has no base tag. */
+      'base-uri': ["'none'"],
+      /* The desktop is a window, not a frame, so it has no ancestors to refuse.
+         The served page is reachable over the network and does — but `'self'`
+         rather than `'none'`, because a book's blob frame inherits this. */
+      'frame-ancestors': ["'self'"],
+    }
+
+    const everything = [...new Set([...Object.keys(shipped), ...Object.keys(served)])].sort()
+    /* NOT EMPTY, and not one. A parse that silently yielded nothing would make
+       every comparison below vacuous. */
+    expect(everything.length).toBeGreaterThan(8)
+
+    for (const directive of everything) {
+      if (directive in DELIBERATELY_DIFFERENT) continue
+      expect(
+        new Set(served[directive] ?? []),
+        `${directive}: the served policy must match the desktop's, or be listed as deliberately different`,
+      ).toEqual(new Set(shipped[directive] ?? []))
+    }
+
+    /* AND EACH NAMED DIFFERENCE IS THE VALUE IT IS SUPPOSED TO BE. */
+    for (const [directive, expected] of Object.entries(DELIBERATELY_DIFFERENT)) {
+      expect(
+        served[directive] ?? [],
+        `${directive}: the served policy is exempt from matching the desktop, which makes this \
+the ONLY thing asserting what it actually is`,
+      ).toEqual([...expected])
+      /* AND IT STILL DIFFERS. An exemption that stopped being needed is one
+         sitting there ready to hide the next real difference in the same
+         directive. */
+      expect(
+        new Set(served[directive] ?? []),
+        `${directive} no longer differs from the desktop — remove it from the list`,
+      ).not.toEqual(new Set(shipped[directive] ?? []))
+    }
+    /* THE BOUNDARY IS NOT PART OF WHAT WAS WIDENED. Asserted here as well as
+     * above, because here is where somebody relaxing the policy for a book is
+     * actually looking. */
+    expect(served['script-src']).toEqual(["'self'"])
   })
 
   /* Development needs the Vite HMR socket; the shipped policy must not. */

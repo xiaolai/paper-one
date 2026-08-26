@@ -1,6 +1,19 @@
 /**
  * The two things a book's bytes need, wherever they are kept.
  *
+ * ## THIS MODULE HAS NO TAURI IN IT, and that is load-bearing
+ *
+ * `tauriVaultFs` used to live here, so importing `extensionFor` — a pure
+ * function over a filename — pulled `@tauri-apps/plugin-fs` in behind it.
+ * `bookFolder` imports that function, the reader imports `bookFolder`, and so
+ * **the entire reader subtree reached the fs plugin through one value import
+ * nothing on that path ever called.** A browser has no such plugin;
+ * `assert-bundle` refuses a web bundle carrying it.
+ *
+ * The binding is `vaultFsTauri.ts` now. This file is the SEAM and the rules —
+ * a filesystem interface, a slice helper, and the closed extension list — and
+ * anything that only needs those pays nothing to reach them.
+ *
  * This module OWNED the layout once — `books/<bookId>.<ext>` at the top level,
  * with `ownBook` writing there and `vaultPath` naming it. A book is a folder
  * now, so the layout moved to `bookFolder` and what is left here is the part
@@ -10,16 +23,6 @@
  * The extension list stays HERE rather than moving with the paths, because it
  * is a security property and not a naming convention — see below.
  */
-
-import {
-  BaseDirectory,
-  exists,
-  mkdir,
-  readFile,
-  remove,
-  rename,
-  writeFile,
-} from '@tauri-apps/plugin-fs'
 
 /** Where copies live, under the app's own data directory. */
 /* `BOOKS_DIR` lives in `bookFolder`, which owns the layout. It was declared
@@ -53,21 +56,47 @@ export interface VaultFs {
    * which is correct and O(n) per append, a price only tests should pay.
    */
   appendFile?: (path: string, bytes: Uint8Array) => Promise<void>
+  /**
+   * A slice of a file, without reading the rest (phase 18).
+   *
+   * OPTIONAL, on the same terms as `appendFile`: a filesystem without it falls
+   * back to `readFile` and a slice, which is correct and **O(n) per slice**.
+   * That price is not one only tests should pay here — `content.read` serves a
+   * book to a browser a slice at a time, so the fallback is O(n²) over the
+   * book, and a 300 MB scanned PDF would be re-read once per megabyte served.
+   *
+   * So: implement it wherever a book's bytes are actually served. The fallback
+   * exists so a fake filesystem in a test need not, and `readRangeOf` below is
+   * the one place that decides which is in use.
+   *
+   * Answers FEWER bytes than asked at the end of the file, and an empty array
+   * past it — the same contract a POSIX read has, and the one a caller
+   * assembling a stream already has to handle.
+   */
+  readRange?: (path: string, offset: number, length: number) => Promise<Uint8Array>
 }
 
-const DIR = { baseDir: BaseDirectory.AppData } as const
-
-export const tauriVaultFs: VaultFs = {
-  readFile: (path) => readFile(path, DIR),
-  writeFile: (path, bytes) => writeFile(path, bytes, DIR),
-  exists: (path) => exists(path, DIR),
-  mkdir: (path) => mkdir(path, { ...DIR, recursive: true }),
-  remove: (path) => remove(path, DIR),
-  rename: (from, to) => rename(from, to, { oldPathBaseDir: DIR.baseDir, newPathBaseDir: DIR.baseDir }),
-  removeDir: (path) => remove(path, { ...DIR, recursive: true }),
-  // A real append, so a journal line costs one write and not a rewrite of
-  // the whole file. The fs plugin's writeFile carries the flag.
-  appendFile: (path, bytes) => writeFile(path, bytes, { ...DIR, append: true }),
+/**
+ * A slice of a file, however this filesystem can manage it.
+ *
+ * ONE PLACE DECIDES. A caller reaching for `fs.readRange ?? readFile-and-slice`
+ * itself is a caller that will get the fallback's bounds subtly wrong — a
+ * negative offset, a length past the end — in a way that only shows on the
+ * last chunk of a large book.
+ */
+export async function readRangeOf(
+  fs: VaultFs,
+  path: string,
+  offset: number,
+  length: number,
+): Promise<Uint8Array> {
+  if (offset < 0 || length < 0) throw new Error(`readRange: offset and length must not be negative (${offset}, ${length})`)
+  if (length === 0) return new Uint8Array(0)
+  if (fs.readRange) return await fs.readRange(path, offset, length)
+  const whole = await fs.readFile(path)
+  /* `subarray` would share the buffer with the whole file, keeping every byte
+   * of a 300 MB book alive for as long as the caller holds one chunk. */
+  return whole.slice(offset, offset + length)
 }
 
 /**
@@ -136,12 +165,42 @@ export function extensionFor(name: string): ContentExtension {
  * The vault names files by content hash so two copies cannot collide; every
  * parser Paper uses routes on the EXTENSION, and foliate rejects a name with no
  * suffix as an unsupported type. So the name is rebuilt from the record each
- * time a stored book is opened — by the reader, and now by the enrichment pass
- * as well. Two copies of this reconstruction is one of them keeping a different
+ * time a stored book is opened — by the reader, and by the enrichment pass as
+ * well. Two copies of this reconstruction is one of them keeping a different
  * fallback when the rule changes.
+ *
+ * ## `ext`, then `format`, and only then a guess
+ *
+ * ⚠️ **THIS READ `ext` ALONE AND DEFAULTED THE REST TO `epub`**, and `ext` is
+ * DEVICE-LOCAL: it says how THIS device named its copy, and a record that
+ * arrived over sync deliberately does not carry it. What travels is `format`.
+ *
+ * So a PDF downloaded from another device had `format: 'pdf'`, no `ext`, and
+ * its bytes on disk as `content.pdf` — and this answered `Title.epub`, which
+ * `contentPathIn` turned into `books/<id>/content.epub`. The file was right
+ * there under its real name and the reader reported it missing. Every
+ * replicated non-EPUB was unopenable on the device that received it, and the
+ * defect scaled with how well sync worked.
+ *
+ * Both are VALIDATED rather than interpolated. The extension goes into a path;
+ * `KNOWN_EXTENSIONS` exists because `book.../../../../etc/passwd` yields a
+ * segment that walks out of the vault, and a value read back from a record is
+ * no more trustworthy than a filename. An unrecognised one falls through to the
+ * next source rather than being sanitised.
+ *
+ * `epub` remains the last resort — the overwhelmingly common case for a record
+ * from before either field was written — but it is now reached only when
+ * neither field says anything, rather than whenever `ext` happened to be absent.
  */
-export function storedBookName(entry: { title?: string; ext?: string }): string {
-  return `${entry.title || 'book'}.${entry.ext || 'epub'}`
+export function storedBookName(entry: { title?: string; ext?: string; format?: string }): string {
+  const named = entry.ext !== undefined && isKnownExtension(entry.ext) ? entry.ext : undefined
+  const travelled = entry.format !== undefined && isKnownExtension(entry.format) ? entry.format : undefined
+  /* `bin` IS DELIBERATELY NOT ACCEPTED from either. It is the vault's inert
+     fallback for bytes nothing recognises, and handing a parser `Title.bin`
+     names a type no parser routes on — so a record stored as `bin` lands on
+     `epub` here, which is the same guess the reader would have made and at
+     least opens something. */
+  return `${entry.title || 'book'}.${named ?? travelled ?? 'epub'}`
 }
 
 /** Read a book Paper owns back as a `File`, ready for the reader. */

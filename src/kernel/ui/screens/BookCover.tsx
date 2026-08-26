@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { coverTintFor } from '../../core/bookAccent'
-import { tauriVaultFs } from '../../core/bookVault'
-import { coverIn } from '../../core/coverArt'
+import type { CoverSource } from '../../core/coverArt'
 import type { IndexedBook } from '../../core/bookIndex'
 
 /**
@@ -30,12 +29,27 @@ import type { IndexedBook } from '../../core/bookIndex'
 export function BookCover({
   book,
   title,
+  coverFor,
   className,
   tintedClassName,
   titleClassName,
 }: {
   book: IndexedBook
   title: string
+  /**
+   * Where the jacket comes from — a function, not a filesystem.
+   *
+   * ⚠️ **THIS WAS `tauriVaultFs`, IMPORTED HERE**, and that one import made
+   * `BookCell`, `BookRow` and the whole `Library` screen impossible to bundle
+   * for a browser. A cover is the only thing on the shelf that needs bytes off
+   * a disk, and it took the entire shelf down with it.
+   *
+   * Absent means there is nowhere to fetch from — a browser before there is a
+   * `cover.read` service — and the tint below is drawn instead. That is not a
+   * degraded state: it is the same picture a book with no jacket gets, which
+   * is most of them.
+   */
+  coverFor?: CoverSource | undefined
   className?: string | undefined
   /** Added to the box only while it is drawing the TINT — see the return. */
   tintedClassName?: string | undefined
@@ -60,7 +74,21 @@ export function BookCover({
   useEffect(() => {
     let revoked = false
     let mine: string | null = null
-    void coverIn(tauriVaultFs, at).then((next) => {
+    /* NOTHING TO ASK. Without a source there is no jacket to wait for, so the
+     * tint is drawn at once rather than after a promise that cannot resolve. */
+    if (coverFor === undefined) return
+    /* ⚠️ **THE READ USED TO OUTLIVE THE CELL.** Cleanup revoked whatever URL
+     * eventually arrived, which stopped the leak — and left the READ running.
+     * This shelf is virtualised, so a flick through two thousand rows unmounts
+     * hundreds of cells with a jacket in flight, and over a channel each one is
+     * a `cover.read` stream still pulling and decoding chunks nobody will look
+     * at, against a byte budget shared with the book being read.
+     *
+     * Revoking is still here as well, and both are needed: the signal stops
+     * work that has not happened, `revoked` catches a source that had already
+     * finished or that cannot honour a signal at all. */
+    const stop = new AbortController()
+    void coverFor(at, stop.signal).then((next) => {
       if (!next) return
       /* The cell may have been unmounted, or pointed at another book, while the
        * bytes were being read. Revoking immediately rather than setting state is
@@ -75,11 +103,17 @@ export function BookCover({
     })
     return () => {
       revoked = true
+      stop.abort()
       if (mine) URL.revokeObjectURL(mine)
       held.current = null
       setUrl(null)
     }
-  }, [at])
+    /* ⚠️ `coverFor` MUST BE A STABLE REFERENCE, and that is the caller's job.
+     * It is in the dependency list because leaving it out captures the first
+     * one forever — but an inline arrow gives a new identity every render, and
+     * on a 1 961-row shelf that is a refetch and a revoked object URL per row
+     * per render. Bind it once at module scope, or in a `useCallback`. */
+  }, [at, coverFor])
 
   /* THE TINT IS THE JACKET, when there is no artwork — so it fills the box,
    * takes the jacket's rounding and shadow, and carries the title. When there

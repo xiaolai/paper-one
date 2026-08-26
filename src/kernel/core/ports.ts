@@ -422,8 +422,33 @@ export function defineSetting<T>(
  */
 export interface SettingsStore {
   get<T>(setting: Setting<T>): T
+  /**
+   * Write a preference. **NEVER THROWS**, and it used to.
+   *
+   * A durable store can refuse a write — a full disk, an exhausted quota, a
+   * private window with storage switched off — and `set` reported that by
+   * throwing. No caller caught it. So a quota error thrown out of an `onClick`
+   * aborted the rest of the handler, and every multi-field write in the app is
+   * a run of `set` calls: choosing a theme writes `theme` and then
+   * `themeFollowsOs`, and `writeKernelPreferences` writes sixteen in a loop. A
+   * refusal on the first left the rest UNATTEMPTED, so what was stored was a
+   * PREFIX of what the reader had chosen — internally inconsistent, silently.
+   *
+   * The refusal is not swallowed; it moves to `persistent`, which is a state
+   * the pane can draw rather than an exception nobody was catching.
+   */
   set<T>(setting: Setting<T>, value: T): void
   subscribe(listener: () => void): () => void
+  /**
+   * Whether what is set here will still be here next launch.
+   *
+   * `false` for a store opened over no storage at all, and for one whose
+   * storage has refused a write — the same distinction the marks and cards
+   * stores draw, and drawn the same way so a pane can say the same sentence.
+   * Changes are published to `subscribe`, so a pane that reads it re-renders
+   * when a write first fails.
+   */
+  readonly persistent: boolean
   /** Every stored value by key. A new object after each change, else the same one. */
   getSnapshot(): Readonly<Record<string, unknown>>
 }

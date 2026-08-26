@@ -1,10 +1,11 @@
 import type { IndexedBook } from '../bookIndex'
-import { folderOf } from '../bookFolder'
-import { CONTENT_EXTENSIONS } from '../bookVault'
+import { contentPathIn, coverPathIn, legacyCoverPathIn, folderOf } from '../bookFolder'
+import { CONTENT_EXTENSIONS, readRangeOf } from '../bookVault'
 import { CONTENT_BLOB_NAMES, REMOVABLE_BLOB_NAMES, type RemovableBlobName } from '../ports'
 import { findBook as find, type ServiceEnvironment } from './environment'
 import { descriptorOf, readInput, reqStr } from './input'
-import type { ContentLocation } from './rows'
+import { SERVICE_ERRORS, refuse } from './refusals'
+import type { ContentChunk, ContentLocation } from './rows'
 
 /**
  * `content.*` — a book's bytes, as far as they can be described without
@@ -24,6 +25,14 @@ import type { ContentLocation } from './rows'
  * computed in TypeScript, and no filesystem seam the kernel owns has a
  * `stat`. Null means "nobody here can say", which a caller must be able to
  * tell from zero.
+ *
+ * ⚠️ `content.read` (phase 18) IS THE EXCEPTION to the paragraph above, and it
+ * is a narrow one. It is a READ, not a TRANSFER, and that difference is what
+ * makes it safe: no resume, no partial file on disk, no second hash to keep
+ * honest. Integrity comes from the TLS the browser client already cannot work
+ * without. A browser has no iroh and so cannot take the blob path at all, and
+ * the alternative — an HTTP byte endpoint — would have existed on one
+ * transport and not the other.
  *
  * `content.evict` deletes THIS DEVICE'S copy and replicates nothing, by
  * construction: the outbox is filtered to `record | marks | removed | cards`,
@@ -84,6 +93,161 @@ export function contentLocate(env: ServiceEnvironment) {
   return async (req: unknown): Promise<ContentLocation> => {
     const input = readInput(descriptorOf('content.locate'), req)
     return locationOf(env, find(env, reqStr(input, 'book')))
+  }
+}
+
+/**
+ * Base64 for a slice, without blowing the stack.
+ *
+ * `btoa(String.fromCharCode(...bytes))` is the one-liner and it throws on a
+ * large array — the argument list is the limit, and a 512 KiB chunk is far past
+ * it. Built in fixed steps instead.
+ */
+function base64Of(bytes: Uint8Array): string {
+  const STEP = 0x8000
+  let binary = ''
+  for (let at = 0; at < bytes.length; at += STEP) {
+    binary += String.fromCharCode(...bytes.subarray(at, at + STEP))
+  }
+  return btoa(binary)
+}
+
+/**
+ * How much of a book crosses the wire at once.
+ *
+ * The envelope caps a frame at 4 MiB and base64 costs four bytes per three, so
+ * this has to leave room: 512 KiB of book is about 683 KiB encoded, comfortably
+ * under, and small enough that a reader assembling a book does not hold a
+ * multi-megabyte string per chunk.
+ */
+const CHUNK_BYTES = 512 * 1024
+
+export function contentRead(env: ServiceEnvironment) {
+  /* A PAGE PER YIELD, not a chunk — every other stream in this table yields an
+   * array of rows and every reader of one flattens pages. A bare object here
+   * type-checked and then broke the shared drain helper on the first spread. A
+   * page of one costs two characters of JSON. */
+  return async function* (req: unknown): AsyncIterable<readonly ContentChunk[]> {
+    const input = readInput(descriptorOf('content.read'), req)
+    const bookId = reqStr(input, 'book')
+    const book = find(env, bookId)
+
+    const fs = env.services.fs
+    /* NOT AN EMPTY STREAM. A caller that cannot tell "this shelf has no
+     * filesystem" from "this book is zero bytes" will write a zero-byte file
+     * and call it a book. */
+    if (fs === null) throw refuse(SERVICE_ERRORS.unsupported, 'this shelf cannot read bytes')
+
+    /* THE SAME FILE `content.locate` DESCRIBED, and `preferredName` is what
+     * makes that one decision rather than two. This took the FIRST stored
+     * name, which is `storedNames`'s sort order — so a folder holding both a
+     * `content.azw3` and a `content.epub` had `locate` report the epub and its
+     * byte count while `read` streamed the azw3. A client sizing a buffer from
+     * one and filling it from the other gets a truncated book and no error.
+     * A folder is not supposed to hold two; it can, and the answer that
+     * contradicts itself is worse than either half. */
+    const names = await blobNames(env, book)
+    const name = preferredName(names)
+    if (name === undefined) {
+      throw refuse(SERVICE_ERRORS.notFound, `no content for ${bookId} on this shelf`)
+    }
+    /* `contentPathIn` takes the BOOK ID and calls `folderOf` itself. Passing
+     * an already-folded folder double-applies it and builds a path under a
+     * directory that does not exist — which reads as "no content" rather than
+     * as a mistake. */
+    const path = contentPathIn(bookId, name)
+
+    const from = typeof input['offset'] === 'number' ? input['offset'] : 0
+    const want = typeof input['length'] === 'number' ? input['length'] : Number.POSITIVE_INFINITY
+
+    let at = from
+    let sent = 0
+    for (;;) {
+      const take = Math.min(CHUNK_BYTES, want - sent)
+      if (take <= 0) return
+      const slice = await readRangeOf(fs, path, at, take)
+      /* A SHORT ANSWER IS THE END OF THE FILE, which is the only way this loop
+       * terminates when no `length` was given. Treating it as an error would
+       * make reading a whole book impossible without knowing its size first. */
+      if (slice.length === 0) return
+      yield [{ bookId, offset: at, bytes: base64Of(slice) }]
+      at += slice.length
+      sent += slice.length
+      if (slice.length < take) return
+    }
+  }
+}
+
+/**
+ * A book's jacket, in chunks (phase 19, WI-19.8).
+ *
+ * ## Why a service and not a port
+ *
+ * `BookCover` takes a `CoverSource` — "a URL for this book, or null" — and the
+ * desktop binds it over the local vault. A browser has no vault, so without
+ * this the whole shelf draws tinted rectangles. Making the component reachable
+ * was WI-19.7; giving it BYTES is this.
+ *
+ * ## Two names, and the older one is not a mistake
+ *
+ * `cover.jpg` is where a jacket lives; `cover.webp` is where it lived in a
+ * library written before that name was made honest. `coverIn` on the desktop
+ * checks both and so does this — a shelf that answered "no cover" for every
+ * book imported before the rename would look exactly like a shelf of books
+ * with no artwork.
+ *
+ * ## Absent is NOT a refusal
+ *
+ * Most books have no jacket. An empty stream says so, and the client draws its
+ * tint; a `notFound` would make the ordinary case an error and fill a log with
+ * it. That is the opposite of `content.read`, where no bytes means the book
+ * cannot be opened and silence would be a lie.
+ */
+const EMPTY = new Uint8Array(0)
+
+export function coverRead(env: ServiceEnvironment) {
+  return async function* (req: unknown): AsyncIterable<readonly ContentChunk[]> {
+    const input = readInput(descriptorOf('cover.read'), req)
+    const bookId = reqStr(input, 'book')
+    /* THE BOOK MUST EXIST, even though a missing cover does not refuse. The
+     * distinction is the point: "no such book" is a caller's mistake and "no
+     * jacket" is an ordinary fact about a book. */
+    find(env, bookId)
+
+    const fs = env.services.fs
+    if (fs === null) throw refuse(SERVICE_ERRORS.unsupported, 'this shelf cannot read bytes')
+
+    let at = 0
+    for (const path of [coverPathIn(bookId), legacyCoverPathIn(bookId)]) {
+      /* ⚠️ A MISSING FILE THROWS, it does not read as empty — `readRangeOf`
+       * hands the filesystem's own error up, and `content.read` never meets
+       * that because `blobNames` has already confirmed the file is there.
+       * There is no such list for a cover, and MOST BOOKS HAVE NO JACKET: the
+       * first version of this turned every one of them into
+       * `cover.read: internal: the service failed`, once per row, on a shelf of
+       * 1 961.
+       *
+       * A real I/O error is swallowed with it, and that is the deliberate
+       * trade: for a jacket, "not there" and "cannot be read" have the same
+       * answer — the tint — and making the ordinary case an error to preserve
+       * a distinction nothing acts on is the worse bargain. Only the PROBE is
+       * forgiving; once the file has answered once, a later failure is real
+       * and is allowed to throw. */
+      const head = await readRangeOf(fs, path, 0, CHUNK_BYTES).catch(() => EMPTY)
+      /* NOTHING AT THIS NAME. Try the older one; if that is empty too the
+       * stream ends and the book simply has no jacket. */
+      if (head.length === 0) continue
+      yield [{ bookId, offset: 0, bytes: base64Of(head) }]
+      at = head.length
+      if (head.length < CHUNK_BYTES) return
+      for (;;) {
+        const slice = await readRangeOf(fs, path, at, CHUNK_BYTES)
+        if (slice.length === 0) return
+        yield [{ bookId, offset: at, bytes: base64Of(slice) }]
+        at += slice.length
+        if (slice.length < CHUNK_BYTES) return
+      }
+    }
   }
 }
 

@@ -11,6 +11,12 @@ able to invoke.
 This book is the adversary. It probes for each route out and writes what it
 found into its own DOM, where the host can read the verdict back.
 
+Two targets, not one. On the DESKTOP the routes out are Tauri's — the global
+object, the internals channel, `invoke`. In the BROWSER client there is no
+Tauri at all, and the thing worth stealing is the session credential; the
+probes for it are marked below. Running this book against only one of the two
+tests only one of them.
+
 It is NOT a passing test on its own. It is the fixture; the assertion is
 `src/kernel/core/rendererIsolation.test.ts` for the static half, and reading
 `#paper-isolation-verdict` out of the running app for the live half.
@@ -72,6 +78,20 @@ NAV = """<?xml version="1.0" encoding="UTF-8"?>
 # `__TAURI_INTERNALS__` is the channel underneath it, which that flag does NOT
 # remove — which is exactly why the CSP rather than the flag is the fix.
 # `parent` is checked separately from `window` because the book is a frame.
+#
+# THE CREDENTIAL PROBES ARE FOR THE BROWSER BUILD (phase 18). There is no
+# `__TAURI__` on a phone, so every probe above answers "reached nothing" there
+# — and a fixture that only asks questions the target cannot fail is a fixture
+# that proves nothing about it. What a browser HAS that the desktop does not is
+# a session credential, and the whole reason it is an `HttpOnly` cookie rather
+# than a `localStorage` entry is that a book's script shares this origin and
+# could otherwise simply read it.
+#
+# `document.cookie` omits `HttpOnly` cookies by definition, so these probes
+# pass by construction — which is the point. They are what makes a REGRESSION
+# visible: the day somebody drops `HttpOnly` to debug something, or moves the
+# credential into storage "just for now", this book says so out loud instead of
+# the change going unnoticed.
 PROBE = """<?xml version="1.0" encoding="UTF-8"?>
 <html xmlns="http://www.w3.org/1999/xhtml">
   <head>
@@ -98,10 +118,70 @@ PROBE = """<?xml version="1.0" encoding="UTF-8"?>
         return true;
       });
       probe('parent.localStorage', function () { return !!parent.localStorage.length });
+
+      // The browser client's session credential, by every route a book has to
+      // it. `paper_session` is the cookie's name — `SESSION_COOKIE` in
+      // `paper-webhost`, and the only other place it is written down.
+      probe('document.cookie', function () { return /paper_session/.test(document.cookie) });
+      probe('parent.document.cookie', function () { return /paper_session/.test(parent.document.cookie) });
+      probe('credential in storage', function () {
+        var stores = [window.localStorage, window.sessionStorage, parent.localStorage, parent.sessionStorage];
+        for (var s = 0; s < stores.length; s++) {
+          var store = stores[s];
+          if (!store) continue;
+          for (var i = 0; i < store.length; i++) {
+            var key = store.key(i);
+            if (/paper_session/.test(key) || /paper_session/.test(store.getItem(key) || '')) return true;
+          }
+        }
+        return false;
+      });
+
+      // ⚠️ READING THE CREDENTIAL WAS NEVER THE ONLY ROUTE, and for a while it
+      // was the only one probed. `HttpOnly` stops a script SEEING the cookie
+      // and does nothing to stop the browser ATTACHING it: a book that can run
+      // can `fetch` an authenticated endpoint, or open the frame socket, and be
+      // answered as the reader without ever learning the value. A fixture that
+      // only tried to read it would have reported "REACHED NOTHING" about a
+      // book with the whole read surface in its hands.
+      //
+      // Asynchronous, so the verdict is written once these settle. Nothing
+      // destructive is attempted — the point is whether the shelf ANSWERS.
+      var pending = 2;
+      function settled() { if (--pending <= 0) show(); }
+
+      try {
+        fetch('/api/auth/session', { credentials: 'include' })
+          .then(function (r) { if (r.status !== 401) reached.push('authenticated fetch (' + r.status + ')'); })
+          .catch(function () { /* blocked or refused counts as safe */ })
+          .then(settled, settled);
+      } catch (e) { settled() }
+
+      try {
+        var proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+        var sock = new WebSocket(proto + location.host + '/ws');
+        var done = false;
+        var finish = function (ok) {
+          if (done) return;
+          done = true;
+          if (ok) reached.push('authenticated websocket');
+          try { sock.close() } catch (e) {}
+          settled();
+        };
+        sock.onopen = function () { finish(true) };
+        sock.onerror = function () { finish(false) };
+        sock.onclose = function () { finish(false) };
+        setTimeout(function () { finish(false) }, 3000);
+      } catch (e) { settled() }
+
       var el = document.getElementById('paper-isolation-verdict');
-      el.textContent = reached.length
-        ? 'REACHED: ' + reached.join(', ')
-        : 'SCRIPT RAN, REACHED NOTHING';
+      function show() {
+        el.textContent = reached.length
+          ? 'REACHED: ' + reached.join(', ')
+          : 'SCRIPT RAN, REACHED NOTHING';
+      }
+      // Say what is known now, in case neither asynchronous probe ever settles.
+      show();
     ]]></script>
   </body>
 </html>
@@ -131,7 +211,20 @@ def main() -> None:
     print("Open it in Paper, then read the verdict:")
     print("  SCRIPT DID NOT RUN         -> the CSP blocked it. This is the pass.")
     print("  SCRIPT RAN, REACHED NOTHING-> script ran but found no route out.")
-    print("  REACHED: ...               -> FAIL, and it names what it got to.")
+    print("  REACHED: ...               -> it names what it got to. See below.")
+    print()
+    print("ONE ENTRY IS NOT A FAILURE, and reading it as one would send you")
+    print("hunting a hole that is not there. `parent.localStorage` fires when the")
+    print("parent has ANY entry at all, and in the browser client it always will:")
+    print("UI preferences live there by design. It reports that the book can SEE")
+    print("the parent's storage, which is true and is why the credential is not")
+    print("kept in it.")
+    print()
+    print("Everything else in a REACHED list is a failure, and these two most of")
+    print("all — they mean a shared book can read the session credential and")
+    print("speak to the shelf as the reader:")
+    print("  document.cookie / parent.document.cookie -> HttpOnly was dropped")
+    print("  credential in storage                    -> it was moved to storage")
 
 
 if __name__ == "__main__":

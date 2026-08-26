@@ -17,8 +17,13 @@ import type { TrashedBook } from '../bookTrash'
  * stopped appearing and nothing at all to notice one that STARTED. That is the
  * wrong way round for this file, because the failure it guards against is a
  * field crossing the wire that should not have — `origin` is a path on this
- * reader's disk, `ext` is how this copy happens to be stored, and a mark's
- * `prefix`/`suffix` are a repair input nobody asked for.
+ * reader's disk, and `ext` is how this copy happens to be stored.
+ *
+ * ⚠️ This sentence used to end "and a mark's `prefix`/`suffix` are a repair
+ * input nobody asked for", which the test below already contradicted: they
+ * have crossed since phase 19, because the browser client is the first real
+ * producer of marks over this wire and a mark born without them cannot be
+ * re-found when its CFI stops resolving.
  *
  * Every projector is asserted on its KEYS, not only on its values, so a field
  * added to a stored shape is invisible here until somebody decides to publish
@@ -195,12 +200,24 @@ describe('markRow', () => {
    *
    * `deletedAt` and `updatedAt` are the ledger's stamps — a read model never
    * shows a tombstone, and a caller reconciling two devices asks sync.
-   * `prefix` and `suffix` are the text either side of the mark, captured so a
-   * CFI that no longer resolves can be re-found: a repair input, not a display
-   * field, and publishing them would roughly triple a mark row on every
-   * listing to serve nobody currently asking.
    */
-  it('drops the stamps and the re-find context, and says so by its keys', () => {
+  /* THE RE-FIND CONTEXT IS ON THE WIRE NOW (phase 19). This test used to pin
+     its ABSENCE, and that absence was a defect: a mark made over the wire was
+     born without the words either side of it, so the day its CFI stopped
+     resolving it could not be found again — while a desktop-made mark could.
+     The browser client is the first real producer of marks over this wire,
+     which is what made the gap matter. Only the stamps are dropped now. */
+  it('carries the re-find context and drops only the stamps, and says so by its keys', () => {
+    /* ⚠️ THE VALUES, NOT ONLY THE KEYS. This asserted that `prefix` and
+       `suffix` were PRESENT and nothing about what was in them — so returning
+       `''`, or the two swapped, or the text of a different mark would all have
+       passed, while destroying exactly the re-anchoring the fields exist for.
+       An empty string is the plausible wrong answer here: it is what a mark
+       made before phase 19 legitimately has. */
+    expect(markRow(MARK).prefix).toBe(MARK.prefix)
+    expect(markRow(MARK).suffix).toBe(MARK.suffix)
+    expect(markRow({ ...MARK, prefix: '', suffix: '' })).toMatchObject({ prefix: '', suffix: '' })
+
     expect(Object.keys(markRow(MARK)).sort()).toEqual([
       'bookId',
       'cfi',
@@ -209,11 +226,44 @@ describe('markRow', () => {
       'id',
       'kind',
       'note',
+      'prefix',
       'sectionIndex',
       'style',
+      'suffix',
       'text',
       'tint',
     ])
+  })
+
+  /**
+   * ⚠️ **A NON-NULL `tagClock` USED TO BE THE STORE'S OWN OBJECT.**
+   *
+   * `bookDetail` was only ever tested with the clock absent, so nothing noticed
+   * that the present case returned it by reference. The CLI and every local
+   * handler reach these projectors with no envelope in between — a JSON round
+   * trip would have copied it — so an in-process caller could mutate the live
+   * clock outside the write queue. Every other field here is a primitive and
+   * could not, which is exactly why this one was easy to miss.
+   */
+  it('copies a tagClock rather than handing over the store\'s own', () => {
+    const clock = {
+      history: { on: true, at: '1-a', spelling: 'History' },
+      unread: { on: false, at: '2-b', spelling: 'Unread' },
+    }
+    const row = bookDetail({ ...BOOK, tagClock: clock } as never)
+
+    expect(row.tagClock).toEqual(clock)
+    expect(row.tagClock, 'the caller was handed the live map').not.toBe(clock)
+    /* ⚠️ AND THE ENTRIES, which are records rather than strings — a shallow
+       copy of the map hands over the same entry objects and the mutation just
+       moves down a level. */
+    expect(row.tagClock?.['history'], 'the caller was handed a live entry').not.toBe(clock.history)
+
+    const taken = row.tagClock as Record<string, { on: boolean; at: string; spelling: string }>
+    taken['history'] = { on: false, at: 'tampered', spelling: 'x' }
+    if (taken['unread']) taken['unread'].at = 'tampered'
+    expect(clock.history.at).toBe('1-a')
+    expect(clock.unread.at).toBe('2-b')
   })
 
   it('publishes every mark kind, tint and style the domain has', () => {

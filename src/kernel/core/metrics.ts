@@ -1,4 +1,4 @@
-import type { ReadingStyle } from './uiTypes'
+import type { Align, ReadingStyle, Theme, Typeface } from './uiTypes'
 /**
  * Paper — layout metrics.
  *
@@ -12,7 +12,20 @@ import type { ReadingStyle } from './uiTypes'
  * scroll snapping, the prose spacing and the chrome.
  */
 
-export type Platform = 'macos' | 'windows' | 'linux'
+/**
+ * The platforms the interface draws for.
+ *
+ * `web` is the BROWSER CLIENT (phase 18) — the shelf's own client, served to a
+ * phone. It is a platform here for one reason: `applyMetrics` publishes the
+ * design system's geometry, and without it the client would have to mirror
+ * those constants in a stylesheet of its own. It did, briefly, and that is the
+ * duplicate this member exists to delete — a client IMITATING the design system
+ * rather than using it.
+ *
+ * It has no window, so its titlebar and system zone are zero. Anything else
+ * keyed by platform should ask whether a browser has one before answering.
+ */
+export type Platform = 'macos' | 'windows' | 'linux' | 'web'
 
 /** §03 baseline grid. The reading line box, and the unit prose spacing, the
  *  ruler band and scroll snapping are all multiples of. */
@@ -92,6 +105,10 @@ export const TITLEBAR_H: Record<Platform, number> = {
   macos: 52,
   windows: 44,
   linux: 44,
+  /* A browser tab has no titlebar to overlay, and the client draws none. Zero
+   * rather than 44: a reserved band with nothing in it would push the reading
+   * surface down the screen for a decoration that does not exist. */
+  web: 0,
 }
 
 /**
@@ -110,6 +127,9 @@ export const SYS_ZONE_W: Record<Platform, number> = {
   macos: 82,
   windows: 138,
   linux: 96,
+  /* No window controls to reserve for — the browser draws its own chrome
+   * outside the page entirely. */
+  web: 0,
 }
 
 /** §03 pane tab bar, matching the aside tabs. */
@@ -834,18 +854,30 @@ export const THEME_SWATCH_H = 52
 export const QR_SIZE = 160
 
 /**
- * THE WINDOW WIDTHS THE LAYOUT CHANGES AT.
+ * THE VIEWPORT WIDTHS THE LAYOUT CHANGES AT.
  *
- * Two, and only two, because each one is a decision about what to give up and
- * there are only two things this app can give up.
+ * Each one is a decision about what to give up, and there are only three things
+ * this app can give up.
  *
  * `compact` — the shelf's list drops its author column, and the screen's gutter
  * narrows. Below this the row cannot hold five columns without the title, which
  * is the one nobody scans past, being squeezed to nothing.
  *
- * `min` — the window's own minimum, from `tauri.conf.json`. Nothing is allowed
+ * `min` — the WINDOW's own minimum, from `tauri.conf.json`. Nothing is allowed
  * to break above it, which is what makes it a number worth stating: it is the
- * width every layout in this app is TESTED at, not a width anything reacts to.
+ * width every desktop layout is TESTED at, not a width anything reacts to.
+ *
+ * `phone` — the shelf's list drops the progress and date columns too, leaving
+ * the cover, the title and the row menu.
+ *
+ * ⚠️ **THIS USED TO SAY "TWO, AND ONLY TWO", AND "WINDOW".** Both were true
+ * while the only host was a desktop window that could not be narrower than 720,
+ * and `tokens.test.ts` asserted exactly that — "a width query that reacts to
+ * something no window can be is a rule that never runs". Phase 18 served the
+ * app to a phone, and an iPhone 15's viewport is 393. At `compact` the row
+ * still reserves 236px of fixed columns plus 70px of gaps, which leaves a book
+ * title about 39px: a rule that RUNS and produces nothing readable, which is
+ * worse than one that never runs.
  *
  * A CSS `@media` query cannot read a custom property — the cascade resolves
  * variables long after the media query has already matched — so these numbers
@@ -853,7 +885,16 @@ export const QR_SIZE = 160
  * asserts that every breakpoint in every stylesheet is one of these, which is
  * the only way the two copies can be kept honest.
  */
-export const BREAKPOINT = { compact: 860, min: 720 } as const
+export const BREAKPOINT = { compact: 860, min: 720, phone: 600 } as const
+
+/**
+ * The narrowest viewport this app is drawn in at all.
+ *
+ * An iPhone SE is 375 CSS pixels and nothing Paper is served to is narrower.
+ * It is the floor a breakpoint must sit above to mean anything — the role 720
+ * played while every host was a window.
+ */
+export const VIEWPORT_MIN = 320
 
 /**
  * A progress track: the thin rule under a book's title, and the reader's own.
@@ -950,8 +991,22 @@ export const RADIUS = {
   chip: 6,
   control: 10,
   card: 14,
+  /**
+   * THE MOBILE SHEET'S TOP CORNERS, and the selection bar's. 24 sits ABOVE
+   * the scale on purpose: a sheet is the outermost surface on a phone, and
+   * its corners should read as the phone's own rather than as a card inside
+   * it. The mockup draws every sheet at 24 and the selection bar at 20; one
+   * token, and the bar takes the card radius it is concentric with.
+   */
+  sheet: 24,
   pill: 999,
 } as const
+
+/**
+ * THE MOBILE SHEET'S GRAB HANDLE — 36×4, `--line-3`. The one part of a sheet
+ * that says what it is. The mockup draws it on every sheet at this size.
+ */
+export const SHEET_HANDLE = { w: 36, h: 4 } as const
 
 /** §12 layer order. Anything not on this list does not get a z-index. */
 export const Z = {
@@ -986,6 +1041,15 @@ export const MOTION = {
   rulerTrack: '90ms ease',
   paneOpen: '220ms ease-out',
   popover: '120ms ease-out',
+  /**
+   * THE MOBILE SHEET — companion and tools, §08: "280ms spring. Interruptible,
+   * follows the finger." A spring rather than an ease because the sheet is
+   * DRAGGED: it has to feel attached to the thumb, and an ease-out lands like
+   * something arriving on its own schedule. Expressed as a cubic-bezier that
+   * overshoots slightly, which is the closest CSS gets to a spring without
+   * JavaScript driving every frame.
+   */
+  sheet: '280ms cubic-bezier(0.32, 0.72, 0, 1)',
   /**
    * A CONTINUOUS VALUE being reported, not a transition between two states.
    *
@@ -1101,6 +1165,9 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
     // screen following it.
     '--radius-chip': `${RADIUS.chip}px`,
     '--radius-mark': `${RADIUS.mark}px`,
+    '--radius-sheet': `${RADIUS.sheet}px`,
+    '--sheet-handle-w': px(SHEET_HANDLE.w),
+    '--sheet-handle-h': px(SHEET_HANDLE.h),
     // The one rung of the §08 ramp a stylesheet needs: the app mark in the book
     // chip is drawn by CSS (a mask over `currentColor`) rather than by a lucide
     // component, so it cannot take `size={ICON.control}` the way every other
@@ -1131,6 +1198,7 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
     '--motion-chrome': MOTION.chromeFade,
     '--motion-pane': MOTION.paneOpen,
     '--motion-popover': MOTION.popover,
+    '--motion-sheet': MOTION.sheet,
     '--motion-readout': MOTION.readout,
   }
   for (const [name, value] of Object.entries(vars)) {
@@ -1310,3 +1378,27 @@ export const DEFAULT_READING_STYLE: ReadingStyle = {
   fidelity: 'paper',
 }
 
+/**
+ * How a book is set before any reader has said otherwise.
+ *
+ * These three were literals inside `initialState`, which was fine while the
+ * desktop was the only thing that opened a book. The browser client cannot
+ * reach `state.ts` — that is the app's whole reducer, and the web build reaches
+ * a short named list of kernel modules — so it would have had to write `'paper'`
+ * and `'literata'` and `'justified'` down a second time.
+ *
+ * Two sets of defaults that agree today is the shape every drift in this tree
+ * has taken. They live here instead, beside `SPACING` and `BRIGHTNESS` and the
+ * rest of the design system's numbers, and both builds read the same ones.
+ */
+export const DEFAULT_THEME: Theme = 'paper'
+export const DEFAULT_TYPEFACE: Typeface = 'literata'
+export const DEFAULT_ALIGN: Align = 'justified'
+
+/** Every spacing at its own default — the book exactly as it was designed. */
+export const DEFAULT_SPACING = {
+  letter: SPACING.letter.def,
+  word: SPACING.word.def,
+  line: SPACING.line.def,
+  paragraph: SPACING.paragraph.def,
+} as const

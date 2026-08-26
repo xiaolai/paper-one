@@ -14,6 +14,7 @@ import { ICON } from '../../core/metrics'
 import { relativeTime } from '../../core/relativeTime'
 import { useRowMenu } from '../hooks/useRowMenu'
 import { BookCover } from './BookCover'
+import type { CoverSource } from '../../core/coverArt'
 import { BookMenu } from './BookMenu'
 import { readSelectClick, type SelectMode } from './BookCell'
 import { TagEditor } from './TagEditor'
@@ -47,6 +48,10 @@ import styles from './Library.module.css'
  */
 export interface BookRowProps {
   readonly book: IndexedBook
+  /** Where a jacket comes from — see `BookCover`. Threaded, not imported:
+   *  one `tauriVaultFs` import here put the whole Library screen out of a
+   *  browser's reach. */
+  readonly coverFor?: CoverSource | undefined
   readonly now: number
   readonly menuFor: string | null
   readonly setMenuFor: React.Dispatch<React.SetStateAction<string | null>>
@@ -60,11 +65,15 @@ export interface BookRowProps {
   readonly selecting: boolean
   readonly onSelect: (book: IndexedBook, mode: SelectMode) => void
   readonly onDragStart: (book: IndexedBook, event: DragEvent) => void
-  readonly onTagBooks: (bookIds: readonly string[], tags: readonly string[]) => void
-  readonly onUntagBooks: (bookIds: readonly string[], tag: string) => void
+  /* OPTIONAL, AND ABSENT MEANS NOT DRAWN. All four are writes — `book.remove`,
+     `book.set`, `tag.add`, `tag.remove` — and a browser session holds only
+     `readingGrant`, so each was refused after the shelf had applied it. See
+     `BookMenu`'s note. */
+  readonly onTagBooks?: ((bookIds: readonly string[], tags: readonly string[]) => void) | undefined
+  readonly onUntagBooks?: ((bookIds: readonly string[], tag: string) => void) | undefined
   readonly onOpen: (book: IndexedBook) => void
-  readonly onRemove: (book: IndexedBook) => void
-  readonly onSetFinished: (bookId: string, finished: boolean) => void
+  readonly onRemove?: ((book: IndexedBook) => void) | undefined
+  readonly onSetFinished?: ((bookId: string, finished: boolean) => void) | undefined
   /** Contributed actions, passed through to the menu — see `BookMenu`. */
   readonly actions: readonly BookAction[]
   /**
@@ -95,6 +104,7 @@ function barWidth(fraction: number | undefined): number | null {
 
 export function BookRow({
   book,
+  coverFor,
   now,
   menuFor,
   setMenuFor,
@@ -206,6 +216,7 @@ export function BookRow({
           </span>
         ) : (
           <BookCover
+            coverFor={coverFor}
             book={book}
             title={title}
             className={styles.rowCover ?? ''}
@@ -279,7 +290,9 @@ export function BookRow({
 
       {editing && (
         <div ref={editorRef} className={editorStyles.popover} style={editorStyle} role="dialog" aria-label={`Tags for ${title}`}>
-          <TagEditor books={editorBooks} shelfTags={shelfTags} onAdd={onTagBooks} onRemove={onUntagBooks} />
+          {onTagBooks && onUntagBooks && (
+            <TagEditor books={editorBooks} shelfTags={shelfTags} onAdd={onTagBooks} onRemove={onUntagBooks} />
+          )}
         </div>
       )}
 
@@ -321,8 +334,9 @@ export function BookRow({
             setTagging={setTagging}
             selected={selected}
             onToggleSelect={() => onSelect(book, 'toggle')}
-            onRemove={onRemove}
-            onSetFinished={onSetFinished}
+            {...(onRemove ? { onRemove } : {})}
+            {...(onSetFinished ? { onSetFinished } : {})}
+            canTag={Boolean(onTagBooks && onUntagBooks)}
             closeMenu={closeMenu}
             itemClass={styles.menuItem ?? ''}
             actions={actions}

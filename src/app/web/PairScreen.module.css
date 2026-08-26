@@ -1,0 +1,103 @@
+/* The six-digit screen's LAYOUT, and nothing else.
+ *
+ * ## What is deliberately not here
+ *
+ * The field and the button are `.paper-cap-field` and
+ * `.paper-cap-button-primary` from `capability.css` — the published vocabulary
+ * every capability's UI already uses. An earlier draft styled both from scratch
+ * and produced exactly what that stylesheet warns about in its own comment: "A
+ * 10px-radius bordered box next to a fully-rounded pill button, in a pane that
+ * draws no field borders anywhere else. The border is what made it read as a
+ * web form dropped into Paper."
+ *
+ * It also contradicted three app-wide rules in `global.css` without meaning to:
+ * a 2px focus ring where the system draws 3px, `:disabled { opacity: .5 }`
+ * where the system uses `[data-disabled]` at .45, and a button left in
+ * `system-ui` because buttons do not inherit `font-family` and
+ * `.paper-cap-button` is the thing that says `font: inherit`.
+ *
+ * So this file holds the ARRANGEMENT and defers every control to the system.
+ * Anything that feels like it needs a new control here should first check
+ * whether `capability.css` already has one.
+ */
+
+.screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100dvh;
+  padding: var(--space-24);
+  /* `100dvh` plus the inset rather than `100vh`: mobile Safari's toolbars make
+   * `vh` taller than the visible viewport, which pushes a centred layout under
+   * the browser chrome exactly when the keyboard is up. */
+  padding-bottom: max(var(--space-24), env(safe-area-inset-bottom));
+  background: var(--bg);
+  color: var(--ink);
+  text-align: center;
+  gap: var(--space-16);
+}
+
+.title {
+  font-size: var(--text-title);
+  font-weight: 500;
+  margin: 0;
+}
+
+/* THE FIELD'S SIZE, not its appearance.
+ *
+ * `.paper-cap-field` is built for a row — `flex: 1 1 auto` at `--control-sm`,
+ * filling whatever width the row gives it. This screen has no row: the field is
+ * the one thing on it, and a code is six characters wide whatever the viewport
+ * is. So the flex behaviour is overridden and a width given, and NOTHING about
+ * fill, radius, border or focus is touched. */
+.code {
+  flex: 0 0 auto;
+  /* FULL WIDTH, not six characters wide.
+   *
+   * Sized to its content the field came out 96px — within a pixel of the
+   * Connect button beneath it, so the two read as a pair of buttons rather than
+   * a field and its action. On a phone the idiom is a stacked full-width
+   * control, which also gives the digits somewhere to go.
+   *
+   * `--prose-narrow` is the design system's narrow measure, so the field never
+   * outgrows the sentence explaining it on a wide screen. */
+  width: 100%;
+  max-width: var(--prose-narrow);
+  height: var(--control-lg);
+  /* The subject of the screen, so the reading size rather than the small one
+   * `.paper-cap-field` uses in a dense settings row. Tabular numerals keep the
+   * digits from shifting as they are typed. */
+  font-size: var(--text-prose);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+/* The action, sized for a thumb rather than for a settings row.
+ *
+ * `.paper-cap-button` is `--control-sm`, right in a dense pane and below the
+ * platform's touch minimum on a phone. `--control-lg` IS that minimum, which is
+ * why the design system has it. */
+.submit {
+  /* Matched to the field above it: same width, same height, so the pair reads
+   * as one control and its action rather than two things of similar size. */
+  width: 100%;
+  max-width: var(--prose-narrow);
+  height: var(--control-lg);
+  padding: 0 var(--space-24);
+  justify-content: center;
+}
+
+/* AMBER, this design system's colour for something the app is telling you. Not
+ * red: a wrong code is an ordinary event and the reader has broken nothing. */
+.problem {
+  font-size: var(--text-small);
+  color: var(--amber);
+  background: var(--amber-bg);
+  border: 1px solid var(--amber-line);
+  border-radius: var(--radius-chip);
+  padding: var(--space-8) var(--space-12);
+  margin: 0;
+  max-width: var(--prose-narrow);
+  line-height: 1.45;
+}

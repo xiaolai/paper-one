@@ -5,7 +5,9 @@
   "description": "The list of Paper's first-party capabilities: ids, what each requires, where its TypeScript and Rust live, which platforms compose it, and the Tauri plugin and permissions it brings. This schema is the editor-facing restatement of scripts/lib/architecture.mjs, which is the enforcement (`pnpm architecture:check`); it does not check cross-item uniqueness, resolvability, acyclicity, or that the directories exist. Meaning of each field: dev-docs/adr/0001-kernel-capabilities.md; the field-by-field rules: dev-docs/capabilities-manifest.md.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["capabilities"],
+  "required": [
+    "capabilities"
+  ],
   "properties": {
     "$schema": {
       "type": "string",
@@ -17,7 +19,11 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "ts", "platforms"],
+        "required": [
+          "id",
+          "ts",
+          "platforms"
+        ],
         "properties": {
           "id": {
             "type": "string",
@@ -44,7 +50,12 @@
             "uniqueItems": true,
             "items": {
               "type": "string",
-              "enum": ["desktop", "ios", "android"]
+              "enum": [
+                "desktop",
+                "ios",
+                "android",
+                "web"
+              ]
             },
             "description": "The per-platform compositions that include this capability."
           },

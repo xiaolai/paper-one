@@ -20,11 +20,26 @@
 
     "inference:default",
 
+    "webhost:default",
+
     "fs:allow-read-text-file",
     "fs:allow-write-text-file",
     "fs:allow-read-file",
     "fs:allow-read-dir",
     "fs:allow-exists",
+
+    {
+      "identifier": "fs:allow-open",
+      "allow": [{ "path": "$APPDATA/**" }]
+    },
+    "fs:allow-seek",
+    "fs:allow-read",
+    "core:resources:allow-close",
+
+    {
+      "identifier": "fs:allow-stat",
+      "allow": [{ "path": "$APPDATA/**" }]
+    },
 
     {
       "identifier": "fs:allow-write-file",

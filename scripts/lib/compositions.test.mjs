@@ -139,6 +139,10 @@ describe('checkCompositionFiles', () => {
       'src/app/composition.desktop.ts': "import { a } from '../capabilities/a'\nexport const capabilities = [a]\n",
       'src/app/composition.ios.ts': "import { a } from '../capabilities/a'\nimport { b } from '../capabilities/b'\nexport const capabilities = [a, b]\n",
       'src/app/composition.android.ts': 'export const capabilities = []\n',
+      /* Every platform has a static composition, so the base fixture needs one
+         per platform or every case reports COMPOSITION_ABSENT for the missing
+         file rather than the thing it is testing. `web` composes nothing. */
+      'src/app/composition.web.ts': 'export const capabilities = []\n',
       ...over,
     }
     return (rel) => base[rel] ?? null
@@ -313,9 +317,60 @@ describe('checkRustSurfaces', () => {
     expect(findings[0].message).toContain('"mob:ios-only"')
     expect(findings[0].message).toContain('for android')
     const desk = { ...peer, permissions: ['peer:desk'] }
-    expect(codes(checkRustSurfaces(manifest([desk]), files()).findings)).toEqual(['PERMISSION_UNGRANTED', 'PERMISSION_UNGRANTED'])
-    // Scoped to macOS: granted for desktop (and, the crate being unconditional, only the platform set differs).
-    expect(codes(checkRustSurfaces(manifest([{ ...desk, platforms: ['desktop'] }]), files()).findings)).toEqual(['CRATE_PLATFORMS_DIFFER'])
+    expect(codes(checkRustSurfaces(manifest([desk]), files()).findings)).toEqual([
+      'PERMISSION_UNGRANTED',
+      'PERMISSION_UNGRANTED',
+      'PERMISSION_UNGRANTED',
+    ])
+
+    /**
+     * ⚠️ **macOS ALONE DOES NOT COVER `desktop`, AND THIS TEST USED TO SAY IT
+     * DID.** The line here read "Scoped to macOS: granted for desktop", and the
+     * check behind it was `.some(…)` — any one of the three OSes satisfied the
+     * manifest's whole desktop platform. `bundle.targets` is `all`, so the
+     * Windows and Linux builds ship without the grant and the command is
+     * refused at runtime on two of the three systems the entry claims. The gate
+     * called that covered.
+     *
+     * `desk.json` is scoped to `["macOS"]`, so the two that are missing are
+     * named — which is the finding a reader can act on.
+     */
+    const macOnly = checkRustSurfaces(manifest([{ ...desk, platforms: ['desktop'] }]), files()).findings
+    /* `CRATE_PLATFORMS_DIFFER` rides along because this fixture's crate is
+       unconditional; the one under test is the permission. */
+    expect(codes(macOnly)).toEqual(['PERMISSION_UNGRANTED', 'CRATE_PLATFORMS_DIFFER'])
+    expect(macOnly[0].message).toContain('"peer:desk"')
+
+    /* AND ALL THREE TOGETHER IS COVERED, so the refusal above is about the
+       missing two and not about `desktop` having become unsatisfiable. */
+    const everyDesktop = [
+      ...acl.filter((f) => !f.file.endsWith('desk.json')),
+      {
+        file: 'src-tauri/capabilities/desk.json',
+        text: JSON.stringify({ platforms: ['macOS', 'windows', 'linux'], permissions: ['peer:desk'] }),
+      },
+    ]
+    expect(
+      codes(checkRustSurfaces(manifest([{ ...desk, platforms: ['desktop'] }]), files({ acl: everyDesktop })).findings),
+    ).toEqual(['CRATE_PLATFORMS_DIFFER'])
+  })
+
+  /**
+   * A `.plugin(…)` INSIDE A RUST RAW STRING IS NOT A REGISTRATION.
+   *
+   * The mask blanked ordinary string literals and was line-bounded on purpose,
+   * so it could not see inside `r#"…"#` — which spans lines and has no escapes.
+   * An error message or doc example quoting the call read as the call, and a
+   * plugin that was never registered passed.
+   */
+  it('registersPlugin is not fooled by a raw string', () => {
+    const quoted = 'fn help() -> &\'static str { r#"call .plugin(tauri_plugin_ghost::init()) first"# }'
+    expect(registersPlugin(quoted, 'tauri_plugin_ghost')).toBe(false)
+    /* Multi-line, which is the shape an ordinary-string mask cannot reach. */
+    const multi = 'const H: &str = r#"\n  .plugin(tauri_plugin_ghost::init())\n"#;'
+    expect(registersPlugin(multi, 'tauri_plugin_ghost')).toBe(false)
+    /* …and a real registration beside one still counts. */
+    expect(registersPlugin(`${multi}\n.plugin(tauri_plugin_ghost::init())`, 'tauri_plugin_ghost')).toBe(true)
   })
 
   it('ACL_UNREADABLE for a capability file that is not JSON or not an object, and goes on', () => {

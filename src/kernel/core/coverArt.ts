@@ -198,6 +198,35 @@ export async function coverUrl(fs: VaultFs, path: string): Promise<string | null
  * `cover.webp` costs one extra `readFile` that misses, for books imported
  * before today, once per cell.
  */
+/**
+ * Where a jacket comes from, as far as a VIEW is concerned.
+ *
+ * A component drawing a cover needs "a URL for this book, or null" and nothing
+ * else. It should not know what a `VaultFs` is, which is why this is a function
+ * and not a filesystem: the desktop binds `coverIn` over the real vault, and a
+ * browser — which has no vault — can bind something that fetches over its
+ * channel without `BookCover` learning a second way to exist.
+ *
+ * `null` means "no jacket", never "not looked yet". The caller draws the tint.
+ *
+ * ## The signal, and the shelf it exists for
+ *
+ * ⚠️ **THERE WAS NO WAY TO CANCEL A COVER**, and the shelf is virtualised. A
+ * cell that scrolled off screen unmounted, revoked whatever URL eventually
+ * arrived, and left the read itself running: over a channel that is a whole
+ * `cover.read` stream — every chunk of a jacket nobody will look at, decoded,
+ * against a byte budget shared with the book being read. A flick through a
+ * library of two thousand rows started hundreds of them and cancelled none.
+ *
+ * Optional because a source may not be able to honour it — a synchronous
+ * filesystem read has nothing to interrupt — but every source must at least
+ * ACCEPT it, and none may hand back a URL for a read that was abandoned. That
+ * last part is what stops an abort from turning into a leak: `BookCover`
+ * revokes what it is given, and a source that resolves after the abort with a
+ * freshly minted URL gives it to nobody.
+ */
+export type CoverSource = (bookId: string, signal?: AbortSignal) => Promise<string | null>
+
 export async function coverIn(fs: VaultFs, bookId: string): Promise<string | null> {
   return (await coverUrl(fs, coverPathIn(bookId))) ?? coverUrl(fs, legacyCoverPathIn(bookId))
 }
@@ -273,7 +302,33 @@ export async function keepCover(
     const small = await downscaleCover(cover)
     if (!small) return false
     await fs.mkdir(folderOf(bookId))
-    await fs.writeFile(coverPathIn(bookId), new Uint8Array(await small.arrayBuffer()))
+    /* ⚠️ WRITTEN BESIDE, THEN RENAMED INTO PLACE.
+     *
+     * This wrote straight to the final path, and the existence check above
+     * treats ANY file at that path as a finished cover. So a write interrupted
+     * by a full disk, a crash or a quit left a truncated file that every later
+     * call accepted — the jacket is permanently broken and the pass that exists
+     * to regenerate it declines to, because something is already there.
+     *
+     * A rename over the same filesystem is atomic: the final path either does
+     * not exist or holds a complete file. The temporary is cleaned up when the
+     * write fails, so a failure leaves nothing behind either. */
+    const bytes = new Uint8Array(await small.arrayBuffer())
+    const finished = coverPathIn(bookId)
+    const partial = `${finished}.writing`
+    try {
+      await fs.writeFile(partial, bytes)
+      await fs.rename(partial, finished)
+    } catch (cause) {
+      /* Best effort: the write is what failed, and a leftover `.writing` is
+         inert — nothing reads that name. */
+      try {
+        await fs.remove(partial)
+      } catch {
+        /* nothing to undo */
+      }
+      throw cause
+    }
     return true
   } catch (cause) {
     console.error('Paper: could not keep the cover', cause)

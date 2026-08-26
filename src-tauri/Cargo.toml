@@ -63,6 +63,33 @@ tauri-plugin-peer = { path = "crates/tauri-plugin-peer" }
 # Gating it here — rather than only at the `.plugin()` call — is what keeps its
 # rustls provider from being compiled for iOS and Android at all.
 tauri-plugin-inference = { path = "crates/tauri-plugin-inference", optional = true }
+# The shelf's web face (phase 18). DESKTOP ONLY and therefore optional, for the
+# same reason the local inference runtime is: a phone is a satchel, never a
+# shelf, and has nothing to serve. Gating it here rather than at the router
+# keeps it out of the mobile build entirely.
+#
+# NOTE FOR ANYONE EDITING THIS COMMENT: do not name another path crate in it.
+# `capability:remove` cuts a crate by purging its name from this file, and
+# `scripts/lib/removal.test.mjs` asserts the name is then gone — a mention in
+# prose here is enough to fail it. Two were named in the first draft of this
+# block and both failed exactly that way.
+#
+# WHY AXUM AND NOT HYPER BY HAND: every crate it needs is already in this tree
+# at a compatible version — hyper 1.11, tower 0.5, http 1.5, hyper-util 0.1 —
+# so it adds six crates rather than a stack, and four of those six are axum
+# itself.
+#
+# THE ONE COST, stated: the automation bridge pins tokio-tungstenite 0.28 and
+# axum wants 0.29, so a desktop build carries both. They are small, and this
+# tree already duplicates base64, bitflags, block2 and core-foundation.
+#
+# NO `tower-http`: the SPA is embedded by build.rs rather than served from a
+# directory, so there is no `ServeDir` and no path-traversal surface to test.
+# NO `macros`, `http2`, `multipart`, `query`, `form`, or `tracing`.
+# The browser client's host (crates/tauri-plugin-webhost). DESKTOP ONLY, for
+# the reason written on the dependency below it.
+tauri-plugin-webhost = { path = "crates/tauri-plugin-webhost", optional = true }
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "ws", "json"], optional = true }
 
 # One feature per platform, and the platform set is closed: `desktop` (the
 # default), `ios`, `android`. A mobile check runs with `--no-default-features
@@ -96,6 +123,8 @@ desktop = [
     "dep:tauri-plugin-mcp-bridge",
     "dep:tauri-plugin-persisted-scope",
     "dep:tauri-plugin-inference",
+    "dep:axum",
+    "dep:tauri-plugin-webhost",
     "tauri/tray-icon",
 ]
 ios = ["tauri-plugin-peer/ios"]

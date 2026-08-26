@@ -509,7 +509,19 @@ export function createKernelServices({
   const clockPort = () => clockSlot.get()()
 
   const NOOP_DISPOSABLE: Disposable = { dispose: () => {} }
-  const serviceHostSlot = exclusiveSlot<ServiceHost>('bindServiceHost: the service host is already bound', () => NOOP_DISPOSABLE)
+  /* A SET, NOT A SLOT, since phase 18.
+   *
+   * It was `exclusiveSlot` — "the service host is already bound" — which was
+   * right while `peer` was the only transport. It is not a property of the
+   * kernel: a service is a service, and the question of how many wires carry it
+   * belongs to the wires. The browser client is a second transport serving the
+   * SAME contributions, and with a slot it simply could not bind: `peer` held
+   * it, and a browser signed in, called `book.list`, and waited for ever.
+   *
+   * Third time this shape has appeared in this phase — the envelope's home and
+   * the test-project globs were the other two. An assumption that is safe with
+   * one caller and silent with two. */
+  const serviceHosts = new Set<ServiceHost>()
   /* Null defaults, and that is the whole default: there is nothing sensible
    * for an unbound device or shelf port to answer, and a stub that returned
    * an empty peer list would be a lie a caller could not detect. */
@@ -549,7 +561,19 @@ export function createKernelServices({
     removeBlob: (bookId, name) => removeBlob({ fs, writes, library, recorder: recorderPort }, bookId, name),
     bindRecorder: (next) => recorderSlot.bind(next),
     bindClock: (next) => clockSlot.bind(next),
-    bindServiceHost: (next) => serviceHostSlot.bind(next),
+    bindServiceHost: (next) => {
+      serviceHosts.add(next)
+      /* Idempotent, like every other disposer here: a capability whose teardown
+       * runs twice must not remove a host a later composition bound. */
+      let disposed = false
+      return {
+        dispose: () => {
+          if (disposed) return
+          disposed = true
+          serviceHosts.delete(next)
+        },
+      }
+    },
     bindDevicePort: (next) => deviceSlot.bind(next),
     devices: () => deviceSlot.get(),
     bindShelfPort: (next) => shelfSlot.bind(next),
@@ -575,22 +599,63 @@ export function createKernelServices({
     bindWorkLine: (next) => workLineSlot.bind(next),
     workLine: () => workLineSlot.get(),
     serveServices: async (list) => {
-      const bound = serviceHostSlot.bound()
-      const served = await serviceHostSlot.get()(list)
-      /* THE UNBOUND FALLBACK IS THE ONLY THING ALLOWED TO ANSWER NOTHING.
+      /* NO HOST IS THE OFFLINE CASE, not a failure — see `bindServiceHost`.
+       * With none bound there is nothing to serve and nothing to dispose. */
+      if (serviceHosts.size === 0) return NOOP_DISPOSABLE
+
+      /* EVERY host gets the same list. They are transports, and a service
+       * reachable over one wire and not another would be a difference nothing
+       * in this table describes. */
+      /* ⚠️ `Promise.all` LOST THE DISPOSERS OF EVERY HOST THAT SUCCEEDED.
        *
-       * ⚠️ This was `?? NOOP_DISPOSABLE`, which is indistinguishable from the
-       * fallback — so a BOUND host returning `undefined` in breach of its own
-       * contract was silently accepted, and if it had registered handlers
-       * their disposer went with it: teardown then took nothing down and the
-       * registrations leaked into the next composition. A host that answers
-       * wrongly is a defect in that host, and it has to be told so where it
-       * happens rather than at the next restart. */
-      if (!bound) return NOOP_DISPOSABLE
-      if (typeof (served as Disposable | undefined)?.dispose !== 'function') {
-        throw new Error('serveServices: the bound service host returned no disposer')
+       * It rejects on the first rejection and discards the other results, so a
+       * second host that had already registered its handlers was left running
+       * with nothing holding its disposer — the exact partial-serve leak the
+       * check below was written to prevent, arriving by the one door that check
+       * could not see. `allSettled` keeps them all, so the unwind can be
+       * complete whichever way a host failed. */
+      const settled = await Promise.allSettled([...serviceHosts].map(async (host) => await host(list)))
+      const served = settled.map((one) => (one.status === 'fulfilled' ? one.value : undefined))
+      const thrown = settled.find((one) => one.status === 'rejected')
+      if (thrown !== undefined && thrown.status === 'rejected') {
+        for (const one of served) {
+          if (typeof (one as Disposable | undefined)?.dispose === 'function') one?.dispose()
+        }
+        throw thrown.reason
       }
-      return served
+
+      /* ⚠️ A BOUND HOST RETURNING NO DISPOSER IS A DEFECT IN THAT HOST, and it
+       * has to be told so where it happens rather than at the next restart.
+       * This was once `?? NOOP_DISPOSABLE`, indistinguishable from the unbound
+       * fallback — so a host that answered wrongly was silently accepted, and
+       * if it had registered handlers their disposer went with it: teardown
+       * took nothing down and the registrations leaked into the next
+       * composition.
+       *
+       * Checked for EVERY host, and the ones that answered properly are still
+       * disposed before throwing — a partial serve left running is the leak
+       * this check exists to prevent, arriving by a different door. */
+      const bad = served.findIndex((one) => typeof (one as Disposable | undefined)?.dispose !== 'function')
+      if (bad !== -1) {
+        for (const one of served) {
+          if (typeof (one as Disposable | undefined)?.dispose === 'function') one?.dispose()
+        }
+        throw new Error(`serveServices: a bound service host returned no disposer (host ${bad + 1} of ${served.length})`)
+      }
+
+      /* ONCE, HOWEVER OFTEN IT IS CALLED. `Disposable` says disposal is
+       * idempotent and this ran every child again on a second call — so a
+       * caller that disposed defensively (a teardown path and an unmount, say)
+       * double-disposed every host beneath it. The children are not required to
+       * tolerate that, and the contract does not ask them to. */
+      let disposed = false
+      return {
+        dispose: () => {
+          if (disposed) return
+          disposed = true
+          for (const one of served) one?.dispose()
+        },
+      }
     },
     drain: async () => {
       await writes.idle()

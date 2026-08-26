@@ -173,3 +173,63 @@ describe('a place row', () => {
     expect(onGoTo).toHaveBeenCalledWith({ bookId: 'other-book', cfi: away.cfi })
   })
 })
+
+/**
+ * A SESSION THAT MAY ONLY READ MARKS IS DRAWN AS ONE.
+ *
+ * `onDelete`, `onDeleteBookmark` and `marks.setNote` were required props, so
+ * every host had to supply them — including the browser client, whose session
+ * holds exactly one grant and it is `readingGrant` (`webhost/lib/pump.ts`).
+ * `mark.remove` and `mark.set` are `mark:write`, so each call was refused after
+ * the panel had already applied it optimistically: the row vanished and came
+ * back, and a note was typed, committed, and thrown away with nothing said.
+ *
+ * A control that cannot work is worse than an absent one — this file's own
+ * opening paragraph is about a feature that was inert and unmeasured. These
+ * assert the absence, so restoring the requirement is a red test rather than a
+ * button that undoes itself.
+ */
+describe('a read-only host', () => {
+  /** The panel with every write callback withheld, as the browser mounts it. */
+  function readOnly(all: readonly Annotation[], allBookmarks: readonly Bookmark[] = []) {
+    const view = marksView({ all, allBookmarks })
+    render(
+      <Marginalia
+        marks={{ ...view, setNote: undefined } as unknown as MarksView}
+        bookId="open-book"
+        platform="macos"
+        onGoTo={vi.fn()}
+      />,
+    )
+    return view
+  }
+
+  it('draws no delete control on a mark or on a bookmark', () => {
+    readOnly([ANNOTATION()], [BOOKMARK()])
+    expect(screen.queryByRole('button', { name: /delete mark/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /remove this bookmark/i })).toBeNull()
+  })
+
+  it('shows an existing note as text, with no editor to lose it in', () => {
+    readOnly([ANNOTATION({ note: 'the whiteness of the whale' })])
+    /* THE NOTE IS STILL READABLE — this is a read-only panel, not a blank one. */
+    expect(screen.getByText('the whiteness of the whale')).toBeTruthy()
+    /* …and it is not a button, so there is no editor to open. */
+    expect(screen.queryByRole('button', { name: /the whiteness of the whale/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /add a note/i })).toBeNull()
+  })
+
+  it('offers no "Add a note" on a mark that has none', () => {
+    readOnly([ANNOTATION({ note: '' })])
+    expect(screen.queryByRole('button', { name: /add a note/i })).toBeNull()
+  })
+
+  /* THE WRITABLE HOST IS UNCHANGED, pinned here so the guards above cannot be
+     satisfied by removing the controls for everybody. */
+  it('still draws both controls for a host that supplied them', () => {
+    draw({ all: [ANNOTATION({ note: '' })], allBookmarks: [BOOKMARK()] })
+    expect(screen.getByRole('button', { name: /delete mark/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /remove this bookmark/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /add a note/i })).toBeTruthy()
+  })
+})

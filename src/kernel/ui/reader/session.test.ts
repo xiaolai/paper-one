@@ -9,6 +9,7 @@ import {
   watchNoteLinks,
 } from './session'
 import type { MarkAnchor, MarkPalette, SelectionSnapshot, SessionCallbacks } from './session'
+import type { BookSource } from '../../core/formats'
 import { buildFixture, elem, txt } from './wordSnap/domFake.testkit'
 import { fakeDocument, type FakeDocument } from './wordSnap/documentFake.testkit'
 import { selectionOver, type FakeSelection } from './wordSnap/selectionFake.testkit'
@@ -257,6 +258,11 @@ const published = (cb: ReturnType<typeof callbacks>): (SelectionSnapshot | null)
 const deps = (view: View) => ({
   createView: () => Promise.resolve(view),
   loadPainters: () => Promise.resolve(painters),
+  /* THE PASS-THROUGH. `prepare` is required — see `SessionDeps.prepare` — and
+     these fixtures open a fake view rather than a real book, so there is
+     nothing to convert. Required because a `RangedSource` with no converter
+     used to be cast straight to `File | string`. */
+  prepare: (source: BookSource) => Promise.resolve(source),
   applySettings: () => {},
   applyVars: () => {},
 })
@@ -310,6 +316,7 @@ describe('ReaderSession disposal', () => {
         return view
       },
       loadPainters: () => Promise.resolve(painters),
+      prepare: (source: BookSource) => Promise.resolve(source),
       applySettings: () => {},
       applyVars: () => {},
     })
@@ -475,6 +482,7 @@ describe('ReaderSession disposal', () => {
     await session.start('book.epub', {
       createView: () => Promise.reject(new Error('module missing')),
       loadPainters: () => Promise.resolve(painters),
+      prepare: (source: BookSource) => Promise.resolve(source),
       applySettings: () => {},
       applyVars: () => {},
     })
@@ -488,6 +496,7 @@ describe('ReaderSession disposal', () => {
     await session.start('book.epub', {
       createView: () => Promise.reject(new Error('module missing')),
       loadPainters: () => Promise.resolve(painters),
+      prepare: (source: BookSource) => Promise.resolve(source),
       applySettings: () => {},
       applyVars: () => {},
     })
@@ -1555,6 +1564,7 @@ describe('ReaderSession marks', () => {
     await session.start('book.epub', {
       createView: () => Promise.resolve(view),
       loadPainters: () => Promise.reject(new Error('overlayer missing')),
+      prepare: (source: BookSource) => Promise.resolve(source),
       applySettings: () => {},
       applyVars: () => {},
     })

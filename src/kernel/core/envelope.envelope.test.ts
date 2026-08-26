@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { ServiceContribution } from '../../../kernel'
+import type { ServiceContribution } from './capability'
 import {
   DEFAULT_TIMEOUT_MS,
   ENVELOPE_ERRORS,
@@ -117,6 +117,101 @@ describe('the codec', () => {
     // Just under the cap encodes: the cap is on the JSON payload, not the body string.
     const under = 'x'.repeat(MAX_FRAME_BYTES - 200)
     expect(decodeFrame(encodeFrame(frame({ body: under }))).body).toBe(under)
+  })
+
+  /**
+   * ⚠️ **ENCODING WAS THE ONE PLACE THAT COULD CHANGE A BODY WITHOUT SAYING SO.**
+   *
+   * `parseFrame` checks the five envelope fields and nothing inside `body`, and
+   * `JSON.stringify` does not refuse what it cannot represent — it REWRITES it.
+   * So a handler that returned `1/0` sent a `null` the peer read as "no value",
+   * and a row carrying a nested `undefined` lost the key. Nothing failed
+   * anywhere; the sender believed it had sent what it computed.
+   *
+   * Each case below is a value that survives `JSON.stringify` as something
+   * ELSE, which is why none of them could be caught downstream: `null` is a
+   * legitimate value and an absent key is a legitimate shape.
+   */
+  describe('a body JSON cannot carry unchanged', () => {
+    const refused = (body: unknown, why: RegExp) => {
+      expect(() => encodeFrame(frame({ body })), String(why)).toThrow(MalformedFrame)
+      expect(() => encodeFrame(frame({ body }))).toThrow(why)
+    }
+
+    it('refuses a non-finite number rather than sending null', () => {
+      refused({ ratio: Infinity }, /non-finite/)
+      refused({ ratio: -Infinity }, /non-finite/)
+      refused({ ratio: NaN }, /non-finite/)
+      refused([1, NaN, 3], /non-finite/)
+    })
+
+    it('refuses a nested undefined rather than dropping the key', () => {
+      refused({ title: 'Moby-Dick', author: undefined }, /undefined/)
+      /* IN AN ARRAY IT BECOMES `null`, which is worse: the row is still there
+         and its contents are not what was put in it. */
+      refused([1, undefined, 3], /undefined/)
+    })
+
+    it('refuses a function or a symbol rather than dropping it', () => {
+      refused({ onDone: () => {} }, /function/)
+      refused({ tag: Symbol('x') }, /symbol/)
+    })
+
+    it('refuses a bigint, naming the frame rather than throwing a bare TypeError', () => {
+      refused({ size: 1n }, /bigint|cannot be serialised/)
+    })
+
+    /* AND A CYCLE DOES NOT HANG. The walk assumes an acyclic graph — a visited
+       set would also reject a shared subgraph, which is legitimate — so
+       `JSON.stringify` runs first and proves it. Written the other way round
+       this is an infinite loop in the sender. */
+    it('refuses a body that references itself, promptly', () => {
+      const cyclic: Record<string, unknown> = { title: 'Moby-Dick' }
+      cyclic['self'] = cyclic
+      expect(() => encodeFrame(frame({ body: cyclic }))).toThrow(MalformedFrame)
+    })
+
+    /* A SHARED SUBGRAPH IS NOT A CYCLE, and must still encode. This is what a
+       visited-set cycle check would have broken. */
+    it('encodes a value referenced twice', () => {
+      const shared = { author: 'Melville' }
+      expect(decodeFrame(encodeFrame(frame({ body: { a: shared, b: shared } }))).body).toEqual({
+        a: { author: 'Melville' },
+        b: { author: 'Melville' },
+      })
+    })
+
+    /**
+     * ⚠️ **THE TWO ENDS USED TO DISAGREE ABOUT DEPTH.** `decodeFrame` refuses a
+     * body nested past `MAX_JSON_DEPTH`; `encodeFrame` emitted one happily. So
+     * a sender could produce a frame no conforming peer would accept and hear
+     * about it only as the peer's refusal — a protocol error attributed to the
+     * wrong end of the wire.
+     */
+    it('refuses a body nested deeper than the decoder will accept', () => {
+      let deep: unknown = 'bottom'
+      for (let i = 0; i < MAX_JSON_DEPTH + 4; i++) deep = [deep]
+      expect(() => encodeFrame(frame({ body: deep }))).toThrow(MalformedFrame)
+    })
+
+    it('accepts a body at the depth the decoder accepts', () => {
+      let deep: unknown = 'bottom'
+      /* -2: the envelope itself is one level, and the body's own outermost
+         bracket is another — the limit is on the SERIALISED frame, which is
+         what makes encode and decode the same rule. */
+      for (let i = 0; i < MAX_JSON_DEPTH - 2; i++) deep = [deep]
+      expect(() => decodeFrame(encodeFrame(frame({ body: deep })))).not.toThrow()
+    })
+
+    /* THE ORDINARY BODIES STILL GO. This is the check that stops the paragraph
+       above from being a way to refuse everything. */
+    it('carries a date, an empty object and an empty array', () => {
+      expect(decodeFrame(encodeFrame(frame({ body: { at: new Date(0) } }))).body).toEqual({
+        at: '1970-01-01T00:00:00.000Z',
+      })
+      expect(decodeFrame(encodeFrame(frame({ body: {} }))).body).toEqual({})
+      expect(decodeFrame(encodeFrame(frame({ body: [] }))).body).toEqual([])
+    })
   })
 
   it('refuses an oversized declared length before decoding anything', () => {
@@ -331,6 +426,123 @@ describe('the router', () => {
     expect(h.sent).toEqual([])
     h.timers.advance(1)
     expect(errBody(h.sent[0]).code).toBe(ENVELOPE_ERRORS.timeout)
+  })
+
+  /**
+   * ⚠️ **THE TIMEOUT WAS AN ABSOLUTE DEADLINE, AND A STREAM IS NOT ONE REQUEST.**
+   *
+   * The timer was armed once at dispatch and never touched again, so a
+   * `content.read` still delivering chunks was aborted at 30 seconds — with
+   * bytes moving — on a book too large or a link too slow to finish inside the
+   * window. The reader saw a transport error on a transfer that was working,
+   * and the only remedy was a timeout long enough for the worst case, which is
+   * the same as no timeout at all for everything else.
+   *
+   * The timeout is about SILENCE. A stream frame is not silence.
+   */
+  describe('the idle clock', () => {
+    /** A handler that yields whenever the test says so, forever. */
+    function dripping() {
+      let next: (() => void) | null = null
+      const tick = () =>
+        new Promise<void>((resolve) => {
+          next = resolve
+        })
+      return {
+        /** Let one more chunk out, and let the router write it. */
+        async drip() {
+          const go = next
+          next = null
+          go?.()
+          await settle()
+        },
+        handler: async function* () {
+          for (;;) {
+            yield 'chunk'
+            await tick()
+          }
+        },
+      }
+    }
+
+    it('lets a stream run past the deadline for as long as it is delivering', async () => {
+      const drip = dripping()
+      const h = harness([{ ...ping, handler: drip.handler }], () => true, 1_000)
+      h.send(frame())
+      await settle()
+
+      /* Four windows' worth of wall clock, each one nearly a full timeout —
+         an absolute deadline fails on the first. */
+      for (let round = 0; round < 4; round++) {
+        h.timers.advance(900)
+        expect(
+          h.sent.some((f) => f.kind === 'err'),
+          `the stream was cut off during round ${round} while it was still delivering`,
+        ).toBe(false)
+        await drip.drip()
+      }
+      expect(h.sent.filter((f) => f.kind === 'stream').length).toBeGreaterThan(3)
+    })
+
+    /* AND IT STILL TIMES OUT. An idle clock that never fires is not a timeout —
+       a handler that stops delivering must still be given up on. */
+    it('times out a stream that stops delivering', async () => {
+      const drip = dripping()
+      const h = harness([{ ...ping, handler: drip.handler }], () => true, 1_000)
+      h.send(frame())
+      await settle()
+      h.timers.advance(900)
+      await drip.drip()
+
+      /* Nothing more from the handler. One full window of silence from the last
+         chunk is the whole budget. */
+      h.timers.advance(999)
+      expect(h.sent.some((f) => f.kind === 'err')).toBe(false)
+      h.timers.advance(1)
+      const err = h.sent.find((f) => f.kind === 'err')
+      expect(err, 'a handler that went quiet must still be given up on').toBeDefined()
+      expect(errBody(err).code).toBe(ENVELOPE_ERRORS.timeout)
+      expect(h.connection.inFlight).toBe(0)
+    })
+
+    /* PROGRESS FROM THE PEER COUNTS TOO: an upload streaming chunks IN is a
+       live request, whatever the handler has had time to answer yet. */
+    it('counts an inbound stream frame as progress', async () => {
+      const h = harness(
+        [
+          {
+            ...ping,
+            handler: async (_req, ctx) => {
+              for await (const _item of ctx.input) void _item
+              return 'done'
+            },
+          },
+        ],
+        () => true,
+        1_000,
+      )
+      h.send(frame({ kind: 'req', body: null }))
+      await settle()
+      for (let round = 0; round < 4; round++) {
+        h.timers.advance(900)
+        expect(h.sent.some((f) => f.kind === 'err'), `cut off during round ${round}`).toBe(false)
+        h.send(frame({ kind: 'stream', body: 'up' }))
+        await settle()
+      }
+      h.send(frame({ kind: 'end', body: null }))
+      await settle()
+      expect(h.sent.some((f) => f.kind === 'err')).toBe(false)
+    })
+
+    /* AND THE CLOCK IS ACTUALLY CLEARED when the request settles — a refresh
+       arming a timer for a settled request would leak a handle per chunk. */
+    it('leaves no timer behind when the stream ends', async () => {
+      const h = harness([{ ...ping, handler: async function* () { yield 1; yield 2; yield 3 } }], () => true, 1_000)
+      h.send(frame())
+      await settle()
+      expect(h.sent.some((f) => f.kind === 'end')).toBe(true)
+      expect(h.timers.pending(), 'a refresh armed a clock nothing will clear').toBe(0)
+    })
   })
 
   it('an answered request stops its clock: nothing fires later', async () => {
@@ -607,6 +819,50 @@ describe('the client', () => {
     expect(((await quick.catch((e: unknown) => e)) as ServiceCallError).error.code).toBe(ENVELOPE_ERRORS.timeout)
   })
 
+  /**
+   * ⚠️ **THE CLIENT HAD THE SAME ABSOLUTE DEADLINE AS THE ROUTER**, and it
+   * bites the reader first: a `content.read` for a large book, over a phone's
+   * link, failed at 30 seconds with the bytes still arriving. The deadline is
+   * about SILENCE — a stream frame is not silence.
+   */
+  describe('the client’s idle clock', () => {
+    it('lets a stream run past the deadline for as long as frames are arriving', async () => {
+      const timers = fakeTimers()
+      const client = createClient({ send: () => {}, timers, timeoutMs: 1_000 })
+      const read = (async () => {
+        const seen: unknown[] = []
+        for await (const item of client.stream('example.ping', null)) seen.push(item)
+        return seen
+      })()
+      await settle()
+
+      for (let round = 0; round < 4; round++) {
+        timers.advance(900)
+        client.receive(encodeFrame(frame({ id: 'c1', kind: 'stream', body: round })))
+        await settle()
+      }
+      client.receive(encodeFrame(frame({ id: 'c1', kind: 'end', body: null })))
+      expect(await read, 'the stream was cut off while frames were still arriving').toEqual([0, 1, 2, 3])
+      expect(timers.pending(), 'a refresh armed a clock nothing will clear').toBe(0)
+    })
+
+    it('still times out a stream that goes quiet', async () => {
+      const timers = fakeTimers()
+      const client = createClient({ send: () => {}, timers, timeoutMs: 1_000 })
+      const read = (async () => {
+        for await (const _item of client.stream('example.ping', null)) void _item
+      })()
+      await settle()
+      timers.advance(900)
+      client.receive(encodeFrame(frame({ id: 'c1', kind: 'stream', body: 'a' })))
+      await settle()
+
+      timers.advance(1_000)
+      const failure = await read.catch((e: unknown) => e)
+      expect((failure as ServiceCallError).error.code).toBe(ENVELOPE_ERRORS.timeout)
+    })
+  })
+
   it('a res arriving after the id was dropped is ignored — the cancel/res race the protocol allows', async () => {
     const timers = fakeTimers()
     const sent: Frame[] = []
@@ -719,6 +975,69 @@ describe('hardening against a hostile peer', () => {
     expect(built).toEqual(['a', 'b'])
   })
 
+  /**
+   * ⚠️ **THE PER-CONNECTION CAP WAS THE ONLY ONE TESTED**, and it is the one a
+   * hostile peer routes around: `maxInFlight` is per CONNECTION, so N
+   * connections each holding N-1 requests is N×(N-1) live handlers with every
+   * per-connection cap respected. `maxInFlightGlobal` is what bounds that, and
+   * nothing exercised it.
+   *
+   * The refusal must also be the peer's OWN: refusing a connection that is
+   * under its own limit because some other peer filled the shelf is correct —
+   * that is what a shared budget means — and it has to be `overloaded` and
+   * retryable rather than a protocol error, or a well-behaved client treats a
+   * busy shelf as a broken one and stops asking.
+   */
+  it('bounds work across ALL connections, not only within one (H2)', async () => {
+    const timers = fakeTimers()
+    const held: string[] = []
+    const slow: ServiceContribution = {
+      name: 'example.slow',
+      grant: 'example:ping',
+      handler: (req) => new Promise(() => held.push(String(req))),
+    }
+    const router = createRouter({
+      services: [slow],
+      hasGrant: () => true,
+      timers,
+      /* GENEROUS PER CONNECTION, TIGHT OVERALL — so anything refused below is
+         refused by the global budget and could not have been by the local one. */
+      maxInFlight: 10,
+      maxInFlightGlobal: 3,
+    })
+
+    const conns = ['a', 'b', 'c'].map((peer) => {
+      const sent: Frame[] = []
+      return { peer, sent, conn: router.connect(peer, (bytes) => sent.push(decodeFrame(bytes))) }
+    })
+    /* One each: three in flight, which is the whole shelf's budget. */
+    for (const one of conns) {
+      one.conn.receive(encodeFrame(frame({ service: 'example.slow', id: `${one.peer}1`, body: one.peer })))
+    }
+    await settle()
+    expect(held).toEqual(['a', 'b', 'c'])
+
+    /* A FOURTH, on a connection holding ONE of its ten. */
+    conns[0]!.conn.receive(encodeFrame(frame({ service: 'example.slow', id: 'a2', body: 'a2' })))
+    await settle()
+    const refusal = errBody(conns[0]!.sent.find((f) => f.id === 'a2' && f.kind === 'err'))
+    expect(refusal.code, 'a peer under its own cap filled the shelf past the global one').toBe(
+      ENVELOPE_ERRORS.overloaded,
+    )
+    expect(refusal.retryable, 'a busy shelf is not a broken one').toBe(true)
+    expect(held, 'no handler may be built for a refused request').toEqual(['a', 'b', 'c'])
+    expect(conns[0]!.conn.inFlight, 'the refusal must not consume a slot').toBe(1)
+
+    /* AND THE BUDGET IS RELEASED. A cap that never gives a slot back is a shelf
+       that stops answering after its first busy moment — the failure a
+       one-shot test cannot see. */
+    conns[2]!.conn.disconnect()
+    await settle()
+    conns[0]!.conn.receive(encodeFrame(frame({ service: 'example.slow', id: 'a3', body: 'a3' })))
+    await settle()
+    expect(held, 'a disconnected peer must give its slot back').toEqual(['a', 'b', 'c', 'a3'])
+  })
+
   it('bounds queued input by bytes, refusing the overflow and aborting the flooder (H3)', async () => {
     const timers = fakeTimers()
     const sink: ServiceContribution = { name: 'example.sink', grant: 'example:ping', handler: () => new Promise(() => {}) }
@@ -731,6 +1050,97 @@ describe('hardening against a hostile peer', () => {
     for (let i = 0; i < 4; i++) conn.receive(encodeFrame(frame({ service: 'example.sink', id: 'q', kind: 'stream', body })))
     expect(errBody(sent.find((f) => f.id === 'q' && f.kind === 'err')).code).toBe(ENVELOPE_ERRORS.overloaded)
     expect(conn.inFlight).toBe(0)
+  })
+
+  /**
+   * THE OUTPUT SIDE HAS A BUDGET TOO, and until now only the input side did.
+   *
+   * Sends are serialised through one promise chain. While a write is pending,
+   * every later frame is captured in a closure on that chain — and nothing
+   * counted them. A peer that stops draining, or one on a slow link, turns
+   * whatever this router decides to say into unbounded heap on the shelf.
+   *
+   * The lever needs no grant. An unknown service name produces an `err`
+   * refusal, which is the cheapest request there is and still allocates a frame
+   * on the chain; `hasGrant` guards the handlers, not the refusals.
+   *
+   * Over budget DISCONNECTS rather than dropping: a dropped frame leaves the
+   * peer waiting on a request this side believes it answered, which is the
+   * silent-loss shape the whole transport exists to avoid.
+   */
+  it('bounds queued OUTPUT by bytes, disconnecting a peer that has stopped reading (H3b)', async () => {
+    const timers = fakeTimers()
+    /* ONE WRITE HELD OPEN, the shape of a peer whose socket buffer is full.
+       Everything after it queues on the send chain. */
+    /* Held in an object rather than a `let`: TypeScript narrows a `let`
+       assigned only inside a Promise executor to `never` at the call below. */
+    const gate = { release: () => {} }
+    const held = new Promise<void>((resolve) => {
+      gate.release = resolve
+    })
+    let sends = 0
+    let first = true
+    const conn = createRouter({
+      services: [],
+      hasGrant: () => true,
+      timers,
+      maxOutboundBytes: 600,
+    }).connect('peer-a', () => {
+      sends += 1
+      if (first) {
+        first = false
+        return held
+      }
+      return undefined
+    })
+
+    /* UNKNOWN SERVICE: no grant, no handler, and an `err` frame back each time
+       — the cheapest possible way to make this side allocate. */
+    const FLOOD = 200
+    for (let i = 0; i < FLOOD; i++) {
+      conn.receive(encodeFrame(frame({ service: 'nobody.home', id: `r${i}`, body: null })))
+    }
+    await settle()
+
+    /* Let the held write finish and drain whatever the chain still holds. THIS
+       is the assertion that needed the release: while the transport is stuck,
+       a router with no budget and one with a budget look identical — both have
+       written exactly once. The difference is how much they were still holding,
+       and that only becomes visible when the chain runs. */
+    gate.release()
+    await settle()
+
+    expect(sends).toBeLessThan(FLOOD)
+    /* AND THE CONNECTION IS SHUT, not merely behind. A later request is
+       answered by nothing at all. */
+    const before = sends
+    conn.receive(encodeFrame(frame({ service: 'nobody.home', id: 'after', body: null })))
+    await settle()
+    expect(sends).toBe(before)
+  })
+
+  it('does not leak the budget through a synchronous transport (H3c)', async () => {
+    /* THE RESERVATION HAS TO BE RELEASED ON EVERY PATH. A sink that returns a
+       plain value has already written the frame; if only the async path
+       released, the budget would be a one-way ratchet and the connection would
+       close after `maxOutboundBytes` of perfectly delivered frames. Small
+       budget, many more bytes than it, all of them delivered. */
+    const timers = fakeTimers()
+    const sent: Frame[] = []
+    const conn = createRouter({
+      services: [],
+      hasGrant: () => true,
+      timers,
+      maxOutboundBytes: 500,
+    }).connect('peer-a', (bytes) => {
+      sent.push(decodeFrame(bytes))
+    })
+
+    for (let i = 0; i < 100; i++) {
+      conn.receive(encodeFrame(frame({ service: 'nobody.home', id: `r${i}`, body: null })))
+    }
+    await settle()
+    expect(sent).toHaveLength(100)
   })
 
   it('serialises awaited sends so stream order survives a slow transport (H4)', async () => {
@@ -915,5 +1325,92 @@ describe('hardening against a hostile peer', () => {
     const header = new Uint8Array(HEADER_BYTES + 4)
     new DataView(header.buffer).setUint32(0, MAX_FRAME_BYTES, false)
     expect(() => decodeFrame(header)).toThrow(FrameTooLarge)
+  })
+
+  /* THE TWO PATHS BELOW WERE UNCOVERED, and the envelope's move into the kernel
+     is what surfaced it: under `src/capabilities/**` it was held to a lower bar
+     than kernel code, so 85% branch coverage on a protocol was invisible. The
+     move did not create the gap; it revealed one. */
+
+  describe('a transport that fails', () => {
+    it('disconnects when send throws synchronously rather than hanging the call', async () => {
+      /* A caller whose socket is already dead gets an error, not a promise that
+         never settles. The synchronous throw is the shape a closed WebSocket
+         takes — `send` on a CLOSED socket raises rather than rejecting. */
+      const client = createClient({
+        send: () => {
+          throw new Error('socket is closed')
+        },
+      })
+      await expect(client.call('book.list', {})).rejects.toBeInstanceOf(ServiceCallError)
+    })
+
+    it('reports that disconnection with the transport error code, not a timeout', async () => {
+      /* The distinction a caller acts on: a disconnect is retryable now, a
+         timeout means waiting. Reporting one as the other sends a retry loop
+         to sleep for the timeout it never hit. */
+      const client = createClient({
+        send: () => {
+          throw new Error('socket is closed')
+        },
+      })
+      const failure = await client.call('book.list', {}).catch((e: unknown) => e)
+      expect(failure).toBeInstanceOf(ServiceCallError)
+      /* ⚠️ **"NOT `timeout`" IS ELEVEN CODES.** `internal`, `malformed` and
+       * `protocol` all satisfy it, and every one of them sends the caller
+       * somewhere different — `internal` reads as a bug on the shelf,
+       * `protocol` as a version skew. The one a caller can act on is
+       * `disconnected`: retryable, now, with a fresh connection.
+       *
+       * The negative assertion stays, because it names the mistake this test
+       * was written about. It is no longer the whole of it. */
+      expect((failure as ServiceCallError).error.code).toBe(ENVELOPE_ERRORS.disconnected)
+      expect((failure as ServiceCallError).error.code).not.toBe(ENVELOPE_ERRORS.timeout)
+      /* AND NOT RETRYABLE — pinned because it is the surprising half. `retryable`
+         here means "ask this client again", and this client is finished: `send`
+         threw, so every later call on it rejects `disconnected` too. Retrying
+         is the caller's job with a NEW connection, which the code is what tells
+         them. A flag that said otherwise would send a retry loop at a socket
+         that will never open. */
+      expect((failure as ServiceCallError).error.retryable).toBe(false)
+    })
+  })
+
+  it('remembers a cancel raised before the stream id exists (reentrant transport)', async () => {
+    /* THE RACE THE CODE DOCUMENTS AND NOTHING EXERCISED. A synchronous
+       transport can deliver a stream frame REENTRANTLY — inside `send`, while
+       `begin` is still running and before `streamId` has been assigned. A
+       teardown fired in that window has no id to cancel, so it sets a flag and
+       the cancel goes out once the id lands.
+       
+       Without that, an overflowing stream opened over a synchronous transport
+       is torn down locally and never cancelled on the wire: the server keeps
+       sending into a reader that is gone. */
+    const timers = fakeTimers()
+    const sent: Frame[] = []
+    let client: ReturnType<typeof createClient>
+    client = createClient({
+      timers,
+      maxStreamBytes: 200,
+      send: (bytes) => {
+        const outgoing = decodeFrame(bytes)
+        sent.push(outgoing)
+        /* Answer the request from INSIDE send, which is what a loopback or an
+           in-memory pair does. The body overflows the buffer, so teardown runs
+           before `begin` has returned an id. */
+        if (outgoing.kind === 'req') {
+          client.receive(
+            encodeFrame(frame({ id: outgoing.id, service: outgoing.service, kind: 'stream', body: 'x'.repeat(300) })),
+          )
+        }
+      },
+    })
+
+    const iterator = client.stream('example.ping', null)[Symbol.asyncIterator]()
+    const failure = await iterator.next().catch((e: unknown) => e)
+    expect((failure as ServiceCallError).error.code).toBe(ENVELOPE_ERRORS.overloaded)
+    /* The cancel still reaches the wire, despite there being no id at the
+       moment the teardown decided to send one. */
+    expect(sent.some((f) => f.kind === 'cancel')).toBe(true)
   })
 })

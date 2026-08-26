@@ -51,6 +51,15 @@ export function markList(env: ServiceEnvironment) {
       if (ctx.signal.aborted) return
       let marks: readonly Mark[]
       if (bookId === undefined) {
+        /* ⚠️ **`loadAll` CANNOT BE INTERRUPTED, AND IT IS THE SLOW PART.** It is
+         * a SHARED store operation — one read per book folder, then a publish
+         * to every subscriber — so its result belongs to the whole app rather
+         * than to this request, and there is nothing here that could
+         * legitimately abandon it halfway. On a two-thousand-book shelf it is
+         * seconds.
+         *
+         * What CAN be abandoned is everything after it, which is why the signal
+         * is read again below rather than only at the top. */
         await env.services.marks.loadAll()
         /* BOTH HALVES. The snapshot splits annotations from bookmarks at the
          * one door every subscriber reads through — `all` is annotations
@@ -63,6 +72,14 @@ export function markList(env: ServiceEnvironment) {
         knownBook(env, bookId)
         marks = liveMarks(await env.services.marks.forBook(bookId))
       }
+      /* ⚠️ **CHECKED AFTER THE READ, AND IT USED TO BE CHECKED ONLY BEFORE IT.**
+       * The read is where the seconds go on a whole-shelf list, so a `cancel`
+       * that arrives during it is the ordinary case rather than a race — and
+       * the sort below is `O(n log n)` over every mark on the shelf, with a
+       * `markRow` allocation each, all of it for a peer that has stopped
+       * listening. `pages` refuses to SEND any of it, which is why this was
+       * invisible: the work was done and thrown away. */
+      if (ctx.signal.aborted) return
       /* By book, then by the kernel's OWN comparator. A CFI does not order
        * lexically: two from different spine items address positions in
        * different documents and are not comparable as strings at all, so a
@@ -103,13 +120,16 @@ export function markAdd(env: ServiceEnvironment) {
        * wrong for every other; a caller that knows says so. */
       sectionIndex: num(input, 'section') ?? 0,
       text: str(input, 'text') ?? '',
-      prefix: '',
-      suffix: '',
+      /* From the wire since phase 19; empty when the caller did not know. See
+       * the table row — a mark with no context is one that cannot be found
+       * again once its CFI stops resolving. */
+      prefix: str(input, 'prefix') ?? '',
+      suffix: str(input, 'suffix') ?? '',
       note: str(input, 'note') ?? '',
       kind,
       tint,
       style: 'fill',
-      chapter: '',
+      chapter: str(input, 'chapter') ?? '',
     })
     await env.services.marks.add(mark)
     return markRow(mark)
@@ -131,9 +151,16 @@ export function markSet(env: ServiceEnvironment) {
      * rewrite of the row: the stamp is what makes the change merge as newer
      * on a peer, and a record rewritten past it replicates as an edit with no
      * stamp — which loses to everything. */
-    if (note !== undefined) await env.services.marks.updateNote(id, note, bookId)
-    if (colour !== undefined) await env.services.marks.setTint(id, colour, bookId)
-    return markRow(await locate(env, id, bookId))
+    /* ⚠️ THE OWNER IS RESOLVED BEFORE ANYTHING IS WRITTEN. The caller's `book`
+     * is a hint, and it was handed straight to the mutators — which write into
+     * that book's folder. A wrong hint edited the wrong file, changed nothing,
+     * and `locate` below then found the mark under its real book and returned
+     * it as a successful answer: the caller was told the note was written and
+     * it was written nowhere. */
+    const owner = (await locate(env, id, bookId)).bookId
+    if (note !== undefined) await env.services.marks.updateNote(id, note, owner)
+    if (colour !== undefined) await env.services.marks.setTint(id, colour, owner)
+    return markRow(await locate(env, id, owner))
   }
 }
 
@@ -187,6 +214,16 @@ export function markRemove(env: ServiceEnvironment) {
  * Both halves of the snapshot are searched: `all` is annotations and
  * `allBookmarks` is the rest, and a bookmark's note is as editable as a
  * highlight's.
+ */
+/**
+ * The mark with this id, using `bookId` as a HINT about where to look first.
+ *
+ * ⚠️ **THE HINT USED TO BE TRUSTED BY THE MUTATORS.** `markSet` passed the
+ * caller's `book` straight to `updateNote` and `setTint`, which write into that
+ * book's folder — so a wrong hint edited the wrong file, changed nothing, and
+ * then this function found the mark somewhere else and returned it as a
+ * SUCCESSFUL answer. The caller was told the note was written and no note was
+ * written anywhere. See `ownerOf`.
  */
 async function locate(env: ServiceEnvironment, id: string, bookId: string | undefined): Promise<Mark> {
   if (bookId !== undefined) {

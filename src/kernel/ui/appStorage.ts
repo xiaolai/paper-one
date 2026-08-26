@@ -8,6 +8,7 @@ import {
 } from '@tauri-apps/plugin-fs'
 import { STORE_FILE, openFileStore, type FileStore, type FileSystem } from '../core/fileStore'
 import type { MarkStorage } from '../core/marks'
+import { inTauri } from './inTauri'
 
 /**
  * The application's own store, resolved once at boot.
@@ -53,10 +54,9 @@ export function localStore(): MarkStorage | null {
   }
 }
 
-/** True when the Tauri IPC layer is present — false in a plain browser tab. */
-export function inTauri(): boolean {
-  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
-}
+/* `inTauri` MOVED TO `./inTauri.ts`, and its absence here is the point: four
+ * modules imported only that two-line `window` check from this file and got
+ * `@tauri-apps/plugin-fs` with it. See that file's header. */
 
 /**
  * Open the reader's store, falling back to the webview's own storage.

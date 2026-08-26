@@ -8,6 +8,7 @@ import type {
   BookDetail,
   BookRow,
   CardRow,
+  ContentChunk,
   ContentLocation,
   EmptiedRow,
   MarkRow,
@@ -57,6 +58,15 @@ import type { ClientContribution } from './capability'
  *     carry them. A second byte path would be a second set of the tests that
  *     one is already held to — a flipped byte, a resumed interruption, a
  *     folder trashed mid-transfer — or, worse, none.
+ *
+ *     ⚠️ `content.read` (phase 18) IS BYTES, and is the deliberate exception.
+ *     It is a READ, not a TRANSFER, and the difference is what makes it safe
+ *     to add: no resume, no partial-file state on disk, no second hash to keep
+ *     honest — integrity comes from the TLS the browser client already
+ *     requires. A browser cannot take the blob path at all (it has no iroh),
+ *     and the alternative was an HTTP byte endpoint, which would exist on one
+ *     transport and not the other. One path, both transports, the properties
+ *     the blob path was tested for either absent or supplied elsewhere.
  *   - `device.pair`. Pairing is a human act with a SAS both people read
  *     aloud, and WI-8.6 recorded what driving it by command costs: `grants`
  *     is optional on the wire, the harness omitted it, an empty grant list
@@ -67,12 +77,16 @@ import type { ClientContribution } from './capability'
 /* ------------------------------------------------------------------ grants */
 
 /**
- * The grant families this table adds, beside the transport's existing
- * `sync:*` and `blob:*`. A family is the part before the colon, which is what
- * `grantCovers` wildcards on: holding `book:*` covers `book:read` and
- * `book:write` and nothing else.
+ * The grant families this table names. A family is the part before the colon,
+ * which is what `grantCovers` wildcards on: holding `book:*` covers
+ * `book:read` and `book:write` and nothing else.
+ *
+ * ⚠️ `blob` IS THE TRANSPORT'S FAMILY AND THIS TABLE NOW NAMES IT TOO, for
+ * `content.read`. It used to say "beside the transport's existing `sync:*` and
+ * `blob:*`", which was true while nothing here carried bytes and stopped being
+ * true when `content.read` did. See that row.
  */
-export const GRANT_FAMILIES = ['book', 'mark', 'card', 'device', 'shelf'] as const
+export const GRANT_FAMILIES = ['book', 'blob', 'mark', 'card', 'device', 'shelf'] as const
 export type GrantFamily = (typeof GRANT_FAMILIES)[number]
 
 /**
@@ -85,6 +99,10 @@ export type GrantFamily = (typeof GRANT_FAMILIES)[number]
 export const SERVICE_GRANTS = [
   'book:read',
   'book:write',
+  /* THE BYTES OF A BOOK, and the one grant a reader is shown by name.
+   * `devicesModel.describeGrants` renders `blob:read` as "book files"; see
+   * `content.read` for why that sentence has to be true. */
+  'blob:read',
   'mark:read',
   'mark:write',
   'card:read',
@@ -137,8 +155,14 @@ export function grantCovers(grants: readonly string[], grant: string): boolean {
  * collection in prose and the store's class name; `shelf` is the
  * authoritative-device ROLE. `book.list` lists books; `shelf.status` reports
  * the role.
+ *
+ * `cover` is its own noun and not a verb on `content` (WI-19.8). The three
+ * `content.*` services are about the bytes a book IS; a jacket is a different
+ * file with a different lifecycle — absent for most books, and never a reason
+ * the book cannot be opened. "Cover" is also not a verb, and `content.cover`
+ * would have been the first row in this table whose second word was not one.
  */
-export const SERVICE_NOUNS = ['book', 'mark', 'card', 'tag', 'content', 'device', 'shelf', 'trash'] as const
+export const SERVICE_NOUNS = ['book', 'mark', 'card', 'tag', 'content', 'cover', 'device', 'shelf', 'trash'] as const
 export type ServiceNoun = (typeof SERVICE_NOUNS)[number]
 
 /**
@@ -166,6 +190,10 @@ export const SERVICE_VERBS = [
   'rename',
   'locate',
   'evict',
+  /* `read` is `content.read` (phase 18) — a slice of a book's bytes. The one
+     verb in this table that carries CONTENT rather than a description of it;
+     the note at the head of the file says why that exception is safe. */
+  'read',
   'grant',
   'forget',
   'status',
@@ -292,6 +320,7 @@ export interface WireShapes {
   TrashRow: TrashRow
   TagCount: TagCountRow
   TagChange: TagChange
+  ContentChunk: ContentChunk
   ContentLocation: ContentLocation
   ShelfStatus: ShelfStatus
   DeviceRow: DeviceRow
@@ -517,6 +546,17 @@ const TABLE = [
       { name: 'kind', type: 'string', maxLength: MAX_WORD, choices: MARK_KINDS, doc: 'What the mark is. Default highlight.' },
       { name: 'colour', type: 'string', maxLength: MAX_WORD, choices: MARK_TINTS, doc: 'The highlight colour. Default yellow.' },
       { name: 'note', type: 'string', maxLength: MAX_MARK_NOTE, doc: "The reader's note." },
+      /* THE RECOVERY CONTEXT, which this row did not carry (phase 19). `Mark.prefix`
+       * and `.suffix` are the words either side of the marked text, captured at
+       * creation because — their own docstring — "recovering it later means
+       * re-opening the book and resolving the CFI, which is the operation that
+       * has already failed". Without them a mark made over this wire was born
+       * less durable than one made on the desktop, and the browser client is
+       * the first real producer of marks over it. Optional, so the CLI and an
+       * older client still write; a reader that knows says so. */
+      { name: 'prefix', type: 'string', maxLength: MAX_MARK_TEXT, doc: 'The words just before the marked text, for re-anchoring.' },
+      { name: 'suffix', type: 'string', maxLength: MAX_MARK_TEXT, doc: 'The words just after the marked text, for re-anchoring.' },
+      { name: 'chapter', type: 'string', maxLength: MAX_RECORD_FIELD, doc: 'The chapter label the mark was made in, as shown in Notes.' },
       {
         name: 'section',
         type: 'number',
@@ -666,6 +706,48 @@ const TABLE = [
     output: { many: false, of: 'ContentLocation' },
   },
   {
+    name: 'content.read',
+    noun: 'content',
+    verb: 'read',
+    /**
+     * ⚠️ `blob:read`, NOT `book:read`, and the difference is a promise the
+     * Devices pane makes.
+     *
+     * `describeGrants` renders `blob:read` as "book files" and renders
+     * `book:read` without it as "Books, highlights, reading position". So a
+     * peer deliberately given the second and denied the first is TOLD it cannot
+     * have the files — and, gated on `book:read`, could stream every byte of
+     * every book anyway. The sentence in the pane was the security boundary a
+     * reader was reading, and the table did not implement it.
+     *
+     * The note at the top of this file explains why `content.read` may carry
+     * bytes at all when the blob path exists. That argument is about the SHAPE
+     * of the transfer — a read, not a resumable transfer — and says nothing
+     * about who may ask. Both can be true: this is the bytes on the envelope's
+     * terms, behind the bytes' own permission.
+     *
+     * A browser client is unaffected: its single grant is `readingGrant`, which
+     * is a `:read` suffix test, so it covers `blob:read` exactly as it covered
+     * `book:read`. `cover.read` deliberately stays on `book:read` — a jacket is
+     * artwork the shelf derived, not the file the reader imported.
+     */
+    grant: 'blob:read',
+    kind: 'stream',
+    summary: "A slice of a book's bytes, base64, in chunks — what a browser reads a book through.",
+    input: [
+      BOOK_ID,
+      { name: 'offset', type: 'number', integer: true, min: 0, doc: 'Where to start, in bytes. Default 0.' },
+      {
+        name: 'length',
+        type: 'number',
+        integer: true,
+        min: 0,
+        doc: 'How many bytes at most. Absent means to the end of the file.',
+      },
+    ],
+    output: { many: true, of: 'ContentChunk', columns: ['bookId', 'offset', 'bytes'] },
+  },
+  {
     name: 'content.evict',
     noun: 'content',
     verb: 'evict',
@@ -674,6 +756,25 @@ const TABLE = [
     summary: "Delete this device's copy of the bytes. Replicates nothing, by construction.",
     input: [BOOK_ID],
     output: { many: false, of: 'ContentLocation' },
+  },
+  /* `cover` FOLLOWS `content` AND DOES NOT INTERLEAVE WITH IT. The CLI builds
+   * its command list by walking `SERVICE_NOUNS` and taking each noun's rows,
+   * so a table whose nouns are not contiguous produces a command order that
+   * disagrees with the table order — which `run.test.ts` asserts they do not.
+   * Found by putting this row between `content.read` and `content.evict`. */
+  {
+    name: 'cover.read',
+    noun: 'cover',
+    verb: 'read',
+    grant: 'book:read',
+    kind: 'stream',
+    summary: "A book's jacket, base64, in chunks — what a browser draws a shelf with.",
+    /* NO `offset`/`length`, unlike `content.read`. A cover is tens of kilobytes
+     * and is drawn whole or not at all; a reader asking for the middle of a
+     * JPEG has nothing to do with the answer. The chunking is the envelope's
+     * frame limit, not a range request. */
+    input: [BOOK_ID],
+    output: { many: true, of: 'ContentChunk', columns: ['bookId', 'offset', 'bytes'] },
   },
 
   /* ---- device ---- */

@@ -4,6 +4,7 @@ import {
   PAGE_ROWS,
   parseRecord,
   tagKey,
+  SERVICE_ERRORS,
   SERVICE_NAMES,
   buildReadServices,
   buildServices,
@@ -14,7 +15,7 @@ import {
   type DevicePort,
   type ServiceDescriptor,
 } from '../../../kernel'
-import { ENVELOPE_VERSION, MAX_PAYLOAD_BYTES, encodeFrame } from './envelope'
+import { ENVELOPE_ERRORS, ENVELOPE_VERSION, MAX_PAYLOAD_BYTES, ServiceCallError, encodeFrame } from './envelope'
 import { FORBIDDEN, markRow, refusalCode, seedBook, serveTable } from './serviceTable.testkit'
 
 /**
@@ -61,6 +62,13 @@ const REQUEST: Readonly<Record<string, unknown>> = {
   'tag.list': {},
   'trash.list': {},
   'content.locate': { book: 'b0000' },
+  /* A bounded slice, so the case does not depend on how long the fixture's
+     content is. `content.read` refuses when the shelf has no filesystem, which
+     is what this harness gives it — see the case below. */
+  'content.read': { book: 'b0000', offset: 0, length: 16 },
+  /* NO RANGE. A cover is drawn whole or not at all, so `cover.read` takes only
+     the book — see its row in the table. */
+  'cover.read': { book: 'b0000' },
   'shelf.status': {},
   'device.list': {},
 }
@@ -86,6 +94,17 @@ describe('the read services, service by service', () => {
     it(`${descriptor.name} answers over the wire`, async () => {
       const shelf = serveTable({
         books,
+        /* CONTENT FOR ONE BOOK, so `content.read` has bytes to answer with
+           rather than refusing "no content on this shelf". The fake filesystem
+           has no `readRange`, so this also exercises `readRangeOf`'s fallback —
+           the path a test filesystem is expected to take. */
+        files: {
+          'books/b0000/content.epub': 'PK\u0003\u0004 pretend epub bytes',
+          /* AND A JACKET, so `cover.read` has bytes to answer with. Its empty
+             answer is the ORDINARY case — most books have none — so a fixture
+             without one would make this case pass while proving nothing. */
+          'books/b0000/cover.jpg': '\u00ff\u00d8\u00ff pretend jpeg bytes',
+        },
         /* `device.list` and `shelf.sync` need ports; `shelf.status` does not,
          * and answers what it can. Bound here so the happy path of
          * `device.list` is a real answer rather than a refusal. */
@@ -134,12 +153,28 @@ describe('the read services, service by service', () => {
 })
 
 describe('a stream cancelled mid-page', () => {
+  /**
+   * ⚠️ **THIS ASSERTED THAT THE CLIENT'S ITERATOR WAS DONE**, which
+   * `iterator.return()` makes true on the spot — before any frame is sent, and
+   * whether or not one ever is. A client that dropped the `cancel` on the floor
+   * passed it, while the generator on the shelf went on building pages for a
+   * peer that had gone. That is the leak the case is named for, and it was the
+   * one thing it could not see.
+   *
+   * The question is about the SHELF, so the answer has to come from there:
+   * `pagesOf` counts what the handler actually yielded.
+   */
   it('stops producing pages when the caller stops reading', async () => {
     const shelf = serveTable({ books })
     const stream = shelf.client.stream('book.list', {})
     const iterator = stream[Symbol.asyncIterator]()
     const first = await iterator.next()
     expect((first.value as BookRow[]).length).toBe(PAGE_ROWS)
+
+    /* MORE TO COME. The fixture is more than two pages, so a handler that
+       stopped here stopped because it was told to. */
+    expect(shelf.pagesOf('book.list')).toBeLessThan(Math.ceil(MANY / PAGE_ROWS))
+
     /* `return()` is what a `break` out of `for await` calls, and it is the
      * client's cue to send `cancel`. The router aborts the handler's signal;
      * the generator checks it before each yield, so no further page is
@@ -147,6 +182,17 @@ describe('a stream cancelled mid-page', () => {
     await iterator.return?.()
     const after = await iterator.next()
     expect(after.done).toBe(true)
+
+    const produced = shelf.pagesOf('book.list')
+    /* SETTLED, so anything still running has had its chance to run. */
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(
+      shelf.pagesOf('book.list'),
+      'the handler went on building pages for a peer that had gone',
+    ).toBe(produced)
+    expect(produced, 'and it stopped well short of the whole shelf').toBeLessThan(
+      Math.ceil(MANY / PAGE_ROWS),
+    )
   })
 
   it('answers the whole shelf when nobody cancels — the paging is real', async () => {
@@ -218,7 +264,9 @@ describe('what the read services actually answer', () => {
   })
 
   it('shelf.status answers what it can with no ports bound, and says null for the rest', async () => {
-    const shelf = serveTable({ books })
+    /* `sizes: null` — the harness binds a real size port by default now, and
+       "no ports bound" is exactly what this case is named for. */
+    const shelf = serveTable({ books, sizes: null })
     const status = (await shelf.client.call('shelf.status', {})) as Record<string, unknown>
     expect(status['books']).toBe(MANY)
     expect(status['role']).toBeNull()
@@ -832,6 +880,41 @@ describe('what the handlers actually answer', () => {
    * this an assertion about every row rather than about the ones somebody
    * happened to write a case for.
    */
+
+/**
+ * Why a table-wide audit is allowed to skip a service.
+ *
+ * ⚠️ **BOTH AUDITS BELOW USED BARE `catch { continue }`.** A handler that
+ * started throwing — an `internal`, a TypeError, anything — silently dropped out
+ * of the sweep, and the only backstop was a loose count (`> half`). A service
+ * failing outright is the LOUDEST thing these audits could have caught and it
+ * was the one thing they were built to swallow.
+ *
+ * A skip is legitimate when the fixture cannot satisfy the request: a book id
+ * this shelf does not have, a port nothing bound, a grant deliberately withheld.
+ * Every one of those is a typed refusal with a nameable code. Anything else is
+ * a defect and is rethrown.
+ */
+const SKIPPABLE: readonly string[] = [
+  ENVELOPE_ERRORS.unknownService,
+  ENVELOPE_ERRORS.unsupported,
+  ENVELOPE_ERRORS.forbidden,
+  SERVICE_ERRORS.notFound,
+  SERVICE_ERRORS.unsupported,
+  SERVICE_ERRORS.conflict,
+  SERVICE_ERRORS.malformed,
+  SERVICE_ERRORS.forbidden,
+]
+
+function skippable(name: string, thrown: unknown): void {
+  const code = thrown instanceof ServiceCallError ? thrown.error.code : null
+  if (code !== null && SKIPPABLE.includes(code)) return
+  throw new Error(
+    `${name} failed with something this fixture cannot excuse (${code ?? String(thrown)}). ` +
+      'A refusal the fixture provoked is skippable; a handler that broke is the finding.',
+  )
+}
+
   it('answers with the kind each row declares, for every service in the table', async () => {
     const world = shelf()
     world.setGrants(['book:*', 'mark:*', 'card:*', 'device:*', 'shelf:*'])
@@ -844,14 +927,20 @@ describe('what the handlers actually answer', () => {
       if (descriptor.irreversible === true) continue
       const body = bodyFor(descriptor)
       if (descriptor.kind === 'req') {
-        const answer = await world.client.call(name, body).catch(() => null)
-        if (answer === null) continue
+        let answer: unknown
+        try {
+          answer = await world.client.call(name, body)
+        } catch (thrown) {
+          skippable(name, thrown)
+          continue
+        }
         expect(typeof answer === 'object' && answer !== null && Symbol.asyncIterator in answer, name).toBe(false)
       } else {
         const pages: unknown[] = []
         try {
           for await (const page of world.client.stream(name, body)) pages.push(page)
-        } catch {
+        } catch (thrown) {
+          skippable(name, thrown)
           continue
         }
         /* Every page of a stream is an ARRAY of rows. A stream that yielded
@@ -890,7 +979,8 @@ describe('what the handlers actually answer', () => {
         } else {
           for await (const page of world.client.stream(name, body)) rows.push(...(page as unknown[]))
         }
-      } catch {
+      } catch (thrown) {
+        skippable(name, thrown)
         continue
       }
       const row = rows[0]

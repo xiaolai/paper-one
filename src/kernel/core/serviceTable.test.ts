@@ -80,14 +80,31 @@ describe('the service table', () => {
     expect([...nouns].sort()).toEqual([...SERVICE_NOUNS].sort())
   })
 
-  it('does not publish sync, pairing, or a second byte path', () => {
+  /**
+   * ⚠️ THIS WAS CALLED "no second byte path" AND SAID "nothing here carries
+   * them", with `content.read` and `cover.read` in the same table — both
+   * declared `kind: 'stream'`, both answering bytes. The table's own header
+   * explains why they are the deliberate exception; only this test still
+   * described the world before it.
+   *
+   * What it actually forbids is a second TRANSFER: `content.get` and
+   * `content.download` are the resumable, hash-verified shape the blob path
+   * already owns, and a second one would need every test that one is held to —
+   * a flipped byte, a resumed interruption, a folder trashed mid-transfer — or,
+   * worse, none. A READ is not that: no resume, no partial file on disk, no
+   * second hash to keep honest.
+   */
+  it('does not publish sync, pairing, or a second byte TRANSFER', () => {
     for (const name of SERVICE_NAMES) {
       expect(name.startsWith('sync.')).toBe(false)
       expect(name).not.toBe('device.pair')
-      /* `content.locate` says where the bytes are; nothing here carries them. */
       expect(name).not.toBe('content.get')
       expect(name).not.toBe('content.download')
     }
+    /* AND THE DELIBERATE READS ARE STILL HERE, named — so removing one is a
+       decision rather than a quiet drift back to the sentence above. */
+    expect(SERVICE_NAMES).toContain('content.read')
+    expect(SERVICE_NAMES).toContain('cover.read')
   })
 
   it('keeps every field name distinct within one service, and documents each', () => {
@@ -132,7 +149,14 @@ describe('the service table', () => {
     expect(readingGrant('device:manage')).toBe(false)
     expect(readingGrant('shelf:admin')).toBe(false)
     expect(readServices().length + writeServices().length).toBe(SERVICE_TABLE.length)
-    /* The ten the plan names for WI-11.3, exactly. */
+    /* WRITTEN OUT, so a service cannot become a READ service by accident.
+     * `readServices` splits on the grant alone, so a row whose grant is
+     * mistyped `book:read` when it writes moves silently into the set every
+     * satchel may call. Growing this list is a deliberate edit; not noticing
+     * it grew is the failure. The ten the plan named for WI-11.3, plus
+     * `content.read` (phase 18) — the browser client's byte path — and
+     * `cover.read` (phase 19), which is what lets that client draw jackets
+     * instead of tinted rectangles. */
     expect(readServices().map((one) => one.name).sort()).toEqual(
       [
         'book.get',
@@ -140,6 +164,8 @@ describe('the service table', () => {
         'book.search',
         'card.list',
         'content.locate',
+        'content.read',
+        'cover.read',
         'device.list',
         'mark.list',
         'shelf.status',

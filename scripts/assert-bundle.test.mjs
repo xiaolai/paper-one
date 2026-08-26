@@ -158,6 +158,98 @@ describe('the plugin', () => {
     expect(absent[0]).toContain('BUNDLE_COMPOSITION_ABSENT src/app/composition.desktop.ts')
   })
 
+  /**
+   * THE WEB BUNDLE, which every case above was blind to.
+   *
+   * The phase-18 gates name this one — "assert-bundle must fail if a
+   * capability leaks into the web bundle" — and nothing exercised it: every
+   * case here was `ios` or `desktop`. `web` is the platform where it matters
+   * most and where the check is strongest, because NO capability lists `web`
+   * in its platforms. Every one that exists is Tauri-bound — `peer` reaches an
+   * iroh endpoint, `inference` supervises a local process, `webhost` IS the
+   * server this build talks to — so any capability module in a web bundle is
+   * foreign by construction, and would fail on a phone rather than at a build.
+   *
+   * `web` is also the platform most likely to be special-cased by accident: it
+   * has a composition and no Cargo feature, and `NATIVE_PLATFORMS` exists to
+   * mark that difference. `decideBundle` is platform-generic and does not know
+   * about it — asserted here rather than assumed from reading it.
+   */
+  it('passes a web bundle that composes nothing, which is what an empty composition means', () => {
+    const root = fixture(MANIFEST)
+    const ids = [`${root}/src/main.web.tsx`, `${root}/src/app/composition.web.ts`, `${root}/node_modules/react/index.js`]
+    const { logged, errors, threw } = drive(root, 'web', ids)
+    expect(errors).toEqual([])
+    expect(threw).toBeNull()
+    expect(logged.at(-1)).toBe('assert-bundle: web: 0 capability modules from {}')
+  })
+
+  it('fails a web build that carries any capability at all, naming the module', () => {
+    const root = fixture(MANIFEST)
+    const ids = [`${root}/src/app/composition.web.ts`, `${root}/src/capabilities/both/index.ts`]
+    const { errors, threw, logged } = drive(root, 'web', ids)
+    expect(threw).not.toBeNull()
+    expect(errors[0]).toContain('BUNDLE_FOREIGN_CAPABILITY src/capabilities/both/index.ts')
+    /* EVERY NATIVE PLATFORM AND NOT web, which is the whole point: there is no
+       capability whose platforms include it, so the refusal does not depend on
+       which one leaked. */
+    expect(errors[0]).toContain('composed on [desktop, ios, android] only')
+    expect(logged.some((l) => l.startsWith('assert-bundle:'))).toBe(false)
+  })
+
+  it('fails a web build carrying a capability that leaked as an internal file, not an index', () => {
+    /* THE QUIETER SHAPE. A tree-shaken index leaves `lib/…` behind, which is
+       still the capability's code in a browser that cannot run it. */
+    const root = fixture(MANIFEST)
+    const ids = [`${root}/src/app/composition.web.ts`, `${root}/src/capabilities/desk/lib/leak.ts`]
+    const { errors } = drive(root, 'web', ids)
+    expect(errors[0]).toContain('BUNDLE_FOREIGN_CAPABILITY src/capabilities/desk/lib/leak.ts')
+  })
+
+  /**
+   * A BROWSER HAS NO TAURI, and only the bundle can say whether one shipped.
+   *
+   * The check has been in `assert-bundle.mjs` since the first web build and had
+   * no test; its own comment says it was "verified once by hand (0 references)".
+   * This is what keeps it at zero.
+   *
+   * It is the guard for the reach that actually happened: `bookVault.ts` held
+   * the vault's seam and its Tauri binding together, `bookFolder` imports
+   * `extensionFor` from it, and the reader imports `bookFolder` — so the entire
+   * reader subtree pulled in a filesystem plugin no module on that path ever
+   * called. The direct-edge rule in `.dependency-cruiser.cjs` cannot see four
+   * hops, and a reachability rule would also flag every type-only path, which
+   * erases and ships nothing. A module in the bundle ships; there is no
+   * ambiguity here to trade against.
+   */
+  it('fails a web build carrying a Tauri module, however deep the import was', () => {
+    const root = fixture(MANIFEST)
+    const ids = [
+      `${root}/src/main.web.tsx`,
+      `${root}/src/app/composition.web.ts`,
+      `${root}/node_modules/@tauri-apps/plugin-fs/dist-js/index.js`,
+    ]
+    const { errors, threw } = drive(root, 'web', ids)
+    expect(threw).not.toBeNull()
+    expect(errors[0]).toContain('the web bundle reaches 1 Tauri module(s)')
+    expect(errors[0]).toContain('@tauri-apps/plugin-fs/dist-js/index.js')
+  })
+
+  /* AND THE NATIVE PLATFORMS ARE UNAFFECTED — they are Tauri targets, and a
+     rule that flagged them would be refusing the app for being the app. */
+  it('says nothing about a Tauri module in a desktop bundle', () => {
+    const root = fixture(MANIFEST)
+    const ids = [
+      `${root}/src/app/composition.desktop.ts`,
+      `${root}/src/capabilities/both/index.ts`,
+      `${root}/src/capabilities/desk/index.ts`,
+      `${root}/node_modules/@tauri-apps/plugin-fs/dist-js/index.js`,
+    ]
+    const { errors, threw } = drive(root, 'desktop', ids)
+    expect(threw).toBeNull()
+    expect(errors).toEqual([])
+  })
+
   it('reads the manifest at generateBundle and refuses an invalid or missing one', () => {
     const invalid = fixture({ capabilities: [{ id: 'Bad Id', ts: 'x', platforms: ['desktop'] }] })
     expect(drive(invalid, 'desktop', []).threw?.message).toMatch(/capabilities.manifest.json is invalid.*ID_INVALID/s)

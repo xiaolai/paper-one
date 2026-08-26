@@ -67,6 +67,9 @@ export const LEGAL_TREE = {
   'src/kernel/testkit.ts': "export { fake } from './core/fake.testkit.ts'\n",
   'src/kernel/core/fake.testkit.ts': 'export const fake = () => null\n',
   'src/kernel/ui/index.ts': "export { App } from './App.ts'\n",
+  /* The BROWSER client's UI entry, beside the native one. Two doors, and the
+     rules below hold each root to its own — see `native-root-not-browser-ui-entry`. */
+  'src/kernel/ui/browser.ts': "export { App } from './App.ts'\n",
   'src/kernel/ui/App.ts': "import { other } from '../core/other.ts'\nexport const App = () => other\n",
   'src/kernel/core/thing.ts': 'export const kernelThing = 1\nexport type KernelType = { n: number }\n',
   'src/kernel/core/other.ts': 'export const other = 2\nexport type OtherType = { m: number }\n',
@@ -108,6 +111,23 @@ export const LEGAL_TREE = {
     "import { nodeFs } from '../hosts/node/fs.ts'\n" +
     "import { betaPort } from '../capabilities/beta/index.ts'\n" +
     'export const cli = { kernelThing, nodeFs, betaPort }\n',
+  /* THE THIRD COMPOSITION (phase 18, reshaped in phase 19): the BROWSER client.
+   * It reaches the kernel through ENTRIES now — the public entry and
+   * `ui/browser.ts` — plus a few dependency-free leaves, exactly as a
+   * composition root does. It used to hold an EXEMPTION instead, because the
+   * public entry was not Tauri-free; WI-19.1 removed that cause.
+   *
+   * The allowance is pinned here for the same reason the peer wire's and the
+   * CLI's are: if `web-client-kernel-entries` ever over-matches, the clean case
+   * fails rather than something subtler later.
+   *
+   * `envelope.ts` is a permitted leaf; `other.ts` is not, and is what the
+   * refusal case below reaches for. */
+  'src/kernel/core/envelope.ts': 'export const encodeFrame = () => new Uint8Array()\n',
+  'src/app/web/channel.ts':
+    "import { encodeFrame } from '../../kernel/core/envelope.ts'\nexport const channel = encodeFrame\n",
+  'src/main.web.tsx':
+    "import { channel } from './app/web/channel.ts'\nvoid channel\n",
 }
 
 /**
@@ -281,6 +301,55 @@ export const CASES = [
     to: /(^|\/)@tauri-apps\/plugin-dialog(\/|$)/,
     expect: ['peer-wire-tauri-api-only'],
   },
+  /**
+   * THE BROWSER CLIENT'S TWO RULES, neither of which had a case here.
+   *
+   * `no-tauri-in-the-web-client` did not exist at all until it was tested by
+   * hand: `no-tauri-api-outside-peer-wire` is scoped to `src/capabilities/`,
+   * so `src/app/web/` could import `@tauri-apps/api/core` and `pnpm
+   * boundaries` reported 0 violations. There is no Tauri in a browser — the
+   * import resolves at build time, ships, and fails on the reader's phone as
+   * `undefined is not a function`, three layers from its cause.
+   */
+  {
+    name: '@tauri-apps imported by the browser client',
+    files: { 'src/app/web/channel.ts': "import { invoke } from '@tauri-apps/api/core'\nexport const send = invoke\n" },
+    from: 'src/app/web/channel.ts',
+    to: /(^|\/)@tauri-apps\/api(\/|$)/,
+    expect: ['no-tauri-in-the-web-client'],
+  },
+  {
+    name: '@tauri-apps imported by the browser composition root',
+    files: { 'src/main.web.tsx': "import { invoke } from '@tauri-apps/api/core'\nvoid invoke\n" },
+    from: 'src/main.web.tsx',
+    to: /(^|\/)@tauri-apps\/api(\/|$)/,
+    expect: ['no-tauri-in-the-web-client'],
+  },
+  /* And the client's entry rule, which had no case either. The client reaches
+   * the kernel through named ENTRIES, and this is the edge that proves they are
+   * doors rather than an open directory — the failure the old allow-list
+   * actually had, where `^src/kernel/ui/reader/` let twenty-odd modules
+   * through as one entry. */
+  {
+    name: 'the browser client -> a kernel module that is not one of its entries',
+    files: { 'src/app/web/books.ts': "import { other } from '../../kernel/core/other.ts'\nexport const books = other\n" },
+    from: 'src/app/web/books.ts',
+    to: 'src/kernel/core/other.ts',
+    expect: ['web-client-kernel-entries'],
+  },
+  /* THE DIRECTORY, specifically. `ui/browser.ts` is an entry; `ui/reader/` is
+   * not, and reaching past the door into the room behind it is the thing this
+   * rule was reshaped to forbid. */
+  {
+    name: 'the browser client -> past its entry into ui/reader/',
+    files: {
+      'src/kernel/ui/reader/FoliateView.tsx': 'export const FoliateView = () => null\n',
+      'src/app/web/Reader.tsx': "import { FoliateView } from '../../kernel/ui/reader/FoliateView.tsx'\nexport const R = FoliateView\n",
+    },
+    from: 'src/app/web/Reader.tsx',
+    to: 'src/kernel/ui/reader/FoliateView.tsx',
+    expect: ['web-client-kernel-entries'],
+  },
   {
     name: 'a capability -> a composition root (the whole-composition back door)',
     files: {
@@ -354,6 +423,71 @@ export const CASES = [
     from: 'src/main.tsx',
     to: 'src/kernel/core/other.ts',
     expect: ['composition-root-kernel-entries'],
+  },
+  /**
+   * ⚠️ THE TWO UI ENTRIES ARE TWO DOORS, and one allowance used to open both.
+   *
+   * `composition-root-kernel-entries` exempted `src/kernel/ui/index.ts` AND
+   * `src/kernel/ui/browser.ts` for every root alike, so a native root could
+   * import the browser's entry and the browser root could import the
+   * Tauri-bound one. The second is the dangerous direction: `ui/index.ts`
+   * re-exports modules that import `@tauri-apps`, and a barrel retains
+   * everything it names. `assert-bundle` would refuse the bundle afterwards,
+   * for a reason that reads as unrelated.
+   */
+  {
+    name: 'a native composition root -> the BROWSER ui entry',
+    files: {
+      'src/main.tsx': LEGAL_TREE['src/main.tsx'] + "import { App as B } from './kernel/ui/browser.ts'\nvoid B\n",
+    },
+    from: 'src/main.tsx',
+    to: 'src/kernel/ui/browser.ts',
+    expect: ['native-root-not-browser-ui-entry'],
+  },
+  {
+    name: 'the browser composition root -> the NATIVE ui entry',
+    files: {
+      'src/main.web.tsx': LEGAL_TREE['src/main.web.tsx'] + "import { App } from './kernel/ui/index.ts'\nvoid App\n",
+    },
+    from: 'src/main.web.tsx',
+    to: 'src/kernel/ui/index.ts',
+    expect: ['web-root-not-native-ui-entry'],
+  },
+  /* AND EACH ROOT KEEPS ITS OWN, so the two rules above are about crossing
+     over rather than about the entries being unreachable. */
+  {
+    name: 'the browser composition root -> the BROWSER ui entry (allowed)',
+    files: {
+      'src/main.web.tsx': LEGAL_TREE['src/main.web.tsx'] + "import { App as B } from './kernel/ui/browser.ts'\nvoid B\n",
+    },
+    from: 'src/main.web.tsx',
+    to: 'src/kernel/ui/browser.ts',
+    expect: [],
+  },
+  /**
+   * A capability reaching an ENTRY is the same back door as one reaching a
+   * composition file, and the rule's target named only the latter — while its
+   * own comment said "nothing may import src/main.tsx".
+   */
+  {
+    name: 'a capability -> src/main.tsx (the entry back door)',
+    files: {
+      'src/capabilities/alpha/index.ts':
+        LEGAL_TREE['src/capabilities/alpha/index.ts'] + "import '../../main.tsx'\n",
+    },
+    from: 'src/capabilities/alpha/index.ts',
+    to: 'src/main.tsx',
+    expect: ['no-capability-to-composition-root'],
+  },
+  {
+    name: 'a capability -> src/main.web.tsx (the same door, browser side)',
+    files: {
+      'src/capabilities/alpha/index.ts':
+        LEGAL_TREE['src/capabilities/alpha/index.ts'] + "import '../../main.web.tsx'\n",
+    },
+    from: 'src/capabilities/alpha/index.ts',
+    to: 'src/main.web.tsx',
+    expect: ['no-capability-to-composition-root'],
   },
   {
     name: 'capability -> the kernel UI entry',

@@ -1,0 +1,112 @@
+/* THE SELECTION BAR, from the mockup: 16px in from each edge, 20px above the
+   foot, 20px radius, `shadow-pop`. Fixed, so the selection stays above it. */
+.bar {
+  position: fixed;
+  left: var(--space-16);
+  right: var(--space-16);
+  bottom: max(var(--space-20), env(safe-area-inset-bottom));
+  z-index: var(--z-popover);
+  padding: var(--space-8);
+  /* Concentric with the sheet: sheet radius minus one inset step. */
+  border-radius: calc(var(--radius-sheet) - var(--space-4));
+  border: 1px solid var(--line-2);
+  background: var(--surface);
+  box-shadow: var(--shadow-pop);
+  animation: rise var(--motion-popover) both;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(var(--space-4));
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.tints {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  padding: var(--space-4) var(--space-6) var(--space-10);
+}
+
+/* 26px circles. The rim is the inset ring the mockup draws; the pressed one
+   gets the ink ring outside it. */
+.swatch {
+  width: var(--control-sm);
+  height: var(--control-sm);
+  border: 0;
+  border-radius: var(--radius-pill);
+  box-shadow: inset 0 0 0 1px var(--line-3);
+  cursor: pointer;
+}
+
+.swatch[data-tint='yellow'] {
+  background: var(--mark-yellow);
+}
+
+.swatch[data-tint='green'] {
+  background: var(--mark-green);
+}
+
+.swatch[data-tint='purple'] {
+  background: var(--mark-purple);
+}
+
+.swatch[aria-pressed='true'] {
+  box-shadow:
+    inset 0 0 0 1px var(--line-3),
+    0 0 0 2px var(--ink);
+}
+
+.count {
+  margin-left: auto;
+  font-size: var(--text-small);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 4 across in the mockup; as many as this session can act on here — three
+   with a write grant, one (Copy) without. */
+.actions {
+  display: grid;
+  grid-template-columns: repeat(var(--n, 3), 1fr);
+  gap: var(--space-4);
+}
+
+.actions[data-count='1'] {
+  --n: 1;
+}
+
+.actions[data-count='2'] {
+  --n: 2;
+}
+
+.actions[data-count='3'] {
+  --n: 3;
+}
+
+.action {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-6);
+  height: calc(var(--control-lg) + var(--space-12));
+  border: 0;
+  border-radius: var(--radius-card);
+  background: var(--wash);
+  color: var(--ink-2);
+  font: inherit;
+  font-size: var(--text-caption);
+  cursor: pointer;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bar {
+    animation: none;
+  }
+}

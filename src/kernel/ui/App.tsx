@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { buildCommands } from './commands'
+import { lookUp } from './lookUpTauri'
+import { coverIn } from '../core/coverArt'
+import { tauriVaultFs } from '../core/vaultFsTauri'
 import { offeredFaces } from '../core/typefaces'
 import { presentFaces } from './fontProbe'
 import { canKeepPlace, resolveAccel } from './accel'
@@ -56,6 +59,16 @@ import { tagCounts } from '../core/library'
 import { SidePane } from './pane/SidePane'
 import { parseBook } from './reader/parseBook'
 import { useSpeech } from './reader/useSpeech'
+
+/**
+ * The desktop's jackets, bound once.
+ *
+ * ⚠️ **MODULE SCOPE, NOT AN INLINE ARROW.** `BookCover` lists `coverFor` in its
+ * effect's dependencies — it has to, or it captures the first one forever — so
+ * a new identity per render would mean a refetch and a revoked object URL for
+ * every one of 1 961 rows, every render.
+ */
+const desktopCovers = (bookId: string) => coverIn(tauriVaultFs, bookId)
 
 export interface AppProps {
   /**
@@ -117,6 +130,17 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
   const settingsSnapshot = useSyncExternalStore(
     services.settings.subscribe,
     services.settings.getSnapshot,
+  )
+  /* ⚠️ A SECOND SUBSCRIPTION, and it is not redundant. `persistent` flips the
+     first time the store's write is REFUSED, and that refusal happens after
+     `values` has already changed and been published — so the snapshot above is
+     byte-identical either side of it, and `useSyncExternalStore` correctly does
+     not re-render. Reading the flag itself is what makes the panel's notice
+     appear on the write that failed rather than on the next one that worked. */
+  const settingsPersistent = useSyncExternalStore(
+    services.settings.subscribe,
+    () => services.settings.persistent,
+    () => services.settings.persistent,
   )
   /* The status bar's third rung, through the kernel's own port — the kernel
      imports nothing from a capability, so `inference` binds this and App reads
@@ -557,15 +581,6 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
        * a generation token this line has just advanced — so it returned
        * without a word and the reader lost an import in progress with nothing
        * on screen to say it had happened. */
-      /* ⚠️ AND THE ONE IT REPLACED IS NAMED, not dropped in silence. The two
-       * ways in disagree about what a second intake means, and each is
-       * defensible: `addFolder` REFUSES while one runs, because a keyboard
-       * shortcut during a walk once started two of them; this one SUPERSEDES,
-       * because dropping books is the reader saying "these now". What was not
-       * defensible is the seam. A drop during a folder walk aborted that walk,
-       * and the walk's notice is guarded by a token the drop had just
-       * advanced — so it returned without a word and the reader lost an import
-       * in progress with nothing on screen to say so. */
       if (imports.busy) setImportNotice('That replaced the import already running.')
       imports.supersede()
 
@@ -1687,6 +1702,7 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
               offered: offeredHere,
               sections: composition.settings,
               missing: composition.failures,
+              persistent: settingsPersistent,
             }}
             contributed={composition.panes}
           />
@@ -1697,6 +1713,10 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
             foliate down mid-flight and loses the reading position — see the
             note on Library's own stacking. */}
         <Reader
+          /* THE DESKTOP HAS A DICTIONARY TO HAND TO; a browser does not, and
+             passes nothing. `screens/Reader.tsx` takes this as a prop so its
+             eighty modules stay free of `@tauri-apps` — see `lookUpTauri.ts`. */
+          onSystemLookUp={lookUp}
           libraryCount={library.books.length}
           shelfUnread={shelfUnread}
           onOpenLibrary={() => dispatch({ type: 'goScreen', screen: 'library' })}
@@ -1736,6 +1756,7 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
 
         {state.screen === 'library' && (
           <Library
+            coverFor={desktopCovers}
             books={library.books}
             platform={platform}
             libraryQuery={state.libraryQuery}

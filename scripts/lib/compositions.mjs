@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { PLATFORMS } from './architecture.mjs'
+import { NATIVE_PLATFORMS, PLATFORMS } from './architecture.mjs'
 import { dependenciesOfFeature, dependencyForCrate, readCargoManifest, rustName } from './cargo.mjs'
 
 /**
@@ -36,6 +36,12 @@ import { dependenciesOfFeature, dependencyForCrate, readCargoManifest, rustName 
 export function platformFromTauriEnv(value) {
   if (value === 'ios') return 'ios'
   if (value === 'android' || value === 'androideabi') return 'android'
+  /* `web` IS NOT A TAURI TARGET, so the Tauri CLI never sets this to it. The
+   * browser-client build sets it by hand — `pnpm build:web` — exactly as
+   * `build:ios` does, and the value is honoured here rather than being made a
+   * special case in the plugin. Everything else, including unset, is a desktop
+   * build; that default is load-bearing for `pnpm dev`. */
+  if (value === 'web') return 'web'
   return 'desktop'
 }
 
@@ -396,10 +402,18 @@ export function checkRustSurfaces(manifest, files) {
           finding('CRATE_DEP_ABSENT', where, `src-tauri/Cargo.toml has no [dependencies] entry with path = "crates/${entry.crate}"`),
         )
       } else {
+        /* NATIVE platforms only, on both sides of the comparison.
+         *
+         * A crate is compiled by a Cargo feature, and `web` has none because
+         * the browser client compiles no Rust at all. Comparing against every
+         * platform made an UNCONDITIONAL dependency look wrong the moment
+         * `web` was added — `tauri-plugin-peer` is compiled for every target
+         * that has targets, and the checker read that as "every platform
+         * including the one with no compiler". */
         const compiled = dep.optional
-          ? PLATFORMS.filter((p) => dependenciesOfFeature(p, cargo).has(dep.name))
-          : [...PLATFORMS]
-        const want = PLATFORMS.filter((p) => entry.platforms.includes(p))
+          ? NATIVE_PLATFORMS.filter((p) => dependenciesOfFeature(p, cargo).has(dep.name))
+          : [...NATIVE_PLATFORMS]
+        const want = NATIVE_PLATFORMS.filter((p) => entry.platforms.includes(p))
         if (compiled.join(',') !== want.join(',')) {
           const how = dep.optional ? `the [features] forward it on [${compiled.join(', ')}]` : 'it is unconditional, so every platform compiles it'
           findings.push(
@@ -426,15 +440,30 @@ export function checkRustSurfaces(manifest, files) {
  *  the call. The mask is LINE-BOUNDED on purpose: an unpaired quote (in a
  *  char literal, or prose) must not swallow the lines after it. */
 export function registersPlugin(libRs, name) {
-  const code = stripComments(libRs).replace(/"(?:[^"\\\n]|\\.)*"/g, '""')
+  const code = stripComments(libRs)
+    /* ⚠️ RAW STRINGS FIRST, and they were not masked at all. Rust's
+     * `r#"…"#` spans lines and contains no escapes, so the line-bounded
+     * ordinary-string mask below cannot see inside one: a `.plugin(x::init())`
+     * quoted in a raw string — an error message, a doc example, a test
+     * fixture — read as a real registration, and a plugin that was never
+     * registered passed this gate. Blanked rather than removed so nothing
+     * downstream depends on offsets. */
+    .replace(/r(#*)"[\s\S]*?"\1/g, (raw) => raw.replace(/[^\n]/g, ' '))
+    .replace(/"(?:[^"\\\n]|\\.)*"/g, '""')
   return new RegExp(`\\.plugin\\(\\s*${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}::init\\(\\)\\s*\\)`).test(code)
 }
 
 /**
  * Tauri capability files name platforms as `macOS`, `windows`, `linux`,
- * `iOS`, `android`; a file without the key applies everywhere. Our closed
- * set folds the three desktop OSes into `desktop`: a file that names any of
- * them grants for desktop. Finer than that this check does not go.
+ * `iOS`, `android`; a file without the key applies everywhere. Our closed set
+ * folds the three desktop OSes into `desktop`.
+ *
+ * ⚠️ **`desktop` MEANS ALL THREE, AND THIS USED TO MEAN ANY.** The check was
+ * `TAURI_PLATFORMS[platform].some(…)`, so a permission scoped to `["macOS"]`
+ * satisfied the manifest's `desktop` — and the Windows and Linux builds, which
+ * this repository ships (`bundle.targets` is `all`), had no such grant. The
+ * command would be refused at runtime on two of the three operating systems
+ * the entry claims, and the gate said it was covered.
  */
 const TAURI_PLATFORMS = { desktop: ['macOS', 'windows', 'linux'], ios: ['iOS'], android: ['android'] }
 
@@ -470,10 +499,28 @@ function readAcl(files, findings) {
     }
   }
   return {
-    grants: (identifier, platform) =>
-      grants.some(
-        (g) => g.identifier === identifier && (g.platforms === null || TAURI_PLATFORMS[platform].some((name) => g.platforms.has(name))),
-      ),
+    /**
+     * Whether `identifier` is granted on every OS `platform` stands for.
+     *
+     * `web` IS NOT A TAURI PLATFORM and has no ACL to consult — it is a
+     * manifest platform with no Cargo feature and no `src-tauri` (see
+     * `NATIVE_PLATFORMS` in `architecture.mjs`). A Tauri permission cannot be
+     * granted there, and asking used to index `TAURI_PLATFORMS['web']`,
+     * yielding `undefined` and throwing on `.some`. Answering `false` is both
+     * true and the safe direction: a web entry needing a Tauri permission is a
+     * finding, not a crash.
+     */
+    grants: (identifier, platform) => {
+      const names = TAURI_PLATFORMS[platform]
+      if (names === undefined) return false
+      /* EVERY, not some — see the note on `TAURI_PLATFORMS`. An ungated file
+         (`platforms === null`) applies everywhere, so it covers all of them. */
+      return names.every((name) =>
+        grants.some(
+          (g) => g.identifier === identifier && (g.platforms === null || g.platforms.has(name)),
+        ),
+      )
+    },
   }
 }
 

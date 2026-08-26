@@ -1,9 +1,9 @@
 import * as pdfjs from 'pdfjs-dist'
 import workerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import viewerCss from 'pdfjs-dist/web/pdf_viewer.css?raw'
-import type { PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist'
+import type { PDFDataRangeTransport, PDFDocumentProxy, PDFPageProxy } from 'pdfjs-dist'
 import type { TocItem } from 'foliate-js/view.js'
-import { titleFromSource } from '../../core/formats'
+import { isRanged, titleFromSource, type BookSource, type RangedSource } from '../../core/formats'
 import { COVER_WIDTH } from '../../core/coverArt'
 import { createReflowGuard } from './wordSnap/invalidate'
 
@@ -269,8 +269,25 @@ async function pageDocument(page: PDFPageProxy): Promise<Document> {
   return doc
 }
 
+/**
+ * The viewer stylesheet, as ONE object URL for the whole book.
+ *
+ * ⚠️ **IT USED TO BE INLINED INTO EVERY PAGE.** `pdf_viewer.css` is 163 KB, and
+ * `pageSource` embedded the whole text in each page's Blob — while `sources`
+ * caches one Blob per page VISITED and holds them until the book closes. A
+ * thousand pages read is over 160 MB of the same stylesheet, retained, on a
+ * device this reader chose specifically to avoid downloading a large file to.
+ *
+ * Served once and referenced instead. Both Content Security Policies allow
+ * `blob:` in `style-src` — foliate already rewrites a book's own stylesheets to
+ * object URLs, which is why that permission is there.
+ */
+function styleSheetUrl(): string {
+  return URL.createObjectURL(new Blob([viewerCss], { type: 'text/css' }))
+}
+
 /** The blank page document, into which `paint` draws. */
-function pageSource(width: number, height: number): string {
+function pageSource(width: number, height: number, styleHref: string): string {
   /* No `lang`. It was hardcoded to English, which is an assertion rather than a
    * default: a Chinese or Japanese PDF was announced as English to the platform,
    * and language-dependent behaviour — selection granularity, hyphenation,
@@ -289,8 +306,8 @@ html, body { margin: 0; padding: 0; }
   --scale-round-x: 1px;
   --scale-round-y: 1px;
 }
-${viewerCss}
 </style>
+<link rel="stylesheet" href="${styleHref}">
 <div id="canvas"></div>
 <div class="textLayer"></div>
 `
@@ -322,9 +339,88 @@ export interface PdfHooks {
   onPagePainted?: () => void
 }
 
-export async function makePdf(file: File | string, hooks: PdfHooks = {}): Promise<PdfBook> {
+/**
+ * A PDF whose bytes are somewhere else (phase 18, WI-18.8).
+ *
+ * The browser client holds no book. `range` is a `PDFDataRangeTransport` over
+ * `content.read`, so pdf.js asks the shelf for the byte ranges of the page it
+ * is rendering and nothing more — the difference between opening a 300 MB
+ * scanned book and downloading one.
+ *
+ * `name` is what the book was called, because pdf.js answers a title from the
+ * document's own metadata and most scanned books have none.
+ */
+/**
+ * A ranged source whose transport has been CHECKED — the narrowing
+ * `transportOf` performs, as a type.
+ *
+ * ⚠️ It was exported and referenced nowhere: callers took the weaker
+ * `RangedSource` and this sat beside them as a public shape that could drift
+ * from the real contract without anything noticing. `transportOf` narrows to it
+ * now, so the check and the type say the same thing by construction.
+ */
+export interface RangedPdf extends RangedSource {
+  readonly range: PDFDataRangeTransport
+}
+
+/** Whether this source's `range` really is a pdf.js transport. */
+function isRangedPdf(source: RangedSource): source is RangedPdf {
+  return source.range instanceof pdfjs.PDFDataRangeTransport
+}
+
+/**
+ * The transport out of a ranged source, checked.
+ *
+ * `formats.ts` types `range` as `object` so that half a megabyte of pdf.js
+ * stays out of every module that asks what a file is; this is the one place
+ * that has already paid for the import, so this is where the type is made
+ * real. It is CHECKED rather than asserted because `getDocument` silently
+ * ignores a `range` that fails its own `instanceof` and then throws "Invalid
+ * parameter object" — true, and about the wrong thing.
+ */
+function transportOf(source: RangedSource): PDFDataRangeTransport {
+  if (isRangedPdf(source)) return source.range
+  throw new Error(
+    `Paper: ${source.name} carries a range that is not a PDFDataRangeTransport. ` +
+      'Two copies of pdf.js in the module graph will do this.',
+  )
+}
+
+export async function makePdf(file: BookSource, hooks: PdfHooks = {}): Promise<PdfBook> {
+  /* ONE STYLESHEET FOR THE BOOK — see `styleSheetUrl`. Minted before anything
+   * can fail, so every exit below has one thing to revoke. */
+  const styleHref = styleSheetUrl()
   const task = pdfjs.getDocument({
-    ...(typeof file === 'string' ? { url: file } : { data: await file.arrayBuffer() }),
+    ...(isRanged(file)
+      ? {
+          /* `length` COMES OFF THE TRANSPORT — `getDocument` reads
+           * `src.range.length` and never looks at a `length` beside it, so
+           * passing one here would be a field nothing reads.
+           *
+           * THE TWO SWITCHES ARE pdf.js's DOCUMENTED PAIRING for range-backed
+           * loading, and they are kept for that reason and not for a measured
+           * one — which is worth stating, because the obvious claim to write
+           * here is false.
+           *
+           * MEASURED 2026-08-25, against a live shelf: a 615 KB, 36-page PDF
+           * opened in 6 ranges and 352 763 bytes — 57% of the file — and the
+           * numbers were IDENTICAL with both switches off, including after
+           * holding the document open for eight seconds to give any background
+           * fetch time to run. So "leave them off and pdf.js pulls the whole
+           * file" is not something this tree has established, and nobody
+           * should repeat it on the strength of this comment.
+           *
+           * What IS established is that the transport is lazy: 57% of a small
+           * article is six chunks around the parts pdf.js needed, and the
+           * fraction falls as the file grows. A large scanned book is the case
+           * that would separate the two settings, and it has not been run. */
+          range: transportOf(file),
+          disableAutoFetch: true,
+          disableStream: true,
+        }
+      : typeof file === 'string'
+        ? { url: file }
+        : { data: await file.arrayBuffer() }),
     cMapUrl: `${ASSET_BASE}cmaps/`,
     cMapPacked: true,
     standardFontDataUrl: `${ASSET_BASE}standard_fonts/`,
@@ -334,7 +430,29 @@ export async function makePdf(file: File | string, hooks: PdfHooks = {}): Promis
     wasmUrl: `${ASSET_BASE}wasm/`,
     iccUrl: `${ASSET_BASE}iccs/`,
   })
-  const pdf: PDFDocumentProxy = await task.promise
+  /**
+   * ⚠️ **A REJECTED LOAD LEFT THE WORKER RUNNING.**
+   *
+   * `getDocument` starts a worker and, for a ranged source, holds the transport
+   * — and pdf.js does NOT tear either down when the loading task rejects. A
+   * corrupt or truncated PDF, or a shelf that dropped mid-read, therefore threw
+   * out of here with the worker alive and the transport still asking for byte
+   * ranges nobody would read. One per failed open, for the life of the window.
+   *
+   * `destroy` is awaited before rethrowing so the cause the caller sees is the
+   * load's, not the teardown's.
+   */
+  let pdf: PDFDocumentProxy
+  try {
+    pdf = await task.promise
+  } catch (cause) {
+    URL.revokeObjectURL(styleHref)
+    await task.destroy().catch(() => {
+      /* The load already failed; a teardown that also fails has nothing to add
+         and must not replace the reason. */
+    })
+    throw cause
+  }
 
   const { info } = (await pdf.getMetadata().catch(() => ({ info: {} }))) as {
     info?: { Title?: string; Author?: string }
@@ -389,7 +507,7 @@ export async function makePdf(file: File | string, hooks: PdfHooks = {}): Promis
          * leaks one per visit for the lifetime of the window. */
         let src = sources.get(i)
         if (!src) {
-          src = pageSource(width, height)
+          src = pageSource(width, height, styleHref)
           sources.set(i, src)
         }
         return {
@@ -480,6 +598,7 @@ export async function makePdf(file: File | string, hooks: PdfHooks = {}): Promis
     destroy: () => {
       for (const src of sources.values()) URL.revokeObjectURL(src)
       sources.clear()
+      URL.revokeObjectURL(styleHref)
       // Reported rather than discarded: this is what releases the worker, and a
       // failure here is a leak that grows one book at a time with nothing on
       // screen to suggest it. Handed back so a caller can await the release;

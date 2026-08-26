@@ -99,6 +99,50 @@ export function listCrates(root) {
 }
 
 /**
+ * Whether a crate is a TAURI PLUGIN, as opposed to a plain library.
+ *
+ * ASKED OF THE DIRECTORY, not of a list kept here — a list would be a fourth
+ * hand-kept register of the same facts, which is the thing `commands.rs`'s
+ * opening comment exists to warn about.
+ *
+ * A plugin crate has both a `build.rs` (which declares its COMMANDS to Tauri's
+ * codegen) and a `permissions/` directory (its ACL). A library crate has
+ * neither, because it has no commands to declare and nothing to permit:
+ * `paper-webauth` and `paper-webhost` are pure logic, and the plugin that wraps
+ * them is `tauri-plugin-webhost`, which the manifest does claim.
+ *
+ * WHY THIS MATTERS RATHER THAN BEING TIDINESS. Every crate used to be treated
+ * as an unclaimed plugin, so the two libraries printed a note on every single
+ * run saying their "features, registration and grants are not checked" — true
+ * only in the sense that they have none. A note that always prints is a note
+ * nobody reads, and the day a REAL plugin crate goes unclaimed it would have
+ * appeared in the middle of them.
+ */
+export function isPluginCrate(root, name) {
+  const dir = path.join(root, CRATES_DIR, name)
+  const has = (child) => {
+    try {
+      statSync(path.join(dir, child))
+      return true
+    } catch {
+      return false
+    }
+  }
+  /* ⚠️ `permissions/` IS NOT PART OF THE TEST, and requiring it made this
+   * blind to the worst case. A Tauri plugin whose ACL directory is MISSING is
+   * exactly what wants finding — and it was classified as a library crate,
+   * which gets no note and no check at all. The absence of the evidence was
+   * read as the absence of the thing.
+   *
+   * `build.rs` calling `tauri_plugin::Builder` is what makes a crate a plugin:
+   * it is the line that generates the command permissions, and a library crate
+   * has no reason to hold it. */
+  if (!has('build.rs')) return false
+  const build = readOrNull(root, `${CRATES_DIR}/${name}/build.rs`)
+  return build !== null && /tauri_plugin::Builder/.test(build)
+}
+
+/**
  * The manifest under `root`, parsed and validated, or an error message. The
  * check reads `platforms`, `ts`, `crate` and `permissions` from it, so an
  * invalid manifest cannot be checked against anything.
@@ -132,12 +176,27 @@ export function checkCompositions(root) {
   })
   findings.push(...rust.findings)
   const claimed = new Set(manifest.capabilities.map((entry) => entry.crate).filter((c) => typeof c === 'string'))
-  const notes = listCrates(root)
-    .filter((name) => !claimed.has(name))
-    .map((name) => `note: ${CRATES_DIR}/${name} is claimed by no manifest entry — its features, registration and grants are not checked`)
+  /* PLUGIN CRATES ONLY. A library crate has no features, registration or
+   * grants for a manifest entry to describe, so saying they are unchecked says
+   * nothing — see `isPluginCrate`.
+   *
+   * ⚠️ **AN UNCLAIMED PLUGIN IS A FINDING, AND IT USED TO BE A NOTE.** The
+   * command printed the line and exited 0, so a plugin crate's Cargo features,
+   * its `.plugin(…::init())` registration and every one of its ACL grants went
+   * completely unchecked — while the gate reported success. That is the state
+   * this whole check exists to make impossible, reached by adding a crate and
+   * forgetting one manifest entry. The note was a description of the hole. */
+  const unclaimed = listCrates(root).filter((name) => !claimed.has(name) && isPluginCrate(root, name))
+  for (const name of unclaimed) {
+    findings.push({
+      code: 'CRATE_UNCLAIMED',
+      where: `${CRATES_DIR}/${name}`,
+      message: `${CRATES_DIR}/${name} is a plugin crate no manifest entry claims — its features, registration and grants are checked by nobody. Add a capabilities.manifest.json entry naming it.`,
+    })
+  }
   return {
     findings,
-    notes,
+    notes: [],
     summary: {
       platforms: PLATFORMS.length,
       capabilities: manifest.capabilities.length,

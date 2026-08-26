@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useReducer, type Dispatch } from 'react'
 import type { MarkStyle, MarkTint } from '../core/marks'
-import { BRIGHTNESS, CONTRAST, DEFAULT_READING_STYLE, DEFAULT_STEP_IDX, FIGURE_HEIGHTS, FIGURE_WIDTHS, MINIMUM_SIZES, READING_STEPS, SPACING, readingStep, stepIndexForSize, type SpacingScale } from '../core/metrics'
+import { BRIGHTNESS, CONTRAST, DEFAULT_ALIGN, DEFAULT_READING_STYLE, DEFAULT_SPACING, DEFAULT_STEP_IDX, DEFAULT_THEME, DEFAULT_TYPEFACE, FIGURE_HEIGHTS, FIGURE_WIDTHS, MINIMUM_SIZES, READING_STEPS, SPACING, readingStep, stepIndexForSize, type SpacingScale } from '../core/metrics'
 import type { SettingsStore } from '../core/ports'
 import { readKernelPreferences, writeKernelPreferences, type KernelPreferences } from '../core/settings'
 import type { PaneContribution } from '../core/capability'
@@ -211,7 +211,7 @@ export const initialState: AppState = {
    * what it wants.
    */
   screen: 'library',
-  theme: 'paper',
+  theme: DEFAULT_THEME,
   themeFollowsOs: true,
   /* The screen's own panel — `paneFits('library', 'library')` holds, so the
    * seed is a legal state. A reader boot swaps both through `paneFor`. */
@@ -228,17 +228,12 @@ export const initialState: AppState = {
   rulerPinned: false,
   stepIdx: DEFAULT_STEP_IDX,
   // §14's face, and the one the whole reading typography is specified around.
-  typeface: 'literata',
+  typeface: DEFAULT_TYPEFACE,
   /* Every spacing at its own default, which is the book exactly as it reads
      today — a reader who never opens these gets no change. */
-  spacing: {
-    letter: SPACING.letter.def,
-    word: SPACING.word.def,
-    line: SPACING.line.def,
-    paragraph: SPACING.paragraph.def,
-  },
+  spacing: { ...DEFAULT_SPACING },
   /* Justified, which is what the book has always been set as. */
-  align: 'justified',
+  align: DEFAULT_ALIGN,
   /* The theme exactly as designed, until a reader says otherwise. */
   brightness: BRIGHTNESS.def,
   contrast: CONTRAST.def,
@@ -404,8 +399,12 @@ export function reducer(state: AppState, action: Action, contributed: Contribute
        * looks exercised and never runs. If a non-modal layer ever arrives, it
        * gets its own list and this comment stops being true loudly. */
       if (state[action.layer]) return { ...state, [action.layer]: false }
-      const closed = Object.fromEntries(LAYER_ORDER.map((layer) => [layer, false]))
-      return { ...state, ...closed, [action.layer]: true }
+      /* `ALL_LAYERS_SHUT`, not a second `Object.fromEntries` over the same
+         list. This rebuilt it on every open — the same map, derived the same
+         way, from the same constant, allocated again — and a second derivation
+         of one value is exactly what the note beside that constant was written
+         about. */
+      return { ...state, ...ALL_LAYERS_SHUT, [action.layer]: true }
     }
 
     case 'closeLayer':
@@ -658,9 +657,16 @@ export function useAppState(settings: SettingsStore, contributed: ContributedPan
     try {
       writeKernelPreferences(settings, prefs)
     } catch (cause) {
-      // Reported, not fatal: a preference that will not persist is a
-      // preference the reader chooses again next launch, and the store
-      // itself says why (`fileStore` reports a failed disk write).
+      /* THE SHIPPED STORE NO LONGER REACHES HERE. `set` used to throw on a
+       * refused write, and this caught it — which meant the batch had already
+       * been ABANDONED partway through, so what persisted was a prefix of what
+       * the reader chose. `createSettingsStore` reports a refusal through
+       * `persistent` instead, which the Settings panel draws, and the loop
+       * completes.
+       *
+       * The guard stays because `SettingsStore` is a PORT: another
+       * implementation may still throw, and a preference that will not persist
+       * must not take the render down with it. */
       console.error('Paper: could not save a preference', cause)
     }
     /* SPREAD FIELD BY FIELD, not `[settings, prefs]`: `preferencesOf` builds a

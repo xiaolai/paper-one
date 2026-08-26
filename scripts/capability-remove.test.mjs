@@ -122,6 +122,11 @@ function fixture(over = {}) {
     'src/app/composition.desktop.ts': composition('desktop', ['example']),
     'src/app/composition.ios.ts': composition('ios', ['example']),
     'src/app/composition.android.ts': composition('android', ['example']),
+    /* `web` composes nothing — the browser client can compose no Tauri-bound
+       capability — but the FILE must exist: every platform has a static
+       composition, and `capability-remove` refuses a tree where one is
+       missing (see the 'a composition file is missing' case below). */
+    'src/app/composition.web.ts': composition('web', []),
     'src/capabilities/example/index.ts': "export const example = { id: 'example' }\n",
     'src/capabilities/example/ui/ExamplePane.tsx': 'export const ExamplePane = () => null\n',
     'src/kernel/index.ts': 'export type Capability = { id: string }\n',
@@ -147,6 +152,7 @@ function fixtureWithCrate(over = {}) {
     'src/app/composition.desktop.ts': composition('desktop', ['example', 'peer']),
     'src/app/composition.ios.ts': composition('ios', ['example', 'peer']),
     'src/app/composition.android.ts': composition('android', ['example', 'peer']),
+    'src/app/composition.web.ts': composition('web', []),
     ...over,
   })
 }
@@ -369,7 +375,14 @@ describe('the pieces', () => {
       { dir: 'src-tauri/crates/tauri-plugin-peer', tracked: false },
     ])
     expect(describePlan(plan)).toContain('  delete  src/capabilities/peer/ (tracked: git rm --cached)')
-    expect(plan.notes).toEqual([])
+    /* ONE NOTE, AND IT IS CORRECT. `web` composes nothing — a browser can
+       compose no Tauri-bound capability — so removing `peer` finds nothing to
+       cut there. That is the "already dropped is NOTED, not refused" rule
+       below, arriving by a different route: not drift, but a platform that
+       never had it. */
+    expect(plan.notes).toEqual([
+      'src/app/composition.web.ts: does not import peer (not composed on web); nothing to remove',
+    ])
     const lines = applyPlan(root, plan, { hooks: { gitRm: (r, rel) => calls.push(`rm ${rel}`), cargoPrune: (r) => calls.push(`prune ${r === root}`) } })
     expect(calls).toEqual(['rm src/capabilities/peer', 'prune true'])
     expect(lines.at(-1)).toBe('pruned  src-tauri/Cargo.lock (cargo metadata --offline)')
@@ -379,8 +392,13 @@ describe('the pieces', () => {
     // than laundering it, since the manifest still composes it on android.
     const lonely = fixture({ 'src/app/composition.android.ts': "import type { Capability } from '../kernel'\nexport const capabilities: readonly Capability[] = []\n" })
     const p2 = planRemoval(lonely, 'example', { deleteFiles: false })
+    /* TWO NOTES, AND THE WORDING IS THE POINT. Android is DRIFT — the manifest
+       says compose it there and the file does not — while web is benign: the
+       manifest never composed it there. The tool keeps those apart rather than
+       laundering one as the other. */
     expect(p2.notes).toEqual([
       'src/app/composition.android.ts: DRIFT — the manifest composes "example" on android but this file does not import it (pnpm compositions:check); nothing to remove here',
+      'src/app/composition.web.ts: does not import example (not composed on web); nothing to remove',
     ])
     expect(p2.deletions).toEqual([])
     expect(describePlan(p2)).toContain(

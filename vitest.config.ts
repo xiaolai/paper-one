@@ -41,7 +41,7 @@ const PROJECTS: readonly Project[] = [
   {
     name: 'kernel-unit',
     include: ['src/kernel/**/*.test.{ts,tsx}', 'src/*.test.{ts,tsx}'],
-    exclude: ['src/kernel/**/*.contract.test.{ts,tsx}'],
+    exclude: ['src/kernel/**/*.contract.test.{ts,tsx}', 'src/kernel/**/*.envelope.test.ts'],
   },
   /* `{ts,tsx}` like every other project's glob. A `.contract.test.tsx`
    matched the broad project instead of this one and ran without the
@@ -50,7 +50,7 @@ const PROJECTS: readonly Project[] = [
   {
     name: 'capabilities',
     include: ['src/capabilities/**/*.test.{ts,tsx}'],
-    exclude: ['src/capabilities/peer/**/*.envelope.test.ts'],
+    exclude: ['src/capabilities/**/*.envelope.test.ts'],
   },
   /* The envelope's own suites, and — since phase 11 — the CLI's client
    * speaking to a router over the fake wire, which is the same protocol under
@@ -58,7 +58,17 @@ const PROJECTS: readonly Project[] = [
    * envelope" is one question. */
   {
     name: 'service-envelope',
-    include: ['src/capabilities/peer/**/*.envelope.test.ts', 'src/cli/**/*.envelope.test.ts'],
+    /* `src/kernel/core/` since phase 18: the envelope moved there when a second
+     * transport needed it, and its suites moved with it. The glob follows the
+     * CODE rather than naming a capability — pinned to `peer/` it silently
+     * dropped both files into `kernel-unit`, where they still ran and this
+     * project quietly became one file. A suite that runs under the wrong
+     * project's settings is the failure the note above this list describes. */
+    include: [
+      'src/kernel/**/*.envelope.test.ts',
+      'src/capabilities/**/*.envelope.test.ts',
+      'src/cli/**/*.envelope.test.ts',
+    ],
   },
   { name: 'hosts', include: ['src/hosts/**/*.test.{ts,tsx}'] },
   {
@@ -173,11 +183,42 @@ const COVERAGE_EXCLUDE = [
  * Only the two that ROSE past their gate are moved. Functions and branches
  * measure above the line already and below their previous baseline, and the
  * rule against lowering is what makes the number mean anything.
+ *
+ * ## IT RECURRED, exactly as predicted, 2026-08-25
+ *
+ * Phase 18 mounted `FoliateView` in the browser client, and that was the FIRST
+ * TEST EVER TO IMPORT IT — 741 lines of reader, reported as seven functions
+ * because nothing loaded it. It has thirty-four. `makePdf.ts` went from one to
+ * fourteen the same way.
+ *
+ * Measured before and after, per file:
+ *
+ *   FoliateView.tsx    4/7  ->  13/34
+ *   makePdf.ts         0/1  ->   2/14
+ *   global          1884/2273 (82.88%) -> 1901/2317 (82.04%)
+ *
+ * SEVENTEEN MORE FUNCTIONS ARE COVERED THAN BEFORE. Forty of the forty-four
+ * that appeared were always there. Nothing became less tested; the denominator
+ * became honest, which is the same event this note describes above and the
+ * reason it was written down.
+ *
+ * `foliateSettings.test.ts` and `FoliateView.test.tsx` are what put the covered
+ * side back as far as it goes without a real renderer: `applyLayout`'s unit,
+ * floor, page-width, gap and ordering rules are each a defect that already
+ * happened once, and each now fails the suite when reverted. What is left
+ * uncovered needs foliate's `View` custom element and a book to paginate, which
+ * jsdom cannot give it — the browser client's own run is where those execute.
+ *
+ * THE FUNCTIONS GATE IS LOWERED TO 82, and that is a decision rather than a
+ * consequence. It is deliberately TIGHTER than this file's own rule of
+ * baseline-minus-one — which would allow 81.04 — because a number that has
+ * just been shown to have been flattering should not be handed a fresh point
+ * of slack. Slack is what let it flatter.
  */
 const COVERAGE_THRESHOLDS = {
   lines: 69.33,
   statements: 69.33,
-  functions: 82.59,
+  functions: 82,
   branches: 88.14,
   'src/kernel/core/**': { lines: 93, statements: 93, functions: 93, branches: 93 },
   'scripts/lib/**': { lines: 99, statements: 99, functions: 100, branches: 95 },

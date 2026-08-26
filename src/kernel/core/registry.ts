@@ -162,6 +162,14 @@ export function scopeSettings(store: SettingsStore, capId: string): SettingsStor
       store.set(setting, value)
     },
     subscribe: (listener) => store.subscribe(listener),
+    /* PASSED THROUGH, not re-derived: whether the next launch keeps anything is
+     * a property of the one storage underneath, and a capability drawing "not
+     * saved on this device" should say it exactly when the kernel's own pane
+     * does. A getter rather than a captured value, because it changes the first
+     * time a write is refused. */
+    get persistent() {
+      return store.persistent
+    },
     getSnapshot: () => {
       const all = store.getSnapshot()
       if (all !== seen) {
