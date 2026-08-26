@@ -50,6 +50,45 @@ mod tests {
         }
     }
 
+    /**
+     * WHAT A TREE WITH NO BUNDLE SERVES — explicitly, rather than by not being
+     * tested.
+     *
+     * A fresh clone compiles with an empty table on purpose: making `cargo
+     * build` depend on a JavaScript build having happened is a worse failure
+     * than a missing client, and one that fails somewhere with nothing to say
+     * about the cause. What that costs is a server with no client, and the
+     * answer to that has to be a sentence rather than a 404 — which reads as
+     * "wrong address" and sends the reader to check the URL.
+     *
+     * Asserted over an EMPTY table rather than over `CLIENT`, so this case runs
+     * the same way whether or not `pnpm build:web` has.
+     */
+    #[test]
+    fn a_tree_with_no_bundle_says_so_rather_than_answering_not_found() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let router = paper_webhost::router(std::sync::Arc::new(paper_webhost::WebHost::new()), &[]);
+        let response = tokio_test::block_on(async {
+            router
+                .oneshot(
+                    Request::builder()
+                        .uri("/")
+                        .body(Body::empty())
+                        .expect("a request"),
+                )
+                .await
+                .expect("infallible")
+        });
+        assert_eq!(
+            response.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a missing client must not read as a wrong address"
+        );
+    }
+
     /// THE END-TO-END PROOF, over the real table and the real router.
     ///
     /// Everything else about this bundle is checked by structure — that keys
@@ -61,8 +100,22 @@ mod tests {
         use axum::http::{Request, StatusCode};
         use tower::ServiceExt;
 
+        /* ⚠️ **A SILENT SKIP IS NOT A PASS**, and this used to be a bare
+         * `return`. `dist-web/` is gitignored, so on a fresh clone the table is
+         * empty and this case did nothing — while reporting `ok`, in the exact
+         * failure mode where the shipped browser client is missing. A test that
+         * cannot run should say so where somebody reading the output sees it.
+         *
+         * The real guard against shipping an empty bundle is in `build.rs`,
+         * which REFUSES a release build with no `index.web.html`. This case is
+         * the end-to-end proof and can only run where the bundle exists; the
+         * empty-table behaviour has its own case below. */
         if CLIENT.is_empty() {
-            return; // no bundle built; see the module header
+            eprintln!(
+                "SKIPPED the_real_router_serves_the_real_bundle_at_the_root: dist-web/ is empty. \
+                 Run `pnpm build:web`. A release build refuses this — see build.rs."
+            );
+            return;
         }
         let router =
             paper_webhost::router(std::sync::Arc::new(paper_webhost::WebHost::new()), CLIENT);

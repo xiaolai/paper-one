@@ -39,6 +39,7 @@ use std::time::{Duration, Instant};
 use axum::body::Body;
 use axum::http::Request;
 use futures_util::{SinkExt, StreamExt};
+use paper_webauth::sessions::Credential;
 use paper_webhost::assets::NO_CLIENT;
 use paper_webhost::pipe::Push;
 use paper_webhost::{router, WebHost, SESSION_COOKIE};
@@ -492,6 +493,86 @@ async fn a_revoked_credential_cannot_open_a_second_socket() {
         .expect_err("a revoked credential must not open another");
     assert!(refused.contains("401"), "expected unauthorized: {refused}");
     drop(first);
+}
+
+/// ⚠️ **A REVOCATION THAT LANDS BETWEEN ADMISSION AND `Pipe::open`.**
+///
+/// The case above revokes BEFORE the second handshake starts, so it exercises
+/// the ordinary refusal — `Admitted` says no — and never reaches the window the
+/// register-then-recheck in `upgrade` exists for.
+///
+/// That window is real. `Admitted` runs `validate` then `admit`, which closes
+/// the gap between asking and being told; it does not close the gap between
+/// being told and the socket EXISTING. A revocation arriving in there does both
+/// of its halves — forgets the credential, then closes every socket it holds —
+/// and finds no socket, because `Pipe::open` has not run. A moment later it
+/// does, and the browser the reader just revoked is holding a live
+/// authenticated channel while the Browsers pane says it is gone.
+///
+/// `pause_before_open` holds the handshake exactly there, so the revocation
+/// lands inside the window rather than near it.
+#[tokio::test]
+async fn a_revocation_inside_the_admission_window_leaves_no_socket() {
+    let shelf = shelf().await;
+    let code = live_code(&shelf);
+    let cookie = sign_in(&shelf, &code).await;
+
+    /* THE CREDENTIAL THIS COOKIE CARRIES, read before the handshake so the
+    revocation below can name it without a pipe record to look it up in —
+    which is the whole point: there is no record yet. */
+    let credential = Credential::from_presented(cookie.split_once('=').expect("a cookie pair").1);
+
+    let (reached, release) = shelf.state.pause_before_open();
+    let handshake = {
+        let origin = shelf.origin.clone();
+        let cookie = cookie.clone();
+        tokio::spawn(async move {
+            let mut request = format!("ws://{origin}/ws")
+                .into_client_request()
+                .expect("a ws request");
+            request
+                .headers_mut()
+                .insert("cookie", cookie.parse().expect("an ascii cookie"));
+            request
+                .headers_mut()
+                .insert("sec-fetch-site", "same-origin".parse().expect("a token"));
+            tokio_tungstenite::connect_async(request)
+                .await
+                .map(|(socket, _)| socket)
+                .map_err(|error| error.to_string())
+        })
+    };
+
+    /* ADMITTED, AND NOT YET REGISTERED. */
+    reached.await.expect("the handshake should reach the seam");
+    assert_eq!(
+        shelf.state.pipe.live_count(),
+        0,
+        "the seam should be before the pipe record exists"
+    );
+
+    /* THE REVOCATION, in the window. `close_credential` finds nothing to close —
+    that is the whole point — so only the re-check after registration can
+    stop this socket. */
+    shelf.state.sessions.revoke(&credential);
+    shelf.state.pipe.close_credential(&credential, "revoked");
+
+    release
+        .send(())
+        .expect("the handshake should still be waiting");
+    let outcome = handshake.await.expect("the handshake task");
+    assert!(
+        outcome.is_err(),
+        "a credential revoked mid-handshake opened a socket anyway"
+    );
+
+    /* AND NOTHING WAS LEFT BEHIND. A record opened and then refused must be
+    closed AND reaped, or that credential's share is spent for the life of
+    the process. */
+    until("the record to be released", || {
+        shelf.state.pipe.live_count() == 0
+    })
+    .await;
 }
 
 #[tokio::test]

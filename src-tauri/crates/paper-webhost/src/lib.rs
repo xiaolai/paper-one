@@ -48,8 +48,10 @@
 pub mod assets;
 pub mod pipe;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
+use tokio::sync::oneshot;
 
 use assets::Asset;
 use axum::body::Body;
@@ -170,6 +172,9 @@ pub struct WebHost {
     pub auth: DeviceAuth,
     pub sessions: Sessions,
     pub pipe: Pipe,
+    /// See [`WebHost::pause_before_open`]. `None` in every build but a test's.
+    admit_gate: Mutex<Option<oneshot::Sender<()>>>,
+    admit_release: Mutex<Option<oneshot::Receiver<()>>>,
 }
 
 impl WebHost {
@@ -178,7 +183,45 @@ impl WebHost {
             auth: DeviceAuth::new(),
             sessions: Sessions::new(),
             pipe: Pipe::new(),
+            admit_gate: Mutex::new(None),
+            admit_release: Mutex::new(None),
         }
+    }
+
+    /// A TEST SEAM FOR THE ADMISSION WINDOW, and the reason it has to exist.
+    ///
+    /// `upgrade` admits a credential and then opens a pipe record, and the
+    /// register-then-recheck below is what makes a revocation landing BETWEEN
+    /// those two safe. A test that revokes before the handshake starts does not
+    /// reach that window at all — it exercises the ordinary refusal, which is
+    /// already covered, while claiming to cover the race.
+    ///
+    /// This pauses the next handshake exactly there: `reached` fires once
+    /// admission has succeeded and before `Pipe::open` runs, and the handshake
+    /// waits for `release`. Both are `None` in production; the cost is one
+    /// `Option` check per socket, on a path that already does two subprocess-free
+    /// validations and allocates a channel.
+    ///
+    /// The peer plugin carries the same seam, for the same window, under
+    /// `#[cfg(test)]` — which is not available here because this crate's tests
+    /// for it live in `tests/`, a separate crate.
+    pub fn pause_before_open(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (reached_tx, reached_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        *self.admit_gate.lock().expect("admit gate") = Some(reached_tx);
+        *self.admit_release.lock().expect("admit release") = Some(release_rx);
+        (reached_rx, release_tx)
+    }
+
+    /// Wait at the seam, if a test armed one. A no-op otherwise.
+    async fn admit_gate(&self) {
+        let reached = self.admit_gate.lock().expect("admit gate").take();
+        let release = self.admit_release.lock().expect("admit release").take();
+        let (Some(reached), Some(release)) = (reached, release) else {
+            return;
+        };
+        let _ = reached.send(());
+        let _ = release.await;
     }
 }
 
@@ -527,6 +570,9 @@ async fn upgrade(
     /* CARRIED TO THE SOCKET. `admitted` is moved into the closure below, so the
      * deadline is taken out here — see `pump`. */
     let expires_at = admitted.expires_at;
+    /* THE ADMISSION WINDOW, held open for a test that asks. Admission has
+     * succeeded; the pipe record does not exist yet. See `pause_before_open`. */
+    state.admit_gate().await;
     let Ok(socket) = state
         .pipe
         .open(admitted.session, admitted.credential.clone(), outbound)
