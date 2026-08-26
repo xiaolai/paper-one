@@ -276,9 +276,15 @@ export type { TrashFs } from './core/bookTrash'
 export type { ContentExtension, KnownExtension, VaultFs } from './core/bookVault'
 
 /* The vocabulary. */
+/* THE CLOSED DOMAINS, exported so a client can VALIDATE a wire row against
+ * them rather than casting. Reading somebody else's JSON and trusting `kind`
+ * to be one of three strings is how an unknown value reaches a switch with no
+ * case for it — see `app/web/wireRow.ts`. */
+export { MARK_KINDS, MARK_STYLES, MARK_TINTS } from './core/marks'
+export type { MarkStyle } from './core/marks'
 export { createMark, isAnnotation, isBookmark, liveMarks, markStamp, mergeMarks, validMarks } from './core/marks'
 export type { Annotation, Bookmark, Mark, MarkKind, MarkStorage, MarkTint, NewMark } from './core/marks'
-export { CARDS_STORAGE_KEY, cardStamp, liveCards, mergeCards, parseCards } from './core/cards'
+export { CARD_KINDS, CARDS_STORAGE_KEY, cardStamp, liveCards, mergeCards, parseCards } from './core/cards'
 export type { Card, CardKind, NewCard } from './core/cards'
 export { KERNEL_PANE_IDS, isContributedPaneId, isKernelPaneId } from './core/uiTypes'
 export type { ContributedPaneId, KernelPaneId, PageLayout, PaneId, Screen, Side, Theme, Typeface } from './core/uiTypes'

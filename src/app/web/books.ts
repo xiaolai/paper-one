@@ -101,10 +101,10 @@ export interface RemoteBooks {
  * parses somebody else's JSON: a number where a string belongs is a shelf
  * disagreeing with this client about the wire, and `String(x)` would hide that
  * behind a plausible-looking row. */
-const str = (v: unknown): string | null => (typeof v === 'string' ? v : null)
-const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
-const strings = (v: unknown): readonly string[] =>
-  Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
+/* Shared with the other stores — see `wireRow.ts`, which was extracted when
+ * `marks.ts` and `cards.ts` turned out to be casting where this file reads. */
+export { str, num, strings } from './wireRow'
+import { byFirstId, num, str, strings } from './wireRow'
 
 /** The formats `services/rows.ts` can send. Anything else reads as unknown. */
 const FORMATS = new Set(['epub', 'pdf', 'mobi', 'azw3', 'cbz', 'fb2', 'fbz', 'bin'])
@@ -143,7 +143,12 @@ export function parseRows(answer: unknown): readonly BookRow[] {
       hasContent: typeof row['hasContent'] === 'boolean' ? row['hasContent'] : null,
     })
   }
-  return rows
+  /* ⚠️ A DUPLICATE `bookId` IS NOT HARMLESS. Every list here keys on it, and
+     React resolves a repeated key by rendering one of the two and discarding
+     the other — a book that vanishes from the shelf, three screens from the
+     cause. The comment above says "a duplicate or missing key is a rendering
+     bug"; only the missing half was actually handled. */
+  return byFirstId(rows, (row) => row.bookId)
 }
 
 const sameList = (a: readonly string[], b: readonly string[]): boolean =>
@@ -185,6 +190,21 @@ export function createRemoteBooks(channel: ShelfChannel): RemoteBooks {
   let state: BooksStatus = 'loading'
   let why: string | null = null
   let disposed = false
+  /**
+   * WHICH REFRESH IS THE CURRENT ONE.
+   *
+   * ⚠️ `refresh` is public and called from several places — mount, a manual
+   * pull, the reconnect path — and nothing stopped two running at once. Each
+   * awaits a stream, so the one that STARTED first can FINISH last: an older
+   * shelf overwrote a newer one, and the status with it. The reader sees the
+   * library go backwards, and a retry that "worked" leaves the stale answer on
+   * screen.
+   *
+   * A generation rather than a mutex: refusing to start a second refresh would
+   * make a manual pull silently do nothing while a slow poll is in flight. This
+   * lets every refresh run and publishes only the newest.
+   */
+  let generation = 0
   const listeners = new Set<() => void>()
 
   const publish = () => {
@@ -206,6 +226,9 @@ export function createRemoteBooks(channel: ShelfChannel): RemoteBooks {
 
   const refresh = async () => {
     if (disposed) return
+    const mine = ++generation
+    /** Superseded by a later refresh, or torn down. */
+    const stale = () => disposed || mine !== generation
     /* `book.list` IS A STREAM, not a call.
      *
      * `serviceTable.ts` declares it `kind: 'stream'` — it answers many rows,
@@ -223,13 +246,17 @@ export function createRemoteBooks(channel: ShelfChannel): RemoteBooks {
         else collected.push(item)
       }
     } catch (thrown) {
-      if (disposed) return
+      if (stale()) return
       why = thrown instanceof Error ? thrown.message : String(thrown)
-      setStatus(rows.length > 0 ? 'stale' : 'failed')
-      publish()
+      /* ONE WAKE-UP, NOT TWO. `setStatus` publishes when the status changes and
+         this published again unconditionally, so every failure re-rendered
+         every subscriber twice for one piece of news. */
+      const moved = state !== (rows.length > 0 ? 'stale' : 'failed')
+      state = rows.length > 0 ? 'stale' : 'failed'
+      if (moved) publish()
       return
     }
-    if (disposed) return
+    if (stale()) return
     why = null
     const next = parseRows(collected)
     /* THE IDENTITY RULE. A new array is published only when the CONTENT

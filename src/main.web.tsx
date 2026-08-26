@@ -459,9 +459,27 @@ function Unreachable({ onRetry }: { readonly onRetry: () => void }) {
 function App() {
   const [state, setState] = useState<SessionState>({ kind: 'checking' })
 
+  /**
+   * WHICH SESSION CHECK IS THE CURRENT ONE.
+   *
+   * ⚠️ `refresh` runs on mount, on the Try again button, and after a sign-out,
+   * and nothing sequenced them. `checkSession` is a network round trip, so the
+   * one that STARTED first can FINISH last — and a reader who pairs
+   * successfully, or signs out deliberately, watches the screen revert to
+   * whatever an earlier check had found. Pressing Try again twice on a slow
+   * shelf is enough to see it.
+   *
+   * A ref rather than state: the generation is not rendered, and bumping state
+   * to track it would be a render per check.
+   */
+  const checking = useRef(0)
+
   const refresh = useCallback(() => {
+    const mine = ++checking.current
     setState({ kind: 'checking' })
-    void checkSession().then(setState)
+    void checkSession().then((next) => {
+      if (mine === checking.current) setState(next)
+    })
   }, [])
 
   useEffect(refresh, [refresh])

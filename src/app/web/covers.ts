@@ -30,16 +30,44 @@ import type { ShelfChannel } from './channel'
 export function remoteCovers(channel: ShelfChannel): (bookId: string) => Promise<string | null> {
   return async (bookId: string): Promise<string | null> => {
     try {
+      /* ⚠️ **THE CHUNKS ARE CHECKED, AND THEY USED TO BE CONCATENATED BLIND.**
+       *
+       * This read `bytes` and appended, ignoring `bookId` and `offset` and
+       * skipping any chunk it could not decode. So a gap (a skipped chunk), a
+       * duplicate, a reordering, or bytes belonging to ANOTHER book were joined
+       * into one blob and handed to `URL.createObjectURL` — which produces a
+       * picture rather than an error. A corrupt jacket is the one failure mode
+       * here that looks like a jacket.
+       *
+       * Contiguity is the check: each chunk must start where the last ended,
+       * and must be this book's. Anything else abandons the cover and reports,
+       * which lands on the tint — the same place a book with no artwork lands,
+       * and the honest answer for bytes this client cannot trust. */
       const parts: Uint8Array[] = []
+      let at = 0
       for await (const page of channel.stream('cover.read', { book: bookId })) {
         for (const chunk of page as readonly unknown[]) {
+          /* A ROW CARRYING NO BYTES IS SKIPPED, and only that. A shelf a
+             version ahead may send a shape this build does not know; it
+             contributes nothing to the image, so ignoring it keeps the cover
+             that WAS sent. Every row that does carry bytes is checked. */
           if (typeof chunk !== 'object' || chunk === null) continue
-          const bytes = (chunk as Record<string, unknown>)['bytes']
+          const row = chunk as Record<string, unknown>
+          const bytes = row['bytes']
           if (typeof bytes !== 'string') continue
+
+          if (row['bookId'] !== undefined && row['bookId'] !== bookId) {
+            throw new Error(`cover.read sent bytes for ${String(row['bookId'])} while reading ${bookId}`)
+          }
+          const offset = row['offset']
+          if (offset !== undefined && (typeof offset !== 'number' || offset !== at)) {
+            throw new Error(`cover.read is not contiguous: expected ${at}, got ${String(offset)}`)
+          }
           const binary = atob(bytes)
           const out = new Uint8Array(binary.length)
           for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i)
           parts.push(out)
+          at += out.length
         }
       }
       /* NO BYTES IS NO JACKET. Minting a URL for an empty blob would give the

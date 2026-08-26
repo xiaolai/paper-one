@@ -109,6 +109,73 @@ describe('remoteCovers', () => {
     expect(console.error).not.toHaveBeenCalled()
   })
 
+  /**
+   * ⚠️ **BYTES ARE JOINED IN ORDER OR NOT AT ALL.**
+   *
+   * The assembly appended every `bytes` it could decode and ignored `bookId`
+   * and `offset` entirely, so a gap, a duplicate, a reordering, or bytes
+   * belonging to ANOTHER book were concatenated into one blob and handed to
+   * `URL.createObjectURL` — which yields a picture rather than an error. A
+   * corrupt jacket is the only failure here that looks like a jacket.
+   *
+   * `null` is the honest answer for bytes this client cannot trust: it draws
+   * the tint, which is where a book with no artwork lands too.
+   */
+  const streamOf = (...chunks: readonly unknown[]) =>
+    ({
+      call: async () => {
+        throw new Error('unused')
+      },
+      stream: () => ({
+        [Symbol.asyncIterator]: async function* () {
+          yield chunks
+        },
+      }),
+      close: () => {},
+    }) as unknown as ShelfChannel
+
+  it('refuses a stream whose offsets skip a gap', async () => {
+    const gapped = streamOf(
+      { bookId: 'a', offset: 0, bytes: btoa('ab') },
+      /* 2 is where the next chunk belongs; 4 means two bytes never arrived. */
+      { bookId: 'a', offset: 4, bytes: btoa('cd') },
+    )
+    expect(await remoteCovers(gapped)('a')).toBeNull()
+  })
+
+  it('refuses a stream that repeats a chunk', async () => {
+    const repeated = streamOf(
+      { bookId: 'a', offset: 0, bytes: btoa('ab') },
+      { bookId: 'a', offset: 0, bytes: btoa('ab') },
+    )
+    expect(await remoteCovers(repeated)('a')).toBeNull()
+  })
+
+  it('refuses a stream that arrives out of order', async () => {
+    const reordered = streamOf(
+      { bookId: 'a', offset: 2, bytes: btoa('cd') },
+      { bookId: 'a', offset: 0, bytes: btoa('ab') },
+    )
+    expect(await remoteCovers(reordered)('a')).toBeNull()
+  })
+
+  it('refuses bytes that belong to another book', async () => {
+    const wrong = streamOf(
+      { bookId: 'a', offset: 0, bytes: btoa('ab') },
+      { bookId: 'b', offset: 2, bytes: btoa('cd') },
+    )
+    expect(await remoteCovers(wrong)('a')).toBeNull()
+  })
+
+  it('joins a contiguous stream, so the refusals above are about the disorder', async () => {
+    const good = streamOf(
+      { bookId: 'a', offset: 0, bytes: btoa('ab') },
+      { bookId: 'a', offset: 2, bytes: btoa('cd') },
+    )
+    expect(await remoteCovers(good)('a')).toBe('blob:cover-0')
+    expect(await lastBlob?.text()).toBe('abcd')
+  })
+
   /* A ROW THAT IS NOT A CHUNK IS SKIPPED, not thrown on. A shelf a version
      ahead may send a field this build does not know; dropping the row keeps the
      cover it did send. */

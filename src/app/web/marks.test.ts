@@ -90,6 +90,57 @@ describe('parseMarks', () => {
   it('survives an answer that is not a list', () => {
     for (const junk of [null, undefined, 7, 'rows', { rows: [] }]) expect(parseMarks(junk)).toEqual([])
   })
+
+  /**
+   * ⚠️ **EVERY FIELD IS READ, AND TWO USED TO BE.**
+   *
+   * This checked `id` and `bookId` and cast the rest straight into `MarkRow`,
+   * so the wrong TYPE in any of the other eleven reached the view: an
+   * object-valued `text` renders by throwing, a string `createdAt` sorts
+   * lexically against numbers, and a `kind` outside the three the client knows
+   * falls through every switch to nothing. The row looked valid because the two
+   * fields anybody had thought about were.
+   */
+  it('drops a row whose field is the wrong type, rather than passing it on', () => {
+    const wrong: readonly Record<string, unknown>[] = [
+      row({ text: { toString: () => 'no' } }),
+      row({ createdAt: '10' }),
+      row({ sectionIndex: 'one' }),
+      row({ note: 42 }),
+      row({ chapter: null }),
+      row({ cfi: 7 }),
+    ]
+    for (const bad of wrong) {
+      expect(parseMarks([bad]), JSON.stringify(Object.keys(bad))).toEqual([])
+    }
+  })
+
+  /* A CLOSED DOMAIN IS CLOSED. An unknown value here is a shelf and a client
+     disagreeing about the wire, which is worth seeing rather than rendering. */
+  it('drops a row whose kind, tint or style is not one this build knows', () => {
+    expect(parseMarks([row({ kind: 'scribble' })])).toEqual([])
+    expect(parseMarks([row({ tint: 'chartreuse' })])).toEqual([])
+    expect(parseMarks([row({ style: 'sparkle' })])).toEqual([])
+  })
+
+  /* …and recovery context genuinely may be absent: a mark made before phase 19
+     carries none, so these two default rather than drop. */
+  it('accepts a row with no prefix or suffix, which an older mark has', () => {
+    const [mark] = parseMarks([row({ prefix: undefined, suffix: undefined })])
+    expect(mark?.prefix).toBe('')
+    expect(mark?.suffix).toBe('')
+  })
+
+  /**
+   * A REPEATED ID LOSES A ROW IN THE RECONCILER. React resolves a duplicate key
+   * by rendering one and discarding the other, so a shelf sending the same mark
+   * twice makes one disappear three screens from the cause.
+   */
+  it('keeps the first of two rows sharing an id', () => {
+    const rows = parseMarks([row({ text: 'first' }), row({ text: 'second' })])
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.text).toBe('first')
+  })
 })
 
 describe('createRemoteMarks', () => {

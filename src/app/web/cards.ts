@@ -1,4 +1,5 @@
-import type { Card, CardRow } from '../../kernel'
+import { CARD_KINDS, type Card, type CardRow } from '../../kernel'
+import { byFirstId, id, num, oneOf, str } from './wireRow'
 import type { ShelfChannel } from './channel'
 
 /**
@@ -55,16 +56,57 @@ export function asCard(row: CardRow): Card {
   }
 }
 
+/**
+ * Rows out of a `card.list` answer.
+ *
+ * ⚠️ **EVERY FIELD IS READ, AND ONE USED TO BE.** This checked `id` and cast
+ * the rest, so an object-valued `body` reached JSX — which renders an object
+ * child by throwing — a string `createdAt` sorted lexically against numbers,
+ * and a `kind` outside the five the deck knows fell through every filter to
+ * nothing. The row looked valid because `id` was.
+ *
+ * `bookId` is the one field allowed to be absent: `null` on the wire means "a
+ * card from no book", which the store keeps as `''`. Anything else is dropped
+ * rather than defaulted — see `wireRow.ts` on why a coerced value is worse
+ * than a missing one.
+ */
 export function parseCards(answer: unknown): readonly Card[] {
   if (!Array.isArray(answer)) return []
   const out: Card[] = []
   for (const item of answer) {
     if (typeof item !== 'object' || item === null) continue
     const row = item as Record<string, unknown>
-    if (typeof row['id'] !== 'string' || row['id'] === '') continue
-    out.push(asCard(row as unknown as CardRow))
+    const rowId = id(row['id'])
+    if (rowId === null) continue
+
+    const kind = oneOf(CARD_KINDS, row['kind'])
+    const body = str(row['body'])
+    const answerText = str(row['answer'])
+    const source = str(row['source'])
+    const createdAt = num(row['createdAt'])
+    if (kind === null || body === null || answerText === null || source === null || createdAt === null) {
+      continue
+    }
+
+    /* `bookId` IS NULLABLE ON THE WIRE and `cfi` is optional in practice — a
+       card made from no passage has neither. Both are the sentinel the store
+       uses, not a repaired value. */
+    const bookId = row['bookId'] === null || row['bookId'] === undefined ? '' : str(row['bookId'])
+    if (bookId === null) continue
+
+    out.push({
+      id: rowId,
+      bookId,
+      kind,
+      body,
+      answer: answerText,
+      source,
+      cfi: str(row['cfi']) ?? '',
+      createdAt,
+    } as Card)
   }
-  return out
+  /* A REPEATED ID LOSES A ROW IN THE RECONCILER, not here — see `byFirstId`. */
+  return byFirstId(out, (card) => card.id)
 }
 
 export interface CardsStore extends RemoteCards {
@@ -82,12 +124,18 @@ export function createRemoteCards(channel: ShelfChannel): CardsStore {
     for (const l of listeners) l()
   }
 
+  /* WHICH REFRESH IS THE CURRENT ONE — the same guard `marks.ts` and `books.ts`
+   * carry, for the same reason: a detached walk that starts first can finish
+   * last, and an older deck lands on top of a newer one. */
+  let generation = 0
+
   const refresh = (): void => {
+    const mine = ++generation
     void (async () => {
       try {
         const seen: Card[] = []
         for await (const page of channel.stream('card.list', {})) seen.push(...parseCards(page))
-        if (!live) return
+        if (!live || mine !== generation) return
         /* NEWEST FIRST — the card just made is the one the reader is looking
          * for, which is the order `byNewest` gives the desktop's deck. */
         cards = [...seen].sort((a, b) => b.createdAt - a.createdAt)

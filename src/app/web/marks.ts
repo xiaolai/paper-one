@@ -1,4 +1,16 @@
-import { isAnnotation, isBookmark, type Annotation, type Bookmark, type Mark, type MarkRow, type MarkTint } from '../../kernel'
+import {
+  MARK_KINDS,
+  MARK_STYLES,
+  MARK_TINTS,
+  isAnnotation,
+  isBookmark,
+  type Annotation,
+  type Bookmark,
+  type Mark,
+  type MarkRow,
+  type MarkTint,
+} from '../../kernel'
+import { byFirstId, id, num, oneOf, str } from './wireRow'
 import type { ShelfChannel } from './channel'
 
 /**
@@ -97,7 +109,23 @@ export function asMark(row: MarkRow): Mark {
   }
 }
 
-/** Rows out of a `mark.list` answer, ignoring anything that is not one. */
+/**
+ * Rows out of a `mark.list` answer, ignoring anything that is not one.
+ *
+ * ⚠️ **EVERY FIELD IS READ, AND TWO USED TO BE.** This checked `id` and
+ * `bookId` and then cast the rest — and `asMark` copies thirteen fields
+ * straight across. A `text` that arrived as an object reached React, which
+ * renders an object child by throwing; a `createdAt` that arrived as a string
+ * sorted lexically; a `kind` this build has never heard of fell through every
+ * switch to nothing. The row looked valid because the two fields anybody had
+ * thought about were.
+ *
+ * A row missing anything REQUIRED is dropped rather than defaulted: a mark with
+ * no `cfi` cannot be found in a book, and one with an invented `tint` is a
+ * shelf and a client disagreeing about the wire, which is worth seeing.
+ * `prefix`/`suffix` default to `''` because they genuinely may be absent — a
+ * mark made before phase 19 has none.
+ */
 export function parseMarks(answer: unknown): readonly Mark[] {
   if (!Array.isArray(answer)) return []
   const out: Mark[] = []
@@ -106,11 +134,53 @@ export function parseMarks(answer: unknown): readonly Mark[] {
     const row = item as Record<string, unknown>
     /* AN ID AND A BOOK, or it is not a mark: React keys on the first and every
      * view groups by the second. */
-    if (typeof row['id'] !== 'string' || row['id'] === '') continue
-    if (typeof row['bookId'] !== 'string' || row['bookId'] === '') continue
-    out.push(asMark(row as unknown as MarkRow))
+    const rowId = id(row['id'])
+    const bookId = id(row['bookId'])
+    if (rowId === null || bookId === null) continue
+
+    const cfi = str(row['cfi'])
+    const sectionIndex = num(row['sectionIndex'])
+    const text = str(row['text'])
+    const note = str(row['note'])
+    const chapter = str(row['chapter'])
+    const createdAt = num(row['createdAt'])
+    const kind = oneOf(MARK_KINDS, row['kind'])
+    const tint = oneOf(MARK_TINTS, row['tint'])
+    const style = oneOf(MARK_STYLES, row['style'])
+    if (
+      cfi === null ||
+      sectionIndex === null ||
+      text === null ||
+      note === null ||
+      chapter === null ||
+      createdAt === null ||
+      kind === null ||
+      tint === null ||
+      style === null
+    ) {
+      continue
+    }
+
+    out.push({
+      id: rowId,
+      bookId,
+      cfi,
+      sectionIndex,
+      text,
+      /* ABSENT IS LEGAL HERE, and only here: recovery context did not cross the
+         wire before phase 19, so an older mark has none. */
+      prefix: str(row['prefix']) ?? '',
+      suffix: str(row['suffix']) ?? '',
+      note,
+      kind,
+      tint,
+      style,
+      chapter,
+      createdAt,
+    } as Mark)
   }
-  return out
+  /* A REPEATED ID LOSES A ROW IN THE RECONCILER, not here — see `byFirstId`. */
+  return byFirstId(out, (mark) => mark.id)
 }
 
 export interface MarksStore extends RemoteMarks {
@@ -140,7 +210,21 @@ export function createRemoteMarks(channel: ShelfChannel): MarksStore {
     changed()
   }
 
+  /**
+   * WHICH REFRESH IS THE CURRENT ONE.
+   *
+   * ⚠️ `refresh` is reached from four places — the initial read, `Marginalia`'s
+   * `loadAll` on mount, a mark being made, and the refusal path in `write` —
+   * and each fires a detached async walk with nothing sequencing them. The one
+   * that STARTS first can FINISH last, so a mark the reader has just made
+   * disappears when an older answer lands on top of the newer one, and comes
+   * back on the next refresh. Intermittent, and indistinguishable from the
+   * shelf being wrong.
+   */
+  let generation = 0
+
   const refresh = (): void => {
+    const mine = ++generation
     void (async () => {
       try {
         const seen: Mark[] = []
@@ -148,7 +232,7 @@ export function createRemoteMarks(channel: ShelfChannel): MarksStore {
         for await (const page of channel.stream('mark.list', {})) {
           seen.push(...parseMarks(page))
         }
-        if (!live) return
+        if (!live || mine !== generation) return
         marks = seen
         resplit()
       } catch (cause) {
