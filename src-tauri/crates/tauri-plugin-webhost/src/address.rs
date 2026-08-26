@@ -57,6 +57,8 @@ use std::process::Command;
 
 use serde::Serialize;
 
+use crate::state::Bind;
+
 /// Where a browser should go, and whether it can get there.
 #[derive(Serialize, Debug, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
@@ -78,7 +80,14 @@ pub enum Address {
     /// Deliberately carries NO url. The server is listening and the page would
     /// load; the sign-in would not stick. See the header.
     NoHttps { port: u16 },
-    /// The server never bound; there is nothing to reach.
+    /// The listener has not answered yet. **ASK AGAIN** — this is the only
+    /// state that resolves itself, and telling it apart from `Unavailable` is
+    /// the whole reason `Bind` exists. It used to be reported as `Unavailable`,
+    /// which the pane draws as a permanent failure a reader is asked to restart
+    /// the app over.
+    Binding,
+    /// The bind was REFUSED; there is nothing to reach and there will not be.
+    /// The plugin binds one pinned port and does not scan for another.
     Unavailable,
 }
 
@@ -229,9 +238,14 @@ pub fn serves_port(serve_status: &str, port: u16) -> bool {
 /// can be tested without a tailnet. That split is not decoration: the decision
 /// this makes was wrong for every self-hosted control server and no test could
 /// see it, because the only way in was two subprocesses.
-pub fn resolve(port: Option<u16>) -> Address {
-    let Some(port) = port else {
-        return Address::Unavailable;
+pub fn resolve(bind: Bind) -> Address {
+    let port = match bind {
+        Bind::Bound(port) => port,
+        /* NOT `Unavailable`. The listener binds on a spawned task, so every
+         * launch passes through this state — and reporting it as a refusal told
+         * a reader to quit whatever was holding the port when nothing was. */
+        Bind::Pending => return Address::Binding,
+        Bind::Failed => return Address::Unavailable,
     };
     let Some(status) = tailscale(&["status", "--json"]) else {
         return Address::NoHttps { port };
@@ -390,7 +404,11 @@ mod tests {
 
     #[test]
     fn no_port_means_there_is_nothing_to_reach() {
-        assert_eq!(resolve(None), Address::Unavailable);
+        assert_eq!(resolve(Bind::Failed), Address::Unavailable);
+        /* AND PENDING IS NOT UNAVAILABLE. Every launch is `Pending` for a
+        moment, and reporting that as a refusal is what put "port 27182 was
+        already in use" in front of readers whose port was free. */
+        assert_eq!(resolve(Bind::Pending), Address::Binding);
     }
 
     /// THE COMMAND IS ONLY OFFERED WHEN IT CAN WORK.

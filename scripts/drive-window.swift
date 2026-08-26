@@ -28,6 +28,15 @@
 // means that click only activates; the page never sees it. Raise the window
 // first, or send the click twice.
 //
+// **A missing permission looks exactly like a successful run.** `CGEvent(...)`
+// returns nil when this process may not post events — no Accessibility grant,
+// or a terminal that has never been added to Input Monitoring — and every call
+// site here optional-chained that nil away. The tool then exited 0 having
+// touched nothing, so an investigation driven by it read "clicked, nothing
+// happened" as a finding about the APP. Every construction is checked now and
+// a failure exits 3, which is the only difference between a diagnostic
+// instrument and a source of wrong conclusions.
+//
 // # Coordinates
 //
 // Screen points, origin at the top-left of the main display — the same space
@@ -48,6 +57,29 @@ func fail(_ message: String) -> Never {
     exit(2)
 }
 
+/// A refused event, told apart from a bad argument by its exit code.
+///
+/// ⚠️ **THIS IS THE FAILURE THE WHOLE FILE EXISTS TO NOT HAVE.** A tool that
+/// cannot drive the app must say so; one that silently drives nothing and exits
+/// 0 sends an investigation after the app instead of after the permission.
+func refused(_ what: String) -> Never {
+    FileHandle.standardError.write(
+        """
+        drive-window: the window server refused to create a \(what) event.
+          This process may not post input events. Grant the terminal (or whatever
+          launched this) Accessibility, and Input Monitoring, in System Settings ›
+          Privacy & Security. Nothing was clicked or scrolled.
+
+        """.data(using: .utf8)!)
+    exit(3)
+}
+
+/// Build an event or exit. Never returns nil, which is the point.
+func event(_ made: CGEvent?, _ what: String) -> CGEvent {
+    guard let made else { refused(what) }
+    return made
+}
+
 let args = CommandLine.arguments
 guard args.count >= 4 else {
     fail("usage: drive-window click <x> <y> | drive-window scroll <x> <y> <ticks>")
@@ -57,22 +89,31 @@ guard let x = Double(args[2]), let y = Double(args[3]) else {
 }
 
 let point = CGPoint(x: x, y: y)
-let source = CGEventSource(stateID: .hidSystemState)
+/* THE SOURCE IS CHECKED TOO. It is nil under the same conditions the events
+ * are, and passing nil onward only moves the silent failure one line down. */
+guard let source = CGEventSource(stateID: .hidSystemState) else {
+    refused("event source")
+}
 
 /* MOVED FIRST, ALWAYS. A click posted at a point the cursor is not at still
  * lands there, but hover state does not update — so a control that only
  * appears on hover is not there to be clicked. */
-CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?
-    .post(tap: .cghidEventTap)
+event(
+    CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left),
+    "mouse-moved"
+).post(tap: .cghidEventTap)
 usleep(80_000)
 
 switch args[1] {
 case "click":
     for type in [CGEventType.leftMouseDown, CGEventType.leftMouseUp] {
-        let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: .left)
+        let click = event(
+            CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: .left),
+            "\(type == .leftMouseDown ? "mouse-down" : "mouse-up")"
+        )
         /* See the header: without this WebKit does not forward the click. */
-        event?.setIntegerValueField(.mouseEventClickState, value: 1)
-        event?.post(tap: .cghidEventTap)
+        click.setIntegerValueField(.mouseEventClickState, value: 1)
+        click.post(tap: .cghidEventTap)
         usleep(60_000)
     }
 
@@ -84,14 +125,17 @@ case "scroll":
      * treated as a fling by some scroll containers and lands somewhere the
      * caller did not ask for; a run of small ones lands predictably. */
     for _ in 0..<8 {
-        CGEvent(
-            scrollWheelEvent2Source: source,
-            units: .pixel,
-            wheelCount: 1,
-            wheel1: ticks,
-            wheel2: 0,
-            wheel3: 0
-        )?.post(tap: .cghidEventTap)
+        event(
+            CGEvent(
+                scrollWheelEvent2Source: source,
+                units: .pixel,
+                wheelCount: 1,
+                wheel1: ticks,
+                wheel2: 0,
+                wheel3: 0
+            ),
+            "scroll-wheel"
+        ).post(tap: .cghidEventTap)
         usleep(40_000)
     }
 

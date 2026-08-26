@@ -25,6 +25,16 @@ import type { Browser, CodeOffer, WebHostAddress, WebHostWire } from '../lib/wir
 
 /** How often the browser list is re-read while the pane is open. */
 const POLL_MS = 4000
+/**
+ * How long to wait before asking again while the listener is still binding.
+ *
+ * Short, because this is the gap between the app starting and its socket being
+ * up — hundreds of milliseconds, not seconds — and the reader is looking at a
+ * pane that says "starting" while it lasts. Unlike the browser poll, this stops
+ * as soon as the answer settles, so a short interval costs a handful of calls
+ * at launch and nothing at all afterwards.
+ */
+const BINDING_RETRY_MS = 400
 /** How long a copy button says it worked. */
 const COPIED_MS = 1600
 
@@ -141,9 +151,20 @@ function AddressBlock({ address }: { readonly address: WebHostAddress | null }) 
         </div>
       )
 
+    case 'binding':
+      /* ⚠️ **THIS USED TO BE REPORTED AS `unavailable`**, which is the sentence
+       * below: quit whatever is holding the port and restart. The listener
+       * binds on a spawned task, so every launch passes through here — and the
+       * pane sampled the address once, so a reader who opened it in that window
+       * was told a working client was broken, permanently, in a state that
+       * would never refresh itself. `BrowsersPane` asks again while this is the
+       * answer. */
+      return <div className={ui.hint}>Starting the browser client…</div>
+
     case 'unavailable':
       /* The plugin binds ONE pinned port and does not scan for another, so this
-       * is not a transient state that will resolve itself. */
+       * really is terminal — which is only true now that "not yet" has a state
+       * of its own to be in. */
       return (
         <div className={ui.hint}>
           Not running — port 27182 was already in use when Paper started. Quit whatever holds it and
@@ -151,6 +172,12 @@ function AddressBlock({ address }: { readonly address: WebHostAddress | null }) 
         </div>
       )
   }
+  /* EVERY KIND ANSWERED. A `switch` that falls through returns `undefined`,
+     which React draws as nothing at all — so a variant added to the wire and
+     forgotten here would be a blank space past a green `tsc`. `never` is what
+     makes it a compile error instead. */
+  const unreached: never = address
+  return unreached
 }
 
 /**
@@ -186,6 +213,9 @@ export function BrowsersPane({ wire, pollMs = POLL_MS }: BrowsersPaneProps) {
   const [offer, setOffer] = useState<CodeOffer | null>(null)
   const [remaining, setRemaining] = useState(0)
   const [browsers, setBrowsers] = useState<readonly Browser[]>([])
+  /* Disables Hide while the shelf is being asked, so a second click cannot
+     start a second cancellation of the same code. */
+  const [hiding, setHiding] = useState(false)
   const [problem, setProblem] = useState<string | null>(null)
 
   /* THE BROWSERS, NOT THE SOCKETS.
@@ -204,14 +234,41 @@ export function BrowsersPane({ wire, pollMs = POLL_MS }: BrowsersPaneProps) {
     }
   }, [wire])
 
-  /* THE ADDRESS IS ASKED ONCE, not on the poll. Resolving it shells out to
-   * Tailscale twice, and a reader's tailnet does not change every four
-   * seconds. */
+  /* THE ADDRESS IS ASKED ONCE IT IS SETTLED, not on the poll. Resolving it
+   * shells out to Tailscale twice, and a reader's tailnet does not change every
+   * four seconds.
+   *
+   * ⚠️ **IT USED TO BE ASKED EXACTLY ONCE, FULL STOP** — and the listener binds
+   * on a spawned task, so the first answer of a launch is routinely "not bound
+   * yet". That was indistinguishable from "the port was taken", so opening this
+   * pane in the first moments of a launch drew "port 27182 was already in use;
+   * quit whatever holds it and reopen Paper" and left it there for the life of
+   * the run, over a browser client that was working.
+   *
+   * `binding` is a state of its own now, and it is the ONLY one asked again:
+   * every other answer is settled, including `unavailable`, which really is
+   * terminal because the plugin binds one pinned port and does not scan. */
   useEffect(() => {
-    void wire
-      .address()
-      .then(setAddress)
-      .catch((thrown: unknown) => setProblem(thrown instanceof Error ? thrown.message : String(thrown)))
+    let live = true
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const ask = () => {
+      void wire
+        .address()
+        .then((next) => {
+          if (!live) return
+          setAddress(next)
+          if (next.kind === 'binding') timer = setTimeout(ask, BINDING_RETRY_MS)
+        })
+        .catch((thrown: unknown) => {
+          if (!live) return
+          setProblem(thrown instanceof Error ? thrown.message : String(thrown))
+        })
+    }
+    ask()
+    return () => {
+      live = false
+      if (timer !== undefined) clearTimeout(timer)
+    }
   }, [wire])
 
   useEffect(() => {
@@ -255,6 +312,35 @@ export function BrowsersPane({ wire, pollMs = POLL_MS }: BrowsersPaneProps) {
       setOffer(await wire.beginCode())
     } catch (thrown) {
       setProblem(thrown instanceof Error ? thrown.message : String(thrown))
+    }
+  }, [wire])
+
+  /**
+   * Take the code back — from the SHELF first, and only then from the screen.
+   *
+   * ⚠️ **THIS USED TO CLEAR THE SCREEN AND FIRE THE CANCELLATION AT NOTHING.**
+   * `setOffer(null); void wire.cancelCode()` — no await, no rejection handler.
+   * The code the reader was hiding is a live authentication credential held by
+   * the shelf, so an IPC failure left six digits valid, off screen, with the
+   * pane showing "Show code" as though nothing were outstanding. The reader had
+   * done the one thing available to them to withdraw it and been told it
+   * worked. The unhandled rejection was the smaller half.
+   *
+   * The order is the fix: the shelf is the authority, so nothing is claimed
+   * until it answers. A failure keeps the code on screen — where the reader can
+   * see what is still live and try again — and says so.
+   */
+  const hide = useCallback(async () => {
+    setProblem(null)
+    setHiding(true)
+    try {
+      await wire.cancelCode()
+      setOffer(null)
+    } catch (thrown) {
+      const why = thrown instanceof Error ? thrown.message : String(thrown)
+      setProblem(`The code is still live — the shelf did not take it back: ${why}`)
+    } finally {
+      setHiding(false)
     }
   }, [wire])
 
@@ -315,12 +401,10 @@ export function BrowsersPane({ wire, pollMs = POLL_MS }: BrowsersPaneProps) {
             <button
               type="button"
               className={ui.button}
-              onClick={() => {
-                setOffer(null)
-                void wire.cancelCode()
-              }}
+              onClick={() => void hide()}
+              disabled={hiding}
             >
-              Hide
+              {hiding ? 'Hiding…' : 'Hide'}
             </button>
           </div>
         </>

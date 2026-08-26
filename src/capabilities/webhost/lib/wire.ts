@@ -59,7 +59,16 @@ export type WebHostAddress =
    *  a plain-HTTP address loads and then cannot hold a sign-in, which is a
    *  wrong answer to "where do I point my browser" rather than a lesser one. */
   | { readonly kind: 'no-https'; readonly port: number }
-  /** The server never bound; there is nothing to reach. */
+  /** The listener has not answered yet.
+   *
+   *  ⚠️ **ASK AGAIN.** This is the ONE address state that resolves itself, and
+   *  it used to be reported as `unavailable` — which the pane draws as a
+   *  permanent failure telling the reader to quit whatever is holding the port
+   *  and restart Paper. The listener binds on a spawned task, so every launch
+   *  passes through here, and a pane opened during that window said a working
+   *  browser client was broken and never took it back. */
+  | { readonly kind: 'binding' }
+  /** The bind was REFUSED; there is nothing to reach and there will not be. */
   | { readonly kind: 'unavailable' }
 
 /**

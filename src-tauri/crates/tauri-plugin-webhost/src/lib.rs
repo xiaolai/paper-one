@@ -82,8 +82,20 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                         /* The bound port, read back rather than assumed — the
                          * one fact worth having if this is ever changed to
                          * accept 0. */
-                        if let Ok(local) = listener.local_addr() {
-                            announce.set_port(local.port());
+                        /* ⚠️ **`local_addr` FAILING IS A FAILED BIND**, not a
+                         * silent nothing. Without this the state stayed
+                         * `Pending` for the life of the run and the pane said
+                         * "looking for an address…" forever — the quiet failure
+                         * that `Bind` exists to make impossible. */
+                        match listener.local_addr() {
+                            Ok(local) => announce.set_port(local.port()),
+                            Err(error) => {
+                                log::error!(
+                                    "webhost: bound the listener but could not read its address: \
+                                     {error}. The browser client is unavailable this run."
+                                );
+                                announce.set_bind_failed();
+                            }
                         }
                         if let Err(error) =
                             axum::serve(listener, router(serving, client::CLIENT)).await
@@ -99,6 +111,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                             "webhost: could not bind 127.0.0.1:{WEBHOST_PORT}: {error}. \
                              The browser client is unavailable this run; nothing else is affected."
                         );
+                        announce.set_bind_failed();
                     }
                 }
             });

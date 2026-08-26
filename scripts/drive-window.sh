@@ -18,6 +18,12 @@
 #
 # THE FIRST CLICK ON AN UNFOCUSED WINDOW IS EATEN by macOS click-through — it
 # only activates. Raise the window first (see AGENTS.md) or click twice.
+#
+# EXIT CODES: 0 posted, 2 bad usage, 3 the window server refused to create the
+# event — which means this process may not post input events (Accessibility and
+# Input Monitoring, in Privacy & Security). 3 exists because that failure used
+# to exit 0 having touched nothing, and an investigation driven by this tool
+# then read "clicked, nothing happened" as a finding about the app.
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)

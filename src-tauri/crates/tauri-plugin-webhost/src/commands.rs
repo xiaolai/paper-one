@@ -97,8 +97,8 @@ pub async fn webhost_address<R: Runtime>(
     _app: AppHandle<R>,
     state: State<'_, Arc<WebHostState>>,
 ) -> Result<Address, Error> {
-    let port = state.port();
-    tauri::async_runtime::spawn_blocking(move || crate::address::resolve(port))
+    let bind = state.bind();
+    tauri::async_runtime::spawn_blocking(move || crate::address::resolve(bind))
         .await
         .map_err(|_| Error::Internal)
 }

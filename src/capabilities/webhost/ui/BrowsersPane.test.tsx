@@ -139,14 +139,24 @@ describe('BrowsersPane', () => {
     await waitFor(() => expect(screen.queryByText('100001')).toBeNull())
   })
 
+  /**
+   * ⚠️ **THIS TEST USED TO UNMOUNT A PANE WITH NO CODE SHOWING**, and pass. It
+   * never called `beginCode`, so what it measured was "the unmount effect
+   * fires" — true of a pane that has nothing to cancel, which is not the case
+   * anyone cares about. The condition it exists for is a LIVE offer: six digits
+   * that authenticate a browser, still good, on a screen nobody is looking at.
+   */
   it('cancels the live code when the pane goes away', async () => {
-    /* The shelf cannot know the screen is gone unless the pane says so, and six
-     * digits nobody is watching are still good until it does. */
     const cancelCode = vi.fn(async () => {})
     const { unmount } = render(<BrowsersPane wire={fakeWire({ cancelCode })} />)
-    await screen.findByRole('button', { name: 'Show code' })
+    fireEvent.click(await screen.findByRole('button', { name: 'Show code' }))
+    /* THE CODE IS ON SCREEN before anything is unmounted — this is the whole
+       difference between this test and the one it replaced. */
+    expect(await screen.findByText('100001')).toBeTruthy()
+    expect(cancelCode, 'nothing should have been cancelled yet').not.toHaveBeenCalled()
+
     unmount()
-    expect(cancelCode).toHaveBeenCalled()
+    expect(cancelCode, 'a live code outlived the pane showing it').toHaveBeenCalled()
   })
 
   it('lists paired browsers and revokes one', async () => {
@@ -208,5 +218,128 @@ describe('BrowsersPane', () => {
     render(<BrowsersPane wire={wire} />)
     fireEvent.click(await screen.findByRole('button', { name: 'Show code' }))
     expect(await screen.findByText('webhost is not running')).toBeTruthy()
+  })
+})
+
+/**
+ * THE TWO STATES THAT LOOK THE SAME AND ARE NOT: a listener that has not bound
+ * yet, and a port that was taken.
+ */
+describe('while the listener is still binding', () => {
+  /**
+   * ⚠️ **"NOT BOUND YET" USED TO BE REPORTED AS "PORT ALREADY IN USE".**
+   *
+   * The listener binds on a spawned task, so every launch passes through the
+   * pending state — and the pane asked for the address exactly once. A reader
+   * who opened it during that window was told to quit whatever was holding port
+   * 27182 and restart Paper, over a browser client that came up half a second
+   * later. Nothing ever took it back, because there was nothing to take back
+   * with: the pane had no second question to ask.
+   */
+  it('says it is starting, not that the port is taken', async () => {
+    const wire = fakeWire({ address: async () => ({ kind: 'binding' }) })
+    render(<BrowsersPane wire={wire} />)
+    expect(await screen.findByText(/Starting the browser client/i)).toBeTruthy()
+    expect(screen.queryByText(/already in use/i), 'a working client accused of being broken').toBeNull()
+  })
+
+  it('asks again, and draws the address once it settles', async () => {
+    let bound = false
+    const wire = fakeWire({
+      address: async () =>
+        bound
+          ? { kind: 'https' as const, url: 'https://studio.tail1234.ts.net/' }
+          : { kind: 'binding' as const },
+    })
+    render(<BrowsersPane wire={wire} />)
+    expect(await screen.findByText(/Starting the browser client/i)).toBeTruthy()
+
+    bound = true
+    expect(await screen.findByText('https://studio.tail1234.ts.net/')).toBeTruthy()
+  })
+
+  /* AND IT STOPS ASKING once the answer is settled — including `unavailable`,
+     which really is terminal: the plugin binds one pinned port and does not
+     scan for another. An address resolution shells out to Tailscale twice, so
+     a pane that kept asking would run two subprocesses every 400ms forever. */
+  it('stops asking once the answer is settled', async () => {
+    const address = vi.fn(async () => ({ kind: 'unavailable' as const }))
+    render(<BrowsersPane wire={fakeWire({ address })} />)
+    expect(await screen.findByText(/already in use/i)).toBeTruthy()
+
+    const asked = address.mock.calls.length
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 1200))
+    })
+    expect(address.mock.calls.length, 'a settled address must not be re-resolved').toBe(asked)
+  })
+})
+
+/**
+ * HIDING A CODE IS A WITHDRAWAL, and it used to be a repaint.
+ */
+describe('hiding a live code', () => {
+  /** Show a code and return the wire's `cancelCode` spy. */
+  async function showing(cancelCode: () => Promise<void>) {
+    render(<BrowsersPane wire={fakeWire({ cancelCode })} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Show code' }))
+    expect(await screen.findByText('100001')).toBeTruthy()
+  }
+
+  it('takes the code back from the shelf, then from the screen', async () => {
+    const cancelCode = vi.fn(async () => {})
+    await showing(cancelCode)
+    fireEvent.click(screen.getByRole('button', { name: 'Hide' }))
+    await waitFor(() => expect(screen.queryByText('100001')).toBeNull())
+    expect(cancelCode).toHaveBeenCalled()
+  })
+
+  /**
+   * ⚠️ **THE CODE USED TO LEAVE THE SCREEN WHETHER OR NOT IT LEFT THE SHELF.**
+   *
+   * `setOffer(null); void wire.cancelCode()` — no await, no rejection handler.
+   * An IPC failure therefore left six digits VALID, off screen, with the pane
+   * back to "Show code" as though nothing were outstanding. The reader had done
+   * the only thing available to withdraw the credential and been told it
+   * worked.
+   */
+  it('keeps the code visible, and says so, when the shelf refuses', async () => {
+    const cancelCode = vi.fn(async () => {
+      throw new Error('the plugin is not answering')
+    })
+    await showing(cancelCode)
+    fireEvent.click(screen.getByRole('button', { name: 'Hide' }))
+
+    expect(await screen.findByText(/still live/i)).toBeTruthy()
+    expect(screen.getByText(/the plugin is not answering/i)).toBeTruthy()
+    expect(
+      screen.getByText('100001'),
+      'a code still valid on the shelf must stay where the reader can see it',
+    ).toBeTruthy()
+  })
+
+  /* AND ONE CANCELLATION AT A TIME. A second click while the first is in flight
+     would cancel a code that is already being cancelled — harmless here, and
+     the kind of double-fire that stops being harmless the moment `cancelCode`
+     is not idempotent. */
+  it('refuses a second click while the first is in flight', async () => {
+    let release = () => {}
+    const cancelCode = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve
+        }),
+    )
+    await showing(cancelCode)
+    fireEvent.click(screen.getByRole('button', { name: 'Hide' }))
+
+    const button = await screen.findByRole('button', { name: /Hiding/i })
+    expect((button as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.click(button)
+    expect(cancelCode).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      release()
+    })
   })
 })

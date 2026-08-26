@@ -1,7 +1,7 @@
 //! What the plugin holds between commands: the host, the port it bound, and
 //! whether the webview is listening.
 
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -11,11 +11,42 @@ use paper_webhost::WebHost;
 use crate::commands::{Browser, BrowserSession, CodeOffer};
 use crate::Error;
 
+/// Whether there is a port to reach, TOLD APART FROM whether there will be.
+///
+/// ⚠️ **THESE USED TO BE THE SAME VALUE**, and the pane said the wrong one.
+/// The port was a `u16` where `0` meant "not bound", and the listener binds on
+/// a spawned task — so for the first moments of every launch `port()` was
+/// `None`, which `resolve` reported as `Unavailable`, which the Browsers pane
+/// draws as "port 27182 was already in use; quit whatever holds it and reopen
+/// Paper". The pane samples the address ONCE, so a reader who opened it during
+/// that window was told, permanently and in a state that would never refresh,
+/// that a working browser client was broken.
+///
+/// The distinction is real and it is three-valued: not yet, yes, and never.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Bind {
+    /// The listener has not answered yet. **NOT a failure** — ask again.
+    Pending,
+    /// Listening on this port.
+    Bound(u16),
+    /// The bind was refused. There is no browser client this run, and no
+    /// amount of asking again will change that: the plugin binds ONE pinned
+    /// port and does not scan.
+    Failed,
+}
+
+/// `Bind` in one atomic: `Pending` is 0, `Failed` is `u32::MAX`, and a bound
+/// port is itself. A port of 0 cannot be bound to and read back — the kernel
+/// answers with the port it chose — so the sentinel cannot collide with a real
+/// value.
+const BIND_PENDING: u32 = 0;
+const BIND_FAILED: u32 = u32::MAX;
+
 pub struct WebHostState {
     pub host: Arc<WebHost>,
-    /// 0 until the listener binds. An atomic rather than a lock because it is
-    /// written once and read by every status call.
-    port: AtomicU16,
+    /// The listener's outcome — see [`Bind`]. An atomic rather than a lock
+    /// because it is written once and read by every status call.
+    bind: AtomicU32,
     /// Whether the webview has announced that it is serving the router.
     ///
     /// ⚠️ **IT GATES NOTHING, AND THE COMMAND CONTRACT SAID IT GATED FRAME
@@ -38,19 +69,41 @@ impl WebHostState {
     pub fn new(host: Arc<WebHost>) -> Self {
         Self {
             host,
-            port: AtomicU16::new(0),
+            bind: AtomicU32::new(BIND_PENDING),
             ready: AtomicBool::new(false),
         }
     }
 
     pub fn set_port(&self, port: u16) {
-        self.port.store(port, Ordering::SeqCst);
+        self.bind.store(u32::from(port), Ordering::SeqCst);
     }
 
+    /// The bind was refused. **CALL THIS ON EVERY FAILING PATH** — a bind that
+    /// neither succeeds nor is reported leaves the pane saying "looking for an
+    /// address" for the life of the run, which is the failure this type exists
+    /// to make impossible to ship silently.
+    pub fn set_bind_failed(&self) {
+        self.bind.store(BIND_FAILED, Ordering::SeqCst);
+    }
+
+    pub fn bind(&self) -> Bind {
+        match self.bind.load(Ordering::SeqCst) {
+            BIND_PENDING => Bind::Pending,
+            BIND_FAILED => Bind::Failed,
+            port => Bind::Bound(port as u16),
+        }
+    }
+
+    /// The bound port, or `None` for both "not yet" and "never".
+    ///
+    /// For STATUS only, where the two really are one answer: the status row
+    /// shows a port or does not. Anything that has to tell a reader WHY there
+    /// is no port must use [`Self::bind`] — conflating them is the defect this
+    /// whole type was introduced for.
     pub fn port(&self) -> Option<u16> {
-        match self.port.load(Ordering::SeqCst) {
-            0 => None,
-            port => Some(port),
+        match self.bind() {
+            Bind::Bound(port) => Some(port),
+            Bind::Pending | Bind::Failed => None,
         }
     }
 
@@ -168,5 +221,83 @@ impl WebHostState {
             .pipe
             .wait_for_frames(WebSessionId(session), usize::MAX, Self::RECV_WAIT)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The three-state, on its own — no `WebHostState`, which needs a running
+    /// `WebHost`. The encoding is what could go wrong: one atomic carrying a
+    /// port and two sentinels.
+    fn cell() -> AtomicU32 {
+        AtomicU32::new(BIND_PENDING)
+    }
+
+    fn read(cell: &AtomicU32) -> Bind {
+        match cell.load(Ordering::SeqCst) {
+            BIND_PENDING => Bind::Pending,
+            BIND_FAILED => Bind::Failed,
+            port => Bind::Bound(port as u16),
+        }
+    }
+
+    /// ⚠️ **PENDING IS NOT FAILED, AND THEY USED TO BE ONE VALUE.** The port
+    /// was a `u16` where 0 meant "not bound"; the listener binds on a spawned
+    /// task, so every launch is briefly in that state — and the Browsers pane
+    /// drew it as "port 27182 was already in use, quit whatever holds it and
+    /// reopen Paper", permanently, over a client that was about to work.
+    #[test]
+    fn a_bind_that_has_not_answered_is_not_a_bind_that_failed() {
+        let cell = cell();
+        assert_eq!(read(&cell), Bind::Pending);
+        assert_ne!(read(&cell), Bind::Failed);
+    }
+
+    #[test]
+    fn a_bound_port_reads_back_as_itself() {
+        let cell = cell();
+        cell.store(u32::from(27182u16), Ordering::SeqCst);
+        assert_eq!(read(&cell), Bind::Bound(27182));
+    }
+
+    /// The sentinels cannot collide with a port a listener can report.
+    ///
+    /// `Failed` is above the whole `u16` range. `Pending` is 0, which is a
+    /// `u16` — and is safe for the reason the constant's own note gives: a
+    /// listener never REPORTS 0. Binding to port 0 asks the kernel to choose
+    /// one, and `local_addr` answers with the port it chose. So the range that
+    /// has to be clear is 1..=65535, and that is what this walks.
+    #[test]
+    fn the_sentinels_are_outside_the_range_of_a_port() {
+        assert!(BIND_FAILED > u32::from(u16::MAX));
+        for port in [1u16, 80, 27182, u16::MAX] {
+            let raw = u32::from(port);
+            assert_ne!(raw, BIND_PENDING);
+            assert_ne!(raw, BIND_FAILED);
+            assert_eq!(
+                match raw {
+                    BIND_PENDING => Bind::Pending,
+                    BIND_FAILED => Bind::Failed,
+                    got => Bind::Bound(got as u16),
+                },
+                Bind::Bound(port)
+            );
+        }
+    }
+
+    /// `port()` folds the two "no port" states together, which is right for the
+    /// status row and wrong for anything explaining itself to a reader. Both
+    /// answers are asserted here so the folding stays deliberate.
+    #[test]
+    fn port_is_none_for_both_ways_of_having_no_port() {
+        let port_of = |bind| match bind {
+            Bind::Bound(port) => Some(port),
+            Bind::Pending | Bind::Failed => None,
+        };
+        assert_eq!(port_of(Bind::Pending), None);
+        assert_eq!(port_of(Bind::Failed), None);
+        assert_eq!(port_of(Bind::Bound(27182)), Some(27182));
     }
 }
