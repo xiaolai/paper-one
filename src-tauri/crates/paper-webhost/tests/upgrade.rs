@@ -417,23 +417,24 @@ async fn a_revoked_browser_is_sent_nothing_that_was_already_queued() {
     );
 }
 
-/* ⚠️ **THE RETRY DEADLINE HAS NO TEST HERE, AND THAT IS A KNOWN GAP.**
+/* THE RETRY DEADLINE IS TESTED IN `lib.rs`, NOT HERE, AND ON PURPOSE.
  *
  * `pump` re-offers a held frame on an ABSOLUTE deadline (`sleep_until`) rather
  * than a fresh `sleep(RETRY)`, because `select!` rebuilds its futures on every
  * pass: a relative sleep restarts from zero whenever the outbound arm wins, so
  * a shelf that is streaming would never retry the frame at all.
  *
- * A test was written for it and DELETED, which is worth recording. It filled
- * the inbox, kept a producer pushing frames toward the browser, sent a sentinel
- * and waited for it — and it passed against the defect. The producer cannot be
- * made to outpace the pump reliably: between bursts `outbound.recv()` goes
- * pending, the relative timer gets its 4 ms, and the sentinel arrives. Keeping
- * it would have added a case that looks like coverage and distinguishes
- * nothing, which is the exact shape this suite's own audit found fifty times.
+ * An integration test for it was written HERE and deleted. It filled the inbox,
+ * kept a producer pushing frames toward the browser, sent a sentinel and waited
+ * — and it passed against the defect. A producer cannot be made to outpace the
+ * pump reliably: between bursts `outbound.recv()` goes pending, the relative
+ * timer gets its four milliseconds, and the sentinel arrives. Keeping it would
+ * have added a case that looks like coverage and distinguishes nothing.
  *
- * What would actually cover it is a fake clock inside the pump, or a drain
- * notification replacing the timer altogether. Neither is here yet. */
+ * `RetryAt` in `lib.rs` is what that decision became, and
+ * `the_deadline_does_not_move_when_it_is_read_again` checks the property that
+ * actually separates the two implementations: re-reading the deadline must not
+ * postpone it. That test fails against every relative formulation. */
 
 #[tokio::test]
 async fn a_revoked_credential_cannot_open_a_second_socket() {

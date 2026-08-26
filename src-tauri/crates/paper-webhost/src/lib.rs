@@ -71,6 +71,37 @@ pub const SESSION_COOKIE: &str = "paper_session";
 /// wakeups a second rather than a spinning core. See `pump`.
 const RETRY: std::time::Duration = std::time::Duration::from_millis(4);
 
+/// WHEN a held frame is next offered, as a value rather than as a `sleep` call.
+///
+/// ⚠️ **THIS EXISTS BECAUSE THE OBVIOUS SPELLING IS WRONG AND UNTESTABLE.**
+/// `tokio::select!` rebuilds its futures on every pass, so
+/// `sleep(RETRY)` inside one restarts from zero whenever the OTHER arm wins.
+/// A browser being sent a book keeps the outbound arm ready continuously,
+/// which re-armed the timer faster than it could ever elapse: the held frame
+/// was never retried for as long as the stream lasted. That is the same lost
+/// frame the holding was introduced to prevent, reached by starvation.
+///
+/// An integration test could not tell the two apart — a producer cannot be
+/// made to outpace the pump reliably, so between bursts the relative timer got
+/// its four milliseconds and the frame arrived anyway. The property that DOES
+/// separate them is local and exact: **re-reading the deadline must not move
+/// it.** That is what `deadline` promises and what `the_deadline_does_not_move`
+/// checks, and it is false for every relative formulation.
+#[derive(Default)]
+struct RetryAt(Option<tokio::time::Instant>);
+
+impl RetryAt {
+    /// The instant to wake at, fixed on first read and stable after it.
+    fn deadline(&mut self, now: tokio::time::Instant) -> tokio::time::Instant {
+        *self.0.get_or_insert(now + RETRY)
+    }
+
+    /// The retry ran; the next one starts its own interval.
+    fn taken(&mut self) {
+        self.0 = None;
+    }
+}
+
 /// The policy that stands between a shared book and everything else.
 ///
 /// `script-src 'self'` with no `'unsafe-inline'`, no `'unsafe-eval'` and no
@@ -554,8 +585,8 @@ async fn pump(
      * still in hand. */
     let mut pending: Option<Vec<u8>> = None;
     /* WHEN the held frame is next offered. Absolute, so a busy outbound arm
-     * cannot push it further away — see the note in the loop. */
-    let mut retry_at: Option<tokio::time::Instant> = None;
+     * cannot push it further away — see `RetryAt`. */
+    let mut retry_at = RetryAt::default();
 
     loop {
         /* WHILE A FRAME IS HELD: stop reading the socket, keep writing to it,
@@ -595,7 +626,7 @@ async fn pump(
              * starvation instead of through dropping. `sleep_until` is
              * cancel-safe against the same instant: rebuilding it changes
              * nothing about when it fires. */
-            let deadline = *retry_at.get_or_insert_with(|| tokio::time::Instant::now() + RETRY);
+            let deadline = retry_at.deadline(tokio::time::Instant::now());
             tokio::select! {
                 frame = outbound.recv() => {
                     let Some(frame) = frame else { break };
@@ -610,7 +641,7 @@ async fn pump(
                     }
                 }
                 () = tokio::time::sleep_until(deadline) => {
-                    retry_at = None;
+                    retry_at.taken();
                     let frame = pending.take().expect("checked immediately above");
                     match state.pipe.push(socket, frame) {
                         Push::Accepted => {}
@@ -1330,6 +1361,50 @@ mod tests {
             StatusCode::NO_CONTENT,
             "the shelf's own page, identified by Origin alone, must still sign in"
         );
+    }
+
+    /// RE-READING THE RETRY DEADLINE MUST NOT MOVE IT.
+    ///
+    /// This is the whole difference between `sleep_until(deadline)` and
+    /// `sleep(RETRY)` inside a `select!`. The macro rebuilds its futures every
+    /// pass, so a relative sleep is `now + RETRY` each time — and with the
+    /// outbound arm continuously ready, "each time" is sub-millisecond and the
+    /// four milliseconds never elapse. The held frame is never retried while
+    /// the shelf is streaming.
+    ///
+    /// An integration test could not see it: a producer cannot be made to
+    /// outpace the pump reliably, so between bursts the relative timer got its
+    /// interval and the frame arrived. This is the property that separates the
+    /// two, checked where it is exact.
+    #[tokio::test]
+    async fn the_deadline_does_not_move_when_it_is_read_again() {
+        let start = tokio::time::Instant::now();
+        let mut retry = RetryAt::default();
+
+        let first = retry.deadline(start);
+        assert_eq!(
+            first,
+            start + RETRY,
+            "the first read sets it one interval out"
+        );
+
+        /* The outbound arm winning, repeatedly, while the frame is still held.
+         * A relative sleep would answer `later + RETRY` every time and the
+         * deadline would recede for ever. */
+        for step in 1..=10 {
+            let later = start + std::time::Duration::from_millis(step);
+            assert_eq!(
+                retry.deadline(later),
+                first,
+                "re-reading the deadline {step}ms later must not postpone it",
+            );
+        }
+
+        /* AND IT RESETS ONCE THE RETRY HAS RUN, or every later retry would fire
+         * instantly against a deadline already in the past. */
+        retry.taken();
+        let after = start + std::time::Duration::from_millis(50);
+        assert_eq!(retry.deadline(after), after + RETRY);
     }
 
     #[test]

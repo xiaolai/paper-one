@@ -1,6 +1,8 @@
+import { spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
 import {
   PINNED,
@@ -8,7 +10,6 @@ import {
   blockersOf,
   checkBrowserSafe,
   specifiersIn,
-  stripComments,
 } from './check-browser-safe.mjs'
 
 /**
@@ -84,27 +85,46 @@ describe('the real tree — the cases this gate was built from', () => {
   })
 })
 
-describe('stripComments', () => {
-  it('removes a block comment that names the platform', () => {
-    expect(stripComments("/* it does not import @tauri-apps/plugin-fs */\nconst a = 1")).not.toMatch(
-      /@tauri-apps/,
-    )
+describe('specifiersIn — comments and strings, which a regex cannot tell apart', () => {
+  /* The old detector stripped comments with regexes and then matched `from
+     '…'`. Both halves were wrong, in opposite directions, and these are the
+     four shapes that show it. It parses now. */
+
+  it('ignores a package named in a block comment', () => {
+    expect([...specifiersIn("/* it does not import @tauri-apps/plugin-fs */\nconst a = 1")]).toEqual([])
   })
 
-  it('removes a line comment', () => {
-    expect(stripComments("// import x from '@tauri-apps/api'\nconst a = 1")).not.toMatch(/@tauri-apps/)
+  it('ignores an import written out inside a line comment', () => {
+    expect([...specifiersIn("// import x from '@tauri-apps/api'\nconst a = 1")]).toEqual([])
   })
 
-  /* NOT `\/\/.*$`. That eats the `//` in a URL and truncates whatever follows
-     on the line — including, in a doc comment, the sentence that matters. */
-  it('leaves a URL alone', () => {
-    expect(stripComments('const url = "https://example.com/x"')).toContain('https://example.com/x')
+  it('ignores a trailing comment without losing the code before it', () => {
+    expect([...specifiersIn("import { a } from './a' // see '@tauri-apps/api'")]).toEqual(['./a'])
   })
 
-  it('removes a trailing comment without eating the code before it', () => {
-    const out = stripComments("import { a } from './a' // see '@tauri-apps/api'")
-    expect(out).toContain("from './a'")
-    expect(out).not.toMatch(/@tauri-apps/)
+  /**
+   * A REGEX LITERAL CONTAINING `//` IS NOT A COMMENT, and the stripper thought
+   * it was — so everything after it on the line vanished, including a real
+   * import. A blocked module read as clean, which is the direction that
+   * matters.
+   */
+  it('is not truncated by a regex literal that contains a comment marker', () => {
+    const source = "const web = /https?:\\/\\//; import fs from '@tauri-apps/plugin-fs'"
+    expect([...specifiersIn(source)]).toEqual(['@tauri-apps/plugin-fs'])
+  })
+
+  /**
+   * AND AN ORDINARY STRING IS NOT AN IMPORT. `bookVault.ts` names the package
+   * three times in prose to say it does NOT import it; the matcher counted
+   * every one. A clean module read as blocked.
+   */
+  it('is not fooled by a string that merely contains an import', () => {
+    const source = "const note = \"from '@tauri-apps/api/core'\"\nconst also = `from '@tauri-apps/plugin-fs'`"
+    expect([...specifiersIn(source)]).toEqual([])
+  })
+
+  it('is not fooled by a URL, which contains its own //', () => {
+    expect([...specifiersIn('const url = "https://example.com/x"')]).toEqual([])
   })
 })
 
@@ -140,8 +160,23 @@ describe('specifiersIn', () => {
     expect([...specifiersIn("export { x } from './x'")]).toEqual(['./x'])
   })
 
-  it('finds a type-only import', () => {
-    expect([...specifiersIn("import type { A } from './a'")]).toEqual(['./a'])
+  /**
+   * A TYPE-ONLY IMPORT IS NOT AN IMPORT, and counting it was a false BLOCK.
+   *
+   * TypeScript erases `import type` entirely, so a type-only edge to
+   * `@tauri-apps` puts no platform code in any bundle. The old scan reported
+   * it, which would have refused a module that ships nothing — and the fix for
+   * that refusal would have been to delete a type, or to add the module to the
+   * pinned list, both of which are worse than the edge.
+   */
+  it('skips a type-only import, which is erased before anything runs', () => {
+    expect([...specifiersIn("import type { A } from '@tauri-apps/api'")]).toEqual([])
+    expect([...specifiersIn("export type { A } from '@tauri-apps/api'")]).toEqual([])
+  })
+
+  /* …but a MIXED clause still needs the module at runtime for its value half. */
+  it('keeps an import whose clause is only partly type-only', () => {
+    expect([...specifiersIn("import { type A, b } from './a'")]).toEqual(['./a'])
   })
 
   it('finds several on one line', () => {
@@ -150,7 +185,7 @@ describe('specifiersIn', () => {
   })
 
   /* `Array.from(` is not an import, and a scan keyed on `from` has to not
-     think it is. The quote is what distinguishes them. */
+     think it is. */
   it('is not fooled by Array.from', () => {
     expect([...specifiersIn('const xs = Array.from(new Set(ys))')]).toEqual([])
   })
@@ -231,5 +266,48 @@ describe('the walk', () => {
   it('matches any @tauri-apps subpath', () => {
     const root = fixture({ 'a.ts': `import { w } from '${PLATFORM_PREFIX}/api/window'` })
     expect(blockedFiles(root, 'a.ts')).toEqual(['a.ts'])
+  })
+})
+
+/**
+ * THE COMMAND'S EXIT CODE, which is the only thing a gate is read by.
+ *
+ * `--survey` returned 0 before the root was ever validated, so
+ * `--root /nowhere --survey src/kernel` printed "0 browser-safe, 0 blocked"
+ * and succeeded. That is an authoritative all-clear about a tree that does not
+ * exist — the third time this detector has produced a confident wrong answer,
+ * and the same shape as the first two: nothing found is indistinguishable from
+ * nowhere looked.
+ */
+describe('the CLI', () => {
+  const SCRIPT = fileURLToPath(new URL('./check-browser-safe.mjs', import.meta.url))
+  const run = (...args) => spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8' })
+
+  it('refuses a survey of a root that does not exist', () => {
+    const result = run('--root', join(tmpdir(), 'paper-no-such-root'), '--survey', 'src/kernel')
+    expect(result.status).toBe(2)
+    expect(result.stderr).toContain('not a directory')
+  })
+
+  it('refuses a survey of a directory that does not exist under a real root', () => {
+    const result = run('--root', fixture({ 'a.ts': '' }), '--survey', 'src/nowhere')
+    expect(result.status).toBe(2)
+    expect(result.stderr).toContain('not a directory')
+  })
+
+  it('refuses a survey that found no sources at all', () => {
+    /* A directory that exists and holds nothing this gate can read. "0 blocked"
+       over an empty scan is the answer that started all of this. */
+    const root = fixture({ 'src/kernel/README.md': 'not a module' })
+    const result = run('--root', root, '--survey', 'src/kernel')
+    expect(result.status).toBe(2)
+    expect(result.stderr).toContain('a survey of nothing is not a clean survey')
+  })
+
+  it('surveys a real tree and exits 0', () => {
+    const root = fixture({ 'src/kernel/a.ts': "export const a = 1" })
+    const result = run('--root', root, '--survey', 'src/kernel')
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('1 browser-safe')
   })
 })

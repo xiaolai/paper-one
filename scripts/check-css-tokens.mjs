@@ -82,38 +82,87 @@ export function stylesheets(root, dir = 'src') {
 }
 
 /**
+ * A stylesheet with its comments blanked, LINE COUNT PRESERVED.
+ *
+ * ⚠️ **A COMMENTED-OUT DECLARATION WAS COUNTED AS A DECLARATION.**
+ * `/* --missing: red *\/` matched `(--[a-z0-9-]+)\s*:` exactly as a live rule
+ * does, so a token somebody had commented out went on satisfying every `var()`
+ * that referenced it — and this gate, whose entire job is to catch a `var()`
+ * that resolves to nothing, reported clean. The dead name looked alive because
+ * its own gravestone was legible.
+ *
+ * Replaced with spaces rather than removed so `referencedIn`'s line numbers
+ * still point at the right line.
+ */
+function withoutComments(text) {
+  const noBlocks = text.replace(/\/\*[\s\S]*?\*\//g, (block) => block.replace(/[^\n]/g, ' '))
+  /* AND LINE COMMENTS, for the TypeScript side. CSS has none, so this is inert
+     there. NOT `\/\/.*$`: that eats the `//` in `https://` and takes the rest
+     of the line with it — the same trap `check-browser-safe` recorded. The
+     capture keeps the character before the marker. */
+  const noLines = noBlocks.replace(/(^|[^:])\/\/[^\n]*/gm, (_all, before) => before)
+  /* AND A BARE `*` CONTINUATION LINE. Inside a complete file the block pass
+     above has already taken these, but the scan is also handed FRAGMENTS — a
+     doc comment's middle, with no `/*` in sight — and a line that begins with
+     `*` is prose in every file this repository has. */
+  return noLines
+    .split('\n')
+    .map((line) => (line.trimStart().startsWith('*') ? '' : line))
+    .join('\n')
+}
+
+/**
  * Names a stylesheet DECLARES.
  *
  * Matches every `--name:` in the text rather than one per line — see the header
- * for what a line-anchored pattern misses.
+ * for what a line-anchored pattern misses — and only outside a comment.
  */
 export function declaredIn(text) {
-  return new Set([...text.matchAll(/(--[a-z0-9-]+)\s*:/gi)].map((m) => m[1]))
+  return new Set([...withoutComments(text).matchAll(/(--[a-z0-9-]+)\s*:/gi)].map((m) => m[1]))
 }
 
 /** Names a stylesheet REFERENCES, with the line each appears on. */
 export function referencedIn(text) {
   const out = []
-  text.split('\n').forEach((line, i) => {
-    for (const m of line.matchAll(/var\(\s*(--[a-z0-9-]+)/gi)) out.push({ name: m[1], line: i + 1 })
-  })
+  /* Comments blanked here too, and for the mirror reason: a `var()` inside a
+     commented-out rule is not a reference, and reporting it as an undefined
+     token is a finding about text nothing reads. */
+  withoutComments(text)
+    .split('\n')
+    .forEach((line, i) => {
+      for (const m of line.matchAll(/var\(\s*(--[a-z0-9-]+)/gi)) out.push({ name: m[1], line: i + 1 })
+    })
   return out
 }
 
 /**
- * Names a source file writes — an inline style key, a `setProperty` argument,
+ * Names a source file WRITES — an inline style key, a `setProperty` argument,
  * or an entry in a table of either.
  *
- * COMMENT LINES ARE SKIPPED. Prose describing a token is not a definition of
- * it, and counting it as one is how a stale doc-comment keeps a dead name
- * looking alive.
+ * ⚠️ **A READ IS NOT A WRITE, AND EVERY TOKEN-SHAPED STRING COUNTED AS ONE.**
+ * `getPropertyValue('--missing')` ASKS for a token; it defines nothing. So a
+ * name that no stylesheet declared and nothing ever set was reported as
+ * defined, purely because something looked it up — which is precisely the
+ * shape of the defect this gate exists to catch, wearing its own uniform.
+ * `useAppPalette` reads nine tokens by name for exactly this reason.
+ *
+ * The reading calls are named rather than the writing ones, because the write
+ * forms are open-ended (a style key, a table entry, a bare string in a map) and
+ * the read forms are a short closed list. Excluding the closed list is honest;
+ * enumerating the open one would silently stop counting the next spelling.
+ *
+ * COMMENTS ARE STRIPPED FIRST, with a real comment-aware pass rather than a
+ * line prefix: a token named in a trailing `// see --ink` or inside a block
+ * comment is prose, and prose keeps a dead name looking alive.
  */
+const READ_CALLS = /\b(?:getPropertyValue|getComputedStyle\([^)]*\)\s*\.getPropertyValue)\s*\(\s*['"`](--[a-z0-9-]+)['"`]/gi
+
 export function writtenInCode(text) {
+  const live = withoutComments(text)
+  const read = new Set([...live.matchAll(READ_CALLS)].map((m) => m[1]))
   const found = new Set()
-  for (const line of text.split('\n')) {
-    const trimmed = line.trimStart()
-    if (trimmed.startsWith('*') || trimmed.startsWith('//') || trimmed.startsWith('/*')) continue
-    for (const m of line.matchAll(/['"`](--[a-z0-9-]+)['"`]/gi)) found.add(m[1])
+  for (const m of live.matchAll(/['"`](--[a-z0-9-]+)['"`]/gi)) {
+    if (!read.has(m[1])) found.add(m[1])
   }
   return found
 }

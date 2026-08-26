@@ -161,6 +161,76 @@ describe('what code counts as a definition', () => {
       new Set(['--one', '--two', '--three']),
     )
   })
+
+  /**
+   * A TRAILING COMMENT IS PROSE TOO, and the old scan only skipped lines that
+   * STARTED with a comment marker. A token named after real code on the same
+   * line vouched for itself.
+   */
+  it('ignores a token named in a comment that follows code', () => {
+    expect(writtenInCode("const a = 1 // see '--noted'")).toEqual(new Set())
+    expect(writtenInCode("const a = 1 /* see '--noted' */")).toEqual(new Set())
+  })
+
+  /* …and a multi-line block comment, which no line-prefix test can see the
+     middle of. */
+  it('ignores a token named inside a multi-line comment', () => {
+    const text = "/*\n  the palette writes '--ink'\n*/\nreturn { '--real': 1 }"
+    expect(writtenInCode(text)).toEqual(new Set(['--real']))
+  })
+
+  /**
+   * ⚠️ **A READ IS NOT A DEFINITION.** `getPropertyValue('--x')` ASKS for a
+   * token and defines nothing — so counting it made a name that no stylesheet
+   * declares and nothing ever sets look defined, purely because something
+   * looked it up. That is the exact defect this gate exists to catch, hiding
+   * behind the gate itself. `useAppPalette` reads nine tokens this way.
+   */
+  it('does not count a token that is only read back', () => {
+    expect(writtenInCode("getComputedStyle(el).getPropertyValue('--asked')")).toEqual(new Set())
+    expect(writtenInCode("cs.getPropertyValue('--asked')")).toEqual(new Set())
+  })
+
+  it('still counts a token that is written, next to one that is read', () => {
+    const text = "cs.getPropertyValue('--asked'); el.style.setProperty('--set', x)"
+    expect(writtenInCode(text)).toEqual(new Set(['--set']))
+  })
+
+  /* NOT `\/\/.*$`. That eats the `//` in a URL and takes the rest of the line
+     with it — including the write that follows. Same trap `check-browser-safe`
+     records; both scanners have now fallen into it. */
+  it('does not lose a write that follows a URL on the same line', () => {
+    const text = `const u = "https://x/y"; el.style.setProperty('--kept', 1)`
+    expect(writtenInCode(text)).toEqual(new Set(['--kept']))
+  })
+})
+
+/**
+ * A COMMENTED-OUT DECLARATION IS NOT A DECLARATION.
+ *
+ * `/* --dead: red; *\/` matched the same pattern a live rule does, so a token
+ * somebody had commented out went on satisfying every `var()` referencing it —
+ * and this gate, whose whole job is to find a `var()` that resolves to nothing,
+ * reported clean. The dead name looked alive because its gravestone was
+ * legible.
+ */
+describe('what a stylesheet counts as a declaration', () => {
+  it('ignores a declaration inside a comment', () => {
+    expect(declaredIn(':root{ /* --dead: red; */ --live: blue; }')).toEqual(new Set(['--live']))
+  })
+
+  it('ignores a var() inside a comment, so it is not reported as undefined', () => {
+    expect(referencedIn('a{ /* color: var(--dead); */ color: var(--live); }').map((r) => r.name)).toEqual([
+      '--live',
+    ])
+  })
+
+  /* Comments are BLANKED rather than removed, so the line a reference sits on
+     is still the line the finding names. */
+  it('keeps line numbers right across a multi-line comment', () => {
+    const css = '/*\n a\n b\n*/\na{ color: var(--live) }'
+    expect(referencedIn(css)).toEqual([{ name: '--live', line: 5 }])
+  })
 })
 
 describe('the scan itself', () => {
