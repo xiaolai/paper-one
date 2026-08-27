@@ -170,12 +170,23 @@ a:hover {
  *
  * Both halves get broken, and neither is exotic:
  *
- *   THE CONTROL IS ITS OWN FILL. The composer's input is bare and transparent
- *   inside a pill its PARENT draws, so the two pixels land in the parent's fill
- *   and the whole thing reads as one focused control. An input that IS the
- *   filled pill — `.paper-cap-field`, `.noteInput` — puts those same two pixels
- *   outside its own background, and the pane shows through the gap: a pill
- *   drawn around a pill. Those inset instead.
+ *   THE CONTROL IS ITS OWN FILL. An input that IS the filled pill —
+ *   `.paper-cap-field`, `.noteInput` — puts those two pixels outside its own
+ *   background, and the pane shows through the gap: a pill drawn around a pill.
+ *   Those inset instead.
+ *
+ *   ⚠️ THIS PARAGRAPH USED TO CITE THE COMPOSER AS THE CASE THE DEFAULT GETS
+ *   RIGHT — "bare and transparent inside a pill its PARENT draws, so the two
+ *   pixels land in the parent's fill and the whole thing reads as one focused
+ *   control". Measured, it does not: the input is 18px tall in a 44px pill and
+ *   320 wide in 376, so the ring drew 324x22 at `--radius-chip` inside a
+ *   999px-radius pill with eleven pixels of fill showing above and below. The
+ *   claim was about the OFFSET and silently generalised to the size and the
+ *   radius, which the offset says nothing about. The composer and the side
+ *   pane's search field now light their CONTAINER
+ *   (`SidePane.module.css`), the idiom `Library.module.css`'s `.searchField`
+ *   established. A bare input inside a pill someone else draws is a THIRD case,
+ *   and it belongs to the pill.
  *
  *   THE CONTAINER WOULD CLIP IT. An icon button in a floating toolbar or on the
  *   reading bar has no two pixels to give — `SelectionTools .tool`,

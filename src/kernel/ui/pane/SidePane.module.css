@@ -408,11 +408,48 @@
   color: var(--muted);
 }
 
-/* Only the pointer-driven ring is dropped. A bare `outline: none` on :focus
- * also suppresses the global :focus-visible rule, leaving keyboard users with
- * no visible focus at all — §10's focus requirement is not optional. */
-.composerInput:focus:not(:focus-visible),
-.searchInput:focus:not(:focus-visible) {
+/* ⚠️ **LIGHT THE PILL, NOT THE BARE INPUT INSIDE IT.**
+ *
+ * These two inputs are transparent and unpadded inside a pill their PARENT
+ * draws, so the global `:focus-visible` ring drew itself around the INPUT's
+ * box. Measured in the running app, on the composer:
+ *
+ *   ring   324 x 22, radius 6px   (`--radius-chip`, from the global rule)
+ *   pill   376 x 44, radius 999px (`--radius-pill`)
+ *
+ * — eleven pixels of pill showing above and below the ring and twenty-six on
+ * each side. A small square-cornered box floating inside a fully rounded one,
+ * which is not what any other focused control in this app looks like.
+ *
+ * `global.css` names this very control as the case its default was designed
+ * for, on the grounds that "the two pixels land in the parent's fill and the
+ * whole thing reads as one focused control". The two pixels do land there; so
+ * do another nine on every side, because the input does not fill the pill. That
+ * paragraph reasoned about the OFFSET and never about the size or the radius,
+ * and it has been corrected.
+ *
+ * The container carries it instead, which is `Library.module.css`'s
+ * `.searchField:focus-within` idiom — the same problem, solved there first.
+ *
+ * `:has(:focus-visible)` RATHER THAN `:focus-within`, which is where this
+ * departs from that precedent and deliberately. `:focus-within` matches a
+ * POINTER click too, and §07 is explicit that focus is `:focus-visible` only so
+ * pointer users never see it. The rule being replaced here was already
+ * keyboard-only; switching to `:focus-within` would have fixed the shape by
+ * regressing the policy. `:has(:focus-visible)` keeps both, and this webview
+ * supports it (checked, not assumed). */
+.composer:has(:focus-visible),
+.searchField:has(:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* The container shows focus — see above. Dropping the input's own ring
+ * unconditionally is only safe BECAUSE of that rule, which is why the two sit
+ * together: on its own this line would leave keyboard users with no visible
+ * focus at all, and §07's focus requirement is not optional. */
+.composerInput:focus,
+.searchInput:focus {
   outline: none;
 }
 
