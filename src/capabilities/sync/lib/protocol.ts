@@ -39,7 +39,13 @@ export const SYNC_JOURNAL_FORMAT = 1
  * versions. Refusing to sync is a bad outcome; syncing and quietly losing a
  * record is a worse one, and it is the one the reader cannot detect.
  */
-export const SYNC_VERSION: readonly [number, number] = [2, 2]
+/* [3, 3] since 2026-08-28: a push group now carries `live` (a restore's own
+ * presence stamp), and the shelf refuses a stale record for a removed book by
+ * INTENT rather than by comparing stamps — a v2 shelf, ignoring the unknown
+ * field, would resurrect the book with a fresh clock (WI-20.1). The semantics
+ * changed under the same wire shape, so the versions must not interoperate;
+ * `versionsOverlap([2, 2], [3, 3])` is false and the hello is refused. */
+export const SYNC_VERSION: readonly [number, number] = [3, 3]
 
 /** The service names, and the grant each is gated on. */
 export const SYNC_SERVICES = {
@@ -83,6 +89,11 @@ export interface PushGroup {
   readonly marks?: readonly Mark[]
   readonly cards?: readonly Card[]
   readonly removed?: { readonly at: Hlc }
+  /** A RESTORE'S presence stamp — the `live` half of the LWW pair, so the
+   *  shelf can order the re-add against a removal it made independently. Set
+   *  by `buildGroup` when the outbox holds a `removed` rev for a book whose
+   *  register now says `live`. */
+  readonly live?: { readonly at: Hlc }
   readonly hasContent: boolean
   readonly contentHash?: string
   readonly format?: string
@@ -270,6 +281,10 @@ export function parsePushGroup(value: unknown): PushGroup | null {
   if (value['removed'] !== undefined) {
     if (!isRecord(value['removed']) || !isHlc(value['removed']['at'])) return null
     out.removed = { at: value['removed']['at'] }
+  }
+  if (value['live'] !== undefined) {
+    if (!isRecord(value['live']) || !isHlc(value['live']['at'])) return null
+    ;(out as { live?: { at: Hlc } }).live = { at: value['live']['at'] }
   }
   if (typeof value['contentHash'] === 'string') out.contentHash = value['contentHash']
   if (typeof value['format'] === 'string') out.format = value['format']

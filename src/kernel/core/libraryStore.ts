@@ -119,7 +119,7 @@ export interface Library {
    * overwrite a real title, author and subjects. Without it a watched folder
    * degraded every existing record to its filename on startup.
    */
-  add(bookId: string, record: BookRecord, sparse?: boolean): Promise<void>
+  add(bookId: string, record: BookRecord, sparse?: boolean, guard?: AddGuard): Promise<AddOutcome>
   /**
    * Add a whole import's worth of books, A FEW AT A TIME — see `WRITE_WIDTH`.
    *
@@ -159,6 +159,16 @@ export interface Library {
    * sweep.
    */
   restore(bookId: string): Promise<RestoreOutcome>
+  /**
+   * A removal that arrived FROM ELSEWHERE, with its own stamp: the register
+   * decides — last writer wins — and only a win moves the folder. ON THE
+   * BOOK'S LANE, both halves in one task, so a re-add of the same book cannot
+   * land between the register and the rename (`applyRemoteRemoval` used to
+   * write the register from outside every lane, and a guarded `add` could
+   * read `live` in between). Answers `lost` for a removal older than what
+   * the register holds, which is a stale message and not an error.
+   */
+  noteRemoteRemoval(bookId: string, at: Hlc): Promise<'removed' | 'lost'>
   /**
    * Where the reader is in a book, and how far through. Identity-guarded, so
    * the page turn that moves nothing writes nothing; progress is clamped to
@@ -338,6 +348,17 @@ export interface Library {
    */
   applyRemoteRows(rows: readonly RemoteRow[]): Promise<void>
 }
+
+/**
+ * What an `add` that arrived from elsewhere is judged against: the stamp of
+ * the state it carries. A register that says `removed` LATER than this is a
+ * removal the sender had not heard, and the add is refused rather than
+ * restoring the book — inside the lane, so nothing can interleave.
+ */
+export interface AddGuard {
+  readonly asOf: Hlc
+}
+export type AddOutcome = 'added' | 'removed-since'
 
 export interface PurgeOptions {
   /** Leave the folder if its `.removed` stamp is later than this instant. */
@@ -611,17 +632,33 @@ export function createLibrary({
       await writeIndex(target, books)
     })
 
+  /**
+   * What a commit may do BEFORE the recorder's `begin`, inside the lane.
+   *
+   * `before` reads and decides — and may itself record a bracket of another
+   * kind, as `add` does for the presence flip. `'refuse'` means the write
+   * does not happen: no `begin` was issued (a bracket begun and abandoned
+   * would be recovered at the next open as a phantom local commit and
+   * PUSHED), and `retract` puts the optimistic row back where it was.
+   */
+  interface CommitHooks {
+    readonly before: (target: IndexFs, live: string) => Promise<'go' | 'refuse'>
+    readonly retract: () => void
+  }
+
   /** State first, then the folder, then the index. */
   const commit = (
     key: string,
     next: readonly IndexedBook[],
     what: 'record' | 'removed',
     write: (target: IndexFs, live: string) => Promise<unknown>,
+    hooks?: CommitHooks,
   ): Promise<void> => {
     publish(next)
     if (!fs) return Promise.resolve()
     const target = fs
     const lane = laneFor(key)
+    let refused = false
     return (
       queue
         /* APPEND, not replace. Each task here applies a CHANGE to what is on
@@ -637,9 +674,16 @@ export function createLibrary({
            * the LANE never has to, because a rekey routes the destination's
            * lane back onto this one — see `lanes`. */
           const live = resolveId(key)
+          if (hooks && (await hooks.before(target, live)) === 'refuse') {
+            refused = true
+            return
+          }
           await recorded(recorder, live, what, () => write(target, live))
         })
-        .then(() => writeIndexNow(target))
+        .then(() => {
+          if (refused) hooks!.retract()
+          return writeIndexNow(target)
+        })
         .catch(async (cause: unknown) => {
           /* THE FOLDER WINS, NOW — not at some later read that may never come.
            *
@@ -764,7 +808,7 @@ export function createLibrary({
     await writeIndexNow(target)
   }
 
-  const add: Library['add'] = (bookId, record, sparse = false) => {
+  const add: Library['add'] = async (bookId, record, sparse = false, guard) => {
     /* MATCHED BY FOLDER, not by the id as spelled. `safeId` is not reversible
      * and not injective, so a record written before the id was stored comes
      * back off the scan as its directory name — `book_abc` for `book:abc` —
@@ -782,9 +826,9 @@ export function createLibrary({
        * path to `add` that never looked. A watched folder rescanning on every
        * launch would then sail past the stranded files until the sweep deleted
        * them. */
-      if (!fs) return Promise.resolve()
+      if (!fs) return 'added'
       const target = fs
-      return queue.append(laneFor(bookId), () =>
+      await queue.append(laneFor(bookId), () =>
         recorded(recorder, bookId, 'record', async () => {
           /* BEST EFFORT, and swallowed HERE rather than inside the
            * primitive. This is a repair folded into an add: a trash entry
@@ -828,6 +872,7 @@ export function createLibrary({
           await target.remove(`${trashOf(bookId)}/book.json`).catch(() => {})
         }),
       )
+      return 'added'
     }
     /* A fresh parse folded into what the reader owns. The book is the
      * authority on its own metadata; the reader is the authority on their
@@ -849,7 +894,47 @@ export function createLibrary({
      * the flag off the shelf. */
     const entry = asRow(merged, bookId, previous?.hasContent)
     const list = at === -1 ? [entry, ...books] : books.map((one, i) => (i === at ? entry : one))
-    return commit(bookId, list, 'record', async (target, live) => {
+    let refused = false
+    /* THE PRESENCE FLIP IS NEWS THE WIRE NEEDS, AND IT IS RECORDED FIRST.
+     *
+     * A re-add of a removed book — the reader opening the file again, a
+     * restore arriving from a peer — used to journal `record` alone, so on the
+     * wire it was indistinguishable from a stale page turn on a book the
+     * shelf had since removed; the classifier that stops THAT from
+     * resurrecting the book would have dropped a genuine restore, and the
+     * CAS ack would have made the divergence permanent. The flip is a
+     * `removed` bracket of its own, exactly as `restore` records it.
+     *
+     * DECIDED BEFORE THE MUTATION, BY READING THE REGISTER, not after by
+     * observing what `restoreBook` did: the recorder has no abort, so a
+     * bracket begun after the fact is lost to a crash between, and one begun
+     * unconditionally dirties every ordinary add with a phantom removal.
+     * Inside the lane, so a local removal cannot land between the read and
+     * the write — and that is also where a GUARDED add is refused: a
+     * register saying `removed` later than the state the add carries is a
+     * removal the sender had not heard. */
+    const hooks: CommitHooks = {
+      before: async (target, live) => {
+        const held = (await readPresence(target))[live]
+        if (held?.state !== 'removed') return 'go'
+        if (guard && held.at > guard.asOf) {
+          refused = true
+          return 'refuse'
+        }
+        await recorded(recorder, live, 'removed', async () => {
+          await restoreBook(target, live).catch(() => ({ state: 'absent' }) as const)
+          /* THE WIRE'S STAMP when there is one — the sender's own register,
+           * applied last-writer-wins — and this device's clock for the
+           * reader's own re-add. */
+          await settlePresence(target, live, 'live', guard?.asOf ?? clock())
+        })
+        return 'go'
+      },
+      retract: () => {
+        if (at === -1) publish(books.filter((one) => one.bookId !== bookId))
+      },
+    }
+    await commit(bookId, list, 'record', async (target, live) => {
       /* RESTORED, not overwritten, when a removed copy is waiting. The id is
        * the bytes, so re-adding a book Paper had removed lands on the same
        * folder name — and its tags, position and marks are still in there.
@@ -936,7 +1021,8 @@ export function createLibrary({
        * committed task, so the index write `commit` chains afterwards carries
        * the answer; `measureContent` deliberately does not write it itself. */
       await measureContent(target, live)
-    })
+    }, hooks)
+    return refused ? 'removed-since' : 'added'
   }
 
   /**
@@ -952,9 +1038,9 @@ export function createLibrary({
    * "and N could not be saved" to be said out loud.
    */
   const addMany: Library['addMany'] = async (entries) => {
-    const failures = await pooled(entries, WRITE_WIDTH, (one) =>
-      add(one.bookId, one.record, one.sparse),
-    )
+    const failures = await pooled(entries, WRITE_WIDTH, async (one) => {
+      await add(one.bookId, one.record, one.sparse)
+    })
     for (const cause of failures) console.error('Paper: could not save an imported book', cause)
     return failures.length
   }
@@ -1038,19 +1124,14 @@ export function createLibrary({
     return outcome
   }
 
-  const remove: Library['remove'] = (bookId) => {
-    const list = books.filter((one) => one.bookId !== bookId)
-    if (list.length === books.length) return Promise.resolve()
-    /* ONE RENAME. Phase 3's removal touched three places — a row, the bytes,
-     * the cover — any of which could fail alone, and two of which did. */
-    const removed = books.find((one) => one.bookId === bookId)
-    return commit(bookId, list, 'removed', async (target, live) => {
-      /* THE PRESENCE REGISTER FIRST, THE RENAME SECOND — the order is the
-       * point (`presence.ts`). A crash between the two leaves a live folder
-       * and a register that says removed, which launch recovery finishes; the
-       * other order would leave a book gone with nothing anywhere recording
-       * that anyone removed it, and a stale satchel would put it back. */
-      await settlePresence(target, live, 'removed', clock())
+  /**
+   * The folder half of a removal — the rename into the trash, and the
+   * put-back when it fails — for a removal the reader made and for one that
+   * arrived from a peer alike. `removed` is the row to put back on failure.
+   */
+  const evictFolder =
+    (removed: IndexedBook | undefined) =>
+    async (target: IndexFs, live: string): Promise<void> => {
       /* A REMOVAL THAT DID NOT HAPPEN IS NOT A REMOVAL. `trashBook` reports
        * false when there was nothing there — fine, the row was already gone —
        * but it also reported false when the move genuinely failed, and this
@@ -1088,7 +1169,52 @@ export function createLibrary({
         await settlePresence(target, live, 'live', clock()).catch(() => {})
         throw cause
       }
+    }
+
+  const remove: Library['remove'] = (bookId) => {
+    const list = books.filter((one) => one.bookId !== bookId)
+    if (list.length === books.length) return Promise.resolve()
+    /* ONE RENAME. Phase 3's removal touched three places — a row, the bytes,
+     * the cover — any of which could fail alone, and two of which did. */
+    const removed = books.find((one) => one.bookId === bookId)
+    return commit(bookId, list, 'removed', async (target, live) => {
+      /* THE PRESENCE REGISTER FIRST, THE RENAME SECOND — the order is the
+       * point (`presence.ts`). A crash between the two leaves a live folder
+       * and a register that says removed, which launch recovery finishes; the
+       * other order would leave a book gone with nothing anywhere recording
+       * that anyone removed it, and a stale satchel would put it back. */
+      await settlePresence(target, live, 'removed', clock())
+      await evictFolder(removed)(target, live)
     })
+  }
+
+  const noteRemoteRemoval: Library['noteRemoteRemoval'] = async (bookId, at) => {
+    if (!fs) return 'lost'
+    const target = fs
+    const held = books.find((one) => one.bookId === bookId)
+    let won = false
+    const judge = () =>
+      queue.append(PRESENCE_KEY, async () => {
+        won = await notePresence(target, bookId, 'removed', at)
+      })
+    if (!held) {
+      /* NO ROW, NO FOLDER TO MOVE: the register alone decides, on its own
+       * key. A guarded `add` racing this reads the register inside its lane
+       * and loses or wins on the stamps either way. */
+      await judge()
+      return won ? 'removed' : 'lost'
+    }
+    const list = books.filter((one) => one.bookId !== bookId)
+    await commit(bookId, list, 'removed', evictFolder(held), {
+      before: async () => {
+        await judge()
+        return won ? 'go' : 'refuse'
+      },
+      retract: () => {
+        if (!books.some((one) => one.bookId === bookId)) publish([held, ...books])
+      },
+    })
+    return won ? 'removed' : 'lost'
   }
 
   const restore: Library['restore'] = async (bookId) => {
@@ -1624,6 +1750,7 @@ export function createLibrary({
     evictContent,
     purgeTrashed,
     emptyExpiredTrash,
+    noteRemoteRemoval,
     applyRemoteRows,
   }
 }

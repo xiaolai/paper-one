@@ -18,6 +18,7 @@ import { createClock, makeHlc, type Clock } from './clock'
 import { JOURNAL_KEY, createJournal, type Journal } from './journal'
 import { crashableFs, fsOver, type CrashableFs } from './journalFs.testkit'
 import { SYNC_CURSOR_SETTING, createLedger, type Ledger, type SyncChannel } from './ledger'
+import { SYNC_VERSION } from './protocol'
 import { canonicalJson, toWire } from './merge'
 import { PUSHABLE } from './protocol'
 
@@ -560,8 +561,8 @@ describe('the star protocol over two real stacks (WI-C.2)', () => {
             epoch: 'e-fake',
             hubSeq,
             journalFormat: 1,
-            // Speaks this build's version — a v1 hello is refused now, see SYNC_VERSION.
-            services: { sync: [2, 2] },
+            // Speaks this build's version — an earlier one is refused, see SYNC_VERSION.
+            services: { sync: [3, 3] },
           }
         }
         if (service === 'sync.pull') return page
@@ -674,6 +675,87 @@ describe('carried findings — removals, content facts, and covers', () => {
   const pushHandler = (stack: Stack) => stack.ledger.services().find((one) => one.name === 'sync.push')!
   const asCtx = (handler: ReturnType<typeof pushHandler>['handler']) =>
     ({ peer: 'satchel-x' }) as unknown as Parameters<typeof handler>[1]
+
+  /**
+   * WI-20.1 — A PAGE TURN THAT UNDID A REMOVAL, and the three refute rounds
+   * that shaped the fix. A record-only push for a book the shelf removed used
+   * to reach `library.add` and restore it; a genuine restore must still win
+   * when it is newer. The distinction is INTENT (a restore carries `live`),
+   * ordered by the restore's own stamp, applied on the book's lane.
+   */
+  describe('WI-20.1 — a removed book is not resurrected by a stale record', () => {
+    const pushTo = async (stack: Stack, group: Record<string, unknown>) => {
+      const push = pushHandler(stack)
+      return push.handler(group as never, asCtx(push.handler))
+    }
+    const removedAt = async (stack: Stack, book: string) => (await readPresence(stack.fs))[book]
+    /* The wall ms a stamp encodes — its first hex field — so a test can build
+       one a hair newer or older than the removal without an implausible year. */
+    const wallOf = (h: string) => parseInt(h.split('-')[0]!, 16)
+    const near = (ms: number) => makeHlc(ms, 0, 'ffffffffffffffff')
+
+    it('(a) a stale record — a page turn older than the removal — leaves the book removed', async () => {
+      const { shelf } = await makeWorld()
+      await shelf.services.library.add('book:x', rec('Xenon'))
+      await shelf.services.library.remove('book:x') // removed @ tR
+      const stalePage = { ...rec('Xenon'), position: 'cfi-1', positionAt: makeHlc(1, 0, 'ffffffffffffffff') }
+      await pushTo(shelf, { book: 'book:x', revs: { record: 1 }, hasContent: false, record: stalePage })
+      expect(shelf.services.library.getSnapshot().map((b) => b.bookId)).not.toContain('book:x')
+      expect((await removedAt(shelf, 'book:x'))?.state).toBe('removed')
+    })
+
+    it('(b) a record NEWER than the removal, but no restore intent, still leaves it removed', async () => {
+      const { shelf } = await makeWorld()
+      await shelf.services.library.add('book:x', rec('Xenon'))
+      await shelf.services.library.remove('book:x')
+      /* A page turn stamped in the far future — newer than the removal, and
+         still not a re-add. Intent, not stamps, is what decides. */
+      const removal = wallOf((await removedAt(shelf, 'book:x'))!.at)
+      const laterPage = { ...rec('Xenon'), position: 'cfi-2', positionAt: near(removal + 1_000) }
+      await pushTo(shelf, { book: 'book:x', revs: { record: 1 }, hasContent: false, record: laterPage })
+      expect(shelf.services.library.getSnapshot().map((b) => b.bookId)).not.toContain('book:x')
+      expect((await removedAt(shelf, 'book:x'))?.state).toBe('removed')
+    })
+
+    it('(c) a restore whose stamp beats the removal brings the book back', async () => {
+      const { shelf } = await makeWorld()
+      await shelf.services.library.add('book:x', rec('Xenon'))
+      await shelf.services.library.remove('book:x')
+      const held = await readPresence(shelf.fs)
+      const later = near(wallOf(held['book:x']!.at) + 1_000)
+      await pushTo(shelf, { book: 'book:x', revs: { removed: 1 }, hasContent: false, record: toWire(rec('Xenon')), live: { at: later } })
+      expect(shelf.services.library.getSnapshot().map((b) => b.bookId)).toContain('book:x')
+      expect((await removedAt(shelf, 'book:x'))?.state).toBe('live')
+      expect(held['book:x']?.state).toBe('removed') // it really was removed first
+    })
+
+    it('(e) a restore OLDER than the shelf\'s own removal loses', async () => {
+      const { shelf } = await makeWorld()
+      await shelf.services.library.add('book:x', rec('Xenon'))
+      await shelf.services.library.remove('book:x') // removed @ tR (a fresh, large wall time)
+      const older = near(wallOf((await readPresence(shelf.fs))['book:x']!.at) - 1_000)
+      await pushTo(shelf, { book: 'book:x', revs: { removed: 1 }, hasContent: false, record: toWire(rec('Xenon')), live: { at: older } })
+      expect(shelf.services.library.getSnapshot().map((b) => b.bookId)).not.toContain('book:x')
+      expect((await removedAt(shelf, 'book:x'))?.state).toBe('removed')
+    })
+
+    it('a genuine restore travels end to end: a re-added book comes back on the far side', async () => {
+      const { shelf, satchel, session } = await makeWorld()
+      await shelf.services.library.add('book:a', rec('Alpha'))
+      await session() // both hold it
+      await satchel.services.library.remove('book:a')
+      await session() // the shelf hears the removal
+      expect(shelf.services.library.getSnapshot()).toEqual([])
+      await satchel.services.library.add('book:a', rec('Alpha')) // re-add on the satchel
+      await session()
+      expect(shelf.services.library.getSnapshot().map((b) => b.bookId)).toContain('book:a')
+      expect((await readPresence(shelf.fs))['book:a']?.state).toBe('live')
+    })
+
+    it('speaks [3, 3]: the version bump that makes `live` safe against an old shelf', () => {
+      expect(SYNC_VERSION).toEqual([3, 3])
+    })
+  })
 
   it('#13 a stale removal does not beat a newer re-add already in the presence register', async () => {
     const { shelf } = await makeWorld()

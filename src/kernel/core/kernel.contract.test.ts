@@ -147,7 +147,8 @@ async function handle(kernel: KernelServices, wire: string): Promise<void> {
   const message = JSON.parse(wire) as Message
   switch (message.op) {
     case 'add':
-      return kernel.library.add(message.bookId, message.record, message.sparse)
+      await kernel.library.add(message.bookId, message.record, message.sparse)
+      return
     case 'update':
       return kernel.library.update(message.bookId, (record) => ({ ...record, ...message.change }))
     case 'position':

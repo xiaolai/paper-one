@@ -251,11 +251,11 @@ const REVIEWED_FOOTPRINT = [
   // Remove-download deletes the content blob by CLOSED NAME through the
   // kernel primitive — it cannot be handed a path and cannot name book.json.
   'sync/lib/ledger.ts removeBlob(book)',
-  // Remote removals land through the KERNEL STORE, not raw fs.
-  'sync/lib/ledger.ts library.remove(book)',
-  // Presence writes — sync/removed.json.
-  'sync/lib/ledger.ts notePresence(target)',
-  'sync/lib/ledger.ts writePresence(target)',
+  // Remote removals land through ONE KERNEL VERB — `noteRemoteRemoval`, which
+  // does the register write and the folder move on the book's own lane. The
+  // ledger no longer touches presence directly (WI-20.1); the three raw calls
+  // that used to be here — `library.remove`, `notePresence`, `writePresence`
+  // — moved into the library, where the fs footprint is already reviewed.
 
   /* -- sync/ui/storageModel.ts -- the downloads ledger, under sync/. */
   'sync/ui/storageModel.ts atomicWrite(fs, DOWNLOADS_INDEX_PATH)',

@@ -1,17 +1,14 @@
 import {
   BOOKS_DIR,
-  PRESENCE_KEY,
   defineSetting,
   folderOf,
   mergeCards,
-  notePresence,
   readBook,
   readMarks,
   readPresence,
   recordPath,
   isContentExtension,
   validMarks,
-  writePresence,
   type BookRecord,
   type ContentBlobName,
   type KernelServices,
@@ -347,19 +344,14 @@ export function createLedger({
    */
   const applyRemoteRemoval = async (book: string, at: Hlc): Promise<void> => {
     if (!fs) return
-    const target = fs
-    let won = false
-    await services.writes.append(PRESENCE_KEY, async () => {
-      won = await notePresence(target, book, 'removed', at)
-    })
-    if (!won || rowOf(book) === undefined) return
-    await journal.markRemote([{ book, what: 'removed' }], () => library.remove(book))
-    await services.writes.append(PRESENCE_KEY, async () => {
-      const presence = await readPresence(target)
-      if (presence[book]?.state === 'removed') {
-        await writePresence(target, { ...presence, [book]: { state: 'removed', at } })
-      }
-    })
+    /* ON THE BOOK'S LANE, both halves in one task — the register write and
+     * the folder move — so a guarded `add` for the same book cannot read
+     * `live` between them and materialise the folder beside a `removed`
+     * register. This used to write `PRESENCE_KEY` directly and call
+     * `library.remove` after, outside every book lane; Codex found the race.
+     * `markRemote` still arms the provenance so the resulting `removed`
+     * commit journals as remote, not as a local removal echoed back. */
+    await journal.markRemote([{ book, what: 'removed' }], () => library.noteRemoteRemoval(book, at))
   }
 
   /**
@@ -468,15 +460,28 @@ export function createLedger({
     }
   }
 
-  const applyIncomingRecord = async (book: string, incoming: BookRecord): Promise<void> => {
+  const applyIncomingRecord = async (book: string, incoming: BookRecord, restoreAt: Hlc | undefined): Promise<void> => {
     if (rowOf(book)) {
+      /* On the shelf: an ordinary edit, merged. */
       await library.update(book, foldRecord(incoming))
-    } else {
-      /* A book this device has never seen: `add` — which also restores a
-       * trashed copy rather than writing over it, exactly what a re-add
-       * arriving from elsewhere needs. */
-      await library.add(book, incoming)
+      return
     }
+    if (restoreAt !== undefined) {
+      /* A RESTORE, and it carries its own presence stamp. `add`'s guard wins
+       * the re-add only if `restoreAt` is newer than a removal the register
+       * holds — so a restore at t2 loses to this shelf's own removal at
+       * t3 > t2, and beats a removal at t1 < t2. */
+      await library.add(book, incoming, false, { asOf: restoreAt })
+      return
+    }
+    /* NO RESTORE INTENT, and not on the shelf. If the register removed this
+     * book, the record is a STALE EDIT — a page turn on a book this device
+     * removed after the satchel last heard — and the removal stands whatever
+     * the record's own stamp says (a page turn at t3 is newer than a removal
+     * at t2 and is still not a re-add). Dropped. Otherwise it is a book this
+     * device has genuinely never seen: added. */
+    if (fs && (await readPresence(fs))[book]?.state === 'removed') return
+    await library.add(book, incoming)
   }
 
   /**
@@ -589,14 +594,27 @@ export function createLedger({
      * its own provenance (see `applyRemoteRemoval`). */
     if (group.removed) await applyRemoteRemoval(group.book, group.removed.at)
 
+    /* A restore carries `live` (its presence stamp); a stale record does not.
+     * Both the record and the marks are judged against it: `marks.mergeRemote`
+     * on a book the register removed writes a ghost `marks.json` beside the
+     * trash, so it is skipped for a removed book with no restore intent, the
+     * same rule the record follows. */
+    const restoreAt = group.live?.at
+    const removedNow = async (): Promise<boolean> => fs !== null && (await readPresence(fs))[group.book]?.state === 'removed'
     const applies: RemoteApply[] = []
     if (group.record) {
       const incoming = group.record
-      applies.push({ keys: [{ book: group.book, what: 'record' }], run: () => applyIncomingRecord(group.book, incoming) })
+      applies.push({ keys: [{ book: group.book, what: 'record' }], run: () => applyIncomingRecord(group.book, incoming, restoreAt) })
     }
     if (group.marks && group.marks.length > 0) {
       const incoming = group.marks
-      applies.push({ keys: [{ book: group.book, what: 'marks' }], run: () => marks.mergeRemote(group.book, incoming) })
+      applies.push({
+        keys: [{ book: group.book, what: 'marks' }],
+        run: async () => {
+          if (restoreAt === undefined && rowOf(group.book) === undefined && (await removedNow())) return
+          await marks.mergeRemote(group.book, incoming)
+        },
+      })
     }
     if (group.cards) {
       const incoming = group.cards
@@ -782,6 +800,7 @@ export function createLedger({
       record?: BookRecord
       marks?: readonly Mark[]
       removed?: { at: Hlc }
+      live?: { at: Hlc }
       contentHash?: string
       format?: string
       size?: number
@@ -793,9 +812,15 @@ export function createLedger({
       const state = (await readPresence(fs))[book]
       if (state?.state === 'removed') {
         group.removed = { at: state.at }
-      } else if (record && group.record === undefined) {
-        // A restore with no record edit: the record IS the news.
-        group.record = toWire(record)
+      } else if (state?.state === 'live') {
+        /* A RESTORE: the register flipped back to `live`, so the removed rev
+         * in the outbox is a re-add. The record is the news, and `live`
+         * carries the flip's stamp so the shelf can order it against a
+         * removal of its own — without it the shelf would fall back to the
+         * record's stamp, which may predate the removal even for a genuine
+         * restore. */
+        if (group.record === undefined && record) group.record = toWire(record)
+        group.live = { at: state.at }
       }
     }
     if (hasContent && record) {
