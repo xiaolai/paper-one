@@ -161,7 +161,11 @@ export { flushBeforeClose, onBeforeClose } from './core/beforeClose'
  * deletion. */
 export { NOT_CONFIGURED, NOT_CONFIGURED_REASON, UNKNOWN_CITATION_NOTE } from './core/companion'
 export type { AnswerEnd, AskContext, AskPassage, Citation, CompanionProvider } from './core/companion'
-export { NO_GLOSS } from './core/gloss'
+/* ⚠️ `NO_GLOSS` IS NOT RE-EXPORTED. It is the port's unbound default and it is
+ * `services.ts`'s to install, not a capability's to reach for — and an audit
+ * confirmed no capability ever did. A barrel's re-exports evaluate with the
+ * barrel, so an unused one is loaded rather than free. The TYPES stay: they
+ * are what a capability implements to bind the port. */
 export type { GlossContext, GlossProvider } from './core/gloss'
 /* WHAT A BOOK'S LINK MAY DO TO THE HOST, decided once and in one place.
  *

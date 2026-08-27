@@ -128,13 +128,19 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
      Settings changed what the popover did without a remount. There is no row
      and no preference: the system-dictionary hand-off is deleted and the gloss
      is the whole of Look up. The subscription went with it — it had exactly
-     one reader — which is why the comment below still says "a second". */
-  /* ⚠️ A SECOND SUBSCRIPTION, and it is not redundant. `persistent` flips the
-     first time the store's write is REFUSED, and that refusal happens after
-     `values` has already changed and been published — so the snapshot above is
-     byte-identical either side of it, and `useSyncExternalStore` correctly does
-     not re-render. Reading the flag itself is what makes the panel's notice
-     appear on the write that failed rather than on the next one that worked. */
+     one reader. */
+  /* ⚠️ IT SUBSCRIBES TO THE FLAG, NOT TO THE VALUES, and that is the whole
+     point. `persistent` flips the first time the store's write is REFUSED, and
+     that refusal happens after `values` has already changed and been published
+     — so a values snapshot is byte-identical either side of it and
+     `useSyncExternalStore` correctly does not re-render. Reading the flag
+     itself is what makes the panel's notice appear on the write that failed
+     rather than on the next one that worked.
+
+     This used to read "a SECOND subscription" and point at a values snapshot
+     directly above it. That snapshot existed to resolve the `Look up` mode and
+     went with it; the sentence outlived it by one commit and was caught by
+     audit. */
   const settingsPersistent = useSyncExternalStore(
     services.settings.subscribe,
     () => services.settings.persistent,

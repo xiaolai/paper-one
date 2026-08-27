@@ -173,22 +173,45 @@ export function createGlossProvider({ plugin, controller }: GlossProviderOptions
                * It mattered less when Dictionary.app sat behind a failed
                * gloss. Nothing sits behind it now.
                *
-               * ⚠️ **ONLY THE PLUGIN'S OWN REJECTIONS ARE TRANSLATED.** A
-               * rejection with NO `kind` did not come from the crate — it is a
-               * Tauri or webview failure — and `detailFor` would map it to its
-               * default, **Something went wrong**, destroying whatever the real
-               * error said on the way. `errorKind` states the same rule for the
-               * same reason: *"a rejection with no `kind` is a Tauri or webview
-               * failure, and treating it as one of the plugin's own would put
-               * the wrong sentence in front of the reader."* So an untranslated
-               * cause is rethrown untouched and `useGloss` reads its `message`.
+               * ⚠️ **ONLY THE PLUGIN'S OWN REJECTIONS CARRY A `kind`**, and the
+               * three branches below are three different failures that an
+               * audit found collapsed into one. `detailFor` maps only a
+               * `kind`; everything else needs handling here, and the case
+               * this whole translation was written for was in the half that
+               * did not have any.
                *
-               * `cancelled` is rethrown too, because it is the reader's own
-               * abort and `useGloss` drops it rather than showing it.
+               * ⚠️ **A BARE STRING WAS STILL REACHING THE READER AS NOTHING.**
+               * Tauri rejects an unknown command with a plain STRING, not an
+               * `Error` — `Command inference_gloss not found` — and the first
+               * version of this rethrew any no-`kind` cause untouched, so
+               * `useGloss`'s `error instanceof Error` was false and the reader
+               * got **No reason was given.** exactly as before. That is the
+               * failure this fix names in its own commit message, and the test
+               * missed it by constructing an `Error`, which is the one shape
+               * the real boundary never produces. A non-`Error` cause is
+               * wrapped, preserving its text; a real `Error` is passed through
+               * with its own message intact.
                */
               const kind = errorKind(cause)
-              if (kind === null || kind === 'cancelled') throw cause
-              throw new Error(detailFor(cause), { cause })
+
+              /* THE READER'S OWN ABORT, and only when it really was one.
+               * `cancelled` also arrives when the DAEMON cancels — it does so
+               * on stop — and that lands with a signal nobody aborted. Passing
+               * it through there shows the reader nothing while the lookup
+               * silently ends. Only a genuinely aborted signal is dropped;
+               * `useGloss` ignores it and the reader has already moved on. */
+              if (kind === 'cancelled' && signal.aborted) throw cause
+
+              if (kind !== null) throw new Error(detailFor(cause), { cause })
+
+              /* NOT THE PLUGIN'S. `errorKind` states the rule and the reason:
+               * a rejection with no `kind` is a Tauri or webview failure, and
+               * `detailFor` would map it to its default, destroying whatever
+               * the real failure said. So it is not translated — but it is
+               * made READABLE, which is a different thing and the half that
+               * was missing. */
+              if (cause instanceof Error) throw cause
+              throw new Error(String(cause), { cause })
             })
         ).trim()
         /* An empty answer is NOT cached and NOT returned as a definition: an

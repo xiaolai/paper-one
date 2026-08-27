@@ -6,10 +6,15 @@ import { sentenceAt } from '../reader/wordSnap/sentenceAt'
 /**
  * One gloss at a time, for the word the reader is looking at.
  *
- * WI-15.13. A PROMISE rather than a stream, and the state below has three
- * shapes rather than a progress number, because two sentences arriving beside
- * a word is an appearance and not a download: streaming it would be jitter,
- * not progress.
+ * WI-15.13. A PROMISE rather than a stream, and the state below is a handful
+ * of named shapes rather than a progress number, because two sentences
+ * arriving beside a word is an appearance and not a download: streaming it
+ * would be jitter, not progress.
+ *
+ * Four non-idle shapes since the system-dictionary hand-off went: `asking`,
+ * `ready`, `failed`, and `unavailable` — the last for a press that cannot
+ * reach a model at all, which used to be impossible because Dictionary.app
+ * was always behind the gesture.
  *
  * # It replaces rather than queues
  *
@@ -45,17 +50,27 @@ export type GlossState =
 export interface Gloss {
   readonly state: GlossState
   /**
-   * Whether a definition can be produced right now — the provider's own
-   * answer, forwarded.
+   * Define the selection.
    *
-   * HERE SO THE CALLER CAN AVOID WORK, not so it can avoid `ask`: `ask`
-   * handles an unavailable provider itself and must go on doing so, because it
-   * is the only thing that can set `unavailable`. What this saves is the
-   * document walk in `glossRequest` — see `askGloss`.
+   * ⚠️ **`request` IS A THUNK, AND THAT IS THE WHOLE POINT.** It used to be a
+   * `(term, sentence)` pair, with the caller deciding whether to build one and
+   * this deciding whether to send it — TWO reads of the provider's live
+   * `available` getter, with a window between them. An audit found the window;
+   * the first fix moved it rather than closing it, and the verify pass said so:
+   * a press that arrived just as a model appeared was dropped instead of being
+   * sent malformed.
+   *
+   * Deferring the build collapses both into ONE decision, made here, at the
+   * moment of use. If there is a model, the thunk runs and the request is sent.
+   * If there is not, the thunk never runs — which is also what keeps the
+   * document walk (and its §F4 diagnostic) off a path that cannot reach a
+   * model. There is no longer a snapshot for anything to go stale against.
+   *
+   * `fallbackTerm` is what the `unavailable` message names, because the thunk
+   * that would have produced the sentence-spelled term is exactly what did not
+   * run.
    */
-  readonly available: boolean
-  /** Define `term`, in the sentence it sits in. */
-  ask(term: string, sentence: string, bookTitle: string): void
+  ask(request: () => GlossRequest, fallbackTerm: string, bookTitle: string): void
   /** Put it away — the reader moved on. */
   dismiss(): void
 }
@@ -80,17 +95,38 @@ export function useGloss(provider: GlossProvider): Gloss {
     setState({ kind: 'idle' })
   }, [])
 
+  /*
+   * ⚠️ **THE PROMPT HAS TO GO AWAY WHEN ITS REASON DOES.**
+   *
+   * `unavailable` says "Paper needs a language model" and offers the download.
+   * Nothing cleared it when the download finished, so a reader who took the
+   * offer came back to a strip still telling them to take it — the app
+   * reporting a state it was no longer in, which is the failure the whole
+   * amber/grey provenance scheme exists to avoid in the other direction.
+   *
+   * Found by audit. Only this state is reconciled: a `ready` gloss stays,
+   * because it is still the answer to the word they asked about, and a
+   * `failed` one stays because a model appearing does not un-fail it.
+   */
+  useEffect(() => {
+    if (!provider.available) return
+    setState((current) => (current.kind === 'unavailable' ? { kind: 'idle' } : current))
+  }, [provider.available])
+
   const ask = useCallback(
-    (term: string, sentence: string, bookTitle: string) => {
-      /* NOTHING TO ASK. Said, not swallowed — see `unavailable` above. The
-       * request in flight still goes, because a reader who asked a second
-       * question has stopped caring about the first either way. */
+    (request: () => GlossRequest, fallbackTerm: string, bookTitle: string) => {
+      /* THE ONLY READ OF `available` ON THIS PATH. Said, not swallowed — see
+       * `unavailable` above. The request in flight still goes, because a
+       * reader who asked a second question has stopped caring about the first
+       * either way. */
       if (!provider.available) {
         abort.current?.abort()
         abort.current = null
-        setState({ kind: 'unavailable', term })
+        setState({ kind: 'unavailable', term: fallbackTerm })
         return
       }
+      /* BUILT ONLY NOW, past the one check that decides. */
+      const { term, sentence } = request()
       /* The previous one is abandoned, not queued — see the header. */
       abort.current?.abort()
       const controller = new AbortController()
@@ -125,7 +161,7 @@ export function useGloss(provider: GlossProvider): Gloss {
     [provider],
   )
 
-  return { state, available: provider.available, ask, dismiss }
+  return { state, ask, dismiss }
 }
 
 /** What a lookup actually sends: a sentence, and the term as that sentence
@@ -220,36 +256,29 @@ export interface AskGlossOptions extends GlossRequestOptions {
  * be missed.
  */
 export function askGloss(
-  gloss: Pick<Gloss, 'ask' | 'available'>,
+  gloss: Pick<Gloss, 'ask'>,
   selection: GlossSelection | null,
   options: AskGlossOptions,
 ): void {
   if (!selection) return
   /*
-   * ⚠️ **NO DOCUMENT WALK FOR A LOOKUP THAT CANNOT REACH A MODEL**, and the
-   * reason is the DIAGNOSTIC rather than the cycles.
+   * ⚠️ **THE WALK IS DEFERRED, NOT CONDITIONAL.** This used to read
+   * `gloss.available` and skip `glossRequest` itself, which put a second
+   * decision here and left a window against `ask`'s own check. Handing over a
+   * thunk means the walk happens if and only if `ask` decides to send — one
+   * decision, and no snapshot for it to disagree with.
    *
-   * `glossRequest` calls `sentenceAt`, which records `gloss.sentence` with the
-   * outcome — the §F4 counter that exists because *"a build where every lookup
-   * silently falls back looks identical to a working one"*. With the
-   * Dictionary.app hand-off deleted, the button now also fires on a machine
-   * with NO model installed, where it can only ever produce the install
-   * prompt. Walking there would file a sample per press for a lookup that
-   * never happened — and on a machine with no model that is EVERY sample, so
-   * the one instrument that can answer "is the walk working" would be reading
-   * pure noise exactly where it is hardest to check by hand.
+   * The walk stays off the no-model path for the reason it always did, and it
+   * is the §F4 counter rather than the cycles: `glossRequest` files
+   * `gloss.sentence` with its outcome, and on a machine with no model every
+   * sample would be for a lookup that never happened. On such a machine that
+   * is EVERY sample, so the one instrument that answers "is the sentence walk
+   * working" would be reading pure noise.
    *
-   * `ask` still decides what an unavailable provider does; this only declines
-   * to prepare an argument it will not use. The raw selection is passed
-   * because the message names what the reader tried to look up, and the
+   * The raw selection text is what the `unavailable` message names — the
    * sentence-spelled term is a thing only the walk could have produced.
    */
-  if (!gloss.available) {
-    gloss.ask(selection.text, '', options.bookTitle)
-    return
-  }
-  const request = glossRequest(selection, options)
-  gloss.ask(request.term, request.sentence, options.bookTitle)
+  gloss.ask(() => glossRequest(selection, options), selection.text, options.bookTitle)
 }
 
 export function glossRequest(

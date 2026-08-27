@@ -32,8 +32,14 @@
  * ⚠️ **IT USED TO BE MIRRORED IN RUST** (`lib.rs`'s `MAX_LOOKUP`) and no
  * longer is, because the command that held the mirror is deleted. One bound,
  * one place, and nothing left to drift against.
+ *
+ * MODULE-PRIVATE, and it was exported until an audit noticed why: the export
+ * existed for `lookUpTauri.ts`, which imported it rather than restating it so
+ * the two bounds could not disagree. That file is deleted. `isLookUpTerm` is
+ * now the only reader, and a constant nobody outside can name is a constant
+ * nobody outside can drift from.
  */
-export const MAX_TERM = 120
+const MAX_TERM = 120
 
 /** What a Look up gesture should actually do. */
 export type LookUpAction = 'gloss' | 'install' | 'none'

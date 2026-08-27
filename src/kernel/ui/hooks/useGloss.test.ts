@@ -396,7 +396,7 @@ describe('with no model installed', () => {
     const { result } = renderHook(() => useGloss(nothing))
 
     act(() => {
-      result.current.ask('gam', 'A gam is a meeting.', 'Moby-Dick')
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam is a meeting.' }), 'gam', 'Moby-Dick')
     })
 
     expect(result.current.state).toEqual({ kind: 'unavailable', term: 'gam' })
@@ -410,7 +410,7 @@ describe('with no model installed', () => {
     const { result } = renderHook(() => useGloss(nothing))
 
     act(() => {
-      result.current.ask('gam', 'A gam is a meeting.', 'Moby-Dick')
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam is a meeting.' }), 'gam', 'Moby-Dick')
     })
 
     expect(result.current.state.kind).not.toBe('failed')
@@ -424,7 +424,7 @@ describe('with no model installed', () => {
     const { result } = renderHook(() => useGloss(nothing))
 
     act(() => {
-      result.current.ask('gam', 'A gam is a meeting.', 'Moby-Dick')
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam is a meeting.' }), 'gam', 'Moby-Dick')
     })
 
     expect(result.current.state.kind).toBe('unavailable')
@@ -446,22 +446,25 @@ describe('with no model installed', () => {
     const fixture = buildFixture(elem('p', {}, [txt('Alpha one. Beta two. Gamma three.')]))
     const whole = 'Alpha one. Beta two. Gamma three.'
     const info = vi.fn()
-    const asked: string[] = []
+    const { result } = renderHook(() => useGloss(nothing))
 
-    askGloss(
-      { available: false, ask: (term) => void asked.push(term) },
-      selectionOf(fixture, 'two', [whole, 16], [whole, 19], {
-        prefix: 'Alpha one. Beta ',
-        suffix: '. Gamma three.',
-      }),
-      { fixedLayout: false, bookTitle: 'Moby-Dick', diagnostics: { info } as never },
-    )
+    act(() => {
+      askGloss(
+        result.current,
+        selectionOf(fixture, 'two', [whole, 16], [whole, 19], {
+          prefix: 'Alpha one. Beta ',
+          suffix: '. Gamma three.',
+        }),
+        { fixedLayout: false, bookTitle: 'Moby-Dick', diagnostics: { info } as never },
+      )
+    })
 
     expect(info).not.toHaveBeenCalled()
-    /* Non-vacuity: the press really did reach `ask`, so the silence above is
-       "did not walk" rather than "did nothing at all" — which is the failure
-       this whole state exists to end. */
-    expect(asked).toEqual(['two'])
+    /* Non-vacuity: the press really did reach the hook, so the silence above
+       is "did not walk" rather than "did nothing at all" — which is the
+       failure this whole state exists to end. It names the RAW selection,
+       because the sentence-spelled term is what the skipped walk produces. */
+    expect(result.current.state).toEqual({ kind: 'unavailable', term: 'two' })
   })
 
   /* And it is dismissable, like every other thing the strip shows. A state the
@@ -470,7 +473,7 @@ describe('with no model installed', () => {
     const { result } = renderHook(() => useGloss(nothing))
 
     act(() => {
-      result.current.ask('gam', 'A gam is a meeting.', 'Moby-Dick')
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam is a meeting.' }), 'gam', 'Moby-Dick')
     })
     act(() => {
       result.current.dismiss()

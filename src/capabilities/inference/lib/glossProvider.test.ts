@@ -209,13 +209,93 @@ describe('the gloss provider', () => {
   /* The reader's own abort is not a fault and must not be dressed as one —
      `useGloss` drops it, and a translated `cancelled` would race that drop and
      flash a sentence at somebody who had already moved on. */
-  it('leaves a cancellation as a cancellation', async () => {
+  it('leaves the reader’s own cancellation as a cancellation', async () => {
+    /* ABORTED DURING THE CALL, not before it. A signal that is already aborted
+       never reaches the plugin at all — `gloss` races the readiness wait
+       against it and throws `AbortError` first — so seeding one would have
+       tested the early guard while claiming to test this branch. */
+    const reader = new AbortController()
+    const gloss = vi.fn(async () => {
+      reader.abort()
+      return Promise.reject({ kind: 'cancelled', message: 'cancelled' })
+    })
+    const { provider } = harness({ gloss: gloss as never })
+
+    const failure = await provider.gloss('counsel', context, reader.signal).catch((e: unknown) => e)
+
+    expect(failure).toEqual({ kind: 'cancelled', message: 'cancelled' })
+  })
+
+  /*
+   * ⚠️ AND `cancelled` DOES NOT ALWAYS MEAN THE READER. Rust cancels in-flight
+   * requests when the daemon stops, and that arrives with a signal nobody
+   * aborted. Passing it through there showed the reader nothing at all while
+   * the lookup silently ended — `useGloss` drops a cancellation, so the strip
+   * stayed on "Looking…" with no answer coming. Found by audit.
+   */
+  it('translates a cancellation the reader did not ask for', async () => {
     const gloss = vi.fn().mockRejectedValue({ kind: 'cancelled', message: 'cancelled' })
     const { provider } = harness({ gloss: gloss as never })
 
     const failure = await provider.gloss('counsel', context, signal()).catch((e: unknown) => e)
 
-    expect(failure).toEqual({ kind: 'cancelled', message: 'cancelled' })
+    expect(failure).toBeInstanceOf(Error)
+    expect((failure as Error).message).toBe('The runtime stopped before it answered')
+  })
+
+  /*
+   * ⚠️ **THE CASE THE TRANSLATION WAS WRITTEN FOR, AND THE ONE ITS FIRST TEST
+   * MISSED.**
+   *
+   * Tauri rejects an unknown command with a plain STRING — `Command
+   * inference_gloss not found` — not an `Error`. The first version of this
+   * suite asserted that shape with `new Error(...)`, which passed while the
+   * real boundary still produced a string, and a string is not an `Error`, so
+   * `useGloss` rendered **No reason was given.** exactly as before the fix.
+   *
+   * A test that constructs the one shape the boundary never emits is a test
+   * that agrees with itself. This one uses the shape Tauri actually rejects
+   * with.
+   */
+  it('makes a bare string rejection readable rather than passing it through', async () => {
+    const gloss = vi.fn().mockRejectedValue('Command inference_gloss not found')
+    const { provider } = harness({ gloss: gloss as never })
+
+    const failure = await provider.gloss('counsel', context, signal()).catch((e: unknown) => e)
+
+    expect(failure).toBeInstanceOf(Error)
+    expect((failure as Error).message).toBe('Command inference_gloss not found')
+  })
+
+  /* NOT translated, though — it has no `kind`, so `detailFor` would map it to
+     "Something went wrong" and destroy the only account of what happened. */
+  it('does not translate a rejection it did not recognise', async () => {
+    const gloss = vi.fn().mockRejectedValue('Command inference_gloss not found')
+    const { provider } = harness({ gloss: gloss as never })
+
+    await expect(provider.gloss('counsel', context, signal())).rejects.not.toThrow(
+      'Something went wrong',
+    )
+  })
+
+  /* The kinds an audit found reaching the default. Each one is a different
+     thing to do about it, and "Something went wrong" is none of them.
+     ⚠️ WORDED FOR EVERY CALLER. `detailFor` is shared with the install and
+     removal paths, and the first version of these two expectations pinned
+     gloss-specific wording ("That LOOKUP is already running", "That PASSAGE is
+     too long to look up") that misreported an install collision. The verify
+     pass caught the wording; these expectations then caught me changing it
+     without re-running them. */
+  it.each([
+    ['modelUnknown', 'That model is not available'],
+    ['requestBusy', 'That request is already running'],
+    ['fieldTooLarge', 'That request was too large'],
+    ['runtimeHttp', 'The runtime refused the request'],
+  ])('says something specific for %s', async (kind, expected) => {
+    const gloss = vi.fn().mockRejectedValue({ kind, message: 'x' })
+    const { provider } = harness({ gloss: gloss as never })
+
+    await expect(provider.gloss('counsel', context, signal())).rejects.toThrow(expected)
   })
 
   it('refuses before asking when the runtime will not start', async () => {

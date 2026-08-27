@@ -30,14 +30,17 @@ import { DEPTH_SETTING, ROUTE_SETTING } from '../lib/settings'
  * `kernel-public-entry-only` forbids), then a cycle button, which is
  * buildable but does not survive seven routes.
  *
- * # `Look up` IS a cycle button, and that is not a contradiction
+ * # The route list is a list because it GROWS
  *
- * The route list is a list because it GROWS — three local models, two agents
- * and an endpoint is six rows and climbing. `Look up` has at most three
- * states and cannot gain a fourth: there is a system dictionary or there is
- * not, and there is a local model or there is not. A cycle is right where the
- * set is closed and wrong where it is open, which is the distinction the
- * earlier draft missed by applying one answer to both.
+ * Three local models, two agents and an endpoint is six rows and climbing. A
+ * cycle is right where the set is CLOSED and wrong where it is open, which is
+ * the distinction the earlier draft missed by applying one answer to both.
+ *
+ * ⚠️ THIS SECTION USED TO SAY "`Look up` IS a cycle button, and that is not a
+ * contradiction" — the closed three-state set was the counter-example that
+ * made the rule legible. There is no such control: the system-dictionary
+ * hand-off is deleted and the gloss is the whole of Look up. Caught by audit,
+ * one commit after the row it described stopped existing.
  */
 
 /** What a row's button does. */

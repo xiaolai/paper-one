@@ -123,6 +123,37 @@ export function detailFor(error: unknown): string {
       return 'The runtime is not answering'
     case 'notRunning':
       return 'The runtime is not running'
+    /* ── REACHABLE FROM THE GLOSS, and added because they were not ──────
+     *
+     * Audit finding. The five below all reach a reader through
+     * `glossProvider`'s translation and every one of them landed on the
+     * default, which says nothing anybody can act on. The gloss is the only
+     * lookup Paper has, so "Something went wrong" there is the end of the
+     * road rather than a nudge toward the other mode.
+     *
+     * `cancelled` is here for the case `glossProvider` cannot treat as the
+     * reader's own abort: the daemon cancels in-flight requests when it stops,
+     * and that arrives with a signal that was never aborted. */
+    case 'modelUnknown':
+      return 'That model is not available'
+    /* ⚠️ WORDED FOR EVERY CALLER, NOT FOR THE GLOSS. These two said "That
+     * lookup is already running" and "That passage is too long to look up",
+     * which is right at a Look up and wrong everywhere else — `detailFor` is
+     * also what a failed download or removal reports, and both kinds are
+     * reachable there: `Registry::begin` refuses a duplicate request id, and
+     * `inference_install_model` bounds its own `request id` field. So an
+     * install collision told the reader their lookup was busy. Caught by the
+     * verify pass, one round after the fix that introduced it. */
+    case 'requestBusy':
+      return 'That request is already running'
+    case 'fieldTooLarge':
+      return 'That request was too large'
+    case 'runtimeHttp':
+      return 'The runtime refused the request'
+    case 'runtimeMalformed':
+      return 'The runtime’s answer could not be read'
+    case 'cancelled':
+      return 'The runtime stopped before it answered'
     default:
       return 'Something went wrong'
   }
