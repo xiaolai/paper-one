@@ -449,20 +449,9 @@ impl Daemon {
             .map_err(|e| crate::error::malformed(route, e.to_string()))
     }
 
-    /// The daemon's base URL, for the streaming paths that build their own
-    /// request. Loopback, always.
-    pub fn base_url(&self) -> String {
-        self.plan.base_url()
-    }
-
     /// The plan this daemon was launched from.
     pub fn plan(&self) -> &SpawnPlan {
         &self.plan
-    }
-
-    /// The child's recent output, for a diagnostic.
-    pub fn log_tail(&self) -> String {
-        self.log.text()
     }
 
     /// Stop the whole tree: ask, wait, then insist.

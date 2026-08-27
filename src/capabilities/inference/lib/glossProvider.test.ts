@@ -329,6 +329,126 @@ describe('the gloss provider', () => {
     expect(gloss).not.toHaveBeenCalled()
   })
 
+  /*
+   * ⚠️ **A LATE ANSWER MUST NOT LAND IN ANOTHER MODEL'S CACHE.**
+   *
+   * `cachedFor` is checked on the way IN, before an await. Two lookups can be
+   * in flight across a model change: A starts under qwen, B starts under llama
+   * and clears the cache on its way in, then A lands and wrote its answer into
+   * a cache now labelled llama. The next lookup of A's word served qwen's
+   * answer under llama's label — precisely what `cachedFor` exists to prevent,
+   * one await too early. Found by audit.
+   */
+  it('does not remember an answer for a model the cache no longer belongs to', async () => {
+    let model = 'qwen'
+    let releaseQwen = (): void => {}
+    const gloss = vi.fn(async (_id: string, asked: string) => {
+      if (asked !== 'qwen') return 'llama says'
+      await new Promise<void>((resolve) => {
+        releaseQwen = resolve
+      })
+      return 'qwen says'
+    })
+    const controller = {
+      textModel: () => model,
+      ensureReady: async () => true,
+    } as unknown as Controller
+    const provider = createGlossProvider({
+      plugin: { gloss, cancel: vi.fn() } as unknown as InferencePlugin,
+      controller,
+    })
+
+    const inFlight = provider.gloss('counsel', context, signal())
+    model = 'llama'
+    await provider.gloss('other', { ...context, sentence: 'A different sentence.' }, signal())
+    releaseQwen()
+
+    /* The caller who asked still gets their answer — it is only not REMEMBERED
+       for a model that did not produce it. */
+    await expect(inFlight).resolves.toBe('qwen says')
+    expect(provider.cacheSize(), 'qwen’s answer was cached under llama').toBe(1)
+  })
+
+  /*
+   * ⚠️ **A FAILED CANCEL IS REPORTED**, and every one used to be swallowed by
+   * a bare `.catch(() => {})`. Anything but the expected race means the daemon
+   * is still generating for a reader who has gone.
+   */
+  it('reports a cancel that failed for anything but the expected race', async () => {
+    const report = vi.fn()
+    const reader = new AbortController()
+    const gloss = vi.fn(async () => {
+      reader.abort()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      return 'never read'
+    })
+    const cancel = vi.fn().mockRejectedValue({ kind: 'runtimeExited', message: 'gone' })
+    const provider = createGlossProvider({
+      plugin: { gloss, cancel } as unknown as InferencePlugin,
+      controller: { textModel: () => 'qwen', ensureReady: async () => true } as unknown as Controller,
+      report,
+    })
+
+    await provider.gloss('counsel', context, reader.signal).catch(() => {})
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(cancel).toHaveBeenCalled()
+    expect(report).toHaveBeenCalledWith(
+      'inference.gloss-cancel-failed',
+      expect.objectContaining({ kind: 'runtimeExited' }),
+    )
+  })
+
+  /* And the one failure that IS expected stays quiet: the request finished
+     before the cancel arrived, which is a race rather than a fault. */
+  it('says nothing when the cancel lost the ordinary race', async () => {
+    const report = vi.fn()
+    const reader = new AbortController()
+    const gloss = vi.fn(async () => {
+      reader.abort()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      return 'never read'
+    })
+    const cancel = vi.fn().mockRejectedValue({ kind: 'requestUnknown', message: 'already done' })
+    const provider = createGlossProvider({
+      plugin: { gloss, cancel } as unknown as InferencePlugin,
+      controller: { textModel: () => 'qwen', ensureReady: async () => true } as unknown as Controller,
+      report,
+    })
+
+    await provider.gloss('counsel', context, reader.signal).catch(() => {})
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(cancel).toHaveBeenCalled()
+    expect(report).not.toHaveBeenCalled()
+  })
+
+  /*
+   * ⚠️ **EVERY LISTENER IT ADDS, IT REMOVES.** The readiness race attached an
+   * anonymous `{ once: true }` listener — which fires once but is only removed
+   * BY firing, so on every ordinary lookup, where `ensureReady` wins the race,
+   * it stayed on the caller's signal for the signal's whole life.
+   */
+  it('leaves no abort listener behind on a lookup that succeeded', async () => {
+    const reader = new AbortController()
+    let live = 0
+    const add = reader.signal.addEventListener.bind(reader.signal)
+    const remove = reader.signal.removeEventListener.bind(reader.signal)
+    reader.signal.addEventListener = ((type: string, listener: never, options: never) => {
+      if (type === 'abort') live += 1
+      return add(type, listener, options)
+    }) as typeof reader.signal.addEventListener
+    reader.signal.removeEventListener = ((type: string, listener: never, options: never) => {
+      if (type === 'abort') live -= 1
+      return remove(type, listener, options)
+    }) as typeof reader.signal.removeEventListener
+
+    const { provider } = harness()
+    await expect(provider.gloss('counsel', context, reader.signal)).resolves.toBeTruthy()
+
+    expect(live, 'an abort listener outlived the lookup that added it').toBe(0)
+  })
+
   it('clears its cache on request', async () => {
     const { provider } = harness()
     await provider.gloss('counsel', context, signal())

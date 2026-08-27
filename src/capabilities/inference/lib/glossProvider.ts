@@ -1,5 +1,5 @@
 import type { GlossContext, GlossProvider } from '../../../kernel'
-import { detailFor, type Controller } from './controller'
+import { detailFor, type Controller, type ReportFailure } from './controller'
 import { errorKind, mintRequestId, type InferencePlugin } from './plugin'
 
 /**
@@ -73,6 +73,8 @@ export function glossKey(term: string, context: GlossContext): string {
 export interface GlossProviderOptions {
   readonly plugin: InferencePlugin
   readonly controller: Controller
+  /** Told when a cancel fails for a reason that is not the expected race. */
+  readonly report?: ReportFailure | undefined
 }
 
 export interface BoundGlossProvider extends GlossProvider {
@@ -82,7 +84,7 @@ export interface BoundGlossProvider extends GlossProvider {
   cacheSize(): number
 }
 
-export function createGlossProvider({ plugin, controller }: GlossProviderOptions): BoundGlossProvider {
+export function createGlossProvider({ plugin, controller, report }: GlossProviderOptions): BoundGlossProvider {
   /* A Map, for insertion order: JavaScript's Map iterates oldest-first, which
    * is the eviction order this wants and costs no bookkeeping. */
   const cache = new Map<string, string>()
@@ -132,20 +134,49 @@ export function createGlossProvider({ plugin, controller }: GlossProviderOptions
        * the daemon binds, probes accelerators, loads a model — and a reader
        * who selected a word and moved on would otherwise be held for the full
        * startup before their abort was noticed. Found by audit. */
+      /* ⚠️ THE LISTENER IS NAMED AND REMOVED, and it used to be neither. An
+       * anonymous `() => resolve('aborted')` was attached with `{ once: true }`
+       * — which fires once, but is only REMOVED by firing. When
+       * `ensureReady()` won the race, as it does on every ordinary lookup, the
+       * listener stayed attached to the caller's signal for its whole life.
+       * `useGloss` mints a fresh `AbortController` per ask so the signal dies
+       * quickly and the leak is bounded there; a caller that reuses one
+       * accumulates a listener per lookup. Found by audit. */
+      let onAbort: (() => void) | null = null
       const ready = await Promise.race([
         controller.ensureReady(),
         new Promise<'aborted'>((resolve) => {
-          if (signal.aborted) resolve('aborted')
-          else signal.addEventListener('abort', () => resolve('aborted'), { once: true })
+          if (signal.aborted) {
+            resolve('aborted')
+            return
+          }
+          onAbort = () => resolve('aborted')
+          signal.addEventListener('abort', onAbort, { once: true })
         }),
-      ])
+      ]).finally(() => {
+        if (onAbort !== null) signal.removeEventListener('abort', onAbort)
+      })
       if (ready === 'aborted' || signal.aborted) {
         throw new DOMException('Aborted', 'AbortError')
       }
       if (!ready) throw new Error('The runtime is not running')
 
       const requestId = mintRequestId('gloss')
-      const abort = (): void => void plugin.cancel(requestId).catch(() => {})
+      /* ⚠️ A FAILED CANCEL IS REPORTED, and every one of them used to be
+       * swallowed by a bare `.catch(() => {})`. Exactly one failure here is
+       * expected: `requestUnknown`, the race where the request finished before
+       * the cancel arrived. Anything else means the daemon is still generating
+       * for a reader who has gone — a GPU and a model held for an answer
+       * nobody will read — and that is worth a line in the log rather than
+       * silence. Found by audit. */
+      const abort = (): void =>
+        void plugin.cancel(requestId).catch((cause: unknown) => {
+          if (errorKind(cause) === 'requestUnknown') return
+          report?.('inference.gloss-cancel-failed', {
+            kind: errorKind(cause),
+            message: cause instanceof Error ? cause.message : String(cause),
+          })
+        })
       signal.addEventListener('abort', abort, { once: true })
       try {
         const answer = (
@@ -217,7 +248,17 @@ export function createGlossProvider({ plugin, controller }: GlossProviderOptions
         /* An empty answer is NOT cached and NOT returned as a definition: an
          * empty amber mark beside a word reads as "this word means nothing". */
         if (answer === '') throw new Error('The model returned nothing')
-        cache.set(key, answer)
+        /* ⚠️ **ONLY IF THE CACHE IS STILL THIS MODEL'S.** Two lookups can be in
+         * flight across a model change: A starts under model A, B starts under
+         * B and clears the cache on the way in, then A lands and wrote its
+         * answer into a cache now labelled B — so the next lookup of A's word
+         * served A's model's answer under B's label. That is the precise thing
+         * `cachedFor` exists to prevent, one await too early. The answer is
+         * still RETURNED to the caller who asked for it; it is only not
+         * remembered for a model that did not produce it. Found by audit. */
+        if (cachedFor === model) {
+          cache.set(key, answer)
+        }
         while (cache.size > CACHE_LIMIT) {
           const oldest = cache.keys().next().value
           if (oldest === undefined) break

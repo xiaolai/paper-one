@@ -188,7 +188,11 @@ export const inference: Capability = {
   start(api: CapabilityContext, signal: AbortSignal): Disposable {
     const plugin = inferencePlugin
     const controller = createController(plugin, (event, fields) => api.diagnostics.warn(event, fields))
-    const gloss = createGlossProvider({ plugin, controller })
+    const gloss = createGlossProvider({
+      plugin,
+      controller,
+      report: (event, fields) => api.diagnostics.warn(event, fields),
+    })
 
     const myLifetime = ++lifetime
     /* EVERYTHING THIS ACQUIRES, OWNED BY ONE THING — see `openSession`. The
@@ -280,7 +284,6 @@ export const inference: Capability = {
   },
 }
 
-export { KEEP_LOADED_SETTING } from './lib/settings'
 /* THE DOWNLOAD LINE IS THE WORK-LINE BINDING, and only that.
  *
  * An `inferenceDownloadLine()` export lived here beside it, with a comment
@@ -290,7 +293,11 @@ export { KEEP_LOADED_SETTING } from './lib/settings'
  * them dead and documented as live, is how the live one comes to be changed
  * without the dead one and nobody notices which is which. See `start`. */
 
-export { useInference } from './ui/useInference'
-export type { Controller, InferenceSnapshot, RuntimeState } from './lib/controller'
 export { DEPTHS, reasonOf } from './lib/plugin'
-export type { Depth, InstallProgress, ModelRow, Probe, Route, RouteKind, UnusableReason } from './lib/plugin'
+/* ⚠️ EXACTLY WHAT `companion` IMPORTS, AND NOTHING ELSE. This list carried
+ * `InstallProgress`, `ModelRow` and `RouteKind` too, plus `KEEP_LOADED_SETTING`,
+ * `useInference` and three controller types on their own lines — none of which
+ * any module outside this directory imported. A capability barrel exists to
+ * serve the capabilities that `require` this one, and `companion` is the only
+ * one; a re-export past that is loaded with the barrel and read by nobody. */
+export type { Depth, Probe, Route, UnusableReason } from './lib/plugin'

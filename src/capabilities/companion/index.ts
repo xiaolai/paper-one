@@ -142,6 +142,14 @@ export const companion: Capability = {
   },
 }
 
-export { DEPTH_SETTING, ROUTE_SETTING } from './lib/settings'
-export type { Passage, SourcePassage } from './lib/passages'
-export { resolveCitations } from './lib/passages'
+/* ⚠️ NOTHING RE-EXPORTED, AND THE ABSENCE IS THE POINT. This barrel used to
+ * carry `DEPTH_SETTING`, `ROUTE_SETTING`, `Passage`, `SourcePassage` and
+ * `resolveCitations`. No module outside this directory imports from
+ * `'../../companion'` at all — `composition.desktop.ts` takes the capability
+ * object above and nothing else — so every one of them was a re-export with no
+ * consumer, and a barrel's re-exports evaluate WITH the barrel rather than on
+ * demand. The live uses are all direct imports within this capability, which
+ * is what they should have been.
+ *
+ * Nothing depends on `companion`; `companion` depends on `inference`. That
+ * asymmetry is why this barrel is bare and `inference`'s is not. */

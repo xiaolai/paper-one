@@ -201,10 +201,7 @@ pub struct ResourceUsage {
 }
 
 #[tauri::command]
-pub async fn inference_resource_usage<R: Runtime>(
-    app: AppHandle<R>,
-    state: State<'_, InferenceState>,
-) -> Result<ResourceUsage> {
+pub async fn inference_resource_usage(state: State<'_, InferenceState>) -> Result<ResourceUsage> {
     /* The guard is dropped before the request, as in `inference_generate` —
     otherwise a memory reading blocks behind whatever is streaming. */
     let request = {
@@ -212,7 +209,6 @@ pub async fn inference_resource_usage<R: Runtime>(
         daemon.health_request()
     };
     let health = crate::daemon::Daemon::read_health(request).await?;
-    let _ = &app;
     Ok(ResourceUsage {
         // Not reported by `/api/v1/health`; `None` until it is read from a
         // route that genuinely carries it, rather than a plausible zero.

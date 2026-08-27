@@ -489,7 +489,15 @@ export function createKernelServices({
    * Third time this shape has appeared in this phase — the envelope's home and
    * the test-project globs were the other two. An assumption that is safe with
    * one caller and silent with two. */
-  const serviceHosts = new Set<ServiceHost>()
+  /* ⚠️ **A SET OF BINDINGS, NOT A SET OF FUNCTIONS.** It held the `ServiceHost`
+   * itself, so binding the SAME function twice collapsed to one entry and
+   * either disposer removed the other's binding — a transport unbound by a
+   * teardown that had nothing to do with it. Two transports sharing a
+   * module-level host function is not exotic; it is what a shared adapter
+   * looks like. Wrapping each binding in its own object makes identity
+   * per-BINDING, which is what `bindServiceHost` returns a disposer for.
+   * Found by audit. */
+  const serviceHosts = new Set<{ readonly host: ServiceHost }>()
   /* Null defaults, and that is the whole default: there is nothing sensible
    * for an unbound device or shelf port to answer, and a stub that returned
    * an empty peer list would be a lie a caller could not detect. */
@@ -516,6 +524,49 @@ export function createKernelServices({
      * that history is known. A composition may still supply its own. */
     { storage, migrate: settingsMigration ?? carryLegacySettings },
   )
+  /**
+   * Dispose every served host, whatever any single one does.
+   *
+   * ⚠️ **THIS LOOP WAS WRITTEN OUT THREE TIMES AND EVERY COPY CALLED
+   * `dispose()` BARE**, so one host throwing took the other two paths with it:
+   *
+   * - on the REJECTION unwind, the loop aborted, every host after the thrower
+   *   stayed registered, and the throw replaced `thrown.reason` — the original
+   *   failure, and the only one that says why any of this is unwinding;
+   * - on the NO-DISPOSER unwind, the same, masking the error naming the host
+   *   that answered wrongly;
+   * - in the returned composite disposer, the same leak with nothing left to
+   *   report it.
+   *
+   * A partial serve left running is the exact leak both unwinds exist to
+   * prevent, arriving by the one door neither of them watched. Found by audit.
+   *
+   * Best-effort and total: every host is asked, failures are collected rather
+   * than propagated, and the caller decides what outranks what. The original
+   * error always does.
+   */
+  const disposeAll = (all: readonly (Disposable | undefined)[]): unknown[] => {
+    const failures: unknown[] = []
+    for (const one of all) {
+      if (typeof one?.dispose !== 'function') continue
+      try {
+        one.dispose()
+      } catch (cause) {
+        failures.push(cause)
+      }
+    }
+    return failures
+  }
+
+  const reportDisposeFailures = (where: string, failures: readonly unknown[]): void => {
+    for (const cause of failures) {
+      diagnostics.warn('services.host-dispose-failed', {
+        where,
+        message: cause instanceof Error ? cause.message : String(cause),
+      })
+    }
+  }
+
   return {
     library,
     marks,
@@ -530,7 +581,11 @@ export function createKernelServices({
     bindRecorder: (next) => recorderSlot.bind(next),
     bindClock: (next) => clockSlot.bind(next),
     bindServiceHost: (next) => {
-      serviceHosts.add(next)
+      /* A fresh object per bind — see the Set's own note. Two binds of one
+       * function are two bindings and two disposers, and neither reaches the
+       * other. */
+      const binding = { host: next }
+      serviceHosts.add(binding)
       /* Idempotent, like every other disposer here: a capability whose teardown
        * runs twice must not remove a host a later composition bound. */
       let disposed = false
@@ -538,7 +593,7 @@ export function createKernelServices({
         dispose: () => {
           if (disposed) return
           disposed = true
-          serviceHosts.delete(next)
+          serviceHosts.delete(binding)
         },
       }
     },
@@ -573,13 +628,13 @@ export function createKernelServices({
        * check below was written to prevent, arriving by the one door that check
        * could not see. `allSettled` keeps them all, so the unwind can be
        * complete whichever way a host failed. */
-      const settled = await Promise.allSettled([...serviceHosts].map(async (host) => await host(list)))
+      const settled = await Promise.allSettled([...serviceHosts].map(async ({ host }) => await host(list)))
       const served = settled.map((one) => (one.status === 'fulfilled' ? one.value : undefined))
       const thrown = settled.find((one) => one.status === 'rejected')
       if (thrown !== undefined && thrown.status === 'rejected') {
-        for (const one of served) {
-          if (typeof (one as Disposable | undefined)?.dispose === 'function') one?.dispose()
-        }
+        /* THE ORIGINAL FAILURE WINS. A disposer throwing during the unwind is
+         * worth reporting and must not replace the reason we are unwinding. */
+        reportDisposeFailures('serve-rejected', disposeAll(served as (Disposable | undefined)[]))
         throw thrown.reason
       }
 
@@ -596,9 +651,7 @@ export function createKernelServices({
        * this check exists to prevent, arriving by a different door. */
       const bad = served.findIndex((one) => typeof (one as Disposable | undefined)?.dispose !== 'function')
       if (bad !== -1) {
-        for (const one of served) {
-          if (typeof (one as Disposable | undefined)?.dispose === 'function') one?.dispose()
-        }
+        reportDisposeFailures('serve-no-disposer', disposeAll(served as (Disposable | undefined)[]))
         throw new Error(`serveServices: a bound service host returned no disposer (host ${bad + 1} of ${served.length})`)
       }
 
@@ -612,7 +665,12 @@ export function createKernelServices({
         dispose: () => {
           if (disposed) return
           disposed = true
-          for (const one of served) one?.dispose()
+          /* NOT `throw`: `Disposable.dispose()` is called from teardown paths
+           * that have nothing to do with the host that failed, and a throw
+           * here would abort THEIR cleanup for somebody else's defect. The
+           * failure is reported instead, which is the only thing left that can
+           * still be done with it. */
+          reportDisposeFailures('unserve', disposeAll(served as (Disposable | undefined)[]))
         },
       }
     },

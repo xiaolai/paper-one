@@ -265,6 +265,86 @@ describe('serving a composed set of services', () => {
     expect(disposed).toBe(1)
   })
 
+  /*
+   * ⚠️ **TWO BINDS OF ONE FUNCTION ARE TWO BINDINGS.** The registry was a
+   * `Set<ServiceHost>`, so binding the same function twice collapsed to one
+   * entry and either disposer removed the other's binding — a live transport
+   * unbound by a teardown that had nothing to do with it. Two transports
+   * sharing a module-level host function is what a shared adapter looks like.
+   */
+  it('keeps two bindings of the same host function apart', async () => {
+    const services = servicesWith(spyRecorder().recorder)
+    let served = 0
+    const shared: Parameters<typeof services.bindServiceHost>[0] = () => {
+      served += 1
+      return { dispose: () => {} }
+    }
+    const first = services.bindServiceHost(shared)
+    services.bindServiceHost(shared)
+
+    /* Both bindings serve — the registry holds two, not one. */
+    await services.serveServices([])
+    expect(served, 'the second bind of one function replaced the first').toBe(2)
+
+    /* And disposing one leaves the other bound. */
+    first.dispose()
+    served = 0
+    await services.serveServices([])
+    expect(served, 'disposing one binding unbound the other').toBe(1)
+  })
+
+  /**
+   * ⚠️ **AND A DISPOSER THAT THROWS MUST NOT ABORT THE UNWIND.**
+   *
+   * The unwind loop called `dispose()` bare, three times over in three places.
+   * A host whose disposer threw stopped the loop where it stood — so every
+   * host after it stayed registered, which is the very partial serve the
+   * unwind exists to prevent, arriving by the one door it did not watch.
+   *
+   * Worse, the throw REPLACED the original reason: the caller was told a
+   * disposer failed instead of being told why anything was unwinding at all.
+   * Found by audit.
+   */
+  it('disposes every host even when one disposer throws, and keeps the original error', async () => {
+    const services = servicesWith(spyRecorder().recorder)
+    const disposed: string[] = []
+    services.bindServiceHost(() => ({ dispose: () => void disposed.push('first') }))
+    services.bindServiceHost(() => ({
+      dispose: () => {
+        throw new Error('this disposer is broken')
+      },
+    }))
+    services.bindServiceHost(() => ({ dispose: () => void disposed.push('third') }))
+    services.bindServiceHost(() => {
+      throw new Error('this transport could not start')
+    })
+
+    /* THE ORIGINAL FAILURE, not the disposer's — the disposer's is a casualty
+       of the unwind and says nothing about why it started. */
+    await expect(services.serveServices([])).rejects.toThrow(/could not start/)
+    /* AND THE HOST PAST THE BROKEN DISPOSER WAS STILL TAKEN DOWN. */
+    expect(disposed, 'a throwing disposer left a later host registered').toEqual(['first', 'third'])
+  })
+
+  /* The same rule on the ordinary path: unserving is called from teardowns
+     that have nothing to do with the host that failed, so one broken disposer
+     must neither abort the others nor throw into somebody else's cleanup. */
+  it('unserves every host even when one disposer throws, without throwing', async () => {
+    const services = servicesWith(spyRecorder().recorder)
+    const disposed: string[] = []
+    services.bindServiceHost(() => ({ dispose: () => void disposed.push('first') }))
+    services.bindServiceHost(() => ({
+      dispose: () => {
+        throw new Error('this disposer is broken')
+      },
+    }))
+    services.bindServiceHost(() => ({ dispose: () => void disposed.push('third') }))
+
+    const served = await services.serveServices([])
+    expect(() => served.dispose()).not.toThrow()
+    expect(disposed).toEqual(['first', 'third'])
+  })
+
   /**
    * DISPOSAL IS IDEMPOTENT — `Disposable` says so, and the composite did not.
    *
