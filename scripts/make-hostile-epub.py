@@ -147,8 +147,32 @@ PROBE = """<?xml version="1.0" encoding="UTF-8"?>
       //
       // Asynchronous, so the verdict is written once these settle. Nothing
       // destructive is attempted — the point is whether the shelf ANSWERS.
-      var pending = 2;
+      var pending = 3;
       function settled() { if (--pending <= 0) show(); }
+      // THE ROUTE THAT NEEDS NO SCRIPT. A blob document inherits the client's
+      // policy; while `frame-src` admitted `'self'`, this frame loaded the real
+      // client — module running, cookie on its socket — under this page. The
+      // location is read rather than trusting `load`, which fires for the
+      // initial about:blank whether or not anything was allowed in.
+      try {
+        var framed = document.createElement('iframe');
+        var framedDone = false;
+        var framedFinish = function () {
+          if (framedDone) return;
+          framedDone = true;
+          var loaded = false;
+          try { loaded = !!framed.contentWindow && framed.contentWindow.location.href !== 'about:blank' }
+          catch (e) { loaded = true }
+          if (loaded) reached.push('framed the client');
+          settled();
+        };
+        framed.onload = framedFinish;
+        framed.setAttribute('aria-hidden', 'true');
+        framed.style.width = '1px'; framed.style.height = '1px';
+        framed.src = location.origin + '/';
+        document.body.appendChild(framed);
+        setTimeout(framedFinish, 3000);
+      } catch (e) { settled() }
 
       try {
         fetch('/api/auth/session', { credentials: 'include' })

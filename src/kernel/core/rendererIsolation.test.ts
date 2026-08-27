@@ -139,6 +139,13 @@ describe('the shipped Content Security Policy', () => {
     for (const [name, policy] of BOUNDARY_POLICIES) {
       const d = directives(policy ?? '')
       expect(d['frame-src'], `${name}: book documents are blob URLs`).toContain('blob:')
+      /* AND NOTHING THE CLIENT ITSELF SERVES. Asserted as an exact set, like
+       * `script-src`, because `'self'` sat here for a phase and was the one
+       * route a book had that needed no script: a blob document inherits this
+       * policy, so `<iframe src="/">` inside a book loaded the real client —
+       * module running, cookie attached to its socket — under the book's own
+       * markup. Nothing Paper serves is legitimately framed by a book. */
+      expect(d['frame-src'], `${name}: a book must not be able to frame the client`).toEqual(['data:', 'blob:'])
       expect(d['img-src'], `${name}: book images are blobs`).toContain('blob:')
       expect(d['img-src'], `${name}: and sometimes data URLs`).toContain('data:')
       expect(d['worker-src'], `${name}: pdf.js runs in a worker`).toContain('blob:')

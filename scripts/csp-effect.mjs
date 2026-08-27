@@ -81,10 +81,15 @@ function servedPolicy() {
 
 /** The policy under test — the real one. */
 const STRICT = servedPolicy()
-/** The same policy with the two additions that would open the boundary. */
-const LOOSE = STRICT.replace("script-src 'self'", "script-src 'self' blob: 'unsafe-inline'")
-if (LOOSE === STRICT) {
-  console.error("csp-effect: the served policy has no `script-src 'self'` to widen — refusing to run a probe that cannot fail.")
+/** The same policy with the three additions that would open the boundary:
+ *  script from a blob or inline, and `'self'` back in `frame-src` — the one
+ *  route that needs no script at all. */
+const LOOSE = STRICT.replace("script-src 'self'", "script-src 'self' blob: 'unsafe-inline'").replace(
+  'frame-src data: blob:',
+  "frame-src 'self' data: blob:",
+)
+if (LOOSE === STRICT || !LOOSE.includes("frame-src 'self'")) {
+  console.error('csp-effect: the served policy has no `script-src \'self\'` or `frame-src data: blob:` to widen — refusing to run a probe that cannot fail.')
   process.exit(2)
 }
 
@@ -93,10 +98,15 @@ const PAGE = `<!doctype html><html><body><p id="verdict">nothing yet</p><script 
 /* THE HOST'S OWN SCRIPT IS THE CONTROL. It is same-origin, so `'self'` permits
  * it; if it does not run, the run below says nothing about books. */
 const HOST_JS = `
-const results = { host: 'ran', inline: 'blocked', external: 'blocked' }
+/* THE THIRD ROUTE NEEDS NO SCRIPT IN THE BOOK. If this page is running INSIDE
+ * a frame, the book framed the client: the real module, the real cookie on
+ * its socket, under the book's own markup. Report to the top and stop, or
+ * the nested client would frame a book that frames a client, forever. */
+if (window !== window.top) { window.top.ran && window.top.ran('framed'); throw new Error('nested client: reported, not booting') }
+const results = { host: 'ran', inline: 'blocked', external: 'blocked', framed: 'blocked' }
 const show = () => {
   document.getElementById('verdict').textContent =
-    'host=' + results.host + ' inline=' + results.inline + ' external=' + results.external
+    'host=' + results.host + ' inline=' + results.inline + ' external=' + results.external + ' framed=' + results.framed
 }
 window.ran = (which) => { results[which] = 'RAN'; show() }
 show()
@@ -104,6 +114,7 @@ const helper = URL.createObjectURL(new Blob(['parent.ran && parent.ran("external
 const book = \`<!doctype html><html><body><p>a book</p>
 <script>parent.ran && parent.ran('inline')<\\/script>
 <script src="\${helper}"><\\/script>
+<iframe src="\${location.origin}/"></iframe>
 </body></html>\`
 const frame = document.createElement('iframe')
 /* EXACTLY WHAT FOLIATE DOES - see its paginator and fixed-layout renderers.
@@ -187,9 +198,9 @@ if (!engines.includes('WebKit')) {
 }
 for (const engine of engines) {
   const blocked = /host=ran/.test(strict[engine]) && !/RAN/.test(strict[engine].replace('host=ran', ''))
-  const allowed = /inline=RAN/.test(loose[engine] ?? '') && /external=RAN/.test(loose[engine] ?? '')
+  const allowed = /inline=RAN/.test(loose[engine] ?? '') && /external=RAN/.test(loose[engine] ?? '') && /framed=RAN/.test(loose[engine] ?? '')
   if (!blocked) {
-    console.error(`\n${engine}: a book's script RAN under the shipped policy. The boundary is open.`)
+    console.error(`\n${engine}: a book's script RAN, or a book FRAMED THE CLIENT, under the shipped policy. The boundary is open.`)
     ok = false
   }
   if (!allowed) {
