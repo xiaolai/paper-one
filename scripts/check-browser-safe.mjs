@@ -223,33 +223,80 @@ function resolveModule(fromFile, spec, aliasList = []) {
  * Returns the modules in the closure and a map of blocking file → the packages
  * it imports. The map is empty for a browser-safe module.
  */
-export function blockersOf(root, entry) {
+export function blockersOf(root, entry, shared = null) {
   const start = path.resolve(root, entry)
   const seen = new Set()
   const blockers = new Map()
-  const aliasList = aliases(root)
+  const cache = shared ?? newWalkCache(root)
   const walk = (file) => {
     if (seen.has(file)) return
     seen.add(file)
-    let source
-    try {
-      source = readFileSync(file, 'utf8')
-    } catch {
-      return // a specifier that resolves to nothing blocks nothing
-    }
-    for (const spec of specifiersIn(source, file)) {
+    /* READ AND PARSED ONCE PER `checkBrowserSafe` CALL, not once per entry —
+     * see `newWalkCache`. `seen` and `blockers` stay per-entry, because each
+     * entry reports its OWN module count and its own blocking files. */
+    const edges = cache.edgesOf(file)
+    if (edges === null) return // a specifier that resolves to nothing blocks nothing
+    for (const { spec, next } of edges) {
       if (spec.startsWith(PLATFORM_PREFIX)) {
         const rel = path.relative(root, file)
         if (!blockers.has(rel)) blockers.set(rel, new Set())
         blockers.get(rel).add(spec)
       }
-      const next = resolveModule(file, spec, aliasList)
       if (next !== null) walk(next)
     }
   }
   if (!existsSync(start)) return { modules: 0, blockers, missing: true }
   walk(start)
   return { modules: seen.size, blockers, missing: false }
+}
+
+/**
+ * One file's outgoing edges, read and parsed once and shared across entries.
+ *
+ * ⚠️ **THE TEN PINNED GRAPHS OVERLAP ALMOST ENTIRELY**, and this used to
+ * re-walk each from scratch: `blockersOf` built a fresh `seen` per entry, so a
+ * module reachable from several of them was read off disk and parsed once per
+ * entry, and `aliases(root)` — which reads and parses `tsconfig.base.json` —
+ * was recomputed for every one.
+ *
+ * That is why the gate's own test could exceed a 15 s `testTimeout` under
+ * `--coverage` while taking 2 s standalone: `scripts/**` is in
+ * `COVERAGE_INCLUDE`, so every one of those redundant parses ran instrumented.
+ * The cost was real work, not a slow machine, and the fix is to stop doing it
+ * rather than to raise the bound.
+ *
+ * ⚠️ **WHAT IS CACHED IS PURE, AND WHAT IS NOT IS NOT.** An edge list is a
+ * function of the file's bytes and the alias table, both fixed for the
+ * lifetime of one call. `seen`, `blockers` and `modules` are per-entry answers
+ * and are deliberately NOT shared — sharing them would merge ten reports into
+ * one and silently change what the gate says.
+ *
+ * The cache is per-call, never module-global: a long-lived one would go stale
+ * against a tree the caller had edited between calls, which is exactly the
+ * shape of bug a detector must not have.
+ */
+function newWalkCache(root) {
+  const aliasList = aliases(root)
+  const edges = new Map()
+  return {
+    edgesOf(file) {
+      if (edges.has(file)) return edges.get(file)
+      let source
+      try {
+        source = readFileSync(file, 'utf8')
+      } catch {
+        edges.set(file, null)
+        return null
+      }
+      /* `specifiersIn` returns a Set — spread it before mapping. */
+      const out = [...specifiersIn(source, file)].map((spec) => ({
+        spec,
+        next: resolveModule(file, spec, aliasList),
+      }))
+      edges.set(file, out)
+      return out
+    },
+  }
 }
 
 /** Every `.ts`/`.tsx` under `dir` that is not a test. */
@@ -274,8 +321,10 @@ export function sourcesUnder(root, dir) {
 
 /** Check a list of modules. Returns one report per module. */
 export function checkBrowserSafe(root, modules) {
+  /* ONE CACHE FOR THE WHOLE CALL — see `newWalkCache`. */
+  const shared = newWalkCache(root)
   return modules.map((module) => {
-    const { modules: count, blockers, missing } = blockersOf(root, module)
+    const { modules: count, blockers, missing } = blockersOf(root, module, shared)
     return {
       module,
       missing,
