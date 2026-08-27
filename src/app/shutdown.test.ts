@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { SHUTDOWN_DONE_EVENT, SHUTDOWN_EVENT, armShutdown, armShutdownInBackground, type ShutdownDeps } from './shutdown'
+import { SHUTDOWN_DONE_EVENT, SHUTDOWN_EVENT, armShutdown, armShutdownInBackground, createTeardown, type ShutdownDeps } from './shutdown'
 
 /**
  * THE QUIT HANDSHAKE — the cross-language path nothing could reach.
@@ -173,6 +173,48 @@ describe('the teardown order', () => {
     world.quit()
     await vi.waitFor(() => expect(attempted).toBe(1))
     expect(world.order).toEqual(['flush', 'drain', 'abort', 'quiesce'])
+  })
+})
+
+/**
+ * THE WINDOW CLOSE AND THE QUIT ARE ONE TEARDOWN.
+ *
+ * The red button ran flush → drain → destroy and never the abort and the
+ * journal close, so the sync journal's flag stayed up on every close — and on
+ * Windows and Linux, which have no quit menu, that was every quit. Now the
+ * close runs the same teardown the shell's ask runs, through one memoised
+ * function: a quit that lands while a close is already tearing down joins it
+ * instead of starting a second abort.
+ */
+describe('one teardown for the close and the quit', () => {
+  it('runs once however many ask, and answers the shell once', async () => {
+    const world = shell()
+    const teardown = createTeardown(world.deps)
+    await armShutdown(world.deps, teardown)
+    /* The window close starts it; the shell's ask joins it. */
+    const closing = teardown()
+    await world.quit()
+    await closing
+    expect(world.order).toEqual(['flush', 'drain', 'abort', 'quiesce'])
+    expect(world.emitted).toEqual([SHUTDOWN_DONE_EVENT])
+  })
+
+  it('is what arming in the background hands back, so the composition root can give it to the window', async () => {
+    const world = shell()
+    const teardown = armShutdownInBackground(world.deps)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(world.listening()).toBe(true)
+    await teardown()
+    expect(world.order).toEqual(['flush', 'drain', 'abort', 'quiesce'])
+    expect(world.emitted).toEqual([SHUTDOWN_DONE_EVENT])
+    /* AND THE SHELL ASKING AFTERWARDS GETS THE FINISHED ONE, not a second —
+       and hears nothing new: the one answer already went, and the shell's
+       persistent listener (`shutdown::watch`) has it. `quit()` awaits an
+       answer, so it is fired and not awaited; a tick is enough to know. */
+    void world.quit()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(world.order).toEqual(['flush', 'drain', 'abort', 'quiesce'])
+    expect(world.emitted).toEqual([SHUTDOWN_DONE_EVENT])
   })
 })
 

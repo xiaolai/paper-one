@@ -13,6 +13,7 @@ import { usePlatform, usePrefersDark, usePrefersReducedMotion } from './platform
 import { useImportRun } from './hooks/useImportRun'
 import { useArchives } from './hooks/useArchives'
 import { useWindowClose } from './hooks/useWindowClose'
+import { closePrepare } from './closeWindow'
 import { openExternal } from './openExternal'
 import { hasOpenLayer, useAppState } from './state'
 import { useTagPrefs } from './hooks/useTagPrefs'
@@ -21,7 +22,7 @@ import type { Composition } from '../core/registry'
 import { useBook } from './hooks/useBook'
 import { useBookIntake } from './hooks/useBookIntake'
 import { useEnrichment } from './hooks/useEnrichment'
-import { onBeforeClose } from '../core/beforeClose'
+import { flushBeforeClose, onBeforeClose } from '../core/beforeClose'
 import { useFileDrop, type DropHaul } from './hooks/useFileDrop'
 import { useLibrary } from './hooks/useLibrary'
 import { useCards } from './hooks/useCards'
@@ -102,6 +103,14 @@ export interface AppProps {
    * itself puts nothing in it.
    */
   composition: Composition
+  /**
+   * What must happen before the window closes, when the composition root has
+   * more to tear down than the kernel knows about — the same teardown the
+   * quit handshake runs: hand over, drain, end the capabilities, close the
+   * sync journal, tell the shell. Absent, the kernel flushes and drains its
+   * own queue and no more, which is right for a host with nothing composed.
+   */
+  beforeWindowClose?: () => Promise<unknown>
 }
 
 /**
@@ -112,7 +121,7 @@ export interface AppProps {
  */
 const NOTICE_MS = 12_000
 
-export function App({ services, fs, shelfUnread = false, composition }: AppProps) {
+export function App({ services, fs, shelfUnread = false, composition, beforeWindowClose }: AppProps) {
   const platform = usePlatform()
   /* Probed once for the app's lifetime: which fonts this machine has cannot
      change while it is running. Shared by the settings panel and the palette so
@@ -997,10 +1006,17 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
     if (overrideSpent(bookId, openAt, book.position.cfi)) setOpenAt(null)
   }, [openAt, bookId, book.position.cfi])
 
-  /* HOLD THE WINDOW SHUT UNTIL EVERY WRITE HAS LANDED — see
-   * `useWindowClose`. A whole errand with its own lifetime failure modes, and
-   * both defects it has had were lifetime defects. */
-  useWindowClose(useCallback(() => services.drain(), [services]))
+  /* HOLD THE WINDOW SHUT UNTIL EVERYTHING HAS LANDED — see `useWindowClose`.
+   * A whole errand with its own lifetime failure modes, and both defects it
+   * has had were lifetime defects. The composition's teardown when there is
+   * one; the kernel's own flush-and-drain when there is not. */
+  const reportClose = useCallback((message: string, cause: unknown) => console.error(message, cause), [])
+  useWindowClose(
+    useMemo(
+      () => beforeWindowClose ?? closePrepare(flushBeforeClose, () => services.drain(), reportClose),
+      [beforeWindowClose, services, reportClose],
+    ),
+  )
 
   /* The book intake — bytes first, then record, one effect — lives in
    * `useBookIntake`, where its ordering rationale is documented. */

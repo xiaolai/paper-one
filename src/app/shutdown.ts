@@ -58,8 +58,8 @@ export const SHUTDOWN_DONE_EVENT = 'paper://shutdown-done'
  * journal dirty — the exact state this exists to prevent, during the window
  * most likely to be slow.
  */
-export async function armShutdown(deps: ShutdownDeps): Promise<void> {
-  const stop = await deps.listen(SHUTDOWN_EVENT, () => void runTeardown(deps))
+export async function armShutdown(deps: ShutdownDeps, teardown: () => Promise<void> = createTeardown(deps)): Promise<void> {
+  const stop = await deps.listen(SHUTDOWN_EVENT, () => void teardown())
   /* THE UNLISTEN IS KEPT AND TIED TO THE LIFETIME. Discarding it left a native
    * registration behind on every reload — StrictMode alone mounts twice in
    * development — so a quit reached several handlers, each aborting a lifetime
@@ -80,12 +80,33 @@ export async function armShutdown(deps: ShutdownDeps): Promise<void> {
  * Failing to arm means every quit leaves the journal dirty, so it is said out
  * loud.
  */
-export function armShutdownInBackground(deps: ShutdownDeps): void {
-  void armShutdown(deps).catch((error: unknown) => {
+export function armShutdownInBackground(deps: ShutdownDeps): () => Promise<void> {
+  const teardown = createTeardown(deps)
+  void armShutdown(deps, teardown).catch((error: unknown) => {
     deps.diagnostics.warn('shutdown.handshake-unavailable', {
       message: error instanceof Error ? error.message : String(error),
     })
   })
+  return teardown
+}
+
+/**
+ * ONE TEARDOWN, HOWEVER MANY ASK.
+ *
+ * Two things end the app: the shell's `paper://shutdown` (⌘Q, the menu, an
+ * AppleScript quit) and the window's own close button — which, on Windows and
+ * Linux, where the quit menu is macOS-only, is the only quit there is. The
+ * close used to run its own flush-and-drain and skip the two steps that close
+ * the journal, so its flag stayed up on every close. Both paths now run THIS,
+ * and a second caller — a quit arriving while the close is already tearing
+ * down — gets the same promise rather than a second abort racing the first.
+ */
+export function createTeardown(deps: ShutdownDeps): () => Promise<void> {
+  let running: Promise<void> | null = null
+  return () => {
+    running ??= runTeardown(deps)
+    return running
+  }
 }
 
 /**

@@ -264,7 +264,10 @@ async function boot(root: HTMLElement): Promise<void> {
    * returned, and the quit handshake timed out for five seconds every time
    * while looking like it had been wired. A silent capability check written
    * into the fix for a silent failure. */
-  armShutdownInBackground({
+  /* THE TEARDOWN IS HANDED TO THE WINDOW AS WELL. Arming answers the shell's
+     ask; the same function goes to `App` as `beforeWindowClose`, so the red
+     button — the only quit on Windows and Linux — closes the journal too. */
+  const teardown = armShutdownInBackground({
     listen: async (event, handler) => {
       const { listen } = await import('@tauri-apps/api/event')
       return listen(event, () => handler())
@@ -343,7 +346,7 @@ async function boot(root: HTMLElement): Promise<void> {
    * flush, and the unclean path still works exactly as it does today. */
   createRoot(root).render(
     <StrictMode>
-      <App services={services} fs={fs} shelfUnread={shelfUnread} composition={composition} />
+      <App services={services} fs={fs} shelfUnread={shelfUnread} composition={composition} beforeWindowClose={teardown} />
     </StrictMode>,
   )
 

@@ -365,6 +365,11 @@ pub fn run() {
                 nudge_traffic_lights(&main);
             }
 
+            /* Before anything can answer: a window close runs the teardown
+             * and answers `paper://shutdown-done` BEFORE it destroys the
+             * window, and the exit request only arrives after. */
+            shutdown::watch(app.handle());
+
             #[cfg(all(feature = "desktop", target_os = "macos"))]
             shutdown::install_quit_item(app.handle())?;
 
@@ -429,17 +434,33 @@ pub fn run() {
                 // `started()` alone is what prevents recursion: the first
                 // request defers and sets it, and the `app.exit(0)` below comes
                 // back through here and passes straight out.
-                if !shutdown::started() {
-                    shutdown::begin();
-                    api.prevent_exit();
-                    let app = app.clone();
-                    // A plain OS thread, not the async runtime: the whole wait
-                    // is one blocking `recv_timeout`, and this adds no
-                    // dependency the app crate did not already have.
-                    std::thread::spawn(move || {
-                        shutdown::run(&app);
-                        app.exit(0);
-                    });
+                match shutdown::exit_action(shutdown::started(), shutdown::finished()) {
+                    shutdown::Exit::Defer => {
+                        shutdown::begin();
+                        api.prevent_exit();
+                        let app = app.clone();
+                        // A plain OS thread, not the async runtime: the whole wait
+                        // is one blocking `recv_timeout`, and this adds no
+                        // dependency the app crate did not already have.
+                        std::thread::spawn(move || {
+                            shutdown::run(&app);
+                            shutdown::finish();
+                            app.exit(0);
+                        });
+                    }
+                    // A SECOND ⌘Q DURING THE HANDSHAKE used to pass straight
+                    // out: `started()` was true, nothing deferred it, and the
+                    // app exited with the webview mid-teardown — the journal
+                    // close it was waiting for, cut off by the reader pressing
+                    // the key twice. Absorbed; the handshake's own `exit(0)`
+                    // arrives after `finish()` and passes.
+                    shutdown::Exit::Absorb => {
+                        log::info!(
+                            "shutdown: a second exit request during the handshake; absorbed"
+                        );
+                        api.prevent_exit();
+                    }
+                    shutdown::Exit::Pass => {}
                 }
             }
         });
@@ -469,6 +490,57 @@ mod shutdown {
     pub const QUIT_ID: &str = "paper-quit";
 
     static STARTED: AtomicBool = AtomicBool::new(false);
+    /// Set once `run` has returned — the handshake's own `exit(0)` follows.
+    static FINISHED: AtomicBool = AtomicBool::new(false);
+    /// Set by `watch` when the webview has answered on its own initiative:
+    /// a WINDOW CLOSE runs the whole teardown and answers before it destroys
+    /// the window, and the exit request only arrives after. `run` used to
+    /// register its listener then, ask a webview that no longer existed, and
+    /// wait out the whole grace period — on Windows and Linux, on every quit.
+    static DONE_SEEN: AtomicBool = AtomicBool::new(false);
+
+    /// What an exit request gets, given where the handshake stands.
+    #[derive(Debug, PartialEq, Eq)]
+    pub enum Exit {
+        /// The first request: defer it, ask the webview, exit when it answers.
+        Defer,
+        /// A request during the handshake: absorb it, or the teardown is cut off.
+        Absorb,
+        /// The handshake's own exit, after `finish`: let it through.
+        Pass,
+    }
+
+    /// The decision, as a function of the two flags — so it can be tested
+    /// without an `AppHandle`, which is where the second-⌘Q defect lived.
+    pub fn exit_action(started: bool, finished: bool) -> Exit {
+        if !started {
+            Exit::Defer
+        } else if !finished {
+            Exit::Absorb
+        } else {
+            Exit::Pass
+        }
+    }
+
+    /// Whether `run` has anything left to ask: not when the webview has
+    /// already answered, which a window close does before the request.
+    pub fn must_ask(done_seen: bool) -> bool {
+        !done_seen
+    }
+
+    /// Hear a `DONE` that arrives before anyone asked. Registered at setup,
+    /// for the life of the app.
+    pub fn watch<R: Runtime>(app: &AppHandle<R>) {
+        app.listen(DONE, |_| DONE_SEEN.store(true, Ordering::SeqCst));
+    }
+
+    pub fn finish() {
+        FINISHED.store(true, Ordering::SeqCst);
+    }
+
+    pub fn finished() -> bool {
+        FINISHED.load(Ordering::SeqCst)
+    }
 
     /// Replace macOS's predefined Quit with one that goes through
     /// `AppHandle::exit`.
@@ -523,6 +595,10 @@ mod shutdown {
     }
 
     pub fn run<R: Runtime>(app: &AppHandle<R>) {
+        if !must_ask(DONE_SEEN.load(Ordering::SeqCst)) {
+            log::info!("shutdown: the webview had already finished its teardown before the exit request; nothing to ask");
+            return;
+        }
         let (tx, rx) = mpsc::channel::<()>();
         // LISTENED FOR BEFORE THE ASK, or a webview that answers immediately
         // answers into nothing and the quit waits out the whole grace period.
@@ -545,6 +621,29 @@ mod shutdown {
             }
         }
         app.unlisten(id);
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::shutdown::{exit_action, must_ask, Exit};
+
+    /// The first request defers; a second during the handshake is absorbed —
+    /// it used to pass straight out and cut the teardown off; the handshake's
+    /// own exit, after `finish`, passes.
+    #[test]
+    fn a_second_exit_request_during_the_handshake_is_absorbed() {
+        assert_eq!(exit_action(false, false), Exit::Defer);
+        assert_eq!(exit_action(true, false), Exit::Absorb);
+        assert_eq!(exit_action(true, true), Exit::Pass);
+    }
+
+    /// A window close answers before the exit request arrives; asking then
+    /// waited out the whole grace period against a webview that was gone.
+    #[test]
+    fn a_done_that_arrived_before_the_ask_means_there_is_nothing_to_wait_for() {
+        assert!(must_ask(false));
+        assert!(!must_ask(true));
     }
 }
 

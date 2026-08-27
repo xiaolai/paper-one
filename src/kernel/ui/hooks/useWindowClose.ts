@@ -1,8 +1,7 @@
 import { useEffect } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
-import { flushBeforeClose } from '../../core/beforeClose'
 import { isTauri } from '../platform'
-import { CLOSE_DRAIN_MS, createCloseSequence } from '../closeWindow'
+import { CLOSE_HOLD_MS, createCloseSequence } from '../closeWindow'
 
 /**
  * Hold the window shut until everything written has landed.
@@ -33,7 +32,7 @@ import { CLOSE_DRAIN_MS, createCloseSequence } from '../closeWindow'
  * it and that loses strictly more. See `CLOSE_DRAIN_MS`, which the app's quit
  * path shares.
  */
-export function useWindowClose(drain: () => Promise<unknown>): void {
+export function useWindowClose(prepare: () => Promise<unknown>): void {
   useEffect(() => {
     if (!isTauri()) return
     /* The registration is ASYNC and the cleanup is not: torn down before the
@@ -49,11 +48,15 @@ export function useWindowClose(drain: () => Promise<unknown>): void {
      * starts, so nothing else will close this window; a throw anywhere in here
      * used to reject the listener and leave the reader with a window that
      * would not close. */
+    /* `prepare` IS THE SAME TEARDOWN ⌘Q RUNS when the composition root
+     * supplies one (`App`'s `beforeWindowClose`): the red button used to
+     * flush and drain and never end the capabilities, so the sync journal's
+     * flag stayed up on every close — and on Windows and Linux, which have no
+     * quit menu, that was every quit. */
     const close = createCloseSequence({
-      flush: flushBeforeClose,
-      drain,
+      prepare,
       destroy: () => getCurrentWindow().destroy(),
-      timeoutMs: CLOSE_DRAIN_MS,
+      timeoutMs: CLOSE_HOLD_MS,
       report: (message, cause) => console.error(message, cause),
     })
     void getCurrentWindow()
@@ -84,5 +87,5 @@ export function useWindowClose(drain: () => Promise<unknown>): void {
       disposed = true
       stop?.()
     }
-  }, [drain])
+  }, [prepare])
 }
