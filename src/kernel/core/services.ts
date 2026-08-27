@@ -6,7 +6,7 @@ import { createLibrary, type Library } from './libraryStore'
 import { createMarkStore, type MarkStore } from './markStore'
 import { folderOf } from './bookFolder'
 import { NOT_CONFIGURED, type CompanionProvider } from './companion'
-import { LOOK_UP_SETTING, NO_GLOSS, availableModes, effectiveMode, type GlossProvider, type LookUpMode } from './gloss'
+import { NO_GLOSS, type GlossProvider } from './gloss'
 import { NO_WORK_LINE, NOOP_DIAGNOSTICS, NOOP_RECORDER, REMOVABLE_BLOB_KINDS, REMOVABLE_BLOB_NAMES, recorded, type DevicePort, type Diagnostics, type MutationRecorder, type MutationToken, type RemovableBlobName, type SettingsStore, type ShelfPort, type SizePort, type WorkLine } from './ports'
 import { carryLegacySettings, createSettingsStore, type SettingsMigration } from './settings'
 import { writeQueue, type WriteQueue } from './writeQueue'
@@ -162,51 +162,26 @@ export interface KernelServices {
   bindWorkLine(work: WorkLine): Disposable
   /** The work line — `NO_WORK_LINE` until one is bound. */
   workLine(): WorkLine
-  /** The gloss provider — `NO_GLOSS` until one is bound. */
+  /**
+   * The gloss provider — `NO_GLOSS` until one is bound.
+   *
+   * ⚠️ **THERE ARE NO LOOK-UP ACCESSORS BESIDE THIS ANY MORE.** `lookUp()`,
+   * `cycleLookUp()` and `hasDictionary()` were here so that `inference` and
+   * `companion` could draw a settings row cycling between the system
+   * dictionary, the gloss and both — a value they could not reach through
+   * `services.settings`, because `scopeSettings` confines a capability to its
+   * own `<id>.` namespace and the setting was `kernel.lookUp`.
+   *
+   * All three are deleted with the mode they served. What is worth keeping
+   * from the episode is why `hasDictionary` was on this interface at all: it
+   * was a fact the composition root worked out and passed down, it defaulted
+   * to `false` on the way, and the production caller forgot to pass it — so on
+   * macOS the system dictionary silently vanished from the cycle. The
+   * replacement fact lives on the provider (`GlossProvider.installable`),
+   * where the object that knows the answer is the one that states it and no
+   * caller can default it wrong.
+   */
   gloss(): GlossProvider
-  /**
-   * The reader's `Look up` preference, and the one way to cycle it.
-   *
-   * HERE RATHER THAN IN THE SETTINGS STORE, and the reason is an invariant
-   * that would otherwise be broken by the only two callers there are.
-   * `LOOK_UP_SETTING` is `kernel.lookUp` on purpose — `ui/lookUp.ts` acts on
-   * it and that file is the kernel's — but a capability's settings handle is
-   * confined to its own `<id>.` namespace by `scopeSettings`, at every door
-   * including `services.settings`. So `inference` and `companion`, which both
-   * DRAW the row, cannot reach the value through the store at all: the read
-   * throws `namespace` the moment their pane mounts.
-   *
-   * An accessor is the seam that satisfies both: the kernel keeps ownership
-   * of the question, and a capability that draws the control asks rather than
-   * reaches. It also collapses a duplicated algorithm — the cycle was written
-   * out twice, identically, in two capability stores.
-   *
-   * `hasDictionary` and `hasGloss` are the CALLER's answers, because only the
-   * caller knows: the platform's dictionary is `ui/lookUp.ts`'s question and
-   * whether a text model is installed is the controller's. A cycle with one
-   * or no available mode does nothing, so a control that would be inert is
-   * simply not offered.
-   */
-  lookUp(): LookUpMode
-  cycleLookUp(hasDictionary: boolean, hasGloss: boolean): void
-  /**
-   * Whether this platform has a system dictionary to hand a passage to.
-   *
-   * ⚠️ **A CAPABILITY CANNOT WORK THIS OUT.** It is
-   * `ui/lookUp.ts`'s `hasDictionary(platform)`, and both the platform and that
-   * function live behind the kernel's React layer, which `kernel-public-entry-only`
-   * puts out of a capability's reach. So `CompanionPane` took it as an
-   * optional prop defaulting to `false`, and the production caller passed
-   * nothing — which on macOS silently removed the system dictionary from the
-   * cycle, so a reader could not select `System dictionary` or `Both` at all.
-   * A default that is wrong for the platform the feature exists for is not a
-   * default.
-   *
-   * The composition root answers it once, and every drawer of the control
-   * asks. Defaults to `false` only where there is genuinely no platform to
-   * ask about — a test, a headless service.
-   */
-  hasDictionary(): boolean
   /**
    * Serve a composed set of services through the bound host, once every
    * capability has started (so a delegating handler's target is ready). The
@@ -246,12 +221,6 @@ export interface KernelServicesOptions {
    * as an empty one.
    */
   readonly shelfRead?: boolean
-  /**
-   * Whether this platform has a system dictionary — see
-   * `KernelServices.hasDictionary`. The composition root passes
-   * `hasDictionary(resolvePlatform())`; everything else leaves it false.
-   */
-  readonly hasDictionary?: boolean
   readonly recorder?: MutationRecorder
   readonly diagnostics?: Diagnostics
   readonly settingsMigration?: SettingsMigration
@@ -498,7 +467,6 @@ export function createKernelServices({
   diagnostics = NOOP_DIAGNOSTICS,
   settingsMigration,
   clock,
-  hasDictionary = false,
 }: KernelServicesOptions): KernelServices {
   /* The delegating ports. The stores capture THESE, so a bind after
    * construction reaches every store without any of them knowing. Each
@@ -587,15 +555,6 @@ export function createKernelServices({
     companion: () => companionSlot.get(),
     bindGloss: (next) => glossSlot.bind(next),
     gloss: () => glossSlot.get(),
-    lookUp: () => settings.get(LOOK_UP_SETTING),
-    cycleLookUp: (hasDictionary, hasGloss) => {
-      const modes = availableModes(hasDictionary, hasGloss)
-      if (modes.length <= 1) return
-      const current = effectiveMode(settings.get(LOOK_UP_SETTING), modes)
-      const index = current === null ? -1 : modes.indexOf(current)
-      settings.set(LOOK_UP_SETTING, modes[(index + 1) % modes.length] as LookUpMode)
-    },
-    hasDictionary: () => hasDictionary,
     bindWorkLine: (next) => workLineSlot.bind(next),
     workLine: () => workLineSlot.get(),
     serveServices: async (list) => {

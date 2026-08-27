@@ -21,8 +21,8 @@ import {
 } from '../../core/metrics'
 import { bookAccent } from '../../core/bookAccent'
 import { citation, type Source } from '../../core/citation'
-import { decideLookUp, hasDictionary, isLookUpTerm } from '../lookUp'
-import { NO_GLOSS, type GlossProvider, type LookUpMode } from '../../core/gloss'
+import { decideLookUp, isLookUpTerm } from '../lookUp'
+import { NO_GLOSS, type GlossProvider } from '../../core/gloss'
 import { NOOP_DIAGNOSTICS, type Diagnostics } from '../../core/ports'
 import { askGloss, useGloss } from '../hooks/useGloss'
 import { marginMarks, type MarkAppearance } from '../../core/marks'
@@ -68,18 +68,21 @@ export interface ReaderProps {
    */
   gloss?: GlossProvider
   /**
-   * Hand a term to the SYSTEM dictionary, when this host has one.
+   * Take the reader to where a model is installed.
    *
-   * A PROP RATHER THAN AN IMPORT, and that is what makes this screen bundlable
-   * for a browser. The implementation is one `invoke`, so importing it put the
-   * whole eighty-module reading surface behind `@tauri-apps` — see
-   * `lookUpTauri.ts`. The desktop passes the real one; a browser passes
-   * nothing and the control is absent, which is byte for byte what already
-   * happens on Windows and Linux, where `hasDictionary` is false.
+   * Called only when the gloss is `installable` and not `available` — a
+   * desktop with `inference` composed and nothing downloaded yet. A host with
+   * nowhere to send them passes nothing, and `decideLookUp` answers `none` so
+   * the control is never drawn in the first place.
+   *
+   * ⚠️ IT REPLACES `onSystemLookUp`, which handed a term to Dictionary.app,
+   * and the two are opposites worth noting: that prop existed so this screen
+   * could stay bundlable for a browser while reaching a native command, and
+   * this one exists so the screen can reach a PANE it must not know the owner
+   * of. The models pane is `inference`'s, and the kernel imports nothing from
+   * a capability — so what crosses is a callback, not an id.
    */
-  onSystemLookUp?: (term: string) => Promise<void>
-  /** The reader's stored `Look up` preference. */
-  lookUpMode?: LookUpMode
+  onInstallGloss?: (() => void) | undefined
   /**
    * Where a lookup says whether it found a real sentence (WI-16.4, §F4).
    *
@@ -189,8 +192,7 @@ export function Reader({
   platform,
   book,
   gloss: glossProvider = NO_GLOSS,
-  lookUpMode = 'system',
-  onSystemLookUp,
+  onInstallGloss,
   diagnostics = NOOP_DIAGNOSTICS,
   marks,
   marking,
@@ -250,20 +252,21 @@ export function Reader({
 
   const { selection, setSelection, ranges, onMarkDrawn, selected, mark, unmark } = marking
 
-  /* WHAT `Look up` DOES, decided once per render from the three things that
-     decide it: the platform's dictionary, whether a gloss is bound, and the
-     reader's preference. `decideLookUp` is the rule; this is where it lands. */
+  /* WHAT `Look up` DOES, decided once per render. There used to be three
+     inputs — the platform's dictionary, the gloss, and a stored preference
+     between them — and there are now two, because there is one behaviour and
+     nothing to choose between. `decideLookUp` is the rule; this is the wiring.
+
+     `onInstallGloss !== undefined` IS PART OF THE QUESTION, not a guard bolted
+     on. `installable` asks whether this BUILD has somewhere to install a model;
+     whether this screen was handed the means to go there is a different fact,
+     and the two can differ — the same distinction `onSystemLookUp` used to
+     carry against `hasDictionary`. Drawing a control that cannot act is what
+     both halves exist to prevent, so they are answered together. */
   const gloss = useGloss(glossProvider)
-  /* `onSystemLookUp !== undefined` IS PART OF THE QUESTION, not a guard bolted
-     on. `hasDictionary` asks whether this PLATFORM has a dictionary; whether
-     this screen was handed the means to reach it is a different fact, and after
-     WI-19.3 they can differ — a browser is given no binding. Drawing a control
-     that cannot act is the failure `hasDictionary` exists to prevent, so the
-     two are answered together. */
   const lookUpAction = decideLookUp(
-    onSystemLookUp !== undefined && hasDictionary(platform),
     glossProvider.available,
-    lookUpMode,
+    glossProvider.installable && onInstallGloss !== undefined,
   )
   /* THE SENTENCE, or today's answer (WI-16.4). `askGloss` walks the document
      for the sentence the term really sits in and falls back to the
@@ -880,15 +883,19 @@ export function Reader({
                       copyToClipboard(citation(selection.text, sourceFor(selection.sectionIndex)))
                     }}
                     onLookUp={
-                      /* WHAT `Look up` DOES, by platform and by what is
-                         installed (WI-15.13). `decideLookUp` is the rule and
+                      /* ONE GESTURE, ONE THING. `decideLookUp` is the rule and
                          it lives in `lookUp.ts` with a test; this is the
                          wiring.
 
-                         NO REGRESSION: with no gloss bound this is
-                         `hasDictionary(platform) ? system : null`, byte for
-                         byte the behaviour that shipped — the control is
-                         absent off macOS and hands to Dictionary.app on it. */
+                         ⚠️ **`install` CALLS THE SAME FUNCTION AS `gloss`**,
+                         and that is deliberate rather than an oversight.
+                         `useGloss.ask` already decides what an unavailable
+                         provider does — it sets `unavailable` rather than
+                         returning silently — so branching here would be a
+                         second copy of a decision the hook has to make anyway,
+                         and the two would eventually disagree about which
+                         states are reachable. The action's only job at this
+                         call site is `none`. */
                       lookUpAction === 'none'
                         ? null
                         : () => {
@@ -898,15 +905,7 @@ export function Reader({
                                question about the passage, not something done to
                                it — and the reader's next act is usually to mark
                                the word they have just understood. */
-                            if (lookUpAction === 'system' || lookUpAction === 'both') {
-                              void onSystemLookUp?.(term).catch((cause: unknown) => {
-                                console.error('Paper: could not look that up', cause)
-                                setNotice('That could not be looked up.')
-                              })
-                            }
-                            if (lookUpAction === 'gloss' || lookUpAction === 'both') {
-                              lookUpGloss()
-                            }
+                            lookUpGloss()
                           }
                     }
                     onRemove={() => {
@@ -916,11 +915,21 @@ export function Reader({
                   />
                 </div>
 
-                {/* THE GLOSS, and the lookup that did not arrive beside it.
-                    Its own component (WI-16.3) so the two can be RENDERED in a
-                    test rather than read back out of this file's source — see
-                    `GlossStrip`, where the whole argument lives. */}
-                <GlossStrip state={gloss.state} onDismiss={() => gloss.dismiss()} />
+                {/* THE GLOSS, the lookup that did not arrive, and the lookup
+                    that had nothing to answer it. Its own component (WI-16.3)
+                    so the three can be RENDERED in a test rather than read back
+                    out of this file's source — see `GlossStrip`, where the
+                    whole argument lives.
+
+                    `onInstall` is passed unconditionally: the strip reads it
+                    only in the `unavailable` state, which `useGloss` can only
+                    reach when the provider is unavailable, which is the same
+                    condition that made `decideLookUp` answer `install`. */}
+                <GlossStrip
+                  state={gloss.state}
+                  onDismiss={() => gloss.dismiss()}
+                  onInstall={onInstallGloss}
+                />
 
                 {/* The way back from a jump. Above the failure notice and
                     styled apart from it: one is an offer and the other is an

@@ -150,12 +150,19 @@ export type { RenderSlot } from './core/renderSlot'
  * is not the window-close path `App` already covers — see `beforeClose.ts`. */
 export { flushBeforeClose, onBeforeClose } from './core/beforeClose'
 /* The companion and the gloss (phase 15). The types a capability implements
- * to bind `KernelServices.bindCompanion` / `bindGloss`, and the constants a
- * settings pane renders the Look up cycle from. */
+ * to bind `KernelServices.bindCompanion` / `bindGloss`.
+ *
+ * ⚠️ **THE LOOK-UP CONSTANTS ARE GONE FROM HERE** — `LOOK_UP_MODES`,
+ * `LOOK_UP_LABELS`, `LOOK_UP_SETTING`, `LookUpMode`, `isLookUpMode`,
+ * `availableModes` and `effectiveMode` were exported so a capability's
+ * settings pane could render the Look up cycle. There is no cycle: the system
+ * dictionary hand-off is deleted and the gloss is the whole feature. A barrel's
+ * re-exports evaluate with the barrel, so this is a saving as well as a
+ * deletion. */
 export { NOT_CONFIGURED, NOT_CONFIGURED_REASON, UNKNOWN_CITATION_NOTE } from './core/companion'
 export type { AnswerEnd, AskContext, AskPassage, Citation, CompanionProvider } from './core/companion'
-export { LOOK_UP_LABELS, LOOK_UP_MODES, LOOK_UP_SETTING, NO_GLOSS, availableModes, effectiveMode, isLookUpMode } from './core/gloss'
-export type { GlossContext, GlossProvider, LookUpMode } from './core/gloss'
+export { NO_GLOSS } from './core/gloss'
+export type { GlossContext, GlossProvider } from './core/gloss'
 /* WHAT A BOOK'S LINK MAY DO TO THE HOST, decided once and in one place.
  *
  * foliate hands any link whose scheme leaves the package to `globalThis.open`

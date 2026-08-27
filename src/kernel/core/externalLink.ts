@@ -58,8 +58,8 @@ export function externalTarget(href: string): ExternalTarget {
   /* CONTROL CHARACTERS FIRST, before parsing. A URL carrying a newline is a
      URL that can mean two things to whatever reads it next, and `new URL`
      strips some of them rather than refusing — so parsing first would launder
-     the very thing worth catching. `look_up` refuses them for the same reason
-     one layer down. */
+     the very thing worth catching. The deleted `look_up` refused them one
+     layer down for the same reason; `open_external` still does. */
   if (/[\u0000-\u0020\u007f]/u.test(raw)) return { kind: 'refuse', why: 'that link is malformed' }
 
   let parsed: URL

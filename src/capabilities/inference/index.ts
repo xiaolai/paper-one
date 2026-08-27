@@ -280,7 +280,7 @@ export const inference: Capability = {
   },
 }
 
-export { KEEP_LOADED_SETTING, LOOK_UP_SETTING } from './lib/settings'
+export { KEEP_LOADED_SETTING } from './lib/settings'
 /* THE DOWNLOAD LINE IS THE WORK-LINE BINDING, and only that.
  *
  * An `inferenceDownloadLine()` export lived here beside it, with a comment

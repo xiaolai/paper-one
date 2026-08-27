@@ -14,8 +14,8 @@
  *
  * AMBER, and that is the whole point rather than decoration. `marks.ts`
  * reserves the companion kind and its amber tint for exactly this: a
- * definition from Apple's dictionary is authoritative and a gloss from a 4B
- * model is not, and the reader must be able to tell without being told.
+ * definition from a dictionary is authoritative and a gloss from a 4B model
+ * is not, and the reader must be able to tell without being told.
  *
  * It borrows `.notice`'s position at the foot rather than floating beside the
  * word: the selection popup already owns the space next to the passage, and
@@ -95,9 +95,13 @@
   min-width: 0;
 }
 
-/* What went wrong, said rather than swallowed — the rule `lookUp` states for
- * the system dictionary — but SECOND and quieter, because the reader's
- * question is "did I get a definition", not "which subsystem declined". */
+/* What went wrong, said rather than swallowed — but SECOND and quieter,
+ * because the reader's question is "did I get a definition", not "which
+ * subsystem declined".
+ *
+ * It matters more than it used to. Dictionary.app was the thing behind a
+ * failed gloss and it is gone, so this line is now the only account the
+ * reader gets of why they have no definition. */
 .glossFailedReason {
   flex: 1 1 auto;
   min-width: 0;
@@ -106,4 +110,62 @@
   white-space: nowrap;
   color: var(--ink-2);
   opacity: 0.75;
+}
+
+/* NOTHING INSTALLED TO ANSWER WITH — and it is not a failure, so it does not
+ * wear the failure's words.
+ *
+ * It takes `.glossFailed`'s geometry deliberately: same rule above it, same
+ * grey, same place at the foot. The reader's eye should learn ONE position for
+ * "the lookup did not produce a definition, here is why", and giving a second
+ * non-answer a third shape would teach them nothing except that the strip
+ * moves. What separates the two is the sentence and the button, which is the
+ * separation that matters — one is over, the other has a way forward.
+ *
+ * NOT amber, for the reason `.glossFailed` is not: amber is reserved for
+ * machine-written text presented as a definition, and this is Paper speaking
+ * about itself. */
+.glossAbsent {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-8);
+  margin: 0 var(--space-24) var(--space-8);
+  padding: var(--space-8) 0 0;
+  border-top: 1px solid var(--line-2);
+  font-size: var(--text-small);
+  color: var(--muted);
+}
+
+/* SHRINKABLE, for `.glossFailedSaid`'s reason: the term is the reader's
+   selection and `isLookUpTerm` allows 120 characters of it, so at
+   `flex: 0 0 auto` a phrase pushes the action and the dismiss off the line. */
+.glossAbsentSaid {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+/* The way out, and the only reason this state is allowed to exist at all —
+   §07 forbids a control that cannot act, and phase 17's decision turns on a
+   control that starts an install being one that acts.
+ *
+ * `--accent` rather than `--muted`: everything else on this line is a report
+ * and this is the offer, so it is the one thing here worth looking at. It
+ * borrows `.returnHintGo`'s shape — a text button, no chrome — because the
+ * strip is a passing notice and a filled button in it would read as a modal's
+ * confirm. */
+.glossInstall {
+  flex: 0 0 auto;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--accent);
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.glossInstall:hover {
+  text-decoration: underline;
 }

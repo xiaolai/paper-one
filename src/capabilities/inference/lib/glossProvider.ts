@@ -95,6 +95,23 @@ export function createGlossProvider({ plugin, controller }: GlossProviderOptions
       return controller.textModel() !== null
     },
 
+    /**
+     * ALWAYS TRUE, and it is a constant rather than an oversight.
+     *
+     * This object exists only because `inference` composed, and `inference`
+     * composing is exactly what puts the Local models section in Settings —
+     * `start()` never fails on absence (F2), so there is no state in which
+     * this provider is bound and the reader has nowhere to install a model.
+     * A build that did not compose it keeps the port's `NO_GLOSS` default,
+     * where the same field is `false`.
+     *
+     * So the two objects that implement `GlossProvider` answer this with two
+     * constants, and between them they say the thing the reader UI actually
+     * needs to know: whether Look up should offer a download or not be drawn
+     * at all. See `GlossProvider.installable`.
+     */
+    installable: true,
+
     async gloss(term: string, context: GlossContext, signal: AbortSignal): Promise<string> {
       const model = controller.textModel()
       if (model === null) {

@@ -20,18 +20,17 @@ import type { RouteRow, RoutesModel } from './routesModel'
 
 export interface CompanionPaneProps {
   readonly model: RoutesModel
-  /**
-   * Whether this platform has a system dictionary — `lookUp.ts`'s answer,
-   * routed through `services.hasDictionary()`.
+  /* ⚠️ `hasDictionary` USED TO BE HERE, and the episode is worth keeping even
+   * though the prop is not. It was optional and defaulted to `false`; the
+   * production caller passed nothing; so on macOS — the one platform that HAD
+   * a dictionary — it was excluded from the Look up cycle and the reader could
+   * not select `System dictionary` or `Both` at all. A default that is wrong
+   * on the platform a feature exists for is not a default, and an optional
+   * prop is how a caller forgets to answer.
    *
-   * ⚠️ **REQUIRED, AND IT USED TO DEFAULT TO `false`.** The production caller
-   * passed nothing, so on macOS — the one platform that HAS a dictionary — it
-   * was excluded from the cycle and the reader could not select
-   * `System dictionary` or `Both` at all. A default that is wrong on the
-   * platform the feature exists for is not a default, and an optional prop is
-   * how a caller forgets to answer.
-   */
-  readonly hasDictionary: boolean
+   * It was made required, and now it is deleted with the row it fed. The fact
+   * it replaced lives on `GlossProvider.installable`, stated by the object
+   * that knows it rather than passed down from a root that has to remember. */
 }
 
 /**
@@ -98,7 +97,7 @@ function RouteAction({ row, model }: { readonly row: RouteRow; readonly model: R
   }
 }
 
-export function CompanionPane({ model, hasDictionary }: CompanionPaneProps) {
+export function CompanionPane({ model }: CompanionPaneProps) {
   const snapshot = useSyncExternalStore(model.subscribe, model.getSnapshot)
   useEffect(() => {
     /* ⚠️ NOT FIRE-AND-FORGET. `refresh` never rejects — it absorbs a failed
@@ -133,29 +132,11 @@ export function CompanionPane({ model, hasDictionary }: CompanionPaneProps) {
         </div>
       ) : null}
 
-      {/* `Look up` is a cycle button and the route list is a list, and that is
-          not a contradiction: the list grows, and this has at most three
-          states and cannot gain a fourth. Absent entirely when there is no
-          gloss to offer — with no model installed, macOS behaves exactly as
-          it does today and Windows and Linux still show no control. */}
-      {snapshot.lookUp !== null ? (
-        <>
-          <div className={ui.row}>
-            <span className={ui.grow}>Look up</span>
-            <button
-              type="button"
-              className={ui.button}
-              onClick={() => model.cycleLookUp(hasDictionary, true)}
-            >
-              {snapshot.lookUp}
-            </button>
-          </div>
-          <div className={ui.hint}>
-            A gloss reads the sentence the word is in, and works on a phrase, where
-            the dictionary returns nothing.
-          </div>
-        </>
-      ) : null}
+      {/* ⚠️ THE `Look up` CYCLE ROW WAS HERE — three states, System dictionary
+          / Gloss / Both, drawn only when a gloss was available. It is deleted
+          with the hand-off it chose between. The reader has nothing to decide:
+          the dictionary button glosses the selection, and macOS's own Look Up
+          is on the right-click menu where it always was. */}
 
       {/* NO VOICE PICKER, and it is a removal rather than an omission.
        *

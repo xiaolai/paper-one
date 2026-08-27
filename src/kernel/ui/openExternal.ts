@@ -5,10 +5,17 @@ import { externalTarget } from '../core/externalLink'
 /**
  * Handing a book's web link to the platform's own browser.
  *
- * THE SHAPE IS `lookUp.ts`'s, and deliberately: Paper already has a way of
+ * THE SHAPE WAS `lookUp.ts`'s, and deliberately: Paper already had a way of
  * saying "this belongs to the operating system, not to us" — a capability
  * predicate the interface consults before drawing anything, and a Rust command
  * that validates its own argument rather than trusting the webview.
+ *
+ * ⚠️ **THE PRECEDENT IS DELETED AND THIS IS NOT.** `lookUp.ts` handed a
+ * passage to Dictionary.app; that whole path went when Paper's dictionary
+ * became the gloss, because macOS already offers Look Up on the right-click
+ * menu. Nothing offers a book's `http://` links, so this one stays — and it is
+ * now the only place the shape lives, which is why it is written out here
+ * rather than referred to.
  *
  * WHAT IT REPLACES. foliate hands any link whose scheme leaves the package to
  * `globalThis.open(href, '_blank')` unless the embedder cancels the event, and

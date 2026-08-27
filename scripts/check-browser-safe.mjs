@@ -21,7 +21,9 @@
  *
  * The recurring defect underneath is worth naming, because this repository has
  * now hit it four times — `extensionFor`, `sizePortOver`, `inTauri`,
- * `decideLookUp`:
+ * `decideLookUp` (whose platform half, `hasDictionary`, has since been deleted
+ * outright along with the system-dictionary hand-off — the fix outlived the
+ * feature that needed it):
  *
  * > **A pure function sharing a module with a platform binding takes the whole
  * > subtree down with it.** The import graph does not care that nobody calls
@@ -98,11 +100,15 @@ export const PINNED = Object.freeze([
   'src/kernel/ui/panes.ts',
   /* THE READING SURFACE ITSELF, eighty modules, freed in WI-19.3. It was held
    * out of a browser by one `invoke` opening macOS Dictionary.app — a control
-   * that is absent off macOS anyway. */
+   * that was absent off macOS anyway, and that no longer exists at all. */
   'src/kernel/ui/screens/Reader.tsx',
   /* `inTauri` is a two-line `window` check and MUST stay answerable without a
    * filesystem: the modules that ask it are the ones that cannot assume one. */
   'src/kernel/ui/inTauri.ts',
+  /* PURE BY CONSTRUCTION SINCE THE HAND-OFF WENT. This was freed by splitting
+   * `lookUpTauri.ts` out of it; that file is now deleted with the command it
+   * wrapped, so there is no binding left to split. The pin stays — it is what
+   * makes putting one back loud. */
   'src/kernel/ui/lookUp.ts',
 ])
 

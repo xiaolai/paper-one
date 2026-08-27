@@ -1,11 +1,10 @@
 import { defineSetting, type Setting } from '../../../kernel'
 
-/* `LOOK_UP_SETTING` is the KERNEL's (`kernel.lookUp`), not this capability's,
- * and re-exported here so the pane reads one object rather than two that could
- * drift. The value decides what `ui/lookUp.ts` does when the reader asks to
- * look something up, and that file is the kernel's — `inference` binds the
- * provider and draws the row; it does not own the question. */
-export { LOOK_UP_SETTING } from '../../../kernel'
+/* ⚠️ `LOOK_UP_SETTING` USED TO BE RE-EXPORTED HERE — the kernel's
+ * `kernel.lookUp`, forwarded so the pane read one object rather than two that
+ * could drift. The setting is deleted along with the mode it held: there is no
+ * longer a choice between the system dictionary and the gloss, because the
+ * hand-off is gone and the gloss is the whole of Look up. */
 
 /**
  * The `inference` capability's durable preferences.

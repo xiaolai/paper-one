@@ -1,5 +1,5 @@
 import type { SettingsStore } from '../../../kernel'
-import { LOOK_UP_LABELS, createGenerations, type KernelServices } from '../../../kernel'
+import { createGenerations } from '../../../kernel'
 import type { Depth } from '../../inference'
 import { reasonOf, type InferencePort, type Probe, type Route } from '../../inference'
 import { DEPTH_SETTING, ROUTE_SETTING } from '../lib/settings'
@@ -86,7 +86,6 @@ export interface RoutesSnapshot {
   readonly inUse: string | null
   /** True when the reader's stored choice is no longer usable. */
   readonly fellBack: boolean
-  readonly lookUp: string | null
   /**
    * The effort label, or null when the control does not apply.
    *
@@ -174,7 +173,6 @@ export interface RoutesModel {
   refresh(): Promise<void>
   use(id: string): void
   signIn(id: string): Promise<void>
-  cycleLookUp(hasDictionary: boolean, hasGloss: boolean): void
   /** Advance the effort one place. */
   cycleDepth(): void
   dispose(): void
@@ -183,14 +181,13 @@ export interface RoutesModel {
 export interface RoutesModelOptions {
   readonly port: InferencePort
   readonly settings: SettingsStore
-  /**
-   * The kernel's own view of `Look up` — see `KernelServices.lookUp`.
-   *
-   * `LOOK_UP_SETTING` is `kernel.lookUp` and this capability's settings
-   * handle is confined to `companion.`, so the value is unreachable through
-   * `settings` and the read threw on the pane's first render.
-   */
-  readonly kernel: Pick<KernelServices, 'lookUp' | 'cycleLookUp'>
+  /* ⚠️ `kernel: Pick<KernelServices, 'lookUp' | 'cycleLookUp'>` USED TO BE
+   * HERE. This pane drew the Look up cycle, and the value it cycled was
+   * `kernel.lookUp` — unreachable through `settings`, because `scopeSettings`
+   * confines this capability to `companion.` and the read threw on the pane's
+   * first render. The accessors existed to get around that. The row, the
+   * setting and the accessors are all deleted together: there is one Look up
+   * behaviour now, so there is nothing to cycle. */
   /**
    * Told when launching a vendor's login flow fails.
    *
@@ -206,12 +203,11 @@ const EMPTY: RoutesSnapshot = {
   signingIn: null,
   inUse: null,
   fellBack: false,
-  lookUp: null,
   depth: null,
   loading: true,
 }
 
-export function createRoutesModel({ port, settings, kernel, report }: RoutesModelOptions): RoutesModel {
+export function createRoutesModel({ port, settings, report }: RoutesModelOptions): RoutesModel {
   const listeners = new Set<() => void>()
   let probe: Probe | null = null
   let cached: RoutesSnapshot | null = EMPTY
@@ -234,9 +230,6 @@ export function createRoutesModel({ port, settings, kernel, report }: RoutesMode
     if (probe === null) return EMPTY
     const chosen = settings.get(ROUTE_SETTING)
     const { inUse, fellBack } = resolveRoute(chosen, probe.routes)
-    const hasGloss = probe.routes.some(
-      (route) => route.kind === 'local' && route.modality === 'text' && route.installed,
-    )
     return {
       rows: probe.routes
         .filter((route) => route.modality === 'text')
@@ -244,10 +237,6 @@ export function createRoutesModel({ port, settings, kernel, report }: RoutesMode
       signingIn,
       inUse,
       fellBack,
-      /* `hasDictionary` is the reader UI's answer and is not known here, so
-       * the row's label is resolved at render. `null` means "no control", and
-       * the pane draws nothing. */
-      lookUp: hasGloss ? LOOK_UP_LABELS[kernel.lookUp()] : null,
       /* Offered only while an AGENT answers — the two flags this maps to
          exist on the agent CLIs and nowhere else. */
       depth:
@@ -308,9 +297,6 @@ export function createRoutesModel({ port, settings, kernel, report }: RoutesMode
         })
       }
     },
-    /* One cycle, in the kernel — this was written out here and in
-       `inference`'s store, identically, which is one algorithm in two files. */
-    cycleLookUp: (hasDictionary, hasGloss) => kernel.cycleLookUp(hasDictionary, hasGloss),
     cycleDepth: () => {
       const at = DEPTH_ORDER.indexOf(settings.get(DEPTH_SETTING))
       settings.set(DEPTH_SETTING, DEPTH_ORDER[(at + 1) % DEPTH_ORDER.length] as Depth)

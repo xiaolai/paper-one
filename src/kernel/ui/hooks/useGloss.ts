@@ -23,9 +23,37 @@ export type GlossState =
   | { readonly kind: 'asking'; readonly term: string }
   | { readonly kind: 'ready'; readonly term: string; readonly text: string }
   | { readonly kind: 'failed'; readonly term: string; readonly reason: string }
+  /**
+   * Asked, with nothing installed to answer with.
+   *
+   * ⚠️ **THIS USED TO BE A SILENT `return`.** `ask` began `if
+   * (!provider.available) return`, which was harmless while the reader had
+   * Dictionary.app behind it — the lookup went to the system dictionary and
+   * the gloss simply did not contribute. With the hand-off deleted the gloss
+   * is the whole feature, and a press that does nothing at all is the exact
+   * failure `lookUpTauri.ts` used to warn about in its own header: *a lookup
+   * that silently did nothing is the failure this path is easiest to get wrong
+   * in.*
+   *
+   * A STATE RATHER THAN A REDIRECT. `useGloss` is the kernel's, and it has no
+   * business knowing that a models pane exists or how to open one — see
+   * `GlossStrip`, which takes the action as a prop and draws nothing when
+   * there is none.
+   */
+  | { readonly kind: 'unavailable'; readonly term: string }
 
 export interface Gloss {
   readonly state: GlossState
+  /**
+   * Whether a definition can be produced right now — the provider's own
+   * answer, forwarded.
+   *
+   * HERE SO THE CALLER CAN AVOID WORK, not so it can avoid `ask`: `ask`
+   * handles an unavailable provider itself and must go on doing so, because it
+   * is the only thing that can set `unavailable`. What this saves is the
+   * document walk in `glossRequest` — see `askGloss`.
+   */
+  readonly available: boolean
   /** Define `term`, in the sentence it sits in. */
   ask(term: string, sentence: string, bookTitle: string): void
   /** Put it away — the reader moved on. */
@@ -54,7 +82,15 @@ export function useGloss(provider: GlossProvider): Gloss {
 
   const ask = useCallback(
     (term: string, sentence: string, bookTitle: string) => {
-      if (!provider.available) return
+      /* NOTHING TO ASK. Said, not swallowed — see `unavailable` above. The
+       * request in flight still goes, because a reader who asked a second
+       * question has stopped caring about the first either way. */
+      if (!provider.available) {
+        abort.current?.abort()
+        abort.current = null
+        setState({ kind: 'unavailable', term })
+        return
+      }
       /* The previous one is abandoned, not queued — see the header. */
       abort.current?.abort()
       const controller = new AbortController()
@@ -89,7 +125,7 @@ export function useGloss(provider: GlossProvider): Gloss {
     [provider],
   )
 
-  return { state, ask, dismiss }
+  return { state, available: provider.available, ask, dismiss }
 }
 
 /** What a lookup actually sends: a sentence, and the term as that sentence
@@ -171,18 +207,47 @@ export interface AskGlossOptions extends GlossRequestOptions {
  *
  * ⚠️ **What is still not pinned by a test, precisely.** `Reader` keeps the
  * routing (`decideLookUp`), the `isLookUpTerm` guard, and the condition that
- * decides whether this is called at all — so deleting the call, or changing
- * `gloss || both`, survives every case in `useGloss.test.ts`. The field-level
- * mutation is closed by the type above; the call-level one is not, and closing
- * it means mounting `Reader` or extracting a smaller UI action boundary. Said
- * here rather than left for someone to assume otherwise.
+ * decides whether this is called at all — so deleting the call survives every
+ * case in `useGloss.test.ts`. The field-level mutation is closed by the type
+ * above; the call-level one is not, and closing it means mounting `Reader` or
+ * extracting a smaller UI action boundary. Said here rather than left for
+ * someone to assume otherwise.
+ *
+ * It got NARROWER when the system dictionary went. The gap used to include
+ * `gloss || both` — a branch that decided whether the gloss fired alongside
+ * Dictionary.app, mutable to `gloss` alone or to neither with nothing red.
+ * There is one behaviour now, so that particular mutation no longer exists to
+ * be missed.
  */
 export function askGloss(
-  gloss: Pick<Gloss, 'ask'>,
+  gloss: Pick<Gloss, 'ask' | 'available'>,
   selection: GlossSelection | null,
   options: AskGlossOptions,
 ): void {
   if (!selection) return
+  /*
+   * ⚠️ **NO DOCUMENT WALK FOR A LOOKUP THAT CANNOT REACH A MODEL**, and the
+   * reason is the DIAGNOSTIC rather than the cycles.
+   *
+   * `glossRequest` calls `sentenceAt`, which records `gloss.sentence` with the
+   * outcome — the §F4 counter that exists because *"a build where every lookup
+   * silently falls back looks identical to a working one"*. With the
+   * Dictionary.app hand-off deleted, the button now also fires on a machine
+   * with NO model installed, where it can only ever produce the install
+   * prompt. Walking there would file a sample per press for a lookup that
+   * never happened — and on a machine with no model that is EVERY sample, so
+   * the one instrument that can answer "is the walk working" would be reading
+   * pure noise exactly where it is hardest to check by hand.
+   *
+   * `ask` still decides what an unavailable provider does; this only declines
+   * to prepare an argument it will not use. The raw selection is passed
+   * because the message names what the reader tried to look up, and the
+   * sentence-spelled term is a thing only the walk could have produced.
+   */
+  if (!gloss.available) {
+    gloss.ask(selection.text, '', options.bookTitle)
+    return
+  }
   const request = glossRequest(selection, options)
   gloss.ask(request.term, request.sentence, options.bookTitle)
 }

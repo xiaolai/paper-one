@@ -43,10 +43,6 @@ export { migrateToFolders, summariseMigration } from '../core/migrateToFolders'
 export { installFatalHandlers } from '../core/reportFatal'
 /* ONE DRAIN BOUND for both shutdowns — see `closeWindow.ts`. */
 export { CLOSE_DRAIN_MS } from './closeWindow'
-/* WHETHER THIS PLATFORM HAS A DICTIONARY, answered at the composition root
-   and handed to `createKernelServices`. Both live behind this entry, which is
-   exactly why a capability cannot ask them and had to be told. */
-export { hasDictionary } from './lookUp'
 export { resolvePlatform } from './platform'
 /* The launch measurements. Dev-only in effect — `moment` and its neighbours
  * send over the HMR socket, which does not exist in a build — but exported

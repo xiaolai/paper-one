@@ -162,7 +162,7 @@ export interface SettingsProps {
    *
    * A host that cannot do the thing does not pass its setter, and the row is
    * not drawn — the same convention as `onAddBooks` on the shelf, `cards` in
-   * Marginalia and `onSystemLookUp` in the reader. The browser client mounts
+   * Marginalia and `onInstallGloss` in the reader. The browser client mounts
    * this pane and has no reading ruler, no scroll port it owns, no side pane
    * (a 393px screen has no side), and no brightness or contrast filter; drawing
    * those rows would name features that host will never have.

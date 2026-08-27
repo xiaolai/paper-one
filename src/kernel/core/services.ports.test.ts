@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { NOT_CONFIGURED, type CompanionProvider } from './companion'
-import { LOOK_UP_MODES, LOOK_UP_SETTING, NO_GLOSS, availableModes, effectiveMode, type GlossProvider } from './gloss'
+import { NO_GLOSS, type GlossProvider } from './gloss'
 import { NO_WORK_LINE, type WorkLine } from './ports'
-import { createKernelServices } from './services'
 import { servicesWith, spyRecorder } from './servicesWorld.testkit'
 
 /**
@@ -65,7 +64,7 @@ describe('the companion, gloss and work-line ports', () => {
 
   it('binds a gloss and restores it on dispose', async () => {
     const services = servicesWith(spyRecorder().recorder)
-    const provider: GlossProvider = { available: true, gloss: async () => 'a meaning' }
+    const provider: GlossProvider = { available: true, installable: true, gloss: async () => 'a meaning' }
     const unbind = services.bindGloss(provider)
     expect(services.gloss().available).toBe(true)
     await expect(services.gloss().gloss('w', { sentence: 's', bookTitle: 'X' }, new AbortController().signal)).resolves.toBe('a meaning')
@@ -117,8 +116,8 @@ describe('the companion, gloss and work-line ports', () => {
     const services = servicesWith(spyRecorder().recorder)
     services.bindCompanion(fake('one'))
     expect(() => services.bindCompanion(fake('two'))).toThrow(/already bound/)
-    services.bindGloss({ available: true, gloss: async () => 'x' })
-    expect(() => services.bindGloss({ available: true, gloss: async () => 'y' })).toThrow(/already bound/)
+    services.bindGloss({ available: true, installable: true, gloss: async () => 'x' })
+    expect(() => services.bindGloss({ available: true, installable: true, gloss: async () => 'y' })).toThrow(/already bound/)
     services.bindWorkLine({ line: () => null, subscribe: () => () => {} })
     expect(() => services.bindWorkLine({ line: () => null, subscribe: () => () => {} })).toThrow(/already bound/)
   })
@@ -300,109 +299,26 @@ describe('serving a composed set of services', () => {
   })
 })
 
-/**
- * WHETHER THIS PLATFORM HAS A DICTIONARY, which only the kernel can answer.
+/*
+ * ⚠️ **TWO WHOLE `describe` BLOCKS WERE HERE — 11 CASES — AND THEY ARE
+ * DELETED WITH WHAT THEY TESTED.**
  *
- * ⚠️ `CompanionPane` took it as an OPTIONAL prop defaulting to `false` and the
- * production caller passed nothing — so on macOS, the one platform that has a
- * system dictionary, it was excluded from the cycle and the reader could not
- * select `System dictionary` or `Both` at all. A capability cannot work it out
- * for itself: the platform and `hasDictionary` both live behind the kernel's
- * React entry, which `kernel-public-entry-only` puts out of its reach. So the
- * composition root answers once and every drawer of the control asks.
+ * `the system dictionary` held `KernelServices.hasDictionary()`; `the look-up
+ * mode` held `lookUp()` and `cycleLookUp()` — the shipped default, the no-op
+ * when only one mode is available, the wrap-around, and the rule that a stored
+ * preference outlives the model it names. All three accessors are gone with
+ * the three-mode `Look up` they served.
+ *
+ * WHAT IS WORTH CARRYING FORWARD, because it was a real defect and the shape
+ * recurs: `hasDictionary` was a fact the composition root computed and passed
+ * down, `CompanionPane` took it as an OPTIONAL prop defaulting to `false`, and
+ * the production caller passed nothing — so on macOS, the one platform that
+ * had a system dictionary, it was silently excluded from the cycle and the
+ * reader could not select `System dictionary` or `Both` at all.
+ *
+ * The replacement fact is `GlossProvider.installable`, and it is deliberately
+ * shaped so the same defect cannot recur: it is a REQUIRED field on the object
+ * that knows the answer, not an optional argument threaded through a root that
+ * has to remember to pass it. `gloss.test.ts` pins the `NO_GLOSS` end and
+ * `ui/lookUp.test.ts` pins what the reader UI does with it.
  */
-describe('the system dictionary', () => {
-  it('is false where no caller said otherwise', () => {
-    expect(servicesWith(spyRecorder().recorder).hasDictionary()).toBe(false)
-  })
-
-  it('reports what the composition root was told', () => {
-    const services = createKernelServices({
-      fs: null,
-      storage: null,
-      initialBooks: [],
-      hasDictionary: true,
-    })
-    expect(services.hasDictionary()).toBe(true)
-    /* AND IT REACHES THE CYCLE. With a dictionary and no gloss there is one
-       mode, so nothing moves; the point is that the mode EXISTS, which is
-       what the default of `false` was denying on macOS. */
-    expect(availableModes(services.hasDictionary(), false)).toEqual(['system'])
-    expect(availableModes(services.hasDictionary(), true)).toHaveLength(3)
-  })
-
-  it('offers only the gloss when the platform has no dictionary', () => {
-    const services = servicesWith(spyRecorder().recorder)
-    expect(availableModes(services.hasDictionary(), true)).toEqual(['gloss'])
-  })
-})
-
-describe('the look-up mode', () => {
-  /* An untouched store reads the SHIPPED default, whatever that is — asserted
-     through the setting rather than against a literal. This used to read
-     `toBe('system')` and carried the comment "which is what makes the
-     no-regression rule true"; both were wrong. The no-regression rule is made
-     true by `decideLookUp`, whose first branch never reads the preference at
-     all, and pinning the literal here meant changing the default broke a test
-     that was only ever describing it. What this file owns is the wiring: an
-     unset store answers with the fallback. `ui/lookUp.test.ts` owns what the
-     fallback then DOES. */
-  it('answers with the shipped default when nothing is stored', () => {
-    expect(servicesWith(spyRecorder().recorder).lookUp()).toBe(LOOK_UP_SETTING.fallback)
-  })
-
-  it('does nothing when only one mode is available', () => {
-    const services = servicesWith(spyRecorder().recorder)
-    const before = services.lookUp()
-    /* A dictionary and no gloss: one mode, so the control is not offered and
-       pressing it must not move to a mode that would fail when used.
-
-       UNCHANGED, not equal to some particular mode. The stored value may well
-       name a mode this machine cannot serve — that is allowed and deliberate
-       (see "A STORED PREFERENCE OUTLIVES THE THING IT NAMES" below), and
-       `decideLookUp` resolves it at the point of use. Asserting a literal here
-       tested the default, not the no-op. */
-    services.cycleLookUp(true, false)
-    expect(services.lookUp()).toBe(before)
-    /* Neither: no modes at all. */
-    services.cycleLookUp(false, false)
-    expect(services.lookUp()).toBe(before)
-  })
-
-  it('cycles the whole set when both halves are there, and wraps', () => {
-    const services = servicesWith(spyRecorder().recorder)
-    const seen = [services.lookUp()]
-    for (let i = 0; i < LOOK_UP_MODES.length; i++) {
-      services.cycleLookUp(true, true)
-      seen.push(services.lookUp())
-    }
-    /* Every mode visited, and back where it started — a cycle, not a walk off
-       the end of the list. */
-    expect(new Set(seen.slice(0, LOOK_UP_MODES.length))).toEqual(new Set(LOOK_UP_MODES))
-    expect(seen[seen.length - 1]).toBe(seen[0])
-  })
-
-  /* A STORED PREFERENCE OUTLIVES THE THING IT NAMES. A reader who chose
-     `gloss` and then removed the model has a setting pointing at nothing;
-     cycling from there must land on what EXISTS rather than on the next entry
-     of a list that no longer applies. */
-  it('keeps an unavailable preference, and resolves it to what exists', () => {
-    const services = servicesWith(spyRecorder().recorder)
-    /* Cycle to something that needs the gloss, so removing the model makes
-       the STORED choice unavailable — the case the note above describes. */
-    services.cycleLookUp(true, true)
-    while (services.lookUp() === 'system') services.cycleLookUp(true, true)
-    const chosen = services.lookUp()
-    const withoutGloss = availableModes(true, false)
-    expect(withoutGloss, 'the stored choice was still available, so this proves nothing').not.toContain(chosen)
-
-    /* PRESERVED, NOT REWRITTEN. Re-installing the model must restore what they
-       asked for without them asking twice, which only works if the stored
-       value survives the model going away. */
-    services.cycleLookUp(true, false)
-    expect(services.lookUp(), 'the preference was rewritten when its model vanished').toBe(chosen)
-
-    /* And what is USED meanwhile is the one that exists. */
-    expect(effectiveMode(services.lookUp(), withoutGloss)).toBe('system')
-  })
-})
