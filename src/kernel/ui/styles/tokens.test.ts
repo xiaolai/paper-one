@@ -42,6 +42,18 @@ const SCALED = new Set([
   'inline-size', 'block-size', 'min-inline-size', 'min-block-size',
   'top', 'right', 'bottom', 'left', 'inset', 'inset-block', 'inset-inline',
   'outline-offset',
+  /* ⚠️ **THE RING'S WIDTH WAS UNPOLICED WHILE ITS OFFSET WAS.** `outline-offset`
+   * has been in this set from the start, so every offset in the app is a token
+   * or one of the sanctioned exceptions — and `outline`, one line above it in
+   * the same rule, was free. Seventeen declarations across eight stylesheets
+   * wrote `outline: 2px solid var(--accent)` by hand and `global.css` wrote
+   * `3px`, so the app had two ring weights decided by whether an author had
+   * happened to declare one. Every one of them passed this guard.
+   *
+   * `--focus-ring` is the token now, and these two names are what stops the
+   * eighteenth copy. `outline: none` and `outline: medium` carry no number and
+   * are unaffected. */
+  'outline', 'outline-width',
 ])
 for (const side of ['top', 'bottom', 'left', 'right', 'block', 'inline'] as const) {
   SCALED.add(`padding-${side}`)

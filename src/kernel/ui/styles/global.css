@@ -203,7 +203,7 @@ a:hover {
  * one — the failure is an ABSENT declaration, so no check over declarations can
  * see it. */
 :focus-visible {
-  outline: 3px solid var(--accent, #1B3A6B);
+  outline: var(--focus-ring);
   outline-offset: var(--space-2);
   border-radius: var(--radius-chip);
 }

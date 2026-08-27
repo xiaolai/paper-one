@@ -533,7 +533,7 @@
 }
 
 .book:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: var(--focus-ring);
   outline-offset: var(--space-4);
   border-radius: var(--radius-mark);
 }
@@ -814,7 +814,7 @@ button.noCopy:hover {
  * being key, so the ring vanished in situations `:focus-within` handles.
  */
 .searchField:focus-within:not(:has(.narrowAnchor :focus-within)) {
-  outline: 2px solid var(--accent);
+  outline: var(--focus-ring);
   outline-offset: 1px;
   /* The resting border goes while the ring is up — two concentric edges a pixel
      apart read as a double border rather than as focus. Transparent rather than
@@ -1042,7 +1042,7 @@ button.noCopy:hover {
    check in its corner. The ring is on the well rather than the artwork, so a
    short jacket's ring is not a short ring. */
 .cell[data-selected='true'] .cover {
-  outline: 2px solid var(--accent);
+  outline: var(--focus-ring);
   outline-offset: var(--space-2);
 }
 
@@ -1208,7 +1208,7 @@ button.noCopy:hover {
 }
 
 .narrow:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: var(--focus-ring);
   outline-offset: 1px;
 }
 

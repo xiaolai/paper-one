@@ -437,11 +437,21 @@
  * pointer users never see it. The rule being replaced here was already
  * keyboard-only; switching to `:focus-within` would have fixed the shape by
  * regressing the policy. `:has(:focus-visible)` keeps both, and this webview
- * supports it (checked, not assumed). */
+ * supports it (checked, not assumed).
+ *
+ * ⚠️ **THE OFFSET IS `.paper-cap-field`'s, NOT A NUMBER PICKED HERE.** Both of
+ * these pills are their own filled shape at `--radius-pill`, which is the case
+ * `design-tokens.md` names as breaking the global `+--space-2` precondition:
+ * the ring lands outside the pill's own background and the pane shows through
+ * the gap, a pill drawn around a pill. `capability.css` states the value and
+ * the mechanism — negative, and *"not zero: on a 999px radius the two curves
+ * meet at a tangent, and a hairline of pane background survives antialiasing
+ * between them"*. `.noteInput` had already reached the same value for the same
+ * reason. This is the third control of that shape and it takes the same rule. */
 .composer:has(:focus-visible),
 .searchField:has(:focus-visible) {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline: var(--focus-ring);
+  outline-offset: -1px;
 }
 
 /* The container shows focus — see above. Dropping the input's own ring
@@ -539,7 +549,7 @@
 }
 
 .noteJump:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: var(--focus-ring);
   outline-offset: var(--space-2);
   border-radius: var(--radius-mark);
 }
@@ -587,7 +597,7 @@
 }
 
 .noteInput:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: var(--focus-ring);
   outline-offset: -1px;
 }
 
@@ -620,7 +630,7 @@
 }
 
 .noteDelete:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: var(--focus-ring);
   outline-offset: calc(-1 * var(--space-2));
 }
 
@@ -829,7 +839,7 @@
    agree about what "this one" looks like. */
 .tagRow[data-over='true'] {
   border-radius: var(--radius-control);
-  outline: 2px solid var(--accent);
+  outline: var(--focus-ring);
   outline-offset: calc(-1 * var(--space-2));
   background: var(--accent-bg);
 }
@@ -895,7 +905,7 @@
 }
 
 .tagFilter:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: var(--focus-ring);
   outline-offset: 1px;
 }
 
@@ -1374,7 +1384,7 @@
 }
 
 .colourDot:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: var(--focus-ring);
   outline-offset: var(--space-2);
 }
 

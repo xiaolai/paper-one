@@ -40,7 +40,7 @@
 }
 
 .mark:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: var(--focus-ring);
   outline-offset: 1px;
 }
 
