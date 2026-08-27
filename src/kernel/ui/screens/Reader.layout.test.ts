@@ -79,6 +79,42 @@ const glossCss = readFileSync(
   'utf8',
 )
 
+const tokensCss = readFileSync(
+  fileURLToPath(new URL('../styles/tokens.css', import.meta.url)),
+  'utf8',
+)
+
+/**
+ * Every opacity a rule sets, as a NUMBER, whether it was written as a literal
+ * or as a token.
+ *
+ * ⚠️ **IT USED TO MATCH `[\d.]+` AND ONLY THAT.** When `.glossFailedReason`'s
+ * `0.75` became `var(--opacity-quiet)` the pattern found nothing, and the
+ * non-vacuity assertion below — the one that exists so a loop over no
+ * declarations cannot pass — went red. That was the guard working: the check is
+ * "is this element visible", and an assertion that can only read literals stops
+ * asking it the moment the design system is used properly.
+ *
+ * Following the token is also STRONGER. A literal `opacity: 0` was catchable
+ * before; a token defined as `0` was not, because there was no literal to read.
+ * Now both are.
+ */
+function opacitiesOf(selector: string): number[] {
+  const out: number[] = []
+  for (const [, raw] of glossRule(selector).matchAll(/opacity\s*:\s*([^;]+)/g)) {
+    const value = (raw ?? '').trim()
+    const token = /^var\(\s*(--[\w-]+)\s*\)$/.exec(value)
+    if (!token) {
+      out.push(Number(value))
+      continue
+    }
+    const defined = new RegExp(`${token[1]}\\s*:\\s*([\\d.]+)`).exec(tokensCss)
+    if (!defined) throw new Error(`tokens.css defines no ${token[1]}`)
+    out.push(Number(defined[1]))
+  }
+  return out
+}
+
 /** The same scoping as `ruleBody`, over the strip's own stylesheet. */
 function glossRule(selector: string): string {
   const source = glossCss.replace(/\/\*[\s\S]*?\*\//g, '')
@@ -129,14 +165,15 @@ describe('the gloss that did not arrive', () => {
       expect(glossRule(rule)).not.toMatch(/content-visibility\s*:\s*hidden/)
       /* Opacity is READ rather than pattern-matched, because the pattern that
        * looks right is wrong: `/opacity:\s*0(\D|$)/` matches `opacity: 0.75`,
-       * since `.` is a non-digit. The question is numeric, so ask it that way. */
-      for (const [, value] of glossRule(rule).matchAll(/opacity\s*:\s*([\d.]+)/g)) {
-        expect(Number(value)).toBeGreaterThan(0)
+       * since `.` is a non-digit. The question is numeric, so ask it that way —
+       * through the token, which `opacitiesOf` resolves. */
+      for (const value of opacitiesOf(rule)) {
+        expect(value).toBeGreaterThan(0)
       }
     }
     /* Non-vacuity: the reason IS de-emphasised, so a loop over no declarations
      * at all would pass. There is one to find. */
-    expect([...glossRule('.glossFailedReason').matchAll(/opacity\s*:\s*([\d.]+)/g)]).toHaveLength(1)
+    expect(opacitiesOf('.glossFailedReason')).toHaveLength(1)
   })
 
   /* A phrase lookup can be 120 characters (`isLookUpTerm`), and at

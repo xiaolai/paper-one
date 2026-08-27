@@ -25,7 +25,7 @@
 
 .heading {
   font-size: var(--text-caption);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   letter-spacing: var(--track-caps);
   text-transform: uppercase;
   color: var(--muted);

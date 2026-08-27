@@ -431,7 +431,7 @@
   gap: var(--space-8);
   padding: var(--space-8) var(--space-24);
   font-size: var(--text-ui);
-  animation: returnHintIn 200ms ease-out;
+  animation: returnHintIn var(--motion-hint);
 }
 
 .returnHintGo {
@@ -552,7 +552,7 @@
    doing nothing when pressed. Without this the toggle kept full opacity and a
    pointer cursor while the renderer was still reporting a position. */
 .bookmarkToggle:disabled {
-  opacity: .4;
+  opacity: var(--opacity-disabled);
   cursor: default;
 }
 
@@ -676,7 +676,7 @@
 .emptyTitle {
   font-family: 'Crimson Pro Variable', 'Crimson Pro', Georgia, serif;
   font-size: var(--text-display);
-  font-weight: 400;
+  font-weight: var(--weight-regular);
   line-height: 1.1;
   letter-spacing: var(--track-tight);
   color: var(--ink);

@@ -23,7 +23,7 @@
   color: var(--surface);
   font-family: inherit;
   font-size: var(--text-ui);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   cursor: pointer;
 }
 

@@ -53,7 +53,7 @@
   min-height: var(--pane-title-row);
   padding: 0 var(--space-16);
   font-size: var(--text-ui);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   letter-spacing: var(--track-snug);
   color: var(--ink);
 }
@@ -220,7 +220,7 @@
  * and dimming it to 45% would hide the structure it exists to show. */
 .tocRow:disabled {
   cursor: default;
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   color: var(--muted);
 }
 
@@ -236,7 +236,7 @@
 .tocRow[data-current='true'] {
   background: var(--surface);
   color: var(--ink);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   box-shadow: var(--shadow-pill);
 }
 
@@ -310,7 +310,7 @@
 .caret::before {
   content: '▌';
   color: var(--amber);
-  animation: companion-caret 1s steps(2, start) infinite;
+  animation: companion-caret var(--motion-caret) steps(2, start) infinite;
 }
 
 @keyframes companion-caret {
@@ -345,7 +345,7 @@
 
 .citation:disabled {
   cursor: default;
-  opacity: 0.6;
+  opacity: var(--opacity-disabled);
 }
 
 /* A failed answer says what happened, in the reader's words, and does NOT
@@ -642,7 +642,7 @@
 
 .noteKind {
   font-size: var(--text-caption);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   letter-spacing: var(--track-caps);
   text-transform: uppercase;
   color: var(--muted);
@@ -883,7 +883,7 @@
    how much it holds. */
 .groupCount {
   margin-inline-start: auto;
-  font-weight: 400;
+  font-weight: var(--weight-regular);
   letter-spacing: normal;
   text-transform: none;
   font-variant-numeric: tabular-nums;
@@ -973,7 +973,7 @@
 .groupTitle {
   padding: var(--space-16) var(--space-10) var(--space-6);
   font-size: var(--text-caption);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   letter-spacing: var(--track-caps-wide);
   text-transform: uppercase;
   color: var(--muted);
@@ -1048,7 +1048,7 @@
 .stepperSmall,
 .stepperLarge {
   line-height: 1;
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
 }
 
 .stepperSmall {
@@ -1066,7 +1066,7 @@
 /* Disabled, not hidden: the ends of §09's ramp are part of what the control
    tells the reader, and a button that vanishes at the limit reads as a bug. */
 .stepperButton:disabled {
-  opacity: 0.35;
+  opacity: var(--opacity-disabled);
   cursor: default;
 }
 
@@ -1141,7 +1141,7 @@
    a grey mark rather than a sample of ink. */
 .themeAa {
   font-size: var(--text-body);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   line-height: 1;
   color: var(--ink);
 }
@@ -1161,7 +1161,7 @@
 
 .emptyTitle {
   font-size: var(--text-body);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   color: var(--ink);
 }
 
@@ -1252,7 +1252,7 @@
 .faceGroup {
   padding: var(--space-8) var(--space-10) var(--space-4);
   font-size: var(--text-caption);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   letter-spacing: var(--track-caps);
   text-transform: uppercase;
   color: var(--muted);
@@ -1404,7 +1404,7 @@
 }
 
 .colourClear:disabled {
-  opacity: 0.35;
+  opacity: var(--opacity-disabled);
   cursor: default;
 }
 

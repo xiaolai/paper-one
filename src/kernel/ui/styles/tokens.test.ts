@@ -205,6 +205,104 @@ describe('the layout changes width at agreed places', () => {
   })
 })
 
+/**
+ * ⚠️ **A SCALE THE NUMERIC GUARD CANNOT POLICE, AND WHY IT NEEDS ITS OWN.**
+ *
+ * `ALLOWED` sanctions any bare number — `-?\d+(\.\d+)?` — because ratios and
+ * counts are legitimately unitless and `calc(2 * var(--space-4))` is the
+ * derivation this file wants people to write. That exemption is right, and it
+ * is also why adding `opacity` or `font-weight` to `SCALED` would have caught
+ * NOTHING: every value they take is a bare number.
+ *
+ * So these two are checked the other way round. Rather than hunting for a
+ * literal, the value must BE a token, and the small set of words that are not
+ * quantities at all is listed out.
+ *
+ * What it was bought for, in both cases a stated design rule written as a
+ * literal at each call site until it drifted:
+ *
+ * - §07 says disabled is 45%. Five controls each chose their own — 0.45, 0.6,
+ *   0.35, 0.35, 0.4 — and none said why.
+ * - Twenty-eight declarations wrote 600, 500 or 400 by hand, with no names and
+ *   nothing to stop a twenty-ninth inventing 650 on a variable face that would
+ *   happily render it.
+ *
+ * `0` and `1` stay literal for opacity because they are presence and absence
+ * rather than a degree of it, and the design system has no token for either —
+ * the same reasoning `ALLOWED` already applies to zero.
+ */
+/*
+ * ── WHAT A FULL SWEEP FOUND, AND WHAT IT DELIBERATELY LEFT ───────────────
+ *
+ * Every stylesheet and every inline style scanned by property, with comments
+ * stripped, looking for a literal where a scale exists.
+ *
+ * ALREADY CLEAN: colour (zero literals outside a `var()` fallback), spacing,
+ * radius, control sizes, text sizes, motion. Inline styles in TSX carry only
+ * `flex: 1` and `: 0`.
+ *
+ * CLOSED BY THIS PASS: the focus ring (seventeen hand-written widths and a
+ * default that disagreed), opacity (§07's one rule written five ways),
+ * font-weight (twenty-eight literals, three values, no names), two durations
+ * that never reached `MOTION`, and one `z-index` restating a layer the scale
+ * held but had never published.
+ *
+ * ⚠️ **THE RESIDUE IS DELIBERATE AND IS LISTED SO IT STAYS ARGUABLE.** None of
+ * these is a quantity from a scale; each is structure, and inventing a token
+ * for it would be the mistake `design-tokens.md` records about the ring
+ * offsets — policy invented over evidence nobody had read.
+ *
+ *   `transform`      `-50%`, `-100%`, `90deg` — centring, a full slide, a right
+ *                    angle. Geometry, not a size anybody chose.
+ *   `steps(2, start)` two steps IS on/off. A blink's structure.
+ *   `0.01ms`         the reduced-motion kill idiom. A conventional near-zero
+ *                    standing in for "off", not a duration.
+ *   `z-index: 1..3`  local stacking inside a component's own context. §12's
+ *                    layer order is for what crosses components, and
+ *                    `--z-*` publishes all of it now.
+ *   `1px` / `0.5px`  the hairline, which `ALLOWED` already sanctions, and one
+ *                    rim.
+ *   `2px` border     exactly one, in `MarginMarks`, with its reason in its own
+ *                    comment: "2px of a pale band is not a colour, it is a
+ *                    smudge." One call site and a stated meaning is not the
+ *                    failure tokens exist to prevent — drift between many call
+ *                    sites is, and anonymity is.
+ */
+describe('opacity and weight come from their scales', () => {
+  const TOKENED: ReadonlyArray<readonly [string, RegExp]> = [
+    ['opacity', /^(0|1|var\(--opacity-[\w-]+\)|inherit|initial|unset|revert)$/],
+    ['font-weight', /^(var\(--weight-[\w-]+\)|inherit|initial|unset|revert)$/],
+  ]
+
+  it('never writes one as a literal', () => {
+    const offences: string[] = []
+    for (const file of stylesheets(SRC)) {
+      if (file.endsWith('tokens.css')) continue
+      const src = readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, (c) => c.replace(/[^\n]/g, ' '))
+      for (const { prop, value, line } of declarations(src)) {
+        const rule = TOKENED.find(([name]) => name === prop)
+        if (!rule) continue
+        if (rule[1].test(value.trim())) continue
+        offences.push(`${relative(SRC, file)}:${line}  ${prop}: ${value}`)
+      }
+    }
+    expect(offences).toEqual([])
+  })
+
+  /* Non-vacuity: the check has to be able to fail, and on the exact shape it
+     was bought for. Both scales, because one passing regex would otherwise
+     cover for the other being wrong. */
+  it('would catch a literal if one appeared', () => {
+    const [, opacity] = TOKENED[0]!
+    const [, weight] = TOKENED[1]!
+    expect(opacity.test('0.45')).toBe(false)
+    expect(opacity.test('var(--opacity-disabled)')).toBe(true)
+    expect(opacity.test('0')).toBe(true)
+    expect(weight.test('600')).toBe(false)
+    expect(weight.test('var(--weight-semibold)')).toBe(true)
+  })
+})
+
 describe('the design system is used, not restated', () => {
   const files = stylesheets(SRC)
 

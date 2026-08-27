@@ -4,7 +4,7 @@
 
 .popover {
   position: absolute;
-  z-index: 40;
+  z-index: var(--z-figure);
   display: flex;
   flex-direction: column;
   gap: var(--space-8);

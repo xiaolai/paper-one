@@ -26,7 +26,7 @@
 
 .gate h1 {
   font-size: var(--text-title);
-  font-weight: 500;
+  font-weight: var(--weight-medium);
   margin: 0;
 }
 
@@ -190,7 +190,7 @@
 .web-screen-title {
   margin: 0 0 var(--space-14);
   font-size: var(--text-title);
-  font-weight: 400;
+  font-weight: var(--weight-regular);
   letter-spacing: var(--track-tight);
 }
 

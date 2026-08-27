@@ -259,7 +259,7 @@
    app-wide `data-disabled` attribute would take them (`pointer-events: none`
    in global.css), which is exactly why this is its own name. */
 .rowOpen[data-nocopy='true'] {
-  opacity: 0.45;
+  opacity: var(--opacity-dimmed);
 }
 
 /* The jacket, small enough to be an anchor for the eye rather than the subject
@@ -529,7 +529,7 @@
 
 /* No-copy: dimmed, not disabled — see `.rowOpen[data-nocopy]`. */
 .book[data-nocopy='true'] {
-  opacity: 0.45;
+  opacity: var(--opacity-dimmed);
 }
 
 .book:focus-visible {
@@ -885,7 +885,7 @@ button.noCopy:hover {
 }
 
 .chipCount {
-  opacity: 0.55;
+  opacity: var(--opacity-quieter);
   font-variant-numeric: tabular-nums;
 }
 
@@ -919,7 +919,7 @@ button.noCopy:hover {
 }
 
 .selectionCount {
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -985,7 +985,7 @@ button.noCopy:hover {
 
 .removeHeading {
   font-size: var(--text-body);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   color: var(--ink);
 }
 
@@ -1082,7 +1082,7 @@ button.noCopy:hover {
   color: inherit;
   font: inherit;
   font-size: var(--text-micro);
-  opacity: 0.75;
+  opacity: var(--opacity-quiet);
   cursor: pointer;
   /* TRUNCATE, do not push. A long tag used to shove its neighbours — and the
      `+N` control after them — past the row's clipped edge, so the one chip
@@ -1150,11 +1150,11 @@ button.noCopy:hover {
   display: block;
   block-size: 100%;
   background: currentColor;
-  opacity: 0.45;
+  opacity: var(--opacity-fill);
 }
 
 .progress[data-finished='true'] .progressFill {
-  opacity: 0.28;
+  opacity: var(--opacity-fill-done);
 }
 
 /* The ellipsis. Quiet until the row is hovered or it has focus — a shelf with an

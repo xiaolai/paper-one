@@ -69,7 +69,7 @@
   display: block;
   margin-bottom: var(--space-2);
   font-size: var(--text-micro);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   letter-spacing: var(--track-caps);
   text-transform: uppercase;
   color: var(--amber);

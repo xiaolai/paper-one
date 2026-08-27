@@ -4655,6 +4655,8 @@
     "src/kernel/ui/styles/capabilityUi.test.ts > the capability vocabulary, measured against the kernel it sits in > matches a field to the button beside it",
     "src/kernel/ui/styles/capabilityUi.test.ts > the capability vocabulary, measured against the kernel it sits in > never reaches for the command palette's field",
     "src/kernel/ui/styles/capabilityUi.test.ts > the capability vocabulary, measured against the kernel it sits in > starts a contributed label in the same column as a kernel one",
+    "src/kernel/ui/styles/tokens.test.ts > opacity and weight come from their scales > never writes one as a literal",
+    "src/kernel/ui/styles/tokens.test.ts > opacity and weight come from their scales > would catch a literal if one appeared",
     "src/kernel/ui/styles/tokens.test.ts > the design system is used, not restated > accepts zero however it is written",
     "src/kernel/ui/styles/tokens.test.ts > the design system is used, not restated > finds the stylesheets at all",
     "src/kernel/ui/styles/tokens.test.ts > the design system is used, not restated > has no raw value in any property with a scale",

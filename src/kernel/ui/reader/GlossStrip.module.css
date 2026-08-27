@@ -36,7 +36,7 @@
 .glossTerm {
   flex: 0 0 auto;
   color: var(--amber);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
 }
 
 .glossBody {
@@ -109,7 +109,7 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--ink-2);
-  opacity: 0.75;
+  opacity: var(--opacity-quiet);
 }
 
 /* NOTHING INSTALLED TO ANSWER WITH — and it is not a failure, so it does not
@@ -162,7 +162,7 @@
   color: var(--accent);
   font-family: inherit;
   font-size: inherit;
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   cursor: pointer;
 }
 
