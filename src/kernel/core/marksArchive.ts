@@ -11,6 +11,7 @@ import {
   type MarkKind,
   type MarkStyle,
   type MarkTint,
+  isBookmarkKind,
 } from './marks'
 
 /**
@@ -141,6 +142,13 @@ export interface MarksImportPlan {
   readonly unmatched: readonly UnmatchedBook[]
   readonly booksTouched: number
   readonly marksAdded: number
+  /**
+   * Archived marks that overlapped ANOTHER MARK IN THE FILE of their own
+   * class and were kept as one — the later-made one. Counted so the notice
+   * can say so; `upsertOverlapping` would otherwise tombstone the earlier of
+   * the pair on the way into the store, silently.
+   */
+  readonly folded: number
   readonly cardsAdded: number
   /** Rows already present, by overlap — see `planImport`. */
   readonly duplicates: number
@@ -409,6 +417,7 @@ export function planImport(
   let marksAdded = 0
   let cardsAdded = 0
   let duplicates = 0
+  let folded = 0
 
   for (const row of archive.books) {
     const match =
@@ -424,24 +433,55 @@ export function planImport(
       continue
     }
     const mine = haveMarks.get(match.bookId) ?? []
+    /* SAME CLASS, then overlap — the rule `upsertOverlapping` applies, and
+     * this filter did not. A bookmark anchors to the visible PAGE, so its CFI
+     * overlaps every highlight on that page; without the class test one live
+     * bookmark made every archived highlight on its page a "duplicate", note
+     * and all, and an archived bookmark was dropped when a highlight stood
+     * on its page. Measured 2026-08-27: one bookmark, one archived highlight,
+     * `marksAdded: 0, duplicates: 1`. */
     const freshMarks = row.marks.filter((incoming) => {
-      const already = mine.some((have) =>
-        incoming.localAnchor.cfi && have.cfi
-          ? cfiOverlaps(incoming.localAnchor.cfi, have.cfi)
-          : incoming.text !== '' && incoming.text === have.text,
+      const already = mine.some(
+        (have) =>
+          isBookmarkKind(incoming.kind) === isBookmarkKind(have.kind) &&
+          (incoming.localAnchor.cfi && have.cfi
+            ? cfiOverlaps(incoming.localAnchor.cfi, have.cfi)
+            : incoming.text !== '' && incoming.text === have.text),
       )
       if (already) duplicates += 1
       return !already
     })
+    /* AND WITHIN THE FILE. Two archived marks of one class that overlap each
+     * other — a legacy export, or one merged from two devices — would reach
+     * `addMany`, whose `upsertOverlapping` keeps the later and tombstones the
+     * earlier without a word. Fold them here, keep the later-made one, and
+     * COUNT it, so the notice says "kept as one" rather than nothing. */
+    const kept: ArchivedMark[] = []
+    for (const incoming of freshMarks) {
+      const at = kept.findIndex(
+        (have) =>
+          isBookmarkKind(have.kind) === isBookmarkKind(incoming.kind) &&
+          (have.localAnchor.cfi && incoming.localAnchor.cfi
+            ? cfiOverlaps(have.localAnchor.cfi, incoming.localAnchor.cfi)
+            : incoming.text !== '' && incoming.text === have.text),
+      )
+      if (at === -1) {
+        kept.push(incoming)
+        continue
+      }
+      folded += 1
+      /* ISO 8601 strings order as their instants do. */
+      if (incoming.createdAt > kept[at]!.createdAt) kept[at] = incoming
+    }
     const cardBodies = haveCards.get(match.bookId) ?? new Set<string>()
     const freshCards = row.cards.filter((incoming) => {
       const already = cardBodies.has(incoming.body)
       if (already) duplicates += 1
       return !already
     })
-    if (freshMarks.length === 0 && freshCards.length === 0) continue
-    additions.push({ bookId: match.bookId, marks: freshMarks, cards: freshCards })
-    marksAdded += freshMarks.length
+    if (kept.length === 0 && freshCards.length === 0) continue
+    additions.push({ bookId: match.bookId, marks: kept, cards: freshCards })
+    marksAdded += kept.length
     cardsAdded += freshCards.length
   }
 
@@ -452,6 +492,7 @@ export function planImport(
     marksAdded,
     cardsAdded,
     duplicates,
+    folded,
   }
 }
 

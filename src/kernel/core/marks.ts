@@ -445,7 +445,14 @@ export type Bookmark = Mark & { readonly kind: (typeof BOOKMARK_KINDS)[number] }
  * exactly one implementation.
  */
 export function isBookmark(mark: Mark): mark is Bookmark {
-  return (BOOKMARK_KINDS as readonly string[]).includes(mark.kind)
+  return isBookmarkKind(mark.kind)
+}
+
+/** The class rule by KIND alone — for a row that is not yet a `Mark`, such
+ *  as an archive's, so the archive and the store cannot disagree about which
+ *  kinds are a bookmark. ONE copy; `isBookmark` and `sameClass` read it. */
+export function isBookmarkKind(kind: MarkKind): boolean {
+  return (BOOKMARK_KINDS as readonly string[]).includes(kind)
 }
 
 export function isAnnotation(mark: Mark): mark is Annotation {

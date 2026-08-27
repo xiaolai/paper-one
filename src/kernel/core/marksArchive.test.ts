@@ -248,6 +248,42 @@ describe('planImport', () => {
     expect(planImport(doc, shelf, mine, []).marksAdded).toBe(1)
   })
 
+  /**
+   * ⚠️ **ONE BOOKMARK USED TO EAT EVERY ARCHIVED HIGHLIGHT ON ITS PAGE.** A
+   * bookmark's CFI is the visible page, so it overlaps each highlight there;
+   * the duplicate test compared CFIs and never asked what class the two were.
+   * `upsertOverlapping` was fixed for this with `sameClass`; the import was
+   * not. Measured 2026-08-27: `marksAdded: 0, duplicates: 1`.
+   */
+  it('does not count a bookmark as a duplicate of a highlight on its page, nor the reverse', () => {
+    const shelf = [BOOK()]
+    const highlight = MARK({ id: 'h', cfi: 'epubcfi(/6/4!/4/2,/1:10,/1:30)' })
+    const bookmark = MARK({ id: 'b', kind: 'bookmark', cfi: 'epubcfi(/6/4!/4/2,/1:0,/1:400)', text: '', note: '' })
+    const highlightIn = planImport(exportMarks(shelf, [highlight], []), shelf, [bookmark], [])
+    expect(highlightIn.marksAdded).toBe(1)
+    expect(highlightIn.duplicates).toBe(0)
+    const bookmarkIn = planImport(exportMarks(shelf, [bookmark], []), shelf, [highlight], [])
+    expect(bookmarkIn.marksAdded).toBe(1)
+    expect(bookmarkIn.duplicates).toBe(0)
+    /* A bookmark on the shelf still makes an archived bookmark of the same
+       page a duplicate — the class rule narrows the test, it does not drop it. */
+    expect(planImport(exportMarks(shelf, [bookmark], []), shelf, [bookmark], []).duplicates).toBe(1)
+  })
+
+  it('folds two archived marks of one class that overlap each other into the later one, and counts it', () => {
+    const shelf = [BOOK()]
+    const early = MARK({ id: 'e', cfi: 'epubcfi(/6/4!/4/2,/1:0,/1:15)', note: 'lost', createdAt: Date.UTC(2026, 0, 1) })
+    const late = MARK({ id: 'l', cfi: 'epubcfi(/6/4!/4/2,/1:5,/1:20)', note: 'kept', createdAt: Date.UTC(2026, 0, 2) })
+    const plan = planImport(exportMarks(shelf, [early, late], []), shelf, [], [])
+    expect(plan.marksAdded).toBe(1)
+    expect(plan.folded).toBe(1)
+    expect(plan.duplicates).toBe(0)
+    expect(plan.additions[0]?.marks.map((m) => m.note)).toEqual(['kept'])
+    /* Order in the file does not decide it; the stamp does. */
+    const reversed = planImport(exportMarks(shelf, [late, early], []), shelf, [], [])
+    expect(reversed.additions[0]?.marks.map((m) => m.note)).toEqual(['kept'])
+  })
+
   it('never removes: a shelf mark absent from the file survives', () => {
     /* Restoring a month-old backup cannot silently delete a month of reading.
        The plan is a list of ADDITIONS and has no other verb. */

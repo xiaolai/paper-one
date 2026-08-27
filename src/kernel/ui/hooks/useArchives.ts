@@ -208,10 +208,13 @@ const importMarksNow = useCallback(() => {
     const rest = missing.length > 3 ? ` and ${missing.length - 3} more` : ''
     const missed = missing.length > 0 ? ` Not on this shelf: ${named}${rest}.` : ''
     const already = plan.duplicates > 0 ? ` ${plan.duplicates} already here.` : ''
+    /* SAID, NOT SWALLOWED: two archived marks that overlapped each other were
+       kept as one, and the reader who exported both deserves to hear it. */
+    const folded = plan.folded > 0 ? ` ${plan.folded} overlapping ${plan.folded === 1 ? 'mark' : 'marks'} kept as one.` : ''
     notice(
       plan.marksAdded === 0 && plan.cardsAdded === 0
-        ? `Nothing to add.${already}${missed}`
-        : `Added ${plan.marksAdded} ${plan.marksAdded === 1 ? 'mark' : 'marks'} and ${plan.cardsAdded} ${plan.cardsAdded === 1 ? 'card' : 'cards'} across ${plan.booksTouched} ${plan.booksTouched === 1 ? 'book' : 'books'}.${already}${missed}`,
+        ? `Nothing to add.${already}${folded}${missed}`
+        : `Added ${plan.marksAdded} ${plan.marksAdded === 1 ? 'mark' : 'marks'} and ${plan.cardsAdded} ${plan.cardsAdded === 1 ? 'card' : 'cards'} across ${plan.booksTouched} ${plan.booksTouched === 1 ? 'book' : 'books'}.${already}${folded}${missed}`,
     )
   })().catch((cause: unknown) => {
     console.error('Paper: could not import that marginalia', cause)
