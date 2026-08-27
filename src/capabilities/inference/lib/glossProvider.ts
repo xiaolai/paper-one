@@ -70,6 +70,24 @@ export function glossKey(term: string, context: GlossContext): string {
   return `${flatten(term)}\u0000${flatten(context.sentence)}`
 }
 
+/**
+ * Whatever text a rejection carries, from either shape it arrives in.
+ *
+ * ⚠️ `String(cause)` IS NOT ENOUGH, and it is the trap this exists to avoid: a
+ * plugin rejection is `{ kind, message }`, a plain object, so `String` gives
+ * `[object Object]` — throwing away the exact sentence the log is being written
+ * to preserve. The `Error` branch alone has the mirror problem, since that
+ * object is not an `Error` either.
+ */
+function messageOf(cause: unknown): string {
+  if (cause instanceof Error) return cause.message
+  if (typeof cause === 'object' && cause !== null) {
+    const { message } = cause as { message?: unknown }
+    if (typeof message === 'string') return message
+  }
+  return String(cause)
+}
+
 export interface GlossProviderOptions {
   readonly plugin: InferencePlugin
   readonly controller: Controller
@@ -213,6 +231,29 @@ export function createGlossProvider({ plugin, controller, report }: GlossProvide
                * with its own message intact.
                */
               const kind = errorKind(cause)
+
+              /* ⚠️ **THE MAINTAINER'S HALF, WHICH DID NOT EXIST.** Everything
+               * below decides what the READER is told, and every branch of it
+               * throws away the only text that says what actually happened.
+               * `RuntimeHttp` is the case that proves it: the variant carries a
+               * status precisely so somebody can act on it — `error.rs` says
+               * "deliberately carries a status and a route" — and it renders as
+               * `the inference runtime answered 404 for /api/v1/chat/completions`.
+               * `detailFor` maps it to "The runtime refused the request", which
+               * is the right sentence for a reader and names neither the status
+               * nor the route.
+               *
+               * So a failing gloss left NOTHING anywhere: not the status, not
+               * the route, not the model. `controller.ts`'s `ReportFailure`
+               * records the same lesson from the prefix bug — "the message this
+               * reports is the maintainer's half, which is the sentence that
+               * would have ended the search in a minute" — and the gloss path
+               * simply had no such hook until now.
+               *
+               * Reported for EVERY failure including cancellation, because a
+               * cancellation the reader did not ask for is one of the things
+               * worth seeing in a log. */
+              report?.('inference.gloss-failed', { kind, model, message: messageOf(cause) })
 
               /* THE READER'S OWN ABORT, and only when it really was one.
                * `cancelled` also arrives when the DAEMON cancels — it does so

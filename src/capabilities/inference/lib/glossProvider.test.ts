@@ -449,6 +449,39 @@ describe('the gloss provider', () => {
     expect(live, 'an abort listener outlived the lookup that added it').toBe(0)
   })
 
+  /*
+   * ⚠️ **THE MAINTAINER'S HALF.** Everything the reader is shown is a
+   * translation, and every translation throws away the text that says what
+   * happened. `RuntimeHttp` proves it: the variant carries a status precisely
+   * so somebody can act on it, and the reader's sentence — "The runtime refused
+   * the request" — names neither the status nor the route. Without this, a
+   * failing gloss left nothing anywhere.
+   */
+  it('logs what actually happened, not the sentence the reader gets', async () => {
+    const report = vi.fn()
+    const gloss = vi
+      .fn()
+      .mockRejectedValue({ kind: 'runtimeHttp', message: 'the inference runtime answered 404 for /api/v1/chat/completions' })
+    const { provider } = harness({ gloss: gloss as never })
+    const withReport = createGlossProvider({
+      plugin: { gloss, cancel: vi.fn() } as unknown as InferencePlugin,
+      controller: { textModel: () => 'qwen', ensureReady: async () => true } as unknown as Controller,
+      report,
+    })
+    void provider
+
+    await withReport.gloss('counsel', context, signal()).catch(() => {})
+
+    expect(report).toHaveBeenCalledWith('inference.gloss-failed', {
+      kind: 'runtimeHttp',
+      model: 'qwen',
+      /* THE STATUS AND THE ROUTE SURVIVE. `String(cause)` on a `{kind, message}`
+         object gives `[object Object]`, which would throw away the one thing
+         worth logging. */
+      message: 'the inference runtime answered 404 for /api/v1/chat/completions',
+    })
+  })
+
   it('clears its cache on request', async () => {
     const { provider } = harness()
     await provider.gloss('counsel', context, signal())

@@ -1032,6 +1032,7 @@
     "src/capabilities/inference/lib/glossProvider.test.ts > the gloss provider > is unavailable with no text model installed",
     "src/capabilities/inference/lib/glossProvider.test.ts > the gloss provider > leaves no abort listener behind on a lookup that succeeded",
     "src/capabilities/inference/lib/glossProvider.test.ts > the gloss provider > leaves the reader’s own cancellation as a cancellation",
+    "src/capabilities/inference/lib/glossProvider.test.ts > the gloss provider > logs what actually happened, not the sentence the reader gets",
     "src/capabilities/inference/lib/glossProvider.test.ts > the gloss provider > makes a bare string rejection readable rather than passing it through",
     "src/capabilities/inference/lib/glossProvider.test.ts > the gloss provider > makes no second request for the same word in the same sentence",
     "src/capabilities/inference/lib/glossProvider.test.ts > the gloss provider > never reaches an agent, however it is called",
