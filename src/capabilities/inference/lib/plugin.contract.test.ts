@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { cancelRequest } from './plugin'
 
 /**
  * FOUR SURFACES NAME THE SAME COMMANDS, THE SAME WAY.
@@ -188,5 +189,47 @@ describe('the plugin command surface', () => {
     const template = /const command = \(name: InferenceCommand\) => `([^`$]*)\$\{name\}`/.exec(PLUGIN_TS)
     expect(template, 'the command helper is not in plugin.ts in the shape this reads').not.toBeNull()
     expect(template?.[1]).toBe(`plugin:${registered}|`)
+  })
+})
+
+/**
+ * ⚠️ **ONE CANCEL PATH, BECAUSE THERE USED TO BE TWO AND ONLY ONE GOT FIXED.**
+ *
+ * `glossProvider` and `inferencePort`'s `withCancel` each wired the reader's
+ * abort to `plugin.cancel` and each swallowed every failure with
+ * `.catch(() => {})`. An audit found the swallow; fixing it in one copy left
+ * the other exactly as it was. Two call sites of one shape are a class, so the
+ * behaviour lives in one function and is asserted here rather than once per
+ * caller.
+ */
+describe('cancelRequest', () => {
+  it('says nothing when the cancel lost the ordinary race', async () => {
+    const report = vi.fn()
+    const cancel = vi.fn().mockRejectedValue({ kind: 'requestUnknown', message: 'already done' })
+    cancelRequest({ cancel } as never, 'gloss-1', report)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(cancel).toHaveBeenCalledWith('gloss-1')
+    expect(report).not.toHaveBeenCalled()
+  })
+
+  /* Anything else means the daemon is still generating for a reader who has
+     gone — a GPU and a model held for an answer nobody will read. */
+  it('reports any other failure, naming the request', async () => {
+    const report = vi.fn()
+    const cancel = vi.fn().mockRejectedValue({ kind: 'runtimeExited', message: 'gone' })
+    cancelRequest({ cancel } as never, 'ask-7', report)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(report).toHaveBeenCalledWith(
+      'inference.cancel-failed',
+      expect.objectContaining({ requestId: 'ask-7', kind: 'runtimeExited' }),
+    )
+  })
+
+  /* It runs from an `abort` listener, where there is nobody to catch — so a
+     rejection must never escape, with or without a reporter. */
+  it('never rethrows, even with no reporter bound', async () => {
+    const cancel = vi.fn().mockRejectedValue(new Error('boom'))
+    expect(() => cancelRequest({ cancel } as never, 'x-1')).not.toThrow()
+    await new Promise((resolve) => setTimeout(resolve, 0))
   })
 })

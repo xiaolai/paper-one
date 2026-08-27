@@ -512,7 +512,15 @@ describe('what the lookup path costs', () => {
      * dependency-cruiser `reachable` rule over the whole call graph, which is a
      * change to the boundary system rather than to this phase. Recorded under
      * "What the audit rounds found" in `dev-docs/plans/phase-16-the-sentence.md`
-     * rather than implied away. */
+     * rather than implied away.
+     *
+     * ⚠️ IT USED TO CARRY MORE WEIGHT THAN THIS. The scan was also the only
+     * thing standing behind `Reader`'s lookup DECISION — whether a control is
+     * drawn, whether the term is worth sending, what to run. Those moved to
+     * `lookUpPress` in `ui/lookUp.ts`, where `lookUp.test.ts` RUNS all three
+     * including the two a scan could never see: an action compared against a
+     * value it cannot hold, and the `isLookUpTerm` guard dropped. What is left
+     * here is the narrow claim that the reader still calls the handler. */
     expect(reader).toContain('askGloss(gloss, selection')
   })
 })

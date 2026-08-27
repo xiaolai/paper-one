@@ -21,7 +21,7 @@ import {
 } from '../../core/metrics'
 import { bookAccent } from '../../core/bookAccent'
 import { citation, type Source } from '../../core/citation'
-import { decideLookUp, isLookUpTerm } from '../lookUp'
+import { decideLookUp, lookUpPress } from '../lookUp'
 import { NO_GLOSS, type GlossProvider } from '../../core/gloss'
 import { NOOP_DIAGNOSTICS, type Diagnostics } from '../../core/ports'
 import { askGloss, useGloss } from '../hooks/useGloss'
@@ -883,30 +883,19 @@ export function Reader({
                       copyToClipboard(citation(selection.text, sourceFor(selection.sectionIndex)))
                     }}
                     onLookUp={
-                      /* ONE GESTURE, ONE THING. `decideLookUp` is the rule and
-                         it lives in `lookUp.ts` with a test; this is the
-                         wiring.
+                      /* ONE GESTURE, ONE THING, and the whole decision lives in
+                         `lookUp.ts` where it can be RUN by a test — `Reader`
+                         cannot be mounted cheaply, so anything left here could
+                         only ever be checked by reading this file back.
 
-                         ⚠️ **`install` CALLS THE SAME FUNCTION AS `gloss`**,
-                         and that is deliberate rather than an oversight.
-                         `useGloss.ask` already decides what an unavailable
-                         provider does — it sets `unavailable` rather than
-                         returning silently — so branching here would be a
-                         second copy of a decision the hook has to make anyway,
-                         and the two would eventually disagree about which
-                         states are reachable. The action's only job at this
-                         call site is `none`. */
-                      lookUpAction === 'none'
-                        ? null
-                        : () => {
-                            const term = selection?.text ?? ''
-                            if (!isLookUpTerm(term)) return
-                            /* The selection is NOT consumed. A lookup is a
-                               question about the passage, not something done to
-                               it — and the reader's next act is usually to mark
-                               the word they have just understood. */
-                            lookUpGloss()
-                          }
+                         ⚠️ `install` CALLS THE SAME FUNCTION AS `gloss`, and
+                         that is deliberate. `useGloss.ask` already decides what
+                         an unavailable provider does — it sets `unavailable`
+                         rather than returning silently — so branching here
+                         would be a second copy of a decision the hook has to
+                         make anyway, and the two would eventually disagree
+                         about which states are reachable. */
+                      lookUpPress(lookUpAction, () => selection?.text ?? '', lookUpGloss)
                     }
                     onRemove={() => {
                       if (selected) unmark(selected)

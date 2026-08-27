@@ -1,6 +1,6 @@
 import type { GlossContext, GlossProvider } from '../../../kernel'
 import { detailFor, type Controller, type ReportFailure } from './controller'
-import { errorKind, mintRequestId, type InferencePlugin } from './plugin'
+import { cancelRequest, errorKind, mintRequestId, type InferencePlugin } from './plugin'
 
 /**
  * The gloss provider — bound by `inference`, and by nothing else.
@@ -162,21 +162,10 @@ export function createGlossProvider({ plugin, controller, report }: GlossProvide
       if (!ready) throw new Error('The runtime is not running')
 
       const requestId = mintRequestId('gloss')
-      /* ⚠️ A FAILED CANCEL IS REPORTED, and every one of them used to be
-       * swallowed by a bare `.catch(() => {})`. Exactly one failure here is
-       * expected: `requestUnknown`, the race where the request finished before
-       * the cancel arrived. Anything else means the daemon is still generating
-       * for a reader who has gone — a GPU and a model held for an answer
-       * nobody will read — and that is worth a line in the log rather than
-       * silence. Found by audit. */
-      const abort = (): void =>
-        void plugin.cancel(requestId).catch((cause: unknown) => {
-          if (errorKind(cause) === 'requestUnknown') return
-          report?.('inference.gloss-cancel-failed', {
-            kind: errorKind(cause),
-            message: cause instanceof Error ? cause.message : String(cause),
-          })
-        })
+      /* One cancel, one place — see `cancelRequest`. This and
+       * `inferencePort`'s `withCancel` both swallowed every failure, and
+       * fixing one copy is how the other stayed broken. */
+      const abort = (): void => cancelRequest(plugin, requestId, report)
       signal.addEventListener('abort', abort, { once: true })
       try {
         const answer = (

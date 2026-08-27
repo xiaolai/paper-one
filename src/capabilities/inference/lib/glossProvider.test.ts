@@ -394,7 +394,7 @@ describe('the gloss provider', () => {
 
     expect(cancel).toHaveBeenCalled()
     expect(report).toHaveBeenCalledWith(
-      'inference.gloss-cancel-failed',
+      'inference.cancel-failed',
       expect.objectContaining({ kind: 'runtimeExited' }),
     )
   })

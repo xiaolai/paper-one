@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
-import { decideLookUp, isLookUpTerm } from './lookUp'
+import { describe, expect, it, vi } from 'vitest'
+import { decideLookUp, isLookUpTerm, lookUpPress } from './lookUp'
 
 /**
  * ⚠️ **THIS FILE USED TO PIN A NO-REGRESSION RULE THAT NO LONGER APPLIES.**
@@ -99,5 +99,58 @@ describe('isLookUpTerm', () => {
   it('counts code points, not UTF-16 units', () => {
     expect(isLookUpTerm('𠮷'.repeat(120))).toBe(true)
     expect(isLookUpTerm('𠮷'.repeat(121))).toBe(false)
+  })
+})
+
+/**
+ * THE WIRING, RUN RATHER THAN READ.
+ *
+ * These three decisions lived inside `Reader.tsx`, which takes sixteen props
+ * and renders foliate — so the only assertion anybody could write was
+ * `useGloss.test.ts` scanning the file for a call. A source scan cannot tell a
+ * working wiring from a plausible-looking one: it survives the action being
+ * compared against a value it can never hold, and it survives the guard being
+ * dropped. Both of those are cases below.
+ */
+describe('lookUpPress', () => {
+  it('draws no control where there is nothing to look up with', () => {
+    expect(lookUpPress('none', () => 'counsel', () => {})).toBeNull()
+  })
+
+  it('acts for a real term', () => {
+    const run = vi.fn()
+    lookUpPress('gloss', () => 'counsel', run)?.()
+    expect(run).toHaveBeenCalledTimes(1)
+  })
+
+  /* The install prompt is a press like any other — `useGloss.ask` is what
+     decides an unavailable provider shows it, so this must not branch. */
+  it('acts the same way when the press will only offer an install', () => {
+    const run = vi.fn()
+    lookUpPress('install', () => 'counsel', run)?.()
+    expect(run).toHaveBeenCalledTimes(1)
+  })
+
+  /* THE GUARD, which a source scan cannot see at all. A reader can select a
+     whole chapter, and a chapter is not a term. */
+  it.each([['an empty selection', ''], ['whitespace only', '  \n '], ['a chapter', 'a'.repeat(121)]])(
+    'does nothing for %s',
+    (_name, term) => {
+      const run = vi.fn()
+      lookUpPress('gloss', () => term, run)?.()
+      expect(run).not.toHaveBeenCalled()
+    },
+  )
+
+  /* THE TERM IS READ AT PRESS TIME, not at render. The button is created once
+     and pressed later, and the selection moves underneath it — reading it
+     early would define whatever was selected when the popup first appeared. */
+  it('reads the selection when pressed, not when created', () => {
+    let selected = 'first'
+    const seen: string[] = []
+    const press = lookUpPress('gloss', () => selected, () => void seen.push(selected))
+    selected = 'second'
+    press?.()
+    expect(seen).toEqual(['second'])
   })
 })

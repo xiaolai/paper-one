@@ -84,3 +84,42 @@ export function isLookUpTerm(term: string): boolean {
   const trimmed = term.trim().replace(/\s+/g, ' ')
   return trimmed !== '' && Array.from(trimmed).length <= MAX_TERM
 }
+
+/**
+ * The handler the selection popup's dictionary button gets, or `null` for no
+ * button at all.
+ *
+ * ⚠️ **EXTRACTED SO IT CAN BE RUN RATHER THAN READ.** This was three lines
+ * inside `Reader.tsx`, and an audit named the consequence: `Reader` takes
+ * sixteen props and renders foliate, so nothing in it can be mounted cheaply,
+ * and the only assertion anybody could write was `useGloss.test.ts` grepping
+ * the file for the string `askGloss(gloss, selection`. A source scan cannot
+ * tell a working wiring from a plausible-looking one — it would survive
+ * `lookUpAction` being compared against a value it can never hold, or the
+ * `isLookUpTerm` guard being dropped.
+ *
+ * All three decisions are here now: whether a control is drawn at all, whether
+ * this selection is worth sending, and what to do when it is.
+ *
+ * `term` is a THUNK because the selection changes under the handler — the
+ * button is created at render and pressed later, and reading the text at
+ * creation would define whatever was selected when the popup first appeared.
+ *
+ * THE SELECTION IS NOT CONSUMED. A lookup is a question about the passage, not
+ * something done to it — and the reader's next act is usually to mark the word
+ * they have just understood, which a consumed selection would make them select
+ * again.
+ */
+export function lookUpPress(
+  action: LookUpAction,
+  term: () => string,
+  run: () => void,
+): (() => void) | null {
+  /* NOT a disabled button: a control that cannot act is the app describing a
+   * feature it does not have — see `decideLookUp` for when that happens. */
+  if (action === 'none') return null
+  return () => {
+    if (!isLookUpTerm(term())) return
+    run()
+  }
+}

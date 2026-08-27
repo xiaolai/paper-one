@@ -184,7 +184,6 @@ describe('rowFor', () => {
     const row = rowFor(claudeOut, null)
     expect(row.value).toBe('Signed out')
     expect(row.action).toBe('sign-in')
-    expect(row.unusable).toBe(true)
   })
 
   it('sends an uninstalled local model to Install rather than Use', () => {
@@ -449,7 +448,6 @@ describe('the routes store', () => {
       const row = model.getSnapshot().rows[0]
       expect(row?.action, 'the row still offered a second login flow').toBe('check-again')
       expect(row?.value).toBe('Waiting for sign-in…')
-      expect(model.getSnapshot().signingIn).toBe('agent:codex')
       model.dispose()
     })
 
@@ -495,12 +493,11 @@ describe('the routes store', () => {
       const model = createRoutesModel({ port, ...wiring() })
       await model.refresh()
       await model.signIn('agent:codex')
-      expect(model.getSnapshot().signingIn).toBe('agent:codex')
+      expect(model.getSnapshot().rows[0]?.action).toBe('check-again')
 
       /* Still signed out: back to offering the flow rather than waiting on
          one that has already failed. */
       await model.refresh()
-      expect(model.getSnapshot().signingIn).toBeNull()
       expect(model.getSnapshot().rows[0]?.action).toBe('sign-in')
 
       await model.signIn('agent:codex')
@@ -532,7 +529,6 @@ describe('the routes store', () => {
       await model.refresh()
 
       await expect(model.signIn('agent:codex')).resolves.toBeUndefined()
-      expect(model.getSnapshot().signingIn).toBeNull()
       expect(model.getSnapshot().rows[0]?.action).toBe('sign-in')
       expect(events[0]?.event).toBe('companion.sign-in-failed')
       expect(events[0]?.fields.message).toBe('Codex is not installed')

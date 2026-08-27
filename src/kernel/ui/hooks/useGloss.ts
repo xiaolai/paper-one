@@ -241,19 +241,19 @@ export interface AskGlossOptions extends GlossRequestOptions {
  * and a source scan cannot tell a working wiring from a plausible-looking one.
  * Everything that turns a SELECTION INTO A REQUEST is here.
  *
- * ⚠️ **What is still not pinned by a test, precisely.** `Reader` keeps the
- * routing (`decideLookUp`), the `isLookUpTerm` guard, and the condition that
- * decides whether this is called at all — so deleting the call survives every
- * case in `useGloss.test.ts`. The field-level mutation is closed by the type
- * above; the call-level one is not, and closing it means mounting `Reader` or
- * extracting a smaller UI action boundary. Said here rather than left for
- * someone to assume otherwise.
+ * ⚠️ **What is still not pinned by a test, precisely.** Deleting the CALL to
+ * this from `Reader` survives every case in `useGloss.test.ts`, and closing
+ * that means mounting `Reader` — sixteen props and foliate — or a
+ * dependency-cruiser `reachable` rule over the call graph. Said here rather
+ * than left for someone to assume otherwise.
  *
- * It got NARROWER when the system dictionary went. The gap used to include
- * `gloss || both` — a branch that decided whether the gloss fired alongside
- * Dictionary.app, mutable to `gloss` alone or to neither with nothing red.
- * There is one behaviour now, so that particular mutation no longer exists to
- * be missed.
+ * It is narrower than it was, twice over. The gap used to include
+ * `gloss || both`, a branch deciding whether the gloss fired alongside
+ * Dictionary.app; there is one behaviour now, so that mutation no longer
+ * exists. And it used to include the whole lookup decision — draw a control or
+ * not, guard the term or not — which now lives in `lookUpPress` and is RUN by
+ * `lookUp.test.ts` rather than scanned for.
+ *
  */
 export function askGloss(
   gloss: Pick<Gloss, 'ask'>,

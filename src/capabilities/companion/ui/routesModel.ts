@@ -67,24 +67,29 @@ export interface RouteRow {
   /** The right-hand value: the detail when usable, the reason when not. */
   readonly value: string
   readonly action: RowAction
-  readonly unusable: boolean
+  /* ⚠️ `unusable: boolean` WAS HERE and nothing outside a test read it — the
+   * pane draws `action` and `value`, both of which already say it. Removed as
+   * dead public surface; the tests that asserted it now assert what the reader
+   * actually sees. Found by audit. */
 }
 
 export interface RoutesSnapshot {
   readonly rows: readonly RouteRow[]
-  /**
-   * The route whose sign-in the reader has started, or null.
+  /* ⚠️ `signingIn: string | null` WAS HERE. The FACT it recorded still is —
+   * a module-local `signingIn` still drives every row through `actionFor` —
+   * but nothing outside a test read it off the snapshot: the pane draws
+   * `action` and `value`, which is where a waiting row already says
+   * `Check again` and `Waiting for sign-in…`. Removed as dead public surface;
+   * the tests that asserted it assert the row instead. Found by audit.
    *
-   * ⚠️ **SIGNING IN USED TO CHANGE NOTHING ON SCREEN.** `agent_sign_in`
-   * launches the vendor's own login in a browser and returns at once — the
-   * credential is theirs and Paper never holds it — so nothing here learned
-   * that it had finished. The row went on saying `Signed out` however long the
-   * reader spent logging in, and pressing it again launched a second flow.
-   *
-   * So the press is a state: the row says it is waiting and offers
-   * `Check again`, which re-probes. One flow at a time, and a way out of it.
-   */
-  readonly signingIn: string | null
+   * The behaviour is worth keeping written down, because it was a real defect.
+   * SIGNING IN USED TO CHANGE NOTHING ON SCREEN: `agent_sign_in` launches the
+   * vendor's own login in a browser and returns at once — the credential is
+   * theirs and Paper never holds it — so nothing here learned that it had
+   * finished. The row went on saying `Signed out` however long the reader
+   * spent logging in, and pressing it again launched a second flow. So the
+   * press is a state: the row says it is waiting and offers `Check again`,
+   * which re-probes. One flow at a time, and a way out of it. */
   /** The route in use, or null when nothing can answer. */
   readonly inUse: string | null
   /** True when the reader's stored choice is no longer usable. */
@@ -132,41 +137,50 @@ export function resolveRoute(
  * `RoutesSnapshot.signingIn`.
  */
 export function rowFor(route: Route, inUse: string | null, signingIn: string | null = null): RouteRow {
-  const unusable = route.unusable !== null
-  /* ⚠️ THE CODE, NOT THE SENTENCE. This compared `unusable` against the exact
-     strings `'Not installed'` and `'Signed out'`, so the wording in `probe.rs`
-     and the button drawn here were the same field: rephrasing a reason turned
-     `[Install]` into a dead row silently. It also had to add `kind === 'local'`
-     to tell a model Paper can download from a CLI the reader must install,
-     because those two share a sentence — they no longer share a code. */
-  const reason = reasonOf(route)
-  const action: RowAction = unusable
-    ? reason === 'notInstalled'
-      ? 'install'
-      : reason === 'signedOut'
-        ? /* Already waiting on a login this reader opened: offer the way to
-             find out rather than a second copy of the flow. */
-          route.id === signingIn
-          ? 'check-again'
-          : 'sign-in'
-        : 'none'
-    : route.id === inUse
-      ? 'in-use'
-      : 'use'
+  const action = actionFor(route, inUse, signingIn)
   return {
     id: route.id,
     label: route.label,
-    /* An unusable route shows the REASON, which is §07's disabled-and-says-why
-     * rather than a control that fails when pressed. */
-    value:
-      action === 'check-again'
-        ? 'Waiting for sign-in…'
-        : unusable
-          ? (route.unusable as string)
-          : (route.detail ?? ''),
+    value: valueFor(route, action),
     action,
-    unusable,
   }
+}
+
+/**
+ * Which control a route offers, exhaustively and in one direction.
+ *
+ * ⚠️ **IT WAS A FOUR-LEVEL NESTED TERNARY**, and the precedence of the states
+ * inside it could only be read by counting brackets. Early returns say the
+ * same thing in the order it is actually decided: usable first, then the two
+ * reasons that have a fix, then the ones that do not. Found by audit.
+ *
+ * ⚠️ THE CODE, NOT THE SENTENCE. This compared `route.unusable` against the
+ * exact strings `'Not installed'` and `'Signed out'`, so the wording in
+ * `probe.rs` and the button drawn here were the same field: rephrasing a
+ * reason turned `[Install]` into a dead row silently. It also had to add
+ * `kind === 'local'` to tell a model Paper can download from a CLI the reader
+ * must install, because those two share a sentence — they no longer share a
+ * code.
+ */
+function actionFor(route: Route, inUse: string | null, signingIn: string | null): RowAction {
+  if (route.unusable === null) return route.id === inUse ? 'in-use' : 'use'
+  const reason = reasonOf(route)
+  if (reason === 'notInstalled') return 'install'
+  if (reason !== 'signedOut') return 'none'
+  /* Already waiting on a login this reader opened: offer the way to find out
+     rather than a second copy of the flow. */
+  return route.id === signingIn ? 'check-again' : 'sign-in'
+}
+
+/**
+ * The row's right-hand side: the detail when usable, the reason when not.
+ *
+ * An unusable route shows the REASON, which is §07's disabled-and-says-why
+ * rather than a control that fails when pressed.
+ */
+function valueFor(route: Route, action: RowAction): string {
+  if (action === 'check-again') return 'Waiting for sign-in…'
+  return route.unusable ?? route.detail ?? ''
 }
 
 
@@ -203,7 +217,6 @@ export interface RoutesModelOptions {
 
 const EMPTY: RoutesSnapshot = {
   rows: [],
-  signingIn: null,
   inUse: null,
   fellBack: false,
   depth: null,
@@ -237,7 +250,6 @@ export function createRoutesModel({ port, settings, report }: RoutesModelOptions
       rows: probe.routes
         .filter((route) => route.modality === 'text')
         .map((route) => rowFor(route, inUse, signingIn)),
-      signingIn,
       inUse,
       fellBack,
       /* Offered only while an AGENT answers — the two flags this maps to
