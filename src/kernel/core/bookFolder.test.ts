@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { asHlc } from './hlc'
+import { asHlc, hlcOf } from './hlc'
 import type { VaultFs } from './bookVault'
 import {
   BOOKS_DIR,
@@ -16,6 +16,7 @@ import {
   readMarks,
   recordFromMeta,
   recordPath,
+  setTag,
   trashOf,
   type BookRecord,
   updateBook,
@@ -617,7 +618,35 @@ describe('mergeStranded', () => {
 
   it('unions the tags rather than picking a list', () => {
     const merged = mergeStranded(stranded, book({ tags: ['Mine'] }))
-    expect(merged.tags).toEqual(['Sea', 'Mine'])
+    /* In the clock's order — by key, deterministic — not arrival order. */
+    expect(merged.tags).toEqual(['Mine', 'Sea'])
+  })
+
+  /**
+   * ⚠️ **THE UNION USED TO LAST UNTIL THE NEXT READ.** `mergeStranded`
+   * unioned the two `tags` lists and spread `live` — carrying `live.tagClock`
+   * through as it was. `parseRecord` re-derives `tags` from a clock it finds,
+   * so the rescued tag was there in memory and gone on the next launch, the
+   * next `updateBook`, and in sync's `tagRegisters`. Measured on the real
+   * modules on 2026-08-27: `["Sea", "Mine"]` in, `["Mine"]` after the round
+   * trip. The merge is over the registers now, and the round trip is the
+   * test.
+   */
+  it('carries the clock, so a rescued tag survives being written and read back', () => {
+    const live = setTag(book({ addedAt: 20 }), 'Mine', true, hlcOf(30))
+    const merged = mergeStranded(stranded, live)
+    expect(merged.tags).toEqual(['Mine', 'Sea'])
+    const back = parseRecord(JSON.stringify(merged))
+    expect(back?.tags).toEqual(['Mine', 'Sea'])
+    expect(Object.keys(back?.tagClock ?? {}).sort()).toEqual(['mine', 'sea'])
+  })
+
+  it('lets a clocked off beat a legacy on, whichever side holds it', () => {
+    const off = setTag(book({ addedAt: 20, tags: ['Sea'] }), 'Sea', false, hlcOf(30))
+    expect(mergeStranded(stranded, off).tags).toBeUndefined()
+    expect(mergeStranded(off, stranded).tags).toBeUndefined()
+    /* And the register that decided it travels, so a read agrees. */
+    expect(parseRecord(JSON.stringify(mergeStranded(stranded, off)))?.tags).toBeUndefined()
   })
 
   it('folds a tag that differs only in case', () => {

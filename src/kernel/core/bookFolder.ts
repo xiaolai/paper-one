@@ -31,7 +31,7 @@
 import type { VaultFs } from './bookVault'
 import { extensionFor } from './bookVault'
 import { isFormat, type Format } from './formats'
-import { hlcOf, isHlc, type Hlc } from './hlc'
+import { compareHlc, hlcOf, isHlc, type Hlc } from './hlc'
 import { TAG_MAX, normalizeTag, tagKey } from './tags'
 
 export const BOOKS_DIR = 'books'
@@ -651,15 +651,18 @@ export async function updateBook(
  * when the book actually arrived.
  */
 export function mergeStranded(stranded: BookRecord, live: BookRecord): BookRecord {
-  const tags = [...(stranded.tags ?? [])]
-  const seen = new Set(tags.map((tag) => tag.trim().normalize('NFC').toLowerCase()))
-  for (const tag of live.tags ?? []) {
-    const key = tag.trim().normalize('NFC').toLowerCase()
-    if (key && !seen.has(key)) {
-      seen.add(key)
-      tags.push(tag)
-    }
-  }
+  /* THE CLOCKS, NOT THE LISTS. This used to union `tags` and spread `live`
+   * — which carried `live.tagClock` through untouched. `parseRecord` treats
+   * a clock as the authority and re-derives `tags` from it, so the union
+   * lasted exactly until the record was read back: in memory `["Sea",
+   * "Mine"]`, on the next launch `["Mine"]`. Every record tagged since the
+   * clock existed has one, so that was the ordinary case, not the legacy
+   * one. Merging the REGISTERS — last writer per tag, a legacy list
+   * synthesised at its documented stamp by `tagRegisters` — and deriving
+   * the list from the result is the only shape a read cannot undo. */
+  const { tags: _tags, tagClock: _clock, ...rest } = live
+  const clock = mergeTagClocks(tagRegisters(stranded), tagRegisters(live))
+  const tags = clock ? tagsFromClock(clock) : []
   const addedAt =
     stranded.addedAt === undefined
       ? live.addedAt
@@ -667,7 +670,8 @@ export function mergeStranded(stranded: BookRecord, live: BookRecord): BookRecor
         ? stranded.addedAt
         : Math.min(stranded.addedAt, live.addedAt)
   return {
-    ...live,
+    ...rest,
+    ...(clock ? { tagClock: clock } : {}),
     ...(tags.length ? { tags } : {}),
     ...(live.position ?? stranded.position ? { position: live.position ?? stranded.position! } : {}),
     ...((live.progress ?? stranded.progress) === undefined
@@ -676,6 +680,26 @@ export function mergeStranded(stranded: BookRecord, live: BookRecord): BookRecor
     ...(stranded.finished || live.finished ? { finished: true } : {}),
     ...(addedAt === undefined ? {} : { addedAt }),
   }
+}
+
+/**
+ * Two tag clocks as one: every register from either, and where both hold a
+ * key, the LATER stamp — a tie going to the second, which `mergeStranded`
+ * passes the live record as. The same rule the sync merge applies to the
+ * same registers, so a rescue and a replica cannot disagree about a tag.
+ */
+function mergeTagClocks(a: TagClock | undefined, b: TagClock | undefined): TagClock | undefined {
+  if (!a) return b
+  if (!b) return a
+  const merged: Record<string, TagClockEntry> = Object.create(null) as Record<string, TagClockEntry>
+  for (const clock of [a, b]) {
+    for (const key of Object.keys(clock)) {
+      const entry = clock[key]!
+      const held = merged[key]
+      if (held === undefined || compareHlc(entry.at, held.at) >= 0) merged[key] = entry
+    }
+  }
+  return merged
 }
 
 /**
