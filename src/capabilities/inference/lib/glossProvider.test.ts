@@ -150,6 +150,74 @@ describe('the gloss provider', () => {
     expect(gloss).toHaveBeenCalledTimes(2)
   })
 
+  /*
+   * ── WHAT THE READER IS TOLD WHEN IT FAILS ─────────────────────────────
+   *
+   * A rejection from the plugin is `{ kind, message }` — a plain object, not
+   * an `Error`. `useGloss` builds the strip's second line with `error
+   * instanceof Error ? error.message : 'No reason was given.'`, so before this
+   * translation EVERY plugin-side failure reached the reader as **No reason
+   * was given.**: the runtime not installed, not started, stopped,
+   * unreachable, a model that would not resolve.
+   *
+   * It was survivable while Dictionary.app sat behind a failed gloss. The
+   * hand-off is deleted, so this line is the whole of what the reader learns.
+   */
+  it('turns a plugin rejection into a sentence the reader can act on', async () => {
+    const gloss = vi.fn().mockRejectedValue({ kind: 'runtimeMissing', message: 'lemonade-server absent' })
+    const { provider } = harness({ gloss: gloss as never })
+
+    const failure = await provider.gloss('counsel', context, signal()).catch((e: unknown) => e)
+
+    /* AN `Error`, because that is the only shape `useGloss` reads a message
+       off — a `{kind, message}` object reaches the reader as nothing at all. */
+    expect(failure).toBeInstanceOf(Error)
+    expect((failure as Error).message).toBe('The runtime is not installed')
+  })
+
+  /* Non-vacuity: two different kinds must not collapse to one sentence, or the
+     assertion above would pass against a hard-coded string. */
+  it('says something different for a different kind', async () => {
+    const gloss = vi.fn().mockRejectedValue({ kind: 'runtimeExited', message: 'exit status: 1' })
+    const { provider } = harness({ gloss: gloss as never })
+
+    await expect(provider.gloss('counsel', context, signal())).rejects.toThrow('The runtime stopped')
+  })
+
+  /*
+   * ⚠️ AND IT DOES NOT TRANSLATE WHAT IT DID NOT RECOGNISE. A rejection with
+   * no `kind` did not come from the crate, so `detailFor` would map it to its
+   * default — **Something went wrong** — destroying the real message on the
+   * way. `errorKind` states the rule: a rejection with no `kind` is a Tauri or
+   * webview failure, and treating it as one of the plugin's own puts the wrong
+   * sentence in front of the reader.
+   *
+   * This is the case that made the prefix bug cost an afternoon: every command
+   * was invoked without `plugin:inference|`, every call rejected with the bare
+   * string `Command inference_gloss not found`, and the one sentence that would
+   * have ended the search was the one a default swallows.
+   */
+  it('passes a rejection that is not the plugin’s through untouched', async () => {
+    const gloss = vi.fn().mockRejectedValue(new Error('Command inference_gloss not found'))
+    const { provider } = harness({ gloss: gloss as never })
+
+    await expect(provider.gloss('counsel', context, signal())).rejects.toThrow(
+      'Command inference_gloss not found',
+    )
+  })
+
+  /* The reader's own abort is not a fault and must not be dressed as one —
+     `useGloss` drops it, and a translated `cancelled` would race that drop and
+     flash a sentence at somebody who had already moved on. */
+  it('leaves a cancellation as a cancellation', async () => {
+    const gloss = vi.fn().mockRejectedValue({ kind: 'cancelled', message: 'cancelled' })
+    const { provider } = harness({ gloss: gloss as never })
+
+    const failure = await provider.gloss('counsel', context, signal()).catch((e: unknown) => e)
+
+    expect(failure).toEqual({ kind: 'cancelled', message: 'cancelled' })
+  })
+
   it('refuses before asking when the runtime will not start', async () => {
     const gloss = vi.fn()
     const controller = { textModel: () => 'qwen', ensureReady: async () => false } as unknown as Controller

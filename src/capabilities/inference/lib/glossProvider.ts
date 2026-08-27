@@ -1,6 +1,6 @@
 import type { GlossContext, GlossProvider } from '../../../kernel'
-import type { Controller } from './controller'
-import { mintRequestId, type InferencePlugin } from './plugin'
+import { detailFor, type Controller } from './controller'
+import { errorKind, mintRequestId, type InferencePlugin } from './plugin'
 
 /**
  * The gloss provider — bound by `inference`, and by nothing else.
@@ -149,7 +149,47 @@ export function createGlossProvider({ plugin, controller }: GlossProviderOptions
       signal.addEventListener('abort', abort, { once: true })
       try {
         const answer = (
-          await plugin.gloss(requestId, model, GLOSS_SYSTEM_PROMPT, glossQuestion(term, context))
+          await plugin
+            .gloss(requestId, model, GLOSS_SYSTEM_PROMPT, glossQuestion(term, context))
+            .catch((cause: unknown) => {
+              /* ⚠️ **THE READER READS THIS, AND THEY USED TO READ NOTHING.**
+               *
+               * A rejection from the plugin is `{ kind, message }` — a plain
+               * object, serialised by the crate's `error.rs`, NOT an `Error`.
+               * `useGloss` turns a rejection into the strip's second line with
+               * `error instanceof Error ? error.message : 'No reason was
+               * given.'`, so every plugin-side failure took the second branch:
+               * the runtime not installed, not started, stopped, unreachable,
+               * a model that would not resolve, a request already in flight —
+               * all of them reached the reader as **No reason was given.**
+               *
+               * `detailFor` is the map from `kind` to a sentence in §11's
+               * voice, and it has existed since WI-15.4. The gloss path could
+               * not use it: `useGloss` is the KERNEL's and `detailFor` is this
+               * capability's, and the kernel imports nothing from a
+               * capability. So the translation belongs HERE, on the far side
+               * of the port, which is the only place that has both.
+               *
+               * It mattered less when Dictionary.app sat behind a failed
+               * gloss. Nothing sits behind it now.
+               *
+               * ⚠️ **ONLY THE PLUGIN'S OWN REJECTIONS ARE TRANSLATED.** A
+               * rejection with NO `kind` did not come from the crate — it is a
+               * Tauri or webview failure — and `detailFor` would map it to its
+               * default, **Something went wrong**, destroying whatever the real
+               * error said on the way. `errorKind` states the same rule for the
+               * same reason: *"a rejection with no `kind` is a Tauri or webview
+               * failure, and treating it as one of the plugin's own would put
+               * the wrong sentence in front of the reader."* So an untranslated
+               * cause is rethrown untouched and `useGloss` reads its `message`.
+               *
+               * `cancelled` is rethrown too, because it is the reader's own
+               * abort and `useGloss` drops it rather than showing it.
+               */
+              const kind = errorKind(cause)
+              if (kind === null || kind === 'cancelled') throw cause
+              throw new Error(detailFor(cause), { cause })
+            })
         ).trim()
         /* An empty answer is NOT cached and NOT returned as a definition: an
          * empty amber mark beside a word reads as "this word means nothing". */
