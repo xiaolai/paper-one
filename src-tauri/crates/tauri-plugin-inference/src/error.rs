@@ -226,6 +226,17 @@ pub fn malformed(route: &str, message: impl Into<String>) -> Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// The shared root resolver's failures, as this plugin's kinds.
+impl From<paper_data_root::Error> for Error {
+    fn from(err: paper_data_root::Error) -> Self {
+        match err {
+            paper_data_root::Error::NotAbsolute(path) => Error::RootNotAbsolute(path),
+            paper_data_root::Error::Io(io) => Error::Io(io),
+            paper_data_root::Error::Tauri(tauri) => Error::Tauri(tauri),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

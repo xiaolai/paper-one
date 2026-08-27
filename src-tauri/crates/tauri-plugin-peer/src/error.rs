@@ -270,6 +270,18 @@ impl Serialize for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// The shared root resolver's failures, as this plugin's kinds — so the wire
+/// sees `dataRootNotAbsolute` and `io` exactly as it always did.
+impl From<paper_data_root::Error> for Error {
+    fn from(err: paper_data_root::Error) -> Self {
+        match err {
+            paper_data_root::Error::NotAbsolute(path) => Error::DataRootNotAbsolute(path),
+            paper_data_root::Error::Io(io) => Error::Io(io),
+            paper_data_root::Error::Tauri(tauri) => Error::Tauri(tauri),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

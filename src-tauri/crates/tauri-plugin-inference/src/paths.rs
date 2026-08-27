@@ -27,16 +27,16 @@
 //! may be pointed at `PAPER_TEST_DATA_DIR`, and two answers to "where is the
 //! data root" is one answer too many.
 
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use tauri::{AppHandle, Manager, Runtime};
 
 use crate::error::{Error, Result};
 
-/// The debug-only override, shared with `tauri-plugin-peer` BY NAME so a test
-/// that moves one plugin's root moves both. Compiled out of release builds.
-pub const TEST_DATA_DIR_ENV: &str = "PAPER_TEST_DATA_DIR";
+/// The debug-only override — ONE copy, in `paper-data-root`, shared with the
+/// app and `tauri-plugin-peer`, so a test that moves one root moves all of
+/// them. It used to be a second copy here, "shared BY NAME".
+pub use paper_data_root::TEST_DATA_DIR_ENV;
 
 /// The subdirectory this plugin owns under the data root.
 pub const INFERENCE_DIR: &str = "inference";
@@ -117,39 +117,10 @@ pub fn safe_component(name: &str) -> Result<&str> {
     }
 }
 
-/// The storage root for this process. Exists on return.
+/// The storage root for this process. Exists on return. Resolved by
+/// `paper-data-root`; only the error is this plugin's.
 pub fn data_root<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf> {
-    resolve(debug_override(), || {
-        app.path().app_data_dir().map_err(Error::from)
-    })
-}
-
-#[cfg(debug_assertions)]
-fn debug_override() -> Option<OsString> {
-    std::env::var_os(TEST_DATA_DIR_ENV)
-}
-
-#[cfg(not(debug_assertions))]
-fn debug_override() -> Option<OsString> {
-    None
-}
-
-fn resolve(
-    override_: Option<OsString>,
-    default: impl FnOnce() -> Result<PathBuf>,
-) -> Result<PathBuf> {
-    let root = match override_ {
-        Some(value) => {
-            let path = PathBuf::from(value);
-            if !path.is_absolute() {
-                return Err(Error::RootNotAbsolute(path));
-            }
-            path
-        }
-        None => default()?,
-    };
-    std::fs::create_dir_all(&root)?;
-    Ok(root)
+    paper_data_root::data_root(app).map_err(Error::from)
 }
 
 /// The `lemond` Paper ships, beside the app's own executable.
@@ -247,12 +218,16 @@ mod tests {
         assert!(layout.staging_path("qwen3", "..").is_err());
     }
 
+    /// The resolver moved to `paper-data-root`; what is this plugin's is the
+    /// KIND the wire sees, and that must not have moved with it.
     #[test]
-    fn a_relative_root_is_refused() {
-        let err = resolve(Some(OsString::from("relative/path")), || {
-            unreachable!("the override wins")
-        })
-        .unwrap_err();
+    fn a_relative_root_is_refused_under_this_plugins_kind() {
+        let err = Error::from(
+            paper_data_root::resolve(Some(std::ffi::OsString::from("relative/path")), || {
+                unreachable!("the override wins")
+            })
+            .unwrap_err(),
+        );
         assert_eq!(err.kind(), "rootNotAbsolute");
     }
 

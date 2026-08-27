@@ -57,6 +57,9 @@ tauri-plugin-persisted-scope = { version = "2", optional = true }
 tauri-plugin-mcp-bridge = { version = "0.12", optional = true }
 # The peer transport, on every platform (crates/tauri-plugin-peer).
 tauri-plugin-peer = { path = "crates/tauri-plugin-peer" }
+# Where the data lives — for the library lock (`src/lock.rs`). A plain
+# library, not a capability, so no capability's removal takes it away.
+paper-data-root = { path = "crates/paper-data-root" }
 # The local inference runtime (crates/tauri-plugin-inference). DESKTOP ONLY and
 # therefore optional: `lemond` ships for macOS, Windows and Linux and there is
 # no mobile build of it, so a phone has nothing for this plugin to supervise.
@@ -113,6 +116,12 @@ axum = { version = "0.8.9", default-features = false, features = ["http1", "toki
 # wry, so this declares what is there rather than adding to it. `objc2-app-kit`
 # rather than raw `msg_send!` because this is unsafe FFI and a typed
 # `contentView()` is worth more than the byte it saves.
+# The library lock (`src/lock.rs`): liveness by `kill(pid, 0)` and the host
+# name by `gethostname`, both Unix. Already in the tree through tauri; this
+# names the dependency rather than reaching it by accident.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSView", "NSResponder"] }

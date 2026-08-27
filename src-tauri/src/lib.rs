@@ -347,6 +347,40 @@ pub fn run() {
         // `peer:default` in capabilities/default.json.
         .plugin(tauri_plugin_peer::init())
         .setup(|app| {
+            /* ONE PROCESS OWNS THE LIBRARY, and this is where it is decided —
+             * before the webview boots, before the journal opens. The same
+             * file, record and protocol as `paper`'s advisory lock, so the CLI
+             * beside a running app is refused by name (it used to guess from a
+             * `pgrep` that could not see a dev build), a second Paper over one
+             * directory is refused rather than racing the first's trash sweep,
+             * and a crashed holder on this host is reclaimed. The refusal is a
+             * native dialog: there is no webview yet to draw one. */
+            #[cfg(feature = "desktop")]
+            {
+                use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+                let root = paper_data_root::data_root(app.handle()).map_err(|e| e.to_string())?;
+                match lock::acquire(&root, "Paper") {
+                    Ok(held) => {
+                        log::info!(
+                            "lock: holding the library as pid {} ({})",
+                            held.owner().pid,
+                            root.display()
+                        );
+                        tauri::Manager::manage(app, held);
+                    }
+                    Err(refused) => {
+                        let (title, body) = lock::refusal_text(&refused, &root);
+                        log::error!("lock: {refused}");
+                        app.dialog()
+                            .message(body)
+                            .title(title)
+                            .kind(MessageDialogKind::Error)
+                            .blocking_show();
+                        std::process::exit(1);
+                    }
+                }
+            }
+
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
@@ -415,6 +449,15 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
+            /* THE LOCK GOES WITH THE PROCESS, here and not in a `Drop`: the
+             * exit comes through `app.exit` after the shutdown handshake, and
+             * the file must go then — while it is still ours to remove. */
+            #[cfg(feature = "desktop")]
+            if let tauri::RunEvent::Exit = &event {
+                if let Some(held) = tauri::Manager::try_state::<lock::DataLock>(app) {
+                    held.release();
+                }
+            }
             // ONLY the quit path is logged. A `match` over every RunEvent
             // was what established which event a macOS quit produces — the
             // answer was "none that can be deferred, unless the Quit item is
@@ -465,6 +508,10 @@ pub fn run() {
             }
         });
 }
+
+/// The library lock — see the module.
+#[cfg(feature = "desktop")]
+mod lock;
 
 /// The quit handshake with the webview.
 mod shutdown {

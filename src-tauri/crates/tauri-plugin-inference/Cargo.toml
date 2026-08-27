@@ -37,6 +37,8 @@ tauri-plugin = { version = "2.6", features = ["build"] }
 # default-features = false: the plugin does not choose the webview or the
 # app-level features; the app does. Only the runtime types are needed here.
 tauri = { version = "2.11.3", default-features = false }
+# The one resolution of the data root, shared with the app and the other plugin.
+paper-data-root = { path = "../paper-data-root" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

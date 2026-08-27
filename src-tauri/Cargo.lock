@@ -125,9 +125,11 @@ name = "app"
 version = "0.1.1"
 dependencies = [
  "axum",
+ "libc",
  "log",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
+ "paper-data-root",
  "serde",
  "serde_json",
  "tauri",
@@ -3934,6 +3936,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "paper-data-root"
+version = "0.1.0"
+dependencies = [
+ "tauri",
+]
+
+[[package]]
 name = "paper-webauth"
 version = "0.1.0"
 dependencies = [
@@ -5745,6 +5754,7 @@ dependencies = [
  "keyring",
  "libc",
  "log",
+ "paper-data-root",
  "rand 0.9.5",
  "reqwest",
  "serde",
@@ -5818,6 +5828,7 @@ dependencies = [
  "iroh-mdns-address-lookup",
  "libc",
  "log",
+ "paper-data-root",
  "qrcode",
  "rand 0.10.2",
  "serde",

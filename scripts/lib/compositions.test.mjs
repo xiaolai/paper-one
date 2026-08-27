@@ -1,4 +1,6 @@
 import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { isPluginCrate } from '../check-compositions.mjs'
 import { describe, expect, it } from 'vitest'
 import { readCargoManifest, rustName } from './cargo.mjs'
 import {
@@ -453,12 +455,31 @@ describe('checkRustSurfaces', () => {
     expect(registersPlugin('', 'tauri_plugin_peer')).toBe(false)
   })
 
-  it('the real lib.rs registers every crate the real Cargo.toml depends on by path', () => {
+  /**
+   * PLUGIN crates, not every path crate. This asserted every `crates/`
+   * dependency was registered with `.plugin(…)`, which was true while the
+   * app depended only on plugins by path — and stopped being true the day it
+   * took `paper-data-root`, a plain library, for its lock. A library has no
+   * `.plugin()` to register; the check that tells the two apart is the shell
+   * check's own `isPluginCrate`. And the loop is guarded: a filter that
+   * matched nothing would have made this case pass on an empty `for`.
+   */
+  it('the real lib.rs registers every PLUGIN crate the real Cargo.toml depends on by path', () => {
     const cargo = readCargoManifest(readFileSync(new URL('../../src-tauri/Cargo.toml', import.meta.url), 'utf8'))
     const libRs = readFileSync(new URL('../../src-tauri/src/lib.rs', import.meta.url), 'utf8')
+    const root = fileURLToPath(new URL('../..', import.meta.url))
+    const plugins = []
+    const libraries = []
     for (const dep of cargo.dependencies.values()) {
-      if (dep.path !== null && dep.path.includes('crates/')) expect(registersPlugin(libRs, rustName(dep.name))).toBe(true)
+      if (dep.path === null || !dep.path.includes('crates/')) continue
+      ;(isPluginCrate(root, dep.name) ? plugins : libraries).push(dep.name)
     }
+    expect(plugins.length, 'the app depends on no plugin crate by path?').toBeGreaterThan(0)
+    for (const name of plugins) expect(registersPlugin(libRs, rustName(name)), `${name} is a plugin the app depends on`).toBe(true)
+    /* The library is depended on, not registered — and is named here so the
+       shape this case now allows is a named one, not a silent widening. */
+    expect(libraries).toEqual(['paper-data-root'])
+    for (const name of libraries) expect(registersPlugin(libRs, rustName(name))).toBe(false)
     expect(registersPlugin(libRs, 'tauri_plugin_fs')).toBe(true)
   })
 })
