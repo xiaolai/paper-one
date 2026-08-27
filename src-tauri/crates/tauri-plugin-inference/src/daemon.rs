@@ -50,6 +50,36 @@ const READY_TIMEOUT: Duration = Duration::from_secs(30);
 /// The gap between health polls while starting.
 const POLL_EVERY: Duration = Duration::from_millis(100);
 
+/// How long a model may go SILENT before Paper gives up on it.
+///
+/// ⚠️ **THIS IS NOT A TOTAL DEADLINE, AND THAT IS THE WHOLE POINT.** The
+/// client below carries `timeout(10s)`, which reqwest documents — and 0.13.4's
+/// source says in as many words — as *"a total request timeout … applied from
+/// when the request starts connecting until the response body has finished.
+/// Also considered a total deadline."* That is right for `/api/v1/health`, which
+/// is what the ten seconds was reasoned about; it is wrong for a chat
+/// completion, whose body IS the answer arriving a token at a time.
+///
+/// The daemon loads a model on the FIRST request that needs it — `await_ready`
+/// only polls for `status: "ok"`, and the health shape it parses reports
+/// `model_loaded: null` — so the first gloss after a launch pays a 2.5 GB GGUF
+/// read inside the same deadline as the generation. On a cold page cache that
+/// alone can exceed ten seconds, and the reader gets a failed lookup on the
+/// first thing they try.
+///
+/// So the streaming client is bounded by SILENCE instead, exactly as
+/// `state.rs`'s download client is and for the same stated reason — *"no
+/// overall timeout: a 2.4 GB download legitimately takes minutes. The read
+/// timeout is what catches a stalled connection."* An answer that is still
+/// arriving is a request still being served.
+///
+/// Two minutes is a backstop against a WEDGED daemon, not a budget for the
+/// reader's patience: cancellation is wired all the way through
+/// (`Cancel::cancelled` races every await in `generate::stream`, and `useGloss`
+/// aborts on dismiss or on the next lookup), so a reader who has stopped
+/// waiting is never held by this.
+const MODEL_SILENCE: Duration = Duration::from_secs(120);
+
 /// How long the tree gets to shut down cleanly before it is killed.
 ///
 /// The daemon unloads models and releases GPU allocations on the way out
@@ -73,6 +103,8 @@ pub struct Daemon {
     group: Option<u32>,
     plan: SpawnPlan,
     client: reqwest::Client,
+    /// The client for requests a MODEL answers — see `MODEL_SILENCE`.
+    model_client: reqwest::Client,
     log: LogTail,
     /// The port its WebSocket chose for itself, once health has reported it.
     websocket_port: Option<u16>,
@@ -165,16 +197,31 @@ impl Daemon {
             spawn_reader(err, log.clone());
         }
 
+        // No proxy, ever, on either client. A reader's `HTTP_PROXY` pointing
+        // loopback traffic at somebody else's server would put the bearer
+        // token and the reader's questions through it.
         let client = reqwest::Client::builder()
-            // The daemon is on the loopback; a request that has not been
+            // CONTROL PLANE ONLY — health, the model list, resource usage. The
+            // daemon is on the loopback; one of these that has not been
             // answered in ten seconds is not going to be.
+            //
+            // ⚠️ This bound used to cover GENERATION too, because there was one
+            // client. It is a TOTAL deadline, so it capped the whole streamed
+            // answer at ten seconds — see `MODEL_SILENCE`.
             .timeout(Duration::from_secs(10))
-            // No proxy, ever. A reader's `HTTP_PROXY` pointing loopback
-            // traffic at somebody else's server would put the bearer token
-            // and the reader's questions through it.
             .no_proxy()
             .build()
             .map_err(|e| unreachable("client", e))?;
+
+        let model_client = reqwest::Client::builder()
+            // Bounded by SILENCE, not by total duration — see `MODEL_SILENCE`.
+            // `read_timeout` exists only on the builder, never per request,
+            // which is why this is a second client rather than an override at
+            // the three call sites that need it.
+            .read_timeout(MODEL_SILENCE)
+            .no_proxy()
+            .build()
+            .map_err(|e| unreachable("model client", e))?;
 
         let group = crate::procgroup::group_of(&child);
         let mut daemon = Daemon {
@@ -182,6 +229,7 @@ impl Daemon {
             group,
             plan,
             client,
+            model_client,
             log,
             websocket_port: None,
             #[cfg(windows)]
@@ -330,8 +378,25 @@ impl Daemon {
     ///
     /// `route` is always a literal in this crate — there is no path a caller
     /// supplies, which is the same closed-set discipline the argv follows.
+    ///
+    /// ⚠️ **CONTROL PLANE.** Ten seconds, total. Anything a MODEL answers goes
+    /// through [`Daemon::model_request`] instead; this one's deadline would cut
+    /// the answer off mid-stream.
     pub fn request(&self, method: reqwest::Method, route: &str) -> reqwest::RequestBuilder {
         self.client
+            .request(method, format!("{}{route}", self.plan.base_url()))
+            .bearer_auth(&self.plan.env[crate::spawn::API_KEY_ENV])
+    }
+
+    /// The same, for a request a MODEL answers — a generation, a gloss, an
+    /// utterance.
+    ///
+    /// Three call sites, all of them in `commands.rs`, and the split is by what
+    /// answers rather than by route so that a fourth long-running command
+    /// cannot inherit the control plane's deadline by accident. See
+    /// `MODEL_SILENCE`.
+    pub fn model_request(&self, method: reqwest::Method, route: &str) -> reqwest::RequestBuilder {
+        self.model_client
             .request(method, format!("{}{route}", self.plan.base_url()))
             .bearer_auth(&self.plan.env[crate::spawn::API_KEY_ENV])
     }
@@ -462,6 +527,51 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ⚠️ **THE CONTROL PLANE'S TEN-SECOND DEADLINE MUST NOT REACH A MODEL.**
+    ///
+    /// `ClientBuilder::timeout` is a TOTAL deadline — reqwest 0.13.4's own
+    /// source: *"applied from when the request starts connecting until the
+    /// response body has finished. Also considered a total deadline."* For
+    /// `/api/v1/health` that is exactly right and it is what the ten seconds
+    /// was reasoned about. For a chat completion the body IS the answer, so
+    /// one client for both capped every generation — and every gloss, and the
+    /// first one after a launch pays a 2.5 GB model load inside the same
+    /// window.
+    ///
+    /// A SOURCE SCAN, in the shape `limits.rs` already uses for the same class
+    /// of mistake, because the thing worth preventing is a FOURTH long-running
+    /// command written later that reaches for `request` because that is what
+    /// the neighbours appeared to use. The clients themselves are private and
+    /// a behavioural test would need a daemon that stalls on demand.
+    #[test]
+    fn every_command_a_model_answers_uses_the_model_client() {
+        let source = include_str!("commands.rs");
+        for command in ["inference_generate", "inference_gloss", "inference_speak"] {
+            let at = source
+                .find(&format!("pub async fn {command}"))
+                .unwrap_or_else(|| panic!("{command} is not in commands.rs under that name"));
+            let body_end = source[at..]
+                .find("\n}\n")
+                .map(|end| at + end)
+                .unwrap_or(source.len());
+            let body = &source[at..body_end];
+            assert!(
+                body.contains("model_request("),
+                "{command} is answered by a model and must not use the control plane's client"
+            );
+            /* AND NOT THE OTHER ONE. The assertion above is satisfied by a
+             * body that calls BOTH, which is the shape a half-finished edit
+             * leaves behind. `.request(reqwest::Method` cannot match inside
+             * `.model_request(reqwest::Method` — the character before
+             * `request(` is `_` there, not `.` — so this is a real second
+             * question rather than a restatement of the first. */
+            assert!(
+                !body.contains(".request(reqwest::Method"),
+                "{command} still builds a request on the ten-second control-plane client"
+            );
+        }
+    }
 
     #[test]
     fn the_log_tail_is_bounded_and_keeps_the_end() {

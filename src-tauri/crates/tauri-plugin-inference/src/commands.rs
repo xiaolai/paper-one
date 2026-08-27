@@ -473,7 +473,7 @@ pub async fn inference_generate<R: Runtime>(
     let request = {
         let daemon = state.daemon().await?;
         daemon
-            .request(reqwest::Method::POST, generate::CHAT_ROUTE)
+            .model_request(reqwest::Method::POST, generate::CHAT_ROUTE)
             .json(&chat_request(model, system, question, MAX_ANSWER_TOKENS))
     };
     /* A SEND THAT FAILS CANCELS THE REQUEST. The webview dropped the channel —
@@ -519,7 +519,7 @@ pub async fn inference_gloss<R: Runtime>(
     let request = {
         let daemon = state.daemon().await?;
         daemon
-            .request(reqwest::Method::POST, generate::CHAT_ROUTE)
+            .model_request(reqwest::Method::POST, generate::CHAT_ROUTE)
             .json(&chat_request(model, system, question, MAX_GLOSS_TOKENS))
     };
     // Streamed on the wire, delivered whole: the daemon's non-streaming path
@@ -746,7 +746,7 @@ pub async fn inference_speak<R: Runtime>(
     let request = {
         let daemon = state.daemon().await?;
         daemon
-            .request(reqwest::Method::POST, speech::SPEECH_ROUTE)
+            .model_request(reqwest::Method::POST, speech::SPEECH_ROUTE)
             .json(&body)
     };
     /* THE TRANSPORT IS `speech`'s. This command is policy — bound the input,
