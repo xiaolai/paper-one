@@ -126,6 +126,63 @@ describe('applySnap — the live selection after the write', () => {
    * A backward *drag* is a different claim and stays on the manual checklist
    * (row 1.2), permanently.
    */
+  /*
+   * ── THE WEBKIT LINE-END DOUBLE-CLICK ───────────────────────────────────
+   *
+   * MEASURED IN THE RUNNING APP with real events posted through the window
+   * server; a synthetic `dblclick` cannot produce a native selection, so none
+   * of this could have been found from a harness.
+   *
+   * Double-clicking the last word of a line does not expand that word. WebKit
+   * anchors where the pointer landed and puts the FOCUS AT OFFSET 0 of the
+   * block, selecting everything before the click, backwards. Two readings from
+   * one paragraph, against two mid-line controls:
+   *
+   *   mid-line        9 → 10    one word, forward
+   *   mid-line      102 → 107   `their`, forward
+   *   end of line    60 → 0     60 characters, backward
+   *   end of line   127 → 0     127 characters, backward
+   *
+   * The click is ON the word in the failing cases, so it is not a hit-testing
+   * miss — it is word expansion abandoned at a column edge.
+   *
+   * The ordinary snap cannot help: WebKit's selection is already word-aligned
+   * at both ends, so snapping returns it unchanged and nothing is written.
+   */
+  it('gives a double-click at the end of a line the word it landed on', () => {
+    const fixture = sentence()
+    const text = fixture.text('the quick brown fox')
+    /* The measured shape: anchor inside the last word, focus at 0, backward. */
+    const selection = selectionOver({ node: text, offset: 17 }, { node: text, offset: 0 })
+    expect(isBackward(selection)).toBe(true)
+
+    const result = applySnap(selection.asSelection(), { doubleClick: true })
+
+    expect(result.snapped).toBe(true)
+    expect(selection.toString()).toBe('fox')
+    /* FORWARD. A word selected by a double-click reads left to right; restoring
+       the backward orientation would preserve the artifact being removed. */
+    expectFields(selection, { anchorNode: text, anchorOffset: 16, focusNode: text, focusOffset: 19 })
+    expect(isBackward(selection)).toBe(false)
+  })
+
+  /*
+   * ⚠️ AND ONLY FOR A DOUBLE-CLICK. A backward DRAG is a real gesture whose
+   * direction the reader chose, and `keeps a backward drag backward` below is
+   * the case that would break if this branch were reached by anything else.
+   * Same selection, no double-click: the ordinary policy, direction intact.
+   */
+  it('leaves an ordinary backward drag to the ordinary policy', () => {
+    const fixture = sentence()
+    const text = fixture.text('the quick brown fox')
+    const selection = selectionOver({ node: text, offset: 17 }, { node: text, offset: 0 })
+
+    applySnap(selection.asSelection())
+
+    expect(selection.toString()).toBe('the quick brown fox')
+    expect(isBackward(selection)).toBe(true)
+  })
+
   it('keeps a backward drag backward', () => {
     const fixture = sentence()
     const text = fixture.text('the quick brown fox')
