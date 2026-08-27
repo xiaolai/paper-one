@@ -1,0 +1,17 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "desktop",
+  "description": "the grants that exist only where their plugins compile: inference and webhost are desktop-only crates, and a platform-less file granting them fails tauri-build's ACL validation on iOS and Android with `Permission inference:default not found`. Scoped, so the three desktop OSes get them and the phones never ask.",
+  "platforms": [
+    "macOS",
+    "windows",
+    "linux"
+  ],
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "inference:default",
+    "webhost:default"
+  ]
+}

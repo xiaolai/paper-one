@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { NATIVE_PLATFORMS, PLATFORMS } from './architecture.mjs'
+import { NATIVE_PLATFORMS, PLATFORMS, namespaceOf } from './architecture.mjs'
 import { dependenciesOfFeature, dependencyForCrate, readCargoManifest, rustName } from './cargo.mjs'
 
 /**
@@ -257,6 +257,7 @@ export const FINDING_CODES = Object.freeze([
   'PLUGIN_UNREGISTERED',
   'ACL_UNREADABLE',
   'PERMISSION_UNGRANTED',
+  'GRANT_UNCOMPILED',
   ...BUNDLE_CODES,
 ])
 
@@ -364,22 +365,28 @@ export function checkRustSurfaces(manifest, files) {
 
   /* The ACL half runs for EVERY entry that lists permissions — a capability
    * whose plugin comes from a registry (no local `crate`) still needs its
-   * grants, and the old crate-only loop skipped it entirely. */
-  if (withPermissions.length > 0) {
-    const acl = readAcl(files.acl, findings)
-    for (const entry of withPermissions) {
-      const where = `capabilities/${entry.id}`
-      for (const permission of entry.permissions ?? []) {
-        for (const platform of entry.platforms) {
-          if (!acl.grants(permission, platform)) {
-            findings.push(
-              finding('PERMISSION_UNGRANTED', where, `permission ${JSON.stringify(permission)} is not granted for ${platform} by any src-tauri/capabilities/*.json`),
-            )
-          }
+   * grants, and the old crate-only loop skipped it entirely.
+   *
+   * AND THE FILES ARE READ WHETHER OR NOT ANY ENTRY LISTS PERMISSIONS. The
+   * inverse rule below is about grants the ACL makes, not grants the manifest
+   * asks for: an entry with `permissions: []` and a stray `inf:allow-x` in a
+   * platform-less file is still a build tauri-build refuses on the phones.
+   * Gating the read on `withPermissions` skipped that case entirely — the
+   * test that spells the grant differently found it. */
+  const acl = readAcl(files.acl, findings)
+  for (const entry of withPermissions) {
+    const where = `capabilities/${entry.id}`
+    for (const permission of entry.permissions ?? []) {
+      for (const platform of entry.platforms) {
+        if (!acl.grants(permission, platform)) {
+          findings.push(
+            finding('PERMISSION_UNGRANTED', where, `permission ${JSON.stringify(permission)} is not granted for ${platform} by any src-tauri/capabilities/*.json`),
+          )
         }
       }
     }
   }
+  findings.push(...uncompiledGrants(manifest, acl.grantList))
   if (withCrate.length === 0) return { findings, crates: 0 }
 
   let cargo = null
@@ -495,10 +502,12 @@ function readAcl(files, findings) {
     const platforms = Array.isArray(json.platforms) ? new Set(json.platforms.map(String)) : null
     for (const item of Array.isArray(json.permissions) ? json.permissions : []) {
       const identifier = typeof item === 'string' ? item : item && typeof item.identifier === 'string' ? item.identifier : null
-      if (identifier !== null) grants.push({ identifier, platforms })
+      if (identifier !== null) grants.push({ identifier, platforms, file })
     }
   }
   return {
+    /** Every grant read, with the file it came from — what the inverse rule walks. */
+    grantList: grants,
     /**
      * Whether `identifier` is granted on every OS `platform` stands for.
      *
@@ -522,6 +531,67 @@ function readAcl(files, findings) {
       )
     },
   }
+}
+
+/** Every Tauri platform name a capability file can be scoped to. */
+const TAURI_PLATFORM_NAMES = Object.freeze(Object.values(TAURI_PLATFORMS).flat())
+
+/**
+ * THE INVERSE OF `PERMISSION_UNGRANTED`, and the half that was missing.
+ *
+ * The forward rule asks "is every permission the manifest lists granted on
+ * every platform the entry composes?" — and is satisfied by a grant in a file
+ * with no `platforms`, which applies EVERYWHERE. Nothing asked the other
+ * question: "does every grant of a manifest plugin sit on a platform that
+ * COMPILES that plugin?" tauri-build asks it at build time, per target, and
+ * refuses the whole capability — `Permission inference:default not found` —
+ * because a plugin that is not compiled for the target contributes no
+ * permission manifest to check against. `inference:default` and
+ * `webhost:default` sat in the platform-less `default.json` for a phase, both
+ * plugins are desktop-only, and the iOS and Android compositions did not
+ * compile. `pnpm verify` runs only default-feature cargo, and the weekly
+ * mobile workflow had never fired, so the first thing to notice was a hand
+ * run of the iOS `cargo check`.
+ *
+ * SCOPED TO MANIFEST PLUGINS, deliberately. A grant's namespace is the text
+ * before its first `:`; only namespaces that belong to a manifest entry are
+ * this rule's business. `core:*`, `dialog:*`, `fs:*`, `log:*` are Tauri's own
+ * and its first-party plugins, compiled on every target that has one, and a
+ * rule that named them would report every capability file in the tree. The
+ * exemption cannot hide the regression above: `inference` IS a manifest
+ * entry, so its grants are checked wherever they are spelled —
+ * `inference:default` and `inference:allow-x` alike.
+ *
+ * One finding per (file, grant), naming the platforms the file applies to
+ * that the entry does not compose — so a reader knows which file to scope
+ * and with what.
+ */
+function uncompiledGrants(manifest, grantList) {
+  const findings = []
+  const composed = new Map() // namespace -> { entry, names: Set<TauriPlatformName> }
+  for (const entry of manifest.capabilities) {
+    const ns = namespaceOf(entry)
+    if (ns === null) continue
+    const names = new Set(entry.platforms.flatMap((p) => TAURI_PLATFORMS[p] ?? []))
+    composed.set(ns, { entry, names })
+  }
+  for (const grant of grantList) {
+    const colon = grant.identifier.indexOf(':')
+    if (colon <= 0) continue
+    const target = composed.get(grant.identifier.slice(0, colon))
+    if (target === undefined) continue
+    const applies = grant.platforms === null ? TAURI_PLATFORM_NAMES : TAURI_PLATFORM_NAMES.filter((n) => grant.platforms.has(n))
+    const missing = applies.filter((n) => !target.names.has(n))
+    if (missing.length === 0) continue
+    findings.push(
+      finding(
+        'GRANT_UNCOMPILED',
+        grant.file,
+        `${grant.file} grants ${JSON.stringify(grant.identifier)} on ${missing.join(', ')}, where the manifest does not compose ${target.entry.id} (platforms: [${target.entry.platforms.join(', ')}]); tauri-build refuses a permission whose plugin is not compiled for the target — scope the file with "platforms", or move the grant to one that is`,
+      ),
+    )
+  }
+  return findings
 }
 
 /* ----------------------------------------------------------------- bundle */

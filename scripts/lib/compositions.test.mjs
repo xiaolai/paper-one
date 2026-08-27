@@ -255,8 +255,13 @@ describe('checkRustSurfaces', () => {
     'mobile-shared = ["tauri-plugin-mob/x"]',
   ].join('\n')
   const lib = 'pub fn run() {\n  tauri::Builder::default()\n    .plugin(tauri_plugin_peer::init())\n    // .plugin(tauri_plugin_ghost::init())\n    .plugin( tauri_plugin_mob::init() )\n    .run()\n}\n'
+  /* `mob:allow-x` lives in a file scoped to the two platforms that compose
+     `mob`. It used to sit in the platform-less `default.json`, which grants it
+     on the three desktop OSes too — the exact shape `GRANT_UNCOMPILED` exists
+     for, so the "clean" fixture was carrying the defect. */
   const acl = [
-    { file: 'src-tauri/capabilities/default.json', text: JSON.stringify({ permissions: ['core:default', 'peer:default', { identifier: 'mob:allow-x' }, 7, { nope: 1 }] }) },
+    { file: 'src-tauri/capabilities/default.json', text: JSON.stringify({ permissions: ['core:default', 'peer:default', 7, { nope: 1 }] }) },
+    { file: 'src-tauri/capabilities/mobile.json', text: JSON.stringify({ platforms: ['iOS', 'android'], permissions: [{ identifier: 'mob:allow-x' }] }) },
     { file: 'src-tauri/capabilities/ios.json', text: JSON.stringify({ platforms: ['iOS'], permissions: ['mob:ios-only'] }) },
     { file: 'src-tauri/capabilities/desk.json', text: JSON.stringify({ platforms: ['macOS'], permissions: ['peer:desk'] }) },
   ]
@@ -290,16 +295,72 @@ describe('checkRustSurfaces', () => {
 
   it('CRATE_PLATFORMS_DIFFER for an unconditional crate the manifest composes on fewer platforms', () => {
     const findings = checkRustSurfaces(manifest([{ ...peer, platforms: ['ios'] }]), files()).findings
-    expect(codes(findings)).toEqual(['CRATE_PLATFORMS_DIFFER'])
-    expect(findings[0].message).toContain('unconditional')
-    expect(findings[0].message).toContain('[ios]')
+    /* Two `GRANT_UNCOMPILED` ride along: an iOS-only `peer` is granted by the
+       platform-less `default.json` and by the macOS-scoped `desk.json`, and
+       both are now the defect that rule names. The one under test is the
+       Cargo side. */
+    expect(codes(findings)).toEqual(['GRANT_UNCOMPILED', 'GRANT_UNCOMPILED', 'CRATE_PLATFORMS_DIFFER'])
+    expect(findings[2].message).toContain('unconditional')
+    expect(findings[2].message).toContain('[ios]')
   })
 
   it('CRATE_PLATFORMS_DIFFER for an optional crate whose features forward it elsewhere', () => {
-    const findings = checkRustSurfaces(manifest([{ ...mob, platforms: ['desktop', 'ios'] }]), files()).findings
+    /* The grant follows the manifest's claim so that only the Cargo side is
+       wrong: `mob:allow-x` scoped to exactly desktop + iOS. */
+    const deskIos = [
+      ...acl.filter((f) => !f.file.endsWith('mobile.json')),
+      { file: 'src-tauri/capabilities/mobile.json', text: JSON.stringify({ platforms: ['macOS', 'windows', 'linux', 'iOS'], permissions: ['mob:allow-x'] }) },
+    ]
+    const findings = checkRustSurfaces(manifest([{ ...mob, platforms: ['desktop', 'ios'] }]), files({ acl: deskIos })).findings
     expect(codes(findings)).toEqual(['CRATE_PLATFORMS_DIFFER'])
     expect(findings[0].message).toContain('forward it on [ios, android]')
     expect(findings[0].message).toContain('dep:tauri-plugin-mob')
+  })
+
+  /**
+   * ⚠️ **THE FORWARD RULE ALONE LET THE iOS BUILD BREAK.** `inference:default`
+   * and `webhost:default` — two desktop-only plugins — sat in the
+   * platform-less `default.json`, which applies everywhere, and every
+   * manifest permission was "granted". tauri-build then refused the file on
+   * iOS: `Permission inference:default not found`, because a plugin that is
+   * not compiled for the target has no permission manifest to grant from.
+   * Measured 2026-08-27 with the iOS `cargo check`; the weekly mobile
+   * workflow that runs it had never fired.
+   */
+  it('GRANT_UNCOMPILED: a manifest plugin granted on a platform that does not compile it, however the grant is spelled', () => {
+    const desk = cap('inf', ['desktop'], { crate: 'tauri-plugin-inf', plugin: 'inf', permissions: ['inf:default'] })
+    const ungated = [{ file: 'src-tauri/capabilities/default.json', text: JSON.stringify({ permissions: ['core:default', 'inf:default'] }) }]
+    const cargoInf = '[dependencies]\ntauri-plugin-inf = { path = "crates/tauri-plugin-inf", optional = true }\n[features]\ndefault = ["desktop"]\ndesktop = ["dep:tauri-plugin-inf"]\nios = []\nandroid = []\n'
+    const libInf = 'pub fn run() { tauri::Builder::default().plugin(tauri_plugin_inf::init()).run() }\n'
+    const findings = checkRustSurfaces(manifest([desk]), files({ acl: ungated, cargoToml: cargoInf, libRs: libInf })).findings
+    expect(codes(findings)).toEqual(['GRANT_UNCOMPILED'])
+    expect(findings[0].where).toBe('src-tauri/capabilities/default.json')
+    expect(findings[0].message).toContain('"inf:default"')
+    expect(findings[0].message).toContain('on iOS, android')
+    expect(findings[0].message).toContain('[desktop]')
+
+    /* SPELLING IS NOT THE RULE: `inf:allow-x` is the same namespace. */
+    const spelled = [{ file: 'src-tauri/capabilities/default.json', text: JSON.stringify({ permissions: ['inf:allow-x'] }) }]
+    expect(codes(checkRustSurfaces(manifest([{ ...desk, permissions: [] }]), files({ acl: spelled, cargoToml: cargoInf, libRs: libInf })).findings)).toEqual([
+      'GRANT_UNCOMPILED',
+    ])
+
+    /* SCOPED TO THE THREE DESKTOP OSes, the same grant is clean — that is the
+       fix, and the shape `src-tauri/capabilities/desktop.json` has. */
+    const scoped = [
+      { file: 'src-tauri/capabilities/default.json', text: JSON.stringify({ permissions: ['core:default'] }) },
+      { file: 'src-tauri/capabilities/desktop.json', text: JSON.stringify({ platforms: ['macOS', 'windows', 'linux'], permissions: ['inf:default'] }) },
+    ]
+    expect(checkRustSurfaces(manifest([desk]), files({ acl: scoped, cargoToml: cargoInf, libRs: libInf })).findings).toEqual([])
+
+    /* NOT THE RULE'S BUSINESS: Tauri's own and its first-party plugins are
+       compiled on every target that has one, and no manifest entry claims
+       them. Ungated `core:`, `dialog:` and `fs:` grants say nothing. */
+    const builtins = [
+      { file: 'src-tauri/capabilities/default.json', text: JSON.stringify({ permissions: ['core:default', 'core:window:allow-close', 'dialog:allow-open', 'fs:allow-read-file', { identifier: 'fs:allow-write-file', allow: [{ path: '$APPDATA/**' }] }] }) },
+      ...scoped.slice(1),
+    ]
+    expect(checkRustSurfaces(manifest([desk]), files({ acl: builtins, cargoToml: cargoInf, libRs: libInf })).findings).toEqual([])
   })
 
   it('PLUGIN_UNREGISTERED when lib.rs is absent or does not call .plugin(<crate>::init()) outside a comment', () => {
@@ -336,9 +397,11 @@ describe('checkRustSurfaces', () => {
      * named — which is the finding a reader can act on.
      */
     const macOnly = checkRustSurfaces(manifest([{ ...desk, platforms: ['desktop'] }]), files()).findings
-    /* `CRATE_PLATFORMS_DIFFER` rides along because this fixture's crate is
-       unconditional; the one under test is the permission. */
-    expect(codes(macOnly)).toEqual(['PERMISSION_UNGRANTED', 'CRATE_PLATFORMS_DIFFER'])
+    /* `GRANT_UNCOMPILED` and `CRATE_PLATFORMS_DIFFER` ride along: a
+       desktop-only `peer` is still granted everywhere by `default.json`, and
+       this fixture's crate is unconditional. The one under test is the
+       permission. */
+    expect(codes(macOnly)).toEqual(['PERMISSION_UNGRANTED', 'GRANT_UNCOMPILED', 'CRATE_PLATFORMS_DIFFER'])
     expect(macOnly[0].message).toContain('"peer:desk"')
 
     /* AND ALL THREE TOGETHER IS COVERED, so the refusal above is about the
@@ -352,7 +415,7 @@ describe('checkRustSurfaces', () => {
     ]
     expect(
       codes(checkRustSurfaces(manifest([{ ...desk, platforms: ['desktop'] }]), files({ acl: everyDesktop })).findings),
-    ).toEqual(['CRATE_PLATFORMS_DIFFER'])
+    ).toEqual(['GRANT_UNCOMPILED', 'CRATE_PLATFORMS_DIFFER'])
   })
 
   /**

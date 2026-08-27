@@ -461,7 +461,11 @@ mod shutdown {
     pub const ASK: &str = "paper://shutdown";
     pub const DONE: &str = "paper://shutdown-done";
 
-    /// Our own Quit item's id.
+    /// Our own Quit item's id. Gated with the item it names: the menu is
+    /// macOS-only (below), so on every other target this constant is dead
+    /// code — which the iOS build reported the moment it compiled again, and
+    /// which a `-D warnings` clippy on the Linux leg would refuse outright.
+    #[cfg(target_os = "macos")]
     pub const QUIT_ID: &str = "paper-quit";
 
     static STARTED: AtomicBool = AtomicBool::new(false);

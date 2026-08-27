@@ -449,10 +449,18 @@ function validatePlugin(entry, at) {
 }
 
 /** The ACL namespace a `plugin` crate name maps to: Tauri strips the crate
- *  prefix. ONE copy — the plugin validator and the permission check both
- *  read it, so they cannot drift. */
-function normalizePluginNamespace(plugin) {
+ *  prefix. ONE copy — the plugin validator, the permission check and the
+ *  compositions checker's grant rule all read it, so they cannot drift. */
+export function normalizePluginNamespace(plugin) {
   return plugin.replace(/^tauri-plugin-/, '')
+}
+
+/** The ACL namespace of a manifest entry: its `plugin`, normalised, else its
+ *  `id` — the same fallback `validatePermissions` applies to the entry's own
+ *  grants, so a grant in a capability file is matched to an entry by exactly
+ *  the rule the manifest was validated under. */
+export function namespaceOf(entry) {
+  return typeof entry.plugin === 'string' ? normalizePluginNamespace(entry.plugin) : typeof entry.id === 'string' ? entry.id : null
 }
 
 /** Hyphen-separated lower-alphanumeric words — no leading, trailing or
