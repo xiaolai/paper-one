@@ -3,6 +3,7 @@ import { folderOf, trashOf } from './bookFolder'
 import {
   TRASH_DAYS,
   emptyExpired,
+  expiredTrash,
   listTrash,
   rescueStrandedMarks,
   restoreBook,
@@ -80,6 +81,30 @@ describe('restoreBook', () => {
   })
 })
 
+
+/**
+ * The LISTING half of the sweep, which the app's boot now uses on its own:
+ * the decision is made here once, off the lanes, and re-made inside each
+ * book's lane by `Library.purgeTrashed` against the stamp as it is then.
+ */
+describe('expiredTrash', () => {
+  const DAY = 24 * 60 * 60 * 1000
+  it('names the folders whose stay is over, and leaves the fresh and the unreadable', async () => {
+    const now = Date.now()
+    const fs = fakeFs({
+      'trash/old/.removed': String(now - (TRASH_DAYS + 1) * DAY),
+      'trash/old/book.json': '{}',
+      'trash/fresh/.removed': String(now - DAY),
+      'trash/fresh/book.json': '{}',
+      'trash/junk/.removed': 'yesterday',
+      'trash/junk/book.json': '{}',
+      'trash/nostamp/book.json': '{}',
+    })
+    expect(await expiredTrash(fs, now)).toEqual(['old'])
+    // And it deletes nothing.
+    expect(await fs.exists('trash/old/book.json')).toBe(true)
+  })
+})
 
 describe('emptyExpired', () => {
   const DAY = 24 * 60 * 60 * 1000

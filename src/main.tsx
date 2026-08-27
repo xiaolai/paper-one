@@ -28,12 +28,11 @@ import '@fontsource/ibm-plex-mono/500.css'
  * dependency-cruiser the specifier maps to the desktop file
  * (`tsconfig.base.json` `paths`): all three export the same shape.
  * `.dependency-cruiser.cjs` holds this file to exactly these imports. */
-import { buildServices, composeCapabilities, flushBeforeClose, createKernelServices, defaultDiagnostics, kernelApi, serviceClients } from './kernel'
+import { buildServices, composeCapabilities, flushBeforeClose, createKernelServices, defaultDiagnostics, finishPendingRemovals, kernelApi, serviceClients } from './kernel'
 import {
   App,
   CLOSE_DRAIN_MS,
   countingFs,
-  emptyExpired,
   inTauri,
   installFatalHandlers,
   libraryFs,
@@ -47,10 +46,10 @@ import {
   summariseMigration,
   timed,
   watchFs,
-  type IndexedBook,
   tauriSizePort,
 } from './kernel/ui'
 import { armShutdownInBackground } from './app/shutdown'
+import { bootShelf } from './app/boot'
 import { capabilities } from 'virtual:paper-composition'
 
 /** Bounded like `App`'s close handler, and under the shell's 5 s grace: a
@@ -96,96 +95,43 @@ async function boot(root: HTMLElement): Promise<void> {
    * `countingFs` is the identity function in a build. */
   const fs = inTauri() ? countingFs(libraryFs) : null
 
-  /* CARRY A PHASE-3 LIBRARY ACROSS, before the shelf is read.
+  /* THE SHELF'S BOOT ORDER — carry a phase-3 library across, finish the
+   * removals a crash left half done, then read the shelf — lives in
+   * `app/boot.ts`, where its order is tested. Timing wraps each step here,
+   * because the timing is this file's concern and the order is not.
    *
-   * Before, because the shelf is built by scanning book folders and a book that
-   * has not been migrated has no folder to find — so running it after would show
-   * an empty library to a reader who has one, exactly once, which is precisely
-   * the alarming failure this project has already produced.
-   *
-   * Awaited, unlike the trash sweep: this decides what the shelf contains.
-   * Idempotent, so the second launch does almost nothing — it reads one record
-   * per book and stops.
-   *
-   * Failure is SWALLOWED rather than fatal. A migration that cannot run leaves
-   * the phase-3 files untouched, which is recoverable; refusing to start is not.
-   */
-  if (fs && storage) {
-    try {
-      /* PARSED SEPARATELY. One `try` around both meant a malformed marks value
-       * stopped every valid library row migrating — and the migration itself
-       * already treats unreadable marks as none, so the strict read was the only
-       * thing standing between a reader and their books. */
-      const outcomes = await timed('carry a legacy library across', () =>
-        migrateToFolders(fs, {
-        /* CHECKED, not asserted. `as []` told the compiler this was a list and
-         * told the runtime nothing — so a store holding a valid JSON OBJECT
-         * threw inside the migration and skipped every legacy book, which is
-         * exactly the whole-or-nothing failure the separate parse above exists
-         * to prevent. */
-        rows: asRows(readJson(storage.getItem('paper.library.v1'), [])),
-        marks: readJson(storage.getItem('paper.marks.v1'), []),
-        }),
-      )
-      const said = summariseMigration(outcomes)
-      if (said) console.info(`Paper: ${said}`)
-    } catch (cause) {
-      console.error('Paper: could not carry the previous library across', cause)
-    }
-  }
-  /* A SHELF THAT WILL NOT LOAD IS NOT AN EMPTY SHELF, and the reader is told
-   * which. Swallowing it drew "Your library is empty" over a library that is
-   * still on disk — the single most alarming thing this app can say, produced by
-   * a transient read. */
-  let initialBooks: readonly IndexedBook[] = []
-  let shelfUnread = false
-  if (fs) {
-    try {
-      /* THE ANSWER TO "why is launch slow" IS USUALLY `rescanned`. A trusted
-       * cache is one file read and one listing; a rescan is two round-trips per
-       * book, and a library of a few thousand feels every one of them. If this
-       * says `rescanned=true` on every launch, the cache is being distrusted
-       * rather than the scan being slow, and that is a different bug. */
-      const shelf = await timed('load the shelf', () => loadShelf(fs), (one) => ({
+   * THE ANSWER TO "why is launch slow" IS USUALLY `rescanned`. A trusted
+   * cache is one file read and one listing; a rescan is two round-trips per
+   * book, and a library of a few thousand feels every one of them. If this
+   * says `rescanned=true` on every launch, the cache is being distrusted
+   * rather than the scan being slow, and that is a different bug. */
+  const { initialBooks, shelfUnread } = await bootShelf({
+    fs,
+    legacy:
+      storage === null
+        ? null
+        : () => ({
+            /* CHECKED, not asserted. `as []` told the compiler this was a list and
+             * told the runtime nothing — so a store holding a valid JSON OBJECT
+             * threw inside the migration and skipped every legacy book. Parsed
+             * separately, so a malformed marks value does not stop the rows. */
+            rows: asRows(readJson(storage.getItem('paper.library.v1'), [])),
+            marks: readJson(storage.getItem('paper.marks.v1'), []),
+          }),
+    migrate: (target, legacy) => timed('carry a legacy library across', () => migrateToFolders(target, legacy)),
+    summarise: summariseMigration,
+    finishPendingRemovals: (target) => timed('finish pending removals', () => finishPendingRemovals(target), (ids) => ({ finished: ids.length })),
+    loadShelf: (target) =>
+      timed('load the shelf', () => loadShelf(target), (one) => ({
         books: one.books.length,
         rescanned: one.rescanned,
         why: one.why,
-      }))
-      initialBooks = shelf.books
-    } catch (cause) {
-      /* SAID, not swallowed. Logging it and carrying on with `[]` still drew
-       * "Your library is empty" over a library that is sitting on disk, which is
-       * the most alarming thing this app can say and the least true. The flag
-       * travels so the screen can say "could not be read" instead. */
-      console.error('Paper: could not read the library', cause)
-      shelfUnread = true
-    }
-  }
-  /* Emptied at BOOT, not on a timer and not when the reader removes something.
-   *
-   * It has to happen somewhere, and every other candidate is worse: a timer
-   * deletes a reader's work while they are looking at the shelf, and doing it
-   * during a removal makes an undoable action wait on unrelated disk work. At
-   * launch nothing is waiting, and being a fortnight late is not a failure.
-   *
-   * Deliberately not awaited. A slow or failing sweep must not delay the window,
-   * and `emptyExpired` errs towards keeping anything it cannot age. */
-  if (fs) {
-    /* REPORTED, not swallowed twice. `emptyExpired` already turns filesystem
-     * failures into `[]` — that is its documented erring-towards-keeping — so
-     * a `.catch(() => [])` on top could only ever hide something it did NOT
-     * expect: a programming error inside the sweep, silently, at boot, on a
-     * path nobody watches. */
-    void emptyExpired(fs).catch((error: unknown) => {
-      /* `defaultDiagnostics`, not `services.diagnostics`: the sweep starts
-       * BEFORE the services exist, so reaching for them here would be a
-       * temporal-dead-zone error thrown inside a catch on the boot path —
-       * a worse failure than the one being reported. */
-      defaultDiagnostics().warn('trash.sweep-failed', {
-        message: error instanceof Error ? error.message : String(error),
-      })
-    })
-  }
+      })),
+    report: {
+      info: (message) => console.info(message),
+      error: (message, cause) => console.error(message, cause),
+    },
+  })
 
   moment('everything before the first render', { ms: Math.round(performance.now() - bootFrom) })
   reportFs('filesystem, up to the first render')
@@ -207,6 +153,25 @@ async function boot(root: HTMLElement): Promise<void> {
      * asking whether this device was healthy. */
     shelfRead: !shelfUnread,
     diagnostics: defaultDiagnostics(),
+  })
+
+  /* THE TRASH IS EMPTIED AT BOOT, ON EACH BOOK'S LANE. Not on a timer and
+   * not when the reader removes something: a timer deletes a reader's work
+   * while they are looking at the shelf, and doing it during a removal makes
+   * an undoable action wait on unrelated disk work. At launch nothing is
+   * waiting, and being a fortnight late is not a failure.
+   *
+   * THROUGH THE LIBRARY, NOT `emptyExpired` DIRECT. The direct sweep read a
+   * stamp and deleted off every queue, so a restore that landed between the
+   * two — one that had kept files back and given them a fresh fortnight —
+   * lost exactly those files. The purge now runs on the book's lane with the
+   * stamp re-read there, so it is ordered against every restore and remove
+   * of that book. Deliberately not awaited: a slow sweep must not delay the
+   * window, and the library errs towards keeping anything it cannot age. */
+  void services.library.emptyExpiredTrash().catch((error: unknown) => {
+    services.diagnostics.warn('trash.sweep-failed', {
+      message: error instanceof Error ? error.message : String(error),
+    })
   })
 
   /* WHAT THIS HOST CAN MEASURE, bound here rather than by a capability.

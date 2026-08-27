@@ -15,7 +15,7 @@ import {
 } from './bookFolder'
 import { hasContentFile, invalidateIndex, writeIndex, type IndexFs, type IndexedBook } from './bookIndex'
 import { keepCover } from './coverArt'
-import { rescueStrandedMarks, restoreBook, trashBook, type RestoreOutcome } from './bookTrash'
+import { TRASH_WINDOW_MS, expiredTrash, readStamp, rescueStrandedMarks, restoreBook, trashBook, type RestoreOutcome } from './bookTrash'
 import { hlcOf, type Hlc } from './hlc'
 import { normalizeTag, tagKey } from './library'
 import { NOOP_RECORDER, REMOVABLE_BLOB_NAMES, recorded, type MutationRecorder } from './ports'
@@ -312,8 +312,24 @@ export interface Library {
    *
    * Answers whether the folder was there and went, so a partial destroy can
    * be reported as one.
+   *
+   * WITH `unlessStampedAfter`, THE STAMP IS RE-READ INSIDE THE LANE and a
+   * folder stamped later than that instant is left. This is what the boot
+   * sweep passes: it decided "expired" from a stamp it read off-lane, and a
+   * restore queued ahead of the purge on the same lane may have re-stamped
+   * the folder — a partial restore keeps the files it could not move and
+   * gives them a fresh fortnight. Deleting on the old decision was the sweep
+   * eating what the restore had deliberately kept.
    */
-  purgeTrashed(bookId: string): Promise<boolean>
+  purgeTrashed(bookId: string, options?: PurgeOptions): Promise<boolean>
+  /**
+   * THE BOOT SWEEP: every trashed folder whose stay is over, purged on its
+   * own book's lane with the stamp re-read there. Answers the folders that
+   * went. Best effort per folder; one that will not go does not stop the
+   * others, and nothing here throws for an unreadable stamp — that folder is
+   * left, as the trash's contract says.
+   */
+  emptyExpiredTrash(now?: number): Promise<string[]>
   /**
    * Apply a batch of changes that arrived from elsewhere: one `updateBook`
    * per row on that book's queue, ONE index write for the batch, one
@@ -321,6 +337,11 @@ export interface Library {
    * Rejects after the batch if any row's write failed, naming them all.
    */
   applyRemoteRows(rows: readonly RemoteRow[]): Promise<void>
+}
+
+export interface PurgeOptions {
+  /** Leave the folder if its `.removed` stamp is later than this instant. */
+  readonly unlessStampedAfter: number
 }
 
 export interface LibraryOptions {
@@ -1478,7 +1499,7 @@ export function createLibrary({
       .then(() => gone)
   }
 
-  const purgeTrashed: Library['purgeTrashed'] = (bookId) => {
+  const purgeTrashed: Library['purgeTrashed'] = (bookId, options) => {
     if (!fs) return Promise.resolve(false)
     const target = fs
     let went = false
@@ -1495,10 +1516,37 @@ export function createLibrary({
          * would otherwise be reported as destroyed. Inside the lane the check
          * and the delete cannot be separated. */
         if (!(await target.exists(at))) return
+        /* AND THE STAMP, AS IT IS NOW — see the interface. An unreadable one
+         * is left: the trash's contract, and the sweep's. */
+        if (options !== undefined) {
+          let stamp: number | null = null
+          try {
+            stamp = readStamp(new TextDecoder().decode(await target.readFile(`${at}/.removed`)))
+          } catch {
+            stamp = null
+          }
+          if (stamp === null || stamp > options.unlessStampedAfter) return
+        }
         await target.removeDir(at)
         went = true
       })
       .then(() => went)
+  }
+
+  const emptyExpiredTrash: Library['emptyExpiredTrash'] = async (now = Date.now()) => {
+    if (!fs) return []
+    const gone: string[] = []
+    /* The folder NAME is the id the purge derives the path from — the same
+     * convention the trash sheet uses for an entry with no readable record,
+     * and `safeId` is a fixed point on a name it produced. */
+    for (const name of await expiredTrash(fs, now)) {
+      try {
+        if (await purgeTrashed(name, { unlessStampedAfter: now - TRASH_WINDOW_MS })) gone.push(name)
+      } catch {
+        continue
+      }
+    }
+    return gone
   }
 
   const applyRemoteRows: Library['applyRemoteRows'] = async (rows) => {
@@ -1575,6 +1623,7 @@ export function createLibrary({
     refreshContent,
     evictContent,
     purgeTrashed,
+    emptyExpiredTrash,
     applyRemoteRows,
   }
 }

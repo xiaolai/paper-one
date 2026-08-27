@@ -38,7 +38,6 @@ export { libraryFs } from '../core/bookFiles'
 export { tauriSizePort } from '../core/bookSizesTauri'
 export { loadShelf } from '../core/bookIndex'
 export type { IndexedBook } from '../core/bookIndex'
-export { emptyExpired } from '../core/bookTrash'
 export { migrateToFolders, summariseMigration } from '../core/migrateToFolders'
 export { installFatalHandlers } from '../core/reportFatal'
 /* ONE DRAIN BOUND for both shutdowns — see `closeWindow.ts`. */

@@ -389,28 +389,56 @@ export async function listTrash(fs: TrashFs, signal?: AbortSignal): Promise<Tras
  * disk rather than words.
  */
 export async function emptyExpired(fs: TrashFs, now = Date.now()): Promise<string[]> {
+  const gone: string[] = []
+  for (const name of await expiredTrash(fs, now)) {
+    try {
+      await fs.removeDir(`trash/${name}`)
+      gone.push(name)
+    } catch {
+      // A delete that failed. Left alone on purpose.
+      continue
+    }
+  }
+  return gone
+}
+
+/** The trash's whole stay, in milliseconds — `TRASH_DAYS`, spent. */
+export const TRASH_WINDOW_MS = TRASH_DAYS * DAY_MS
+
+/**
+ * The trashed folders whose stay is over at `now`, by folder name — the
+ * LISTING half of the sweep, with the sweep's rules: a folder whose stamp is
+ * missing, unreadable or not a positive integer is left, and so is one that
+ * cannot be listed. Reads and decides; deletes nothing.
+ *
+ * SPLIT OUT so the app's sweep can delete on each book's LANE instead
+ * (`Library.emptyExpiredTrash`). `emptyExpired` above listed and deleted in
+ * one pass, off every queue — so a restore that landed between its stamp
+ * read and its `removeDir` lost the files the restore had deliberately kept
+ * back, and the fresh stamp with them. The decision is made here once and
+ * re-made inside the lane by the purge, against the stamp as it is then.
+ */
+export async function expiredTrash(fs: TrashFs, now = Date.now()): Promise<string[]> {
   let entries: { name: string; isDirectory: boolean }[]
   try {
     entries = await fs.readDir('trash')
   } catch {
     return []
   }
-  const gone: string[] = []
+  const expired: string[] = []
   for (const entry of entries) {
     if (!entry.isDirectory) continue
-    const at = `trash/${entry.name}`
     try {
-      const stamp = readStamp(new TextDecoder().decode(await fs.readFile(`${at}/.removed`)))
+      const stamp = readStamp(new TextDecoder().decode(await fs.readFile(`trash/${entry.name}/.removed`)))
       if (stamp === null) continue
-      if (now - stamp < TRASH_DAYS * DAY_MS) continue
-      await fs.removeDir(at)
-      gone.push(entry.name)
+      if (now - stamp < TRASH_WINDOW_MS) continue
+      expired.push(entry.name)
     } catch {
-      // Unreadable stamp, or a delete that failed. Left alone on purpose.
+      // Unreadable stamp. Left alone on purpose.
       continue
     }
   }
-  return gone
+  return expired
 }
 
 /**
