@@ -6,10 +6,15 @@ import { sentenceAt } from '../reader/wordSnap/sentenceAt'
 /**
  * One gloss at a time, for the word the reader is looking at.
  *
- * WI-15.13. A PROMISE rather than a stream, and the state below has three
- * shapes rather than a progress number, because two sentences arriving beside
- * a word is an appearance and not a download: streaming it would be jitter,
- * not progress.
+ * WI-15.13. A PROMISE rather than a stream, and the state below is a handful
+ * of named shapes rather than a progress number, because two sentences
+ * arriving beside a word is an appearance and not a download: streaming it
+ * would be jitter, not progress.
+ *
+ * Four non-idle shapes since the system-dictionary hand-off went: `asking`,
+ * `ready`, `failed`, and `unavailable` — the last for a press that cannot
+ * reach a model at all, which used to be impossible because Dictionary.app
+ * was always behind the gesture.
  *
  * # It replaces rather than queues
  *
@@ -23,11 +28,49 @@ export type GlossState =
   | { readonly kind: 'asking'; readonly term: string }
   | { readonly kind: 'ready'; readonly term: string; readonly text: string }
   | { readonly kind: 'failed'; readonly term: string; readonly reason: string }
+  /**
+   * Asked, with nothing installed to answer with.
+   *
+   * ⚠️ **THIS USED TO BE A SILENT `return`.** `ask` began `if
+   * (!provider.available) return`, which was harmless while the reader had
+   * Dictionary.app behind it — the lookup went to the system dictionary and
+   * the gloss simply did not contribute. With the hand-off deleted the gloss
+   * is the whole feature, and a press that does nothing at all is the exact
+   * failure `lookUpTauri.ts` used to warn about in its own header: *a lookup
+   * that silently did nothing is the failure this path is easiest to get wrong
+   * in.*
+   *
+   * A STATE RATHER THAN A REDIRECT. `useGloss` is the kernel's, and it has no
+   * business knowing that a models pane exists or how to open one — see
+   * `GlossStrip`, which takes the action as a prop and draws nothing when
+   * there is none.
+   */
+  | { readonly kind: 'unavailable'; readonly term: string }
 
 export interface Gloss {
   readonly state: GlossState
-  /** Define `term`, in the sentence it sits in. */
-  ask(term: string, sentence: string, bookTitle: string): void
+  /**
+   * Define the selection.
+   *
+   * ⚠️ **`request` IS A THUNK, AND THAT IS THE WHOLE POINT.** It used to be a
+   * `(term, sentence)` pair, with the caller deciding whether to build one and
+   * this deciding whether to send it — TWO reads of the provider's live
+   * `available` getter, with a window between them. An audit found the window;
+   * the first fix moved it rather than closing it, and the verify pass said so:
+   * a press that arrived just as a model appeared was dropped instead of being
+   * sent malformed.
+   *
+   * Deferring the build collapses both into ONE decision, made here, at the
+   * moment of use. If there is a model, the thunk runs and the request is sent.
+   * If there is not, the thunk never runs — which is also what keeps the
+   * document walk (and its §F4 diagnostic) off a path that cannot reach a
+   * model. There is no longer a snapshot for anything to go stale against.
+   *
+   * `fallbackTerm` is what the `unavailable` message names, because the thunk
+   * that would have produced the sentence-spelled term is exactly what did not
+   * run.
+   */
+  ask(request: () => GlossRequest, fallbackTerm: string, bookTitle: string): void
   /** Put it away — the reader moved on. */
   dismiss(): void
 }
@@ -52,9 +95,38 @@ export function useGloss(provider: GlossProvider): Gloss {
     setState({ kind: 'idle' })
   }, [])
 
+  /*
+   * ⚠️ **THE PROMPT HAS TO GO AWAY WHEN ITS REASON DOES.**
+   *
+   * `unavailable` says "Paper needs a language model" and offers the download.
+   * Nothing cleared it when the download finished, so a reader who took the
+   * offer came back to a strip still telling them to take it — the app
+   * reporting a state it was no longer in, which is the failure the whole
+   * amber/grey provenance scheme exists to avoid in the other direction.
+   *
+   * Found by audit. Only this state is reconciled: a `ready` gloss stays,
+   * because it is still the answer to the word they asked about, and a
+   * `failed` one stays because a model appearing does not un-fail it.
+   */
+  useEffect(() => {
+    if (!provider.available) return
+    setState((current) => (current.kind === 'unavailable' ? { kind: 'idle' } : current))
+  }, [provider.available])
+
   const ask = useCallback(
-    (term: string, sentence: string, bookTitle: string) => {
-      if (!provider.available) return
+    (request: () => GlossRequest, fallbackTerm: string, bookTitle: string) => {
+      /* THE ONLY READ OF `available` ON THIS PATH. Said, not swallowed — see
+       * `unavailable` above. The request in flight still goes, because a
+       * reader who asked a second question has stopped caring about the first
+       * either way. */
+      if (!provider.available) {
+        abort.current?.abort()
+        abort.current = null
+        setState({ kind: 'unavailable', term: fallbackTerm })
+        return
+      }
+      /* BUILT ONLY NOW, past the one check that decides. */
+      const { term, sentence } = request()
       /* The previous one is abandoned, not queued — see the header. */
       abort.current?.abort()
       const controller = new AbortController()
@@ -169,13 +241,19 @@ export interface AskGlossOptions extends GlossRequestOptions {
  * and a source scan cannot tell a working wiring from a plausible-looking one.
  * Everything that turns a SELECTION INTO A REQUEST is here.
  *
- * ⚠️ **What is still not pinned by a test, precisely.** `Reader` keeps the
- * routing (`decideLookUp`), the `isLookUpTerm` guard, and the condition that
- * decides whether this is called at all — so deleting the call, or changing
- * `gloss || both`, survives every case in `useGloss.test.ts`. The field-level
- * mutation is closed by the type above; the call-level one is not, and closing
- * it means mounting `Reader` or extracting a smaller UI action boundary. Said
- * here rather than left for someone to assume otherwise.
+ * ⚠️ **What is still not pinned by a test, precisely.** Deleting the CALL to
+ * this from `Reader` survives every case in `useGloss.test.ts`, and closing
+ * that means mounting `Reader` — sixteen props and foliate — or a
+ * dependency-cruiser `reachable` rule over the call graph. Said here rather
+ * than left for someone to assume otherwise.
+ *
+ * It is narrower than it was, twice over. The gap used to include
+ * `gloss || both`, a branch deciding whether the gloss fired alongside
+ * Dictionary.app; there is one behaviour now, so that mutation no longer
+ * exists. And it used to include the whole lookup decision — draw a control or
+ * not, guard the term or not — which now lives in `lookUpPress` and is RUN by
+ * `lookUp.test.ts` rather than scanned for.
+ *
  */
 export function askGloss(
   gloss: Pick<Gloss, 'ask'>,
@@ -183,8 +261,24 @@ export function askGloss(
   options: AskGlossOptions,
 ): void {
   if (!selection) return
-  const request = glossRequest(selection, options)
-  gloss.ask(request.term, request.sentence, options.bookTitle)
+  /*
+   * ⚠️ **THE WALK IS DEFERRED, NOT CONDITIONAL.** This used to read
+   * `gloss.available` and skip `glossRequest` itself, which put a second
+   * decision here and left a window against `ask`'s own check. Handing over a
+   * thunk means the walk happens if and only if `ask` decides to send — one
+   * decision, and no snapshot for it to disagree with.
+   *
+   * The walk stays off the no-model path for the reason it always did, and it
+   * is the §F4 counter rather than the cycles: `glossRequest` files
+   * `gloss.sentence` with its outcome, and on a machine with no model every
+   * sample would be for a lookup that never happened. On such a machine that
+   * is EVERY sample, so the one instrument that answers "is the sentence walk
+   * working" would be reading pure noise.
+   *
+   * The raw selection text is what the `unavailable` message names — the
+   * sentence-spelled term is a thing only the walk could have produced.
+   */
+  gloss.ask(() => glossRequest(selection, options), selection.text, options.bookTitle)
 }
 
 export function glossRequest(

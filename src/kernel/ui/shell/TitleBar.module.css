@@ -129,7 +129,7 @@
 
 .chipTitle {
   font-size: var(--text-ui);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   letter-spacing: var(--track-snug);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -206,6 +206,6 @@
 /* §07 Disabled — 45% opacity, no pointer events, and the reason stated nearby
  * rather than hidden in a title attribute alone. */
 .action[data-disabled='true'] {
-  opacity: 0.45;
+  opacity: var(--opacity-disabled);
   pointer-events: none;
 }

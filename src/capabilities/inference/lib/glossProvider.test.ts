@@ -150,6 +150,154 @@ describe('the gloss provider', () => {
     expect(gloss).toHaveBeenCalledTimes(2)
   })
 
+  /*
+   * ── WHAT THE READER IS TOLD WHEN IT FAILS ─────────────────────────────
+   *
+   * A rejection from the plugin is `{ kind, message }` — a plain object, not
+   * an `Error`. `useGloss` builds the strip's second line with `error
+   * instanceof Error ? error.message : 'No reason was given.'`, so before this
+   * translation EVERY plugin-side failure reached the reader as **No reason
+   * was given.**: the runtime not installed, not started, stopped,
+   * unreachable, a model that would not resolve.
+   *
+   * It was survivable while Dictionary.app sat behind a failed gloss. The
+   * hand-off is deleted, so this line is the whole of what the reader learns.
+   */
+  it('turns a plugin rejection into a sentence the reader can act on', async () => {
+    const gloss = vi.fn().mockRejectedValue({ kind: 'runtimeMissing', message: 'lemonade-server absent' })
+    const { provider } = harness({ gloss: gloss as never })
+
+    const failure = await provider.gloss('counsel', context, signal()).catch((e: unknown) => e)
+
+    /* AN `Error`, because that is the only shape `useGloss` reads a message
+       off — a `{kind, message}` object reaches the reader as nothing at all. */
+    expect(failure).toBeInstanceOf(Error)
+    expect((failure as Error).message).toBe('The runtime is not installed')
+  })
+
+  /* Non-vacuity: two different kinds must not collapse to one sentence, or the
+     assertion above would pass against a hard-coded string. */
+  it('says something different for a different kind', async () => {
+    const gloss = vi.fn().mockRejectedValue({ kind: 'runtimeExited', message: 'exit status: 1' })
+    const { provider } = harness({ gloss: gloss as never })
+
+    await expect(provider.gloss('counsel', context, signal())).rejects.toThrow('The runtime stopped')
+  })
+
+  /*
+   * ⚠️ AND IT DOES NOT TRANSLATE WHAT IT DID NOT RECOGNISE. A rejection with
+   * no `kind` did not come from the crate, so `detailFor` would map it to its
+   * default — **Something went wrong** — destroying the real message on the
+   * way. `errorKind` states the rule: a rejection with no `kind` is a Tauri or
+   * webview failure, and treating it as one of the plugin's own puts the wrong
+   * sentence in front of the reader.
+   *
+   * This is the case that made the prefix bug cost an afternoon: every command
+   * was invoked without `plugin:inference|`, every call rejected with the bare
+   * string `Command inference_gloss not found`, and the one sentence that would
+   * have ended the search was the one a default swallows.
+   */
+  it('passes a rejection that is not the plugin’s through untouched', async () => {
+    const gloss = vi.fn().mockRejectedValue(new Error('Command inference_gloss not found'))
+    const { provider } = harness({ gloss: gloss as never })
+
+    await expect(provider.gloss('counsel', context, signal())).rejects.toThrow(
+      'Command inference_gloss not found',
+    )
+  })
+
+  /* The reader's own abort is not a fault and must not be dressed as one —
+     `useGloss` drops it, and a translated `cancelled` would race that drop and
+     flash a sentence at somebody who had already moved on. */
+  it('leaves the reader’s own cancellation as a cancellation', async () => {
+    /* ABORTED DURING THE CALL, not before it. A signal that is already aborted
+       never reaches the plugin at all — `gloss` races the readiness wait
+       against it and throws `AbortError` first — so seeding one would have
+       tested the early guard while claiming to test this branch. */
+    const reader = new AbortController()
+    const gloss = vi.fn(async () => {
+      reader.abort()
+      return Promise.reject({ kind: 'cancelled', message: 'cancelled' })
+    })
+    const { provider } = harness({ gloss: gloss as never })
+
+    const failure = await provider.gloss('counsel', context, reader.signal).catch((e: unknown) => e)
+
+    expect(failure).toEqual({ kind: 'cancelled', message: 'cancelled' })
+  })
+
+  /*
+   * ⚠️ AND `cancelled` DOES NOT ALWAYS MEAN THE READER. Rust cancels in-flight
+   * requests when the daemon stops, and that arrives with a signal nobody
+   * aborted. Passing it through there showed the reader nothing at all while
+   * the lookup silently ended — `useGloss` drops a cancellation, so the strip
+   * stayed on "Looking…" with no answer coming. Found by audit.
+   */
+  it('translates a cancellation the reader did not ask for', async () => {
+    const gloss = vi.fn().mockRejectedValue({ kind: 'cancelled', message: 'cancelled' })
+    const { provider } = harness({ gloss: gloss as never })
+
+    const failure = await provider.gloss('counsel', context, signal()).catch((e: unknown) => e)
+
+    expect(failure).toBeInstanceOf(Error)
+    expect((failure as Error).message).toBe('The runtime stopped before it answered')
+  })
+
+  /*
+   * ⚠️ **THE CASE THE TRANSLATION WAS WRITTEN FOR, AND THE ONE ITS FIRST TEST
+   * MISSED.**
+   *
+   * Tauri rejects an unknown command with a plain STRING — `Command
+   * inference_gloss not found` — not an `Error`. The first version of this
+   * suite asserted that shape with `new Error(...)`, which passed while the
+   * real boundary still produced a string, and a string is not an `Error`, so
+   * `useGloss` rendered **No reason was given.** exactly as before the fix.
+   *
+   * A test that constructs the one shape the boundary never emits is a test
+   * that agrees with itself. This one uses the shape Tauri actually rejects
+   * with.
+   */
+  it('makes a bare string rejection readable rather than passing it through', async () => {
+    const gloss = vi.fn().mockRejectedValue('Command inference_gloss not found')
+    const { provider } = harness({ gloss: gloss as never })
+
+    const failure = await provider.gloss('counsel', context, signal()).catch((e: unknown) => e)
+
+    expect(failure).toBeInstanceOf(Error)
+    expect((failure as Error).message).toBe('Command inference_gloss not found')
+  })
+
+  /* NOT translated, though — it has no `kind`, so `detailFor` would map it to
+     "Something went wrong" and destroy the only account of what happened. */
+  it('does not translate a rejection it did not recognise', async () => {
+    const gloss = vi.fn().mockRejectedValue('Command inference_gloss not found')
+    const { provider } = harness({ gloss: gloss as never })
+
+    await expect(provider.gloss('counsel', context, signal())).rejects.not.toThrow(
+      'Something went wrong',
+    )
+  })
+
+  /* The kinds an audit found reaching the default. Each one is a different
+     thing to do about it, and "Something went wrong" is none of them.
+     ⚠️ WORDED FOR EVERY CALLER. `detailFor` is shared with the install and
+     removal paths, and the first version of these two expectations pinned
+     gloss-specific wording ("That LOOKUP is already running", "That PASSAGE is
+     too long to look up") that misreported an install collision. The verify
+     pass caught the wording; these expectations then caught me changing it
+     without re-running them. */
+  it.each([
+    ['modelUnknown', 'That model is not available'],
+    ['requestBusy', 'That request is already running'],
+    ['fieldTooLarge', 'That request was too large'],
+    ['runtimeHttp', 'The runtime refused the request'],
+  ])('says something specific for %s', async (kind, expected) => {
+    const gloss = vi.fn().mockRejectedValue({ kind, message: 'x' })
+    const { provider } = harness({ gloss: gloss as never })
+
+    await expect(provider.gloss('counsel', context, signal())).rejects.toThrow(expected)
+  })
+
   it('refuses before asking when the runtime will not start', async () => {
     const gloss = vi.fn()
     const controller = { textModel: () => 'qwen', ensureReady: async () => false } as unknown as Controller
@@ -179,6 +327,159 @@ describe('the gloss provider', () => {
     const { provider, gloss } = harness()
     await expect(provider.gloss('counsel', context, aborted.signal)).rejects.toThrow()
     expect(gloss).not.toHaveBeenCalled()
+  })
+
+  /*
+   * ⚠️ **A LATE ANSWER MUST NOT LAND IN ANOTHER MODEL'S CACHE.**
+   *
+   * `cachedFor` is checked on the way IN, before an await. Two lookups can be
+   * in flight across a model change: A starts under qwen, B starts under llama
+   * and clears the cache on its way in, then A lands and wrote its answer into
+   * a cache now labelled llama. The next lookup of A's word served qwen's
+   * answer under llama's label — precisely what `cachedFor` exists to prevent,
+   * one await too early. Found by audit.
+   */
+  it('does not remember an answer for a model the cache no longer belongs to', async () => {
+    let model = 'qwen'
+    let releaseQwen = (): void => {}
+    const gloss = vi.fn(async (_id: string, asked: string) => {
+      if (asked !== 'qwen') return 'llama says'
+      await new Promise<void>((resolve) => {
+        releaseQwen = resolve
+      })
+      return 'qwen says'
+    })
+    const controller = {
+      textModel: () => model,
+      ensureReady: async () => true,
+    } as unknown as Controller
+    const provider = createGlossProvider({
+      plugin: { gloss, cancel: vi.fn() } as unknown as InferencePlugin,
+      controller,
+    })
+
+    const inFlight = provider.gloss('counsel', context, signal())
+    model = 'llama'
+    await provider.gloss('other', { ...context, sentence: 'A different sentence.' }, signal())
+    releaseQwen()
+
+    /* The caller who asked still gets their answer — it is only not REMEMBERED
+       for a model that did not produce it. */
+    await expect(inFlight).resolves.toBe('qwen says')
+    expect(provider.cacheSize(), 'qwen’s answer was cached under llama').toBe(1)
+  })
+
+  /*
+   * ⚠️ **A FAILED CANCEL IS REPORTED**, and every one used to be swallowed by
+   * a bare `.catch(() => {})`. Anything but the expected race means the daemon
+   * is still generating for a reader who has gone.
+   */
+  it('reports a cancel that failed for anything but the expected race', async () => {
+    const report = vi.fn()
+    const reader = new AbortController()
+    const gloss = vi.fn(async () => {
+      reader.abort()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      return 'never read'
+    })
+    const cancel = vi.fn().mockRejectedValue({ kind: 'runtimeExited', message: 'gone' })
+    const provider = createGlossProvider({
+      plugin: { gloss, cancel } as unknown as InferencePlugin,
+      controller: { textModel: () => 'qwen', ensureReady: async () => true } as unknown as Controller,
+      report,
+    })
+
+    await provider.gloss('counsel', context, reader.signal).catch(() => {})
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(cancel).toHaveBeenCalled()
+    expect(report).toHaveBeenCalledWith(
+      'inference.cancel-failed',
+      expect.objectContaining({ kind: 'runtimeExited' }),
+    )
+  })
+
+  /* And the one failure that IS expected stays quiet: the request finished
+     before the cancel arrived, which is a race rather than a fault. */
+  it('says nothing when the cancel lost the ordinary race', async () => {
+    const report = vi.fn()
+    const reader = new AbortController()
+    const gloss = vi.fn(async () => {
+      reader.abort()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      return 'never read'
+    })
+    const cancel = vi.fn().mockRejectedValue({ kind: 'requestUnknown', message: 'already done' })
+    const provider = createGlossProvider({
+      plugin: { gloss, cancel } as unknown as InferencePlugin,
+      controller: { textModel: () => 'qwen', ensureReady: async () => true } as unknown as Controller,
+      report,
+    })
+
+    await provider.gloss('counsel', context, reader.signal).catch(() => {})
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(cancel).toHaveBeenCalled()
+    expect(report).not.toHaveBeenCalled()
+  })
+
+  /*
+   * ⚠️ **EVERY LISTENER IT ADDS, IT REMOVES.** The readiness race attached an
+   * anonymous `{ once: true }` listener — which fires once but is only removed
+   * BY firing, so on every ordinary lookup, where `ensureReady` wins the race,
+   * it stayed on the caller's signal for the signal's whole life.
+   */
+  it('leaves no abort listener behind on a lookup that succeeded', async () => {
+    const reader = new AbortController()
+    let live = 0
+    const add = reader.signal.addEventListener.bind(reader.signal)
+    const remove = reader.signal.removeEventListener.bind(reader.signal)
+    reader.signal.addEventListener = ((type: string, listener: never, options: never) => {
+      if (type === 'abort') live += 1
+      return add(type, listener, options)
+    }) as typeof reader.signal.addEventListener
+    reader.signal.removeEventListener = ((type: string, listener: never, options: never) => {
+      if (type === 'abort') live -= 1
+      return remove(type, listener, options)
+    }) as typeof reader.signal.removeEventListener
+
+    const { provider } = harness()
+    await expect(provider.gloss('counsel', context, reader.signal)).resolves.toBeTruthy()
+
+    expect(live, 'an abort listener outlived the lookup that added it').toBe(0)
+  })
+
+  /*
+   * ⚠️ **THE MAINTAINER'S HALF.** Everything the reader is shown is a
+   * translation, and every translation throws away the text that says what
+   * happened. `RuntimeHttp` proves it: the variant carries a status precisely
+   * so somebody can act on it, and the reader's sentence — "The runtime refused
+   * the request" — names neither the status nor the route. Without this, a
+   * failing gloss left nothing anywhere.
+   */
+  it('logs what actually happened, not the sentence the reader gets', async () => {
+    const report = vi.fn()
+    const gloss = vi
+      .fn()
+      .mockRejectedValue({ kind: 'runtimeHttp', message: 'the inference runtime answered 404 for /api/v1/chat/completions' })
+    const { provider } = harness({ gloss: gloss as never })
+    const withReport = createGlossProvider({
+      plugin: { gloss, cancel: vi.fn() } as unknown as InferencePlugin,
+      controller: { textModel: () => 'qwen', ensureReady: async () => true } as unknown as Controller,
+      report,
+    })
+    void provider
+
+    await withReport.gloss('counsel', context, signal()).catch(() => {})
+
+    expect(report).toHaveBeenCalledWith('inference.gloss-failed', {
+      kind: 'runtimeHttp',
+      model: 'qwen',
+      /* THE STATUS AND THE ROUTE SURVIVE. `String(cause)` on a `{kind, message}`
+         object gives `[object Object]`, which would throw away the one thing
+         worth logging. */
+      message: 'the inference runtime answered 404 for /api/v1/chat/completions',
+    })
   })
 
   it('clears its cache on request', async () => {

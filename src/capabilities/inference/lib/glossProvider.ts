@@ -1,6 +1,6 @@
 import type { GlossContext, GlossProvider } from '../../../kernel'
-import type { Controller } from './controller'
-import { mintRequestId, type InferencePlugin } from './plugin'
+import { detailFor, type Controller, type ReportFailure } from './controller'
+import { cancelRequest, errorKind, mintRequestId, type InferencePlugin } from './plugin'
 
 /**
  * The gloss provider — bound by `inference`, and by nothing else.
@@ -70,9 +70,29 @@ export function glossKey(term: string, context: GlossContext): string {
   return `${flatten(term)}\u0000${flatten(context.sentence)}`
 }
 
+/**
+ * Whatever text a rejection carries, from either shape it arrives in.
+ *
+ * ⚠️ `String(cause)` IS NOT ENOUGH, and it is the trap this exists to avoid: a
+ * plugin rejection is `{ kind, message }`, a plain object, so `String` gives
+ * `[object Object]` — throwing away the exact sentence the log is being written
+ * to preserve. The `Error` branch alone has the mirror problem, since that
+ * object is not an `Error` either.
+ */
+function messageOf(cause: unknown): string {
+  if (cause instanceof Error) return cause.message
+  if (typeof cause === 'object' && cause !== null) {
+    const { message } = cause as { message?: unknown }
+    if (typeof message === 'string') return message
+  }
+  return String(cause)
+}
+
 export interface GlossProviderOptions {
   readonly plugin: InferencePlugin
   readonly controller: Controller
+  /** Told when a cancel fails for a reason that is not the expected race. */
+  readonly report?: ReportFailure | undefined
 }
 
 export interface BoundGlossProvider extends GlossProvider {
@@ -82,7 +102,7 @@ export interface BoundGlossProvider extends GlossProvider {
   cacheSize(): number
 }
 
-export function createGlossProvider({ plugin, controller }: GlossProviderOptions): BoundGlossProvider {
+export function createGlossProvider({ plugin, controller, report }: GlossProviderOptions): BoundGlossProvider {
   /* A Map, for insertion order: JavaScript's Map iterates oldest-first, which
    * is the eviction order this wants and costs no bookkeeping. */
   const cache = new Map<string, string>()
@@ -94,6 +114,23 @@ export function createGlossProvider({ plugin, controller }: GlossProviderOptions
     get available(): boolean {
       return controller.textModel() !== null
     },
+
+    /**
+     * ALWAYS TRUE, and it is a constant rather than an oversight.
+     *
+     * This object exists only because `inference` composed, and `inference`
+     * composing is exactly what puts the Local models section in Settings —
+     * `start()` never fails on absence (F2), so there is no state in which
+     * this provider is bound and the reader has nowhere to install a model.
+     * A build that did not compose it keeps the port's `NO_GLOSS` default,
+     * where the same field is `false`.
+     *
+     * So the two objects that implement `GlossProvider` answer this with two
+     * constants, and between them they say the thing the reader UI actually
+     * needs to know: whether Look up should offer a download or not be drawn
+     * at all. See `GlossProvider.installable`.
+     */
+    installable: true,
 
     async gloss(term: string, context: GlossContext, signal: AbortSignal): Promise<string> {
       const model = controller.textModel()
@@ -115,29 +152,143 @@ export function createGlossProvider({ plugin, controller }: GlossProviderOptions
        * the daemon binds, probes accelerators, loads a model — and a reader
        * who selected a word and moved on would otherwise be held for the full
        * startup before their abort was noticed. Found by audit. */
+      /* ⚠️ THE LISTENER IS NAMED AND REMOVED, and it used to be neither. An
+       * anonymous `() => resolve('aborted')` was attached with `{ once: true }`
+       * — which fires once, but is only REMOVED by firing. When
+       * `ensureReady()` won the race, as it does on every ordinary lookup, the
+       * listener stayed attached to the caller's signal for its whole life.
+       * `useGloss` mints a fresh `AbortController` per ask so the signal dies
+       * quickly and the leak is bounded there; a caller that reuses one
+       * accumulates a listener per lookup. Found by audit. */
+      let onAbort: (() => void) | null = null
       const ready = await Promise.race([
         controller.ensureReady(),
         new Promise<'aborted'>((resolve) => {
-          if (signal.aborted) resolve('aborted')
-          else signal.addEventListener('abort', () => resolve('aborted'), { once: true })
+          if (signal.aborted) {
+            resolve('aborted')
+            return
+          }
+          onAbort = () => resolve('aborted')
+          signal.addEventListener('abort', onAbort, { once: true })
         }),
-      ])
+      ]).finally(() => {
+        if (onAbort !== null) signal.removeEventListener('abort', onAbort)
+      })
       if (ready === 'aborted' || signal.aborted) {
         throw new DOMException('Aborted', 'AbortError')
       }
       if (!ready) throw new Error('The runtime is not running')
 
       const requestId = mintRequestId('gloss')
-      const abort = (): void => void plugin.cancel(requestId).catch(() => {})
+      /* One cancel, one place — see `cancelRequest`. This and
+       * `inferencePort`'s `withCancel` both swallowed every failure, and
+       * fixing one copy is how the other stayed broken. */
+      const abort = (): void => cancelRequest(plugin, requestId, report)
       signal.addEventListener('abort', abort, { once: true })
       try {
         const answer = (
-          await plugin.gloss(requestId, model, GLOSS_SYSTEM_PROMPT, glossQuestion(term, context))
+          await plugin
+            .gloss(requestId, model, GLOSS_SYSTEM_PROMPT, glossQuestion(term, context))
+            .catch((cause: unknown) => {
+              /* ⚠️ **THE READER READS THIS, AND THEY USED TO READ NOTHING.**
+               *
+               * A rejection from the plugin is `{ kind, message }` — a plain
+               * object, serialised by the crate's `error.rs`, NOT an `Error`.
+               * `useGloss` turns a rejection into the strip's second line with
+               * `error instanceof Error ? error.message : 'No reason was
+               * given.'`, so every plugin-side failure took the second branch:
+               * the runtime not installed, not started, stopped, unreachable,
+               * a model that would not resolve, a request already in flight —
+               * all of them reached the reader as **No reason was given.**
+               *
+               * `detailFor` is the map from `kind` to a sentence in §11's
+               * voice, and it has existed since WI-15.4. The gloss path could
+               * not use it: `useGloss` is the KERNEL's and `detailFor` is this
+               * capability's, and the kernel imports nothing from a
+               * capability. So the translation belongs HERE, on the far side
+               * of the port, which is the only place that has both.
+               *
+               * It mattered less when Dictionary.app sat behind a failed
+               * gloss. Nothing sits behind it now.
+               *
+               * ⚠️ **ONLY THE PLUGIN'S OWN REJECTIONS CARRY A `kind`**, and the
+               * three branches below are three different failures that an
+               * audit found collapsed into one. `detailFor` maps only a
+               * `kind`; everything else needs handling here, and the case
+               * this whole translation was written for was in the half that
+               * did not have any.
+               *
+               * ⚠️ **A BARE STRING WAS STILL REACHING THE READER AS NOTHING.**
+               * Tauri rejects an unknown command with a plain STRING, not an
+               * `Error` — `Command inference_gloss not found` — and the first
+               * version of this rethrew any no-`kind` cause untouched, so
+               * `useGloss`'s `error instanceof Error` was false and the reader
+               * got **No reason was given.** exactly as before. That is the
+               * failure this fix names in its own commit message, and the test
+               * missed it by constructing an `Error`, which is the one shape
+               * the real boundary never produces. A non-`Error` cause is
+               * wrapped, preserving its text; a real `Error` is passed through
+               * with its own message intact.
+               */
+              const kind = errorKind(cause)
+
+              /* ⚠️ **THE MAINTAINER'S HALF, WHICH DID NOT EXIST.** Everything
+               * below decides what the READER is told, and every branch of it
+               * throws away the only text that says what actually happened.
+               * `RuntimeHttp` is the case that proves it: the variant carries a
+               * status precisely so somebody can act on it — `error.rs` says
+               * "deliberately carries a status and a route" — and it renders as
+               * `the inference runtime answered 404 for /api/v1/chat/completions`.
+               * `detailFor` maps it to "The runtime refused the request", which
+               * is the right sentence for a reader and names neither the status
+               * nor the route.
+               *
+               * So a failing gloss left NOTHING anywhere: not the status, not
+               * the route, not the model. `controller.ts`'s `ReportFailure`
+               * records the same lesson from the prefix bug — "the message this
+               * reports is the maintainer's half, which is the sentence that
+               * would have ended the search in a minute" — and the gloss path
+               * simply had no such hook until now.
+               *
+               * Reported for EVERY failure including cancellation, because a
+               * cancellation the reader did not ask for is one of the things
+               * worth seeing in a log. */
+              report?.('inference.gloss-failed', { kind, model, message: messageOf(cause) })
+
+              /* THE READER'S OWN ABORT, and only when it really was one.
+               * `cancelled` also arrives when the DAEMON cancels — it does so
+               * on stop — and that lands with a signal nobody aborted. Passing
+               * it through there shows the reader nothing while the lookup
+               * silently ends. Only a genuinely aborted signal is dropped;
+               * `useGloss` ignores it and the reader has already moved on. */
+              if (kind === 'cancelled' && signal.aborted) throw cause
+
+              if (kind !== null) throw new Error(detailFor(cause), { cause })
+
+              /* NOT THE PLUGIN'S. `errorKind` states the rule and the reason:
+               * a rejection with no `kind` is a Tauri or webview failure, and
+               * `detailFor` would map it to its default, destroying whatever
+               * the real failure said. So it is not translated — but it is
+               * made READABLE, which is a different thing and the half that
+               * was missing. */
+              if (cause instanceof Error) throw cause
+              throw new Error(String(cause), { cause })
+            })
         ).trim()
         /* An empty answer is NOT cached and NOT returned as a definition: an
          * empty amber mark beside a word reads as "this word means nothing". */
         if (answer === '') throw new Error('The model returned nothing')
-        cache.set(key, answer)
+        /* ⚠️ **ONLY IF THE CACHE IS STILL THIS MODEL'S.** Two lookups can be in
+         * flight across a model change: A starts under model A, B starts under
+         * B and clears the cache on the way in, then A lands and wrote its
+         * answer into a cache now labelled B — so the next lookup of A's word
+         * served A's model's answer under B's label. That is the precise thing
+         * `cachedFor` exists to prevent, one await too early. The answer is
+         * still RETURNED to the caller who asked for it; it is only not
+         * remembered for a model that did not produce it. Found by audit. */
+        if (cachedFor === model) {
+          cache.set(key, answer)
+        }
         while (cache.size > CACHE_LIMIT) {
           const oldest = cache.keys().next().value
           if (oldest === undefined) break

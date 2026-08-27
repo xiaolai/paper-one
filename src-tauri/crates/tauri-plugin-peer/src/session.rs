@@ -1161,12 +1161,40 @@ mod tests {
          * bound holding throughout. Without it, the sender completes and the
          * inbox holds all 24 MiB, and both of those are caught wherever the
          * sampling happens to fall. */
+        /* ⚠️ **AND THE HOLD WINDOW STARTS WHEN THE CAP IS REACHED, NOT WHEN THE
+         * TEST DOES.** It used to be three seconds from the top of the loop,
+         * with `reached_cap` asserted afterwards — which made one wall-clock
+         * budget answer two different questions:
+         *
+         *   1. did the inbox get FULL (a transport moving 8 MiB between two
+         *      in-process nodes — work whose duration is the machine's, not
+         *      this crate's), and
+         *   2. did the bound HOLD while it was full (the actual measurement).
+         *
+         * On a loaded runner the first can consume the entire window, so
+         * `reached_cap` came out false and the test failed for being slow.
+         * Observed once under `cargo test --workspace -- --test-threads=1`
+         * with the whole JS suite ahead of it; passes standalone every time,
+         * which is the signature of a timing budget rather than a defect.
+         *
+         * The two are separated now. `REACH_WITHIN` is a LIVENESS CEILING and
+         * deliberately not a measurement: if 8 MiB never arrives the test must
+         * say so rather than hang, and the number only has to be far past any
+         * real machine. `HELD_FOR` is the measurement, and it now measures what
+         * it is named for — how long the invariant held once there was
+         * something to hold.
+         *
+         * Nothing the previous rewrite bought is given up. The bound is still
+         * checked on EVERY sample, a finished sender is still the unambiguous
+         * failure, and the cap is still known to have been reached — by
+         * construction now rather than by a trailing assertion, since the loop
+         * has no other way out. */
         const HELD_FOR: Duration = Duration::from_secs(3);
-        let watch_until = tokio::time::Instant::now() + HELD_FOR;
-        let mut reached_cap = false;
-        while tokio::time::Instant::now() < watch_until {
+        const REACH_WITHIN: Duration = Duration::from_secs(60);
+        let started = tokio::time::Instant::now();
+        let mut reached_at: Option<tokio::time::Instant> = None;
+        loop {
             let buffered = shelf_session.inbox_bytes();
-            reached_cap |= buffered >= INBOX_BYTE_CAP;
             assert!(
                 buffered <= INBOX_BYTE_CAP + crate::frame::MAX_FRAME as usize,
                 "buffered {buffered} bytes is over the budget plus one frame"
@@ -1180,15 +1208,20 @@ mod tests {
                 "the sender finished with nothing draining: {} MiB went somewhere unbounded",
                 (FRAMES as usize * FRAME) / (1024 * 1024)
             );
+            if reached_at.is_none() && buffered >= INBOX_BYTE_CAP {
+                reached_at = Some(tokio::time::Instant::now());
+            }
+            match reached_at {
+                Some(at) if at.elapsed() >= HELD_FOR => break,
+                None => assert!(
+                    started.elapsed() < REACH_WITHIN,
+                    "the inbox never reached its budget in {REACH_WITHIN:?}; \
+                     nothing here exercised backpressure"
+                ),
+                _ => {}
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        /* AND THE CAP WAS ACTUALLY REACHED. Without this the assertions above
-        are satisfied by an inbox that received nothing at all — which is the
-        original defect wearing the new loop's clothes. */
-        assert!(
-            reached_cap,
-            "the inbox never reached its budget in {HELD_FOR:?}; nothing here exercised backpressure"
-        );
 
         // Drain it all, in order — nothing was dropped.
         let mut got: Vec<Bytes> = Vec::new();

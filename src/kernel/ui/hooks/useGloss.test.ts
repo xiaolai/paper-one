@@ -62,6 +62,7 @@ function spyProvider(): {
     seen,
     provider: {
       available: true,
+      installable: true,
       async gloss(term, context) {
         seen.push({ term, context })
         return 'a definition'
@@ -365,6 +366,123 @@ describe('the handler itself', () => {
   })
 })
 
+/**
+ * ⚠️ **THE PRESS THAT USED TO DO NOTHING.**
+ *
+ * `ask` began `if (!provider.available) return`, and while Dictionary.app sat
+ * behind the gesture that was harmless — the lookup went to the system
+ * dictionary and the gloss simply did not contribute. The hand-off is deleted,
+ * so a silent return is a dictionary button that does nothing at all on a
+ * fresh desktop, with nothing on screen to say why.
+ *
+ * These cases are what make the difference between the two behaviours
+ * observable. Without them the silent return is indistinguishable from the
+ * state below in any test that only watches the provider.
+ */
+describe('with no model installed', () => {
+  const nothing: GlossProvider = {
+    available: false,
+    /* TRUE, because the case worth pinning is the desktop one: `inference` is
+       composed, the Local models pane exists, and only the download is
+       missing. The hook does not read this field — the reader UI does — and
+       that is itself worth being explicit about. */
+    installable: true,
+    async gloss() {
+      throw new Error('the hook must not call a provider that says it cannot answer')
+    },
+  }
+
+  it('says so, rather than returning silently', () => {
+    const { result } = renderHook(() => useGloss(nothing))
+
+    act(() => {
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam is a meeting.' }), 'gam', 'Moby-Dick')
+    })
+
+    expect(result.current.state).toEqual({ kind: 'unavailable', term: 'gam' })
+  })
+
+  /* NOT `failed`, and the distinction is the reader's not the maintainer's:
+     one says something went wrong and the other says something is missing.
+     Rendering them the same way would tell a reader on a fresh install that
+     Paper is broken. */
+  it('is not reported as a failure', () => {
+    const { result } = renderHook(() => useGloss(nothing))
+
+    act(() => {
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam is a meeting.' }), 'gam', 'Moby-Dick')
+    })
+
+    expect(result.current.state.kind).not.toBe('failed')
+  })
+
+  /* The provider's own contract is that `gloss` THROWS when it cannot answer
+     — `NO_GLOSS` says so in capitals — so a hook that called it anyway would
+     turn every press into an unhandled rejection. The fake above throws with a
+     message naming this, so the failure is legible if it ever regresses. */
+  it('does not call a provider that has already said it cannot answer', () => {
+    const { result } = renderHook(() => useGloss(nothing))
+
+    act(() => {
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam is a meeting.' }), 'gam', 'Moby-Dick')
+    })
+
+    expect(result.current.state.kind).toBe('unavailable')
+  })
+
+  /*
+   * ⚠️ **AND IT DOES NOT WALK THE DOCUMENT ON THE WAY**, which is about the
+   * §F4 counter rather than about cycles.
+   *
+   * `glossRequest` records `gloss.sentence` with its outcome, and that counter
+   * exists because "a build where every lookup silently falls back looks
+   * identical to a working one". The dictionary button now fires on machines
+   * with NO model, where it can only produce the install prompt — so walking
+   * there would file a sample per press for a lookup that never happened. On a
+   * machine with no model that is EVERY sample, and the one instrument that
+   * can answer "is the walk working" would be reading pure noise.
+   */
+  it('files no sentence diagnostic, because no lookup happened', () => {
+    const fixture = buildFixture(elem('p', {}, [txt('Alpha one. Beta two. Gamma three.')]))
+    const whole = 'Alpha one. Beta two. Gamma three.'
+    const info = vi.fn()
+    const { result } = renderHook(() => useGloss(nothing))
+
+    act(() => {
+      askGloss(
+        result.current,
+        selectionOf(fixture, 'two', [whole, 16], [whole, 19], {
+          prefix: 'Alpha one. Beta ',
+          suffix: '. Gamma three.',
+        }),
+        { fixedLayout: false, bookTitle: 'Moby-Dick', diagnostics: { info } as never },
+      )
+    })
+
+    expect(info).not.toHaveBeenCalled()
+    /* Non-vacuity: the press really did reach the hook, so the silence above
+       is "did not walk" rather than "did nothing at all" — which is the
+       failure this whole state exists to end. It names the RAW selection,
+       because the sentence-spelled term is what the skipped walk produces. */
+    expect(result.current.state).toEqual({ kind: 'unavailable', term: 'two' })
+  })
+
+  /* And it is dismissable, like every other thing the strip shows. A state the
+     reader cannot put away is a state that outstays the question. */
+  it('is dismissed like any other', () => {
+    const { result } = renderHook(() => useGloss(nothing))
+
+    act(() => {
+      result.current.ask(() => ({ term: 'gam', sentence: 'A gam is a meeting.' }), 'gam', 'Moby-Dick')
+    })
+    act(() => {
+      result.current.dismiss()
+    })
+
+    expect(result.current.state).toEqual({ kind: 'idle' })
+  })
+})
+
 describe('what the lookup path costs', () => {
   /*
    * §E3. The walk is on the GESTURE and nowhere else. `publish()` runs on every
@@ -394,7 +512,15 @@ describe('what the lookup path costs', () => {
      * dependency-cruiser `reachable` rule over the whole call graph, which is a
      * change to the boundary system rather than to this phase. Recorded under
      * "What the audit rounds found" in `dev-docs/plans/phase-16-the-sentence.md`
-     * rather than implied away. */
+     * rather than implied away.
+     *
+     * ⚠️ IT USED TO CARRY MORE WEIGHT THAN THIS. The scan was also the only
+     * thing standing behind `Reader`'s lookup DECISION — whether a control is
+     * drawn, whether the term is worth sending, what to run. Those moved to
+     * `lookUpPress` in `ui/lookUp.ts`, where `lookUp.test.ts` RUNS all three
+     * including the two a scan could never see: an action compared against a
+     * value it cannot hold, and the `isLookUpTerm` guard dropped. What is left
+     * here is the narrow claim that the reader still calls the handler. */
     expect(reader).toContain('askGloss(gloss, selection')
   })
 })

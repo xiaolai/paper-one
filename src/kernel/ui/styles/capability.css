@@ -155,7 +155,7 @@
   background: var(--accent);
   color: var(--surface);
   box-shadow: none;
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
 }
 
 .paper-cap-button-primary:hover,

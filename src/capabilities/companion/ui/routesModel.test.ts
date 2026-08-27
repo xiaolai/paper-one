@@ -184,7 +184,6 @@ describe('rowFor', () => {
     const row = rowFor(claudeOut, null)
     expect(row.value).toBe('Signed out')
     expect(row.action).toBe('sign-in')
-    expect(row.unusable).toBe(true)
   })
 
   it('sends an uninstalled local model to Install rather than Use', () => {
@@ -267,14 +266,21 @@ function portWith(probe: Probe | (() => Promise<Probe>)): { port: InferencePort;
 }
 
 /**
- * THE REAL GUARD. `scopeSettings` confines this capability to `companion.`
- * at every door, and the look-up mode is `kernel.lookUp` — so a store handed
- * in raw makes these suites pass over a pane that throws on its first render.
- * It did: both phase-15 panes read it through the scoped handle.
+ * THE REAL GUARD. `scopeSettings` confines this capability to `companion.` at
+ * every door, so a store handed in raw makes these suites pass over a pane
+ * that throws on its first render. It did: both phase-15 panes read a
+ * `kernel.`-namespaced value through the scoped handle and threw.
+ *
+ * ⚠️ IT USED TO RETURN A `kernel` HANDLE TOO — `Pick<KernelServices, 'lookUp'
+ * | 'cycleLookUp'>` — because the Look up cycle's value was `kernel.lookUp`
+ * and therefore unreachable through `settings`. The row is deleted, so the
+ * accessors are, so this returns the store alone. The guard itself still
+ * earns its keep: `DEPTH_SETTING` is this capability's own and a raw store
+ * would hide a namespace mistake in any future one.
  */
 function wiring() {
   const services = createKernelServices({ fs: null, storage: null, initialBooks: [] })
-  return { settings: scopeSettings(services.settings, 'companion'), kernel: services }
+  return { settings: scopeSettings(services.settings, 'companion') }
 }
 
 /**
@@ -300,7 +306,6 @@ describe('the routes store', () => {
     expect(first.rows).toEqual([])
     expect(first.inUse).toBeNull()
     expect(first.fellBack).toBe(false)
-    expect(first.lookUp).toBeNull()
     expect(first.depth).toBeNull()
 
     await model.refresh()
@@ -315,9 +320,9 @@ describe('the routes store', () => {
   /* THE STABLE REFERENCE. Two reads with nothing changed in between must be
      the SAME object, and a change must produce a different one. */
   it('returns one snapshot object until something changes', async () => {
-    const { settings, kernel } = wiring()
+    const { settings } = wiring()
     const { port } = portWith(probeOf(route({ id: 'local', kind: 'local', installed: true })))
-    const model = createRoutesModel({ port, settings, kernel })
+    const model = createRoutesModel({ port, settings })
     await model.refresh()
     const before = model.getSnapshot()
     expect(model.getSnapshot()).toBe(before)
@@ -335,9 +340,9 @@ describe('the routes store', () => {
   })
 
   it('notifies subscribers exactly once per change, and stops on unsubscribe', async () => {
-    const { settings, kernel } = wiring()
+    const { settings } = wiring()
     const { port } = portWith(probeOf())
-    const model = createRoutesModel({ port, settings, kernel })
+    const model = createRoutesModel({ port, settings })
     let seen = 0
     const stop = model.subscribe(() => void (seen += 1))
 
@@ -443,7 +448,6 @@ describe('the routes store', () => {
       const row = model.getSnapshot().rows[0]
       expect(row?.action, 'the row still offered a second login flow').toBe('check-again')
       expect(row?.value).toBe('Waiting for sign-in…')
-      expect(model.getSnapshot().signingIn).toBe('agent:codex')
       model.dispose()
     })
 
@@ -489,12 +493,11 @@ describe('the routes store', () => {
       const model = createRoutesModel({ port, ...wiring() })
       await model.refresh()
       await model.signIn('agent:codex')
-      expect(model.getSnapshot().signingIn).toBe('agent:codex')
+      expect(model.getSnapshot().rows[0]?.action).toBe('check-again')
 
       /* Still signed out: back to offering the flow rather than waiting on
          one that has already failed. */
       await model.refresh()
-      expect(model.getSnapshot().signingIn).toBeNull()
       expect(model.getSnapshot().rows[0]?.action).toBe('sign-in')
 
       await model.signIn('agent:codex')
@@ -526,7 +529,6 @@ describe('the routes store', () => {
       await model.refresh()
 
       await expect(model.signIn('agent:codex')).resolves.toBeUndefined()
-      expect(model.getSnapshot().signingIn).toBeNull()
       expect(model.getSnapshot().rows[0]?.action).toBe('sign-in')
       expect(events[0]?.event).toBe('companion.sign-in-failed')
       expect(events[0]?.fields.message).toBe('Codex is not installed')
@@ -535,9 +537,9 @@ describe('the routes store', () => {
   })
 
   it('writes the chosen route, and signs in through the port', async () => {
-    const { settings, kernel } = wiring()
+    const { settings } = wiring()
     const { port, signedIn } = portWith(probeOf(route({ id: 'codex', kind: 'agent' })))
-    const model = createRoutesModel({ port, settings, kernel })
+    const model = createRoutesModel({ port, settings })
     await model.refresh()
     model.use('codex')
     expect(settings.get(ROUTE_SETTING)).toBe('codex')
@@ -547,23 +549,26 @@ describe('the routes store', () => {
   })
 
   /* THE REGRESSION, NAMED. `getSnapshot` is the `useSyncExternalStore` read
-     that runs on mount, and it resolves the look-up label. Reading that
-     through `settings` throws `namespace` under the real guard, which is what
-     `Settings → Local models` and this pane both did in the running app. */
+     that runs on mount, and it used to resolve the look-up label there —
+     reading a `kernel.`-namespaced setting through the scoped handle, which
+     throws `namespace` under the real guard. That is what `Settings → Local
+     models` and this pane both did in the running app.
+     The label is gone; the shape of the defect is not, so this stays as the
+     assertion that the mount-time read is clean under the guard. */
   it('builds a snapshot without touching the kernel namespace', async () => {
-    const { settings, kernel } = wiring()
+    const { settings } = wiring()
     const { port } = portWith(probeOf(route({ id: 'local:m', kind: 'local', installed: true })))
-    const model = createRoutesModel({ port, settings, kernel })
+    const model = createRoutesModel({ port, settings })
     await model.refresh()
     expect(() => model.getSnapshot()).not.toThrow()
-    expect(model.getSnapshot().lookUp).not.toBeNull()
+    expect(model.getSnapshot().rows).not.toEqual([])
     model.dispose()
   })
 
   it('writes the effort through the settings store, not its own field', () => {
-    const { settings, kernel } = wiring()
+    const { settings } = wiring()
     const { port } = portWith(probeOf())
-    const model = createRoutesModel({ port, settings, kernel })
+    const model = createRoutesModel({ port, settings })
     model.cycleDepth()
     expect(settings.get(DEPTH_SETTING)).toBe(DEPTH_ORDER[1])
     model.dispose()
@@ -576,9 +581,9 @@ describe('the routes store', () => {
      worse than not having one. This is what stops it coming back without the
      enforcement point that would make it mean something. */
   it('stores nothing under `companion.tools`', () => {
-    const { settings, kernel } = wiring()
+    const { settings } = wiring()
     const { port } = portWith(probeOf())
-    const model = createRoutesModel({ port, settings, kernel })
+    const model = createRoutesModel({ port, settings })
     model.cycleDepth()
     model.use('agent:codex')
     /* Neither in the snapshot the pane draws from, nor reachable as a
@@ -587,19 +592,12 @@ describe('the routes store', () => {
     model.dispose()
   })
 
-  /* The cycle is over what is AVAILABLE, so a machine with one option cannot
-     be cycled into a mode that does nothing. */
-  it('cycles Look up only when there is more than one mode', () => {
-    const { settings, kernel } = wiring()
-    const { port } = portWith(probeOf())
-    const model = createRoutesModel({ port, settings, kernel })
-    const before = kernel.lookUp()
-    model.cycleLookUp(false, false)
-    expect(kernel.lookUp()).toBe(before)
-    model.cycleLookUp(true, true)
-    expect(kernel.lookUp()).not.toBe(before)
-    model.dispose()
-  })
+  /* ⚠️ `cycles Look up only when there is more than one mode` WAS HERE. It
+     pinned that a machine with one available mode could not be cycled into a
+     mode that does nothing — a real rule while `Look up` had three modes. It
+     has none: the system-dictionary hand-off is deleted and the gloss is the
+     whole feature, so `cycleLookUp` is gone from this model and from the
+     kernel. */
 })
 
 /**
@@ -613,9 +611,9 @@ describe('the routes store', () => {
  */
 describe('the effort control', () => {
   it('is absent when a local model is answering', async () => {
-    const { settings, kernel } = wiring()
+    const { settings } = wiring()
     const { port } = portWith(probeOf(route({ id: 'local:m', kind: 'local', installed: true })))
-    const model = createRoutesModel({ port, settings, kernel })
+    const model = createRoutesModel({ port, settings })
     await model.refresh()
     expect(model.getSnapshot().inUse).toBe('local:m')
     expect(model.getSnapshot().depth).toBeNull()
@@ -623,18 +621,18 @@ describe('the effort control', () => {
   })
 
   it('shows the account default while an agent is answering', async () => {
-    const { settings, kernel } = wiring()
+    const { settings } = wiring()
     const { port } = portWith(probeOf(route({ id: 'agent:codex', kind: 'agent' })))
-    const model = createRoutesModel({ port, settings, kernel })
+    const model = createRoutesModel({ port, settings })
     await model.refresh()
     expect(model.getSnapshot().depth).toBe(DEPTH_LABELS.default)
     model.dispose()
   })
 
   it('cycles the whole set and wraps back to the account default', async () => {
-    const { settings, kernel } = wiring()
+    const { settings } = wiring()
     const { port } = portWith(probeOf(route({ id: 'agent:codex', kind: 'agent' })))
-    const model = createRoutesModel({ port, settings, kernel })
+    const model = createRoutesModel({ port, settings })
     await model.refresh()
     const seen = [model.getSnapshot().depth]
     for (let i = 0; i < DEPTH_ORDER.length; i++) {
@@ -691,7 +689,6 @@ describe('the rows the pane can act on', () => {
     const model = createRoutesModel({
       port,
       settings: scopeSettings(services.settings, 'companion'),
-      kernel: services,
     })
     await model.refresh()
     const ids = model.getSnapshot().rows.map((r) => r.id)

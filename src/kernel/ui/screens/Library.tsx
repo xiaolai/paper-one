@@ -101,7 +101,7 @@ export interface LibraryProps {
    * Take books off this machine, or nothing when the host has none to take.
    *
    * OPTIONAL, AND ABSENT MEANS THE CONTROL IS NOT DRAWN — the same convention
-   * as `bookActions` for a row and `onSystemLookUp` for the reader. A browser
+   * as `bookActions` for a row and `onInstallGloss` for the reader. A browser
    * has no local filesystem, so a `+` wired to a no-op would be the shelf
    * offering something it cannot do; a DISABLED `+` would be little better,
    * because it names a feature this host will never have.

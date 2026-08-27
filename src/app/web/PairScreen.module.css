@@ -40,7 +40,7 @@
 
 .title {
   font-size: var(--text-title);
-  font-weight: 500;
+  font-weight: var(--weight-medium);
   margin: 0;
 }
 

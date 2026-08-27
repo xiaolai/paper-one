@@ -42,6 +42,20 @@ pub const MAX_AGENT_PROMPT: usize = 64 * 1024;
 pub const MAX_SPEECH_TEXT: usize = 4 * 1024;
 pub const MAX_REQUEST_ID: usize = 64;
 pub const MAX_ANSWER_BYTES: usize = 1024 * 1024;
+/// The longest utterance the daemon may hand back.
+///
+/// ⚠️ **THE SPEECH BODY WAS UNBOUNDED**, and it was hidden by a timeout rather
+/// than by a bound: the daemon client carried a ten-second TOTAL deadline, so
+/// nothing could arrive for very long. Splitting the streaming client off
+/// removed that deadline for the right reason — an answer legitimately takes
+/// longer than ten seconds — and took the accidental cap with it. Found by
+/// audit. `generate::stream` had a real bound all along
+/// (`MAX_ANSWER_BYTES`); `speech::collect` read `response.bytes()` whole.
+///
+/// 32 MiB against a real utterance: `MAX_SPEECH_TEXT` is 4 KiB, roughly four
+/// minutes of speech, and Kokoro's 24 kHz 16-bit mono is about 48 KB/s — call
+/// it 11 MB. Far above anything legitimate, far below what hurts.
+pub const MAX_SPEECH_BYTES: usize = 32 * 1024 * 1024;
 
 /// Refuse `value` if it is over `limit`, naming the field.
 ///

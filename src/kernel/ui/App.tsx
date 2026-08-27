@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { buildCommands } from './commands'
-import { lookUp } from './lookUpTauri'
 import { coverIn } from '../core/coverArt'
 import { tauriVaultFs } from '../core/vaultFsTauri'
 import { offeredFaces } from '../core/typefaces'
@@ -124,19 +123,24 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
    * hook, which explains why there is deliberately no control for it. */
   const reducedMotion = usePrefersReducedMotion()
   const [state, dispatch] = useAppState(services.settings, composition.panes)
-  /* The reader's `Look up` preference (WI-15.13). Read through the settings
-     store's `useSyncExternalStore` pair, so cycling the row in Settings
-     changes what the popover does without a remount. */
-  const settingsSnapshot = useSyncExternalStore(
-    services.settings.subscribe,
-    services.settings.getSnapshot,
-  )
-  /* ⚠️ A SECOND SUBSCRIPTION, and it is not redundant. `persistent` flips the
-     first time the store's write is REFUSED, and that refusal happens after
-     `values` has already changed and been published — so the snapshot above is
-     byte-identical either side of it, and `useSyncExternalStore` correctly does
-     not re-render. Reading the flag itself is what makes the panel's notice
-     appear on the write that failed rather than on the next one that worked. */
+  /* ⚠️ THE `Look up` PREFERENCE USED TO BE READ HERE, through a second
+     `useSyncExternalStore` on the settings store, so that cycling the row in
+     Settings changed what the popover did without a remount. There is no row
+     and no preference: the system-dictionary hand-off is deleted and the gloss
+     is the whole of Look up. The subscription went with it — it had exactly
+     one reader. */
+  /* ⚠️ IT SUBSCRIBES TO THE FLAG, NOT TO THE VALUES, and that is the whole
+     point. `persistent` flips the first time the store's write is REFUSED, and
+     that refusal happens after `values` has already changed and been published
+     — so a values snapshot is byte-identical either side of it and
+     `useSyncExternalStore` correctly does not re-render. Reading the flag
+     itself is what makes the panel's notice appear on the write that failed
+     rather than on the next one that worked.
+
+     This used to read "a SECOND subscription" and point at a values snapshot
+     directly above it. That snapshot existed to resolve the `Look up` mode and
+     went with it; the sentence outlived it by one commit and was caught by
+     audit. */
   const settingsPersistent = useSyncExternalStore(
     services.settings.subscribe,
     () => services.settings.persistent,
@@ -148,12 +152,6 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
      was when nothing is downloading. */
   const workLine = services.workLine()
   const download = useSyncExternalStore(workLine.subscribe, workLine.line, workLine.line)
-  const lookUpMode = useMemo(
-    () => services.lookUp(),
-    /* `settingsSnapshot` is the dependency that matters: the store hands back
-       a new object on every change, which is what re-reads the value. */
-    [services.settings, settingsSnapshot],
-  )
   /* The open book lives here, not in the reader: Contents and Companion read
    * from it and they are panels of the side pane now. */
   const book = useBook()
@@ -1713,10 +1711,19 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
             foliate down mid-flight and loses the reading position — see the
             note on Library's own stacking. */}
         <Reader
-          /* THE DESKTOP HAS A DICTIONARY TO HAND TO; a browser does not, and
-             passes nothing. `screens/Reader.tsx` takes this as a prop so its
-             eighty modules stay free of `@tauri-apps` — see `lookUpTauri.ts`. */
-          onSystemLookUp={lookUp}
+          /* NOWHERE TO SEND A READER WITH NO MODEL BUT THE SETTINGS PANE, and
+             that is the honest action rather than a placeholder: `inference`
+             contributes its Local models section there, and a pane is the
+             finest target the app has — there is no mechanism for opening a
+             pane scrolled to one capability's section, and inventing one for a
+             single caller would put a section id in the kernel, which is the
+             thing `onInstallGloss` exists to avoid naming.
+
+             PASSED UNCONDITIONALLY. `decideLookUp` needs `installable` as well
+             as this, and only a build that composes `inference` has that — so
+             on iOS and Android, where the composition is `[peer, sync]` and the
+             port keeps its `NO_GLOSS` default, the button is still absent. */
+          onInstallGloss={() => dispatch({ type: 'openPane', pane: 'settings' })}
           libraryCount={library.books.length}
           shelfUnread={shelfUnread}
           onOpenLibrary={() => dispatch({ type: 'goScreen', screen: 'library' })}
@@ -1728,7 +1735,6 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
              binds it after composition, and a reader who installs a model
              must not have to restart to get Look up back. */
           gloss={services.gloss()}
-          lookUpMode={lookUpMode}
           /* Whether a lookup found a real sentence or fell back — counted,
              never shown. See `ReaderProps.diagnostics`. */
           diagnostics={services.diagnostics}

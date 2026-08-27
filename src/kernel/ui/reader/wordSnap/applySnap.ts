@@ -62,6 +62,14 @@ export interface SnapApplication {
 export type ApplySnapOptions = SnapOptions & {
   readonly maxChars?: number
   readonly maxNodes?: number
+  /**
+   * The gesture was a double-click — `PointerEvent.detail >= 2`.
+   *
+   * Only read to recognise ONE WebKit behaviour, described at
+   * `wordAtAnchor`. A double-click is otherwise an ordinary pointer gesture
+   * and takes the ordinary path.
+   */
+  readonly doubleClick?: boolean | undefined
 }
 
 export function applySnap(selection: Selection, options: ApplySnapOptions = {}): SnapApplication {
@@ -125,6 +133,15 @@ function snap(selection: Selection, options: ApplySnapOptions): boolean {
   const backward =
     selection.anchorNode !== live.startContainer || selection.anchorOffset !== live.startOffset
 
+  /* ⚠️ **A DOUBLE-CLICK IS NEVER BACKWARD**, and one that is did not expand a
+   * word — see `wordAtAnchor`. Handled before the ordinary path, because the
+   * ordinary path cannot help: the selection WebKit produced is already
+   * word-aligned at both ends, so snapping returns it unchanged and nothing is
+   * written. */
+  if (options.doubleClick === true && backward) {
+    return wordAtAnchor(selection, options)
+  }
+
   /* The walk's outer bound: the top of whatever tree the selection is in. Not
    * the range's common ancestor — a word runs past the edges of the selection,
    * which is the entire point — and not `document`, which is not an element.
@@ -152,6 +169,73 @@ function snap(selection: Selection, options: ApplySnapOptions): boolean {
   const anchor = backward ? snapped.end : snapped.start
   const focus = backward ? snapped.start : snapped.end
   selection.setBaseAndExtent(anchor.node, anchor.offset, focus.node, focus.offset)
+  return true
+}
+
+/**
+ * The word the reader actually double-clicked, when WebKit selected a block
+ * instead.
+ *
+ * ⚠️ **MEASURED IN THE RUNNING APP**, on a paginated EPUB, with real
+ * (`isTrusted`) events posted through the window server — a synthetic
+ * `dblclick` cannot produce a native selection, so nothing about this could
+ * have been learned from a harness.
+ *
+ * Double-clicking the LAST WORD OF A LINE does not expand that word. WebKit
+ * puts the anchor where the pointer landed and the focus at offset 0 of the
+ * block, selecting everything from the start of the paragraph up to the click,
+ * backwards. Two measurements from one paragraph:
+ *
+ * | click | anchor → focus | selected |
+ * |---|---|---|
+ * | mid-line | 9 → 10 | one word, forward |
+ * | mid-line | 102 → 107 | `their`, forward |
+ * | end of line 1 | 60 → **0** | 60 chars, backward |
+ * | end of line 2 | 127 → **0** | 127 chars, backward |
+ *
+ * The click is ON the word in both failing cases — line 1's text ends at
+ * x=820 and the click was at x=810 — so this is not a hit-testing miss. It is
+ * word expansion abandoned at a column edge.
+ *
+ * **The anomaly is its own signal.** A double-click that expands a word puts
+ * the anchor at the word's start and the focus at its end, which is forward,
+ * always. A BACKWARD double-click therefore expanded nothing, and there is no
+ * legitimate gesture it could be confused with — a backward *drag* is not a
+ * double-click.
+ *
+ * The anchor is exactly where the pointer landed, so the word the reader meant
+ * is the word containing it. A ONE-CHARACTER range there is inside that word,
+ * and the ordinary policy expands a range inside a word to the whole of it —
+ * so this needs no new rule, only a different question asked of the same one.
+ */
+function wordAtAnchor(selection: Selection, options: ApplySnapOptions): boolean {
+  const { anchorNode } = selection
+  if (!anchorNode) return false
+  const at = textPosition(anchorNode, selection.anchorOffset)
+  if (!at) return false
+  const root = walkRoot(at.node)
+  if (!root) return false
+
+  /* A one-character probe, forward where there is room and backward at the end
+   * of the node. Either lands inside the same word; `snapWordRange` refuses a
+   * collapsed range, which is why this cannot simply ask about the caret. */
+  const probe =
+    at.offset < at.node.data.length
+      ? { start: at, end: { node: at.node, offset: at.offset + 1 } }
+      : at.offset > 0
+        ? { start: { node: at.node, offset: at.offset - 1 }, end: at }
+        : null
+  if (!probe) return false
+
+  const word = snapInDom(root, probe.start, probe.end, options)
+  if (!word) return false
+  if (!word.start.node.isConnected || !word.end.node.isConnected) return false
+
+  /* FORWARD, deliberately. The reader double-clicked; the result is a word,
+   * and a word selected by a double-click reads left to right. Restoring the
+   * backward orientation here would preserve the artifact this exists to
+   * remove. */
+  selection.setBaseAndExtent(word.start.node, word.start.offset, word.end.node, word.end.offset)
   return true
 }
 

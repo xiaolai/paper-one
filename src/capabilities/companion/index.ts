@@ -28,7 +28,7 @@ import { CompanionPane } from './ui/CompanionPane'
 /* ---------------------------------------------------------- runtime state */
 
 /**
- * What the settings section draws, and the fact it needs alongside.
+ * What the settings section draws.
  *
  * A SLOT WITH RESTORATION, not a bare `let`. `render` is called by the pane
  * with no arguments, so this has to be module-scoped — and the hand-written
@@ -36,17 +36,12 @@ import { CompanionPane } from './ui/CompanionPane'
  * only start there is: two live compositions left the second's teardown
  * blanking a pane the first was still serving. See `createRenderSlot`.
  *
- * `hasDictionary` travels with the model because it is a fact from `start` and
- * not derivable here: the platform lives behind the kernel's React entry,
- * which `kernel-public-entry-only` puts out of a capability's reach — see
- * `KernelServices.hasDictionary`.
+ * ⚠️ IT USED TO BE `{ model, hasDictionary }` — a pair, because the pane drew
+ * the Look up cycle and the platform's dictionary was a fact from `start` that
+ * could not be derived here. Both the row and the fact are gone, so the slot
+ * holds the model alone again.
  */
-interface CompanionSection {
-  readonly model: RoutesModel
-  readonly hasDictionary: boolean
-}
-
-const section = createRenderSlot<CompanionSection>()
+const section = createRenderSlot<RoutesModel>()
 
 /* ⚠️ NO MODULE-GLOBAL `provider`, AND NO `companionProvider()` ACCESSOR.
  *
@@ -70,10 +65,7 @@ export const companion: Capability = {
       order: 5,
       render: () => {
         const held = section.current()
-        /* ASKED, NOT DEFAULTED. `hasDictionary` used to be an optional prop
-           and this call passed nothing, so macOS — the one platform with a
-           system dictionary — was told it had none. */
-        return held === null ? null : createElement(CompanionPane, { model: held.model, hasDictionary: held.hasDictionary })
+        return held === null ? null : createElement(CompanionPane, { model: held })
       },
     },
   ],
@@ -101,13 +93,12 @@ export const companion: Capability = {
     const routes = createRoutesModel({
       port,
       settings: api.settings,
-      kernel: api.services,
       report: (event, fields) => api.diagnostics.warn(event, fields),
     })
     session.own('routesModel', () => routes.dispose())
     /* HELD NOW, released later — `hold` is the acquisition and the disposer it
        returns is what the session owns. */
-    const showing = section.hold({ model: routes, hasDictionary: api.services.hasDictionary() })
+    const showing = section.hold(routes)
     session.own('section', () => showing.dispose())
 
     const boundProvider = createCompanionProvider({
@@ -151,6 +142,14 @@ export const companion: Capability = {
   },
 }
 
-export { DEPTH_SETTING, ROUTE_SETTING } from './lib/settings'
-export type { Passage, SourcePassage } from './lib/passages'
-export { resolveCitations } from './lib/passages'
+/* ⚠️ NOTHING RE-EXPORTED, AND THE ABSENCE IS THE POINT. This barrel used to
+ * carry `DEPTH_SETTING`, `ROUTE_SETTING`, `Passage`, `SourcePassage` and
+ * `resolveCitations`. No module outside this directory imports from
+ * `'../../companion'` at all — `composition.desktop.ts` takes the capability
+ * object above and nothing else — so every one of them was a re-export with no
+ * consumer, and a barrel's re-exports evaluate WITH the barrel rather than on
+ * demand. The live uses are all direct imports within this capability, which
+ * is what they should have been.
+ *
+ * Nothing depends on `companion`; `companion` depends on `inference`. That
+ * asymmetry is why this barrel is bare and `inference`'s is not. */

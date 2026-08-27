@@ -133,14 +133,14 @@ pub fn parse_line(line: &str) -> Event {
 /// a popover beside a word is jitter, not progress) and the thread wants the
 /// deltas. One code path, two shapes, rather than two paths that can drift.
 pub async fn stream(
-    request: reqwest::RequestBuilder,
+    request: crate::daemon::ModelRequest,
     cancel: &Cancel,
     mut on_delta: impl FnMut(String),
 ) -> Result<String> {
     let response = tokio::select! {
         biased;
         () = cancel.cancelled() => return Err(Error::Cancelled),
-        sent = request.send() => sent.map_err(|e| unreachable(CHAT_ROUTE, e))?,
+        sent = request.into_builder().send() => sent.map_err(|e| unreachable(CHAT_ROUTE, e))?,
     };
     let status = response.status();
     if !status.is_success() {

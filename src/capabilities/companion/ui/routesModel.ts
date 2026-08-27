@@ -1,5 +1,5 @@
 import type { SettingsStore } from '../../../kernel'
-import { LOOK_UP_LABELS, createGenerations, type KernelServices } from '../../../kernel'
+import { createGenerations } from '../../../kernel'
 import type { Depth } from '../../inference'
 import { reasonOf, type InferencePort, type Probe, type Route } from '../../inference'
 import { DEPTH_SETTING, ROUTE_SETTING } from '../lib/settings'
@@ -30,14 +30,17 @@ import { DEPTH_SETTING, ROUTE_SETTING } from '../lib/settings'
  * `kernel-public-entry-only` forbids), then a cycle button, which is
  * buildable but does not survive seven routes.
  *
- * # `Look up` IS a cycle button, and that is not a contradiction
+ * # The route list is a list because it GROWS
  *
- * The route list is a list because it GROWS — three local models, two agents
- * and an endpoint is six rows and climbing. `Look up` has at most three
- * states and cannot gain a fourth: there is a system dictionary or there is
- * not, and there is a local model or there is not. A cycle is right where the
- * set is closed and wrong where it is open, which is the distinction the
- * earlier draft missed by applying one answer to both.
+ * Three local models, two agents and an endpoint is six rows and climbing. A
+ * cycle is right where the set is CLOSED and wrong where it is open, which is
+ * the distinction the earlier draft missed by applying one answer to both.
+ *
+ * ⚠️ THIS SECTION USED TO SAY "`Look up` IS a cycle button, and that is not a
+ * contradiction" — the closed three-state set was the counter-example that
+ * made the rule legible. There is no such control: the system-dictionary
+ * hand-off is deleted and the gloss is the whole of Look up. Caught by audit,
+ * one commit after the row it described stopped existing.
  */
 
 /** What a row's button does. */
@@ -64,29 +67,33 @@ export interface RouteRow {
   /** The right-hand value: the detail when usable, the reason when not. */
   readonly value: string
   readonly action: RowAction
-  readonly unusable: boolean
+  /* ⚠️ `unusable: boolean` WAS HERE and nothing outside a test read it — the
+   * pane draws `action` and `value`, both of which already say it. Removed as
+   * dead public surface; the tests that asserted it now assert what the reader
+   * actually sees. Found by audit. */
 }
 
 export interface RoutesSnapshot {
   readonly rows: readonly RouteRow[]
-  /**
-   * The route whose sign-in the reader has started, or null.
+  /* ⚠️ `signingIn: string | null` WAS HERE. The FACT it recorded still is —
+   * a module-local `signingIn` still drives every row through `actionFor` —
+   * but nothing outside a test read it off the snapshot: the pane draws
+   * `action` and `value`, which is where a waiting row already says
+   * `Check again` and `Waiting for sign-in…`. Removed as dead public surface;
+   * the tests that asserted it assert the row instead. Found by audit.
    *
-   * ⚠️ **SIGNING IN USED TO CHANGE NOTHING ON SCREEN.** `agent_sign_in`
-   * launches the vendor's own login in a browser and returns at once — the
-   * credential is theirs and Paper never holds it — so nothing here learned
-   * that it had finished. The row went on saying `Signed out` however long the
-   * reader spent logging in, and pressing it again launched a second flow.
-   *
-   * So the press is a state: the row says it is waiting and offers
-   * `Check again`, which re-probes. One flow at a time, and a way out of it.
-   */
-  readonly signingIn: string | null
+   * The behaviour is worth keeping written down, because it was a real defect.
+   * SIGNING IN USED TO CHANGE NOTHING ON SCREEN: `agent_sign_in` launches the
+   * vendor's own login in a browser and returns at once — the credential is
+   * theirs and Paper never holds it — so nothing here learned that it had
+   * finished. The row went on saying `Signed out` however long the reader
+   * spent logging in, and pressing it again launched a second flow. So the
+   * press is a state: the row says it is waiting and offers `Check again`,
+   * which re-probes. One flow at a time, and a way out of it. */
   /** The route in use, or null when nothing can answer. */
   readonly inUse: string | null
   /** True when the reader's stored choice is no longer usable. */
   readonly fellBack: boolean
-  readonly lookUp: string | null
   /**
    * The effort label, or null when the control does not apply.
    *
@@ -130,41 +137,50 @@ export function resolveRoute(
  * `RoutesSnapshot.signingIn`.
  */
 export function rowFor(route: Route, inUse: string | null, signingIn: string | null = null): RouteRow {
-  const unusable = route.unusable !== null
-  /* ⚠️ THE CODE, NOT THE SENTENCE. This compared `unusable` against the exact
-     strings `'Not installed'` and `'Signed out'`, so the wording in `probe.rs`
-     and the button drawn here were the same field: rephrasing a reason turned
-     `[Install]` into a dead row silently. It also had to add `kind === 'local'`
-     to tell a model Paper can download from a CLI the reader must install,
-     because those two share a sentence — they no longer share a code. */
-  const reason = reasonOf(route)
-  const action: RowAction = unusable
-    ? reason === 'notInstalled'
-      ? 'install'
-      : reason === 'signedOut'
-        ? /* Already waiting on a login this reader opened: offer the way to
-             find out rather than a second copy of the flow. */
-          route.id === signingIn
-          ? 'check-again'
-          : 'sign-in'
-        : 'none'
-    : route.id === inUse
-      ? 'in-use'
-      : 'use'
+  const action = actionFor(route, inUse, signingIn)
   return {
     id: route.id,
     label: route.label,
-    /* An unusable route shows the REASON, which is §07's disabled-and-says-why
-     * rather than a control that fails when pressed. */
-    value:
-      action === 'check-again'
-        ? 'Waiting for sign-in…'
-        : unusable
-          ? (route.unusable as string)
-          : (route.detail ?? ''),
+    value: valueFor(route, action),
     action,
-    unusable,
   }
+}
+
+/**
+ * Which control a route offers, exhaustively and in one direction.
+ *
+ * ⚠️ **IT WAS A FOUR-LEVEL NESTED TERNARY**, and the precedence of the states
+ * inside it could only be read by counting brackets. Early returns say the
+ * same thing in the order it is actually decided: usable first, then the two
+ * reasons that have a fix, then the ones that do not. Found by audit.
+ *
+ * ⚠️ THE CODE, NOT THE SENTENCE. This compared `route.unusable` against the
+ * exact strings `'Not installed'` and `'Signed out'`, so the wording in
+ * `probe.rs` and the button drawn here were the same field: rephrasing a
+ * reason turned `[Install]` into a dead row silently. It also had to add
+ * `kind === 'local'` to tell a model Paper can download from a CLI the reader
+ * must install, because those two share a sentence — they no longer share a
+ * code.
+ */
+function actionFor(route: Route, inUse: string | null, signingIn: string | null): RowAction {
+  if (route.unusable === null) return route.id === inUse ? 'in-use' : 'use'
+  const reason = reasonOf(route)
+  if (reason === 'notInstalled') return 'install'
+  if (reason !== 'signedOut') return 'none'
+  /* Already waiting on a login this reader opened: offer the way to find out
+     rather than a second copy of the flow. */
+  return route.id === signingIn ? 'check-again' : 'sign-in'
+}
+
+/**
+ * The row's right-hand side: the detail when usable, the reason when not.
+ *
+ * An unusable route shows the REASON, which is §07's disabled-and-says-why
+ * rather than a control that fails when pressed.
+ */
+function valueFor(route: Route, action: RowAction): string {
+  if (action === 'check-again') return 'Waiting for sign-in…'
+  return route.unusable ?? route.detail ?? ''
 }
 
 
@@ -174,7 +190,6 @@ export interface RoutesModel {
   refresh(): Promise<void>
   use(id: string): void
   signIn(id: string): Promise<void>
-  cycleLookUp(hasDictionary: boolean, hasGloss: boolean): void
   /** Advance the effort one place. */
   cycleDepth(): void
   dispose(): void
@@ -183,14 +198,13 @@ export interface RoutesModel {
 export interface RoutesModelOptions {
   readonly port: InferencePort
   readonly settings: SettingsStore
-  /**
-   * The kernel's own view of `Look up` — see `KernelServices.lookUp`.
-   *
-   * `LOOK_UP_SETTING` is `kernel.lookUp` and this capability's settings
-   * handle is confined to `companion.`, so the value is unreachable through
-   * `settings` and the read threw on the pane's first render.
-   */
-  readonly kernel: Pick<KernelServices, 'lookUp' | 'cycleLookUp'>
+  /* ⚠️ `kernel: Pick<KernelServices, 'lookUp' | 'cycleLookUp'>` USED TO BE
+   * HERE. This pane drew the Look up cycle, and the value it cycled was
+   * `kernel.lookUp` — unreachable through `settings`, because `scopeSettings`
+   * confines this capability to `companion.` and the read threw on the pane's
+   * first render. The accessors existed to get around that. The row, the
+   * setting and the accessors are all deleted together: there is one Look up
+   * behaviour now, so there is nothing to cycle. */
   /**
    * Told when launching a vendor's login flow fails.
    *
@@ -203,15 +217,13 @@ export interface RoutesModelOptions {
 
 const EMPTY: RoutesSnapshot = {
   rows: [],
-  signingIn: null,
   inUse: null,
   fellBack: false,
-  lookUp: null,
   depth: null,
   loading: true,
 }
 
-export function createRoutesModel({ port, settings, kernel, report }: RoutesModelOptions): RoutesModel {
+export function createRoutesModel({ port, settings, report }: RoutesModelOptions): RoutesModel {
   const listeners = new Set<() => void>()
   let probe: Probe | null = null
   let cached: RoutesSnapshot | null = EMPTY
@@ -234,20 +246,12 @@ export function createRoutesModel({ port, settings, kernel, report }: RoutesMode
     if (probe === null) return EMPTY
     const chosen = settings.get(ROUTE_SETTING)
     const { inUse, fellBack } = resolveRoute(chosen, probe.routes)
-    const hasGloss = probe.routes.some(
-      (route) => route.kind === 'local' && route.modality === 'text' && route.installed,
-    )
     return {
       rows: probe.routes
         .filter((route) => route.modality === 'text')
         .map((route) => rowFor(route, inUse, signingIn)),
-      signingIn,
       inUse,
       fellBack,
-      /* `hasDictionary` is the reader UI's answer and is not known here, so
-       * the row's label is resolved at render. `null` means "no control", and
-       * the pane draws nothing. */
-      lookUp: hasGloss ? LOOK_UP_LABELS[kernel.lookUp()] : null,
       /* Offered only while an AGENT answers — the two flags this maps to
          exist on the agent CLIs and nowhere else. */
       depth:
@@ -308,9 +312,6 @@ export function createRoutesModel({ port, settings, kernel, report }: RoutesMode
         })
       }
     },
-    /* One cycle, in the kernel — this was written out here and in
-       `inference`'s store, identically, which is one algorithm in two files. */
-    cycleLookUp: (hasDictionary, hasGloss) => kernel.cycleLookUp(hasDictionary, hasGloss),
     cycleDepth: () => {
       const at = DEPTH_ORDER.indexOf(settings.get(DEPTH_SETTING))
       settings.set(DEPTH_SETTING, DEPTH_ORDER[(at + 1) % DEPTH_ORDER.length] as Depth)

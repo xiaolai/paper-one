@@ -97,7 +97,7 @@
 .group {
   padding: var(--space-10) var(--space-10) var(--space-4);
   font-size: var(--text-caption);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   letter-spacing: var(--track-caps-wide);
   text-transform: uppercase;
   color: var(--muted);
@@ -146,7 +146,7 @@
 .rowOn {
   color: var(--accent);
   font-size: var(--text-caption);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
 }
 
 .combo {

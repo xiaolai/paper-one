@@ -34,7 +34,6 @@ import {
   CLOSE_DRAIN_MS,
   countingFs,
   emptyExpired,
-  hasDictionary,
   inTauri,
   installFatalHandlers,
   libraryFs,
@@ -45,7 +44,6 @@ import {
   openAppStorage,
   reportFs,
   reportStartup,
-  resolvePlatform,
   summariseMigration,
   timed,
   watchFs,
@@ -208,13 +206,6 @@ async function boot(root: HTMLElement): Promise<void> {
      * from a library with none. `shelf.status` reported `books: 0` to a peer
      * asking whether this device was healthy. */
     shelfRead: !shelfUnread,
-    /* ASKED ONCE, HERE. A capability that draws the Look up control cannot
-     * work this out — the platform and `hasDictionary` both live behind the
-     * kernel's React layer, which `kernel-public-entry-only` puts out of its
-     * reach — so `CompanionPane` defaulted it to `false` and the caller
-     * passed nothing, which removed the system dictionary from the cycle on
-     * the one platform that has one. */
-    hasDictionary: hasDictionary(resolvePlatform()),
     diagnostics: defaultDiagnostics(),
   })
 

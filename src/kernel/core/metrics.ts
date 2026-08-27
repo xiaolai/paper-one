@@ -1061,6 +1061,25 @@ export const MOTION = {
    * which is exactly the mistake a name prevents.
    */
   readout: '120ms linear',
+  /**
+   * THE RETURN HINT ARRIVING, and its own name for the reason `readout` has
+   * one: it is not `chromeFade` at a different speed, it is a thing entering
+   * once and being noticed.
+   *
+   * It was `200ms ease-out`, written into `Reader.module.css` — one of the two
+   * durations in the app that never reached this table, and therefore the two
+   * that no reader of this file could see.
+   */
+  hint: '200ms ease-out',
+  /**
+   * THE COMPANION'S CARET, which is a CADENCE rather than a transition.
+   *
+   * A blink has no start and end state to ease between; it has a period. The
+   * timing function stays at the call site because `steps(2, start)` is what
+   * makes it a blink rather than a fade, and two steps is the structure of
+   * on/off — not a quantity from any scale.
+   */
+  caret: '1s',
   pageTurn: '300ms',
 } as const
 
@@ -1195,11 +1214,20 @@ export function applyMetrics(root: HTMLElement, platform: Platform): void {
     '--z-pane-sheet': String(Z.paneSheet),
     '--z-menu': String(Z.menu),
     '--z-scrim': String(Z.scrim),
+    /* ⚠️ PUBLISHED LATE. The comment above says these exist "so stylesheets stop
+     * restating the numbers", and `figure` was not among them — so
+     * `FootnotePopover.module.css` wrote `z-index: 40` by hand, which is
+     * `Z.figure`, because there was no token it could have used instead. A
+     * scale that publishes some of its members teaches the stylesheet to guess
+     * about the rest. */
+    '--z-figure': String(Z.figure),
     '--motion-chrome': MOTION.chromeFade,
     '--motion-pane': MOTION.paneOpen,
     '--motion-popover': MOTION.popover,
     '--motion-sheet': MOTION.sheet,
     '--motion-readout': MOTION.readout,
+    '--motion-hint': MOTION.hint,
+    '--motion-caret': MOTION.caret,
   }
   for (const [name, value] of Object.entries(vars)) {
     root.style.setProperty(name, value)

@@ -29,7 +29,7 @@
 
 .tab[aria-current='page'] {
   color: var(--accent);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
 }
 
 /* 10px in the mockup. Below §10's 11px floor for MUTED text — but the active

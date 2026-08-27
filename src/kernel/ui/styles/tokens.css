@@ -167,6 +167,84 @@
  * 2px steps to 16, then 4px steps. Fine-grained where the eye can tell 2px
  * apart — inside a control — and coarse where it cannot.
  */
+/**
+ * THE FOCUS RING, as one value.
+ *
+ * ⚠️ **IT WAS WRITTEN OUT SEVENTEEN TIMES AND THE GLOBAL DEFAULT DISAGREED
+ * WITH ALL OF THEM.** Seventeen declarations across eight stylesheets said
+ * `outline: 2px solid var(--accent)` by hand; `global.css` said `3px`. So a
+ * control that declared its own ring got 2px and a control that inherited the
+ * default got 3px, for no reason either of them stated — two ring weights in
+ * one app, decided by whether an author had happened to write a rule.
+ *
+ * `tokens.test.ts` could not see it: `outline-offset` is in its `SCALED` set
+ * and `outline` is not, so the OFFSET was policed to the space scale while the
+ * WIDTH beside it was free. That gap is closed with this token — the guard now
+ * reads `outline` and `outline-width` too.
+ *
+ * 2px, because seventeen authors who thought about it chose 2px and one
+ * default nobody revisited chose 3px. The colour rides along: a ring is a ring,
+ * and a caller that wanted a different one would be making a statement this
+ * design system does not have.
+ *
+ * ⚠️ **THE OFFSET IS DELIBERATELY NOT IN HERE.** `dev-docs/design-tokens.md`
+ * has the evidence: nineteen declarations override the global `--space-2` with
+ * six values, because the precondition breaks in two independent ways — a
+ * control that IS its own filled shape, and a control whose container would
+ * clip a ring drawn outside it. "Do not collapse the six into two tokens" is
+ * that file's own conclusion, tested on paper and refused by the data. Width is
+ * one value; offset is a decision each control owes.
+ */
+/**
+ * HOW FAINT A THING IS, as a scale.
+ *
+ * ⚠️ **§07 SAYS DISABLED IS 45%, AND FIVE CONTROLS EACH CHOSE THEIR OWN
+ * NUMBER.** `global.css`'s `[data-disabled]` had 0.45, `.citation:disabled`
+ * 0.6, `.stepperButton:disabled` and `.colourClear:disabled` 0.35, and
+ * `.bookmarkToggle:disabled` 0.4. Not one of them said why it differed. A rule
+ * that is stated in prose and written as a literal at each call site is a rule
+ * that drifts, and this is what the drift looks like: one design decision
+ * spread over four numbers.
+ *
+ * ⚠️ **`disabled` AND `dimmed` HOLD THE SAME VALUE AND ARE NOT THE SAME
+ * TOKEN.** `[data-nocopy]` on the shelf is "dimmed, not disabled" — its own
+ * comment insists on the distinction, because the events must keep flowing. It
+ * agrees with §07 today by coincidence, and collapsing them would mean a change
+ * to the disabled rule silently moved a control that is not disabled.
+ * `design-tokens.md` reached the same conclusion about the ring offsets — "do
+ * not collapse the six into two tokens" — for the same reason.
+ *
+ * `0` and `1` are not on this scale and cannot be: they are presence and
+ * absence, not a degree of it.
+ */
+:root {
+  --opacity-disabled: 0.45;
+  --opacity-dimmed: 0.45;
+  --opacity-quiet: 0.75;
+  --opacity-quieter: 0.55;
+  --opacity-fill: 0.45;
+  --opacity-fill-done: 0.28;
+}
+
+/**
+ * THE THREE WEIGHTS, because the typefaces are variable and every weight in the
+ * app is one of these three.
+ *
+ * Twenty-eight declarations wrote 600, 500 or 400 as a literal — no scale, no
+ * names, and nothing stopping a twenty-ninth from inventing 650. The faces are
+ * `@fontsource-variable`, so any number between is renderable, which is exactly
+ * why the set has to be named rather than left to whoever types next.
+ */
+:root {
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+}
+
+:root {
+  --focus-ring: 2px solid var(--accent, #1B3A6B);
+}
+
 :root {
   --space-2: 2px;
   --space-4: 4px;

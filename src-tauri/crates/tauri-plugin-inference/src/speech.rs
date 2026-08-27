@@ -18,6 +18,8 @@
 //! a caller has to know.
 
 use crate::error::{unreachable, Error, Result};
+use futures_util::StreamExt;
+
 use crate::requests::Cancel;
 
 /// The daemon's speech route.
@@ -41,11 +43,11 @@ pub fn body(model: &str, text: &str, voice: Option<&str>) -> serde_json::Value {
 /// ⚠️ **BOTH AWAITS RACE IT.** Cancelling mid-utterance has to stop the
 /// REQUEST as well as the audio — WI-15.9's acceptance names both — and a
 /// response whose body is still arriving is a request still being served.
-pub async fn collect(request: reqwest::RequestBuilder, cancel: &Cancel) -> Result<Vec<u8>> {
+pub async fn collect(request: crate::daemon::ModelRequest, cancel: &Cancel) -> Result<Vec<u8>> {
     let response = tokio::select! {
         biased;
         () = cancel.cancelled() => return Err(Error::Cancelled),
-        sent = request.send() => sent.map_err(|e| unreachable(SPEECH_ROUTE, e))?,
+        sent = request.into_builder().send() => sent.map_err(|e| unreachable(SPEECH_ROUTE, e))?,
     };
     let status = response.status();
     if !status.is_success() {
@@ -54,12 +56,36 @@ pub async fn collect(request: reqwest::RequestBuilder, cancel: &Cancel) -> Resul
             route: SPEECH_ROUTE.to_owned(),
         });
     }
-    let bytes = tokio::select! {
-        biased;
-        () = cancel.cancelled() => return Err(Error::Cancelled),
-        body = response.bytes() => body.map_err(|e| unreachable(SPEECH_ROUTE, e))?,
-    };
-    Ok(bytes.to_vec())
+    /* ⚠️ **BOUNDED, AND IT USED TO BE `response.bytes()`.** The daemon is a
+     * SEPARATE PROCESS: a wedged or hostile one can answer for ever, and this
+     * grew a `Vec` until the app died. It looked safe only because the shared
+     * client carried a ten-second total deadline, so nothing could arrive for
+     * long — an accidental cap, and splitting the streaming client off removed
+     * it. `generate::stream` has had a real bound all along; this had none.
+     *
+     * Refused by name rather than truncated, for that module's stated reason:
+     * half an utterance presented as a whole one is the shape this crate
+     * refuses everywhere else. */
+    let mut audio: Vec<u8> = Vec::new();
+    let mut body = response.bytes_stream();
+    loop {
+        let chunk = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(Error::Cancelled),
+            next = body.next() => match next {
+                None => break,
+                Some(chunk) => chunk.map_err(|e| unreachable(SPEECH_ROUTE, e))?,
+            },
+        };
+        if audio.len() + chunk.len() > crate::limits::MAX_SPEECH_BYTES {
+            return Err(Error::FieldTooLarge {
+                field: "the utterance",
+                limit: crate::limits::MAX_SPEECH_BYTES,
+            });
+        }
+        audio.extend_from_slice(&chunk);
+    }
+    Ok(audio)
 }
 
 #[cfg(test)]
@@ -106,7 +132,9 @@ mod tests {
         /* An address nothing is listening on: reaching the network at all
         would be the failure, and this makes that failure distinguishable
         from the cancellation. */
-        let request = reqwest::Client::new().post("http://127.0.0.1:1/api/v1/audio/generations");
+        let request = crate::daemon::ModelRequest::from_builder_for_test(
+            reqwest::Client::new().post("http://127.0.0.1:1/api/v1/audio/generations"),
+        );
         assert!(matches!(
             collect(request, &cancel).await,
             Err(Error::Cancelled)

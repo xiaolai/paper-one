@@ -205,6 +205,29 @@ pub fn plan_spawn(inputs: &SpawnInputs) -> SpawnPlan {
         // `auto` resolves to the HuggingFace hub cache even with the cache
         // directory moved. Verified, not assumed.
         "models_dir": path_string(&inputs.models_dir),
+        /* ⚠️ **THE KEY THAT MAKES AN INSTALLED MODEL VISIBLE**, and it was
+         * empty — which is why the gloss answered `runtimeHttp` 404 on every
+         * lookup with a 2.3 GB model sitting on disk.
+         *
+         * `models_dir` is the HUGGINGFACE HUB CACHE. Its shipped default is
+         * `auto`, which resolves to `~/.cache/huggingface/hub`, and the layout
+         * it expects is `models--<org>--<repo>/snapshots/<rev>/…`. Paper
+         * writes `models/<manifest-id>/<artifact>.gguf`, which is not that, so
+         * pointing `models_dir` at it hands the daemon an EMPTY cache:
+         * `/api/v1/models` answered `{"data":[]}` while the Local models pane
+         * said `Installed · 2.5 GB`.
+         *
+         * `extra_models_dir` is the one that takes a folder of loose GGUF
+         * files — the daemon's own strings are `Scanning for GGUF models in: `
+         * and three validations about it being a readable directory. Both are
+         * set: the hub cache stays Paper-owned so nothing is written to the
+         * reader's real `~/.cache`, and the scan finds what Paper downloaded.
+         *
+         * Paper never registers a model over the API — `install.rs` calls no
+         * daemon endpoint at all — so this config key is the ONLY way an
+         * installed model becomes reachable. That is what made the failure
+         * total rather than intermittent. */
+        "extra_models_dir": path_string(&inputs.models_dir),
         "host": LOOPBACK,
         "port": inputs.port,
         // The second half of the belt-and-braces above.
@@ -276,6 +299,34 @@ mod tests {
             plan.env.get(CACHE_DIR_ENV).map(String::as_str),
             Some("/data/Paper/runtime"),
             "the cache dir must be set, or the daemon writes to ~/.cache/lemonade"
+        );
+    }
+
+    /// ⚠️ **AN INSTALLED MODEL THE DAEMON CANNOT SEE.**
+    ///
+    /// `models_dir` is the HuggingFace hub cache — default `auto`, resolving
+    /// to `~/.cache/huggingface/hub`, laid out as
+    /// `models--<org>--<repo>/snapshots/<rev>/…`. Paper writes
+    /// `models/<manifest-id>/<artifact>.gguf`, so pointing only `models_dir`
+    /// at it hands the daemon an empty cache.
+    ///
+    /// Measured in the running app: `/api/v1/models` answered `{"data":[]}`
+    /// with a 2.3 GB GGUF on disk, the Local models pane said
+    /// `Installed · 2.5 GB`, and every gloss came back
+    /// `the inference runtime answered 404 for /api/v1/chat/completions`.
+    ///
+    /// `extra_models_dir` is the folder-of-loose-GGUFs key — the daemon's own
+    /// strings are `Scanning for GGUF models in: ` plus three validations
+    /// about it being a readable directory. Paper registers nothing over the
+    /// API (`install.rs` calls no daemon endpoint), so this key is the only
+    /// route from "downloaded" to "answerable".
+    #[test]
+    fn extra_models_dir_points_at_the_models_paper_downloaded() {
+        let plan = plan_spawn(&inputs());
+        assert_eq!(plan.config["extra_models_dir"], "/data/Paper/models");
+        assert_ne!(
+            plan.config["extra_models_dir"], "",
+            "an empty extra_models_dir is the daemon scanning nowhere, which is a 404 per lookup"
         );
     }
 

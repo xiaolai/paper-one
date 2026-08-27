@@ -103,85 +103,24 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-/// The characters that may appear in a URL unescaped — RFC 3986's unreserved
-/// set. Everything else is percent-encoded from its UTF-8 bytes.
-///
-/// Written out rather than pulled in as a dependency: this is the only URL this
-/// application builds, and a crate for twelve lines is a supply chain for
-/// twelve lines.
-///
-/// MACOS-ONLY, because its one caller is. `look_up` builds a `dict://` URL
-/// inside a `#[cfg(target_os = "macos")]` block — every other platform takes
-/// the branch that says it has no system dictionary — so on iOS, Android,
-/// Windows and Linux this function compiled with nothing calling it and earned
-/// a `dead_code` warning in each. The gate here is not a silencer: it states
-/// the same platform scope the caller already has, so the two cannot drift, and
-/// a future caller on another platform fails to compile rather than quietly
-/// widening what this is for.
-#[cfg(target_os = "macos")]
-fn percent_encode(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for byte in text.as_bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(*byte as char)
-            }
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
-}
-
-/// The longest passage worth handing to a dictionary.
-///
-/// Not a defensive round number: a `dict://` lookup of a paragraph finds
-/// nothing, and a reader can select a whole chapter. This is the point past
-/// which the feature cannot work, so refusing is more honest than launching
-/// Dictionary.app to show it nothing.
-const MAX_LOOKUP: usize = 120;
-
-/// Hand a passage to the system dictionary.
-///
-/// A HANDOFF, not a lookup: what comes back from `DCSCopyTextDefinition` is a
-/// doubled headword and whatever dictionaries the reader has enabled, run
-/// together with no structure, and a multi-word selection returns nothing at
-/// all — see `lookUp.ts` for why that cannot be typeset into the panel the
-/// design draws. Dictionary.app is the version of this that is true everywhere.
-///
-/// NO SHELL IS INVOLVED. The URL is one `arg`, so it reaches `open` through
-/// `execve` as a single element and nothing in it is ever parsed as syntax; the
-/// scheme is written here rather than accepted from the caller, so this cannot
-/// be turned into a general "open any URL" command by passing one.
-#[tauri::command]
-fn look_up(term: String) -> Result<(), String> {
-    let trimmed = term.trim();
-    if trimmed.is_empty() || trimmed.chars().count() > MAX_LOOKUP {
-        return Err("nothing to look up".into());
-    }
-    if trimmed.chars().any(char::is_control) {
-        return Err("that passage cannot be looked up".into());
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let url = format!("dict://{}", percent_encode(trimmed));
-        std::process::Command::new("open")
-            .arg(url)
-            .spawn()
-            .map_err(|cause| format!("could not open the dictionary: {cause}"))?;
-        Ok(())
-    }
-
-    /* Loud on every other platform rather than silently doing nothing. The
-     * reader never reaches this — `hasDictionary` is what decides whether the
-     * button is drawn — so arriving here means the two have drifted apart, and
-     * that is worth an error in the console rather than a button that appears
-     * to work. */
-    #[cfg(not(target_os = "macos"))]
-    {
-        Err("this platform has no system dictionary".into())
-    }
-}
+/* ⚠️ `look_up` WAS HERE, and it is deleted rather than left unwired.
+ *
+ * It took a passage, percent-encoded it into a `dict://` URL and handed that
+ * to `open`, which raised Dictionary.app. Three things went with it: the
+ * twelve-line `percent_encode` written out to avoid a crate for twelve lines,
+ * `MAX_LOOKUP` (120, mirrored by `isLookUpTerm` on the TypeScript side), and
+ * the `#[cfg(target_os = "macos")]` gate that made all of it macOS-only.
+ *
+ * WHY: macOS already offers Look Up on the right-click menu of any selection,
+ * so Paper's copy was a second route to the same window — and carrying it cost
+ * a mode, a stored setting, a settings row and this command. Paper's dictionary
+ * button now glosses the selection with the local model and does nothing else.
+ * See `src/kernel/core/gloss.ts`.
+ *
+ * `open_external` below is a DIFFERENT command and stays: it exists because a
+ * book's own links must not reach the platform unvalidated, which has nothing
+ * to do with dictionaries.
+ */
 
 /// The only two schemes a book may hand to the platform.
 ///
@@ -201,11 +140,11 @@ const MAX_URL: usize = 2048;
 /// `javascript:` or `data:` in front of the app's own window. Paper now cancels
 /// that event and routes the href here instead.
 ///
-/// `look_up` says of itself that the scheme is written in Rust "so this cannot
-/// be turned into a general 'open any URL' command by passing one". This IS the
-/// general one, which is exactly why it validates rather than trusting: the TS
-/// side already refused everything but http and https, and a check that only
-/// exists on the caller's side is not a boundary.
+/// The deleted `look_up` used to say of itself that the scheme was written in
+/// Rust "so this cannot be turned into a general 'open any URL' command by
+/// passing one". This IS the general one, which is exactly why it validates
+/// rather than trusting: the TS side already refused everything but http and
+/// https, and a check that only exists on the caller's side is not a boundary.
 ///
 /// NO SHELL IS INVOLVED, and on Windows that took a second look. The URL is one
 /// `arg`, so on macOS and Linux it reaches `open`/`xdg-open` through `execve` as
@@ -265,9 +204,9 @@ fn open_external(url: String) -> Result<(), String> {
         Ok(())
     }
 
-    /* Loud rather than silently doing nothing, exactly as `look_up` is. The
-     * reader never reaches this — `canOpenExternal` decides whether the route
-     * exists at all — so arriving here means the two have drifted. */
+    /* Loud rather than silently doing nothing. The reader never reaches this
+     * — `canOpenExternal` decides whether the route exists at all — so
+     * arriving here means the two have drifted. */
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         Err("this platform has no browser to open a link in".into())
@@ -330,9 +269,9 @@ pub fn run() {
     let mut builder = tauri::Builder::default()
         /* This application's own commands. Unlike a plugin's, they are not
         gated by the capability file — an app command is reachable from the
-        webview the moment it is registered here, which is why `look_up`
+        webview the moment it is registered here, which is why `open_external`
         validates its own argument rather than trusting the caller. */
-        .invoke_handler(tauri::generate_handler![look_up, open_external])
+        .invoke_handler(tauri::generate_handler![open_external])
         // Scoped by `capabilities/default.json`, not by these registrations —
         // registering a plugin grants nothing on its own.
         .plugin(tauri_plugin_fs::init())

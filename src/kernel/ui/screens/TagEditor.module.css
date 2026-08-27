@@ -25,7 +25,7 @@
 
 .heading {
   font-size: var(--text-caption);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   letter-spacing: var(--track-caps);
   text-transform: uppercase;
   color: var(--muted);
@@ -129,7 +129,7 @@
 }
 
 .field:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: var(--focus-ring);
   outline-offset: 1px;
 }
 

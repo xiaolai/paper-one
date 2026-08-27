@@ -123,12 +123,100 @@ describe('the gloss strip', () => {
     })
   })
 
-  /* Both states carry the same control, from one definition — written twice,
-   * its label or glyph would drift apart for no reason anyone could name. */
+
+  /*
+   * ── NOTHING INSTALLED TO ANSWER WITH ──────────────────────────────────
+   *
+   * The state that only exists because the Dictionary.app hand-off was
+   * deleted. Before that, a macOS reader with no model pressed Look up and got
+   * the system dictionary; now they get this, and phase 17's decision is that
+   * they must get SOMETHING — "the control simply disappearing on macOS leaves
+   * a reader who used it yesterday with no explanation and no discoverable
+   * route back."
+   */
+  describe('and the lookup with nothing to answer it', () => {
+    const absent = { kind: 'unavailable', term: 'gam' } as const
+
+    /* Same doctrine as the failure, and it matters more here: this text is
+       about Paper, not about the word, so amber would be the app labelling its
+       own apology as a definition of "gam". */
+    it('is not the companion box, because it is not a definition', () => {
+      render(<GlossStrip state={absent} onDismiss={() => {}} onInstall={() => {}} />)
+
+      expect(screen.getByRole('status').getAttribute('data-kind')).not.toBe('companion')
+    })
+
+    it('is actually visible', () => {
+      render(<GlossStrip state={absent} onDismiss={() => {}} onInstall={() => {}} />)
+
+      expect(isVisible(screen.getByRole('status'))).toBe(true)
+    })
+
+    /* SAYS WHY, and does not say "couldn't". Nothing failed — there is a
+       download between the reader and the feature, which is a different
+       sentence and a different feeling. */
+    it('names what is missing rather than reporting a failure', () => {
+      render(<GlossStrip state={absent} onDismiss={() => {}} onInstall={() => {}} />)
+
+      const strip = screen.getByRole('status')
+      expect(textOf(strip)).toMatch(/language model/i)
+      expect(textOf(strip)).toContain('gam')
+      expect(textOf(strip)).not.toMatch(/couldn.t define/i)
+    })
+
+    /* THE WHOLE JUSTIFICATION FOR DRAWING THE BUTTON AT ALL. §07 forbids a
+       control that cannot act; this state is allowed to exist only because the
+       one it offers does. A strip that reported the absence and offered no way
+       out would be the dead button in a longer form. */
+    it('offers the way out, and it works', () => {
+      const onInstall = vi.fn()
+      render(<GlossStrip state={absent} onDismiss={() => {}} onInstall={onInstall} />)
+
+      screen.getByRole('button', { name: /install/i }).click()
+
+      expect(onInstall).toHaveBeenCalledTimes(1)
+    })
+
+    /*
+     * AND IT OFFERS NOTHING WHERE THERE IS NOWHERE TO GO. Unreachable in the
+     * app — `decideLookUp` answers `none` without an install route, so the
+     * button is never drawn and this state is never entered — but asserted
+     * because "unreachable" is a claim about a caller, and this component is
+     * the kernel's and can be mounted by anyone.
+     *
+     * The sentence still renders. Saying "Paper needs a language model" on a
+     * browser client is TRUE; offering to install one there would not be.
+     */
+    it('offers no install where the caller gave no way to install', () => {
+      render(<GlossStrip state={absent} onDismiss={() => {}} />)
+
+      expect(textOf(screen.getByRole('status'))).toMatch(/language model/i)
+      expect(screen.queryByRole('button', { name: /install/i })).toBeNull()
+    })
+
+    /* Non-vacuity, as for the failure: this must not be the element a
+       definition renders into. */
+    it('renders into a different element from the one a definition uses', () => {
+      const { container: ok } = render(
+        <GlossStrip state={{ kind: 'ready', term: 'gam', text: 'A meeting.' }} onDismiss={() => {}} />,
+      )
+      const readyClass = ok.firstElementChild?.className
+      cleanup()
+      const { container: none } = render(<GlossStrip state={absent} onDismiss={() => {}} />)
+
+      expect(readyClass).toBeTruthy()
+      expect(none.firstElementChild?.className).not.toBe(readyClass)
+    })
+  })
+
+  /* All four states carry the same control, from one definition — written
+   * four times, its label or glyph would drift apart for no reason anyone
+   * could name. */
   it.each([
     ['ready', { kind: 'ready', term: 'gam', text: 'A meeting.' } as const],
     ['asking', { kind: 'asking', term: 'gam' } as const],
     ['failed', { kind: 'failed', term: 'gam', reason: 'No model.' } as const],
+    ['unavailable', { kind: 'unavailable', term: 'gam' } as const],
   ])('is dismissed from the %s state by one control', (_name, state) => {
     const onDismiss = vi.fn()
     render(<GlossStrip state={state} onDismiss={onDismiss} />)

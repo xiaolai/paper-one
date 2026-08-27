@@ -53,7 +53,7 @@
   min-height: var(--pane-title-row);
   padding: 0 var(--space-16);
   font-size: var(--text-ui);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   letter-spacing: var(--track-snug);
   color: var(--ink);
 }
@@ -220,7 +220,7 @@
  * and dimming it to 45% would hide the structure it exists to show. */
 .tocRow:disabled {
   cursor: default;
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   color: var(--muted);
 }
 
@@ -236,7 +236,7 @@
 .tocRow[data-current='true'] {
   background: var(--surface);
   color: var(--ink);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   box-shadow: var(--shadow-pill);
 }
 
@@ -310,7 +310,7 @@
 .caret::before {
   content: '▌';
   color: var(--amber);
-  animation: companion-caret 1s steps(2, start) infinite;
+  animation: companion-caret var(--motion-caret) steps(2, start) infinite;
 }
 
 @keyframes companion-caret {
@@ -345,7 +345,7 @@
 
 .citation:disabled {
   cursor: default;
-  opacity: 0.6;
+  opacity: var(--opacity-disabled);
 }
 
 /* A failed answer says what happened, in the reader's words, and does NOT
@@ -408,11 +408,58 @@
   color: var(--muted);
 }
 
-/* Only the pointer-driven ring is dropped. A bare `outline: none` on :focus
- * also suppresses the global :focus-visible rule, leaving keyboard users with
- * no visible focus at all — §10's focus requirement is not optional. */
-.composerInput:focus:not(:focus-visible),
-.searchInput:focus:not(:focus-visible) {
+/* ⚠️ **LIGHT THE PILL, NOT THE BARE INPUT INSIDE IT.**
+ *
+ * These two inputs are transparent and unpadded inside a pill their PARENT
+ * draws, so the global `:focus-visible` ring drew itself around the INPUT's
+ * box. Measured in the running app, on the composer:
+ *
+ *   ring   324 x 22, radius 6px   (`--radius-chip`, from the global rule)
+ *   pill   376 x 44, radius 999px (`--radius-pill`)
+ *
+ * — eleven pixels of pill showing above and below the ring and twenty-six on
+ * each side. A small square-cornered box floating inside a fully rounded one,
+ * which is not what any other focused control in this app looks like.
+ *
+ * `global.css` names this very control as the case its default was designed
+ * for, on the grounds that "the two pixels land in the parent's fill and the
+ * whole thing reads as one focused control". The two pixels do land there; so
+ * do another nine on every side, because the input does not fill the pill. That
+ * paragraph reasoned about the OFFSET and never about the size or the radius,
+ * and it has been corrected.
+ *
+ * The container carries it instead, which is `Library.module.css`'s
+ * `.searchField:focus-within` idiom — the same problem, solved there first.
+ *
+ * `:has(:focus-visible)` RATHER THAN `:focus-within`, which is where this
+ * departs from that precedent and deliberately. `:focus-within` matches a
+ * POINTER click too, and §07 is explicit that focus is `:focus-visible` only so
+ * pointer users never see it. The rule being replaced here was already
+ * keyboard-only; switching to `:focus-within` would have fixed the shape by
+ * regressing the policy. `:has(:focus-visible)` keeps both, and this webview
+ * supports it (checked, not assumed).
+ *
+ * ⚠️ **THE OFFSET IS `.paper-cap-field`'s, NOT A NUMBER PICKED HERE.** Both of
+ * these pills are their own filled shape at `--radius-pill`, which is the case
+ * `design-tokens.md` names as breaking the global `+--space-2` precondition:
+ * the ring lands outside the pill's own background and the pane shows through
+ * the gap, a pill drawn around a pill. `capability.css` states the value and
+ * the mechanism — negative, and *"not zero: on a 999px radius the two curves
+ * meet at a tangent, and a hairline of pane background survives antialiasing
+ * between them"*. `.noteInput` had already reached the same value for the same
+ * reason. This is the third control of that shape and it takes the same rule. */
+.composer:has(:focus-visible),
+.searchField:has(:focus-visible) {
+  outline: var(--focus-ring);
+  outline-offset: -1px;
+}
+
+/* The container shows focus — see above. Dropping the input's own ring
+ * unconditionally is only safe BECAUSE of that rule, which is why the two sit
+ * together: on its own this line would leave keyboard users with no visible
+ * focus at all, and §07's focus requirement is not optional. */
+.composerInput:focus,
+.searchInput:focus {
   outline: none;
 }
 
@@ -502,7 +549,7 @@
 }
 
 .noteJump:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: var(--focus-ring);
   outline-offset: var(--space-2);
   border-radius: var(--radius-mark);
 }
@@ -550,7 +597,7 @@
 }
 
 .noteInput:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: var(--focus-ring);
   outline-offset: -1px;
 }
 
@@ -583,7 +630,7 @@
 }
 
 .noteDelete:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: var(--focus-ring);
   outline-offset: calc(-1 * var(--space-2));
 }
 
@@ -595,7 +642,7 @@
 
 .noteKind {
   font-size: var(--text-caption);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   letter-spacing: var(--track-caps);
   text-transform: uppercase;
   color: var(--muted);
@@ -792,7 +839,7 @@
    agree about what "this one" looks like. */
 .tagRow[data-over='true'] {
   border-radius: var(--radius-control);
-  outline: 2px solid var(--accent);
+  outline: var(--focus-ring);
   outline-offset: calc(-1 * var(--space-2));
   background: var(--accent-bg);
 }
@@ -836,7 +883,7 @@
    how much it holds. */
 .groupCount {
   margin-inline-start: auto;
-  font-weight: 400;
+  font-weight: var(--weight-regular);
   letter-spacing: normal;
   text-transform: none;
   font-variant-numeric: tabular-nums;
@@ -858,7 +905,7 @@
 }
 
 .tagFilter:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: var(--focus-ring);
   outline-offset: 1px;
 }
 
@@ -926,7 +973,7 @@
 .groupTitle {
   padding: var(--space-16) var(--space-10) var(--space-6);
   font-size: var(--text-caption);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   letter-spacing: var(--track-caps-wide);
   text-transform: uppercase;
   color: var(--muted);
@@ -1001,7 +1048,7 @@
 .stepperSmall,
 .stepperLarge {
   line-height: 1;
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
 }
 
 .stepperSmall {
@@ -1019,7 +1066,7 @@
 /* Disabled, not hidden: the ends of §09's ramp are part of what the control
    tells the reader, and a button that vanishes at the limit reads as a bug. */
 .stepperButton:disabled {
-  opacity: 0.35;
+  opacity: var(--opacity-disabled);
   cursor: default;
 }
 
@@ -1094,7 +1141,7 @@
    a grey mark rather than a sample of ink. */
 .themeAa {
   font-size: var(--text-body);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   line-height: 1;
   color: var(--ink);
 }
@@ -1114,7 +1161,7 @@
 
 .emptyTitle {
   font-size: var(--text-body);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   color: var(--ink);
 }
 
@@ -1205,7 +1252,7 @@
 .faceGroup {
   padding: var(--space-8) var(--space-10) var(--space-4);
   font-size: var(--text-caption);
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   letter-spacing: var(--track-caps);
   text-transform: uppercase;
   color: var(--muted);
@@ -1337,7 +1384,7 @@
 }
 
 .colourDot:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: var(--focus-ring);
   outline-offset: var(--space-2);
 }
 
@@ -1357,7 +1404,7 @@
 }
 
 .colourClear:disabled {
-  opacity: 0.35;
+  opacity: var(--opacity-disabled);
   cursor: default;
 }
 

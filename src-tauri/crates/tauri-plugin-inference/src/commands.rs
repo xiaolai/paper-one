@@ -201,10 +201,7 @@ pub struct ResourceUsage {
 }
 
 #[tauri::command]
-pub async fn inference_resource_usage<R: Runtime>(
-    app: AppHandle<R>,
-    state: State<'_, InferenceState>,
-) -> Result<ResourceUsage> {
+pub async fn inference_resource_usage(state: State<'_, InferenceState>) -> Result<ResourceUsage> {
     /* The guard is dropped before the request, as in `inference_generate` —
     otherwise a memory reading blocks behind whatever is streaming. */
     let request = {
@@ -212,7 +209,6 @@ pub async fn inference_resource_usage<R: Runtime>(
         daemon.health_request()
     };
     let health = crate::daemon::Daemon::read_health(request).await?;
-    let _ = &app;
     Ok(ResourceUsage {
         // Not reported by `/api/v1/health`; `None` until it is read from a
         // route that genuinely carries it, rather than a plausible zero.
@@ -473,7 +469,7 @@ pub async fn inference_generate<R: Runtime>(
     let request = {
         let daemon = state.daemon().await?;
         daemon
-            .request(reqwest::Method::POST, generate::CHAT_ROUTE)
+            .model_request(reqwest::Method::POST, generate::CHAT_ROUTE)
             .json(&chat_request(model, system, question, MAX_ANSWER_TOKENS))
     };
     /* A SEND THAT FAILS CANCELS THE REQUEST. The webview dropped the channel —
@@ -519,7 +515,7 @@ pub async fn inference_gloss<R: Runtime>(
     let request = {
         let daemon = state.daemon().await?;
         daemon
-            .request(reqwest::Method::POST, generate::CHAT_ROUTE)
+            .model_request(reqwest::Method::POST, generate::CHAT_ROUTE)
             .json(&chat_request(model, system, question, MAX_GLOSS_TOKENS))
     };
     // Streamed on the wire, delivered whole: the daemon's non-streaming path
@@ -746,7 +742,7 @@ pub async fn inference_speak<R: Runtime>(
     let request = {
         let daemon = state.daemon().await?;
         daemon
-            .request(reqwest::Method::POST, speech::SPEECH_ROUTE)
+            .model_request(reqwest::Method::POST, speech::SPEECH_ROUTE)
             .json(&body)
     };
     /* THE TRANSPORT IS `speech`'s. This command is policy — bound the input,

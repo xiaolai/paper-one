@@ -289,6 +289,39 @@ export function isCancelled(error: unknown): boolean {
 }
 
 /**
+ * Cancel a request, and say so when the cancel itself fails for a real reason.
+ *
+ * ⚠️ **THIS WAS `\.catch(() => {})` IN TWO PLACES**, and that is the whole
+ * argument for it existing. `glossProvider` and `inferencePort`'s `withCancel`
+ * each wired the reader's abort to `plugin.cancel` and each swallowed every
+ * failure — so when an audit found the swallow, fixing it in one copy left the
+ * other exactly as it was. Two call sites of one shape is a class, not two
+ * bugs.
+ *
+ * EXACTLY ONE FAILURE IS EXPECTED: `requestUnknown`, the race where the
+ * request finished before the cancel arrived. Anything else means the daemon
+ * is still generating for a reader who has gone — a GPU and a model held for
+ * an answer nobody will read — and that is worth a line in the log.
+ *
+ * Never rethrows: it runs from an `abort` listener, where there is nobody to
+ * catch and the reader has already moved on.
+ */
+export function cancelRequest(
+  plugin: Pick<InferencePlugin, 'cancel'>,
+  requestId: string,
+  report?: ((event: string, fields: Record<string, unknown>) => void) | undefined,
+): void {
+  void plugin.cancel(requestId).catch((cause: unknown) => {
+    if (errorKind(cause) === 'requestUnknown') return
+    report?.('inference.cancel-failed', {
+      requestId,
+      kind: errorKind(cause),
+      message: cause instanceof Error ? cause.message : String(cause),
+    })
+  })
+}
+
+/**
  * A request id, unique per call.
  *
  * MINTED BY THE CALLER, which is what lets a cancel that arrives before the

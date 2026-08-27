@@ -44,6 +44,37 @@ const blockedFiles = (root, entry) => [...blockersOf(root, entry).blockers.keys(
 
 describe('the real tree — the cases this gate was built from', () => {
   /**
+   * ⚠️ **WALKED ONCE, ASSERTED TWICE — AND IT USED TO BE WALKED TWICE.**
+   *
+   * `checkBrowserSafe` over `PINNED` reads and parses the transitive import
+   * graph of ten entry modules, which is most of `src/`. Two cases below ask
+   * different questions of the same answer, and each used to recompute it.
+   *
+   * Measured under `pnpm vitest run --coverage --project scripts`: 16 669 ms
+   * and 11 113 ms, against a 15 000 ms `testTimeout` — so the first one FAILED,
+   * intermittently, only ever under coverage and never in isolation (2.0 s for
+   * the whole file). `scripts/**` is in `COVERAGE_INCLUDE`, so the walk runs
+   * v8-instrumented; the cost is real, and doing it twice doubled it.
+   *
+   * The input is a pure function of the working tree, which does not change
+   * during a run, so one walk is not a shortcut — the second call could only
+   * ever return the same thing.
+   *
+   * ⚠️ **LAZY, NOT A `const` IN THE DESCRIBE BODY.** A describe body runs at
+   * COLLECTION, where no `testTimeout` applies — so hoisting it there would
+   * have swapped a bounded failure ("timed out in 15000ms", with the test
+   * named) for an unbounded one (collection hangs, nothing named). Paying it
+   * inside the first test that asks keeps the liveness bound exactly where it
+   * can still report.
+   *
+   * The walk itself is now much cheaper than the measurements above: the same
+   * audit fixed `checkBrowserSafe` to parse each file once per CALL rather than
+   * once per ENTRY, which is where the real cost was.
+   */
+  let walked = null
+  const pinnedReports = () => (walked ??= checkBrowserSafe(process.cwd(), [...PINNED]))
+
+  /**
    * THE KNOWN POSITIVE, against the repository itself.
    *
    * `vaultFsTauri.ts` IS the Tauri binding for the vault filesystem. If this
@@ -68,7 +99,7 @@ describe('the real tree — the cases this gate was built from', () => {
   })
 
   it('keeps every pinned module browser-safe', () => {
-    for (const report of checkBrowserSafe(process.cwd(), [...PINNED])) {
+    for (const report of pinnedReports()) {
       expect({ module: report.module, missing: report.missing, blockers: report.blockers }).toEqual({
         module: report.module,
         missing: false,
@@ -78,7 +109,7 @@ describe('the real tree — the cases this gate was built from', () => {
   })
 
   it('pins modules that exist', () => {
-    for (const report of checkBrowserSafe(process.cwd(), [...PINNED])) {
+    for (const report of pinnedReports()) {
       expect(report.missing).toBe(false)
       expect(report.modules).toBeGreaterThan(0)
     }

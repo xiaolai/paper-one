@@ -50,6 +50,58 @@ const READY_TIMEOUT: Duration = Duration::from_secs(30);
 /// The gap between health polls while starting.
 const POLL_EVERY: Duration = Duration::from_millis(100);
 
+/// How long a model may go SILENT before Paper gives up on it.
+///
+/// ⚠️ **THIS IS NOT A TOTAL DEADLINE, AND THAT IS THE WHOLE POINT.** The
+/// client below carries `timeout(10s)`, which reqwest documents — and 0.13.4's
+/// source says in as many words — as *"a total request timeout … applied from
+/// when the request starts connecting until the response body has finished.
+/// Also considered a total deadline."* That is right for `/api/v1/health`, which
+/// is what the ten seconds was reasoned about; it is wrong for a chat
+/// completion, whose body IS the answer arriving a token at a time.
+///
+/// The daemon loads a model on the FIRST request that needs it — `await_ready`
+/// only polls for `status: "ok"`, and the health shape it parses reports
+/// `model_loaded: null` — so the first gloss after a launch pays a 2.5 GB GGUF
+/// read inside the same deadline as the generation. On a cold page cache that
+/// alone can exceed ten seconds, and the reader gets a failed lookup on the
+/// first thing they try.
+///
+/// So the streaming client is bounded by SILENCE instead, exactly as
+/// `state.rs`'s download client is and for the same stated reason — *"no
+/// overall timeout: a 2.4 GB download legitimately takes minutes. The read
+/// timeout is what catches a stalled connection."* An answer that is still
+/// arriving is a request still being served.
+///
+/// Two minutes is a backstop against a WEDGED daemon, not a budget for the
+/// reader's patience: cancellation is wired all the way through
+/// (`Cancel::cancelled` races every await in `generate::stream`, and `useGloss`
+/// aborts on dismiss or on the next lookup), so a reader who has stopped
+/// waiting is never held by this.
+const MODEL_SILENCE: Duration = Duration::from_secs(120);
+
+/// The absolute ceiling on one model-answered request.
+///
+/// ⚠️ **`MODEL_SILENCE` ALONE IS NOT A BOUND**, which an audit pointed out and
+/// which is the flaw in replacing a total deadline with a read timeout and
+/// stopping there: a response that emits ANY byte inside each 120-second
+/// window runs for ever. An SSE keep-alive comment is such a byte, and so is a
+/// model dribbling one token a minute. The old ten seconds was wrong for a
+/// generation, but it was at least a ceiling; removing it without putting one
+/// back traded a bound that was too tight for no bound at all.
+///
+/// Ten minutes is chosen against the work rather than as a round number:
+/// `MAX_ANSWER_TOKENS` is 1024, and 1024 tokens at a slow five per second is
+/// about three and a half minutes, plus a cold 2.5 GB model load. Nothing
+/// legitimate approaches ten minutes; a request that does is wedged.
+///
+/// It is a REQUEST-level override, so it coexists with the client's
+/// `read_timeout` rather than replacing it — verified in reqwest 0.13.4, where
+/// `read_timeout` lives on the client config and is applied independently of
+/// the per-request deadline. Two different questions: "has it gone quiet?" and
+/// "has this gone on too long?"
+const MODEL_CEILING: Duration = Duration::from_secs(600);
+
 /// How long the tree gets to shut down cleanly before it is killed.
 ///
 /// The daemon unloads models and releases GPU allocations on the way out
@@ -73,6 +125,8 @@ pub struct Daemon {
     group: Option<u32>,
     plan: SpawnPlan,
     client: reqwest::Client,
+    /// The client for requests a MODEL answers — see `MODEL_SILENCE`.
+    model_client: reqwest::Client,
     log: LogTail,
     /// The port its WebSocket chose for itself, once health has reported it.
     websocket_port: Option<u16>,
@@ -165,16 +219,31 @@ impl Daemon {
             spawn_reader(err, log.clone());
         }
 
+        // No proxy, ever, on either client. A reader's `HTTP_PROXY` pointing
+        // loopback traffic at somebody else's server would put the bearer
+        // token and the reader's questions through it.
         let client = reqwest::Client::builder()
-            // The daemon is on the loopback; a request that has not been
+            // CONTROL PLANE ONLY — health, the model list, resource usage. The
+            // daemon is on the loopback; one of these that has not been
             // answered in ten seconds is not going to be.
+            //
+            // ⚠️ This bound used to cover GENERATION too, because there was one
+            // client. It is a TOTAL deadline, so it capped the whole streamed
+            // answer at ten seconds — see `MODEL_SILENCE`.
             .timeout(Duration::from_secs(10))
-            // No proxy, ever. A reader's `HTTP_PROXY` pointing loopback
-            // traffic at somebody else's server would put the bearer token
-            // and the reader's questions through it.
             .no_proxy()
             .build()
             .map_err(|e| unreachable("client", e))?;
+
+        let model_client = reqwest::Client::builder()
+            // Bounded by SILENCE, not by total duration — see `MODEL_SILENCE`.
+            // `read_timeout` exists only on the builder, never per request,
+            // which is why this is a second client rather than an override at
+            // the three call sites that need it.
+            .read_timeout(MODEL_SILENCE)
+            .no_proxy()
+            .build()
+            .map_err(|e| unreachable("model client", e))?;
 
         let group = crate::procgroup::group_of(&child);
         let mut daemon = Daemon {
@@ -182,6 +251,7 @@ impl Daemon {
             group,
             plan,
             client,
+            model_client,
             log,
             websocket_port: None,
             #[cfg(windows)]
@@ -330,11 +400,36 @@ impl Daemon {
     ///
     /// `route` is always a literal in this crate — there is no path a caller
     /// supplies, which is the same closed-set discipline the argv follows.
+    ///
+    /// ⚠️ **CONTROL PLANE.** Ten seconds, total. Anything a MODEL answers goes
+    /// through [`Daemon::model_request`] instead; this one's deadline would cut
+    /// the answer off mid-stream.
     pub fn request(&self, method: reqwest::Method, route: &str) -> reqwest::RequestBuilder {
         self.client
             .request(method, format!("{}{route}", self.plan.base_url()))
             .bearer_auth(&self.plan.env[crate::spawn::API_KEY_ENV])
     }
+
+    /// The same, for a request a MODEL answers — a generation, a gloss, an
+    /// utterance.
+    ///
+    /// Three call sites, all of them in `commands.rs`, and the split is by what
+    /// answers rather than by route so that a fourth long-running command
+    /// cannot inherit the control plane's deadline by accident. See
+    /// `MODEL_SILENCE`.
+    pub fn model_request(&self, method: reqwest::Method, route: &str) -> ModelRequest {
+        let built = self
+            .model_client
+            .request(method, format!("{}{route}", self.plan.base_url()))
+            // BOTH BOUNDS. `read_timeout` on the client catches silence;
+            // this catches a request that never stops making just enough
+            // progress to reset it. See `MODEL_CEILING`.
+            .timeout(MODEL_CEILING)
+            .bearer_auth(&self.plan.env[crate::spawn::API_KEY_ENV]);
+        ModelRequest(built)
+    }
+
+    // (see `ModelRequest` below for why `model_request` returns a newtype)
 
     async fn parse<T: serde::de::DeserializeOwned>(
         route: &str,
@@ -354,20 +449,9 @@ impl Daemon {
             .map_err(|e| crate::error::malformed(route, e.to_string()))
     }
 
-    /// The daemon's base URL, for the streaming paths that build their own
-    /// request. Loopback, always.
-    pub fn base_url(&self) -> String {
-        self.plan.base_url()
-    }
-
     /// The plan this daemon was launched from.
     pub fn plan(&self) -> &SpawnPlan {
         &self.plan
-    }
-
-    /// The child's recent output, for a diagnostic.
-    pub fn log_tail(&self) -> String {
-        self.log.text()
     }
 
     /// Stop the whole tree: ask, wait, then insist.
@@ -459,9 +543,125 @@ where
     });
 }
 
+/// A request the MODEL client built, and the only thing a model answer can be
+/// read from.
+///
+/// ⚠️ **THIS IS THE THIRD ATTEMPT AT ONE INVARIANT, AND THE FIRST THAT HOLDS.**
+/// The rule is that a request a model answers must not carry the control
+/// plane's ten-second total deadline. Two source-scanning tests tried to
+/// enforce it and a verify pass defeated both: the first hard-coded three
+/// command names, so it could not see a fourth; the second matched hard-coded
+/// route constants, so a command on a new route walked past it. The third
+/// asked whether `commands.rs` contained the text `.request(reqwest::Method`
+/// — and `post_json`/`get_json` reach the control-plane client without ever
+/// writing that text, as does an aliased import or a line break in the middle
+/// of the call.
+///
+/// Every one of them failed the same way: a scan can only ask about the shapes
+/// somebody thought of. So this is a TYPE. `generate::stream` and
+/// `speech::collect` take a `ModelRequest`; the field is private to this
+/// module, so `Daemon::model_request` is the only thing in the crate that can
+/// make one, and an attempt to forge one elsewhere is `E0423`.
+///
+/// ⚠️ **BE EXACT ABOUT WHAT THAT BUYS, because the first version of this
+/// comment was not.** It said routing a model answer through the control-plane
+/// client is a compile error. It is not, and a verify pass produced the
+/// counter-example: `daemon.request(POST, generate::CHAT_ROUTE).json(&b).send()`
+/// compiles, and so does `post_json` on a model route. Both bypass
+/// `stream`/`collect` entirely and never mention this type.
+///
+/// What the type actually guarantees is narrower and still worth having: **an
+/// answer cannot be READ as a model answer unless the request came from the
+/// model client.** Every model-answered path in this crate goes through
+/// `stream` or `collect`, so the guarantee covers all of them today; what it
+/// cannot do is stop somebody hand-rolling a fourth path that reads a response
+/// itself. That is a smaller hole than the three scans left, and unlike them
+/// it is written down accurately.
+///
+/// `post_json` and `get_json` stay on the control plane deliberately — health
+/// and endpoint registration are exactly what that deadline is for.
+pub struct ModelRequest(reqwest::RequestBuilder);
+
+impl ModelRequest {
+    /// Attach the JSON body, staying a `ModelRequest`.
+    pub fn json<T: serde::Serialize + ?Sized>(self, value: &T) -> Self {
+        ModelRequest(self.0.json(value))
+    }
+
+    /// Hand the builder to whatever reads the answer.
+    ///
+    /// `pub(crate)` rather than `pub`: `generate` and `speech` need it and
+    /// nothing outside this crate does. It does not weaken the invariant —
+    /// what matters is that the CONSTRUCTOR is unreachable, and a private
+    /// tuple field makes it so for every module but this one.
+    pub(crate) fn into_builder(self) -> reqwest::RequestBuilder {
+        self.0
+    }
+
+    /// Build one from a bare builder, for a test that has no daemon.
+    ///
+    /// `#[cfg(test)]`, so it does not exist in a shipped build and cannot
+    /// weaken the invariant the type is here to hold: in production
+    /// `Daemon::model_request` remains the only constructor. A test that wants
+    /// to exercise `stream`/`collect` against a dead address has no daemon to
+    /// ask, and making it spawn one to check a cancellation would be a worse
+    /// test for no gain.
+    #[cfg(test)]
+    pub(crate) fn from_builder_for_test(builder: reqwest::RequestBuilder) -> Self {
+        ModelRequest(builder)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The three commands a model answers really do go through the model
+    /// client — non-vacuity for `ModelRequest`, and nothing more than that.
+    ///
+    /// ⚠️ **THIS TEST NO LONGER ENFORCES THE RULE, AND SAYING SO IS THE POINT.**
+    /// Three earlier versions claimed to, and a verify pass defeated each in
+    /// turn: hard-coded command names could not see a fourth command;
+    /// hard-coded route constants could not see a new route; and a scan for
+    /// `.request(reqwest::Method` could not see `post_json`, an aliased
+    /// import, or a line break in the middle of the call. A guard that says it
+    /// is closed and is not is worse than no guard, because the next person
+    /// reads the comment rather than the code.
+    ///
+    /// `ModelRequest` holds the invariant now, at compile time, for every path
+    /// that READS a model answer — see its docstring, which is careful about
+    /// what that does and does not cover.
+    ///
+    /// What is left here is weaker than "the wiring is live", and the earlier
+    /// wording overclaimed that too: this only finds the substring
+    /// `model_request(` inside a roughly delimited function body, so a comment
+    /// or a dead branch would satisfy it. It is a smoke check against the
+    /// three commands silently losing their model client in a refactor, and
+    /// the compiler and `ModelRequest` are what actually hold the rule.
+    #[test]
+    fn the_commands_a_model_answers_are_wired_to_the_model_client() {
+        let source = include_str!("commands.rs");
+        let mut answered = Vec::new();
+        for (at, _) in source.match_indices("pub async fn ") {
+            let name: String = source[at + "pub async fn ".len()..]
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            let body_end = source[at..]
+                .find("\n}\n")
+                .map(|end| at + end)
+                .unwrap_or(source.len());
+            if source[at..body_end].contains("model_request(") {
+                answered.push(name);
+            }
+        }
+        for expected in ["inference_generate", "inference_gloss", "inference_speak"] {
+            assert!(
+                answered.iter().any(|name| name == expected),
+                "{expected} no longer reaches a model through the model client; found {answered:?}"
+            );
+        }
+    }
 
     #[test]
     fn the_log_tail_is_bounded_and_keeps_the_end() {

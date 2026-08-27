@@ -84,10 +84,22 @@
 import { applySnap, unsnapped, type SnapApplication } from './applySnap'
 
 export interface DeferredSnap {
-  /** Arm the snap for the next macrotask. Replaces any snap already pending —
-   *  a rapid second gesture supersedes the first rather than queueing behind
-   *  it, so only one is ever outstanding. */
-  schedule: () => void
+  /**
+   * Arm the snap for the next macrotask. Replaces any snap already pending —
+   * a rapid second gesture supersedes the first rather than queueing behind
+   * it, so only one is ever outstanding.
+   *
+   * ⚠️ **THE EVENT IS READ FOR ONE FIELD ONLY: `detail`.** It is the click
+   * count, and the only moment it exists is the gesture — by the time the
+   * macrotask runs there is no event left to ask. It travels because a
+   * double-click at the end of a line needs correcting and nothing observable
+   * later can tell one from an ordinary drag; see `applySnap`'s
+   * `wordAtAnchor`.
+   *
+   * Optional, so a caller with no event (a test, a programmatic selection)
+   * still schedules an ordinary snap.
+   */
+  schedule: (event?: { readonly detail?: number } | undefined) => void
   /** Drop a pending snap without running it. Idempotent, safe with nothing
    *  pending, and not a latch: a later gesture schedules again. */
   cancel: () => void
@@ -110,8 +122,13 @@ export interface DeferredSnapOptions {
 
 export function deferSnap(doc: Document, options: DeferredSnapOptions): DeferredSnap {
   let handle: ReturnType<typeof setTimeout> | null = null
+  /* Captured at SCHEDULE time, unlike everything else here, because it is the
+     one fact that stops existing when the gesture does. Reset on cancel so a
+     dropped double-click cannot colour the next gesture. */
+  let doubleClick = false
 
   const cancel = (): void => {
+    doubleClick = false
     if (handle === null) return
     clearTimeout(handle)
     handle = null
@@ -126,12 +143,19 @@ export function deferSnap(doc: Document, options: DeferredSnapOptions): Deferred
     /* The one branch, and it chooses between two RESULTS rather than between
      * running and returning — see the header. Provenance is asked here, after
      * the selection has been read, because both answers need the selection. */
-    options.onSettled(options.isPointerProduced() ? applySnap(selection) : unsnapped(selection))
+    const wasDoubleClick = doubleClick
+    doubleClick = false
+    options.onSettled(
+      options.isPointerProduced()
+        ? applySnap(selection, { doubleClick: wasDoubleClick })
+        : unsnapped(selection),
+    )
   }
 
   return {
-    schedule: () => {
+    schedule: (event) => {
       cancel()
+      doubleClick = (event?.detail ?? 0) >= 2
       handle = setTimeout(run, 0)
     },
     cancel,
