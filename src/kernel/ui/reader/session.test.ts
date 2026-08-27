@@ -2430,6 +2430,33 @@ describe('ReaderSession — a pointer gesture always publishes', () => {
     expect(published(cb)).toEqual([{ ...SNAPPED, range: selection.getRangeAt(0) }])
     expect(selection.mutations).toBe(1)
   })
+
+  /**
+   * ⚠️ **A HELD ⌘B WROTE A ROW AND A TOMBSTONE PER REPEAT.** The forwarded
+   * copy carried the key, the code and the four modifiers, and not `repeat` —
+   * so `accel.ts`'s toggle guard, which refuses a repeating ⌘B/⌘K/⌘\/⌘T/⌘1–4
+   * for exactly that reason, saw a fresh press on every auto-repeat whenever
+   * focus was inside the book. Two independent audits found it on the same
+   * day. The event's own init is what is asserted, because that is the whole
+   * defect: a field the constructor was never handed.
+   */
+  it('forwards repeat, location and isComposing — the fields the host keymap guards on', async () => {
+    const inits: Record<string, unknown>[] = []
+    class RecordingKeyboardEvent extends Event {
+      constructor(type: string, init: Record<string, unknown> = {}) {
+        super(type, init as EventInit)
+        inits.push(init)
+      }
+    }
+    vi.stubGlobal('KeyboardEvent', RecordingKeyboardEvent)
+    const { doc } = await gesture()
+
+    doc.dispatch('keydown', { key: 'b', code: 'KeyB', metaKey: true, repeat: true, location: 0, isComposing: false, target: null })
+    expect(inits.at(-1)).toMatchObject({ key: 'b', code: 'KeyB', metaKey: true, repeat: true, location: 0, isComposing: false })
+
+    doc.dispatch('keydown', { key: 'Enter', code: 'NumpadEnter', repeat: false, location: 3, isComposing: true, target: null })
+    expect(inits.at(-1)).toMatchObject({ key: 'Enter', repeat: false, location: 3, isComposing: true })
+  })
 })
 
 /**

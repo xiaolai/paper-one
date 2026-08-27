@@ -2034,6 +2034,16 @@ export class ReaderSession {
         ctrlKey: event.ctrlKey,
         shiftKey: event.shiftKey,
         altKey: event.altKey,
+        /* AND THE THREE THE HOST'S GUARDS READ. `repeat` was not copied, so a
+         * key held inside the book arrived at the keymap as a fresh press
+         * every auto-repeat: the toggle guard in `accel.ts` — whose own note
+         * says a held ⌘B writes a row and a tombstone per cycle — could not
+         * fire, because focus is in the book whenever the reader has clicked
+         * the page, which is most of the time. `location` tells a keypad
+         * Enter from the other one; `isComposing` is an IME mid-word. */
+        repeat: event.repeat,
+        location: event.location,
+        isComposing: event.isComposing,
         bubbles: true,
         cancelable: true,
       })

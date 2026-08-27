@@ -3898,6 +3898,7 @@
     "src/kernel/ui/reader/session.test.ts > ReaderSession restore > reports a book that cannot be displayed even from the start",
     "src/kernel/ui/reader/session.test.ts > ReaderSession restore > reports a null cfi for a renderer that publishes none",
     "src/kernel/ui/reader/session.test.ts > ReaderSession restore > reports the CFI foliate publishes on relocate, so there is one to save",
+    "src/kernel/ui/reader/session.test.ts > ReaderSession — a pointer gesture always publishes > forwards repeat, location and isComposing — the fields the host keymap guards on",
     "src/kernel/ui/reader/session.test.ts > ReaderSession — a pointer gesture always publishes > publishes snapped when the selectionchange lands inside the gesture",
     "src/kernel/ui/reader/session.test.ts > ReaderSession — a pointer gesture always publishes > publishes unsnapped when a keystroke interrupts the drag",
     "src/kernel/ui/reader/session.test.ts > ReaderSession — a pointer gesture always publishes > publishes unsnapped when the selectionchange lands after the pointer is up",
