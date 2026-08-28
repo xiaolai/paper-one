@@ -60,6 +60,28 @@ impl BlobTarget {
         })
     }
 
+    /// The target a `.part` belongs to — `content.epub.part` is
+    /// `content.epub`'s — validated exactly as [`resolve`](Self::resolve)
+    /// with [`Access::Write`] validates that name, because a `.part` is only
+    /// ever something a fetch wrote.
+    ///
+    /// This is how the launch sweep addresses one. [`validate_name`] refuses
+    /// `.part` as a NAME and goes on refusing it: no command can serve,
+    /// fetch, hash or delete a `.part` by naming it. What this adds is
+    /// narrower — the sibling of a name the plugin writes — so the sweep can
+    /// collect what a fetch abandoned and nothing else: not `notes.txt.part`,
+    /// not `cover.webp.part` (never written, so never ours), not a bare
+    /// `.part`.
+    pub fn of_part(root: &Path, folder: &str, part_name: &str) -> Result<Self> {
+        let Some(name) = part_name
+            .strip_suffix(".part")
+            .filter(|name| !name.is_empty())
+        else {
+            return Err(Error::InvalidBlobName(part_name.to_owned()));
+        };
+        Self::resolve(root, folder, name, Access::Write)
+    }
+
     pub fn folder(&self) -> &str {
         &self.folder
     }
@@ -296,6 +318,57 @@ mod tests {
                 kind(BlobTarget::resolve(&root(), "b", bad, Access::Read)),
                 "invalidBlobName",
                 "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn of_part_names_the_target_a_part_belongs_to() {
+        // The launch sweep addresses a `.part` ONLY as the sibling of a target
+        // the fetch path could have written: `content.epub.part` is
+        // `content.epub`'s, and the target it builds is the one `resolve`
+        // would build for that name.
+        let target = BlobTarget::of_part(&root(), "book_a", "content.epub.part").unwrap();
+        assert_eq!(
+            target,
+            BlobTarget::resolve(&root(), "book_a", "content.epub", Access::Write).unwrap()
+        );
+        assert_eq!(
+            target.part_path(),
+            root()
+                .join("books")
+                .join("book_a")
+                .join("content.epub.part")
+        );
+        assert_eq!(
+            BlobTarget::of_part(&root(), "b", "cover.jpg.part")
+                .unwrap()
+                .name(),
+            "cover.jpg"
+        );
+    }
+
+    #[test]
+    fn of_part_refuses_everything_that_is_not_a_written_names_part() {
+        // Not a `.part` at all, a `.part` of a name outside the closed set, a
+        // `.part` of the read-only legacy cover (never written, so never ours
+        // to collect), the bare suffix, and a folder outside the grammar —
+        // each refused, so the sweep can only ever remove what a fetch left.
+        for (folder, name, expected) in [
+            ("b", "content.epub", "invalidBlobName"),
+            ("b", "notes.txt.part", "invalidBlobName"),
+            ("b", "book.json.part", "invalidBlobName"),
+            ("b", "content.exe.part", "invalidBlobName"),
+            ("b", "cover.webp.part", "readOnlyBlobName"),
+            ("b", ".part", "invalidBlobName"),
+            ("b", "content.epub.part.part", "invalidBlobName"),
+            ("b", "", "invalidBlobName"),
+            ("../b", "content.epub.part", "invalidFolder"),
+        ] {
+            assert_eq!(
+                kind(BlobTarget::of_part(&root(), folder, name)),
+                expected,
+                "{folder:?}/{name:?}"
             );
         }
     }

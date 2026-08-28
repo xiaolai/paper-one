@@ -5,8 +5,17 @@
 //! The file is written to a temp sibling and renamed into place, so it is
 //! either absent (generate) or complete (load) — never a short file that
 //! would brick every pairing on the next launch. A file of the wrong length
-//! is reported, not overwritten. Mode 0600 on Unix; the directory `peer/` is
-//! what the mobile shells exclude from backups (plan III.2.7).
+//! is reported, not overwritten. Mode 0600 on Unix.
+//!
+//! The directory `peer/` is kept out of backups, because a backup that
+//! carries the key restores as THIS peer: a Mac restored or migrated from
+//! another one comes back with the same endpoint id, and every device that
+//! paired with the original accepts both. On macOS the plugin marks the
+//! directory itself, here, with the attribute Time Machine reads
+//! ([`exclude_from_backup`]); the mobile shells do the same through their
+//! own APIs (plan III.2.7). Two live copies of one key still cannot be told
+//! apart by their id — that needs an instance identity outside `peer/`, which
+//! is `handover.md`'s design, not this file's.
 
 use std::path::{Path, PathBuf};
 
@@ -19,6 +28,16 @@ pub const PEER_DIR: &str = "peer";
 const KEY_FILE: &str = "identity.key";
 const KEY_LEN: u64 = 32;
 
+/// The marker Time Machine reads: the on-disk form of Foundation's
+/// `NSURLIsExcludedFromBackupKey` (`CSBackupSetItemExcluded` without
+/// `excludeByPath`) — an extended attribute on the item itself, so it
+/// travels with the directory and needs no admin-owned preference file.
+/// `tmutil isexcluded` reports it.
+#[cfg(target_os = "macos")]
+const BACKUP_EXCLUDE_XATTR: &str = "com.apple.metadata:com_apple_backup_excludeItem";
+#[cfg(target_os = "macos")]
+const BACKUP_EXCLUDE_VALUE: &[u8] = b"com.apple.backupd";
+
 /// `<root>/peer/identity.key`.
 pub fn key_path(root: &Path) -> PathBuf {
     root.join(PEER_DIR).join(KEY_FILE)
@@ -27,16 +46,67 @@ pub fn key_path(root: &Path) -> PathBuf {
 /// Load the key, or generate and persist one if there is none.
 pub fn load_or_create(root: &Path) -> Result<SecretKey> {
     let path = key_path(root);
-    match std::fs::metadata(&path) {
-        Ok(meta) => load(&path, meta.len()),
+    let key = match std::fs::metadata(&path) {
+        Ok(meta) => load(&path, meta.len())?,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             let key = SecretKey::generate();
             write_new(&path, &key)?;
-            Ok(key)
+            key
         }
-        Err(err) => Err(err.into()),
+        Err(err) => return Err(err.into()),
+    };
+    // On every load, not only at creation — the way the key's mode is
+    // re-asserted below: every install that exists today wrote `peer/`
+    // before this marker did, and loading is what reaches them.
+    exclude_from_backup(&root.join(PEER_DIR));
+    Ok(key)
+}
+
+/// Keep `peer/` out of Time Machine, so a restored or migrated Mac does not
+/// come back as the peer it was copied from. Set on `peer/` and nothing
+/// else — the library around it is exactly what a backup should carry.
+///
+/// Best effort, deliberately: a filesystem without extended attributes
+/// refuses it, and a device that cannot mark its directory must still be
+/// able to pair. The failure is logged, not raised.
+#[cfg(target_os = "macos")]
+fn exclude_from_backup(dir: &Path) {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(path) = CString::new(dir.as_os_str().as_bytes()) else {
+        log::warn!(
+            "peer: {} could not be excluded from backup: the path holds a NUL",
+            dir.display()
+        );
+        return;
+    };
+    let name = CString::new(BACKUP_EXCLUDE_XATTR).expect("a literal without NUL");
+    // SAFETY: two NUL-terminated strings that outlive the call, and a value
+    // buffer whose length is passed beside its pointer; `setxattr` copies the
+    // value and keeps no pointer to it.
+    let rc = unsafe {
+        libc::setxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            BACKUP_EXCLUDE_VALUE.as_ptr().cast(),
+            BACKUP_EXCLUDE_VALUE.len(),
+            0,
+            0,
+        )
+    };
+    if rc != 0 {
+        log::warn!(
+            "peer: {} could not be excluded from backup: {}",
+            dir.display(),
+            std::io::Error::last_os_error()
+        );
     }
 }
+
+/// Nothing to mark: Linux and Windows have no per-item backup exclusion, and
+/// the mobile shells own theirs (plan III.2.7).
+#[cfg(not(target_os = "macos"))]
+fn exclude_from_backup(_dir: &Path) {}
 
 fn load(path: &Path, len: u64) -> Result<SecretKey> {
     if len != KEY_LEN {
@@ -163,6 +233,79 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600, "mode was {mode:o}");
+    }
+
+    /// What Time Machine reads back: the exclusion xattr's value, or `None`
+    /// when the attribute is absent. `getxattr`, the syscall the marker is
+    /// stored through — not `tmutil`, whose answer for a path under `/tmp`
+    /// would fold in the system-wide exclusions and prove nothing about ours.
+    #[cfg(target_os = "macos")]
+    fn backup_exclusion(dir: &Path) -> Option<Vec<u8>> {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let path = CString::new(dir.as_os_str().as_bytes()).unwrap();
+        let name = CString::new(BACKUP_EXCLUDE_XATTR).unwrap();
+        let mut value = vec![0u8; 64];
+        let len = unsafe {
+            libc::getxattr(
+                path.as_ptr(),
+                name.as_ptr(),
+                value.as_mut_ptr().cast(),
+                value.len(),
+                0,
+                0,
+            )
+        };
+        if len < 0 {
+            let err = std::io::Error::last_os_error();
+            assert_eq!(err.raw_os_error(), Some(libc::ENOATTR), "{err}");
+            return None;
+        }
+        value.truncate(len as usize);
+        Some(value)
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_fresh_peer_directory_is_excluded_from_backup() {
+        let dir = ScratchDir::new("identity-backup");
+        assert_eq!(
+            backup_exclusion(dir.path()),
+            None,
+            "the root itself is not marked"
+        );
+        load_or_create(dir.path()).unwrap();
+        let peer_dir = dir.path().join(PEER_DIR);
+        assert_eq!(
+            backup_exclusion(&peer_dir).as_deref(),
+            Some(BACKUP_EXCLUDE_VALUE),
+            "peer/ carries the marker NSURLIsExcludedFromBackupKey writes"
+        );
+        assert_eq!(
+            backup_exclusion(dir.path()),
+            None,
+            "only peer/ is excluded, not the library around it"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_existing_peer_directory_gains_the_exclusion_on_load() {
+        // Every install that exists today has a `peer/` written before this
+        // marker was; loading, not only creating, is what reaches them.
+        let dir = ScratchDir::new("identity-backup-existing");
+        let key = SecretKey::generate();
+        let path = key_path(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, key.to_bytes()).unwrap();
+        let peer_dir = dir.path().join(PEER_DIR);
+        assert_eq!(backup_exclusion(&peer_dir), None);
+        let loaded = load_or_create(dir.path()).unwrap();
+        assert_eq!(loaded.public(), key.public());
+        assert_eq!(
+            backup_exclusion(&peer_dir).as_deref(),
+            Some(BACKUP_EXCLUDE_VALUE)
+        );
     }
 
     #[cfg(unix)]

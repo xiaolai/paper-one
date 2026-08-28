@@ -8,8 +8,9 @@
 //! once; every later call gets the same node back. Events go out through
 //! `app.emit` under the names in `events.rs`.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, Runtime};
 use tokio::sync::OnceCell;
 
@@ -23,6 +24,13 @@ use crate::role::local_role;
 #[derive(Default)]
 pub struct PeerState {
     node: OnceCell<Arc<Node>>,
+    /// The launch sweep of abandoned `.part` files
+    /// (`blobs::sweep_abandoned_parts`), awaited once before the node starts.
+    /// The node is the only route to a transfer, so ordering the two is what
+    /// guarantees no fetch resumes from a file the sweep is about to unlink —
+    /// and it lets the sweep leave the main thread at launch. `None` once
+    /// awaited, or when setup scheduled nothing.
+    before_start: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl std::fmt::Debug for PeerState {
@@ -39,6 +47,7 @@ impl PeerState {
     pub async fn node<R: Runtime>(&self, app: &AppHandle<R>) -> Result<Arc<Node>> {
         self.node
             .get_or_try_init(|| async {
+                self.await_before_start().await;
                 let root = data_root(app)?;
                 let role = local_role(&root)?;
                 let sink = tauri_sink(app.clone());
@@ -46,6 +55,33 @@ impl PeerState {
             })
             .await
             .cloned()
+    }
+
+    /// A task the node must not start before. Setup schedules the `.part`
+    /// sweep through this; a second call replaces the first, which is why
+    /// there is one caller.
+    pub fn start_after(&self, task: JoinHandle<()>) {
+        *self
+            .before_start
+            .lock()
+            .expect("before_start is never poisoned") = Some(task);
+    }
+
+    async fn await_before_start(&self) {
+        // Taken out under the lock, awaited outside it: a `std::sync::Mutex`
+        // guard must not live across an await.
+        let pending = self
+            .before_start
+            .lock()
+            .expect("before_start is never poisoned")
+            .take();
+        if let Some(task) = pending {
+            // A sweep that panicked is a logged failure, not a node that never
+            // starts.
+            if let Err(err) = task.await {
+                log::warn!("peer: the .part sweep did not finish: {err}");
+            }
+        }
     }
 
     /// Close the node if it was ever started. Waits for the QUIC close to go
