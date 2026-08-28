@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -81,6 +81,16 @@ describe('the built CLI', () => {
       path.join(publicDir, residue),
       path.join(REPO_ROOT, OUT_DIR, residue),
     ]
+    /* BOTH DIRECTORIES ARE UNTRACKED, so a fresh checkout has neither and
+     * planting into them threw `ENOENT` before this line ever ran. `public/`
+     * has no tracked file at all — git does not create it — and `bin/` is a
+     * build output; on a developer's machine both are left over from an
+     * earlier build, which is the only reason this test has ever passed. It
+     * failed on all three CI legs the first time the gate got far enough to
+     * run it. Creating them is the fixture's own job: `build-cli.mjs` already
+     * treats a missing `public/` as no residue (`removePublicResidue`), so
+     * the script under test was never the thing that needed a directory. */
+    for (const plant of plants) mkdirSync(path.dirname(plant), { recursive: true })
     for (const plant of plants) writeFileSync(plant, `${path.basename(plant)}: for the purposes of this test\n`)
     try {
       const result = spawnSync('node', [path.join(REPO_ROOT, 'scripts', 'build-cli.mjs')], {
