@@ -1689,6 +1689,8 @@ export function App({ services, fs, shelfUnread = false, composition, beforeWind
             onGoTo={jumpTo}
             onDeleteMark={marking.unmark}
             markFocus={marking.focus}
+            onMarkFocusDone={marking.clearFocus}
+            selection={marking.selection?.text ?? null}
             /* The one place the app decides what the companion is — and this
                IS the line the old comment said would change when a provider
                arrived. It reads the kernel's port rather than a constant, so

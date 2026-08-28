@@ -397,6 +397,16 @@ export interface MarginaliaProps {
    */
   focus?: MarkFocus | null
   /**
+   * Called ONCE per request, when `focus` has been acted on, with its nonce.
+   *
+   * The owner clears the request on hearing this — see `Marking.clearFocus`.
+   * Without it the request outlives its answer: it stays in the owner's state
+   * for the session, and a remount of this panel (Contents and back) finds it
+   * again and honours it again. Optional because a host that never sends a
+   * request — the browser client — has nothing to clear.
+   */
+  onFocusDone?: ((nonce: number) => void) | undefined
+  /**
    * Whether a book is on the shelf, and so can be opened at all.
    *
    * WHAT DECIDES A CROSS-BOOK ROW'S REACHABILITY. Asked separately from
@@ -417,6 +427,7 @@ export function Marginalia({
   onDeleteBookmark,
   platform,
   focus,
+  onFocusDone,
   onGoTo,
   onShelf,
   now: injectedNow,
@@ -506,27 +517,55 @@ export function Marginalia({
     return books.flatMap((id) => (byBook.get(id) ?? []).sort(compareMarks))
   }, [inScope, filter, bookId])
 
-  /* Reveal whatever was asked for.
+  /* Reveal whatever was asked for — ONCE per request.
    *
    * The filter is cleared first when it would hide the mark: asking to see a
    * highlight while the list is filtered to Notes would otherwise scroll to a
    * row that is not rendered, which looks exactly like the click doing
-   * nothing. Keyed on the whole focus object, nonce included, so asking twice
-   * for the same mark works twice. */
+   * nothing. Keyed on the nonce, so asking twice for the same mark works
+   * twice.
+   *
+   * ⚠️ HONOURED ONCE, AND THAT IS THE WHOLE DEFECT THIS USED TO HAVE. The
+   * effect depends on `everything`, and `everything` republishes after every
+   * write — the note's own save included — so a request that was merely
+   * DELIVERED was acted on again on every one of them: the editor the reader
+   * had just closed re-opened, and a mark made anywhere afterwards re-opened
+   * it once more and pulled keyboard focus out of the book. "The first blur
+   * doesn't stick" was how it read. `honoured` remembers the nonce this panel
+   * has already answered; the owner is told so it can clear the request,
+   * which is what stops a remount finding it again.
+   *
+   * `everything` STAYS A DEPENDENCY, deliberately: `marks.all` is empty until
+   * `loadAll` has run, and the panel mounts on the very click that asks for
+   * the mark — so on a first open the request arrives BEFORE the row it names
+   * and has to wait for the list. Reading the list through a ref would drop
+   * exactly that case. A request honoured once is not a request that may only
+   * be looked at once. */
+  const honoured = useRef(0)
+  const frame = useRef(0)
+  /** The row the last request revealed — tinted, so the reader can find it. */
+  const [revealed, setRevealed] = useState<string | null>(null)
   useEffect(() => {
-    if (!focus) return
+    if (!focus || focus.nonce === honoured.current) return
     const target = everything.find((mark) => mark.id === focus.id)
     if (!target) return
+    honoured.current = focus.nonce
+    setRevealed(focus.id)
     if (!matches(target, filter)) setFilter('All')
     if (focus.edit) setEditing(focus.id)
-    // After paint, so the row exists to scroll to when the filter just changed.
-    const frame = requestAnimationFrame(() => {
+    /* After paint, so the row exists to scroll to when the filter just
+       changed. Not cancelled when the deps change — a later republish would
+       otherwise cancel the scroll the request was for — only on unmount,
+       below; a frame whose row has gone finds nothing and does nothing. */
+    cancelAnimationFrame(frame.current)
+    frame.current = requestAnimationFrame(() => {
       rows.current.get(focus.id)?.scrollIntoView({ block: 'nearest' })
     })
-    return () => cancelAnimationFrame(frame)
+    onFocusDone?.(focus.nonce)
     // `filter` is deliberately absent: this reacts to a focus request, not to
     // the reader changing the filter themselves afterwards.
-  }, [focus, everything])
+  }, [focus, everything, onFocusDone])
+  useEffect(() => () => cancelAnimationFrame(frame.current), [])
 
   /* Counted from what exists rather than written as prose: the fixture said
    * "1,204 highlights · 318 notes" under a list of three. Counted over the
@@ -634,7 +673,7 @@ export function Marginalia({
              gold rule meaning nothing. `data-place` suppresses it. */
           data-place={isBookmark(mark) ? 'true' : undefined}
           data-tint={isBookmark(mark) ? undefined : mark.tint}
-          data-focused={mark.id === focus?.id}
+          data-focused={mark.id === revealed}
         >
           {/* THE WORK, on rows that are not from the open book. Above whatever
               the row goes on to say about the place inside it.

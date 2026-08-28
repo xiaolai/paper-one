@@ -117,6 +117,19 @@ export interface SidePaneProps {
   onDeleteMark: (mark: Annotation) => void
   /** The mark Notes should reveal, if one has been asked for. */
   markFocus: MarkFocus | null
+  /** Notes has revealed it — the request is spent. See `Marking.clearFocus`. */
+  onMarkFocusDone: (nonce: number) => void
+  /**
+   * The reader's live selection, as text, for the companion.
+   *
+   * REQUIRED, NOT OPTIONAL. `Companion` takes `selection` and defaults it to
+   * null, and this pane mounted it without one — so every question ever asked
+   * went out with no passage, while `core/companion.ts`, the ledger and
+   * `numberPassages` all described one. An optional prop is a prop a host can
+   * forget with nothing said; a required one is the compile-time half of
+   * `SidePane.test.tsx`.
+   */
+  selection: string | null
   /**
    * The companion's provider.
    *
@@ -195,6 +208,8 @@ export function SidePane({
   onGoTo,
   onDeleteMark,
   markFocus,
+  onMarkFocusDone,
+  selection,
   companion,
   companionPassages,
   books,
@@ -242,6 +257,7 @@ export function SidePane({
             hasBook={book.source !== null}
             provider={companion}
             bookTitle={books.find((row) => row.bookId === book.bookId)?.title ?? ''}
+            selection={selection}
             passages={companionPassages ?? (() => [])}
             /* A bare cfi IS a `JumpTarget` — the union's string arm — so a
                citation navigates through exactly the path a search hit does,
@@ -269,6 +285,7 @@ export function SidePane({
                questions, both answered where the list already is. */
             onShelf={(id) => books.some((entry) => entry.bookId === id)}
             focus={markFocus}
+            onFocusDone={onMarkFocusDone}
             {...(onGoTo ? { onGoTo } : {})}
           />
         )}
@@ -284,7 +301,10 @@ export function SidePane({
           />
         )}
 
-        {pane === 'search' && <SearchPanel book={book} />}
+        {/* A hit is a jump like any other panel's — through `onGoTo`, so it
+            enters the stack and raises "← Back to". Mounted without it, the
+            panel navigated on its own and the ledger's promise was a row. */}
+        {pane === 'search' && <SearchPanel book={book} {...(onGoTo ? { onGoTo } : {})} />}
 
         {pane === 'settings' && (
           <Settings

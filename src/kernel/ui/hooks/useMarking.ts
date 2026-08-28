@@ -58,6 +58,23 @@ export interface Marking {
   readonly focus: MarkFocus | null
   /** Ask Notes to show a mark — and to open its editor when `edit`. */
   focusMark: (id: string, edit?: boolean) => void
+  /**
+   * The panel's answer: the request carrying `nonce` has been honoured.
+   *
+   * A REQUEST IS CONSUMED, NOT MERELY DELIVERED. `focus` used to sit in state
+   * for the life of the session — nothing ever cleared it — so every render of
+   * the panel that re-examined it acted on it again: the editor the reader
+   * had just closed re-opened on the marks republishing after its own save,
+   * and a mark made anywhere afterwards re-opened it once more. The panel
+   * guards against a repeat itself; this is what stops a REMOUNT — switching
+   * to Contents and back — from finding the stale request and honouring it a
+   * second time.
+   *
+   * BY NONCE, because a second request can land while the first is still
+   * being scrolled to, and a clear that did not check would throw the newer
+   * one away.
+   */
+  clearFocus: (nonce: number) => void
 }
 
 export function useMarking(book: Book, marks: MarksView): Marking {
@@ -196,6 +213,9 @@ export function useMarking(book: Book, marks: MarksView): Marking {
     nonce.current += 1
     setFocus({ id, edit, nonce: nonce.current })
   }, [])
+  const clearFocus = useCallback((done: number) => {
+    setFocus((current) => (current?.nonce === done ? null : current))
+  }, [])
 
   const unmark = useCallback(
     (target: Annotation) => {
@@ -228,7 +248,8 @@ export function useMarking(book: Book, marks: MarksView): Marking {
       unmark,
       focus,
       focusMark,
+      clearFocus,
     }),
-    [selection, ranges, onMarkDrawn, selected, mark, unmark, focus, focusMark],
+    [selection, ranges, onMarkDrawn, selected, mark, unmark, focus, focusMark, clearFocus],
   )
 }
