@@ -50,7 +50,7 @@ pub mod pipe;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime};
 
 use tokio::sync::oneshot;
 
@@ -64,7 +64,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use paper_webauth::sessions::{Credential, Sessions, CREDENTIAL_TTL};
+use paper_webauth::sessions::{Credential, Outcome as Saved, SessionId, Sessions, CREDENTIAL_TTL};
 use paper_webauth::{DeviceAuth, Outcome, Refused};
 use pipe::{Pipe, Push, WebSessionId, MAX_FRAME, OUTBOUND_CAP};
 use serde::Deserialize;
@@ -187,15 +187,43 @@ pub struct WebHost {
 }
 
 impl WebHost {
+    /// A host whose credential set lives in memory — tests, and a shelf whose
+    /// session file could not be read.
     pub fn new() -> Self {
+        Self::with_sessions(Sessions::new())
+    }
+
+    /// A host over a credential set the caller opened — `Sessions::persisted`
+    /// for a shelf that must remember its browsers across a restart.
+    pub fn with_sessions(sessions: Sessions) -> Self {
         Self {
             auth: DeviceAuth::new(),
-            sessions: Sessions::new(),
+            sessions,
             pipe: Pipe::new(),
             admit_gate: Mutex::new(None),
             admit_release: Mutex::new(None),
             failed_upgrades: AtomicUsize::new(0),
         }
+    }
+
+    /// Sign out every browser: the "this laptop was stolen" button.
+    ///
+    /// All four things plan §7 says a revocation touches, for the whole set at
+    /// once: the credentials are forgotten (and the generation moves, so an
+    /// admission already in flight for ANY of them fails), every socket is
+    /// closed, and the pairing material on screen — the live six-digit code,
+    /// which is the only pairing secret this design has — is retired, so a
+    /// code the reader had just shown cannot be spent after they pressed the
+    /// button. The router's grant cache empties with the sockets.
+    ///
+    /// `applied` is what was signed out; `saved` says whether the disk agrees.
+    /// The order matters and is the same as `signout`'s: forget first, so a
+    /// reconnect cannot slip in between, then close.
+    pub fn revoke_all(&self) -> Saved<Vec<SessionId>> {
+        let revoked = self.sessions.revoke_all();
+        self.pipe.close_all("revoked");
+        self.auth.cancel();
+        revoked
     }
 
     /// How many handshakes opened a pipe record and then never became a
@@ -445,11 +473,12 @@ impl<S: Sync> FromRequestParts<S> for SameOrigin {
 /// It also means one implementation for every authenticated route rather than
 /// the same three lines copied per handler.
 pub struct Admitted {
-    pub session: paper_webauth::sessions::SessionId,
+    pub session: SessionId,
     pub credential: Credential,
     /// When this credential stops being good — carried so the SOCKET can act
-    /// on it. See `pump`, and `Admission::expires_at`.
-    pub expires_at: Instant,
+    /// on it. See `pump`, and `Admission::expires_at`. Wall-clock, because the
+    /// credential set is on disk and a monotonic instant cannot be.
+    pub expires_at: SystemTime,
 }
 
 impl FromRequestParts<Arc<WebHost>> for Admitted {
@@ -465,7 +494,7 @@ impl FromRequestParts<Arc<WebHost>> for Admitted {
          * second would reopen finding 7 exactly where it costs most. */
         let admission = state
             .sessions
-            .validate(&credential, Instant::now())
+            .validate(&credential, SystemTime::now())
             .map_err(|_| StatusCode::UNAUTHORIZED)?;
         let expires_at = admission.expires_at();
         let session = state
@@ -489,6 +518,7 @@ impl FromRequestParts<Arc<WebHost>> for Admitted {
 async fn submit(
     _same_origin: SameOrigin,
     State(state): State<Arc<WebHost>>,
+    request_headers: axum::http::HeaderMap,
     Json(body): Json<SubmitBody>,
 ) -> Result<Response, StatusCode> {
     let now = Instant::now();
@@ -505,7 +535,23 @@ async fn submit(
 
     match state.auth.submit(reservation, body.code.as_bytes(), now) {
         Outcome::Granted(granted) => {
-            let credential = state.sessions.issue(granted, now);
+            /* THE DEVICE, AS THE PANE WILL NAME IT. Derived here, at pairing
+             * time, from the one thing the browser says about itself. */
+            let label = device_label(
+                request_headers
+                    .get(header::USER_AGENT)
+                    .and_then(|value| value.to_str().ok()),
+            );
+            /* A CREDENTIAL THAT CANNOT BE SAVED IS NOT ISSUED. It would work
+             * until the next restart and then vanish under a cookie promising
+             * ninety days; the disk is the reason, and the reason is logged. */
+            let credential = match state.sessions.issue(granted, SystemTime::now(), &label) {
+                Ok(credential) => credential,
+                Err(error) => {
+                    log::error!("webhost: could not save the new browser session: {error}");
+                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                }
+            };
             let mut response = StatusCode::NO_CONTENT.into_response();
             response.headers_mut().insert(
                 header::SET_COOKIE,
@@ -555,8 +601,19 @@ async fn signout(
          * a credential that is still good. `Sessions::revoke` warns that
          * forgetting alone leaves an open socket answering requests — this is
          * the call that stops it. */
-        let _ = state.sessions.revoke(&credential);
-        state.pipe.close_credential(&credential, "revoked");
+        let revoked = state.sessions.revoke(&credential);
+        if let Some(browser) = revoked.applied {
+            state.pipe.close_browser(browser, "revoked");
+        }
+        /* SIGNED OUT NOW; MAYBE NOT AFTER A RESTART. The browser is gone
+         * either way, and there is nobody on this request to tell but the
+         * log — the shelf's owner is not the one who pressed the button. */
+        if let Err(error) = revoked.saved {
+            log::error!(
+                "webhost: a browser signed out but the change could not be saved, so it may \
+                 be back after a restart: {error}"
+            );
+        }
     }
     let mut response = StatusCode::NO_CONTENT.into_response();
     response.headers_mut().insert(
@@ -600,10 +657,7 @@ async fn upgrade(
     /* THE ADMISSION WINDOW, held open for a test that asks. Admission has
      * succeeded; the pipe record does not exist yet. See `pause_before_open`. */
     state.admit_gate().await;
-    let Ok(socket) = state
-        .pipe
-        .open(admitted.session, admitted.credential.clone(), outbound)
-    else {
+    let Ok(socket) = state.pipe.open(admitted.session, outbound) else {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     };
 
@@ -626,7 +680,7 @@ async fn upgrade(
      * reaches us. There is no third arrangement. */
     if state
         .sessions
-        .validate(&admitted.credential, Instant::now())
+        .validate(&admitted.credential, SystemTime::now())
         .is_err()
     {
         state.pipe.close(socket, "revoked before registration");
@@ -687,7 +741,7 @@ async fn pump(
     socket: WebSessionId,
     mut ws: WebSocket,
     mut outbound: mpsc::Receiver<Vec<u8>>,
-    expires_at: Instant,
+    expires_at: SystemTime,
 ) {
     /* THE CREDENTIAL'S OWN DEADLINE, ON THE SOCKET.
      *
@@ -698,10 +752,14 @@ async fn pump(
      * connecting. The whole point of an absolute ceiling is that a browser
      * forgotten on a borrowed laptop stops working on its own, and it did not.
      *
-     * `tokio::time::Instant` from a `std::time::Instant`: the deadline is a
-     * point, so the remaining duration is what carries across. Saturating,
-     * because a credential can be past its ceiling before this runs. */
-    let remaining = expires_at.saturating_duration_since(Instant::now());
+     * A `tokio::time::Sleep` from a wall-clock `SystemTime`: the deadline is
+     * a point, so the remaining duration is what carries across. Zero, not an
+     * error, when a credential is already past its ceiling — or when the
+     * clock went backwards, which reads as "already expired" and closes,
+     * the safe direction. */
+    let remaining = expires_at
+        .duration_since(SystemTime::now())
+        .unwrap_or(Duration::ZERO);
     let expiry = tokio::time::sleep(tokio::time::Duration::from_secs_f64(
         remaining.as_secs_f64().min(u32::MAX as f64),
     ));
@@ -865,6 +923,59 @@ async fn pump(
 
     state.pipe.close(socket, "socket ended");
     state.pipe.reap(socket);
+}
+
+/// The device a browser is on, as the Browsers pane will name it — "Safari on
+/// iPhone" — derived from its `User-Agent` at pairing time.
+///
+/// A HANDFUL OF PATTERNS, NOT A PARSER. The pane's job is to let a reader tell
+/// their phone from their laptop when deciding what to revoke; the family and
+/// the platform do that, and everything finer would be a library. The order
+/// of the browser checks is the one that works: Chrome and Edge both say
+/// `Safari/`, Edge also says `Chrome/`, and Firefox on iOS says `FxiOS`.
+///
+/// ⚠️ THE RAW STRING IS NEVER STORED. It is input from the network, chosen by
+/// whatever reached the port, so the label is built from the match and not
+/// from the text — an unknown agent is "A browser", not the first eighty
+/// bytes of whatever it sent. `Sessions` bounds the label again on the way in.
+pub fn device_label(user_agent: Option<&str>) -> String {
+    let Some(ua) = user_agent else {
+        return "A browser".to_owned();
+    };
+    let browser = if ua.contains("Firefox/") || ua.contains("FxiOS/") {
+        "Firefox"
+    } else if ua.contains("Edg/") || ua.contains("EdgiOS/") {
+        "Edge"
+    } else if ua.contains("OPR/") {
+        "Opera"
+    } else if ua.contains("Chrome/") || ua.contains("CriOS/") {
+        "Chrome"
+    } else if ua.contains("Safari/") {
+        "Safari"
+    } else {
+        "A browser"
+    };
+    let device = if ua.contains("iPhone") {
+        Some("iPhone")
+    } else if ua.contains("iPad") {
+        Some("iPad")
+    } else if ua.contains("Android") {
+        Some("Android")
+    } else if ua.contains("Macintosh") {
+        Some("Mac")
+    } else if ua.contains("Windows") {
+        Some("Windows")
+    } else if ua.contains("CrOS") {
+        Some("Chromebook")
+    } else if ua.contains("Linux") {
+        Some("Linux")
+    } else {
+        None
+    };
+    match device {
+        Some(device) => format!("{browser} on {device}"),
+        None => browser.to_owned(),
+    }
 }
 
 #[cfg(test)]
@@ -1141,17 +1252,14 @@ mod tests {
         // A socket the browser already holds, admitted the ordinary way.
         let admission = state
             .sessions
-            .validate(&credential, Instant::now())
+            .validate(&credential, SystemTime::now())
             .expect("valid");
         let admitted = state.sessions.admit(admission).expect("admitted");
         /* `_rx` is bound, not dropped: dropping the receiver closes the
          * channel, and a later `send` would then say `Gone` for a reason that
          * has nothing to do with what this test is about. */
         let (tx, _rx) = tokio::sync::mpsc::channel(crate::pipe::OUTBOUND_CAP);
-        let socket = state
-            .pipe
-            .open(admitted, credential.clone(), tx)
-            .expect("a live socket");
+        let socket = state.pipe.open(admitted, tx).expect("a live socket");
         assert_eq!(state.pipe.live_count(), 1);
 
         let _ = call(
@@ -1629,6 +1737,138 @@ mod tests {
                 "the upgrade must set {call}: without it axum assembles up to its own 64 MiB \
                  default before Pipe::push refuses the frame, which is the memory this cap exists \
                  to refuse spending"
+            );
+        }
+    }
+
+    /// THE DEVICE LABEL NAMES THE FAMILY AND THE PLATFORM, and nothing else.
+    #[test]
+    fn a_user_agent_becomes_a_label_a_reader_can_tell_their_devices_apart_by() {
+        let cases = [
+            (
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 \
+                 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
+                "Safari on iPhone",
+            ),
+            (
+                "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) \
+                 Chrome/126.0.0.0 Mobile Safari/537.36",
+                "Chrome on Android",
+            ),
+            (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 (KHTML, like \
+                 Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0",
+                "Edge on Mac",
+            ),
+            (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0",
+                "Firefox on Windows",
+            ),
+            (
+                "Mozilla/5.0 (iPad; CPU OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like \
+                 Gecko) FxiOS/127.0 Mobile/15E148 Safari/605.1.15",
+                "Firefox on iPad",
+            ),
+            ("curl/8.6.0", "A browser"),
+        ];
+        for (ua, expected) in cases {
+            assert_eq!(device_label(Some(ua)), expected, "{ua}");
+        }
+        assert_eq!(device_label(None), "A browser");
+    }
+
+    /// AND NEVER THE RAW STRING. A user agent is chosen by whatever reached
+    /// the port; the label is built from what matched, not from the text.
+    #[test]
+    fn a_hostile_user_agent_does_not_reach_the_label() {
+        let hostile =
+            "Mozilla/5.0 (iPhone) <script>alert(1)</script>\n\x1b[31m Safari/604.1 ".repeat(50);
+        let label = device_label(Some(&hostile));
+        assert_eq!(label, "Safari on iPhone");
+    }
+
+    /// A SIGN-IN RECORDS THE DEVICE, from the request that made it.
+    #[tokio::test]
+    async fn signing_in_records_the_device_the_pane_will_show() {
+        let state = host();
+        let code = live_code(&state);
+        let mut request = json_post("/api/auth/submit", &format!(r#"{{"code":"{code}"}}"#), None);
+        request.headers_mut().insert(
+            header::USER_AGENT,
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 \
+             (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
+                .parse()
+                .expect("ascii"),
+        );
+        let response = call(Arc::clone(&state), request).await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let records = state.sessions.records(SystemTime::now());
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].label, "Safari on iPhone");
+    }
+
+    /// REVOKE-ALL TOUCHES ALL FOUR THINGS, and spares nothing.
+    ///
+    /// The credential set is emptied, every socket — connected or not — is
+    /// closed, an admission taken beforehand fails, and the code on screen is
+    /// retired: the six digits are the only pairing secret this design has,
+    /// and a code shown just before the button was pressed must not be
+    /// spendable just after.
+    #[tokio::test]
+    async fn revoking_everything_closes_every_socket_and_retires_the_code() {
+        let state = host();
+        let mut sockets = Vec::new();
+        let mut cookies = Vec::new();
+        let mut receivers = Vec::new();
+        for _ in 0..2 {
+            let cookie = granted_cookie(&state).await;
+            let value = cookie.split_once('=').expect("name=value").1.to_owned();
+            let credential = Credential::from_presented(&value);
+            let admission = state
+                .sessions
+                .validate(&credential, SystemTime::now())
+                .expect("valid");
+            let admitted = state.sessions.admit(admission).expect("admitted");
+            let (tx, rx) = tokio::sync::mpsc::channel(crate::pipe::OUTBOUND_CAP);
+            receivers.push(rx);
+            sockets.push(state.pipe.open(admitted, tx).expect("a socket"));
+            cookies.push(cookie);
+        }
+        /* An admission in flight for one of them, and a code on screen. */
+        let in_flight = state
+            .sessions
+            .validate(
+                &Credential::from_presented(cookies[0].split_once('=').expect("pair").1),
+                SystemTime::now(),
+            )
+            .expect("valid");
+        let _ = live_code(&state);
+        assert!(state.auth.reserve(Instant::now()).is_ok(), "a code is live");
+
+        let out = state.revoke_all();
+        assert_eq!(out.applied.len(), 2);
+        out.saved.expect("in memory, nothing to save");
+
+        assert_eq!(state.sessions.live_count(), 0);
+        assert_eq!(state.pipe.live_count(), 0, "every socket is closed");
+        for socket in sockets {
+            assert_eq!(state.pipe.closed_reason(socket).as_deref(), Some("revoked"));
+        }
+        assert_eq!(
+            state.sessions.admit(in_flight).err(),
+            Some(paper_webauth::sessions::Rejected::RevokedMeanwhile)
+        );
+        assert_eq!(
+            state.auth.reserve(Instant::now()).err(),
+            Some(Refused::NoOffer),
+            "the code on screen is retired with the browsers"
+        );
+        for cookie in cookies {
+            assert_eq!(
+                call(Arc::clone(&state), get("/api/auth/session", Some(&cookie)))
+                    .await
+                    .status(),
+                StatusCode::UNAUTHORIZED
             );
         }
     }

@@ -172,6 +172,68 @@ describe('servePipe', () => {
     vi.useRealTimers()
   })
 
+  /**
+   * BACKPRESSURE IS A WAIT, NOT A FAILURE.
+   *
+   * ⚠️ The plugin used to answer `backpressure` the instant a browser's budget
+   * was full, and this pump treated EVERY rejected send as a dead session —
+   * `onError`, then `close`. `content.read` yields 512 KiB chunks as fast as
+   * IPC accepts them, the session budget is 8 MiB, and every book larger than
+   * twelve chunks aborted mid-stream on the phone, under a variant whose own
+   * doc said "NOT an error… retry".
+   *
+   * The wait lives in Rust now (`Pipe::send_wait`): `webhost_send` holds the
+   * call until room appears and answers only then. So what this pump has to
+   * do is the thing it already did — AWAIT the send — and what it must not do
+   * is treat a slow answer as a lost session. The wire below holds the first
+   * frame for a while, the way a plugin waiting on a full browser does; the
+   * frame must arrive once, late, with nothing reported and nothing closed.
+   */
+  it('awaits a send the plugin is holding for room, rather than closing the session', async () => {
+    vi.useFakeTimers()
+    const onError = vi.fn()
+    const inbox: Uint8Array[] = []
+    const client = createClient({ send: (bytes) => void inbox.push(bytes) })
+    let release: (() => void) | undefined
+    let sends = 0
+    const wire = fakeWire({
+      sessions: async () => [{ id: 1 }],
+      sessionRecv: async () => inbox.splice(0, inbox.length),
+      send: (_session, frame) => {
+        sends += 1
+        /* ROOM APPEARS LATER. The plugin is parked on its broadcast; the
+           promise it handed the webview is still pending. */
+        return new Promise<void>((resolve) => {
+          release = () => {
+            client.receive(frame)
+            resolve()
+          }
+        })
+      },
+    })
+    const pump = servePipe({ wire, services: [PING], pollMs: 5, sessionsMs: 10, onError })
+
+    const answer = client.call('example.ping', 'a slow phone')
+    let settled = false
+    void answer.then(() => (settled = true))
+    await tick(20)
+
+    /* Held, not failed: the session is still served, nothing was reported,
+       and the frame was offered exactly once — the retry is Rust's. */
+    expect(settled).toBe(false)
+    expect(pump.serving, 'a slow send was taken for a dead session').toBe(1)
+    expect(onError).not.toHaveBeenCalled()
+    expect(sends).toBe(1)
+
+    release?.()
+    await tick()
+    expect(await answer).toEqual({ echoed: 'a slow phone' })
+    expect(sends).toBe(1)
+
+    pump.stop()
+    vi.useRealTimers()
+  })
+
   it('serves a browser that arrives after it started', async () => {
     vi.useFakeTimers()
     const inbox: Uint8Array[] = []

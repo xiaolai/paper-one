@@ -41,6 +41,7 @@ use std::sync::Arc;
 
 pub use error::Error;
 
+use paper_webauth::sessions::Sessions;
 use paper_webhost::{router, WebHost};
 use state::WebHostState;
 use tauri::plugin::{Builder, TauriPlugin};
@@ -48,6 +49,13 @@ use tauri::{Manager, Runtime};
 
 /// The loopback port the browser client is served on. See the header.
 pub const WEBHOST_PORT: u16 = 27182;
+
+/// Where the browser credential set lives, under the data root. Beside the
+/// peer plugin's `peer/`, and for the same reason a directory rather than a
+/// file at the root: what this plugin keeps is one thing to find, back up or
+/// remove.
+pub const SESSIONS_DIR: &str = "webhost";
+pub const SESSIONS_FILE: &str = "sessions.json";
 
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
     Builder::new("webhost")
@@ -59,12 +67,47 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::webhost_sessions,
             commands::webhost_browsers,
             commands::webhost_revoke,
+            commands::webhost_revoke_all,
             commands::webhost_ready,
             commands::webhost_send,
             commands::webhost_session_recv,
         ])
         .setup(|app, _api| {
-            let host = Arc::new(WebHost::new());
+            /* THE BROWSERS SURVIVE A RESTART. The credential set was an
+             * in-memory map under a cookie promising ninety days, so every
+             * launch forgot every phone. It lives in `webhost/sessions.json`
+             * under the data root now, as hashes (WI-20.29; D6 in the
+             * phase-20 plan).
+             *
+             * A file this build cannot read — or a data root it cannot
+             * resolve — starts EMPTY and says so loudly. Empty is the safe
+             * direction: nobody is signed in, and the next sign-in writes a
+             * file this build can read. Silently reading a file wrongly is
+             * the direction that would keep a revoked browser alive. */
+            let sessions = match paper_data_root::data_root(app) {
+                Ok(root) => {
+                    let path = root.join(SESSIONS_DIR).join(SESSIONS_FILE);
+                    match Sessions::persisted(&path) {
+                        Ok(sessions) => sessions,
+                        Err(error) => {
+                            log::error!(
+                                "webhost: cannot read {}: {error}. Starting with no browsers \
+                                 signed in; every phone will need a new code.",
+                                path.display()
+                            );
+                            Sessions::new()
+                        }
+                    }
+                }
+                Err(error) => {
+                    log::error!(
+                        "webhost: cannot resolve the data root: {error}. Browser sessions will \
+                         not survive this run."
+                    );
+                    Sessions::new()
+                }
+            };
+            let host = Arc::new(WebHost::with_sessions(sessions));
             /* ONE managed value, and the commands take the same `Arc`.
              * Managing a second `WebHostState` beside it compiled, ran, and
              * was wrong: the server task set the bound port on one object

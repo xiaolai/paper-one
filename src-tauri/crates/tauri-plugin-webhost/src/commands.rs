@@ -66,6 +66,16 @@ pub struct Browser {
     /// Whether it is holding a socket right now. Shown, not enforced: a browser
     /// that is away is still a browser that can come back.
     pub connected: bool,
+    /// The device, as described when it paired — "Safari on iPhone". What a
+    /// reader tells their phone from their laptop by, when deciding which to
+    /// revoke; a bare number could not.
+    pub label: String,
+    /// Epoch milliseconds. When the six digits were typed.
+    pub created_ms: u64,
+    /// Epoch milliseconds, to the minute. The last handshake or client boot.
+    pub last_seen_ms: u64,
+    /// Epoch milliseconds. When the credential stops being good on its own.
+    pub expires_at_ms: u64,
 }
 
 #[command]
@@ -150,8 +160,20 @@ pub async fn webhost_revoke<R: Runtime>(
     state: State<'_, Arc<WebHostState>>,
     id: u64,
 ) -> Result<(), Error> {
-    state.revoke(id);
-    Ok(())
+    state.revoke(id)
+}
+
+/// Sign out every browser at once — the "this laptop was stolen" button.
+///
+/// Forgets every credential, closes every socket, retires the code on screen.
+/// Answers how many browsers went. `unsaved` means they went and the disk did
+/// not record it; see `WebHostState::revoke`.
+#[command]
+pub async fn webhost_revoke_all<R: Runtime>(
+    _app: AppHandle<R>,
+    state: State<'_, Arc<WebHostState>>,
+) -> Result<usize, Error> {
+    state.revoke_all()
 }
 
 /// The webview says it is serving the router.
@@ -171,6 +193,12 @@ pub async fn webhost_ready<R: Runtime>(
 }
 
 /// A frame from the webview to one browser.
+///
+/// ⚠️ **IT WAITS.** A browser that is not keeping up used to be answered
+/// `backpressure` at once, and the webview treated that as the session being
+/// dead. The plugin now waits for room — up to `WebHostState::SEND_WAIT` —
+/// and answers `backpressure` only after a browser has drained nothing for
+/// that long, at which point the socket is closed as well. See `state.rs`.
 #[command]
 pub async fn webhost_send<R: Runtime>(
     _app: AppHandle<R>,
@@ -178,7 +206,7 @@ pub async fn webhost_send<R: Runtime>(
     session: u64,
     frame: Vec<u8>,
 ) -> Result<(), Error> {
-    state.send(session, frame)
+    state.send(session, frame).await
 }
 
 /// Every frame waiting from one browser.

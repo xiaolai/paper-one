@@ -227,10 +227,10 @@ async fn a_signed_in_browser_appears_in_live_ids_while_its_socket_is_open() {
 
     let ids = shelf.state.pipe.live_ids();
     assert_eq!(ids.len(), 1);
-    /* AND IT KNOWS WHOSE IT IS. `close_credential` is how a sign-out reaches a
-     * live socket, and it can only do that if the record carries the
-     * credential. */
-    assert!(shelf.state.pipe.credential_of(ids[0]).is_some());
+    /* AND IT KNOWS WHOSE IT IS. `close_browser` is how a sign-out reaches a
+     * live socket, and it can only do that if the record carries the durable
+     * id of the browser that opened it. */
+    assert!(shelf.state.pipe.admitted(ids[0]).is_some());
 
     drop(socket);
 }
@@ -359,7 +359,7 @@ async fn a_frame_the_shelf_sends_reaches_the_browser() {
 #[tokio::test]
 async fn revoking_a_credential_closes_the_socket_the_browser_is_holding() {
     /* Adversarial suite 6, at the layer it actually happens. The in-process
-     * tests prove `close_credential` returns the ids; only a real socket can
+     * tests prove `close_browser` returns the ids; only a real socket can
      * show the client being disconnected. */
     let shelf = shelf().await;
     let code = live_code(&shelf);
@@ -367,13 +367,13 @@ async fn revoking_a_credential_closes_the_socket_the_browser_is_holding() {
     let mut socket = connect(&shelf, Some(&cookie)).await.expect("a socket");
     until("the session", || shelf.state.pipe.live_count() == 1).await;
 
-    let credential = shelf
+    let browser = shelf
         .state
         .pipe
-        .credential_of(shelf.state.pipe.live_ids()[0])
-        .expect("the credential behind the socket");
-    shelf.state.sessions.revoke(&credential);
-    shelf.state.pipe.close_credential(&credential, "signed out");
+        .admitted(shelf.state.pipe.live_ids()[0])
+        .expect("the browser behind the socket");
+    let _ = shelf.state.sessions.revoke_by_id(browser);
+    shelf.state.pipe.close_browser(browser, "signed out");
 
     /* THE CLIENT SEES IT END. Draining to `None` — or to a close or an error —
     is the socket going away; only the timeout can fail this, which is the
@@ -424,13 +424,13 @@ async fn a_revoked_browser_is_sent_nothing_that_was_already_queued() {
         shelf.state.pipe.send(id, SECRET.to_vec());
     }
 
-    let credential = shelf
+    let browser = shelf
         .state
         .pipe
-        .credential_of(id)
-        .expect("the credential behind the socket");
-    shelf.state.sessions.revoke(&credential);
-    shelf.state.pipe.close_credential(&credential, "signed out");
+        .admitted(id)
+        .expect("the browser behind the socket");
+    let _ = shelf.state.sessions.revoke_by_id(browser);
+    shelf.state.pipe.close_browser(browser, "signed out");
 
     /* Read everything the client is given until the socket ends. Any binary
      * frame arriving here arrived AFTER the revocation. */
@@ -481,18 +481,65 @@ async fn a_revoked_credential_cannot_open_a_second_socket() {
     let first = connect(&shelf, Some(&cookie)).await.expect("a socket");
     until("the session", || shelf.state.pipe.live_count() == 1).await;
 
-    let credential = shelf
+    let browser = shelf
         .state
         .pipe
-        .credential_of(shelf.state.pipe.live_ids()[0])
-        .expect("the credential");
-    shelf.state.sessions.revoke(&credential);
+        .admitted(shelf.state.pipe.live_ids()[0])
+        .expect("the browser");
+    let _ = shelf.state.sessions.revoke_by_id(browser);
 
     let refused = connect(&shelf, Some(&cookie))
         .await
         .expect_err("a revoked credential must not open another");
     assert!(refused.contains("401"), "expected unauthorized: {refused}");
     drop(first);
+}
+
+/// SIGNING OUT EVERY BROWSER ENDS EVERY SOCKET, over the real wire.
+///
+/// The in-process test proves the pipe records close and the code is retired;
+/// only real sockets can show two clients each LEARNING it, and each being
+/// refused on the way back with the cookie it still holds — which is what
+/// "the laptop was stolen" has to mean from the phone's side.
+#[tokio::test]
+async fn revoking_everything_ends_every_socket_and_refuses_every_cookie() {
+    let shelf = shelf().await;
+    let mut clients = Vec::new();
+    let mut cookies = Vec::new();
+    for _ in 0..2 {
+        let code = live_code(&shelf);
+        let cookie = sign_in(&shelf, &code).await;
+        clients.push(connect(&shelf, Some(&cookie)).await.expect("a socket"));
+        cookies.push(cookie);
+    }
+    until("both sessions", || shelf.state.pipe.live_count() == 2).await;
+
+    let out = shelf.state.revoke_all();
+    assert_eq!(out.applied.len(), 2, "both browsers are signed out");
+    out.saved.expect("in memory, nothing to save");
+
+    for mut socket in clients {
+        let ended = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(message) = socket.next().await {
+                if matches!(message, Ok(Message::Close(_)) | Err(_)) {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(ended.is_ok(), "every socket should have been closed");
+    }
+    until("every session to be released", || {
+        shelf.state.pipe.live_count() == 0
+    })
+    .await;
+
+    for cookie in cookies {
+        let refused = connect(&shelf, Some(&cookie))
+            .await
+            .expect_err("a signed-out cookie must not open a socket");
+        assert!(refused.contains("401"), "expected unauthorized: {refused}");
+    }
 }
 
 /// ⚠️ **A REVOCATION THAT LANDS BETWEEN ADMISSION AND `Pipe::open`.**
@@ -551,11 +598,13 @@ async fn a_revocation_inside_the_admission_window_leaves_no_socket() {
         "the seam should be before the pipe record exists"
     );
 
-    /* THE REVOCATION, in the window. `close_credential` finds nothing to close —
+    /* THE REVOCATION, in the window. `close_browser` finds nothing to close —
     that is the whole point — so only the re-check after registration can
     stop this socket. */
-    shelf.state.sessions.revoke(&credential);
-    shelf.state.pipe.close_credential(&credential, "revoked");
+    let revoked = shelf.state.sessions.revoke(&credential);
+    if let Some(browser) = revoked.applied {
+        shelf.state.pipe.close_browser(browser, "revoked");
+    }
 
     release
         .send(())

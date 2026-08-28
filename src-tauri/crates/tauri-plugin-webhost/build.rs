@@ -17,6 +17,7 @@ const COMMANDS: &[&str] = &[
     "webhost_sessions",
     "webhost_browsers",
     "webhost_revoke",
+    "webhost_revoke_all",
     "webhost_ready",
     "webhost_send",
     "webhost_session_recv",

@@ -20,3 +20,10 @@ rand = "0.10"
 # Constant-time comparison. The 6-digit code is a secret compared against
 # attacker-supplied input; `==` on bytes short-circuits and leaks position.
 subtle = "2"
+# THE SESSION FILE HOLDS `sha256(credential)`, never the credential (WI-20.29,
+# the phase-20 plan's D6). The same `sha2` the inference plugin already
+# resolves, so this is an edge in the graph and not a new crate.
+sha2 = "0.10"
+# The file's shape. Both already in this tree many times over.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

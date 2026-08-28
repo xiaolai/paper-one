@@ -17,6 +17,10 @@ tauri-plugin = { version = "2", features = ["build"] }
 tauri = { version = "2.11.3" }
 paper-webhost = { path = "../paper-webhost" }
 paper-webauth = { path = "../paper-webauth" }
+# Where `webhost/sessions.json` lives: ONE resolution of the data root, shared
+# with the app and the other plugins (see that crate's header for why it is
+# not a copy of forty lines).
+paper-data-root = { path = "../paper-data-root" }
 serde = { version = "1", features = ["derive"] }
 # `tailscale status --json` is a large document and the two facts wanted from it
 # sit inside a NAMED object. Read by hand, the search for `"DNSName"` ran from

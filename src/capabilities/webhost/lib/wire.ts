@@ -94,6 +94,31 @@ export interface Browser {
   readonly id: number
   /** Whether it is connected right now. Shown, not enforced. */
   readonly connected: boolean
+  /** The device, as described when it paired — "Safari on iPhone". What a
+   *  reader tells their phone from their laptop by. */
+  readonly label: string
+  /** Epoch milliseconds: when the six digits were typed. */
+  readonly createdMs: number
+  /** Epoch milliseconds, to the minute: the last handshake or client boot. */
+  readonly lastSeenMs: number
+  /** Epoch milliseconds: when the credential stops being good on its own. */
+  readonly expiresAtMs: number
+}
+
+/**
+ * The one refusal a revocation can answer with that is NOT a failure to
+ * revoke. `unsaved` means the browser IS cut off — the in-memory half never
+ * fails — and `webhost/sessions.json` could not be written, so after a restart
+ * it may be back. A pane that showed the bare code would read as "nothing
+ * happened", which is the wrong half of the truth; the sentence carries both.
+ */
+function explained(thrown: unknown): never {
+  if (thrown === 'unsaved') {
+    throw new Error(
+      'Signed out for now, but the change could not be saved — after Paper restarts this browser may be back. Check that Paper can write to its data folder.',
+    )
+  }
+  throw thrown
 }
 
 export interface WebHostWire {
@@ -102,7 +127,18 @@ export interface WebHostWire {
   ready(): Promise<void>
   /** Every frame waiting from one browser. Never waits; empty means nothing. */
   sessionRecv(session: number): Promise<readonly Uint8Array[]>
-  /** One frame back to a browser. */
+  /**
+   * One frame back to a browser. **Resolves when the frame is queued, which
+   * may be a while**: the plugin waits for the browser to make room (up to
+   * a minute) rather than refusing, so a pending promise here is backpressure
+   * working, not a session going away.
+   *
+   * ⚠️ It used to reject with `backpressure` the instant a budget was full,
+   * and the pump — which treats a rejected send as a dead session — closed
+   * the router connection. Every book larger than the 8 MiB session budget
+   * aborted mid-stream on the phone. A rejection now means the browser
+   * drained nothing for the whole wait and its socket has been closed.
+   */
   send(session: number, frame: Uint8Array): Promise<void>
   address(): Promise<WebHostAddress>
   beginCode(): Promise<CodeOffer>
@@ -113,6 +149,11 @@ export interface WebHostWire {
   browsers(): Promise<readonly Browser[]>
   /** Cut one off, by its DURABLE id from `browsers` — not a socket id. */
   revoke(id: number): Promise<void>
+  /**
+   * Sign out every browser: forgets every credential, closes every socket,
+   * retires the code on screen. Resolves to how many went.
+   */
+  revokeAll(): Promise<number>
 }
 
 export function tauriWire(): WebHostWire {
@@ -133,7 +174,8 @@ export function tauriWire(): WebHostWire {
     cancelCode: () => invoke<void>('plugin:webhost|webhost_cancel_code'),
     sessions: () => invoke<readonly BrowserSession[]>('plugin:webhost|webhost_sessions'),
     browsers: () => invoke<readonly Browser[]>('plugin:webhost|webhost_browsers'),
-    revoke: (id) => invoke<void>('plugin:webhost|webhost_revoke', { id }),
+    revoke: (id) => invoke<void>('plugin:webhost|webhost_revoke', { id }).catch(explained),
+    revokeAll: () => invoke<number>('plugin:webhost|webhost_revoke_all').catch(explained),
   }
 }
 
@@ -162,6 +204,12 @@ export function fakeWire(overrides: Partial<WebHostWire> = {}): WebHostWire {
          close. */
       paired = paired.filter((browser) => browser.id !== id)
       live = live.filter((session) => session.id !== id)
+    },
+    revokeAll: async () => {
+      const count = paired.length
+      paired = []
+      live = []
+      return count
     },
     ...overrides,
   }

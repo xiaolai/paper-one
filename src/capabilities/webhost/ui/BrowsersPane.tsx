@@ -202,6 +202,21 @@ function CopyableCode({ value, label }: { readonly value: string; readonly label
   )
 }
 
+/**
+ * "28 Aug, 10:12" — the moment, not a relative phrase. The pane re-reads the
+ * list every four seconds, and a "3 minutes ago" would need a clock of its own
+ * to stay true between reads; the shelf records last-seen to the minute, so
+ * the minute is what is shown.
+ */
+function seenAt(ms: number): string {
+  return new Date(ms).toLocaleString(undefined, {
+    day: 'numeric',
+    month: 'short',
+    hour: 'numeric',
+    minute: '2-digit',
+  })
+}
+
 export interface BrowsersPaneProps {
   readonly wire: WebHostWire
   /** Injected so a test need not wait four seconds to see a refresh. */
@@ -216,6 +231,10 @@ export function BrowsersPane({ wire, pollMs = POLL_MS }: BrowsersPaneProps) {
   /* Disables Hide while the shelf is being asked, so a second click cannot
      start a second cancellation of the same code. */
   const [hiding, setHiding] = useState(false)
+  /* Signing out EVERY browser is the one control on this pane that cannot be
+     undone one row at a time, so it asks once. `busy` keeps a second click
+     from starting a second sweep while the first is being answered. */
+  const [signOutAll, setSignOutAll] = useState<'idle' | 'confirm' | 'busy'>('idle')
   const [problem, setProblem] = useState<string | null>(null)
 
   /* THE BROWSERS, NOT THE SOCKETS.
@@ -357,6 +376,25 @@ export function BrowsersPane({ wire, pollMs = POLL_MS }: BrowsersPaneProps) {
     [refresh, wire],
   )
 
+  /**
+   * The "this laptop was stolen" button: every credential forgotten, every
+   * socket closed, the code on screen retired. The shelf answers how many went;
+   * the list is re-read afterwards rather than emptied here, because the shelf
+   * is the authority on who is signed in — the same rule `hide` follows.
+   */
+  const revokeAll = useCallback(async () => {
+    setProblem(null)
+    setSignOutAll('busy')
+    try {
+      await wire.revokeAll()
+    } catch (thrown) {
+      setProblem(thrown instanceof Error ? thrown.message : String(thrown))
+    } finally {
+      setSignOutAll('idle')
+    }
+    await refresh()
+  }, [refresh, wire])
+
   const unavailable = address !== null && address.kind === 'unavailable'
 
   return (
@@ -421,10 +459,16 @@ export function BrowsersPane({ wire, pollMs = POLL_MS }: BrowsersPaneProps) {
           </div>
           {browsers.map((browser) => (
             <div className={ui.row} key={browser.id}>
+              {/* THE DEVICE, NOT A NUMBER. "Browser 3" told a reader deciding
+                  what to revoke nothing they could act on; "Safari on iPhone,
+                  seen this morning" is the question answered. The label was
+                  derived from the browser's own description at pairing time
+                  and is bounded on the shelf, so it is safe to draw. */}
               <span className={ui.grow}>
-                Browser {browser.id}
+                {browser.label}
                 {browser.connected ? '' : ' — away'}
               </span>
+              <span className={ui.value}>seen {seenAt(browser.lastSeenMs)}</span>
               {/* Destructive and coloured rather than filled — `capability.css`
                   says a filled red block in a settings list reads as an alarm.
 
@@ -440,6 +484,43 @@ export function BrowsersPane({ wire, pollMs = POLL_MS }: BrowsersPaneProps) {
               </button>
             </div>
           ))}
+          {/* ONE ASK, INLINE. A dialog would be the app's only one; a button
+              that acts on the first click would be the only irreversible
+              control on the pane that does. The wording says what "all"
+              means — every phone types a code again — so the second click is
+              a decision and not a reflex. */}
+          {signOutAll === 'idle' ? (
+            <div className={ui.actions}>
+              <button type="button" className={ui.button} onClick={() => setSignOutAll('confirm')}>
+                Sign out all…
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className={ui.hint}>
+                Sign out all {browsers.length} browsers? Each will need a new code, and the code on
+                screen now stops working.
+              </div>
+              <div className={ui.actions}>
+                <button
+                  type="button"
+                  className={`${ui.button} ${ui.buttonDanger}`}
+                  onClick={() => void revokeAll()}
+                  disabled={signOutAll === 'busy'}
+                >
+                  {signOutAll === 'busy' ? 'Signing out…' : 'Sign out all'}
+                </button>
+                <button
+                  type="button"
+                  className={ui.button}
+                  onClick={() => setSignOutAll('idle')}
+                  disabled={signOutAll === 'busy'}
+                >
+                  Keep them
+                </button>
+              </div>
+            </>
+          )}
         </>
       )}
 

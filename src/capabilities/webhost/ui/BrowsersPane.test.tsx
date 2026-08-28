@@ -9,6 +9,21 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
+/** One fixed moment, so the pane's "seen" text is the same on every run. */
+const SEEN = Date.UTC(2026, 7, 28, 10, 12)
+
+/** A paired browser as the plugin lists one. */
+function browserRow(id: number, label: string, connected = true): Browser {
+  return {
+    id,
+    connected,
+    label,
+    createdMs: SEEN - 3_600_000,
+    lastSeenMs: SEEN,
+    expiresAtMs: SEEN + 90 * 86_400_000,
+  }
+}
+
 describe('BrowsersPane', () => {
   it('gives an address a phone can actually open, not a port number', async () => {
     /* A port is true and useless: a reader has to guess a hostname, and every
@@ -160,22 +175,94 @@ describe('BrowsersPane', () => {
   })
 
   it('lists paired browsers and revokes one', async () => {
-    let paired: Browser[] = [
-      { id: 1, connected: true },
-      { id: 2, connected: true },
-    ]
+    let paired: Browser[] = [browserRow(1, 'Safari on iPhone'), browserRow(2, 'Firefox on Mac')]
     const revoke = vi.fn(async (id: number) => {
       paired = paired.filter((browser) => browser.id !== id)
     })
     render(<BrowsersPane wire={fakeWire({ browsers: async () => paired, revoke })} />)
 
-    expect(await screen.findByText('Browser 1')).toBeTruthy()
-    expect(await screen.findByText('Browser 2')).toBeTruthy()
+    expect(await screen.findByText('Safari on iPhone')).toBeTruthy()
+    expect(await screen.findByText('Firefox on Mac')).toBeTruthy()
 
     fireEvent.click(screen.getAllByRole('button', { name: 'Revoke' })[0]!)
     expect(revoke).toHaveBeenCalledWith(1)
-    await waitFor(() => expect(screen.queryByText('Browser 1')).toBeNull())
-    expect(screen.getByText('Browser 2')).toBeTruthy()
+    await waitFor(() => expect(screen.queryByText('Safari on iPhone')).toBeNull())
+    expect(screen.getByText('Firefox on Mac')).toBeTruthy()
+  })
+
+  /**
+   * THE ROW NAMES THE DEVICE AND SAYS WHEN IT WAS LAST HERE. "Browser 3" told
+   * a reader deciding what to revoke nothing they could act on.
+   */
+  it('shows what each browser is, and when it was last seen', async () => {
+    render(
+      <BrowsersPane
+        wire={fakeWire({ browsers: async () => [browserRow(4, 'Chrome on Android', false)] })}
+      />,
+    )
+    expect(await screen.findByText(/Chrome on Android/)).toBeTruthy()
+    expect(screen.getByText(/away/)).toBeTruthy()
+    /* The minute, as the shelf records it — whatever the locale spells it. */
+    const expected = new Date(SEEN).toLocaleString(undefined, {
+      day: 'numeric',
+      month: 'short',
+      hour: 'numeric',
+      minute: '2-digit',
+    })
+    expect(screen.getByText(`seen ${expected}`)).toBeTruthy()
+    expect(screen.queryByText(/Browser 4/)).toBeNull()
+  })
+
+  /**
+   * SIGNING OUT EVERYONE ASKS ONCE, and does nothing until answered.
+   *
+   * The only control on the pane that cannot be undone a row at a time. The
+   * first click opens the question; the shelf is not touched until the
+   * second, and "Keep them" closes it having done nothing.
+   */
+  it('signs out every browser only after a confirmation', async () => {
+    let paired: Browser[] = [browserRow(1, 'Safari on iPhone'), browserRow(2, 'Firefox on Mac')]
+    const revokeAll = vi.fn(async () => {
+      const count = paired.length
+      paired = []
+      return count
+    })
+    render(<BrowsersPane wire={fakeWire({ browsers: async () => paired, revokeAll })} />)
+    expect(await screen.findByText('Safari on iPhone')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out all…' }))
+    expect(revokeAll, 'the first click must only ask').not.toHaveBeenCalled()
+    expect(screen.getByText(/Sign out all 2 browsers\?/)).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Keep them' }))
+    expect(revokeAll).not.toHaveBeenCalled()
+    expect(screen.getByText('Safari on iPhone')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out all…' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out all' }))
+    expect(revokeAll).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(screen.queryByText('Safari on iPhone')).toBeNull())
+    expect(screen.queryByText('Firefox on Mac')).toBeNull()
+    expect(screen.queryByText('Paired browsers')).toBeNull()
+  })
+
+  /**
+   * AN UNSAVED REVOCATION SAYS SO. The browser is cut off now; the disk did
+   * not record it. Both halves reach the reader, not a bare code.
+   */
+  it('says when a revocation held in memory but could not be saved', async () => {
+    const revoke = vi.fn(async () => {
+      throw new Error(
+        'Signed out for now, but the change could not be saved — after Paper restarts this browser may be back. Check that Paper can write to its data folder.',
+      )
+    })
+    render(
+      <BrowsersPane
+        wire={fakeWire({ browsers: async () => [browserRow(1, 'Safari on iPhone')], revoke })}
+      />,
+    )
+    fireEvent.click(await screen.findByRole('button', { name: 'Revoke' }))
+    expect(await screen.findByText(/could not be saved/)).toBeTruthy()
   })
 
   /**
@@ -191,11 +278,14 @@ describe('BrowsersPane', () => {
     const revoke = vi.fn(async () => {})
     render(
       <BrowsersPane
-        wire={fakeWire({ browsers: async () => [{ id: 7, connected: false }], revoke })}
+        wire={fakeWire({
+          browsers: async () => [browserRow(7, 'Chrome on Android', false)],
+          revoke,
+        })}
       />,
     )
 
-    expect(await screen.findByText(/Browser 7/)).toBeTruthy()
+    expect(await screen.findByText(/Chrome on Android/)).toBeTruthy()
     expect(screen.getByText(/away/)).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Revoke' }))
     expect(revoke).toHaveBeenCalledWith(7)

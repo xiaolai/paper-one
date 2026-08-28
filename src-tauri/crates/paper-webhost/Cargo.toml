@@ -16,6 +16,10 @@ serde = { version = "1", features = ["derive"] }
 # `sync` for the per-socket outbound channel, `rt` because the socket loop is a
 # task. Already in this tree; no new resolution.
 tokio = { version = "1", features = ["sync", "rt", "macros"] }
+# A sign-out whose revocation reached memory and not the disk has nobody to
+# tell but the log: the browser is gone either way, and the shelf's owner is
+# not on this request. Already in the tree.
+log = "0.4"
 
 [dev-dependencies]
 # `ServiceExt::oneshot` drives the router in-process, so the tests exercise the

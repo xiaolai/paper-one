@@ -3,8 +3,9 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use paper_webauth::sessions::SessionId;
 use paper_webhost::pipe::{Send, WebSessionId};
 use paper_webhost::WebHost;
 
@@ -154,7 +155,7 @@ impl WebHostState {
     /// now" is a question about the pipe and not a second piece of state to keep
     /// in step.
     pub fn browsers(&self) -> Vec<Browser> {
-        let open: Vec<_> = self
+        let open: Vec<SessionId> = self
             .host
             .pipe
             .live_ids()
@@ -163,11 +164,15 @@ impl WebHostState {
             .collect();
         self.host
             .sessions
-            .live_sessions()
+            .records(SystemTime::now())
             .into_iter()
-            .map(|id| Browser {
-                id: id.as_u64(),
-                connected: open.contains(&id),
+            .map(|record| Browser {
+                id: record.id.as_u64(),
+                connected: open.contains(&record.id),
+                label: record.label,
+                created_ms: epoch_ms(record.created),
+                last_seen_ms: epoch_ms(record.last_seen),
+                expires_at_ms: epoch_ms(record.expires_at),
             })
             .collect()
     }
@@ -176,25 +181,70 @@ impl WebHostState {
     ///
     /// Takes the DURABLE authorization id, not a socket id. Revoking by socket
     /// could only ever reach a browser that happened to be connected.
-    pub fn revoke(&self, id: u64) {
+    ///
+    /// `Err(Unsaved)` means the browser IS cut off and the disk did not take
+    /// it: after a restart it may be back. Both facts reach the pane.
+    pub fn revoke(&self, id: u64) -> Result<(), Error> {
         /* Forget the credential FIRST so a reconnect cannot slip through the
          * gap, then close whatever sockets it holds. `Sessions::revoke` alone
          * leaves an open socket answering requests, which its own doc comment
          * warns about — and a browser with no socket at all is exactly the case
          * this ordering has to cover, because there is nothing to close. */
-        if let Some(credential) = self
-            .host
-            .sessions
-            .revoke_by_id(paper_webauth::sessions::SessionId::from_u64(id))
-        {
-            self.host.pipe.close_credential(&credential, "revoked");
+        let revoked = self.host.sessions.revoke_by_id(SessionId::from_u64(id));
+        if let Some(browser) = revoked.applied {
+            self.host.pipe.close_browser(browser, "revoked");
         }
+        revoked
+            .saved
+            .map_err(|error| Error::Unsaved(error.to_string()))
     }
 
-    pub fn send(&self, session: u64, frame: Vec<u8>) -> Result<(), Error> {
-        match self.host.pipe.send(WebSessionId(session), frame) {
+    /// Sign out every browser. Returns how many. See `WebHost::revoke_all`
+    /// for the four things it touches; the `Err` is the same "applied, not
+    /// saved" answer `revoke` gives.
+    pub fn revoke_all(&self) -> Result<usize, Error> {
+        let revoked = self.host.revoke_all();
+        let count = revoked.applied.len();
+        revoked
+            .saved
+            .map(|()| count)
+            .map_err(|error| Error::Unsaved(error.to_string()))
+    }
+
+    /// How long a send waits for the browser to make room before the browser
+    /// is judged to have stopped.
+    ///
+    /// The wait ends the moment ANY room appears — one 512 KiB chunk written to
+    /// the socket frees that much — so this is not "drain 8 MiB in a minute",
+    /// it is "drain one chunk in a minute". A phone on a poor link manages
+    /// that; a phone whose page the OS has suspended, or a tab that closed
+    /// without the socket noticing, does not, and holding a router connection
+    /// open for it any longer only delays the reconnect the client will make.
+    const SEND_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+    /// A frame to one browser, WAITING for room rather than refusing.
+    ///
+    /// ⚠️ **THIS MAPPED `Backpressure` TO AN ERROR**, under a doc comment on
+    /// the variant saying "NOT an error… retry" — and the webview's pump does
+    /// not retry a rejected send; it closes the session as dead. Twelve 512 KiB
+    /// chunks of a book filled the session's budget, and every larger book
+    /// aborted mid-stream on the phone. `Pipe::send_wait` is the retry, done
+    /// where the room appears.
+    ///
+    /// A wait that runs out CLOSES THE SOCKET. The peer envelope makes the same
+    /// call for the same reason: a browser that has drained nothing for
+    /// `SEND_WAIT` is not reading, closing is what frees its budget, and the
+    /// browser learning it was cut off is what lets it reconnect. The error
+    /// keeps its name on the wire — the webview drops the router connection,
+    /// as it should for a session that is now gone.
+    pub async fn send(&self, session: u64, frame: Vec<u8>) -> Result<(), Error> {
+        let id = WebSessionId(session);
+        match self.host.pipe.send_wait(id, frame, Self::SEND_WAIT).await {
             Send::Sent => Ok(()),
-            Send::Backpressure => Err(Error::Backpressure),
+            Send::Backpressure(_) => {
+                self.host.pipe.close(id, "not keeping up");
+                Err(Error::Backpressure)
+            }
             Send::TooLarge => Err(Error::FrameTooLarge),
             Send::Gone => Err(Error::NoSuchSession),
         }
@@ -222,6 +272,12 @@ impl WebHostState {
             .wait_for_frames(WebSessionId(session), usize::MAX, Self::RECV_WAIT)
             .await
     }
+}
+
+/// Epoch milliseconds for the wire, saturating at zero for a clock before 1970.
+fn epoch_ms(at: SystemTime) -> u64 {
+    at.duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 #[cfg(test)]

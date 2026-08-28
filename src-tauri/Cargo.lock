@@ -3947,6 +3947,9 @@ name = "paper-webauth"
 version = "0.1.0"
 dependencies = [
  "rand 0.10.2",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "subtle",
 ]
 
@@ -3957,6 +3960,7 @@ dependencies = [
  "axum",
  "futures-util",
  "http-body-util",
+ "log",
  "paper-webauth",
  "serde",
  "tokio",
@@ -5863,6 +5867,7 @@ dependencies = [
  "axum",
  "http-body-util",
  "log",
+ "paper-data-root",
  "paper-webauth",
  "paper-webhost",
  "serde",
