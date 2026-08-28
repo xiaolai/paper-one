@@ -2251,6 +2251,8 @@
     "src/hosts/node/lock.test.ts > a clock that moved under a live holder > does not call a running holder stale when both stamps shifted together",
     "src/hosts/node/lock.test.ts > a clock that moved under a live holder > still reclaims when the start time disagrees by more than the boot time — a different process on a reused pid",
     "src/hosts/node/lock.test.ts > a reclamation the filesystem will not allow > refuses within the wait instead of spinning, and says what stopped it",
+    "src/hosts/node/lock.test.ts > a zombie holder > keeps a live pid alive, so the exclusion has not swallowed the ordinary case",
+    "src/hosts/node/lock.test.ts > a zombie holder > reads a running process as not one, and cannot say for a pid that is gone",
     "src/hosts/node/lock.test.ts > two releases in flight at once > can be retried when the removal fails",
     "src/hosts/node/lock.test.ts > two releases in flight at once > does not remove the lock a new owner published while the first release was in flight",
     "src/hosts/node/services.test.ts > defaultDataDir > lets the environment name another, so a harness can point at a fixture",

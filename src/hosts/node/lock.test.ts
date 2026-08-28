@@ -32,7 +32,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   }
 })
 
-const { LOCK_FILE, LockHeld, acquireDataLock } = await import('./lock')
+const { LOCK_FILE, LockHeld, acquireDataLock, livePid, zombiePid } = await import('./lock')
 
 afterEach(() => {
   hooks.rename = null
@@ -213,5 +213,48 @@ describe('a clock that moved under a live holder', () => {
     })
     expect(lock.owner.pid).toBe(process.pid)
     await lock.release()
+  })
+})
+
+/**
+ * A ZOMBIE IS NOT ALIVE, and `kill(pid, 0)` says it is.
+ *
+ * `livePid` used to be that call alone. An unreaped process keeps its pid
+ * table entry, so signal 0 succeeds for a corpse — and on Linux it keeps its
+ * ORIGINAL START TIME too, so it also passes the identity check in `holds`.
+ * Both guards, defeated by one state. On macOS the start time instead becomes
+ * unreadable, which passes the no-start-time fallback: the same wrong
+ * conclusion by the opposite route.
+ *
+ * Measured 2026-08-29 on Linux: Paper killed under a container PID 1 that
+ * never calls `wait()` left its lock held for good, and the app would not
+ * reopen — no error, no paint. `paper` beside such a corpse is refused just as
+ * permanently, which is this file's half.
+ *
+ * ⚠️ **THE REAL-ZOMBIE CASE IS TESTED IN RUST, NOT HERE, AND THAT IS A GAP
+ * WORTH NAMING RATHER THAN PAPERING OVER.** Node reaps its own children —
+ * libuv waits on SIGCHLD — so `spawn` cannot produce the state from a test in
+ * this language, and every shell construct that can is racy enough that the
+ * test would fail for reasons unrelated to the thing it checks. A test that is
+ * flaky about its own setup teaches a reader to re-run rather than read.
+ * `src-tauri/src/lock.rs`'s `a_zombie_is_not_alive_though_the_kernel_still_
+ * answers_for_it` builds one properly, because Rust's `Child` does NOT reap on
+ * drop, and it is red under a knockout of the exclusion.
+ *
+ * What is checkable here is the reading itself, in both directions — which is
+ * what would break if `ps` output or the parse ever moved.
+ */
+describe('a zombie holder', () => {
+  it('reads a running process as not one, and cannot say for a pid that is gone', () => {
+    /* BOTH DIRECTIONS. A parse that answered `true` for everything would look
+       right on a zombie and wrong here; `null` rather than `false` for an
+       absent pid matters because a caller reads `false` as alive, and
+       reclaiming a running app's library is the worse of the two mistakes. */
+    expect(zombiePid(process.pid)).toBe(false)
+    expect(zombiePid(0x7ffffff)).toBeNull()
+  })
+
+  it('keeps a live pid alive, so the exclusion has not swallowed the ordinary case', () => {
+    expect(livePid(process.pid)).toBe(true)
   })
 })

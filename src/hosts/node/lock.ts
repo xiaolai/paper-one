@@ -139,15 +139,58 @@ export interface LockOptions {
 const DEFAULT_WAIT_MS = 5_000
 const DEFAULT_POLL_MS = 50
 
-function livePid(pid: number): boolean {
+/**
+ * Is this pid a ZOMBIE — dead, and still holding its slot?
+ *
+ * `null` where the state cannot be read, which is "cannot refute" rather than
+ * "no": an unreadable answer must not become a reclaim.
+ *
+ * `ps -o stat=` prints `Z` for exactly this, on macOS and Linux alike, and
+ * this file already shells out to `ps` for `etime`.
+ */
+export function zombiePid(pid: number): boolean | null {
+  try {
+    const out = execFileSync('ps', ['-o', 'stat=', '-p', String(pid)], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+    if (out === '') return null
+    /* The first letter is the state; the rest are flags (`Zs`, `Z+`). */
+    return out.startsWith('Z')
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Is this pid alive?
+ *
+ * ⚠️ **A ZOMBIE IS NOT, AND `kill(pid, 0)` SAYS IT IS.** Signal 0 succeeds for
+ * an unreaped process — it still holds its pid table entry — and on Linux it
+ * still reports its ORIGINAL START TIME, so it also passes the identity check
+ * in `holds` below. Both guards, defeated by one state. On macOS the start
+ * time is instead unreadable, which passes the no-start-time fallback: the
+ * same wrong conclusion by the opposite route.
+ *
+ * Measured on 2026-08-29: Paper killed under a container PID 1 that never
+ * calls `wait()` left its lock held for good, and the app would not reopen —
+ * no error, no paint. `paper` beside such a corpse is refused just as
+ * permanently, which is this file's half of it. The app's half is
+ * `src-tauri/src/lock.rs`, and the rule is meant to read the same in both.
+ */
+export function livePid(pid: number): boolean {
+  let exists: boolean
   try {
     process.kill(pid, 0)
-    return true
+    exists = true
   } catch (error) {
     /* EPERM means it EXISTS and is somebody else's — alive, and not ours to
      * reclaim. Only ESRCH is "no such process". */
-    return (error as { code?: string }).code === 'EPERM'
+    exists = (error as { code?: string }).code === 'EPERM'
   }
+  /* Fail closed on an unreadable state: reclaiming a running app's library is
+   * the worse of the two mistakes. */
+  return exists && zombiePid(pid) !== true
 }
 
 /** This host's boot, as the record spells it. `os.uptime()` is whole seconds. */

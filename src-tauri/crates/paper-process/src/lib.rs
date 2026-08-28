@@ -32,6 +32,35 @@ pub fn started_at_ms(pid: u32) -> Option<u64> {
 }
 
 /// When this host booted, as epoch milliseconds, or `None` when the platform
+/// Whether `pid` is a ZOMBIE — dead, and still holding its slot.
+///
+/// `None` where the state cannot be read at all, which is "cannot refute"
+/// rather than "no": a caller must not turn an unreadable answer into a
+/// reclaim.
+///
+/// ⚠️ **WHY A LOCK CARES.** `kill(pid, 0)` SUCCEEDS for a zombie, and an
+/// unreaped process keeps its pid table entry, its `/proc/<pid>/stat` and its
+/// ORIGINAL START TIME. So a zombie defeats both halves of an identity check
+/// at once: it answers the liveness probe, and its start time still matches
+/// the record exactly — which reads as "the same process is still running"
+/// when the truth is "the same process, dead, unreaped".
+///
+/// Measured, not theorised: an app killed under a container PID 1 that never
+/// calls `wait()` left its lock permanently held, and Paper would not open
+/// again — no error, no paint, the process alive and waiting on a dialog
+/// nobody could dismiss. `docker run` without `--init` is exactly that PID 1,
+/// which makes CI the place this is met first. On an ordinary desktop systemd
+/// reaps orphans and the pid genuinely goes, so this cannot be reproduced
+/// there; the exposure is containers and any launcher that spawns Paper and
+/// keeps running without reaping it.
+///
+/// It reads no more than `started_at_ms` already does — the same
+/// `/proc/<pid>/stat` line, one field earlier; the same `proc_pidinfo` call,
+/// one field over — which keeps the module's ONE LOOKUP rule.
+pub fn is_zombie(pid: u32) -> Option<bool> {
+    platform::is_zombie(pid)
+}
+
 /// cannot say.
 pub fn booted_at_ms() -> Option<u64> {
     platform::booted_at_ms()
@@ -83,6 +112,82 @@ mod platform {
         Some(info.pbi_start_tvsec * 1_000 + info.pbi_start_tvusec / 1_000)
     }
 
+    /// Where `p_stat` sits in the `kinfo_proc` that `sysctl` returns.
+    ///
+    /// `kinfo_proc` opens with `struct extern_proc kp_proc`, whose first four
+    /// members on 64-bit macOS are a 16-byte union (`p_un`), two pointers
+    /// (`p_vmspace`, `p_sigacts`) at 8 each, and `int p_flag` at 4 — so the
+    /// `char p_stat` after them lands at 36. Named rather than inlined, and
+    /// the test beside `is_zombie` checks it in BOTH directions: a real zombie
+    /// must read `Z` and a real live process must not. An offset that happened
+    /// to be wrong could still answer one of those correctly by accident; it
+    /// cannot answer both.
+    const P_STAT_OFFSET: usize = 36;
+
+    /// `SZOMB`, through `sysctl` — no `proc_pidinfo` flavor will answer.
+    ///
+    /// ⚠️ **`PROC_PIDTBSDINFO` AND `PROC_PIDT_SHORTBSDINFO` BOTH SHORT-WRITE
+    /// FOR A ZOMBIE**, measured, and the first is the flavor `started_at_ms`
+    /// above uses. So on macOS a zombie reports `started_at_ms() == None`, and
+    /// `lock.rs`'s `holds` then takes its `(None, Some(boot))` arm and calls
+    /// the lock HELD until the machine next reboots.
+    ///
+    /// The same defect therefore reaches the two platforms by OPPOSITE routes:
+    /// on Linux a zombie KEEPS its start time and passes the identity check;
+    /// on macOS it LOSES it and passes the no-start-time fallback. Neither is
+    /// visible to a liveness probe, which is why the exclusion belongs in
+    /// `alive` rather than in either arm of that match.
+    ///
+    /// `sysctl(KERN_PROC_PID)` is what `ps` reads, and it does answer — `ps -o
+    /// stat` prints `Z` for precisely this state. `libc` exposes the constants
+    /// but not `kinfo_proc` on Apple, so the one byte is read by offset.
+    pub fn is_zombie(pid: u32) -> Option<bool> {
+        let mut mib = [
+            libc::CTL_KERN,
+            libc::KERN_PROC,
+            libc::KERN_PROC_PID,
+            pid as libc::c_int,
+        ];
+        /* Sized from the kernel rather than guessed: `kinfo_proc` is not in
+        `libc` here, and a buffer smaller than the real struct makes
+        `sysctl` answer ENOMEM. */
+        let mut len: usize = 0;
+        // SAFETY: a null buffer with a zero length asks `sysctl` for the size.
+        let rc = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                mib.len() as libc::c_uint,
+                std::ptr::null_mut(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if rc != 0 || len <= P_STAT_OFFSET {
+            return None;
+        }
+        let mut buf = vec![0u8; len];
+        // SAFETY: `buf` is `len` bytes and `len` carries that size in and the
+        // written size out; both are checked before the byte is read.
+        let rc = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                mib.len() as libc::c_uint,
+                buf.as_mut_ptr().cast(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        /* A LENGTH OF ZERO IS "NO SUCH PROCESS": `sysctl` returns 0 and writes
+        nothing for a pid that is gone. `None` — cannot say — rather than
+        "not a zombie", which a caller reads as alive. */
+        if rc != 0 || len <= P_STAT_OFFSET {
+            return None;
+        }
+        Some(u32::from(buf[P_STAT_OFFSET]) == libc::SZOMB)
+    }
+
     pub fn booted_at_ms() -> Option<u64> {
         // `kern.boottime`, the timeval the kernel recorded at boot — the
         // same source `uptime` and `sysctl kern.boottime` print.
@@ -132,6 +237,18 @@ mod platform {
             return None;
         }
         Some(boot_seconds()? * 1_000 + ticks * 1_000 / hz as u64)
+    }
+
+    /// Field 3 of `/proc/<pid>/stat` — the state character, `Z` for a zombie.
+    ///
+    /// The same line `started_at_ms` reads, and the same `rfind(')')` trick
+    /// for the same reason: field 2 is the command name and is the only field
+    /// that may hold spaces and parentheses, so everything is counted from
+    /// after the LAST `)`. State is the first field after it.
+    pub fn is_zombie(pid: u32) -> Option<bool> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let after = stat.rfind(')')?;
+        Some(stat[after + 1..].split_whitespace().next()? == "Z")
     }
 
     pub fn booted_at_ms() -> Option<u64> {
