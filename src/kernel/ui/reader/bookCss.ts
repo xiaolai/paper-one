@@ -1184,6 +1184,22 @@ p, li, blockquote, dd {
   line-height: max(var(--paper-line), 1.2em) !important; /* constant: the floor, one-and-a-fifth of the enlarged text own size */
   letter-spacing: var(--paper-letter) !important;
   word-spacing: var(--paper-word) !important;
+  /* THE FACE IS THE READER'S TOO, AND IT WAS THE ONE CONTROL LEFT TO INHERIT.
+   *
+   * Every other setting in this rule reaches the prose marked; the family was
+   * declared once, on body above, and left to inheritance — which loses to any
+   * rule that matches the element. Calibre writes p { font-family } as a
+   * matter of course, so on every such book the Typeface setting did nothing
+   * while its four siblings worked, and nothing said so: the body rule was
+   * there, the variable was set, and the paragraph was set in Georgia.
+   *
+   * On the element list and not the prose marker, because a face is not an
+   * alignment: forcing justify on a centred dedication flattens it, forcing the
+   * reader's face on it does exactly what the reader asked. Code is not here
+   * and must not be — code, kbd and samp carry their own family rule, and pre
+   * is code by definition — so a monospace run inside a paragraph keeps its
+   * face while the paragraph takes the reader's. */
+  font-family: var(--paper-family) !important;
 }
 
 /* ALIGNMENT IS THE READER'S TOO, BUT IT CANNOT SIMPLY JOIN THE RULE ABOVE.

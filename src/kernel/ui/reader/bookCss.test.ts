@@ -4,9 +4,10 @@
 // into the book, so it needs a document to read even when the assertion is about
 // a plain declaration. See dev-docs/hook-tests.md for the per-file opt-in.
 import { describe, expect, it } from 'vitest'
-import { ALIGNS, type Align } from '../../core/uiTypes'
-import { resolvedBookCss } from './bookCss'
+import { ALIGNS, type Align, type ReadingStyle } from '../../core/uiTypes'
+import { bookSheets, bookVars, resolveBookVars, resolvedBookCss } from './bookCss'
 import { DEFAULT_STEP_IDX } from '../../core/metrics'
+import { faceById } from '../../core/typefaces'
 
 /**
  * Alignment, and the hyphenation that is half of it.
@@ -234,5 +235,95 @@ describe('the reader’s settings reach the prose', () => {
       ).toEqual(EXPECTED[align])
       expect(ruleValue(css, 'body', '-webkit-hyphens'), align).toBe(EXPECTED[align].hyphens)
     }
+  })
+})
+
+/**
+ * THE TYPEFACE IS A CONTROL TOO, and it was the one control left to inherit.
+ *
+ * Size, line, tracking, alignment and hyphens all reach the prose elements
+ * marked; the family was declared once, on `body`, unmarked — so it lost to any
+ * rule that matched the element. Calibre writes `p { font-family }` as a matter
+ * of course, and on every such book the Typeface setting did nothing at all
+ * while its four siblings worked. The ledger's "book `<p>` computes to the
+ * chosen face" held only for books that set no family below `body`.
+ */
+describe('the typeface reaches the prose', () => {
+  const family = () => faceById('literata').stack
+
+  it('forces the reader’s face on the prose elements, with the weight the size rule uses', () => {
+    const css = resolvedBookCss(settings('justified'))
+    const start = css.indexOf('\np, li, blockquote, dd {')
+    expect(start, 'the shared prose rule is gone — this test asserts nothing').toBeGreaterThan(-1)
+    expect(ruleValue(css, 'p, li, blockquote, dd', 'font-family')).toBe(`${family()} !important`)
+  })
+
+  /* The body declaration stays as the fallback for prose the element list does
+     not name — a book set in divs — and stays a default there, unforced. */
+  it('keeps the body declaration as the unmarked fallback', () => {
+    const css = resolvedBookCss(settings('justified'))
+    expect(ruleValue(css, 'body', 'font-family')).toBe(family())
+  })
+
+  /* Code is set apart by the house-ratio rules and keeps its own face; the
+     forced family must not name it, and must not name `pre`, whose contents are
+     code by definition. */
+  it('names none of code, pre, kbd or samp', () => {
+    const css = resolvedBookCss(settings('justified')).replace(/\/\*[\s\S]*?\*\//g, '')
+    for (const [, selector, body] of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      if (!/font-family:[^;]*!important/.test(body ?? '')) continue
+      expect(selector ?? '', 'a forced family under a code selector').not.toMatch(/\b(code|pre|kbd|samp)\b/)
+    }
+  })
+
+  /* WHAT A READER SEES, in a real cascade rather than in the sheet's text. The
+     book's rule sits BETWEEN the two tiers, where the app puts it, and carries a
+     class so that it outranks the prose rule on specificity — only the marking
+     can win, which is the whole claim. jsdom honours `!important` and
+     specificity in `getComputedStyle`; measured before this was written.
+
+     In the suite's own document, not a `createHTMLDocument` — a document made
+     that way has no window, so `getComputedStyle` has nobody to ask and the
+     assertion would compare against nothing. Everything is removed after. */
+  const computed = (bookCss: string, style?: Partial<ReadingStyle>) => {
+    const [before, after] = bookSheets()
+    const vars = bookVars(style ? { ...settings('justified'), style } : settings('justified'))
+    const added: Element[] = []
+    for (const css of [resolveBookVars(before, vars), bookCss, resolveBookVars(after, vars)]) {
+      const element = document.createElement('style')
+      element.textContent = css
+      document.head.append(element)
+      added.push(element)
+    }
+    const host = document.createElement('div')
+    host.innerHTML = '<p class="body">prose <code>code</code></p>'
+    document.body.append(host)
+    added.push(host)
+    /* Quotes normalised: the engine serialises a quoted family name with double
+       quotes whatever the sheet wrote, and the spelling is not the claim. */
+    const unquoted = (value: string) => value.replace(/["']/g, '')
+    try {
+      return {
+        p: unquoted(window.getComputedStyle(host.querySelector('p') as HTMLElement).fontFamily),
+        code: unquoted(window.getComputedStyle(host.querySelector('code') as HTMLElement).fontFamily),
+      }
+    } finally {
+      for (const element of added) element.remove()
+    }
+  }
+
+  it('computes to the chosen face on a paragraph the book gave its own, and leaves code in the reader’s monospace', () => {
+    const seen = computed('p.body { font-family: Georgia; }', { codeFace: 'paper' })
+    expect(seen.p).toBe(family().replace(/["']/g, ''))
+    expect(seen.code).toBe(faceById('plex').stack.replace(/["']/g, ''))
+  })
+
+  /* The other direction of the exclusion: with the code face left to the
+     publisher, a code run the book set in its own monospace keeps it — the
+     forced family reaches the paragraph around it and stops there. */
+  it('leaves a code run the book set in monospace alone, while the paragraph takes the face', () => {
+    const seen = computed('p.body { font-family: Georgia; } code { font-family: Menlo, monospace; }')
+    expect(seen.p).toBe(family().replace(/["']/g, ''))
+    expect(seen.code).toBe('Menlo, monospace')
   })
 })

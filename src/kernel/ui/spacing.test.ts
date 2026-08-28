@@ -264,10 +264,15 @@ describe('the reader’s spacings survive a book’s own stylesheet', () => {
        here for the base and is now also the accessibility floor. Everything
        WI-14.4 put in the `before` tier is absent from this list because it is
        absent from that sheet's marks — a house default, which a book beats. */
+    /* AND THE TEN ARE ELEVEN. `font-family` was the one typographic control
+       declared once on `body` and left to inheritance, so a book's own
+       `p { font-family }` — Calibre's habit — defeated the Typeface setting
+       on every such book while the other controls worked. It is marked on the
+       same prose elements as the spacings; see `bookCss.test.ts`. */
     const READER_CONTROLS = new Set([
       'margin', 'line-height', 'letter-spacing', 'word-spacing',
       'hyphens', '-webkit-hyphens', 'text-align', 'font-size',
-      'text-indent', 'max-width',
+      'text-indent', 'max-width', 'font-family',
     ])
     const stray: string[] = []
     for (const [, selector = '', body = ''] of code.matchAll(/([^{}]*)\{([^{}]*)\}/g)) {
