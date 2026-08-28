@@ -742,3 +742,137 @@ async fn a_frame_that_meets_a_full_inbox_is_delivered_after_the_drain() {
     );
     drop(socket);
 }
+
+/// A raw upgrade request over a bare stream, abandoned after the shelf has
+/// admitted it and BEFORE it can answer — a browser giving up in the sliver
+/// between the handler opening a pipe record and hyper flushing the `101`.
+///
+/// # Why a bare stream, and why a reset rather than a close
+///
+/// tungstenite drives the whole handshake or none of it; there is no hook
+/// between "request sent" and "response read". And the abandonment has to be a
+/// RESET: after a plain close the shelf's first write still succeeds — the
+/// kernel buffers it and the peer answers with a reset afterwards — so the
+/// upgrade completes and `pump` finds the dead socket, which is the ordinary
+/// exit. Only a write that FAILS makes hyper drop the connection with the
+/// upgrade still pending, and that is the one path that reaches
+/// `on_failed_upgrade`. `SO_LINGER` of zero turns the close into a reset.
+///
+/// # Why the request carries a line it does not need
+///
+/// While a handler is in flight hyper probes the socket for EOF and, on one,
+/// DROPS the handler (`mid_message_detect_eof`: "found unexpected EOF on busy
+/// connection"). A reset landing while the handler waits at the seam would
+/// therefore never open a record at all — the wrong window. The probe skips the
+/// socket while hyper's own read buffer holds unparsed bytes, so the request is
+/// followed by the first line of a second one that never finishes: pipelined
+/// and stalled, which HTTP permits. Those bytes park in the buffer, hyper stops
+/// looking, and the reset is first met by the write of the `101`.
+async fn abandon_a_handshake(shelf: &Shelf, cookie: &str) {
+    let (reached, release) = shelf.state.pause_before_open();
+    let stream = TcpStream::connect(&shelf.origin)
+        .await
+        .expect("a connection");
+    let request = format!(
+        "GET /ws HTTP/1.1\r\n\
+         Host: {origin}\r\n\
+         Connection: Upgrade\r\n\
+         Upgrade: websocket\r\n\
+         Sec-WebSocket-Version: 13\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+         Sec-Fetch-Site: same-origin\r\n\
+         Cookie: {cookie}\r\n\
+         \r\n\
+         GET /ws HTTP/1.1\r\n",
+        origin = shelf.origin
+    );
+    /* `try_write` in a loop rather than `write_all`: the dev build takes tokio
+     * with `net` and not `io-util`, and a helper that leans on a feature a
+     * sibling dependency happens to switch on is a helper that breaks when
+     * that sibling changes. */
+    let mut bytes = request.as_bytes();
+    while !bytes.is_empty() {
+        stream.writable().await.expect("writable");
+        match stream.try_write(bytes) {
+            Ok(written) => bytes = &bytes[written..],
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(error) => panic!("writing the request: {error}"),
+        }
+    }
+
+    /* ADMITTED, AND PARKED BEFORE `Pipe::open`. */
+    reached.await.expect("the handshake should reach the seam");
+
+    /* THE RESET. Then a moment for it to cross the loopback: the shelf's write
+     * is what must meet it, and a write that wins the race succeeds, completes
+     * the upgrade and ends through `pump` instead — reaped either way, which is
+     * why the count below is asserted rather than assumed. */
+    /* tokio deprecates `set_linger` because a linger WAIT blocks the runtime
+     * thread on drop. A linger of zero is not a wait — it is the abort, the
+     * one portable way to make a close send a reset — and the only other
+     * routes to the option are an unstable std API or a crate this crate does
+     * not take. */
+    #[allow(deprecated)]
+    let reset = stream.set_linger(Some(Duration::ZERO));
+    reset.expect("SO_LINGER");
+    drop(stream);
+    tokio::time::sleep(Duration::from_millis(25)).await;
+
+    release
+        .send(())
+        .expect("the handshake should still be waiting");
+}
+
+/// A browser that gives up mid-handshake must not keep its seat at the table.
+///
+/// ⚠️ `on_failed_upgrade` CLOSED the record and did not REAP it, and the two
+/// are not the same thing: `Pipe::open` counts every record toward
+/// `MAX_SESSIONS`, closed or not — only `reap` removes one — and every other
+/// exit path reaps. Sixty-four abandoned handshakes, over any span of time,
+/// and the shelf answered 429 to every browser for the life of the process,
+/// with nothing logged and nothing in the Browsers pane to explain it.
+///
+/// One past the cap, so that under the defect the last abandonment is itself
+/// refused at `open` and the browser after it is what the defect turns away.
+#[tokio::test]
+async fn a_handshake_the_browser_abandons_does_not_keep_its_seat() {
+    let shelf = shelf().await;
+    let code = live_code(&shelf);
+    let cookie = sign_in(&shelf, &code).await;
+
+    const ABANDONED: usize = paper_webhost::pipe::MAX_SESSIONS + 1;
+    for _ in 0..ABANDONED {
+        abandon_a_handshake(&shelf, &cookie).await;
+    }
+    until("the abandoned handshakes to be noticed", || {
+        shelf.state.failed_upgrades() >= paper_webhost::pipe::MAX_SESSIONS
+    })
+    .await;
+
+    let socket = connect(&shelf, Some(&cookie))
+        .await
+        .expect("sixty-five abandoned handshakes must not turn the next browser away");
+    until("the session to be registered", || {
+        shelf.state.pipe.live_count() == 1
+    })
+    .await;
+    drop(socket);
+
+    /* THE CONTROL. A reset that lost its race with the `101` ended through
+     * `pump`, which reaps whether or not the callback does — so a shortfall
+     * here means the case above proved less than it claims, and says so
+     * rather than passing quietly. */
+    let mut noticed = 0;
+    for _ in 0..200 {
+        noticed = shelf.state.failed_upgrades();
+        if noticed == ABANDONED {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        noticed, ABANDONED,
+        "{noticed} of {ABANDONED} abandoned handshakes reached `on_failed_upgrade`; \
+         the rest were reaped by `pump`, and this test did not exercise the callback for them"
+    );
+}

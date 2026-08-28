@@ -48,6 +48,7 @@
 pub mod assets;
 pub mod pipe;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -181,6 +182,8 @@ pub struct WebHost {
     /// See [`WebHost::pause_before_open`]. `None` in every build but a test's.
     admit_gate: Mutex<Option<oneshot::Sender<()>>>,
     admit_release: Mutex<Option<oneshot::Receiver<()>>>,
+    /// See [`WebHost::failed_upgrades`].
+    failed_upgrades: AtomicUsize,
 }
 
 impl WebHost {
@@ -191,7 +194,25 @@ impl WebHost {
             pipe: Pipe::new(),
             admit_gate: Mutex::new(None),
             admit_release: Mutex::new(None),
+            failed_upgrades: AtomicUsize::new(0),
         }
+    }
+
+    /// How many handshakes opened a pipe record and then never became a
+    /// socket — the browser gone between `Pipe::open` and the `101` reaching
+    /// it. The count of times `upgrade`'s failure callback has run.
+    ///
+    /// A CONTROL, in the sense `pause_before_open` is a seam. That callback is
+    /// reachable from a test only by a reset landing in a window a few
+    /// microseconds wide, and a reset that misses it ends the socket through
+    /// `pump` — which cleans up exactly as the callback must, so the two are
+    /// indistinguishable afterwards. A test that cannot tell which path it
+    /// took proves nothing about the one it names; this is what lets it tell.
+    /// One atomic increment on a path that has already lost a connection —
+    /// released after the reap and acquired here, so a reader that sees N has
+    /// seen the N records go.
+    pub fn failed_upgrades(&self) -> usize {
+        self.failed_upgrades.load(Ordering::Acquire)
     }
 
     /// A TEST SEAM FOR THE ADMISSION WINDOW, and the reason it has to exist.
@@ -627,7 +648,7 @@ async fn upgrade(
      * different things — this one bounds the ASSEMBLY, that one bounds what
      * reaches the inbox. */
     let socket_for_failure = socket;
-    let pipe = Arc::clone(&state);
+    let host = Arc::clone(&state);
     ws.max_message_size(MAX_FRAME)
         .max_frame_size(MAX_FRAME)
         /* A PIPE RECORD IS OPENED BEFORE THE UPGRADE CAN FAIL, and axum's
@@ -635,8 +656,22 @@ async fn upgrade(
          * client that disconnects mid-handshake left a record nothing would
          * ever close. `MAX_SESSIONS_PER_CREDENTIAL` is four; four abandoned
          * handshakes and that credential could open no more sockets, for the
-         * life of the process, with nothing logged. */
-        .on_failed_upgrade(move |_error| pipe.pipe.close(socket_for_failure, "upgrade failed"))
+         * life of the process, with nothing logged.
+         *
+         * ⚠️ AND CLOSED IS NOT GONE. The first fix closed the record and
+         * stopped, which freed the credential's share and nothing else:
+         * `Pipe::open` counts every record toward `MAX_SESSIONS`, closed or
+         * not, and only `reap` removes one — every other exit path here does
+         * both. Sixty-four abandoned handshakes, over any span of time, and
+         * the shelf answered 429 to every browser for the life of the
+         * process, with nothing in the Browsers pane to explain it. The
+         * record's task is this closure — there is no socket, so no `pump`
+         * will ever reap on its behalf. */
+        .on_failed_upgrade(move |_error| {
+            host.pipe.close(socket_for_failure, "upgrade failed");
+            host.pipe.reap(socket_for_failure);
+            host.failed_upgrades.fetch_add(1, Ordering::Release);
+        })
         .on_upgrade(move |ws| pump(state, socket, ws, receiver, expires_at))
 }
 
