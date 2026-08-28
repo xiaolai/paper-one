@@ -168,6 +168,13 @@ pub async fn inference_remove_model<R: Runtime>(
     state: State<'_, InferenceState>,
     model: String,
 ) -> Result<()> {
+    /* BOUNDED BEFORE THE LOCK KEY IS BUILT FROM IT. `lock_model` formats the
+     * id into `model:{model}` and a refusal copies it again into
+     * `RequestBusy` — both happen before `manifest.model(&model)` gets to say
+     * it is not a model at all. Missed when the other model commands were
+     * bounded, because this one reads as a delete rather than as a command
+     * that takes a string. */
+    limits::within("model id", &model, limits::MAX_MODEL_ID)?;
     /* THE SAME LOCK THE INSTALL TAKES. Removing a model's artifacts while
      * they are being fetched is the same collision from the other side, and
      * this command carries no request id to have been serialised by. */
@@ -421,7 +428,11 @@ fn parse_agent_route(route: &str) -> Result<Agent> {
     match route {
         "agent:codex" => Ok(Agent::Codex),
         "agent:claude" => Ok(Agent::Claude),
-        // A route id the probe did not mint. Never a path, never an argv.
+        /* A route id the probe did not mint. Never a path, never an argv —
+         * but `to_owned` here COPIES whatever arrived into an error that
+         * crosses IPC, which is why both callers bound the route first.
+         * `every_string_parameter_of_every_command_is_bounded` in `limits.rs`
+         * is what holds that, rather than this sentence. */
         other => Err(Error::ModelUnknown(other.to_owned())),
     }
 }
@@ -559,6 +570,7 @@ pub async fn agent_ask<R: Runtime>(
 ) -> Result<String> {
     limits::within("request id", &request_id, limits::MAX_REQUEST_ID)?;
     limits::within("prompt", &prompt, limits::MAX_AGENT_PROMPT)?;
+    limits::within("route id", &route, limits::MAX_MODEL_ID)?;
     let which = parse_agent_route(&route)?;
     /* REGISTERED BEFORE THE PROBE, and the probe races cancellation.
      *
@@ -626,6 +638,7 @@ pub async fn agent_ask<R: Runtime>(
 /// stays theirs.
 #[tauri::command]
 pub async fn agent_sign_in(route: String) -> Result<()> {
+    limits::within("route id", &route, limits::MAX_MODEL_ID)?;
     let which = parse_agent_route(&route)?;
     let path = agent::which(which.exe()).ok_or_else(|| Error::AgentMissing(which.name()))?;
     let args: &[&str] = match which {
@@ -671,7 +684,14 @@ pub async fn inference_add_endpoint<R: Runtime>(
     label: String,
     base_url: String,
 ) -> Result<()> {
+    /* THE ID IS BOUNDED HERE AND NOT ONLY IN THE STORE. `EndpointStore::add`
+     * refuses an invalid id by copying it into `ModelUnknown`, and that error
+     * crosses IPC — so the store's grammar check is a length check that
+     * ALLOCATES AND ECHOES whatever it refuses. Bounded before the blocking
+     * hop, like the label beside it and the key in `set_endpoint_key`. */
+    limits::within("endpoint id", &id, limits::MAX_ENDPOINT_ID)?;
     limits::within("endpoint label", &label, limits::MAX_ENDPOINT_LABEL)?;
+    limits::within("endpoint url", &base_url, limits::MAX_ENDPOINT_URL)?;
     /* ⚠️ ONE WRITER AT A TIME. `add` and `remove` read the list, edit it and
      * write it back through the same temporary path; nothing serialised them
      * and `#[tauri::command]`s run concurrently, so two at once lose an edit
@@ -692,6 +712,12 @@ pub async fn inference_remove_endpoint<R: Runtime>(
     state: State<'_, InferenceState>,
     id: String,
 ) -> Result<()> {
+    /* ⚠️ THIS IS THE ONE THAT NEVER REACHED A GRAMMAR CHECK. `add` and
+     * `set_key` call `valid_id`; `EndpointStore::remove` does not — it filters
+     * the list by the id and then hands it straight to the keychain as an
+     * account name. So nothing at all bounded this field, and the bound has to
+     * be here rather than borrowed from a sibling command. */
+    limits::within("endpoint id", &id, limits::MAX_ENDPOINT_ID)?;
     let _writing = state.endpoint_writes().lock().await;
     /* ⚠️ THE RECONFIGURE IS THE HALF THAT MATTERS, and it is unconditional.
      * Without it a key the reader deleted stayed live in the running child's
@@ -713,6 +739,8 @@ pub async fn inference_set_endpoint_key<R: Runtime>(
     key: String,
 ) -> Result<()> {
     // Bounded BEFORE the blocking keychain write gets to allocate for it.
+    // Both fields: the id is the keychain ACCOUNT the key is written under.
+    limits::within("endpoint id", &id, limits::MAX_ENDPOINT_ID)?;
     limits::within("endpoint key", &key, limits::MAX_ENDPOINT_KEY)?;
     let _writing = state.endpoint_writes().lock().await;
     state
@@ -742,6 +770,14 @@ pub async fn inference_speak<R: Runtime>(
     limits::within("request id", &request_id, limits::MAX_REQUEST_ID)?;
     limits::within("model id", &model, limits::MAX_MODEL_ID)?;
     limits::within("speech text", &text, limits::MAX_SPEECH_TEXT)?;
+    /* THE VOICE IS A CALLER STRING TOO, and it was the one field on this
+     * command left unbounded — `speech::body` copies it into the JSON body
+     * that goes to the daemon, so an unbounded voice is an unbounded request
+     * whatever `MAX_SPEECH_TEXT` says about the text beside it. An
+     * `Option<String>` reads as "optional, therefore small"; it is neither. */
+    if let Some(voice) = voice.as_deref() {
+        limits::within("voice", voice, limits::MAX_MODEL_ID)?;
+    }
     /* SPEECH, and this is where the modality check earns itself: without it a
      * caller could name the text model here and the answering model in
      * `inference_generate` could be a voice. Registered BEFORE the resolve,

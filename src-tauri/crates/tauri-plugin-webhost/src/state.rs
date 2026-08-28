@@ -215,11 +215,12 @@ impl WebHostState {
             self.host.pipe.close_browser(browser, "revoked");
         }
         revoked.saved.map_err(|error| {
-            /* THE DISK'S REASON GOES TO THE LOG. The wire carries the stable
-             * code alone (`Serialize` on `Error`), so this is the one place
-             * the io error is ever seen. */
+            /* THE DISK'S REASON GOES TO THE LOG AND STAYS THERE. The wire
+             * carries the stable code alone (`Serialize` on `Error`), so this
+             * line is the one place the io error is ever seen — which is why
+             * the variant carries no copy of it. */
             log::error!("webhost: a revocation was applied but could not be saved: {error}");
-            Error::Unsaved(error.to_string())
+            Error::Unsaved
         })
     }
 
@@ -230,11 +231,12 @@ impl WebHostState {
         let revoked = self.host.revoke_all();
         let count = revoked.applied.len();
         revoked.saved.map(|()| count).map_err(|error| {
-            /* As in `revoke`: the wire gets the code, the log gets the cause. */
+            /* As in `revoke`: the wire gets the code, the log gets the cause,
+             * and the variant carries neither twice. */
             log::error!(
                 "webhost: every browser was signed out but the change could not be saved: {error}"
             );
-            Error::Unsaved(error.to_string())
+            Error::Unsaved
         })
     }
 

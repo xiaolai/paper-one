@@ -281,6 +281,40 @@ impl RuntimeManifest {
     /// manifest names a file is refused before its target is looked at, so a
     /// link pointing outside the tree at a file with the right bytes is
     /// still a path Paper did not stage.
+    ///
+    /// # ⚠️ Two things this does NOT prove, both accepted on purpose
+    ///
+    /// **The manifest is unsigned and sits inside the tree it vouches for.**
+    /// It is the anchor for every hash below, so anyone who can write
+    /// `runtime.manifest.json` can write the files beside it and restate
+    /// their digests to match. What this establishes is INTEGRITY against a
+    /// record — a flipped byte, a half-applied update, a planted
+    /// `version.dll` — and not PROVENANCE. It does not answer an adversary
+    /// who already holds write access to the runtime directory.
+    ///
+    /// **And it is time-of-check to time-of-use.** The hash is read here and
+    /// the path is handed to `exec` later; a file replaced in between runs
+    /// unverified. Nothing holds the files open across that gap, and on
+    /// Windows nothing could hold them in a way that survives a rename.
+    ///
+    /// Both of these stand, and they stand as a DECISION rather than an
+    /// oversight — D8, 2026-08-27. The runtime is in Application Support
+    /// because it is not in the bundle yet, and the alternative it replaced
+    /// was worse by a wide margin: lemond fetching `llama-server` from GitHub
+    /// inside the first gloss, with no hash Paper controlled, over a libcurl
+    /// download that carries no quarantine flag so Gatekeeper never looks at
+    /// it. Two things bound the exposure meanwhile. This runs BEFORE EVERY
+    /// SPAWN rather than once at install, so the race is one spawn wide
+    /// instead of the life of the installation. And the boundary is the data
+    /// directory's own permissions: anything that can write here can already
+    /// write the reader's library and their books.
+    ///
+    /// What retires both at once is shipping the runtime INSIDE the bundle,
+    /// codesigned under Paper's Team ID with hardened runtime. Then the
+    /// anchor is Apple's rather than a JSON file beside the thing it
+    /// describes, and the kernel checks the signature at `exec` — which is
+    /// the same instant as the use, so there is no window left to race.
+    /// Until that bundling step, this function is the guard.
     pub async fn verify(&self, dir: &Path) -> Result<VerifiedBackend> {
         for entry in &self.files {
             let path = dir.join(&entry.path);

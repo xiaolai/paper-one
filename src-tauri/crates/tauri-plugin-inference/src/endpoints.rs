@@ -152,9 +152,14 @@ pub struct Endpoint {
 
 /// A provider id: `[a-z0-9-]`, so it is safe as an environment-variable stem
 /// and as a keychain account.
+///
+/// The length comes from [`crate::limits::MAX_ENDPOINT_ID`] rather than a
+/// literal, because the commands bound the same field before it ever reaches
+/// here and two numbers for one grammar is the drift this crate keeps
+/// refusing to write.
 pub fn valid_id(id: &str) -> bool {
     !id.is_empty()
-        && id.len() <= 40
+        && id.len() <= crate::limits::MAX_ENDPOINT_ID
         && id
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
@@ -172,7 +177,7 @@ pub fn valid_base_url(url: &str) -> bool {
      * reaches the daemon as a provider registration that cannot resolve, so it
      * surfaces as a route that fails when pressed rather than as a value
      * refused when it was typed. Found by audit. */
-    if !url.starts_with("https://") || url.len() > 400 {
+    if !url.starts_with("https://") || url.len() > crate::limits::MAX_ENDPOINT_URL {
         return false;
     }
     /* No whitespace or control characters anywhere: they cannot appear in a

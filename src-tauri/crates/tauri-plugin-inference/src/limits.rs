@@ -45,9 +45,37 @@ pub const MAX_ANSWER_BYTES: usize = 1024 * 1024;
 /// A manifest id is a short slug; anything past this is not a model name,
 /// it is an allocation. Applied wherever a caller-minted model string
 /// arrives, BEFORE it is copied into ids, errors or lock keys.
+///
+/// ⚠️ **THREE FIELDS OF THIS KIND WERE MISSED THE FIRST TIME**, all found by a
+/// later reading rather than by anything failing: `inference_remove_model`'s
+/// `model`, which goes into a lock key and a `RequestBusy` error before the
+/// manifest lookup can refuse it; `inference_speak`'s `voice`, which goes into
+/// the JSON body sent to the daemon; and `route`, which
+/// `parse_agent_route` copies into `ModelUnknown` and back across IPC.
+/// Bounding the commands that FELT like the model commands is not a bound —
+/// every field that carries a caller-minted daemon id names one, and they all
+/// share this number because they are the same kind of value: `af_sky`,
+/// `agent:codex`, a slug something downstream has to recognise.
 pub const MAX_MODEL_ID: usize = 256;
+/// A cloud endpoint id, and the ONE number for it.
+///
+/// [`crate::endpoints::valid_id`] is the real grammar — `[a-z0-9-]` — and
+/// reads its length from here so there is no second number to drift. This is
+/// applied at the command boundary as well, because the id is the keychain
+/// account name and the `LEMONADE_<ID>_API_KEY` stem, and because the store
+/// refuses an invalid one by COPYING it into an error that crosses IPC:
+/// unbounded, that is a megabyte of caller's choosing echoed back.
+/// `inference_remove_endpoint` did not reach the grammar check at all — its
+/// store path never called it — so the bound here is the only thing that
+/// stood between a webview and an unbounded keychain account name.
+pub const MAX_ENDPOINT_ID: usize = 40;
 /// A reader-entered display name for a cloud endpoint row.
 pub const MAX_ENDPOINT_LABEL: usize = 256;
+/// A cloud endpoint's base URL, and — like [`MAX_ENDPOINT_ID`] — the one
+/// number for it: [`crate::endpoints::valid_base_url`] reads its length from
+/// here. Bounded at the command boundary too, because that validator refuses
+/// by formatting the URL into a `ManifestMalformed` that crosses IPC.
+pub const MAX_ENDPOINT_URL: usize = 400;
 /// A pasted API credential. Generous — some providers issue long tokens —
 /// but bounded before it reaches the blocking keychain write.
 pub const MAX_ENDPOINT_KEY: usize = 8 * 1024;
@@ -106,32 +134,109 @@ mod tests {
         assert!(within("question", &four_byte, 12).is_ok());
         assert!(within("question", &four_byte, 11).is_err());
     }
-    /// EVERY COMMAND THAT TAKES A STRING BOUNDS IT. The list is here rather
-    /// than in a comment because a command added later with an unbounded
-    /// `String` is exactly the regression this file exists to prevent, and a
-    /// prose reminder does not fail.
+    /// EVERY STRING PARAMETER OF EVERY COMMAND IS BOUNDED — per FIELD, and
+    /// over commands this test discovers rather than a list somebody keeps.
+    ///
+    /// ⚠️ **BOTH OF THOSE ARE CORRECTIONS.** What stood here asserted that
+    /// each of six NAMED commands mentioned `limits::within` somewhere in its
+    /// body, and it passed throughout: `inference_speak` bounded three of its
+    /// four strings and left `voice` open, `inference_remove_model` was not on
+    /// the list at all, and neither was any endpoint command — so the id that
+    /// becomes a keychain account name, and the URL, went unbounded past a
+    /// green test whose name claims otherwise. A test that asks "does this
+    /// function mention the guard" answers a question nobody had.
+    ///
+    /// So: find every `#[tauri::command]`, read its signature, and require a
+    /// `limits::within` call naming each `String` and `Option<String>` it
+    /// takes. No list to fall behind, and no field that hides behind a
+    /// bounded sibling.
     #[test]
-    fn every_string_taking_command_checks_a_limit() {
+    fn every_string_parameter_of_every_command_is_bounded() {
         let source = include_str!("commands.rs");
-        for command in [
-            "inference_generate",
-            "inference_gloss",
-            "inference_speak",
-            "agent_ask",
-            "inference_cancel",
-            "inference_install_model",
-        ] {
-            let at = source
-                .find(&format!("pub async fn {command}"))
-                .unwrap_or_else(|| panic!("{command} is not in commands.rs under that name"));
-            let body_end = source[at..]
+        let mut checked = 0;
+        for (at, _) in source.match_indices("#[tauri::command]") {
+            let rest = &source[at..];
+            let signature_start = at + rest.find('(').expect("a command has a parameter list");
+            /* Every command returns `Result<…>`, so this is the end of the
+             * parameter list and the start of the body. A parameter TYPE
+             * cannot contain it. */
+            let body_start = at + rest.find(") -> Result").expect("a command returns Result");
+            let name = rest[..rest.find('(').unwrap()]
+                .rsplit("fn ")
+                .next()
+                .expect("a command is a fn")
+                .split('<')
+                .next()
+                .expect("a name before any generics")
+                .trim()
+                .to_owned();
+            let signature = &source[signature_start + 1..body_start];
+            let body_end = source[body_start..]
                 .find("\n}\n")
-                .map(|end| at + end)
+                .map(|end| body_start + end)
                 .unwrap_or(source.len());
-            assert!(
-                source[at..body_end].contains("limits::within"),
-                "{command} takes caller-controlled input and bounds none of it"
-            );
+            let body = &source[body_start..body_end];
+
+            for parameter in signature.split(',') {
+                let Some((field, kind)) = parameter.split_once(':') else {
+                    // The tail of a multi-part generic — `State<'_,
+                    // InferenceState>` splits across the comma.
+                    continue;
+                };
+                let (field, kind) = (field.trim(), kind.trim());
+                if kind != "String" && kind != "Option<String>" {
+                    continue;
+                }
+                checked += 1;
+                assert!(
+                    bounds(body, field),
+                    "{name} takes {field}: {kind} from the webview and no \
+                     limits::within call in its body names it"
+                );
+            }
         }
+        /* A parser that matched nothing would pass every assertion above
+         * without running one — the failure mode this file's own header
+         * warns about in another form. */
+        assert!(
+            checked > 10,
+            "only {checked} string parameters were found; the parse is wrong, not the code"
+        );
+    }
+
+    /// Whether some `limits::within(…)` call in `body` bounds `field`.
+    ///
+    /// The call is `within("<name>", <value>, <limit>)` and this reads the
+    /// VALUE, never the display name: the names are prose, and "endpoint id"
+    /// contains the word `id`, so a looser match would let the bound on one
+    /// parameter vouch for another.
+    fn bounds(body: &str, field: &str) -> bool {
+        const CALL: &str = "limits::within(";
+        body.match_indices(CALL).any(|(start, _)| {
+            let open = start + CALL.len();
+            let end = body[open..]
+                .find(')')
+                .map(|end| open + end)
+                .unwrap_or(body.len());
+            body[open..end]
+                .split(',')
+                .nth(1)
+                .is_some_and(|value| value.trim().trim_start_matches('&') == field)
+        })
+    }
+
+    /// The parser above is the kind that finds nothing and looks clean, so it
+    /// is pointed at a KNOWN POSITIVE and a known negative here.
+    #[test]
+    fn the_parameter_check_can_actually_fail() {
+        let body = r#"
+            limits::within("request id", &request_id, limits::MAX_REQUEST_ID)?;
+            limits::within("voice", voice, limits::MAX_MODEL_ID)?;
+        "#;
+        assert!(bounds(body, "request_id"));
+        assert!(bounds(body, "voice"));
+        // Not a prefix match, and not "some bound exists nearby".
+        assert!(!bounds(body, "id"));
+        assert!(!bounds(body, "model"));
     }
 }

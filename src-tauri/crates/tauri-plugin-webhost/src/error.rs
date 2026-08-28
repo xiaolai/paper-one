@@ -24,12 +24,18 @@ pub enum Error {
     /// may be back. Distinct from a failure to revoke, which does not exist:
     /// the in-memory half never fails. The pane has to say both halves.
     ///
-    /// The wire carries the CODE alone — `Serialize` below drops the field —
-    /// so the disk's reason is logged where the variant is built
-    /// (`state.rs`), which is the only place it is ever seen. The field stays
-    /// because `Display` carries it into that log line.
-    #[error("the change could not be saved: {0}")]
-    Unsaved(String),
+    /// The wire carries the CODE alone — `Serialize` below drops it — so the
+    /// disk's reason is logged where the variant is built (`state.rs`), which
+    /// is the only place it is ever seen.
+    ///
+    /// ⚠️ **NO PAYLOAD, AND IT USED TO CARRY ONE.** The `String` was kept on
+    /// the stated grounds that "`Display` carries it into that log line", and
+    /// it did not: both log sites format the raw `io::Error` they already
+    /// hold, so nothing ever read the copy back — not the wire, not the log,
+    /// not a caller. A reason given for a field is not the same thing as a
+    /// reader of it, and the difference is one grep.
+    #[error("the change could not be saved")]
+    Unsaved,
     /// A blocking task did not come back — it panicked, or the runtime is
     /// shutting down.
     ///
@@ -50,7 +56,7 @@ impl Serialize for Error {
             Error::NoSuchSession => "no-such-session",
             Error::Backpressure => "backpressure",
             Error::FrameTooLarge => "frame-too-large",
-            Error::Unsaved(_) => "unsaved",
+            Error::Unsaved => "unsaved",
             Error::Internal => "internal",
         })
     }

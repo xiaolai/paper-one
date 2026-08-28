@@ -135,49 +135,62 @@ impl BlobTarget {
     /// The serve side reads through this name.
     pub fn checked_read(&self, root: &Path) -> Result<()> {
         self.checked(root)?;
-        refuse_symlink(&self.path, root)?;
-        /* "A real file" means exactly that: a directory, FIFO, socket or
-         * device under the content name would hang or garble the serve —
-         * hashing a FIFO blocks forever — and the promise above said file.
-         * Absent stays fine; absence has its own meaning to both callers. */
-        match std::fs::symlink_metadata(&self.path) {
-            Ok(meta) if meta.is_file() => Ok(()),
-            Ok(_) => Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("{} is not a regular file", self.path.display()),
-            )
-            .into()),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(err.into()),
-        }
+        refuse_planted(&self.path, root)
     }
 
     /// [`checked`](Self::checked), plus: neither the `.part` a fetch appends
     /// into nor the content file the `.part` is renamed onto may be a
-    /// final-component symlink. Re-run immediately before the rename to close
-    /// the check→rename race.
+    /// final-component symlink, and neither may be anything other than a
+    /// regular file. Re-run immediately before the rename to close the
+    /// check→rename race.
     pub fn checked_part(&self, root: &Path) -> Result<()> {
         self.checked(root)?;
-        refuse_symlink(&self.part_path(), root)?;
-        refuse_symlink(&self.path, root)
+        refuse_planted(&self.part_path(), root)?;
+        refuse_planted(&self.path, root)
     }
 }
 
-/// A final-component symlink is refused as outside the containment boundary. A
-/// missing path (nothing planted) or a plain file passes. This is `lstat`
-/// (`symlink_metadata`) so it inspects the link itself, never its target.
-fn refuse_symlink(path: &Path, root: &Path) -> Result<()> {
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => Err(Error::PathOutsideDataRoot {
-            path: path.to_path_buf(),
-            root: root.to_path_buf(),
-        }),
-        Ok(_) => Ok(()),
+/// The final component, if anything is there at all, must be a REGULAR FILE
+/// that is not a symlink.
+///
+/// ⚠️ **ONE FUNCTION BECAUSE TWO DRIFTED.** `checked_read` grew the
+/// regular-file half — hashing a FIFO blocks for ever, and a directory or a
+/// device under the content name garbles the serve — and `checked_part` was
+/// left with the symlink half alone, so the FETCH side went on accepting a
+/// FIFO or a directory as its `.part`. That is the same hang from the other
+/// end: `hash_path` on the finished `.part` is the identical read, and a
+/// fetch is the one path a REMOTE peer can provoke. Two call sites for one
+/// rule is how the gap opened; one function is how it stays shut.
+///
+/// A missing path passes — absence has its own meaning to both callers. One
+/// `lstat` answers both questions, and it is `symlink_metadata` so it
+/// inspects the link itself, never its target.
+fn refuse_planted(path: &Path, root: &Path) -> Result<()> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
         /* ONLY absence passes: a permission or I/O failure answered "safe"
          * would let a containment check fail open. */
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err.into()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err.into()),
+    };
+    /* The symlink case FIRST, and it keeps its own error: a link is refused
+     * as a breach of containment — it names somewhere else — while a FIFO is
+     * refused as the wrong kind of thing in the right place. The two answers
+     * are not interchangeable to a caller reading the kind. */
+    if meta.file_type().is_symlink() {
+        return Err(Error::PathOutsideDataRoot {
+            path: path.to_path_buf(),
+            root: root.to_path_buf(),
+        });
     }
+    if !meta.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} is not a regular file", path.display()),
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// `^[A-Za-z0-9_]{1,80}$`.
@@ -492,5 +505,59 @@ mod tests {
             target.checked_part(&root).unwrap_err().kind(),
             "pathOutsideDataRoot"
         );
+    }
+
+    /// ⚠️ **A FIFO `.part` WOULD HANG THE FETCH, AND `checked_part` TOOK IT.**
+    /// `checked_read` was hardened to require a regular file — hashing a FIFO
+    /// blocks for ever — and the fetch side was left behind, so the one path a
+    /// REMOTE peer can drive was the one still open: a `.part` planted as a
+    /// FIFO reaches `hash_path`, which is the same blocking read.
+    #[cfg(unix)]
+    #[test]
+    fn checked_part_refuses_a_fifo_where_the_part_goes() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let dir = ScratchDir::new("paths-part-fifo");
+        let root = dir.path().join("root");
+        let folder = root.join("books").join("bk1");
+        std::fs::create_dir_all(&folder).unwrap();
+        let target = BlobTarget::resolve(&root, "bk1", "content.epub", Access::Write).unwrap();
+
+        let fifo = std::ffi::CString::new(target.part_path().as_os_str().as_bytes()).unwrap();
+        // 0o600: readable by nobody else, and this one is never opened.
+        assert_eq!(
+            unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) },
+            0,
+            "mkfifo: {}",
+            std::io::Error::last_os_error()
+        );
+
+        // "io", not "pathOutsideDataRoot": it is the wrong KIND of thing in
+        // the right place, which is a different answer from naming somewhere
+        // else — see `refuse_planted`.
+        assert_eq!(target.checked_part(&root).unwrap_err().kind(), "io");
+    }
+
+    /// The other half of the same gap: a directory under either name. The
+    /// `.part` cannot be appended to and the content name cannot be renamed
+    /// onto, and both were accepted.
+    #[test]
+    fn checked_part_refuses_a_directory_under_either_name() {
+        let dir = ScratchDir::new("paths-part-dir");
+        let root = dir.path().join("root");
+        let folder = root.join("books").join("bk1");
+        std::fs::create_dir_all(&folder).unwrap();
+        let target = BlobTarget::resolve(&root, "bk1", "content.epub", Access::Write).unwrap();
+
+        std::fs::create_dir(target.part_path()).unwrap();
+        assert_eq!(target.checked_part(&root).unwrap_err().kind(), "io");
+        std::fs::remove_dir(target.part_path()).unwrap();
+
+        // A real `.part` beside a content NAME that is a directory: the
+        // rename target is checked as strictly as the source.
+        std::fs::write(target.part_path(), b"partial").unwrap();
+        assert!(target.checked_part(&root).is_ok());
+        std::fs::create_dir(target.path()).unwrap();
+        assert_eq!(target.checked_part(&root).unwrap_err().kind(), "io");
     }
 }

@@ -115,6 +115,10 @@ fn embed_client() {
 ///
 /// Distinguishing them costs one `match` and is the difference between "no
 /// client was asked for" and "the client is broken and nobody said so".
+///
+/// ⚠️ **NOTHING IS FOLLOWED AND NOTHING IRREGULAR IS EMBEDDED**, which is what
+/// keeps the walk inside `dist-web/` and what keeps it terminating. See the
+/// note at the type check below.
 fn collect(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(String, String)>) -> bool {
     let read = match std::fs::read_dir(dir) {
         Ok(read) => read,
@@ -137,12 +141,57 @@ fn collect(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(String,
             )
         });
         let path = entry.path();
-        if path.is_dir() {
+        /* ⚠️ `symlink_metadata`, NOT `path.is_dir()` — and this used to be
+         * `is_dir()`, which FOLLOWS the link.
+         *
+         * A symlinked directory anywhere under `dist-web/` was therefore
+         * walked as though it were part of the tree. Whatever it pointed at
+         * came out embedded in the binary under request paths that claim to
+         * be inside the bundle, and a link at an ancestor — `..`, or `/` —
+         * took the walk out of `dist-web/` altogether while every
+         * `strip_prefix` below still succeeded, because the paths were built
+         * by descending from the root rather than resolved against it. A
+         * link back INTO the tree was worse: there is no visited set here, so
+         * it recursed until the build ran out of stack.
+         *
+         * Refusing links outright answers both without a canonicalisation or
+         * a visited set: nothing is followed, so nothing can leave the tree
+         * and nothing can cycle. It is the same rule `tauri-plugin-inference`
+         * holds over the staged runtime, for the same reason — the build that
+         * writes this directory (Vite) emits regular files, so anything else
+         * in it is a tree somebody else arranged. */
+        let kind = std::fs::symlink_metadata(&path)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "cannot read the type of {} for the browser client: {error}",
+                    path.display()
+                )
+            })
+            .file_type();
+        if kind.is_dir() {
             /* The return is discarded ON PURPOSE here and only here: a
              * subdirectory that vanished mid-walk now panics above rather than
              * reporting `false`, so the only value this can return is `true`. */
             let _ = collect(root, &path, out);
             continue;
+        }
+        if !kind.is_file() {
+            /* Loud, not skipped: a client silently missing a chunk is the
+             * exact failure this function's note above is about, arrived at
+             * from a different direction. */
+            panic!(
+                "{} is {} and not a regular file, so the browser client bundle will not embed \
+                 it.\n\
+                 \n\
+                 dist-web/ holds what `pnpm build:web` wrote and nothing else. Delete it and \
+                 rebuild.",
+                path.display(),
+                if kind.is_symlink() {
+                    "a symbolic link"
+                } else {
+                    "a special file"
+                },
+            );
         }
         /* `expect`, not a silent `continue`: every path here was produced by
          * walking `root`, so a prefix miss is an invariant violation — and a
