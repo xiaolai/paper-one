@@ -209,14 +209,20 @@ PROBE = """<?xml version="1.0" encoding="UTF-8"?>
       try {
         // Bounded, and settled in every arm: a fetch left pending used to keep
         // `pending` above zero forever, so the final verdict never replaced
-        // the preliminary one. Only the endpoint's documented authenticated
-        // answer (a 200) is a hit; 401 is the safe expected refusal, and
+        // the preliminary one. Any 2xx is a hit — the endpoint's documented
+        // authenticated answer is a 204; 401 is the safe expected refusal, and
         // anything else is reported as a probe ANOMALY rather than a breach.
         var fetchCtl = ('AbortController' in window) ? new AbortController() : null;
         if (fetchCtl) setTimeout(function () { try { fetchCtl.abort() } catch (e) {} }, PROBE_TIMEOUT_MS);
         fetch('/api/auth/session', { credentials: 'include', signal: fetchCtl && fetchCtl.signal })
           .then(function (r) {
-            if (r.status === 200) reached.push('authenticated fetch (200)');
+            // ANY 2xx IS THE BREACH, not the 200 this looked for. The real
+            // endpoint answers 204 — its extractor IS the authentication, so
+            // reaching the handler at all means a live credential — and a
+            // probe keyed on 200 filed the genuine hit under `observed` as a
+            // harmless anomaly. A fixture that cannot report the thing it
+            // exists to detect is worse than no fixture.
+            if (r.status >= 200 && r.status < 300) reached.push('authenticated fetch (' + r.status + ')');
             else if (r.status !== 401) observed.push('auth fetch returned ' + r.status);
           })
           .catch(function () { /* blocked, aborted or refused counts as safe */ })

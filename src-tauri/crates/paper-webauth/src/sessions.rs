@@ -737,22 +737,39 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
      * fallible act, which is what makes "save failed ⇒ disk unchanged" true. */
     tighten_file(&tmp)?;
     std::fs::rename(&tmp, path)?;
-    /* Persist the rename. `EINVAL`/`ENOTSUP` mean the filesystem does not
-     * take a directory fsync — PostgreSQL and SQLite ignore exactly these —
-     * but any OTHER failure is a rename whose durability is unknown, and
-     * `saved: Ok(())` must not claim it. Windows cannot open a directory as
-     * a file at all, hence the platform split. */
+    /* Persist the rename — AND REPORT A FAILURE HERE AS A LOG, NOT AS `Err`.
+     *
+     * This block and the paragraph above it were added by two different fixes
+     * in the same pass and contradicted each other: that one makes the rename
+     * the last fallible act, because `issue` rolls its memory back on `Err`
+     * and a rollback over a committed file is the phantom row it describes;
+     * this one returned `Err` after the rename for a durability failure. Both
+     * cannot hold, and the caller is what decides which does — `Err` here
+     * would resurrect exactly the defect the paragraph above closed.
+     *
+     * The distinction that resolves it: once `rename` returns, the row IS in
+     * the directory and every later read finds it. A directory fsync that
+     * fails says the rename may not SURVIVE A POWER LOSS — a durability
+     * question, not a "did it happen" one — so the honest answer to the
+     * caller is "saved", and the honest answer to the operator is a log line
+     * naming the risk. `EINVAL`/`ENOTSUP` are not even that: they mean the
+     * filesystem does not take a directory fsync at all, which PostgreSQL and
+     * SQLite both ignore. Windows cannot open a directory as a file, hence
+     * the platform split. */
     #[cfg(unix)]
     {
-        let dir_file = std::fs::File::open(dir)?;
-        if let Err(error) = dir_file.sync_all() {
+        match std::fs::File::open(dir).and_then(|dir_file| dir_file.sync_all()) {
+            Ok(()) => {}
             /* `InvalidInput` is EINVAL, `Unsupported` is ENOTSUP. */
-            if !matches!(
-                error.kind(),
-                io::ErrorKind::InvalidInput | io::ErrorKind::Unsupported
-            ) {
-                return Err(error);
-            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::InvalidInput | io::ErrorKind::Unsupported
+                ) => {}
+            Err(error) => log::warn!(
+                "the sessions file was written but its directory would not sync ({error}); \
+                 the write is in place and may not survive a power loss"
+            ),
         }
     }
     Ok(())
