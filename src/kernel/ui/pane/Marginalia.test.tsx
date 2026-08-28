@@ -55,6 +55,7 @@ function marksView(over: Partial<MarksView> = {}): MarksView {
     bookmarks: [],
     allBookmarks: [],
     persistent: true,
+    unreadable: false,
     ready: true,
     add: vi.fn(),
     remove: vi.fn(),
@@ -74,6 +75,7 @@ function draw(over: {
   allBookmarks?: readonly Bookmark[]
   onShelf?: (bookId: string) => boolean
   onGoTo?: (target: JumpTarget) => void
+  unreadable?: boolean
 }) {
   const onGoTo = over.onGoTo ?? vi.fn()
   render(
@@ -81,6 +83,7 @@ function draw(over: {
       marks={marksView({
         all: over.all ?? [],
         allBookmarks: over.allBookmarks ?? [],
+        unreadable: over.unreadable ?? false,
       })}
       cards={cardsView()}
       bookId="open-book"
@@ -327,5 +330,21 @@ describe('a focus request', () => {
     republish([NOTED])
     expect(editor()).not.toBeNull()
     expect(onFocusDone).toHaveBeenCalledWith(1)
+  })
+})
+
+/* A file that is there and will not read is a different fact from a store
+   that will not write, and the panel says which (WI-20.36): the reader whose
+   marks vanished from the list deserves to hear that the file is damaged and
+   is being left alone, not that "storage is unavailable". */
+describe('a marks file that could not be read', () => {
+  it('is said so, in the panel', () => {
+    draw({ unreadable: true })
+    expect(screen.getByText(/could not be read/).textContent).toContain('left as it is')
+  })
+
+  it('is not said of a book whose file read', () => {
+    draw({})
+    expect(screen.queryByText(/could not be read/)).toBeNull()
   })
 })

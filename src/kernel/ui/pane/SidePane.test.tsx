@@ -72,7 +72,7 @@ const marksView = () =>
   ({ all: [], current: [], bookmarks: [], allBookmarks: [], persistent: true, ready: true, loadAll: vi.fn() }) as unknown as MarksView
 
 /** The pane in the reader, on one panel, with only what that panel reads varied. */
-function draw(over: Partial<SidePaneProps> & { pane: 'search' | 'companion' }) {
+function draw(over: Partial<SidePaneProps> & { pane: 'search' | 'companion' | 'library' }) {
   const onGoTo = vi.fn()
   const props: SidePaneProps = {
     state: { ...initialState, screen: 'reader', pane: over.pane, lastPane: over.pane },
@@ -126,5 +126,42 @@ describe('the companion panel', () => {
     fireEvent.change(input, { target: { value: 'who is speaking?' } })
     fireEvent.keyDown(input, { key: 'Enter' })
     expect(companion.asked[0]?.selection).toBe('Call me Ishmael.')
+  })
+})
+
+/* The reader's decisions about their tags — pins, colours, hidden subjects,
+   saved views — live in storage the panel writes; when that write is refused
+   the panel is where the decision was made, so it is where the refusal is
+   said (WI-20.36). */
+describe('the library panel', () => {
+  const prefs = { pinned: [], colours: {}, hiddenSubjects: [], views: [] }
+  const tagPrefs = (persistent: boolean): TagPrefsStore => ({
+    prefs,
+    persistent,
+    togglePinned: vi.fn(),
+    setColour: vi.fn(),
+    toggleHidden: vi.fn(),
+    saveView: vi.fn(),
+    renameView: vi.fn(),
+    removeView: vi.fn(),
+  })
+  const library = (persistent: boolean): SidePaneProps['library'] => ({
+    onRenameTag: vi.fn(),
+    onRemoveTag: vi.fn(),
+    tagPrefs: tagPrefs(persistent),
+    lastRemoval: null,
+    onUndoRemoveTag: vi.fn(),
+    onAdoptTag: vi.fn(),
+    onTagBooks: vi.fn(),
+  })
+
+  it('says when the tag preferences are not being kept', () => {
+    draw({ pane: 'library', library: library(false) })
+    expect(screen.getByText(/not being saved/).textContent).toContain('pins')
+  })
+
+  it('says nothing when they are', () => {
+    draw({ pane: 'library', library: library(true) })
+    expect(screen.queryByText(/not being saved/)).toBeNull()
   })
 })

@@ -479,3 +479,54 @@ describe('addMany', () => {
     expect(fs.writes(marksPathIn(BOOK))).toBe(before)
   })
 })
+
+/**
+ * A marks file that is THERE and will not read (WI-20.36).
+ *
+ * `readMarks` throws for one — the most destructive line in that file used to
+ * collapse it into `[]` — and `open` caught the throw and installed the empty
+ * list with `ready: true` and no flag. So the reader saw a book with no marks,
+ * the ribbon offered to place a bookmark, and the only thing standing between
+ * the next write and the damaged file was that the write's own read throws
+ * too. The store now says so, and stops calling the book ready.
+ */
+describe('a marks file that will not read', () => {
+  const damaged = '{"not": "a list"}'
+
+  it('is reported as unreadable rather than installed as empty, and nothing is written over it', async () => {
+    const { fs, store: s } = store()
+    fs.store.set(marksPathIn(BOOK), new TextEncoder().encode(damaged))
+    await s.open(BOOK)
+
+    const before = s.getSnapshot()
+    expect(before.unreadable).toBe(true)
+    expect(before.ready).toBe(false)
+    expect(before.current).toEqual([])
+
+    await expect(s.add(highlight())).rejects.toThrow()
+    expect(new TextDecoder().decode(fs.store.get(marksPathIn(BOOK)))).toBe(damaged)
+    expect(s.getSnapshot().persistent).toBe(false)
+  })
+
+  it('is a fact about the open book, gone once another book reads', async () => {
+    const other = 'book:other'
+    const fs = fakeFs({
+      [recordPath(BOOK)]: JSON.stringify({ bookId: BOOK, title: 'A', author: 'B' }),
+      [recordPath(other)]: JSON.stringify({ bookId: other, title: 'C', author: 'D' }),
+      [marksPathIn(BOOK)]: damaged,
+    })
+    const s = createMarkStore({ fs, queue: writeQueue() })
+    await s.open(BOOK)
+    expect(s.getSnapshot().unreadable).toBe(true)
+    await s.open(other)
+    expect(s.getSnapshot().unreadable).toBe(false)
+    expect(s.getSnapshot().ready).toBe(true)
+  })
+
+  it('is not what a book with no marks file yet is', async () => {
+    const { store: s } = store()
+    await s.open(BOOK)
+    expect(s.getSnapshot().unreadable).toBe(false)
+    expect(s.getSnapshot().ready).toBe(true)
+  })
+})

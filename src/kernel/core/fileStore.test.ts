@@ -179,3 +179,35 @@ describe('a store that will not parse', () => {
 async function readBack(fs: FileSystem): Promise<string> {
   return (await fs.read(STORE_FILE)) ?? ''
 }
+
+/**
+ * A damaged store is ANNOUNCED, not only logged (WI-20.36). The quarantine
+ * wrote a line to the console and started empty, and a reader who lost a
+ * year of marks to a truncated file learned it from an empty Marginalia panel
+ * with nothing to say why. The store now reports what it did so boot can
+ * say it where the reader looks.
+ */
+describe('what the store has to say about its own file', () => {
+  it('reports the damaged file it moved aside', async () => {
+    const warn = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { fs } = fakeFs({ [STORE_FILE]: '{"paper.marks.v1": [trunca' })
+    const store = await openFileStore({ fs })
+    expect(store.damaged).toEqual({ aside: `${STORE_FILE}.corrupt` })
+    warn.mockRestore()
+  })
+
+  it('reports a damaged file it could not move, which the next write will replace', async () => {
+    const warn = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { fs } = fakeFs({ [STORE_FILE]: 'not json' })
+    const store = await openFileStore({ fs: { ...fs, quarantine: () => Promise.reject(new Error('EROFS')) } })
+    expect(store.damaged).toEqual({ aside: null })
+    warn.mockRestore()
+  })
+
+  it('has nothing to say about a store that read', async () => {
+    const { fs } = fakeFs({ [STORE_FILE]: JSON.stringify({ 'paper.marks.v1': MARKS }) })
+    expect((await openFileStore({ fs })).damaged).toBeNull()
+    const { fs: empty } = fakeFs()
+    expect((await openFileStore({ fs: empty })).damaged).toBeNull()
+  })
+})

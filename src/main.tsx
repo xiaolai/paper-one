@@ -82,7 +82,10 @@ async function boot(root: HTMLElement): Promise<void> {
   /* FIRST, so the window's own cost is on the record before the app adds any of
    * its own. Everything above this line ran before `boot` was called at all. */
   reportStartup()
-  const storage = await timed('open the store', () => openAppStorage())
+  /* AND WHAT OPENING IT HAD TO SAY — a damaged file moved aside, a disk it
+   * could not open — carried to the shelf's foot rather than to the console,
+   * which is not where a reader looks for their cards and settings. */
+  const { storage, notice: storeNotice } = await timed('open the store', () => openAppStorage())
   /* THE SHELF IS AWAITED TOO, for the same reason the store is: rendering first
    * and filling in afterwards gives every reader one frame of an empty library,
    * and this one would be a frame of "Your library is empty" over a full one.
@@ -311,7 +314,14 @@ async function boot(root: HTMLElement): Promise<void> {
    * flush, and the unclean path still works exactly as it does today. */
   createRoot(root).render(
     <StrictMode>
-      <App services={services} fs={fs} shelfUnread={shelfUnread} composition={composition} beforeWindowClose={teardown} />
+      <App
+        services={services}
+        fs={fs}
+        shelfUnread={shelfUnread}
+        bootNotice={storeNotice}
+        composition={composition}
+        beforeWindowClose={teardown}
+      />
     </StrictMode>,
   )
 

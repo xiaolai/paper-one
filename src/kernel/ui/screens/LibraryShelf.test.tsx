@@ -248,3 +248,53 @@ describe('a capability store that moves', () => {
     expect(screen.getAllByText('Downloading 25%').length).toBeGreaterThan(0)
   })
 })
+
+/**
+ * The foot says when a save did not land (WI-20.36). It is the one line the
+ * shelf has for "something happened to your library", and a write that
+ * failed is the thing most worth that line.
+ */
+describe('the foot, when a save did not land', () => {
+  it('names the book, offers the retry, and can be dismissed', () => {
+    const retry = vi.fn()
+    const dismiss = vi.fn()
+    render(
+      <Library
+        {...shelf}
+        saveFailure={{ message: 'Couldn’t save “Bad Blood”', retry }}
+        onDismissSaveFailure={dismiss}
+      />,
+    )
+    expect(screen.getByRole('status').textContent).toContain('Couldn’t save “Bad Blood”')
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(retry).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }))
+    expect(dismiss).toHaveBeenCalledTimes(1)
+  })
+
+  /* The reader's own action that did not happen outranks the one that did:
+     "1,959 added" over a failed save is the wrong thing to read. */
+  it('outranks the import line, and offers no retry it cannot run', () => {
+    render(
+      <Library
+        {...shelf}
+        importNotice="Added 3 books."
+        saveFailure={{ message: 'Couldn’t save “Bad Blood”', retry: null }}
+        onDismissSaveFailure={vi.fn()}
+      />,
+    )
+    expect(screen.getByRole('status').textContent).toContain('Couldn’t save')
+    expect(screen.queryByText('Added 3 books.')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
+  })
+})
+
+describe('what boot had to say', () => {
+  it('stands in the foot until dismissed, below a save that failed', () => {
+    const dismiss = vi.fn()
+    render(<Library {...shelf} bootNotice="The store could not be read." onDismissBootNotice={dismiss} />)
+    expect(screen.getByRole('status').textContent).toContain('The store could not be read.')
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }))
+    expect(dismiss).toHaveBeenCalledTimes(1)
+  })
+})

@@ -27,6 +27,7 @@ import { NOOP_DIAGNOSTICS, type Diagnostics } from '../../core/ports'
 import { askGloss, useGloss } from '../hooks/useGloss'
 import { marginMarks, type MarkAppearance } from '../../core/marks'
 import type { MarksView } from '../hooks/useMarks'
+import type { SaveFailureView } from '../hooks/useLibrary'
 import type { Marking } from '../hooks/useMarking'
 import type { Bookmarking } from '../hooks/useBookmarking'
 import { hasOpenLayer } from '../state'
@@ -83,6 +84,14 @@ export interface ReaderProps {
    * a capability — so what crosses is a callback, not an id.
    */
   onInstallGloss?: (() => void) | undefined
+  /**
+   * A save that did not land — a position, a tag, a mark's record — with
+   * the way to try it again. Drawn in the notice slot over the footer, where
+   * the clipboard's failures already are: the reader is here, not on the
+   * shelf, when a page turn's write is refused. See `LibraryView.saveFailure`.
+   */
+  saveFailure?: SaveFailureView | null
+  onDismissSaveFailure?: () => void
   /**
    * Where a lookup says whether it found a real sentence (WI-16.4, §F4).
    *
@@ -193,6 +202,8 @@ export function Reader({
   book,
   gloss: glossProvider = NO_GLOSS,
   onInstallGloss,
+  saveFailure = null,
+  onDismissSaveFailure,
   diagnostics = NOOP_DIAGNOSTICS,
   marks,
   marking,
@@ -930,6 +941,24 @@ export function Reader({
                       ← Back to {returnTo}
                     </button>
                     <span className={styles.returnHintKey}>{comboFor('⌘[', platform)}</span>
+                  </div>
+                )}
+
+                {/* A save that did not land (WI-20.36): the position this page
+                    turn wrote, or the mark's record. Amber, like the clipboard's
+                    failure below, and beside its retry — the reader is here
+                    when the disk refuses a write, not on the shelf. */}
+                {saveFailure && (
+                  <div className={styles.notice} role="status">
+                    <span>{saveFailure.message}</span>
+                    {saveFailure.retry !== null && (
+                      <button type="button" className={styles.noticeDismiss} onClick={saveFailure.retry}>
+                        Retry
+                      </button>
+                    )}
+                    <button type="button" className={styles.noticeDismiss} onClick={onDismissSaveFailure}>
+                      Dismiss
+                    </button>
                   </div>
                 )}
 

@@ -79,29 +79,41 @@ const exportTagsNow = useCallback(() => {
 }, [library.books])
 
 const importTagsNow = useCallback(() => {
-  void importTagsFromFile()
-    .then((picked) => {
-      if (!picked) return
-      if (!picked.archive) {
-        notice('That file is not a Paper tag export.')
-        return
-      }
-      const plan = planImport(picked.archive, library.books)
-      for (const one of plan.additions) library.tagBooks([one.bookId], one.tags)
-      /* THE NUMBER THAT DID NOTHING IS WORTH SAYING TOO. An archive from
-         another library matches nothing here, and an import that reports only
-         its successes leaves the reader believing it worked. */
-      const missed = plan.unmatched > 0 ? ` ${plan.unmatched} not on this shelf.` : ''
-      notice(
-        plan.booksTouched === 0
-          ? `Nothing to add — those tags are already here.${missed}`
-          : `Added ${plan.tagsAdded} ${plan.tagsAdded === 1 ? 'tag' : 'tags'} across ${plan.booksTouched} ${plan.booksTouched === 1 ? 'book' : 'books'}.${missed}`,
-      )
-    })
-    .catch((cause: unknown) => {
-      console.error('Paper: could not import those tags', cause)
-      notice('That file could not be read.')
-    })
+  void (async () => {
+    const picked = await importTagsFromFile()
+    if (!picked) return
+    if (!picked.archive) {
+      notice('That file is not a Paper tag export.')
+      return
+    }
+    const plan = planImport(picked.archive, library.books)
+    /* THE NUMBER THAT DID NOTHING IS WORTH SAYING TOO. An archive from
+       another library matches nothing here, and an import that reports only
+       its successes leaves the reader believing it worked. */
+    const missed = plan.unmatched > 0 ? ` ${plan.unmatched} not on this shelf.` : ''
+    if (plan.additions.length === 0) {
+      notice(`Nothing to add — those tags are already here.${missed}`)
+      return
+    }
+    /* ONE BATCHED CALL, AWAITED, exactly as the marks import below. This
+     * looped `tagBooks` once per archived book in one synchronous pass —
+     * two thousand write chains in flight in a single tick, the flood the
+     * library's `addMany` documents — and said "Added N" before a single
+     * write had landed, so a full disk produced a cheerful notice and no
+     * tags. The books figure is the STORE's answer, what actually changed on
+     * disk, and what could not be saved is said in the same breath. */
+    const { changed, failed } = await library.tagMany(plan.additions)
+    const lost =
+      failed > 0 ? ` ${failed.toLocaleString()} ${failed === 1 ? 'book' : 'books'} could not be saved.` : ''
+    notice(
+      changed === 0 && failed === 0
+        ? `Nothing to add — those tags are already here.${missed}`
+        : `Added ${plan.tagsAdded.toLocaleString()} ${plan.tagsAdded === 1 ? 'tag' : 'tags'} across ${changed.toLocaleString()} ${changed === 1 ? 'book' : 'books'}.${lost}${missed}`,
+    )
+  })().catch((cause: unknown) => {
+    console.error('Paper: could not import those tags', cause)
+    notice('That file could not be read.')
+  })
 }, [library])
 /**
  * The reader's marginalia, out to a file and back.

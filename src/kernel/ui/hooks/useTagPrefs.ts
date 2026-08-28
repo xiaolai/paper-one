@@ -30,6 +30,16 @@ import {
 
 export interface TagPrefsStore {
   readonly prefs: TagPrefs
+  /**
+   * Whether the next launch will see any of this.
+   *
+   * False with no storage, and false from a write the storage refused until
+   * one it takes. The write effect used to advance its "last written" marker
+   * BEFORE `setItem` and report a throw to the console only — so a pin, a
+   * colour, a hidden subject or a saved view showed as kept until the next
+   * launch, when it was gone, and nothing on screen had said otherwise.
+   */
+  readonly persistent: boolean
   togglePinned: (tag: string) => void
   setColour: (tag: string, colour: TagColour | null) => void
   toggleHidden: (subject: string) => void
@@ -66,17 +76,27 @@ export function useTagPrefs(storage: MarkStorage | null): TagPrefsStore {
    * what was READ: a launch that changes nothing must not rewrite the file. */
   const written = useRef<TagPrefs | null>(null)
   if (written.current === null) written.current = prefs
+  const [persistent, setPersistent] = useState(storage !== null)
 
   useEffect(() => {
     if (!storage || written.current === prefs) return
-    written.current = prefs
     try {
       storage.setItem(TAG_PREFS_STORAGE_KEY, JSON.stringify(prefs))
+      /* ADVANCED AFTER THE WRITE, not before it. Advanced first, a refused
+       * write was recorded as done, and the value stayed on screen as though
+       * kept. Left behind, the next change writes the whole current value —
+       * which carries this one — so a store that recovers (the file store
+       * queues the retry before it throws for the previous failure) takes
+       * everything the reader decided in between. */
+      written.current = prefs
+      setPersistent(true)
     } catch (cause) {
-      /* Reported, not thrown. These are conveniences — the tags themselves are
-       * on the books — so a reader whose disk is full keeps their library and
-       * loses a pin. */
+      /* Reported AND published. These are conveniences — the tags themselves
+       * are on the books — so a reader whose disk is full keeps their library
+       * and loses a pin; but they are told the pin is what they are losing,
+       * in the panel where they made it. */
       console.error('Paper: could not save your tag preferences', cause)
+      setPersistent(false)
     }
   }, [storage, prefs])
 
@@ -104,5 +124,5 @@ export function useTagPrefs(storage: MarkStorage | null): TagPrefsStore {
     setPrefs((current) => removeViewIn(current, id))
   }, [])
 
-  return { prefs, togglePinned, setColour, toggleHidden, saveView, renameView, removeView }
+  return { prefs, persistent, togglePinned, setColour, toggleHidden, saveView, renameView, removeView }
 }

@@ -112,6 +112,19 @@ export interface MarkSnapshot {
    * stops persisting is indistinguishable from one that works.
    */
   readonly persistent: boolean
+  /**
+   * The open book's marks file is THERE and would not read.
+   *
+   * A different fact from `persistent`, and it used to be no fact at all:
+   * `open` caught the read's throw and installed an empty list with `ready`
+   * true — so the reader saw a book with no marks, the ribbon offered to
+   * place a bookmark on it, and only the write's own read throwing again
+   * stood between that bookmark and the damaged file. Now the book is not
+   * called ready, this says why, and the file is left exactly as it is.
+   * Cleared by the next `open`, which is the point at which the question
+   * is asked again.
+   */
+  readonly unreadable: boolean
 }
 
 export interface MarkStore {
@@ -254,6 +267,8 @@ export function createMarkStore({
   let persistent = true
   /** Whether a write has failed since the last successful load — see `applyElsewhere`. */
   let failed = false
+  /** The book whose marks file was there and would not read — see `MarkSnapshot.unreadable`. */
+  let unreadableId: string | null = null
   /** Which `open` is the current one, so a read that lands late is discarded. */
   let generation = 0
   /**
@@ -283,6 +298,7 @@ export function createMarkStore({
     bookId: null,
     ready: false,
     persistent,
+    unreadable: false,
   }
 
   /**
@@ -359,6 +375,7 @@ export function createMarkStore({
       bookId: openId,
       ready,
       persistent,
+      unreadable: openId !== null && unreadableId === openId,
     }
     for (const listener of [...listeners]) listener()
   }
@@ -523,6 +540,8 @@ export function createMarkStore({
 
   const open: MarkStore['open'] = (bookId) => {
     openId = bookId
+    // A fact about ONE open; the next open asks the question again.
+    unreadableId = null
     generation += 1
     const mine = generation
     if (!bookId || !fs) {
@@ -549,7 +568,15 @@ export function createMarkStore({
       })
       .catch(() => {
         if (mine !== generation) return
-        loaded = { bookId, marks: [] }
+        /* NOT INSTALLED AS EMPTY. `readMarks` throws for a file that is there
+         * and will not read, precisely so that it is not mistaken for a book
+         * with no marks — and this catch used to undo that one line later,
+         * handing the projections an empty list under the open book's id so
+         * `ready` came out true. `loaded` is left as it was, which is not
+         * this book's, so the book is not ready and its lists are empty; the
+         * flag says why. A write will find the same throw and fail rather
+         * than replace the file. */
+        unreadableId = bookId
         publish()
       })
   }

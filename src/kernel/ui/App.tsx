@@ -97,6 +97,13 @@ export interface AppProps {
    */
   shelfUnread?: boolean
   /**
+   * What boot found wrong with the store, in one sentence — a damaged file
+   * moved aside, a disk it could not open — or null. Shown in the shelf's
+   * foot until dismissed, because the console it used to go to is not where
+   * a reader looks for their cards and settings (WI-20.36).
+   */
+  bootNotice?: string | null
+  /**
    * What the composed capabilities contributed — panes for the side pane,
    * commands for the palette — as `composeCapabilities` returned it. Built
    * by the composition root, like `services`, and read here; the kernel
@@ -121,7 +128,14 @@ export interface AppProps {
  */
 const NOTICE_MS = 12_000
 
-export function App({ services, fs, shelfUnread = false, composition, beforeWindowClose }: AppProps) {
+export function App({
+  services,
+  fs,
+  shelfUnread = false,
+  bootNotice: bootSaid = null,
+  composition,
+  beforeWindowClose,
+}: AppProps) {
   const platform = usePlatform()
   /* Probed once for the app's lifetime: which fonts this machine has cannot
      change while it is running. Shared by the settings panel and the palette so
@@ -432,6 +446,10 @@ export function App({ services, fs, shelfUnread = false, composition, beforeWind
    * DECLARED ABOVE THE IMPORT COORDINATOR, which writes every import's notice
    * through it. */
   const [importNotice, setImportNotice] = useState<string | null>(null)
+  /* Standing, not transient: a quarantined store is not something the app
+     did, it is something the reader has lost, and it stays until they say
+     they have read it. */
+  const [bootNotice, setBootNotice] = useState<string | null>(bootSaid)
 
   /* THE IMPORT LIFECYCLE, ONCE — see `useImportRun`. The progress bar, the
    * generation token, the abort handle, the handover and the settle were
@@ -1738,6 +1756,8 @@ export function App({ services, fs, shelfUnread = false, composition, beforeWind
              port keeps its `NO_GLOSS` default, the button is still absent. */
           onInstallGloss={() => dispatch({ type: 'openPane', pane: 'settings' })}
           libraryCount={library.books.length}
+          saveFailure={library.saveFailure}
+          onDismissSaveFailure={library.dismissSaveFailure}
           shelfUnread={shelfUnread}
           onOpenLibrary={() => dispatch({ type: 'goScreen', screen: 'library' })}
           state={state}
@@ -1793,6 +1813,10 @@ export function App({ services, fs, shelfUnread = false, composition, beforeWind
             onAddFolder={addFolder}
             importing={importing}
             importNotice={importNotice}
+            saveFailure={library.saveFailure}
+            onDismissSaveFailure={library.dismissSaveFailure}
+            bootNotice={bootNotice}
+            onDismissBootNotice={() => setBootNotice(null)}
             shelfUnread={shelfUnread}
             enriching={enrichment.pending}
             download={download}

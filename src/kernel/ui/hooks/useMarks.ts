@@ -34,6 +34,9 @@ export interface MarksView {
   /** Whether this book's marks have been READ — see `MarkSnapshot.ready`.
    *  Paired with the book asked for, like the two lists above. */
   readonly ready: boolean
+  /** This book's marks file is there and would not read — see
+   *  `MarkSnapshot.unreadable`. Paired with the book, like `ready`. */
+  readonly unreadable: boolean
   /**
    * Add a mark and hand it back AT ONCE, because the reader draws it before
    * the write lands: foliate only offers marks to an overlay when it builds
@@ -158,8 +161,20 @@ export function useMarks(store: MarkStore, bookId: string | null): MarksView {
       bookmarks,
       persistent: snapshot.persistent,
       ready: snapshot.ready && snapshot.bookId === bookId,
+      unreadable: snapshot.unreadable && snapshot.bookId === bookId,
       ...verbs,
     }),
-    [snapshot.all, snapshot.allBookmarks, current, bookmarks, snapshot.persistent, snapshot.ready, snapshot.bookId, bookId, verbs],
+    [
+      snapshot.all,
+      snapshot.allBookmarks,
+      current,
+      bookmarks,
+      snapshot.persistent,
+      snapshot.ready,
+      snapshot.unreadable,
+      snapshot.bookId,
+      bookId,
+      verbs,
+    ],
   )
 }

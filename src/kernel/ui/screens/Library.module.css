@@ -115,6 +115,21 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* The foot's one control: the retry and the dismiss beside a save that did
+   not land. The reader's own notice-dismiss link, in the foot's caption
+   size, and no box — it is a word in a sentence, not a button in a row. */
+.statusAction {
+  border: none;
+  background: none;
+  padding: 0;
+  margin-left: var(--space-6);
+  color: var(--muted);
+  font-family: inherit;
+  font-size: var(--text-caption);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
 .library[data-platform='macos'] {
   padding-top: var(--titlebar-h);
 }

@@ -550,3 +550,87 @@ describe('addMany, the shape a folder import writes in', () => {
     expect(library.getSnapshot()).toHaveLength(9)
   })
 })
+
+/**
+ * A failed save is SHOWN, with its retry (WI-20.36).
+ *
+ * `letGo` reported every rejection to the console and nothing else — so a
+ * tag that never reached the disk looked, on the shelf, exactly like one that
+ * had. The store publishes the failure; the hook, which is the one holding
+ * the verb that failed, is what can offer to run it again.
+ */
+describe('useLibrary and a save that did not land', () => {
+  afterEach(cleanup)
+
+  const quiet = () => vi.spyOn(console, 'error').mockImplementation(() => {})
+
+  function failing() {
+    let refuse = true
+    const fs = fakeFs({
+      [`${BOOKS_DIR}/book_a/book.json`]: JSON.stringify({ title: 'Moby-Dick', author: '' }),
+      [`${BOOKS_DIR}/book_a/content.epub`]: 'B',
+    })
+    const wrapped = {
+      ...fs,
+      writeFile: async (path: string, bytes: Uint8Array) => {
+        if (refuse && path.startsWith(`${BOOKS_DIR}/book_a/`)) throw new Error('disk full')
+        return fs.writeFile(path, bytes)
+      },
+    }
+    const library = createLibrary({
+      fs: wrapped,
+      queue: writeQueue(),
+      initial: [{ bookId: 'book_a', title: 'Moby-Dick', author: '', hasContent: true }],
+    })
+    const hook = renderHook(() => useLibrary(library))
+    return { fs, library, hook, heal: () => (refuse = false) }
+  }
+
+  it('shows the failure with a retry, and the retry that lands clears it', async () => {
+    const warn = quiet()
+    const { fs, hook, heal } = failing()
+    await act(async () => {
+      hook.result.current.tag('book_a', 'Sea')
+      await vi.waitFor(() => expect(hook.result.current.saveFailure).not.toBeNull())
+    })
+    expect(hook.result.current.saveFailure?.message).toBe('Couldn’t save “Moby-Dick”')
+    expect(hook.result.current.saveFailure?.retry).toBeTypeOf('function')
+
+    heal()
+    await act(async () => {
+      hook.result.current.saveFailure?.retry?.()
+      await vi.waitFor(() => expect(hook.result.current.saveFailure).toBeNull())
+    })
+    const record = JSON.parse(new TextDecoder().decode(fs.store.get(`${BOOKS_DIR}/book_a/book.json`))) as {
+      tags?: string[]
+    }
+    expect(record.tags).toEqual(['Sea'])
+    warn.mockRestore()
+  })
+
+  /* A failure the hook did not run — a capability's handler writing through
+     the store directly — is shown, and offers no retry: the hook holds no verb
+     for it, and re-running the wrong one would be worse than none. */
+  it('offers no retry for a failure it did not run', async () => {
+    const warn = quiet()
+    const { library, hook } = failing()
+    await act(async () => {
+      await library.tag('book_a', 'Sea').catch(() => {})
+    })
+    expect(hook.result.current.saveFailure?.message).toBe('Couldn’t save “Moby-Dick”')
+    expect(hook.result.current.saveFailure?.retry).toBeNull()
+    warn.mockRestore()
+  })
+
+  it('can be dismissed', async () => {
+    const warn = quiet()
+    const { hook } = failing()
+    await act(async () => {
+      hook.result.current.tag('book_a', 'Sea')
+      await vi.waitFor(() => expect(hook.result.current.saveFailure).not.toBeNull())
+    })
+    act(() => hook.result.current.dismissSaveFailure())
+    expect(hook.result.current.saveFailure).toBeNull()
+    warn.mockRestore()
+  })
+})

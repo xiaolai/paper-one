@@ -351,6 +351,18 @@ export function LibraryPanel({
 
   return (
     <div className={styles.libraryPanel}>
+      {/* §11: say what happened. A pin, a colour, a hidden subject or a saved
+          view the storage refused stayed on screen as though kept and was gone
+          at the next launch, with nothing having said so (WI-20.36). Said
+          here, where the decisions are made. */}
+      {!tagPrefs.persistent && (
+        <div className={styles.panelMeta}>
+          <span>
+            Your tag pins, colours, hidden subjects and saved views are not being saved — this
+            device's storage is unavailable.
+          </span>
+        </div>
+      )}
       <button
         type="button"
         className={styles.scopeRow}

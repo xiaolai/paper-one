@@ -229,6 +229,34 @@ export interface Library {
    *  `subjects`) is skipped, and only the writer knows that. */
   tagBooks(bookIds: readonly string[], tags: readonly string[]): Promise<number>
   /**
+   * A whole archive's worth of tags, `WRITE_WIDTH` books at a time — the tag
+   * import's verb, and the plural of `tagBooks` the way `addMany` is of `add`.
+   *
+   * The import looped `tagBooks` once per archived book in one synchronous
+   * pass — two thousand write chains in flight in a single tick, which is
+   * the flood `addMany` documents — and reported "Added N" before any of
+   * them had landed. Failures are COUNTED AND RETURNED beside the count of
+   * records that changed, so the notice says what happened rather than what
+   * was asked for.
+   */
+  tagMany(entries: readonly TagEntry[]): Promise<TagManyOutcome>
+  /**
+   * Whether the LAST write to a book's folder landed.
+   *
+   * False from a write that failed until any write succeeds; the marks and
+   * the cards publish the same flag, and the library was the one store whose
+   * failures went to the console and nowhere the reader looks.
+   */
+  readonly persistent: boolean
+  /**
+   * The last write that did not land — until the SAME book writes
+   * successfully, or the reader dismisses it. Another book's success does
+   * not clear it: a page turn in B landing must not make A's lost tag look
+   * saved. A second subscription over the same listeners, like `lastRemoval`.
+   */
+  lastFailure(): SaveFailure | null
+  dismissFailure(): void
+  /**
    * Take one tag off every book named, and RECORD what was actually taken.
    *
    * The one place a removal is recorded, so the shelf-wide `removeTag` and the
@@ -363,6 +391,33 @@ export interface AddGuard {
 }
 export type AddOutcome = 'added' | 'removed-since'
 
+/** One archived book's tags to apply — what `tagMany` takes. */
+export interface TagEntry {
+  readonly bookId: string
+  readonly tags: readonly string[]
+}
+
+export interface TagManyOutcome {
+  /** Records that actually changed — a book already carrying the tag is not one. */
+  readonly changed: number
+  /** Books whose write did not land. */
+  readonly failed: number
+}
+
+/**
+ * A write that did not land, as the shelf reports it.
+ *
+ * `title` is what the status line names, resolved when the failure happened
+ * — the repair that follows a failed write may take the row off the shelf,
+ * after which there is nothing left to look it up in.
+ */
+export interface SaveFailure {
+  readonly bookId: string
+  readonly title: string
+  readonly what: 'record' | 'removed'
+  readonly message: string
+}
+
 export interface PurgeOptions {
   /** Leave the folder if its `.removed` stamp is later than this instant. */
   readonly unlessStampedAfter: number
@@ -440,7 +495,7 @@ const sameRow = (a: IndexedBook, b: IndexedBook): boolean => canonical(a) === ca
  * round-trips, a handful in flight overlaps the latency, and a write is
  * several round-trips plus an fsync where a scan is two small reads.
  */
-const WRITE_WIDTH = 8
+export const WRITE_WIDTH = 8
 
 /**
  * Run `work` over every item, at most `width` in flight, gathering failures
@@ -605,6 +660,37 @@ export function createLibrary({
     notify()
   }
 
+  /* WHETHER THE LAST WRITE LANDED, and which one did not. Both published
+   * through the same listeners as the list, read by their own getters — the
+   * status line subscribes to the failure the way the settings pane subscribes
+   * to its store's flag, so the notice appears on the write that failed
+   * rather than on the next one that worked. */
+  let persistent = true
+  let failure: SaveFailure | null = null
+  const noteFailed = (bookId: string, what: SaveFailure['what'], cause: unknown, predicted: readonly IndexedBook[]) => {
+    /* NAMED NOW. The repair below may take the row off the shelf, and a
+     * failure the status line can only call by its id is one the reader
+     * cannot connect to anything they did. */
+    const row = predicted.find((one) => one.bookId === bookId) ?? books.find((one) => one.bookId === bookId)
+    const title = row?.title || bookId
+    persistent = false
+    failure = { bookId, title, what, message: cause instanceof Error ? cause.message : String(cause) }
+    notify()
+  }
+  const noteLanded = (bookId: string) => {
+    const cleared = failure !== null && failure.bookId === bookId
+    if (persistent && !cleared) return
+    persistent = true
+    if (cleared) failure = null
+    notify()
+  }
+  const lastFailure: Library['lastFailure'] = () => failure
+  const dismissFailure: Library['dismissFailure'] = () => {
+    if (failure === null) return
+    failure = null
+    notify()
+  }
+
   /**
    * Put what the disk actually holds back into the row.
    *
@@ -685,9 +771,13 @@ export function createLibrary({
         })
         .then(() => {
           if (refused) hooks!.retract()
+          else noteLanded(resolveId(key))
           return writeIndexNow(target)
         })
         .catch(async (cause: unknown) => {
+          /* SAID FIRST, before the repair — which is a further write that may
+           * itself fail, and whose failure must not be the only one heard. */
+          noteFailed(resolveId(key), what, cause, next)
           /* THE FOLDER WINS, NOW — not at some later read that may never come.
            *
            * The optimistic row predicted a write that did not land, and worse,
@@ -1510,6 +1600,25 @@ export function createLibrary({
     })
   }
 
+  /**
+   * One `tagBooks` per archived book, `WRITE_WIDTH` in flight — see the
+   * interface. Each book's failure is its own: `tagBooks` raises what it
+   * gathered, `pooled` catches it per item, and the count says the rest.
+   */
+  const tagMany: Library['tagMany'] = async (entries) => {
+    let changed = 0
+    const failures = await pooled(entries, WRITE_WIDTH, async (one) => {
+      /* AWAITED, THEN ADDED. `changed += await …` reads `changed` BEFORE the
+       * await and assigns after it, so eight workers in flight each add to a
+       * count seven of them read stale — 201 of 2,000 was the number the
+       * test got. */
+      const touched = await tagBooks([one.bookId], one.tags)
+      changed += touched
+    })
+    for (const cause of failures) console.error('Paper: could not save imported tags', cause)
+    return { changed, failed: failures.length }
+  }
+
   const untagBooks: Library['untagBooks'] = (bookIds, raw) => {
     const key = tagKey(raw)
     const at = clock()
@@ -1739,10 +1848,16 @@ export function createLibrary({
     ownTagCount,
     ownTagBooks,
     tagBooks,
+    tagMany,
     untagBooks,
     adoptTag,
     lastRemoval,
     undoRemoveTag,
+    get persistent() {
+      return persistent
+    },
+    lastFailure,
+    dismissFailure,
     keepJacket,
     keepContent,
     positionOf,

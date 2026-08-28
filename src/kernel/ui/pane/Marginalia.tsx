@@ -326,6 +326,12 @@ export interface MarginaliaProps {
     readonly allBookmarks: MarksView['allBookmarks']
     readonly persistent: MarksView['persistent']
     /**
+     * Optional, because the browser client's store is fed over the wire and
+     * has no file to fail to read — absent is "nothing to say", not "read
+     * fine". The desktop's `MarksView` always answers.
+     */
+    readonly unreadable?: MarksView['unreadable']
+    /**
      * ⚠️ OPTIONAL, AND ABSENT MEANS THE NOTE IS READ-ONLY.
      *
      * `setNote` reaches `mark.set`, which the table gates on `mark:write`. The
@@ -588,6 +594,15 @@ export function Marginalia({
   if (everything.length === 0) {
     return (
       <div className={styles.empty}>
+        {/* THE CASE THIS MATTERS MOST IN: a reader whose marks file is damaged
+            reaches exactly this branch, and "Nothing kept yet" is the one
+            sentence that must not stand alone over it (WI-20.36). */}
+        {marks.unreadable && (
+          <div className={styles.emptyBody}>
+            This book's marks file could not be read. It is left as it is, and marks made now are
+            not being saved over it.
+          </div>
+        )}
         <div className={styles.emptyTitle}>Nothing kept yet</div>
         <div className={styles.emptyBody}>
           Select a passage and choose Mark — notes you write on a mark appear
@@ -613,6 +628,20 @@ export function Marginalia({
       {!marks.persistent && (
         <div className={styles.panelMeta}>
           <span>Marginalia is not being saved — this device's storage is unavailable.</span>
+        </div>
+      )}
+
+      {/* A different fact from the one above, and it used to be no fact at
+          all (WI-20.36): a marks file that is there and will not read was
+          installed as an empty list, so the reader whose marks had vanished
+          from this list was shown a book with none. The file is being left
+          alone, and this says so. */}
+      {marks.unreadable && (
+        <div className={styles.panelMeta}>
+          <span>
+            This book's marks file could not be read. It is left as it is, and marks made now are
+            not being saved over it.
+          </span>
         </div>
       )}
 

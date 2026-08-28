@@ -34,6 +34,7 @@ import { moment, onFirstPaint } from '../devTiming'
 import { ICON } from '../../core/metrics'
 import type { Platform } from '../../core/metrics'
 import { useRowMenu } from '../hooks/useRowMenu'
+import type { SaveFailureView } from '../hooks/useLibrary'
 import { VIRTUALISE_ABOVE, gridWindow } from '../../core/virtualGrid'
 import { OverlaySheet } from '../overlays/OverlaySheet'
 import { BookCell, type SelectMode } from './BookCell'
@@ -171,6 +172,22 @@ export interface LibraryProps {
   download?: string | null
   /** What the last import did, in one line. */
   importNotice: string | null
+  /**
+   * A save that did not land, with the way to try it again — the foot's
+   * FIRST rung, above everything the app is doing on its own and above what
+   * it just did. The reader's action that did not happen outranks the one
+   * that did: "1,959 added" over a failed save is the wrong thing to read.
+   * See `LibraryView.saveFailure`.
+   */
+  saveFailure?: SaveFailureView | null
+  onDismissSaveFailure?: () => void
+  /**
+   * What boot had to say about the store — a damaged file moved aside, or a
+   * disk it could not open — standing in the foot until the reader dismisses
+   * it. Below a failed save, above the app's own work.
+   */
+  bootNotice?: string | null
+  onDismissBootNotice?: () => void
   /** The search field's contents — held in app state, see `AppState.libraryQuery`. */
   libraryQuery: string
   /** Accepts a functional update, resolved by the reducer against current state. */
@@ -267,6 +284,10 @@ export function Library({
   onAddFolder,
   importing,
   importNotice,
+  saveFailure = null,
+  onDismissSaveFailure,
+  bootNotice = null,
+  onDismissBootNotice,
   shelfUnread = false,
   enriching,
   download = null,
@@ -1172,6 +1193,9 @@ export function Library({
       {/* THE FOOT: what is on the shelf, and what is being done to it.
           Never a control — a status bar that can be clicked is a toolbar, and
           this one reports two things a reader would otherwise have to work out.
+          The one exception is a save that did not land: the retry belongs
+          beside the sentence that reports the failure, because a reader told
+          "couldn't save" with nothing to press has been told to worry.
 
           The count says how much of the library is showing, and says it as a
           fraction the moment anything is narrowing the shelf: "24 of 1,965" is
@@ -1202,9 +1226,34 @@ export function Library({
             `statusWork` clips rather than wraps — see the class — so the
             hundred-character filenames that made the old banner rewrap on
             every book simply run out of room here. */}
-        {work !== null ? (
+        {saveFailure !== null ? (
+          /* THE FIRST RUNG (WI-20.36). Every verb's promise used to be let go
+             to the console, and the shelf showed a tag or a position the disk
+             had refused exactly as it showed one it had taken. */
+          <span className={styles.statusWork} role="status">
+            {saveFailure.message}
+            {saveFailure.retry !== null && (
+              <button type="button" className={styles.statusAction} onClick={saveFailure.retry}>
+                Retry
+              </button>
+            )}
+            <button type="button" className={styles.statusAction} onClick={onDismissSaveFailure}>
+              Dismiss
+            </button>
+          </span>
+        ) : work !== null ? (
           <span className={styles.statusWork} role="status">
             {work}
+          </span>
+        ) : bootNotice !== null ? (
+          /* What boot found wrong with the store, standing here until read:
+             a quarantined file is the reader's cards and settings, and a
+             console line is not where they look for them. */
+          <span className={styles.statusWork} role="status">
+            {bootNotice}
+            <button type="button" className={styles.statusAction} onClick={onDismissBootNotice}>
+              Dismiss
+            </button>
           </span>
         ) : download !== null ? (
           /* A MODEL DOWNLOAD, as a THIRD RUNG below the import (WI-15.12).

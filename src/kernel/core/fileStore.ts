@@ -42,6 +42,16 @@ export interface FileStore extends MarkStorage {
   readonly healthy: boolean
   /** True when the contents were seeded from localStorage on this run. */
   readonly migrated: boolean
+  /**
+   * What this run found on disk that it could not read — or null.
+   *
+   * `aside` is where the damaged file went, or null when it could not be
+   * moved and the next write will replace it. Reported rather than only
+   * logged: a reader who lost their cards and settings to a truncated file
+   * learned it from an empty pane with nothing to say why, and a console
+   * line is not where a reader looks. Boot says it where they do.
+   */
+  readonly damaged: { readonly aside: string | null } | null
 }
 
 /** The filesystem operations this needs, injected so it can be tested. */
@@ -82,6 +92,7 @@ export async function openFileStore({
 }: FileStoreOptions): Promise<FileStore> {
   let contents: Contents = {}
   let migrated = false
+  let damaged: FileStore['damaged'] = null
 
   const existing = await fs.read(path)
   if (existing !== null) {
@@ -96,8 +107,10 @@ export async function openFileStore({
       try {
         await fs.quarantine?.(path, aside)
         console.error(`Paper: the store could not be read; moved it to ${aside}`)
+        damaged = { aside }
       } catch (cause) {
         console.error('Paper: the store could not be read, and could not be moved aside', cause)
+        damaged = { aside: null }
       }
     } else {
       contents = readable
@@ -181,6 +194,9 @@ export async function openFileStore({
     },
     get migrated() {
       return migrated
+    },
+    get damaged() {
+      return damaged
     },
   }
 
