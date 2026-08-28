@@ -3,7 +3,7 @@ name = "tauri-plugin-peer"
 version = "0.1.0"
 description = "Paper's peer transport: an iroh endpoint, identity, pairing and blob streams, behind Tauri commands"
 authors = ["Paper"]
-license = ""
+license = "MIT"
 edition = "2021"
 # iroh 1.0.3 and iroh-mdns-address-lookup 0.4.0 declare 1.91; the app crate
 # says the same, and the toolchain itself is pinned by the root

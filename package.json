@@ -2,7 +2,7 @@
   "name": "paper",
   "private": true,
   "version": "0.1.1",
-  "license": "ISC",
+  "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@10.33.0",
   "engines": {

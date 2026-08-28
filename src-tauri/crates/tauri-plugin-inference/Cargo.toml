@@ -3,6 +3,7 @@ name = "tauri-plugin-inference"
 version = "0.1.0"
 description = "Paper's local inference runtime: a supervised lemond child, a per-launch bearer token, verified model artifacts, and agent probes, behind Tauri commands"
 authors = ["Paper"]
+license = "MIT"
 edition = "2021"
 # The app crate and tauri-plugin-peer both say 1.91; the toolchain itself is
 # pinned by the root rust-toolchain.toml.

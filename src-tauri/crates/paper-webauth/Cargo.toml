@@ -3,7 +3,7 @@ name = "paper-webauth"
 version = "0.1.0"
 description = "Paper's browser device-authorization: a one-time 6-digit code, atomically rate-limited"
 authors = ["Paper"]
-license = ""
+license = "MIT"
 edition = "2021"
 # Matches the app crate and tauri-plugin-peer; the toolchain itself is pinned
 # by the root rust-toolchain.toml.

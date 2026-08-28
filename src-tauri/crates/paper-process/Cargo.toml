@@ -3,7 +3,7 @@ name = "paper-process"
 version = "0.1.0"
 description = "Process identity for Paper: when a pid started and when this host booted, so a pid in a record is never mistaken for the process that wrote it"
 authors = ["Paper"]
-license = "ISC"
+license = "MIT"
 edition = "2021"
 # Matches the app crate and the plugins; the toolchain itself is pinned by
 # the root rust-toolchain.toml.
