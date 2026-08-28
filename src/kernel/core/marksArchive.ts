@@ -1,11 +1,15 @@
 import type { IndexedBook } from './bookIndex'
 import type { Card, CardKind } from './cards'
-import { liveCards } from './cards'
+import { CARD_KINDS, MAX_CARD_TEXT, liveCards } from './cards'
 import { fold } from './library'
 import { cfiOverlaps } from './markMatch'
 import { ARCHIVE_MAX_ROWS } from './importLimits'
 import {
   MARK_KINDS,
+  MARK_STYLES,
+  MARK_TINTS,
+  MAX_MARK_NOTE,
+  MAX_MARK_TEXT,
   liveMarks,
   type Mark,
   type MarkKind,
@@ -184,13 +188,18 @@ export interface UnmatchedBook {
  * scans only TRACKED files, so it stayed silent for as long as this file was
  * untracked. Green before the first commit meant less than it looked.
  */
-const nameKey = (title: string, author: string): string => `${fold(title)}\u0000${fold(author)}`
+/* A structured tuple, not a joined string: NUL is a valid character in a
+ * JavaScript string and in escaped JSON, so a separator could be forged by a
+ * crafted title. `JSON.stringify` of the pair cannot be. */
+const nameKey = (title: string, author: string): string => JSON.stringify([fold(title), fold(author)])
 
 const iso = (at: number): string => new Date(at).toISOString()
 
 const MARK_KIND_SET: ReadonlySet<string> = new Set(MARK_KINDS)
-const TINTS: ReadonlySet<string> = new Set(['yellow', 'green', 'purple'])
-const STYLES: ReadonlySet<string> = new Set(['fill', 'underline', 'wave'])
+/* From the canonical registries, not a second spelling of them. */
+const TINTS: ReadonlySet<string> = new Set(MARK_TINTS)
+const STYLES: ReadonlySet<string> = new Set(MARK_STYLES)
+const CARD_KIND_SET: ReadonlySet<string> = new Set(CARD_KINDS)
 
 /**
  * Everything the reader has written, as a document.
@@ -265,28 +274,40 @@ const oneOf = <T extends string>(value: unknown, allowed: ReadonlySet<string>, f
 function parseMark(raw: unknown): ArchivedMark | null {
   if (typeof raw !== 'object' || raw === null) return null
   const row = raw as Record<string, unknown>
-  const text = str(row['text'])
-  const note = str(row['note'])
-  /* A ROW THAT SAYS NOTHING IS NOISE, not a mark. With neither a quote nor a
-     note there is no passage to re-find and nothing the reader wrote — it
-     would import as an anchor to blank text. */
-  if (!text && !note) return null
+  /* THE CANONICAL BOUNDS, not a generic hundred thousand: the service table
+     refuses a mark past `MAX_MARK_TEXT`/`MAX_MARK_NOTE`, and an archive is
+     the one door that used to walk past that — a row too large for the
+     transport, persisted by an import. */
+  const text = str(row['text'], MAX_MARK_TEXT)
+  const note = str(row['note'], MAX_MARK_NOTE)
+  const kind = oneOf<MarkKind>(row['kind'], MARK_KIND_SET, 'highlight')
   const anchor = row['localAnchor']
   const anchorRow = typeof anchor === 'object' && anchor !== null ? (anchor as Record<string, unknown>) : {}
+  const cfi = str(anchorRow['cfi'], 4000)
+  /* A ROW THAT SAYS NOTHING IS NOISE, not a mark — with neither a quote nor
+     a note there is no passage to re-find and nothing the reader wrote.
+     EXCEPT A BOOKMARK: a bookmark is a place, not a quote, and `exportMarks`
+     writes one with blank text when the page had none. Read before `kind`
+     was consulted, this dropped every such bookmark from its own export. A
+     bookmark needs an anchor to be a place; without one it is noise too. */
+  if (!text && !note && !(isBookmarkKind(kind) && cfi)) return null
   const sectionIndex = anchorRow['sectionIndex']
   return {
     text,
-    prefix: str(row['prefix']),
-    suffix: str(row['suffix']),
+    prefix: str(row['prefix'], MAX_MARK_TEXT),
+    suffix: str(row['suffix'], MAX_MARK_TEXT),
     note,
-    kind: oneOf<MarkKind>(row['kind'], MARK_KIND_SET, 'highlight'),
+    kind,
     tint: oneOf<MarkTint>(row['tint'], TINTS, 'yellow'),
     style: oneOf<MarkStyle>(row['style'], STYLES, 'fill'),
     chapter: str(row['chapter'], 1000),
     createdAt: str(row['createdAt'], 40),
     localAnchor: {
-      cfi: str(anchorRow['cfi'], 4000),
-      sectionIndex: typeof sectionIndex === 'number' && Number.isFinite(sectionIndex) ? sectionIndex : 0,
+      cfi,
+      /* A stored mark's section is a non-negative integer; anything else is
+         the documented fallback rather than a mark stranded on section -1.5. */
+      sectionIndex:
+        typeof sectionIndex === 'number' && Number.isInteger(sectionIndex) && sectionIndex >= 0 ? sectionIndex : 0,
     },
   }
 }
@@ -294,8 +315,12 @@ function parseMark(raw: unknown): ArchivedMark | null {
 function parseCard(raw: unknown): ArchivedCard | null {
   if (typeof raw !== 'object' || raw === null) return null
   const row = raw as Record<string, unknown>
-  const body = str(row['body'])
+  const body = str(row['body'], MAX_CARD_TEXT)
   if (!body) return null
+  /* VALIDATED, not cast. An unknown kind was stored as written and then
+     refused by `parseCards` on the next load — the import reported the card
+     added and the card was gone by morning. */
+  if (!CARD_KIND_SET.has(str(row['kind'], 40))) return null
   const anchor = row['localAnchor']
   const cfi =
     typeof anchor === 'object' && anchor !== null
@@ -304,7 +329,7 @@ function parseCard(raw: unknown): ArchivedCard | null {
   return {
     kind: str(row['kind'], 40) as CardKind,
     body,
-    answer: str(row['answer']),
+    answer: str(row['answer'], MAX_CARD_TEXT),
     source: str(row['source'], 1000),
     createdAt: str(row['createdAt'], 40),
     localAnchor: cfi ? { cfi } : null,
@@ -337,25 +362,22 @@ export function parseArchive(raw: string): MarksArchive | null {
    * costs is BUILDING them, not reading them. Counted across the whole archive
    * rather than per book, because a hundred thousand books of one mark each is
    * the same amount of work as one book of a hundred thousand. */
+  /* EVERY CANDIDATE COUNTS — each book object examined and each mark or
+   * card row handed to a parser, parsed or not. Counting only what PARSED
+   * let a compact archive of a million invalid rows, or a million empty book
+   * objects, cost a million iterations against a budget it never touched. */
   let rows = 0
   for (const one of doc['books']) {
-    if (typeof one !== 'object' || one === null) continue
     if (rows >= ARCHIVE_MAX_ROWS) break
+    rows += 1
+    if (typeof one !== 'object' || one === null) continue
     const row = one as Record<string, unknown>
-    const marks = Array.isArray(row['marks'])
-      ? row['marks']
-          .slice(0, Math.max(0, ARCHIVE_MAX_ROWS - rows))
-          .map(parseMark)
-          .filter((mark): mark is ArchivedMark => mark !== null)
-      : []
-    rows += marks.length
-    const cards = Array.isArray(row['cards'])
-      ? row['cards']
-          .slice(0, Math.max(0, ARCHIVE_MAX_ROWS - rows))
-          .map(parseCard)
-          .filter((card): card is ArchivedCard => card !== null)
-      : []
-    rows += cards.length
+    const markRows = Array.isArray(row['marks']) ? row['marks'].slice(0, Math.max(0, ARCHIVE_MAX_ROWS - rows)) : []
+    rows += markRows.length
+    const marks = markRows.map(parseMark).filter((mark): mark is ArchivedMark => mark !== null)
+    const cardRows = Array.isArray(row['cards']) ? row['cards'].slice(0, Math.max(0, ARCHIVE_MAX_ROWS - rows)) : []
+    rows += cardRows.length
+    const cards = cardRows.map(parseCard).filter((card): card is ArchivedCard => card !== null)
     if (marks.length === 0 && cards.length === 0) continue
     const bookId = str(row['bookId'], 200)
     const title = str(row['title'], 1000)
@@ -419,6 +441,12 @@ export function planImport(
   let duplicates = 0
   let folded = 0
 
+  /* ROWS ARE GATHERED BY THE SHELF BOOK THEY RESOLVE TO before anything is
+   * judged. Two archive rows for one book — an export merged from two
+   * devices, a title matched and an id matched — used to be planned
+   * independently: duplicates across the pair survived, and the book took
+   * two concurrent `addMany` calls. */
+  const grouped = new Map<string, { marks: ArchivedMark[]; cards: ArchivedCard[] }>()
   for (const row of archive.books) {
     const match =
       (row.bookId ? byId.get(row.bookId) : undefined) ??
@@ -432,7 +460,14 @@ export function planImport(
       })
       continue
     }
-    const mine = haveMarks.get(match.bookId) ?? []
+    const into = grouped.get(match.bookId) ?? { marks: [], cards: [] }
+    into.marks.push(...row.marks)
+    into.cards.push(...row.cards)
+    grouped.set(match.bookId, into)
+  }
+
+  for (const [bookId, row] of grouped) {
+    const mine = haveMarks.get(bookId) ?? []
     /* SAME CLASS, then overlap — the rule `upsertOverlapping` applies, and
      * this filter did not. A bookmark anchors to the visible PAGE, so its CFI
      * overlaps every highlight on that page; without the class test one live
@@ -441,12 +476,8 @@ export function planImport(
      * on its page. Measured 2026-08-27: one bookmark, one archived highlight,
      * `marksAdded: 0, duplicates: 1`. */
     const freshMarks = row.marks.filter((incoming) => {
-      const already = mine.some(
-        (have) =>
-          isBookmarkKind(incoming.kind) === isBookmarkKind(have.kind) &&
-          (incoming.localAnchor.cfi && have.cfi
-            ? cfiOverlaps(incoming.localAnchor.cfi, have.cfi)
-            : incoming.text !== '' && incoming.text === have.text),
+      const already = mine.some((have) =>
+        samePassage(incoming, { kind: have.kind, cfi: have.cfi, sectionIndex: have.sectionIndex, text: have.text }),
       )
       if (already) duplicates += 1
       return !already
@@ -458,29 +489,32 @@ export function planImport(
      * COUNT it, so the notice says "kept as one" rather than nothing. */
     const kept: ArchivedMark[] = []
     for (const incoming of freshMarks) {
-      const at = kept.findIndex(
-        (have) =>
-          isBookmarkKind(have.kind) === isBookmarkKind(incoming.kind) &&
-          (have.localAnchor.cfi && incoming.localAnchor.cfi
-            ? cfiOverlaps(have.localAnchor.cfi, incoming.localAnchor.cfi)
-            : incoming.text !== '' && incoming.text === have.text),
+      const at = kept.findIndex((have) =>
+        samePassage(incoming, {
+          kind: have.kind,
+          cfi: have.localAnchor.cfi,
+          sectionIndex: have.localAnchor.sectionIndex,
+          text: have.text,
+        }),
       )
       if (at === -1) {
         kept.push(incoming)
         continue
       }
       folded += 1
-      /* ISO 8601 strings order as their instants do. */
-      if (incoming.createdAt > kept[at]!.createdAt) kept[at] = incoming
+      if (instantOf(incoming.createdAt) > instantOf(kept[at]!.createdAt)) kept[at] = incoming
     }
-    const cardBodies = haveCards.get(match.bookId) ?? new Set<string>()
+    /* A working set, GROWN as cards are accepted: read-only, it let every
+     * repeat of one body inside the archive through as a fresh card. */
+    const cardBodies = new Set(haveCards.get(bookId) ?? [])
     const freshCards = row.cards.filter((incoming) => {
       const already = cardBodies.has(incoming.body)
       if (already) duplicates += 1
+      else cardBodies.add(incoming.body)
       return !already
     })
     if (kept.length === 0 && freshCards.length === 0) continue
-    additions.push({ bookId: match.bookId, marks: kept, cards: freshCards })
+    additions.push({ bookId, marks: kept, cards: freshCards })
     marksAdded += kept.length
     cardsAdded += freshCards.length
   }
@@ -496,7 +530,45 @@ export function planImport(
   }
 }
 
-const mdEscape = (text: string): string => text.replace(/([\\`*_[\]])/gu, '\\$1')
+/**
+ * One passage rule for both places that ask — is this archived mark the same
+ * passage as that one? — because the two copies had already drifted: neither
+ * compared `sectionIndex`, which `findMark` requires, so identical-looking
+ * CFIs from different spine sections folded into one and an annotation was
+ * lost. Same class first (a bookmark spans its page); then, when both sides
+ * carry an anchor, the same section AND an overlap; else the quote itself.
+ */
+const samePassage = (
+  a: ArchivedMark,
+  b: { readonly kind: MarkKind; readonly cfi: string; readonly sectionIndex: number; readonly text: string },
+): boolean =>
+  isBookmarkKind(a.kind) === isBookmarkKind(b.kind) &&
+  (a.localAnchor.cfi && b.cfi
+    ? a.localAnchor.sectionIndex === b.sectionIndex && cfiOverlaps(a.localAnchor.cfi, b.cfi)
+    : a.text !== '' && a.text === b.text)
+
+/* Parsed, not compared as text: ISO 8601 strings from ONE clock order
+ * lexically, but an archive from elsewhere may carry offsets, and "later"
+ * has to mean the later instant. Unparseable stamps sort first, so a dated
+ * mark always wins over an undated one. */
+const instantOf = (stamp: string): number => {
+  const at = Date.parse(stamp)
+  return Number.isNaN(at) ? Number.NEGATIVE_INFINITY : at
+}
+
+/* Inline syntax, raw HTML, and the block syntax a line may open with — a
+ * reader's note is prose, and prose beginning with `#` or `>` must not
+ * become a heading or a quote of the reading copy around it. Applied per
+ * line, because a multi-line value is several line starts. */
+const mdEscape = (text: string): string =>
+  text
+    .split('\n')
+    .map((line) =>
+      line
+        .replace(/([\\`*_[\]<>])/gu, '\\$1')
+        .replace(/^(\s*)([#>+-]|\d+\.)(?=\s)/u, '$1\\$2'),
+    )
+    .join('\n')
 
 /**
  * The reading copy, rendered FROM THE SAME DOCUMENT the JSON is written from.

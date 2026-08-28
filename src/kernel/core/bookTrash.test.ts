@@ -450,6 +450,33 @@ describe('a removal interrupted half way', () => {
     expect([...fs.store.keys()].some((k) => k.endsWith('.displaced'))).toBe(false)
   })
 
+  it('keeps an EARLIER interrupted removal’s recovery copy through a removal that fails', async () => {
+    /* The old `.displaced` files were swept BEFORE the moves began — so a
+     * removal that then failed had already discarded the only copies the
+     * earlier failure kept, and returned false over the loss. The sweep now
+     * runs after everything moved; a failure leaves the earlier holdings
+     * where the earlier run put them. */
+    const fs = fakeFs(shelved())
+    await trashBook(fs, 'book_a')
+    fs.store.set(`${folderOf('book_a')}/content.epub`, new TextEncoder().encode('FRESH'))
+    const held = `${trashOf('book_a')}/notes.txt.displaced`
+    fs.store.set(held, new TextEncoder().encode('EARLIER RUN HELD THIS'))
+
+    const rename = fs.rename
+    fs.rename = async (from, to) => {
+      if (from.startsWith(folderOf('book_a'))) throw new Error('locked')
+      return rename(from, to)
+    }
+    expect(await trashBook(fs, 'book_a')).toBe(false)
+    fs.rename = rename
+
+    expect(new TextDecoder().decode(fs.store.get(held)!)).toBe('EARLIER RUN HELD THIS')
+
+    /* And a removal that COMMITS is what takes it, along with its own. */
+    expect(await trashBook(fs, 'book_a')).toBe(true)
+    expect([...fs.store.keys()].some((k) => k.endsWith('.displaced'))).toBe(false)
+  })
+
   it('puts back everything it had already moved', async () => {
     const fs = fakeFs(shelved())
     await trashBook(fs, 'book_a')

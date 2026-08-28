@@ -491,6 +491,16 @@ export interface RouterConnection {
   recheckGrants(): void
   /** The peer is gone: every in-flight handler is aborted and nothing more is written. */
   disconnect(): void
+  /**
+   * Hear the connection close — for ANY reason: the caller's own
+   * `disconnect`, a transport write that rejected, or the outbound budget
+   * overflowing. The router hangs up on its own for the last two, and until
+   * this existed nothing outside it could tell: the webhost pump went on
+   * holding a session whose router had already gone silent (the 2026-08-28
+   * audit, #61). Fires once; a listener added after the close is called at
+   * once, so there is no window to miss. Answers the unsubscribe.
+   */
+  onDisconnect(listener: () => void): () => void
   /** How many requests are in flight — for tests and diagnostics. */
   readonly inFlight: number
 }
@@ -638,7 +648,14 @@ interface InFlight {
 }
 
 function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
-  return typeof value === 'object' && value !== null && Symbol.asyncIterator in value
+  /* A function can be an iterable too, and presence is not enough: the
+   * property must BE a function, or `for await` fails later as an internal
+   * service error naming nothing. */
+  return (
+    (typeof value === 'object' || typeof value === 'function') &&
+    value !== null &&
+    typeof (value as { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator] === 'function'
+  )
 }
 
 /**
@@ -658,6 +675,19 @@ function positiveLimit(name: string, value: number): number {
 
 export function createRouter(options: RouterOptions): Router {
   const services = new Map<string, ServiceContribution>()
+  /* THE GRANT CHECK NEVER THROWS OUT OF `receive`. `hasGrant` is injected —
+   * a capability's binding, a pump's book-bound rule — and an exception from
+   * it escaped the receive loop that promises never to, and took the
+   * transport down over one frame. A check that fails is a check that said
+   * no, and the reason goes to the log. */
+  const granted = (peer: Parameters<typeof hasGrant>[0], grant: Parameters<typeof hasGrant>[1]): boolean => {
+    try {
+      return hasGrant(peer, grant)
+    } catch (cause) {
+      console.error(`Paper: the grant check threw for ${grant}; treating it as refused`, cause)
+      return false
+    }
+  }
   for (const service of options.services) {
     if (services.has(service.name)) throw new Error(`envelope router: service "${service.name}" registered twice`)
     services.set(service.name, service)
@@ -817,7 +847,7 @@ export function createRouter(options: RouterOptions): Router {
           refuse(frame.service, frame.id, serviceError(ENVELOPE_ERRORS.duplicateId, `request ${JSON.stringify(frame.id)} is already in flight`))
           return
         }
-        if (!hasGrant(peer, service.grant)) {
+        if (!granted(peer, service.grant)) {
           refuse(frame.service, frame.id, serviceError(ENVELOPE_ERRORS.forbidden, `peer lacks grant ${JSON.stringify(service.grant)}`))
           return
         }
@@ -907,12 +937,24 @@ export function createRouter(options: RouterOptions): Router {
         })()
       }
 
+      const closed = new Set<() => void>()
       const disconnect = () => {
         if (!open) return
         open = false
         for (const id of [...inFlight.keys()]) {
           settle(id)?.controller.abort(serviceError(ENVELOPE_ERRORS.disconnected, 'peer disconnected'))
         }
+        /* After the aborts, so a listener that tears the session down sees
+         * the handlers already gone; each on its own, so one that throws
+         * cannot keep the next from hearing. */
+        for (const listener of [...closed]) {
+          try {
+            listener()
+          } catch {
+            /* A listener's failure is its own; the close still happened. */
+          }
+        }
+        closed.clear()
       }
 
       return {
@@ -920,10 +962,20 @@ export function createRouter(options: RouterOptions): Router {
         get inFlight() {
           return inFlight.size
         },
+        onDisconnect(listener) {
+          if (!open) {
+            listener()
+            return () => {}
+          }
+          closed.add(listener)
+          return () => {
+            closed.delete(listener)
+          }
+        },
         recheckGrants() {
           if (!open) return
           for (const [id, entry] of [...inFlight]) {
-            if (!hasGrant(peer, entry.grant)) abortAndRefuse(id, serviceError(ENVELOPE_ERRORS.forbidden, 'grant revoked'))
+            if (!granted(peer, entry.grant)) abortAndRefuse(id, serviceError(ENVELOPE_ERRORS.forbidden, 'grant revoked'))
           }
         },
         receive(bytes) {
@@ -975,7 +1027,7 @@ export function createRouter(options: RouterOptions): Router {
                 refuse(frame.service, frame.id, serviceError(ENVELOPE_ERRORS.protocol, `stream after end`))
                 return
               }
-              if (!hasGrant(peer, entry.grant)) {
+              if (!granted(peer, entry.grant)) {
                 abortAndRefuse(frame.id, serviceError(ENVELOPE_ERRORS.forbidden, 'grant revoked'))
                 return
               }
@@ -1002,10 +1054,14 @@ export function createRouter(options: RouterOptions): Router {
                 refuse(frame.service, frame.id, serviceError(ENVELOPE_ERRORS.protocol, `end after end`))
                 return
               }
-              if (!hasGrant(peer, entry.grant)) {
+              if (!granted(peer, entry.grant)) {
                 abortAndRefuse(frame.id, serviceError(ENVELOPE_ERRORS.forbidden, 'grant revoked'))
                 return
               }
+              /* PROGRESS, like every accepted input frame: a handler still
+               * draining what it was sent must not time out at the very
+               * instant the sender finished. */
+              entry.refresh?.()
               entry.ended = true
               entry.input.end()
               return
@@ -1192,8 +1248,8 @@ export function createClient(options: ClientOptions): Client {
       /* The per-call override must actually limit — `NaN` disarms the
        * timer's comparison and zero or a negative fires it before the
        * request leaves. Same rule the constructor applies to its default. */
-      if (call.timeoutMs !== undefined && (!Number.isFinite(call.timeoutMs) || call.timeoutMs <= 0)) {
-        reject(new ServiceCallError(service, serviceError(ENVELOPE_ERRORS.internal, `timeoutMs must be a positive finite number, not ${String(call.timeoutMs)}`)))
+      if (call.timeoutMs !== undefined && (!Number.isInteger(call.timeoutMs) || call.timeoutMs <= 0)) {
+        reject(new ServiceCallError(service, serviceError(ENVELOPE_ERRORS.internal, `timeoutMs must be a positive integer, not ${String(call.timeoutMs)}`)))
         return
       }
       const onAbort = () => fail(serviceError(ENVELOPE_ERRORS.cancelled, 'cancelled by the caller'))
@@ -1312,9 +1368,15 @@ export function createClient(options: ClientOptions): Client {
           wake()
         },
       )
+      /* ONE ITERATOR, however many times it is asked for. Each call minted a
+       * fresh iterator over the SAME buffer and cursor, so two consumers
+       * silently split the items between them — and the concurrent-read
+       * guard below only fires once both are waiting at the same time. */
+      let iterator: AsyncIterator<unknown> | null = null
       return {
         [Symbol.asyncIterator]() {
-          return {
+          if (iterator) return iterator
+          iterator = {
             async next(): Promise<IteratorResult<unknown>> {
               for (;;) {
                 if (head < items.length) {
@@ -1347,6 +1409,7 @@ export function createClient(options: ClientOptions): Client {
               return Promise.reject(reason)
             },
           }
+          return iterator
         },
       }
     },
@@ -1392,7 +1455,13 @@ export function createClient(options: ClientOptions): Client {
           return
         case 'req':
         case 'cancel':
-          /* Requests travel the other way; a client is not a router. */
+          /* Requests travel the other way; a client is not a router. One that
+           * arrives FOR A PENDING CALL — `entry` is that call — is a protocol
+           * violation, and it used to be ignored, leaving the call to fail on
+           * its timeout instead of at once, as a wrong-direction frame does
+           * on the router. */
+          finish(frame.id)
+          entry.reject(new ServiceCallError(entry.service, serviceError(ENVELOPE_ERRORS.protocol, `${frame.kind} frame on the client side`)))
           return
       }
     },

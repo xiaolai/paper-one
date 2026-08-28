@@ -165,14 +165,20 @@ describe('a store that will not parse', () => {
     warn.mockRestore()
   })
 
-  it('ignores entries that are not strings', async () => {
+  it('treats an entry that is not a string as damage to the whole file', async () => {
+    /* It used to FILTER the bad entry and accept the remainder as healthy —
+       so the next write erased the dropped key with no quarantine and no
+       notice. Nothing this code writes is a non-string, so one means the
+       file is not ours; the move-aside path keeps every byte. */
+    const warn = vi.spyOn(console, 'error').mockImplementation(() => {})
     const { fs } = fakeFs({
       [STORE_FILE]: JSON.stringify({ 'paper.marks.v1': 42, 'paper.cards.v1': CARDS }),
     })
     const store = await openFileStore({ fs })
-    // A number here would reach a parser that calls JSON.parse on it.
     expect(store.getItem('paper.marks.v1')).toBeNull()
-    expect(store.getItem('paper.cards.v1')).toBe(CARDS)
+    expect(store.getItem('paper.cards.v1')).toBeNull()
+    expect(store.damaged).toEqual({ aside: `${STORE_FILE}.corrupt` })
+    warn.mockRestore()
   })
 })
 
@@ -201,6 +207,45 @@ describe('what the store has to say about its own file', () => {
     const { fs } = fakeFs({ [STORE_FILE]: 'not json' })
     const store = await openFileStore({ fs: { ...fs, quarantine: () => Promise.reject(new Error('EROFS')) } })
     expect(store.damaged).toEqual({ aside: null })
+    warn.mockRestore()
+  })
+
+  it('reports a damaged file when this filesystem has no way to move it aside', async () => {
+    /* `fs.quarantine?.()` resolved undefined, and the report claimed the
+       bytes were moved to a path nothing wrote — the next write then
+       overwrote the reader's only copy under a notice saying it was safe. */
+    const warn = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { fs } = fakeFs({ [STORE_FILE]: 'not json' })
+    const { quarantine, ...bare } = fs
+    void quarantine
+    const store = await openFileStore({ fs: bare })
+    expect(store.damaged).toEqual({ aside: null })
+    warn.mockRestore()
+  })
+
+  it('treats one invalid entry as a damaged file, never as a healthy remainder', async () => {
+    /* Filtered out, the surviving keys read as a healthy store and the next
+       write erased the dropped one with no quarantine and no notice. */
+    const warn = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { fs } = fakeFs({ [STORE_FILE]: JSON.stringify({ 'paper.marks.v1': MARKS, rogue: 7 }) })
+    const store = await openFileStore({ fs })
+    expect(store.damaged).toEqual({ aside: `${STORE_FILE}.corrupt` })
+    expect(store.getItem('paper.marks.v1')).toBeNull()
+    warn.mockRestore()
+  })
+
+  it('migrates past a legacy key that throws, rather than refusing to open', async () => {
+    const warn = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { fs } = fakeFs()
+    const legacy = {
+      getItem: (key: string) => {
+        if (key === 'paper.marks.v1') throw new Error('SecurityError')
+        return key === 'paper.cards.v1' ? 'kept' : null
+      },
+      setItem: () => {},
+    }
+    const store = await openFileStore({ fs, legacy })
+    expect(store.getItem('paper.cards.v1')).toBe('kept')
     warn.mockRestore()
   })
 

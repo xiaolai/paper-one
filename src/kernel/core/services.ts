@@ -259,12 +259,10 @@ export interface KernelServicesOptions {
  * returned. Weak because the entry should die with the token; a bracket left
  * open by a crash must not pin one forever.
  */
-const issuedAt = new WeakMap<MutationToken, number>()
-
 function exclusiveSlot<T>(
   alreadyBound: string,
   fallback: T,
-): { get(): T; bind(next: T): Disposable; generation(): number; bound(): boolean } {
+): { get(): T; bind(next: T): Disposable; generation(): number } {
   let target = fallback
   /* Bumped on every bind AND every unbind, so "the binding that issued this"
    * is answerable later without holding a reference to the value itself. Used
@@ -278,9 +276,6 @@ function exclusiveSlot<T>(
   return {
     get: () => target,
     generation: () => generation,
-    /* Whether anything is bound, as opposed to the fallback answering. The
-       service host needs it: only the FALLBACK may return no disposer. */
-    bound: () => owner !== null,
     bind: (next) => {
       if (owner !== null) throw new Error(alreadyBound)
       const token = {}
@@ -314,6 +309,12 @@ function routedRecorder(
   slot: { get(): MutationRecorder; generation(): number },
   fallback: MutationRecorder,
 ): MutationRecorder {
+  /* PER RECORDER PORT, not module-wide. Token uniqueness is not something
+   * `MutationRecorder` promises, so a recorder that reused one token object
+   * across two `KernelServices` instances had each overwriting the other's
+   * routing generation in a shared map. Weak, so an entry dies with its
+   * token — a bracket left open by a crash must not pin one forever. */
+  const issuedAt = new WeakMap<MutationToken, number>()
   /* A COMMIT GOES TO THE RECORDER THAT ISSUED ITS BEGIN, OR TO THE DEFAULT —
    * never to a DIFFERENT one.
    *
@@ -397,10 +398,14 @@ async function removeBlob(
      * folder belongs to a DIFFERENT, live book is refused rather than
      * quietly honoured. */
     const folder = folderOf(bookId)
-    const owner = library.getSnapshot().find((one) => folderOf(one.bookId) === folder)
-    if (owner !== undefined && owner.bookId !== bookId) {
+    /* ANY row on the folder that is not this id refuses — not the FIRST row
+     * found. A snapshot holding both the requested id and a colliding alias
+     * (a corrupt index, a caller-supplied initial set) let ordering decide
+     * whether the shared blob could be deleted. */
+    const other = library.getSnapshot().find((one) => folderOf(one.bookId) === folder && one.bookId !== bookId)
+    if (other !== undefined) {
       throw new Error(
-        `removeBlob: ${JSON.stringify(bookId)} does not own ${folder} — ${JSON.stringify(owner.bookId)} does`,
+        `removeBlob: ${JSON.stringify(bookId)} does not own ${folder} — ${JSON.stringify(other.bookId)} does`,
       )
     }
     /* `folderOf` sanitises the id into `books/<safeId>` — a slash, a dot,
@@ -560,10 +565,17 @@ export function createKernelServices({
 
   const reportDisposeFailures = (where: string, failures: readonly unknown[]): void => {
     for (const cause of failures) {
-      diagnostics.warn('services.host-dispose-failed', {
-        where,
-        message: cause instanceof Error ? cause.message : String(cause),
-      })
+      /* The diagnostics port is injected, and a throwing one must not abort
+       * the remaining reports, make ordinary disposal throw, or REPLACE the
+       * host-start failure this is reporting on. Every report on its own. */
+      try {
+        diagnostics.warn('services.host-dispose-failed', {
+          where,
+          message: cause instanceof Error ? cause.message : String(cause),
+        })
+      } catch (reporting) {
+        console.error('Paper: the diagnostics port threw while reporting a dispose failure', reporting, cause)
+      }
     }
   }
 

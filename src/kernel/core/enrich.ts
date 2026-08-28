@@ -116,11 +116,13 @@ export function pendingCount(books: readonly IndexedBook[]): number {
 }
 
 /**
- * A shelf row as the record it came from — the shelf's own extra fields dropped.
+ * A shelf row as the record it came from — the shelf's DERIVED field dropped.
  *
  * `IndexedBook` is a `BookRecord` plus `bookId` and the derived `hasContent`.
- * Neither belongs in a record being written back: `hasContent` is derived on
- * scan and storing it is the exact disagreement `bookIndex` exists to avoid.
+ * Only `hasContent` goes: it is derived on scan, and storing it is the exact
+ * disagreement `bookIndex` exists to avoid. `bookId` STAYS — a record on disk
+ * carries its own id (`parseRecord` reads it back), and the failure path below
+ * repeats the row field for field, id included.
  */
 function recordOf(book: IndexedBook): BookRecord {
   const { hasContent: _hasContent, ...record } = book

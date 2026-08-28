@@ -158,10 +158,6 @@ export interface Library {
   /** Take a book off the shelf. Its folder goes to the trash, not away. */
   remove(bookId: string): Promise<void>
   /**
-   * Bring a removed book back from the trash, row and all. Resolves with
-   * whether there was one to bring back.
-   */
-  /**
    * Bring a removed book back — and say HOW it went.
    *
    * `Promise<boolean>` could not distinguish "there was nothing in the trash"
@@ -795,13 +791,13 @@ export function createLibrary({
     generation += 1
     const joined = !dirty.has(bookId)
     dirty.add(bookId)
-    armFlush(target)
+    armFlush()
     if (!joined) return Promise.resolve()
     const marker = { version: 1 as const, generation, books: [...dirty] }
     return queue.append('index', () => writeDirtyMarker(target, marker))
   }
 
-  const armFlush = (target: IndexFs) => {
+  const armFlush = () => {
     if (flushTimer !== null) return
     flushTimer = setTimeout(() => {
       flushTimer = null
@@ -810,7 +806,6 @@ export function createLibrary({
     /* A timer must not keep a Node process — `paper` — alive for a flush
      * its drain will run anyway; a browser's timer has no such handle. */
     ;(flushTimer as { unref?: () => void }).unref?.()
-    void target
   }
 
   const flushIndex: Library['flushIndex'] = () => {
@@ -866,6 +861,13 @@ export function createLibrary({
     const target = fs
     const lane = laneFor(key)
     let refused = false
+    /* What the disk write actually produced. `updateBook` applies the change
+     * to what is ON DISK and answers the merged record — and discarding that
+     * answer meant a stale cached row (an index one write behind after a
+     * crash) stayed published, and was then SERIALISED into the index below:
+     * the write landed right and the cache wrote the lie back. A resolved
+     * value shaped like a record is reconciled before the index goes out. */
+    let landed: unknown
     return (
       queue
         /* APPEND, not replace. Each task here applies a CHANGE to what is on
@@ -885,15 +887,19 @@ export function createLibrary({
             refused = true
             return
           }
-          await recorded(recorder, live, what, () => write(target, live))
+          landed = await recorded(recorder, live, what, () => write(target, live))
         })
         .then(() => {
           if (refused) {
             hooks!.retract()
             return writeIndexNow(target)
           }
-          noteLanded(resolveId(key))
-          return index === 'defer' ? markDirty(target, resolveId(key)) : writeIndexNow(target)
+          const live = resolveId(key)
+          noteLanded(live)
+          if (typeof landed === 'object' && landed !== null && typeof (landed as { title?: unknown }).title === 'string') {
+            reconcile(live, landed as BookRecord)
+          }
+          return index === 'defer' ? markDirty(target, live) : writeIndexNow(target)
         })
         .catch(async (cause: unknown) => {
           /* SAID FIRST, before the repair — which is a further write that may
@@ -1065,22 +1071,27 @@ export function createLibrary({
        * them. */
       if (!fs) return 'added'
       const target = fs
-      await queue.append(laneFor(bookId), () =>
-        recorded(recorder, bookId, 'record', async () => {
+      await queue.append(laneFor(bookId), () => {
+        /* THE ID AS IT IS NOW. This branch took the rekey-aware lane and
+         * then used the id it was CALLED with for every restore, presence,
+         * trash and record operation — so a rekey queued ahead of it had the
+         * repair recreate and write the obsolete folder. */
+        const here = resolveId(bookId)
+        return recorded(recorder, here, 'record', async () => {
           /* BEST EFFORT, and swallowed HERE rather than inside the
            * primitive. This is a repair folded into an add: a trash entry
            * that cannot be read must not stop the reader adding the book,
            * and the sweep or the next add will meet the leftovers again.
            * The explicit `restore` above propagates the same failure,
            * because there the fault IS the answer. */
-          await restoreBook(target, bookId).catch(() => ({ state: 'absent' }) as const)
-          await noteReAdd(target, bookId)
+          await restoreBook(target, here).catch(() => ({ state: 'absent' }) as const)
+          await noteReAdd(target, here)
           /* AND THE SAME RESCUE the full path does. Returning after the
            * restore alone left a `book.json` the restore could not move
            * sitting in the trash — so a folder import, which is all sparse
            * adds, was the one route that could see the stranded record and
            * walk past it. */
-          await rescueStrandedMarks(target, bookId)
+          await rescueStrandedMarks(target, here)
           /* AND THE ROW LEARNS THE BOOK HAS BYTES AGAIN.
            *
            * This is the path an import takes for a book already on the
@@ -1101,14 +1112,14 @@ export function createLibrary({
            * that never measured, and a stale `true` kept claiming bytes that
            * are gone. AFTER the restore, so bytes the trash just gave back are
            * counted. */
-          await noteContent(target, previous.bookId)
-          const stranded = parseRecord(await readText(target, `${trashOf(bookId)}/book.json`))
+          await noteContent(target, resolveId(previous.bookId))
+          const stranded = parseRecord(await readText(target, `${trashOf(here)}/book.json`))
           if (!stranded) return
-          const live = await readBook(target, bookId)
-          await writeBook(target, bookId, live ? mergeStranded(stranded, live) : stranded)
-          await target.remove(`${trashOf(bookId)}/book.json`).catch(() => {})
-        }),
-      )
+          const live = await readBook(target, here)
+          await writeBook(target, here, live ? mergeStranded(stranded, live) : stranded)
+          await target.remove(`${trashOf(here)}/book.json`).catch(() => {})
+        })
+      })
       return 'added'
     }
     /* A fresh parse folded into what the reader owns. The book is the
@@ -1647,9 +1658,19 @@ export function createLibrary({
     if (!fs) return false
     const target = fs
     let wrote = false
-    await queue.append(laneFor(bookId), () =>
-      recorded(recorder, bookId, 'content', async () => {
-        const at = contentPathIn(bookId, name)
+    await queue.append(laneFor(bookId), async () => {
+      /* RESOLVED AT RUN TIME, like every other task on the rekey-aware lane —
+       * this one used the id it was called with, so a rekey queued ahead had
+       * it write the bytes back into the obsolete folder. */
+      const live = resolveId(bookId)
+      /* ONLY FOR A BOOK THAT IS STILL HERE — `keepJacket`'s rule, for
+       * `keepJacket`'s reason: `atomicWrite` MAKES the folder it writes
+       * into, so a content task queued behind a removal politely recreated
+       * the folder the removal had just carried to the trash, holding
+       * nothing but orphaned bytes no row names. */
+      if (!(await target.exists(recordPath(live)))) return
+      await recorded(recorder, live, 'content', async () => {
+        const at = contentPathIn(live, name)
         /* Checked before the bytes are touched: `arrayBuffer()` copies the
          * whole book into memory, and reopening a 40MB book should not do that
          * to discover it is already here. */
@@ -1659,8 +1680,8 @@ export function createLibrary({
          * `content.epub`, because `exists` would then call it the book. */
         await atomicWrite(target, at, new Uint8Array(await bytes.arrayBuffer()))
         wrote = true
-      }),
-    )
+      })
+    })
     return wrote
   }
 
@@ -1810,7 +1831,16 @@ export function createLibrary({
     setLastRemoval(null)
     /* The count is the tagging path's answer, not the undo's: an undo either
      * happened or there was nothing offered. */
-    await tagBooks(offered.bookIds, [offered.tag])
+    try {
+      await tagBooks(offered.bookIds, [offered.tag])
+    } catch (cause) {
+      /* THE OFFER SURVIVES A WRITE THAT DID NOT. Cleared first and left
+       * cleared, a transient disk failure spent the reader's one retry on
+       * nothing — the toast was gone and the tag was too. Put back only when
+       * no NEWER removal claimed the slot while the undo was failing. */
+      if (removal === null) setLastRemoval(offered)
+      throw cause
+    }
   }
 
   const positionOf: Library['positionOf'] = (bookId) =>
@@ -1819,9 +1849,12 @@ export function createLibrary({
   const refreshContent: Library['refreshContent'] = (bookId) => {
     if (!fs) return Promise.resolve()
     const target = fs
-    return queue.append(laneFor(bookId), () =>
-      recorded(recorder, bookId, 'content', () => noteContent(target, bookId)),
-    )
+    return queue.append(laneFor(bookId), () => {
+      /* Resolved when the task RUNS: queued behind a rekey, the raw id would
+       * measure the obsolete folder and leave the newly keyed row unmoved. */
+      const live = resolveId(bookId)
+      return recorded(recorder, live, 'content', () => noteContent(target, live))
+    })
   }
 
   const evictContent: Library['evictContent'] = (bookId, candidates) => {
@@ -1838,14 +1871,15 @@ export function createLibrary({
      * caller still needs to tell "evicted" from "there was nothing there". */
     let gone = 0
     return queue
-      .append(laneFor(bookId), () =>
-        recorded(recorder, bookId, 'content', async () => {
-          /* THE FOLDER AS IT IS NOW, not as the caller's id spelled it. A
-           * rekey queued ahead of this moves the directory, and resolving the
-           * path from the raw id would then check an empty old location and
-           * leave the content in place under the new one — the eviction
-           * reporting success over bytes still on disk. */
-          const folder = folderOf(resolveId(bookId))
+      .append(laneFor(bookId), () => {
+        /* THE ID AS IT IS NOW, once, for everything in the task. The folder
+         * was already resolved; the recorder and the closing measure still
+         * used the raw id, so a rekey ahead in the lane had the journal name
+         * the obsolete book and the measure read the obsolete folder —
+         * `hasContent` then falsely false on the row that stayed. */
+        const live = resolveId(bookId)
+        return recorded(recorder, live, 'content', async () => {
+          const folder = folderOf(live)
           /* THE INDEX IS INVALIDATED FIRST, and durably.
            *
            * One queue task is atomic against other WRITERS, not against a
@@ -1861,7 +1895,7 @@ export function createLibrary({
            * — the next measure sees them and says so — while "says here,
            * bytes gone" is the state that makes a book unopenable and looks
            * fine. */
-          const at = books.findIndex((one) => one.bookId === resolveId(bookId))
+          const at = books.findIndex((one) => one.bookId === live)
           if (at !== -1 && books[at]!.hasContent !== false) {
             const list = [...books]
             list[at] = { ...list[at]!, hasContent: false }
@@ -1880,9 +1914,9 @@ export function createLibrary({
           /* Same task, same bracket: the row can never disagree with the
            * folder across a crash the way it could when this was a separate
            * append. */
-          await noteContent(target, bookId)
-        }),
-      )
+          await noteContent(target, live)
+        })
+      })
       .then(() => gone)
   }
 
@@ -1929,7 +1963,12 @@ export function createLibrary({
     for (const name of await expiredTrash(fs, now)) {
       try {
         if (await purgeTrashed(name, { unlessStampedAfter: now - TRASH_WINDOW_MS })) gone.push(name)
-      } catch {
+      } catch (cause) {
+        /* NAMED, not swallowed: a sweep that fails on the same entry every
+         * launch should read as that in the log, not as a clean sweep that
+         * happened to purge nothing. Still best effort — one entry that will
+         * not go must not stop the rest. */
+        console.warn(`Paper: could not purge ${name} from the trash`, cause)
         continue
       }
     }
@@ -1954,9 +1993,29 @@ export function createLibrary({
     if (!fs) return
     const target = fs
     const failures = await pooled(applied, WRITE_WIDTH, (row) =>
-      queue.append(laneFor(row.bookId), async () => {
-        await recorded(recorder, row.bookId, 'record', () => updateBook(target, row.bookId, row.change))
-      }),
+      queue
+        .append(laneFor(row.bookId), async () => {
+          /* Resolved at run time and RECONCILED with what the write answered,
+           * both for `commit`'s reasons: a rekey ahead in the lane moves the
+           * folder, and the optimistic row above was built from a cache that
+           * can be behind the disk the change was actually applied to. */
+          const live = resolveId(row.bookId)
+          const landed = await recorded(recorder, live, 'record', () => updateBook(target, live, row.change))
+          if (landed) reconcile(live, landed)
+        })
+        .catch(async (cause: unknown) => {
+          /* A row whose write did not land must not stay published as if it
+           * had — the batch index write below would serialise the phantom
+           * and the cache-trust check would believe it every launch. Same
+           * repair as `commit`'s: say so first, then let the folder win. */
+          noteFailed(resolveId(row.bookId), 'record', cause, list)
+          await queue.append(laneFor(row.bookId), async () => {
+            const live = resolveId(row.bookId)
+            const truth = await readBook(target, live)
+            if (truth) reconcile(live, truth)
+          })
+          throw cause
+        }),
     )
     // ONE index write for the batch, whatever happened to the rows.
     await writeIndexNow(target)

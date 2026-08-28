@@ -289,6 +289,8 @@ describe('the bounds every field declares', () => {
       out.push(['choices', field.type === 'string[]' ? ['not-a-choice'] : 'not-a-choice'])
     }
     if (field.maxItems !== undefined) out.push(['maxItems', Array.from({ length: field.maxItems + 1 }, () => 'x')])
+    if (field.minItems !== undefined) out.push(['minItems', Array.from({ length: field.minItems - 1 }, () => 'x')])
+    if (field.pattern !== undefined) out.push(['pattern', 'not the shape'])
     if (field.integer === true) out.push(['integer', (field.min ?? 0) + 0.5])
     if (field.min !== undefined) out.push(['min', field.min - 1])
     if (field.max !== undefined) out.push(['max', field.max + 1])
@@ -313,7 +315,7 @@ describe('the bounds every field declares', () => {
     /* THE SWEEP MUST HAVE SWEPT. A generator that produced no violations —
      * a renamed constraint, a table read wrongly — would pass the loop above
      * without entering it once. */
-    expect([...exercised.keys()].sort()).toEqual(['choices', 'integer', 'max', 'maxItems', 'maxLength', 'min', 'nonEmpty'])
+    expect([...exercised.keys()].sort()).toEqual(['choices', 'integer', 'max', 'maxItems', 'maxLength', 'min', 'minItems', 'nonEmpty', 'pattern'])
     for (const [constraint, count] of exercised) expect(count, constraint).toBeGreaterThan(0)
   })
 
@@ -325,7 +327,9 @@ describe('the bounds every field declares', () => {
         /* A field with a closed vocabulary has no length edge to sit on: its
          * legal values are the words, not every string up to a bound. */
         if (field.choices === undefined && field.maxLength !== undefined && field.type === 'string') {
-          edges.push('x'.repeat(field.maxLength))
+          /* A patterned field's edge must still have the shape: `a` is a hex
+             digit, `x` is not. */
+          edges.push((field.pattern ? 'a' : 'x').repeat(field.maxLength))
         }
         if (field.choices === undefined && field.maxLength !== undefined && field.type === 'string[]') {
           edges.push(['x'.repeat(field.maxLength)])

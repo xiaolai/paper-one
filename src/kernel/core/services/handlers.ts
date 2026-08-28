@@ -1,5 +1,5 @@
 import type { ServiceContribution, ServiceHandler } from '../capability'
-import { SERVICE_TABLE, readingGrant, type ServiceDescriptor, type ServiceName } from '../serviceTable'
+import { SERVICE_TABLE, readServices, type ServiceDescriptor, type ServiceName } from '../serviceTable'
 import { bookAdd, bookGet, bookList, bookPosition, bookRemove, bookRestore, bookSearch, bookSet } from './book'
 import { cardAdd, cardList, cardRemove } from './card'
 import { contentEvict, contentLocate, contentRead, coverRead } from './content'
@@ -113,6 +113,19 @@ export function buildServices(
   env: ServiceEnvironment,
   only?: readonly ServiceDescriptor[],
 ): readonly ServiceContribution[] {
+  if (only) {
+    /* A FILTER, HELD TO IT. `only` took any descriptors at all, so a caller
+     * could clone `trash.empty`, change its grant to `book:read`, and be
+     * handed a contribution that bypassed the table's authorization record.
+     * Every entry must be the table's own object, once. */
+    const table = new Set<ServiceDescriptor>(SERVICE_TABLE)
+    const seen = new Set<ServiceDescriptor>()
+    for (const descriptor of only) {
+      if (!table.has(descriptor)) throw new Error(`buildServices: ${descriptor.name} is not a descriptor from the service table`)
+      if (seen.has(descriptor)) throw new Error(`buildServices: ${descriptor.name} is listed twice`)
+      seen.add(descriptor)
+    }
+  }
   return (only ?? SERVICE_TABLE).map((descriptor) => ({
     name: descriptor.name,
     grant: descriptor.grant,
@@ -120,8 +133,9 @@ export function buildServices(
   }))
 }
 
-/** Just the read half — the ten services WI-11.3 landed first, because they
- *  carry no concurrency question and are worth having before the rest. */
+/** Just the read half — the services WI-11.3 landed first, because they
+ *  carry no concurrency question and were worth having before the rest. The
+ *  set is `readServices()`'s, not a second spelling of its rule. */
 export function buildReadServices(env: ServiceEnvironment): readonly ServiceContribution[] {
-  return buildServices(env, SERVICE_TABLE.filter((one) => readingGrant(one.grant)))
+  return buildServices(env, readServices())
 }

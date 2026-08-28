@@ -189,6 +189,15 @@ export function contentRead(env: ServiceEnvironment) {
        * terminates when no `length` was given. Treating it as an error would
        * make reading a whole book impossible without knowing its size first. */
       if (slice.length === 0) return
+      /* RE-CHECKED PER CHUNK, not once at the top. The hash was compared to
+       * the record before the first read; a re-import or an enrichment that
+       * rewrote the file mid-stream moved the record's hash, and chunks from
+       * two versions of the book were spliced into one answer. The record is
+       * the version the shelf vouches for, so the stream is refused the
+       * moment it stops describing what is being served. */
+      if (expected !== undefined && find(env, bookId).contentHash !== expected) {
+        throw refuse(SERVICE_ERRORS.conflict, `the content of ${bookId} changed while it was being read`)
+      }
       yield [{ bookId, offset: at, bytes: base64Of(slice) }]
       at += slice.length
       sent += slice.length
@@ -374,8 +383,10 @@ async function storedNames(env: ServiceEnvironment, bookId: string): Promise<rea
    * book whose folder had gone was reported as still holding content on the
    * strength of a stale `hasContent`. Absence is an empty list, which is the
    * truth; anything else keeps the honest "could not look". */
-  if (!(await fs.exists(folderOf(bookId)))) return []
   try {
+    /* INSIDE the try: a folder that cannot be STATTED is the "could not
+     * look" answer, not a throw out of a service that promised one. */
+    if (!(await fs.exists(folderOf(bookId)))) return []
     return (await fs.readDir(folderOf(bookId)))
       .filter((entry) => !entry.isDirectory && entry.name.startsWith('content.'))
       .map((entry) => entry.name)

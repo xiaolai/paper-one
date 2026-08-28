@@ -40,8 +40,14 @@ export function descriptorOf(name: string): ServiceDescriptor {
   return found
 }
 
-const isPlainObject = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value)
+/* A body is a plain object: `Object.prototype` or none behind it. A class
+ * instance or an object with a crafted prototype satisfied the old test and
+ * then answered inherited properties for fields it did not carry. */
+const isPlainObject = (value: unknown): value is Record<string, unknown> => {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const proto: unknown = Object.getPrototypeOf(value)
+  return proto === Object.prototype || proto === null
+}
 
 /** The value a field may hold, once checked. */
 export type FieldValue = string | number | boolean | readonly string[]
@@ -78,6 +84,7 @@ function checkField(field: ServiceField, value: unknown): FieldValue {
       if (field.choices && !field.choices.includes(value)) {
         return wrong(`must be one of ${field.choices.join(', ')}, not ${JSON.stringify(value)}`)
       }
+      if (field.pattern && !field.pattern.test(value)) return wrong(`must match ${String(field.pattern)}`)
       return value
     }
     case 'number': {
@@ -96,6 +103,10 @@ function checkField(field: ServiceField, value: unknown): FieldValue {
     case 'string[]': {
       if (!Array.isArray(value) || !value.every((one) => typeof one === 'string')) return wrong('must be a list of strings')
       if (field.nonEmpty === true && value.some((one) => one.trim() === '')) return wrong('must hold no empty entry')
+      const fewest = field.minItems
+      if (fewest !== undefined && value.length < fewest) {
+        return wrong(`must hold at least ${fewest} ${fewest === 1 ? 'entry' : 'entries'}`)
+      }
       const most = field.maxItems
       if (most !== undefined && value.length > most) {
         return wrong(`must hold at most ${most} entries, not ${value.length}`)
@@ -108,7 +119,9 @@ function checkField(field: ServiceField, value: unknown): FieldValue {
       if (allowed && value.some((one) => !allowed.includes(one))) {
         return wrong(`must hold only ${allowed.join(', ')}`)
       }
-      return value as readonly string[]
+      /* ISOLATED. Returned by reference, the caller's later mutation of its
+       * own array rewrote a value this validator had already vouched for. */
+      return Object.freeze([...value]) as readonly string[]
     }
   }
 }
@@ -137,7 +150,7 @@ export function readInput(descriptor: ServiceDescriptor, body: unknown): Service
   }
   const out: Record<string, FieldValue> = {}
   for (const field of descriptor.input) {
-    const value = raw[field.name]
+    const value = Object.hasOwn(raw, field.name) ? raw[field.name] : undefined
     if (value === undefined) {
       if (field.required === true) throw refuse(SERVICE_ERRORS.malformed, `${descriptor.name} needs ${field.name}`)
       continue

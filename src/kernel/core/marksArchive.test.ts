@@ -52,7 +52,7 @@ const CARD = (over: Partial<Card> = {}): Card =>
   ({
     id: 'c1',
     bookId: 'moby',
-    kind: 'recall',
+    kind: 'Recall',
     body: 'Who narrates?',
     answer: 'Ishmael',
     source: 'Loomings',
@@ -322,5 +322,67 @@ describe('archiveName', () => {
     const day = new Date(2026, 7, 21)
     expect(archiveName(day)).toBe('paper-marginalia-2026-08-21.json')
     expect(archiveName(day, 'md')).toBe('paper-marginalia-2026-08-21.md')
+  })
+})
+
+describe('what the audit found in the archive (round 1)', () => {
+  it('keeps a bookmark whose page had no text — a place, not a quote', () => {
+    /* `parseMark` refused any row with neither text nor note before it had
+       looked at `kind`, and `exportMarks` writes exactly that row for a
+       bookmark on a page with nothing to quote — so a reader's own export
+       silently dropped every such bookmark on the way back in. */
+    const bookmark = MARK({ id: 'b', kind: 'bookmark', cfi: 'epubcfi(/6/4!/4/2,/1:0,/1:400)', text: '', note: '' })
+    const doc = exportMarks([BOOK()], [bookmark], [])
+    const parsed = parseArchive(JSON.stringify(doc))!
+    expect(parsed.books[0]?.marks.map((one) => one.kind)).toEqual(['bookmark'])
+    expect(planImport(doc, [BOOK()], [], []).marksAdded).toBe(1)
+  })
+
+  it('refuses a card whose kind the card store would refuse on the next load', () => {
+    /* Cast, not checked: the import reported the card added, stored it, and
+       `parseCards` threw it away the next time the file was read. */
+    const doc = exportMarks([BOOK()], [], [CARD()])
+    const text = JSON.stringify(doc).replace('"kind":"Recall"', '"kind":"question"')
+    expect(parseArchive(text)?.books[0]?.cards ?? []).toEqual([])
+  })
+
+  it('does not call two marks the same passage when they sit in different sections', () => {
+    /* `findMark` requires the section to match; neither duplicate detection
+       nor in-archive folding did, so a CFI that happens to overlap another
+       section's was discarded as its duplicate. */
+    const cfi = 'epubcfi(/6/4!/4/2,/1:0,/1:9)'
+    const inSectionOne = MARK({ id: 'm-s1', cfi, sectionIndex: 1, text: 'later' })
+    const doc = exportMarks([BOOK()], [inSectionOne], [])
+    const shelfHasSectionZero = MARK({ id: 'm-s0', cfi, sectionIndex: 0, text: 'earlier' })
+    const plan = planImport(doc, [BOOK()], [shelfHasSectionZero], [])
+    expect(plan.duplicates).toBe(0)
+    expect(plan.marksAdded).toBe(1)
+
+    /* And within one file: two sections, one CFI, two marks kept. */
+    const both = exportMarks([BOOK()], [inSectionOne, MARK({ id: 'm-s0b', cfi, sectionIndex: 0, text: 'earlier' })], [])
+    expect(planImport(both, [BOOK()], [], []).folded).toBe(0)
+    expect(planImport(both, [BOOK()], [], []).marksAdded).toBe(2)
+  })
+
+  it('plans two archive rows for one shelf book as one addition, and counts a body repeated across them once', () => {
+    /* One row matched by id, another by name — two devices' exports merged
+       into one file. Planned independently, the pair kept its cross-row
+       duplicates and the book took two concurrent `addMany` calls. */
+    const byId = BOOK()
+    const byName = BOOK({ bookId: 'elsewhere' })
+    const doc = exportMarks(
+      [byId, byName],
+      [MARK({ id: 'm1', bookId: 'moby' }), MARK({ id: 'm2', bookId: 'elsewhere' })],
+      [CARD({ id: 'c1', bookId: 'moby' }), CARD({ id: 'c2', bookId: 'elsewhere' })],
+    )
+    const plan = planImport(doc, [BOOK()], [], [])
+    expect(plan.additions).toHaveLength(1)
+    expect(plan.additions[0]?.bookId).toBe('moby')
+    /* Same passage on both rows → folded to one; same card body → one added,
+       the repeat counted as a duplicate rather than let through. */
+    expect(plan.folded).toBe(1)
+    expect(plan.marksAdded).toBe(1)
+    expect(plan.cardsAdded).toBe(1)
+    expect(plan.duplicates).toBe(1)
   })
 })

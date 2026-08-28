@@ -322,7 +322,12 @@ describe('the mark store splits bookmarks from annotations', () => {
     await marks.loadAll()
     expect(marks.getSnapshot().all).toEqual([])
 
-    await expect(marks.remove(second.id, OTHER)).resolves.toBeUndefined()
+    /* Told the book, the edit routes to that book's file — which is gone,
+       so it REJECTS and the store says it is not saving. It used to warn
+       and resolve, and a resolved removal whose edit had nowhere to land was
+       a Notes row that looked deleted until the next reload disagreed. */
+    await expect(marks.remove(second.id, OTHER)).rejects.toThrow(/no folder/)
+    expect(marks.getSnapshot().persistent).toBe(false)
     // Told only the id, there is nothing left to resolve it against.
     await expect(marks.remove(second.id)).rejects.toThrow(/no mark/)
   })
@@ -528,5 +533,29 @@ describe('a marks file that will not read', () => {
     await s.open(BOOK)
     expect(s.getSnapshot().unreadable).toBe(false)
     expect(s.getSnapshot().ready).toBe(true)
+  })
+})
+
+describe('a cross-book scan that fails', () => {
+  it('says so in the snapshot instead of passing as an empty shelf, until a scan lands', async () => {
+    /* The catch used to install `[]` and publish — and a damaged books
+       directory read exactly like a library with nothing kept (audit
+       #101/#477). The flag is the difference, and it clears on the next
+       scan that succeeds. */
+    const fs = libraryWith(BOOK)
+    const readDir = fs.readDir.bind(fs)
+    let broken = true
+    fs.readDir = async (dir: string) => {
+      if (broken) throw new Error('EIO: the books directory would not list')
+      return readDir(dir)
+    }
+    const marks = createMarkStore({ fs, queue: writeQueue() })
+    await marks.loadAll()
+    expect(marks.getSnapshot().scanFailed).toBe(true)
+    expect(marks.getSnapshot().all).toEqual([])
+
+    broken = false
+    await marks.loadAll()
+    expect(marks.getSnapshot().scanFailed).toBe(false)
   })
 })

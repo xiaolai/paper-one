@@ -1,9 +1,8 @@
 import { folderOf, type BookRecord } from '../bookFolder'
-import { CONTENT_EXTENSIONS, isContentExtension } from '../bookVault'
 import { BLOB_FOLDER } from '../ports'
 import { listTrash } from '../bookTrash'
 import type { IndexedBook } from '../bookIndex'
-import { allTags, byRecency, displayAuthor, inScope, matchesQuery } from '../library'
+import { allTags, byRecency, inScope, matchesQuery } from '../library'
 import { parseQuery } from '../searchQuery'
 import { fold, tagKey } from '../tags'
 import type { ServiceContext } from '../capability'
@@ -51,9 +50,16 @@ function filtered(books: readonly IndexedBook[], input: ServiceInput): readonly 
   const wantedAuthor = author === undefined ? null : fold(author)
   return books.filter((book) => {
     if (wantedTag !== null && !allTags(book).some((one) => tagKey(one) === wantedTag)) return false
-    if (wantedAuthor !== null && !fold(displayAuthor(book)).includes(wantedAuthor)) return false
+    /* THE STORED FIELD, not the display fallback: `displayAuthor` answers
+     * "Unknown author" for an empty one, so that phrase as a filter matched
+     * every authorless book against a filter the doc says is over the field. */
+    if (wantedAuthor !== null && !fold(book.author ?? '').includes(wantedAuthor)) return false
     if (finished !== undefined && (book.finished === true) !== finished) return false
-    if (downloaded !== undefined && (book.hasContent === true) !== downloaded) return false
+    /* THREE STATES, and the filter names two of them exactly: `true` is a
+     * measured yes, `false` a measured no, and an unmeasured row answers
+     * NEITHER — collapsing unknown into "not downloaded" was a definite
+     * answer the model never gave. */
+    if (downloaded !== undefined && book.hasContent !== downloaded) return false
     if (since !== undefined && !touchedSince(book, since)) return false
     return true
   })
@@ -168,18 +174,10 @@ export function bookAdd(env: ServiceEnvironment) {
           : `book ${bookId} would share a folder with ${trashed.bookId}, which is in the trash`,
       )
     }
+    /* Against the blob layer's own set — declared as the row's `choices`,
+     * so `readInput` refuses it, `--help` prints the vocabulary and this
+     * handler holds no second copy of the rule. */
     const ext = str(input, 'ext')
-    /* AGAINST THE SAME SET THE BLOB LAYER USES. `ext` was any string: the
-     * record truncates it to eight characters and content operations accept
-     * only `CONTENT_EXTENSIONS`, so anything else produced a book whose
-     * declared format named a blob nothing would ever store or fetch —
-     * `hasContent` derived from a file that cannot exist. */
-    if (ext !== undefined && !isContentExtension(ext)) {
-      throw refuse(
-        SERVICE_ERRORS.malformed,
-        `ext ${JSON.stringify(ext)} is not a format this shelf stores — one of ${CONTENT_EXTENSIONS.join(', ')}`,
-      )
-    }
     const record: BookRecord = {
       bookId,
       title: reqStr(input, 'title'),

@@ -109,6 +109,13 @@ export function setTag(record: BookRecord, spelling: string, on: boolean, at: Hl
   const key = tagKey(spelling)
   if (!key) return record
   const held = tagRegisters(record) ?? {}
+  /* THE SAME CAP THE READER APPLIES. `parseRecord` keeps `MAX_TAGS`
+   * registers and drops the rest on the next read — so a write that grew
+   * the clock past it succeeded, and the register silently vanished later.
+   * A capacity error at the write is a failure the reader is shown. */
+  if (!(key in held) && Object.keys(held).length >= MAX_TAGS) {
+    throw new Error(`a record can carry at most ${MAX_TAGS} tag registers`)
+  }
   const clock: Record<string, TagClockEntry> = { ...held, [key]: { at, on, spelling } }
   const tags = tagsFromClock(clock)
   const { tags: _replaced, ...rest } = record
@@ -386,8 +393,13 @@ const CONTENT_HASH = /^[0-9a-f]{64}$/
 function readTagClock(raw: unknown): TagClock | undefined {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
   const clock: Record<string, TagClockEntry> = Object.create(null) as Record<string, TagClockEntry>
-  const keys = Object.keys(raw).sort().slice(0, MAX_TAGS)
+  /* VALIDATED FIRST, CAPPED SECOND. Capping the raw keys let alphabetically
+   * earlier junk consume the slots and push valid registers out — tag loss
+   * on the next write. The cap counts registers that are registers. */
+  const keys = Object.keys(raw).sort()
+  let kept = 0
   for (const key of keys) {
+    if (kept >= MAX_TAGS) break
     const value = (raw as Record<string, unknown>)[key]
     if (typeof value !== 'object' || value === null || Array.isArray(value)) continue
     const entry = value as Record<string, unknown>
@@ -408,6 +420,7 @@ function readTagClock(raw: unknown): TagClock | undefined {
     if (!isHlc(entry['at'])) continue
     if (typeof entry['on'] !== 'boolean') continue
     clock[key] = { at: entry['at'], on: entry['on'], spelling }
+    kept += 1
   }
   return clock
 }
@@ -443,7 +456,9 @@ export function parseRecord(raw: string | null): BookRecord | null {
   const clock = readTagClock(r['tagClock'])
   const derivedTags = clock ? tagsFromClock(clock) : undefined
   return {
-    ...(text(r['bookId']) ? { bookId: text(r['bookId'])! } : {}),
+    /* NEVER CUT: an id sliced to five hundred characters is a different
+     * identity, and everything after it would target a different folder. */
+    ...(typeof r['bookId'] === 'string' && r['bookId'] !== '' && r['bookId'].length <= MAX_FIELD ? { bookId: r['bookId'] } : {}),
     title,
     author: text(r['author']) ?? '',
     ...(text(r['sortAs']) ? { sortAs: text(r['sortAs'])! } : {}),
@@ -719,7 +734,15 @@ function mergeTagClocks(a: TagClock | undefined, b: TagClock | undefined): TagCl
       if (held === undefined || compareHlc(entry.at, held.at) >= 0) merged[key] = entry
     }
   }
-  return merged
+  /* ROUND-TRIP STABLE: two full clocks merge to twice `MAX_TAGS`, and the
+   * next read would keep the first `MAX_TAGS` by key and drop the rest
+   * silently. The same deterministic rule is applied here, so what is
+   * written is what will be read. */
+  const keys = Object.keys(merged).sort()
+  if (keys.length <= MAX_TAGS) return merged
+  const capped: Record<string, TagClockEntry> = Object.create(null) as Record<string, TagClockEntry>
+  for (const key of keys.slice(0, MAX_TAGS)) capped[key] = merged[key]!
+  return capped
 }
 
 /**
@@ -837,7 +860,11 @@ export function mergeParsed(previous: BookRecord | null, parsed: BookRecord): Bo
   if (!previous) return parsed
   return {
     ...parsed,
+    /* TAGS AND THEIR CLOCK TOGETHER: they are one register in two forms, and
+     * keeping the reader's list beside a parse's clock made the returned
+     * record show one set of tags while a reread derived another. */
     ...(previous.tags ? { tags: previous.tags } : {}),
+    ...(previous.tagClock ? { tagClock: previous.tagClock } : {}),
     ...(previous.position ? { position: previous.position } : {}),
     ...(previous.progress === undefined ? {} : { progress: previous.progress }),
     ...(previous.finished === undefined ? {} : { finished: previous.finished }),

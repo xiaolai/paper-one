@@ -90,7 +90,10 @@ export async function openFileStore({
   legacy = null,
   schedule = (fn) => void Promise.resolve().then(fn),
 }: FileStoreOptions): Promise<FileStore> {
-  let contents: Contents = {}
+  /* Null-prototype, so a key like `toString` or `__proto__` is data rather
+   * than an inherited function or a prototype write. The keys are ours today;
+   * the object should not care. */
+  let contents: Contents = Object.create(null) as Contents
   let migrated = false
   let damaged: FileStore['damaged'] = null
 
@@ -104,12 +107,22 @@ export async function openFileStore({
        * The store then starts empty, which is what a reader sees either way;
        * the difference is whether the old bytes still exist afterwards. */
       const aside = `${path}.corrupt`
-      try {
-        await fs.quarantine?.(path, aside)
-        console.error(`Paper: the store could not be read; moved it to ${aside}`)
-        damaged = { aside }
-      } catch (cause) {
-        console.error('Paper: the store could not be read, and could not be moved aside', cause)
+      if (fs.quarantine) {
+        try {
+          await fs.quarantine(path, aside)
+          console.error(`Paper: the store could not be read; moved it to ${aside}`)
+          damaged = { aside }
+        } catch (cause) {
+          console.error('Paper: the store could not be read, and could not be moved aside', cause)
+          damaged = { aside: null }
+        }
+      } else {
+        /* NO SEAM IS NOT A MOVE. `fs.quarantine?.()` resolved undefined and
+         * the report claimed the bytes were preserved at a path nothing
+         * wrote — the next write then overwrote the reader's only copy,
+         * under a notice saying it was safe. An absent seam is the
+         * could-not-move case, told as such. */
+        console.error('Paper: the store could not be read, and this filesystem cannot move it aside')
         damaged = { aside: null }
       }
     } else {
@@ -121,8 +134,16 @@ export async function openFileStore({
      * migration — or a downgrade — still finds the reader's work where it was.
      * Nothing here deletes anything a reader made. */
     for (const key of MIGRATED_KEYS) {
-      const value = legacy.getItem(key)
-      if (value !== null) contents[key] = value
+      /* PER KEY, because browser storage can throw on a read even after the
+       * object itself was handed over (a revoked permission, a dying
+       * profile) — and one throwing key used to reject the whole open,
+       * which took the disk-backed store down over a LEGACY copy. */
+      try {
+        const value = legacy.getItem(key)
+        if (value !== null) contents[key] = value
+      } catch (cause) {
+        console.error(`Paper: could not migrate ${key} from the old storage`, cause)
+      }
     }
     migrated = Object.keys(contents).length > 0
   }
@@ -218,13 +239,16 @@ function parse(text: string): Contents | null {
   try {
     const value: unknown = JSON.parse(text)
     if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
-    // Only string entries: every store above this writes a JSON string, and a
-    // non-string here would reach `JSON.parse` in a parser expecting one.
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>).filter(
-        ([, v]) => typeof v === 'string',
-      ),
-    ) as Contents
+    /* ONE invalid entry damns the file, deliberately. Every store above this
+     * writes a JSON string, so a non-string entry means the file was not
+     * written by this code — and FILTERING it meant the remainder was
+     * accepted as healthy and the next write erased the dropped keys with no
+     * quarantine and no notice. Damage is damage: `null` sends the whole
+     * file down the move-aside path, where every byte survives and the boot
+     * notice says so. */
+    const entries = Object.entries(value as Record<string, unknown>)
+    if (!entries.every(([, v]) => typeof v === 'string')) return null
+    return Object.assign(Object.create(null), Object.fromEntries(entries)) as Contents
   } catch {
     /* Reported to the caller rather than thrown. Throwing here would happen
      * before React mounts and take the whole application down — a reader whose

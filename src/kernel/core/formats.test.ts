@@ -117,7 +117,7 @@ function mobiOf(version: number): Uint8Array {
   const view = new DataView(bytes.buffer)
   view.setUint32(78, record0, false)
   bytes.set(utf8('MOBI'), record0 + 16)
-  view.setUint32(record0 + 16 + 36, version, false)
+  view.setUint32(record0 + 36, version, false)
   return bytes
 }
 
@@ -170,7 +170,9 @@ describe('sniffFormat', () => {
 
   it('does not throw on a truncated or lying archive', () => {
     const epub = zipOf([{ name: 'mimetype', data: utf8('application/epub+zip') }])
-    expect(sniffFormat(epub.subarray(0, 8))).toBe('cbz') // a ZIP of some kind, unreadably short
+    /* A ZIP of some kind, unreadably short: no entries, so no verdict — the
+       name decides. It used to be called a comic, as was every DOCX. */
+    expect(sniffFormat(epub.subarray(0, 8))).toBeNull()
     const lying = zipOf([{ name: 'mimetype' }])
     // Compressed size pointing past the end just stops the walk.
     new DataView(lying.buffer).setUint32(18, 99999, true)

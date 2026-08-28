@@ -1428,3 +1428,87 @@ describe('hardening against a hostile peer', () => {
     expect(sent.some((f) => f.kind === 'cancel')).toBe(true)
   })
 })
+
+/* --------------------------------------------- what audit-fix round 1 found */
+
+describe('what the audit found in the envelope (round 1)', () => {
+  it('treats a grant check that THROWS as a refusal, and keeps receiving', async () => {
+    /* `hasGrant` is injected — a capability's binding, a pump's book-bound
+       rule — and an exception from it escaped `receive`, which promises never
+       to throw, and took the whole receive loop down over one frame. */
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const h = harness([ping], () => {
+      throw new Error('the binding is broken')
+    })
+    expect(() => h.send(frame({ id: 'r1' }))).not.toThrow()
+    await settle()
+    expect(h.sent[0]?.kind).toBe('err')
+    expect(errBody(h.sent[0]).code).toBe(ENVELOPE_ERRORS.forbidden)
+    quiet.mockRestore()
+  })
+
+  it('finishes a pending call at once when the router sends it a request frame', async () => {
+    /* A `req` or `cancel` arriving on the client side for a pending call is
+       a protocol violation, like a wrong-direction frame on the router — and it
+       used to be ignored, leaving the call to fail only on its timeout. */
+    const timers = fakeTimers()
+    const client = createClient({ send: () => {}, timers, timeoutMs: 1_000 })
+    const answer = client.call('example.ping', null).catch((e: unknown) => e)
+    await settle()
+    client.receive(encodeFrame(frame({ id: 'c1', kind: 'req', body: { hello: 'wrong way' } })))
+    const failure = await answer
+    expect((failure as ServiceCallError).error.code).toBe(ENVELOPE_ERRORS.protocol)
+    expect(timers.pending(), "the call's clock outlived the call").toBe(0)
+  })
+})
+
+describe('onDisconnect', () => {
+  it('fires once when the router hangs up on its outbound budget, and at once for a listener that arrives late', async () => {
+    /* THE HANG-UP NOBODY OUTSIDE THE ROUTER COULD SEE. The webhost pump holds a
+       record per session and learned of a rejected write through its own
+       catch — but a budget overflow is decided in here, and the pump went on
+       serving a connection that had already gone silent (audit #61). */
+    const timers = fakeTimers()
+    const held = new Promise<void>(() => {})
+    const conn = createRouter({ services: [], hasGrant: () => true, timers, maxOutboundBytes: 600 }).connect(
+      'peer-a',
+      () => held,
+    )
+    let heard = 0
+    const unsubscribe = conn.onDisconnect(() => {
+      heard += 1
+    })
+    for (let i = 0; i < 200; i++) {
+      conn.receive(encodeFrame(frame({ service: 'nobody.home', id: `r${i}`, body: null })))
+    }
+    await settle()
+    expect(heard).toBe(1)
+    conn.disconnect()
+    expect(heard).toBe(1)
+    let late = 0
+    conn.onDisconnect(() => {
+      late += 1
+    })
+    expect(late).toBe(1)
+    unsubscribe()
+  })
+
+  it('does not fire for a listener that unsubscribed, and a throwing listener does not silence the next', () => {
+    const conn = createRouter({ services: [], hasGrant: () => true }).connect('peer-a', () => undefined)
+    let gone = 0
+    const off = conn.onDisconnect(() => {
+      gone += 1
+    })
+    off()
+    let after = 0
+    conn.onDisconnect(() => {
+      throw new Error('a listener that fails')
+    })
+    conn.onDisconnect(() => {
+      after += 1
+    })
+    conn.disconnect()
+    expect(gone).toBe(0)
+    expect(after).toBe(1)
+  })
+})

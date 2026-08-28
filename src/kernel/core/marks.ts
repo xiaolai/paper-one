@@ -710,15 +710,6 @@ export function createMark<T extends NewMark>(draft: T): Mark & Pick<T, 'kind'> 
 }
 
 /**
- * How much of the page a bookmark remembers.
- *
- * A highlight's `text` is what the reader selected, which is as long as they
- * meant it to be. A bookmark's is whatever was visible when they pressed the
- * key — a whole page — and storing that would put a screenful of prose into
- * `marks.json` for every bookmark, and onto the wire for every sync. What the
- * list needs is enough to recognise the place by, which is the opening line.
- */
-/**
  * The bounds a MARK's own fields carry, and the reason they exist at all.
  *
  * A mark is persisted and then read back — by `mark.list`, by the sync feed,
@@ -738,6 +729,15 @@ export function createMark<T extends NewMark>(draft: T): Mark & Pick<T, 'kind'> 
 export const MAX_MARK_TEXT = 8_000
 export const MAX_MARK_NOTE = 8_000
 
+/**
+ * How much of the page a bookmark remembers.
+ *
+ * A highlight's `text` is what the reader selected, which is as long as they
+ * meant it to be. A bookmark's is whatever was visible when they pressed the
+ * key — a whole page — and storing that would put a screenful of prose into
+ * `marks.json` for every bookmark, and onto the wire for every sync. What the
+ * list needs is enough to recognise the place by, which is the opening line.
+ */
 export const BOOKMARK_TEXT_MAX = 140
 
 /**
@@ -984,13 +984,20 @@ export function validMarks(parsed: unknown): Mark[] {
         deleted !== undefined && !(updated !== undefined && updated > deleted) ? deleted : undefined
       return {
         ...rest,
+        /* THE SAME BOUNDS THE SERVICE TABLE REFUSES AT, applied at the one
+         * door stored rows come through. The table refuses an oversized mark
+         * on the way in; a peer's `mergeRemote` and a hand-edited file do not
+         * pass the table, and a row past the bound made every later answer
+         * that carried it too large for the transport. Cut, not dropped: a
+         * highlight with an over-long quote is still the reader's highlight. */
+        text: rest.text.slice(0, MAX_MARK_TEXT),
         // Absent for every mark made before context was stored, which is most of
         // them. Empty is the honest reading: there is nothing extra to re-anchor
         // with — NOT a reason to drop a mark the reader made.
         prefix: readContext(row.prefix),
         suffix: readContext(row.suffix),
         tint: readTint(row.tint),
-        note: noteForKind(rest.note, row.kind),
+        note: noteForKind(rest.note.slice(0, MAX_MARK_NOTE), row.kind),
         style: styleForKind(readStyle(row.style), row.kind),
         ...(updated !== undefined ? { updatedAt: updated } : {}),
         ...(tombstone !== undefined ? { deletedAt: tombstone } : {}),

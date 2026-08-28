@@ -165,3 +165,48 @@ describe('tagMany', () => {
     expect(await library.tagMany([{ bookId: 'book_a', tags: ['sea'] }])).toEqual({ changed: 0, failed: 0 })
   })
 })
+
+describe('what the disk write answered', () => {
+  it('reconciles the published row with the record the write actually produced', async () => {
+    /* `updateBook` applies the change to what is ON DISK — deliberately,
+       because the cached row can be one write behind after a crash — and
+       answers the merged record. `commit` used to discard that answer: the
+       optimistic row built from the stale cache stayed published and was
+       then serialised into the index, writing the lie back over the truth
+       the write had just merged. */
+    const fs = fakeFs({
+      [`${BOOKS_DIR}/book_a/book.json`]: JSON.stringify({ title: 'Moby-Dick', author: '', finished: true }),
+      [`${BOOKS_DIR}/book_a/content.epub`]: 'B',
+    })
+    /* The cache is BEHIND the disk: its row does not know the book was
+       finished. */
+    const library = createLibrary({ fs, queue: writeQueue(), initial: [row('book_a', 'Moby-Dick')] })
+
+    await library.tag('book_a', 'Sea')
+
+    const after = library.getSnapshot().find((one) => one.bookId === 'book_a')!
+    expect(after.tags).toEqual(['Sea'])
+    expect(after.finished).toBe(true)
+  })
+})
+
+describe('the undo offer and a write that fails', () => {
+  it('keeps the offer when putting the tag back could not be written', async () => {
+    /* Cleared before the restoring writes and left cleared on failure, a
+       transient disk error spent the reader's one retry on nothing. */
+    const { library, refuse } = world(['book_a'])
+    await library.tag('book_a', 'Sea')
+    await library.untagBooks(['book_a'], 'Sea')
+    expect(library.lastRemoval()).toMatchObject({ tag: 'Sea', bookIds: ['book_a'] })
+
+    refuse('book_a', true)
+    await expect(library.undoRemoveTag()).rejects.toThrow()
+    expect(library.lastRemoval()).toMatchObject({ tag: 'Sea', bookIds: ['book_a'] })
+
+    /* And with the disk back, the same offer goes through. */
+    refuse('book_a', false)
+    await library.undoRemoveTag()
+    expect(library.lastRemoval()).toBeNull()
+    expect(library.getSnapshot()[0]?.tags).toEqual(['Sea'])
+  })
+})

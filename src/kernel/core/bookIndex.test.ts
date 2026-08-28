@@ -179,13 +179,52 @@ describe('loadShelf', () => {
     expect(fs.store.has(INDEX_FILE)).toBe(false)
   })
 
-  it('ignores a marker it cannot read', async () => {
+  it('rescans on a marker it cannot read, rather than trusting a cache the marker says is behind', async () => {
+    /* An unreadable marker means writes happened and WHICH books is unknown —
+     * the one answer the cache cannot absorb. This used to be read as
+     * absence, and the stale index was trusted with a marker sitting right
+     * there saying not to. */
     const fs = fakeFs(twoBooks)
     await writeIndex(fs, await scanBooks(fs))
     fs.store.set(INDEX_DIRTY_FILE, new TextEncoder().encode('not json'))
-    const { books, rescanned } = await loadShelf(fs)
-    expect(rescanned).toBe(false)
+    const { books, rescanned, why } = await loadShelf(fs)
+    expect(rescanned).toBe(true)
+    expect(why).toBe('marker unreadable')
     expect(books).toHaveLength(2)
+    /* The scan read everything and its index landed, so the marker went. */
+    expect(fs.store.has(INDEX_DIRTY_FILE)).toBe(false)
+  })
+
+  it('treats a marker listing anything that is not a book id as unreadable, whole', async () => {
+    const fs = fakeFs(twoBooks)
+    await writeIndex(fs, await scanBooks(fs))
+    fs.store.set(
+      INDEX_DIRTY_FILE,
+      new TextEncoder().encode(JSON.stringify({ version: 1, generation: 3, books: ['book_a', 7] })),
+    )
+    const { rescanned, why } = await loadShelf(fs)
+    expect(rescanned).toBe(true)
+    expect(why).toBe('marker unreadable')
+  })
+
+  it('keeps the marker when the refreshed index cannot be written', async () => {
+    /* Cleared unconditionally, a refused write left the OLD index on disk
+     * with nothing saying its rows were behind — the next launch trusted a
+     * cache the marker existed to indict. */
+    const fs = fakeFs(twoBooks)
+    await writeIndex(fs, await scanBooks(fs))
+    fs.store.set(
+      INDEX_DIRTY_FILE,
+      new TextEncoder().encode(JSON.stringify({ version: 1, generation: 1, books: ['book_a'] })),
+    )
+    const writeFile = fs.writeFile.bind(fs)
+    fs.writeFile = async (path, bytes) => {
+      if (path === INDEX_FILE || path.startsWith(`${INDEX_FILE}.`)) throw new Error('disk full')
+      return writeFile(path, bytes)
+    }
+    const { rescanned } = await loadShelf(fs)
+    expect(rescanned).toBe(false)
+    expect(fs.store.has(INDEX_DIRTY_FILE)).toBe(true)
   })
 
   /* Losing the cache is a rescan, not data loss. */

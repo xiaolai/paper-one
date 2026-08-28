@@ -52,27 +52,34 @@ export interface DirtyMarker {
   readonly books: readonly string[]
 }
 
-export async function readDirtyMarker(fs: IndexFs): Promise<DirtyMarker | null> {
+export async function readDirtyMarker(fs: IndexFs): Promise<DirtyMarker | 'absent' | 'unreadable'> {
   let raw: string
   try {
     raw = new TextDecoder().decode(await fs.readFile(INDEX_DIRTY_FILE))
   } catch {
-    return null
+    /* A read failure is NOT absence. An absent marker means "nothing is
+     * behind the index" and the cache may be trusted; a marker that exists
+     * and cannot be read means writes happened and WHICH books is unknown —
+     * trusting the cache on that answer is how a saved position quietly
+     * rewinds. `exists` is what tells the two apart; when even that throws,
+     * fail closed. */
+    const there = await fs.exists(INDEX_DIRTY_FILE).catch(() => true)
+    return there ? 'unreadable' : 'absent'
   }
-  /* A marker that will not parse is treated as "every listed book unknown",
-   * which the caller cannot act on — so it is the same as a full rescan's
-   * worth of distrust: `null` here, and the caller's cache is refused by the
-   * folder check or trusted on its own terms. Never a throw: the marker is a
+  /* A marker that will not parse — or lists anything that is not a book id —
+   * is 'unreadable', never "absent" and never a filtered remnant: the caller
+   * cannot know which books the damaged half named, so the only honest
+   * reading is a full distrust of the cache. Never a throw: the marker is a
    * hint about what to re-read, not a store. */
   try {
     const parsed: unknown = JSON.parse(raw)
-    if (typeof parsed !== 'object' || parsed === null) return null
+    if (typeof parsed !== 'object' || parsed === null) return 'unreadable'
     const one = parsed as Record<string, unknown>
-    if (one['version'] !== 1 || typeof one['generation'] !== 'number' || !Array.isArray(one['books'])) return null
-    const books = one['books'].filter((id): id is string => typeof id === 'string')
-    return { version: 1, generation: one['generation'], books }
+    if (one['version'] !== 1 || typeof one['generation'] !== 'number' || !Array.isArray(one['books'])) return 'unreadable'
+    if (!one['books'].every((id): id is string => typeof id === 'string')) return 'unreadable'
+    return { version: 1, generation: one['generation'], books: one['books'] }
   } catch {
-    return null
+    return 'unreadable'
   }
 }
 
@@ -427,11 +434,13 @@ async function scanFolder(fs: IndexFs, name: string): Promise<FolderScan> {
 /**
  * Rebuild by reading every book's record.
  *
- * A folder whose `book.json` is missing or unreadable is SKIPPED rather than
- * failing the scan: one damaged book should cost that book, not the library. It
- * also means a half-written import — a folder with content but no record yet —
- * is simply not on the shelf until it is finished, which is the correct
- * behaviour rather than a special case.
+ * A folder whose `book.json` is missing or unreadable costs that book, never
+ * the library — one damaged record must not fail the scan. What happens to the
+ * recordless folder depends on what it holds: recognisable content bytes and
+ * it is ADOPTED as a book (see `scanFolder` and `adoptOrphan` — bytes with no
+ * record is a book, not a non-book), while a folder with neither a record nor
+ * recognised content is a stray: not on the shelf, but counted in the folder
+ * snapshot so its mere presence does not distrust the cache every launch.
  *
  * TWO ROUND-TRIPS PER BOOK, a few folders at a time — see `SCAN_WIDTH`. This
  * walk used to be strictly serial and probed each folder up to ten times —
@@ -501,7 +510,7 @@ export async function scanBooks(fs: IndexFs): Promise<IndexedBook[]> {
  * the directory behind the app, and an incomplete row is an index written by a
  * version that did not record whether a book has bytes.
  */
-export type ShelfSource = 'cache' | 'no cache' | 'folders disagree' | 'rows incomplete'
+export type ShelfSource = 'cache' | 'no cache' | 'folders disagree' | 'rows incomplete' | 'marker unreadable'
 
 export interface LoadShelfOptions {
   /**
@@ -548,19 +557,35 @@ export async function loadShelf(
        * cannot see, and the one this marker exists for. `hasContent` is the
        * cache's derived flag and is carried; the record is the folder's. */
       const marker = await readDirtyMarker(fs)
-      if (!marker || marker.books.length === 0) return { books: [...cached.books], rescanned: false, why: 'cache' }
-      const books = await refreshed(fs, cached.books, marker.books)
-      if (persist) {
-        await writeIndex(fs, books, cached.folders).catch(() => {})
-        await clearDirtyMarker(fs)
+      if (marker === 'unreadable') {
+        /* Writes happened and which books is unknown: the cache cannot be
+         * trusted on any subset, so this falls through to the scan below,
+         * which reads every record and then replaces the marker. */
+        why = 'marker unreadable'
+      } else {
+        if (marker === 'absent' || marker.books.length === 0)
+          return { books: [...cached.books], rescanned: false, why: 'cache' }
+        const books = await refreshed(fs, cached.books, marker.books)
+        if (persist) {
+          /* THE MARKER OUTLIVES A FAILED WRITE. Cleared unconditionally, a
+           * refused `writeIndex` left the OLD index on disk with nothing
+           * saying its rows were behind — and the next launch trusted it,
+           * which is precisely the lie the marker exists to prevent. */
+          const wrote = await writeIndex(fs, books, cached.folders).then(
+            () => true,
+            () => false,
+          )
+          if (wrote) await clearDirtyMarker(fs)
+        }
+        return { books, rescanned: false, why: 'cache' }
       }
-      return { books, rescanned: false, why: 'cache' }
+    } else {
+      /* Named in the order they are checked, so the answer is the FIRST thing
+       * wrong rather than the last — an index that both disagrees and predates
+       * `hasContent` is a version mismatch, and saying so is more use than
+       * reporting the symptom it also has. */
+      why = agrees ? 'rows incomplete' : 'folders disagree'
     }
-    /* Named in the order they are checked, so the answer is the FIRST thing
-     * wrong rather than the last — an index that both disagrees and predates
-     * `hasContent` is a version mismatch, and saying so is more use than
-     * reporting the symptom it also has. */
-    why = agrees ? 'rows incomplete' : 'folders disagree'
   }
   /* ONE SNAPSHOT for both halves of the write: the scan returns the listing it
    * actually walked. A second listing taken here used to race the scan — a
@@ -569,9 +594,14 @@ export async function loadShelf(
    * the disagreement. */
   const { books, folders } = await scanShelf(fs)
   if (persist) {
-    await writeIndex(fs, books, folders).catch(() => {})
-    /* A scan read every record, so nothing is behind the index it wrote. */
-    await clearDirtyMarker(fs)
+    /* A scan read every record, so nothing is behind the index it wrote —
+     * but only an index that actually LANDED may take the marker with it;
+     * see the same rule on the marker path above. */
+    const wrote = await writeIndex(fs, books, folders).then(
+      () => true,
+      () => false,
+    )
+    if (wrote) await clearDirtyMarker(fs)
   }
   return { books, rescanned: true, why }
 }

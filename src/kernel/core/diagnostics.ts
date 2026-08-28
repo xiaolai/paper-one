@@ -166,13 +166,29 @@ export function createDiagnostics({
   scope = 'kernel',
 }: DiagnosticsOptions = {}): Diagnostics {
   if (!enabled) return NOOP_DIAGNOSTICS
+  /* THE SINK IS GUARDED HERE, ONCE. A diagnostic is written from a catch
+   * block more often than not — the store's failure path, a teardown, a
+   * reporter's own reporter — and a sink that throws (a console replaced by
+   * a test double, a bridge whose channel has closed) would turn the report
+   * of one failure into a second, unhandled one at whichever of the ~fifty
+   * call sites happened to be on the stack. The 2026-08-28 audit found the
+   * guard missing at several of them; one guard at the factory covers every
+   * caller, present and future, and a sink that fails is simply a diagnostic
+   * that was lost — which is what a diagnostic is allowed to be. */
+  const quietly = (write: () => void): void => {
+    try {
+      write()
+    } catch {
+      /* A lost diagnostic, not a second failure. */
+    }
+  }
   const at = (name: string): Diagnostics => {
     const line = (event: string) => `[paper:${name}] ${event}`
     return {
       child: (child) => at(`${name}.${child}`),
-      info: (event, fields = {}) => sink.info(line(event), redact(fields)),
-      warn: (event, fields = {}) => sink.warn(line(event), redact(fields)),
-      error: (event, fields = {}) => sink.error(line(event), redact(fields)),
+      info: (event, fields = {}) => quietly(() => sink.info(line(event), redact(fields))),
+      warn: (event, fields = {}) => quietly(() => sink.warn(line(event), redact(fields))),
+      error: (event, fields = {}) => quietly(() => sink.error(line(event), redact(fields))),
     }
   }
   return at(scope)

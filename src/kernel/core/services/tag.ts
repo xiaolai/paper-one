@@ -78,7 +78,6 @@ export function tagAdd(env: ServiceEnvironment) {
      * refused a request without it — the `?? []` fallback could not run and
      * stated a second, softer contract beside the table's. */
     const bookIds = known(env, reqList(input, 'book'))
-    if (bookIds.length === 0) throw refuse(SERVICE_ERRORS.malformed, 'tag.add needs at least one book')
     /* WHAT THE STORE WROTE, not what a snapshot predicted.
      *
      * This counted, from the in-memory shelf, the books that did not appear

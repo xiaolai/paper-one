@@ -120,7 +120,13 @@ export async function readRangeOf(
   offset: number,
   length: number,
 ): Promise<Uint8Array> {
-  if (offset < 0 || length < 0) throw new Error(`readRange: offset and length must not be negative (${offset}, ${length})`)
+  /* SAFE INTEGERS OR NOTHING. `NaN < 0` is false, so NaN sailed past the old
+   * negative check — and what NaN, Infinity, fractions and 2^53+1 do next is
+   * adapter-dependent: the in-memory `slice` quietly coerces, a real seek can
+   * throw or land elsewhere. One rule here, where the doc above says the
+   * bounds are decided. */
+  if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length) || offset < 0 || length < 0)
+    throw new Error(`readRange: offset and length must be non-negative safe integers (${offset}, ${length})`)
   if (length === 0) return new Uint8Array(0)
   if (fs.readRange) return await fs.readRange(path, offset, length)
   const whole = await fs.readFile(path)
@@ -223,13 +229,19 @@ export function extensionFor(name: string): ContentExtension {
  * neither field says anything, rather than whenever `ext` happened to be absent.
  */
 export function storedBookName(entry: { title?: string; ext?: string; format?: string }): string {
-  const named = entry.ext !== undefined && isKnownExtension(entry.ext) ? entry.ext : undefined
-  const travelled = entry.format !== undefined && isKnownExtension(entry.format) ? entry.format : undefined
-  /* `bin` IS DELIBERATELY NOT ACCEPTED from either. It is the vault's inert
-     fallback for bytes nothing recognises, and handing a parser `Title.bin`
-     names a type no parser routes on — so a record stored as `bin` lands on
-     `epub` here, which is the same guess the reader would have made and at
-     least opens something. */
+  const stored = (ext: string | undefined) =>
+    ext !== undefined && (isKnownExtension(ext) || ext === 'bin') ? ext : undefined
+  const named = stored(entry.ext)
+  const travelled = stored(entry.format)
+  /* `bin` IS ACCEPTED, and the reasoning that once refused it was wrong in a
+     way that mattered: "hand the parser `Title.epub`, which at least opens
+     something" forgot that this name also LOCATES the file —
+     `contentPathIn` turns it into `books/<id>/content.epub` while the vault
+     stored the bytes as `content.bin`, so the guess opened NOTHING and the
+     reader was told the file was missing with the file right there. Named
+     `.bin`, the bytes are found, foliate sniffs real formats regardless of
+     the extension, and bytes nothing can parse fail as what they are —
+     "cannot be opened", not "not found". */
   return `${entry.title || 'book'}.${named ?? travelled ?? 'epub'}`
 }
 
