@@ -96,6 +96,7 @@ export type {
   ServiceNoun,
   ServiceOutput,
   ServiceVerb,
+  WithdrawnField,
 } from './core/serviceTable'
 
 /* The table's HANDLERS, and the ports the three nouns the kernel cannot

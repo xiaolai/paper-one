@@ -178,9 +178,9 @@ describe('every write service, through the CLI', () => {
   it('sets fields on a record, and the change is on disk', async () => {
     const dataDir = await library()
     const { host } = await watched(dataDir)
-    expect((await through(host, ['book', 'set', 'bbb', '--title', 'Moby-Dick or, The Whale'])).code).toBe(EXIT.ok)
-    const written = JSON.parse(await readFile(join(dataDir, 'books/bbb/book.json'), 'utf8')) as { title: string }
-    expect(written.title).toBe('Moby-Dick or, The Whale')
+    expect((await through(host, ['book', 'set', 'bbb', '--finished'])).code).toBe(EXIT.ok)
+    const written = JSON.parse(await readFile(join(dataDir, 'books/bbb/book.json'), 'utf8')) as { finished?: boolean }
+    expect(written.finished).toBe(true)
   })
 
   it('adds and removes a book, and a removal is recoverable', async () => {
@@ -276,7 +276,7 @@ describe('the journal bracket a CLI write leaves', () => {
   it('is one begin/commit pair per mutation, with nothing dangling', async () => {
     const dataDir = await library()
     const { host, seen } = await watched(dataDir)
-    await through(host, ['book', 'set', 'bbb', '--title', 'Renamed'])
+    await through(host, ['book', 'set', 'bbb', '--finished'])
     const { pairs, dangling } = bracketsAreWholeAndPaired(seen)
     expect(pairs).toBe(1)
     expect(dangling).toBe(0)
@@ -309,7 +309,7 @@ describe('the journal bracket a CLI write leaves', () => {
 
   it('leaves no bracket at all for a write the service refused', async () => {
     const { host, seen } = await watched(await library())
-    expect((await through(host, ['book', 'set', 'nope', '--title', 'x'])).code).toBe(EXIT.refused)
+    expect((await through(host, ['book', 'set', 'nope', '--finished'])).code).toBe(EXIT.refused)
     expect(seen).toEqual([])
   })
 })
@@ -321,7 +321,7 @@ describe('two writers cannot interleave', () => {
     try {
       const err: string[] = []
       const code = await paper({
-        argv: ['book', 'set', 'bbb', '--title', 'Second'],
+        argv: ['book', 'set', 'bbb', '--finished'],
         dataDir,
         lockWaitMs: 0,
         sinks: { out: () => {}, err: (line) => err.push(line) },
@@ -331,8 +331,8 @@ describe('two writers cannot interleave', () => {
       expect(err.join('\n')).toContain(String(held.owner.pid))
       /* AND NOTHING WAS WRITTEN. A refusal that had already changed the file
        * would be the worst of both. */
-      const record = JSON.parse(await readFile(join(dataDir, 'books/bbb/book.json'), 'utf8')) as { title: string }
-      expect(record.title).toBe('Moby-Dick')
+      const record = JSON.parse(await readFile(join(dataDir, 'books/bbb/book.json'), 'utf8')) as { finished?: boolean }
+      expect(record.finished).toBeUndefined()
     } finally {
       await held.release()
     }
@@ -359,13 +359,13 @@ describe('two writers cannot interleave', () => {
   it('takes the lock, does the write, and gives it back', async () => {
     const dataDir = await library()
     const code = await paper({
-      argv: ['book', 'set', 'bbb', '--title', 'Locked and written'],
+      argv: ['book', 'set', 'bbb', '--finished'],
       dataDir,
       sinks: { out: () => {}, err: () => {} },
     })
     expect(code).toBe(EXIT.ok)
-    const record = JSON.parse(await readFile(join(dataDir, 'books/bbb/book.json'), 'utf8')) as { title: string }
-    expect(record.title).toBe('Locked and written')
+    const record = JSON.parse(await readFile(join(dataDir, 'books/bbb/book.json'), 'utf8')) as { finished?: boolean }
+    expect(record.finished).toBe(true)
     /* Released, so the next writer is not refused by a ghost. */
     await expect(readFile(join(dataDir, LOCK_FILE))).rejects.toThrow()
   })
@@ -391,7 +391,7 @@ describe('two writers cannot interleave', () => {
      * either way, which is what this test was really for. */
     await expect(
       paper({
-        argv: ['book', 'set', 'bbb', '--title', 'x'],
+        argv: ['book', 'set', 'bbb', '--finished'],
         dataDir: root,
         sinks: { out: () => {}, err: (line) => err.push(line) },
       }),
@@ -404,7 +404,7 @@ describe('two writers cannot interleave', () => {
     const dataDir = await library()
     expect(
       await paper({
-        argv: ['book', 'set', 'nope', '--title', 'x'],
+        argv: ['book', 'set', 'nope', '--finished'],
         dataDir,
         sinks: { out: () => {}, err: () => {} },
       }),

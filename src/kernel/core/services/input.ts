@@ -127,6 +127,12 @@ export function readInput(descriptor: ServiceDescriptor, body: unknown): Service
   }
   const known = new Set(descriptor.input.map((field) => field.name))
   for (const key of Object.keys(raw)) {
+    /* WITHDRAWN BEFORE UNKNOWN. A field the row refuses on purpose gets the
+     * row's own sentence, not the misspelling's — `book.set` with a `title`
+     * is a caller asking for a rename, and "no such field" would send them
+     * looking for the spelling of an edit that is not offered. */
+    const gone = descriptor.withdrawn?.find((one) => one.name === key)
+    if (gone) throw refuse(SERVICE_ERRORS.malformed, `${descriptor.name} does not take ${key}: ${gone.why}`)
     if (!known.has(key)) throw refuse(SERVICE_ERRORS.malformed, `${descriptor.name} has no field ${JSON.stringify(key)}`)
   }
   const out: Record<string, FieldValue> = {}

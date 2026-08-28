@@ -307,8 +307,9 @@ describe('every command, over the envelope', () => {
 
   it('writes through the wire, and the shelf holds the change', async () => {
     const shelf = await serveOverTheWire()
-    expect((await overTheWire(shelf, ['book', 'set', 'b0001', '--title', 'Renamed remotely'])).code).toBe(EXIT.ok)
-    expect(shelf.services.library.getSnapshot().find((one) => one.bookId === 'b0001')?.title).toBe('Renamed remotely')
+    /* `--finished`, since WI-20.7 withdrew `--title`: a rename is not offered. */
+    expect((await overTheWire(shelf, ['book', 'set', 'b0001', '--finished'])).code).toBe(EXIT.ok)
+    expect(shelf.services.library.getSnapshot().find((one) => one.bookId === 'b0001')?.finished).toBe(true)
   })
 
   it('carries a service refusal across unchanged, code and all', async () => {
@@ -671,7 +672,7 @@ describe('paper --shelf', () => {
     const err: string[] = []
     const out: string[] = []
     const code = await paper({
-      argv: ['--shelf', 'k', 'book', 'set', 'b0005', '--title', 'x'],
+      argv: ['--shelf', 'k', 'book', 'set', 'b0005', '--finished'],
       sinks: { out: (line) => out.push(line), err: (line) => err.push(line) },
       remote: async () =>
         remoteCaller({
@@ -730,13 +731,13 @@ describe('paper --shelf', () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'paper-remote-'))
     try {
       const code = await paper({
-        argv: ['--shelf', 'the-shelf', 'book', 'set', 'b0004', '--title', 'Remote write'],
+        argv: ['--shelf', 'the-shelf', 'book', 'set', 'b0004', '--finished'],
         dataDir,
         sinks: { out: () => {}, err: () => {} },
         remote: async () => remoteCaller({ channel: shelf.channel, close: async () => {} }),
       })
       expect(code).toBe(EXIT.ok)
-      expect(shelf.services.library.getSnapshot().find((one) => one.bookId === 'b0004')?.title).toBe('Remote write')
+      expect(shelf.services.library.getSnapshot().find((one) => one.bookId === 'b0004')?.finished).toBe(true)
 
       /* NOTHING WAS CREATED. Not a lock, not an index, not a `books/` — the
        * local host was never opened. An empty directory is the whole

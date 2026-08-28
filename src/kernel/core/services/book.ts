@@ -197,8 +197,9 @@ export function bookSet(env: ServiceEnvironment) {
     const input = readInput(descriptorOf('book.set'), req)
     const bookId = reqStr(input, 'book')
     find(env, bookId)
-    const title = str(input, 'title')
-    const author = str(input, 'author')
+    /* NO TITLE, NO AUTHOR — withdrawn on the row (WI-20.7), so `readInput`
+     * has already refused either by name before this runs. The edit went
+     * through `patch` with no stamp and lost to the next parse. */
     const finished = bool(input, 'finished')
     const position = str(input, 'position')
     const progress = num(input, 'progress')
@@ -242,8 +243,6 @@ export function bookSet(env: ServiceEnvironment) {
      * inside the patch rather than read off a snapshot out here — omitted
      * means "leave it alone", and the record is what actually holds it. */
     await env.services.library.patch(bookId, {
-      ...(title === undefined ? {} : { title }),
-      ...(author === undefined ? {} : { author }),
       ...(finished === undefined ? {} : { finished }),
       ...(position === undefined ? {} : { position: { position, ...(progress === undefined ? {} : { progress }) } }),
     })

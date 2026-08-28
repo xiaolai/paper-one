@@ -411,6 +411,30 @@ export interface ServiceDescriptor {
    * the reference says so.
    */
   readonly atLeastOne?: readonly string[]
+  /**
+   * Fields this service once took and now REFUSES BY NAME, each with the
+   * reason.
+   *
+   * Dropping a field from `input` alone turns a caller's `--title` into
+   * "book.set has no field title — did you mean …?", which is the answer to
+   * a misspelling, not to an edit that was withdrawn on purpose. Declared
+   * here, `readInput` and the CLI refuse it with the reason in the message,
+   * and `--help` and the reference print it beside the fields that are
+   * taken — one statement, enforced and published, like `atLeastOne`.
+   *
+   * The first entry is `book.set`'s `title` and `author` (WI-20.7): the
+   * edit went through `patch` with no stamp, the next parse or enrichment
+   * let the file's metadata win in `mergeParsed`, and sync's metadata group
+   * is taken whole by `parsedAt`, which `patch` never moved. Nothing in the
+   * app called it. An edit the kernel cannot keep is not offered.
+   */
+  readonly withdrawn?: readonly WithdrawnField[]
+}
+
+/** A field a service refuses by name, and the sentence it refuses it with. */
+export interface WithdrawnField {
+  readonly name: string
+  readonly why: string
 }
 
 /* -------------------------------------------------------------- the table */
@@ -472,16 +496,19 @@ const TABLE = [
     verb: 'set',
     grant: 'book:write',
     kind: 'req',
-    summary: 'Change fields on one record: title, author, finished, position.',
+    summary: 'Change fields on one record: finished, position.',
     input: [
       BOOK_ID,
-      { name: 'title', type: 'string', maxLength: MAX_RECORD_FIELD, doc: 'A new title.' },
-      { name: 'author', type: 'string', maxLength: MAX_RECORD_FIELD, doc: 'A new author.' },
       { name: 'finished', type: 'boolean', doc: 'Whether the reader is done with it.' },
       { name: 'position', type: 'string', maxLength: MAX_RECORD_POSITION, doc: 'Where the reader is, as a CFI.' },
       { name: 'progress', type: 'number', min: 0, max: 1, doc: 'How far through, in [0, 1]. Needs `position`.' },
     ],
-    atLeastOne: ['title', 'author', 'finished', 'position', 'progress'],
+    atLeastOne: ['finished', 'position', 'progress'],
+    /* Refused by name, not dropped — see `withdrawn` on the descriptor. */
+    withdrawn: [
+      { name: 'title', why: 'a rename is not offered — an edit with no stamp loses to the next parse of the file' },
+      { name: 'author', why: 'a rename is not offered — an edit with no stamp loses to the next parse of the file' },
+    ],
     output: { many: false, of: 'BookDetail', columns: ['bookId', 'title', 'author', 'tags', 'progress', 'finished', 'hasContent'] },
   },
   {

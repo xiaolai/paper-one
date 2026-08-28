@@ -395,17 +395,15 @@ describe('what an audit of the published surface found', () => {
 
     await shelf.client.call('book.set', {
       book: 'one',
-      title: 'Moby-Dick',
       finished: true,
       position: 'epubcfi(/6/4)',
     })
 
-    /* ONE write of the record, carrying all three fields — and the position
-     * did not reset the progress it never named. */
+    /* ONE write of the record, carrying both fields — and the position did
+     * not reset the progress it never named. */
     expect(writes).toHaveLength(1)
     const landed = JSON.parse(writes[0] as string)
     expect(landed).toMatchObject({
-      title: 'Moby-Dick',
       finished: true,
       position: 'epubcfi(/6/4)',
       progress: 0.5,
@@ -591,11 +589,38 @@ describe('what the third pass found', () => {
   it('refuses a field past the bound the record enforces, rather than storing a shorter one', async () => {
     const shelf = serveTable({ books: [seedBook('one')] })
     const tooLong = 'x'.repeat(MAX_RECORD_FIELD + 1)
-    const failure = await shelf.client.call('book.set', { book: 'one', title: tooLong }).catch((e: unknown) => e)
+    /* `book.add`, since WI-20.7: `book.set` no longer takes a title at all, and
+     * `add` is the one write left that carries a prose field to the record. */
+    const failure = await shelf.client.call('book.add', { book: 'two', title: tooLong }).catch((e: unknown) => e)
     expect(refusalCode(failure)).toBe('malformed')
     expect(String(failure)).toContain(String(MAX_RECORD_FIELD))
     /* Exactly at the bound is fine — the refusal is past it, not near it. */
-    await expect(shelf.client.call('book.set', { book: 'one', title: 'y'.repeat(MAX_RECORD_FIELD) })).resolves.toBeDefined()
+    await expect(shelf.client.call('book.add', { book: 'three', title: 'y'.repeat(MAX_RECORD_FIELD) })).resolves.toBeDefined()
+  })
+
+  /**
+   * WI-20.7 — A RENAME IS NOT OFFERED, and the refusal says so by name.
+   *
+   * `book.set --title` wrote through `patch` with no stamp, so the next open
+   * or enrichment let the parse win again and sync's metadata group — taken
+   * whole by `parsedAt`, which `patch` never moved — carried the old title
+   * back. The service shipped an edit the kernel could not keep. Withdrawn
+   * from the row rather than silently dropped: a caller sending the field is
+   * told why, not "no such field", and the record is untouched.
+   */
+  it('refuses a title or an author on book.set by name — a rename is not offered', async () => {
+    const shelf = serveTable({ books: [seedBook('one', { author: 'Melville' })] })
+    for (const [field, value] of [
+      ['title', 'Renamed'],
+      ['author', 'Somebody Else'],
+    ] as const) {
+      const failure = await shelf.client.call('book.set', { book: 'one', [field]: value }).catch((e: unknown) => e)
+      expect(refusalCode(failure)).toBe('malformed')
+      expect(String(failure)).toContain(field)
+      expect(String(failure)).toMatch(/rename/i)
+    }
+    const record = JSON.parse(new TextDecoder().decode(shelf.fs.store.get('books/one/book.json') as Uint8Array))
+    expect(record).toMatchObject({ title: 'Title one', author: 'Melville' })
   })
 
   /* `hasContent` is derived from the folder and CACHED, and the index is

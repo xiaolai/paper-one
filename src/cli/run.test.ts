@@ -319,10 +319,13 @@ describe('what an audit of the CLI found', () => {
    * many extra lines as the title contains — the same "somebody else's string
    * reaches the terminal" hole as an escape sequence, wearing a character
    * that looks harmless. */
+  /* Stored through `book add`, since WI-20.7: `book set` no longer takes a
+   * title, and `add` is the one CLI write left that puts somebody else's
+   * prose into a record. */
   it('keeps a cell to one line, whatever the stored string contains', async () => {
     const root = await library()
-    expect((await cli(root, ['book', 'set', 'bbb', '--title', 'one\ntwo\rthree'])).code).toBe(EXIT.ok)
-    const human = await cli(root, ['book', 'get', 'bbb'])
+    expect((await cli(root, ['book', 'add', 'lines', 'one\ntwo\rthree'])).code).toBe(EXIT.ok)
+    const human = await cli(root, ['book', 'get', 'lines'])
     const title = human.out.split('\n').find((line) => line.startsWith('title'))
     expect(title).toContain('one two three')
   })
@@ -330,14 +333,14 @@ describe('what an audit of the CLI found', () => {
   it('never writes a terminal control sequence into human output', async () => {
     const root = await library()
     const nasty = 'safe\u001b[2Khidden\u0007'
-    expect((await cli(root, ['book', 'set', 'bbb', '--title', nasty])).code).toBe(EXIT.ok)
+    expect((await cli(root, ['book', 'add', 'nasty', nasty])).code).toBe(EXIT.ok)
     const human = await cli(root, ['book', 'list'])
     expect(human.out).not.toContain('\u001b')
     expect(human.out).not.toContain('\u0007')
     expect(human.out).toContain('safe')
     /* `--json` is untouched: `JSON.stringify` escapes them, and a consumer
      * decoding that JSON is not a terminal. */
-    const rows = JSON.parse((await cli(root, ['book', 'get', 'bbb', '--json'])).out) as { title: string }
+    const rows = JSON.parse((await cli(root, ['book', 'get', 'nasty', '--json'])).out) as { title: string }
     expect(rows.title).toBe(nasty)
   })
 

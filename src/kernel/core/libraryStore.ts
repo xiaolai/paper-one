@@ -89,8 +89,11 @@ export interface TagRemoval {
  * because omitting it once silently returned the reader to the first page.
  */
 export interface BookPatch {
-  readonly title?: string
-  readonly author?: string
+  /* No `title` or `author`: `book.set` was the one caller that sent them,
+   * and a stampless prose edit lost to the next parse — `mergeParsed` lets
+   * the file win, and sync's metadata group is taken whole by `parsedAt`,
+   * which this never moved. Withdrawn from the row (WI-20.7); the per-field
+   * register a real rename needs is designed in phase 20's D2, not here. */
   readonly finished?: boolean
   readonly position?: { readonly position: string; readonly progress?: number }
 }
@@ -1259,8 +1262,6 @@ export function createLibrary({
     const at = clock()
     return update(bookId, (record) => {
       let next = record
-      if (fields.title !== undefined && fields.title !== next.title) next = { ...next, title: fields.title }
-      if (fields.author !== undefined && fields.author !== next.author) next = { ...next, author: fields.author }
       /* Identity-guarded field by field, so a patch naming three fields of
        * which two already hold writes only what moved — and a patch that
        * moves nothing returns `record` itself, which `update` reads as

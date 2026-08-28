@@ -118,6 +118,38 @@ describe('the service table', () => {
     }
   })
 
+  /* A WITHDRAWN FIELD IS A RULE THE TABLE STATES, not a name that quietly
+   * stopped being listed. Refused by name with its reason, published beside
+   * the fields that are taken — and never one the service also takes, which
+   * would make `readInput` refuse a field the row declares. */
+  it('names no withdrawn field that is also taken, and says why each was withdrawn', () => {
+    for (const one of SERVICE_TABLE) {
+      const taken = new Set(one.input.map((field) => field.name))
+      for (const gone of one.withdrawn ?? []) {
+        expect(taken.has(gone.name), `${one.name} both takes and withdraws ${gone.name}`).toBe(false)
+        expect(gone.name).toMatch(/^[a-z][a-zA-Z]*$/)
+        expect(gone.why.length).toBeGreaterThan(0)
+      }
+    }
+  })
+
+  /**
+   * WI-20.7 — `book.set` offered a title and an author it could not keep. The
+   * write went through `patch` with no stamp, so the next parse or enrichment
+   * put the file's own metadata back over it, and sync's metadata group is
+   * taken whole by `parsedAt`, which `patch` never moved. Nothing in the app
+   * called it; the CLI reached it through the table. The two fields are
+   * withdrawn BY NAME rather than dropped, so a caller who types `--title`
+   * is told a rename is not offered instead of "no such field".
+   */
+  it('withdraws title and author from book.set by name, and takes only the fields it can keep', () => {
+    const set = serviceDescriptor('book.set') as ServiceDescriptor
+    expect(set.input.map((field) => field.name)).toEqual(['book', 'finished', 'position', 'progress'])
+    expect(set.atLeastOne).toEqual(['finished', 'position', 'progress'])
+    expect((set.withdrawn ?? []).map((gone) => gone.name)).toEqual(['title', 'author'])
+    for (const gone of set.withdrawn ?? []) expect(gone.why).toMatch(/rename/i)
+  })
+
   it('numbers positionals 0..n-1 with no gap and no repeat', () => {
     for (const one of SERVICE_TABLE) {
       const positions = positionalFields(one).map((field) => field.positional)
