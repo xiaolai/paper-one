@@ -33,10 +33,25 @@ export const CONFIG = path.join(REPO_ROOT, '.dependency-cruiser.cjs')
 export const MANIFEST_NAME = 'capabilities.manifest.json'
 /** The one rule that lives here rather than in the config. */
 export const REQUIRES_RULE = 'capability-requires-declared'
-/** The bin as pnpm installs it. Not `require.resolve`d: the package's
- *  `exports` map hides its bin from resolution, and the shim is the public
- *  contract anyway — it is what a human runs. */
-const DEPCRUISE = path.join(REPO_ROOT, 'node_modules', '.bin', 'depcruise')
+/**
+ * The cruiser's own entry, run through `node` rather than through the shim.
+ *
+ * IT USED TO BE `node_modules/.bin/depcruise`, and that cannot be spawned on
+ * Windows: pnpm writes an extensionless shell script there beside the `.CMD`,
+ * `existsSync` finds it, and `spawn` without a shell gets `ENOENT` — so
+ * `pnpm boundaries` had never once run on the Windows leg. `shell: true`
+ * would fix the spawn and hand the path back to a command interpreter, which
+ * is a quoting bug waiting for a checkout with a space in its name.
+ *
+ * Still not `require.resolve`d — the package's `exports` map hides its bin
+ * from resolution, which is what the note here used to say. A path join does
+ * not consult `exports`, and `dependency-cruiser` is a direct devDependency,
+ * so pnpm links it at this exact place on all three platforms.
+ */
+export const DEPCRUISE = path.join(REPO_ROOT, 'node_modules', 'dependency-cruiser', 'bin', 'dependency-cruise.mjs')
+
+/** One cruise of this repository is most of a second; this is a hang, not a slow run. */
+export const CRUISE_TIMEOUT_MS = 300_000
 
 const CAPABILITY_FILE = /^src\/capabilities\/([^/]+)\/(.+)$/
 const CAPABILITY_INDEX = /^src\/capabilities\/([^/]+)\/index\.tsx?$/
@@ -90,31 +105,50 @@ export function loadManifest(root) {
  * Asynchronous so the selftest can run its fixture trees a few at a time;
  * one cruise is most of a second of TypeScript start-up.
  */
-export function cruise(root) {
-  if (!existsSync(DEPCRUISE)) throw new Error(`${DEPCRUISE} is missing — run pnpm install`)
+export function cruise(root, { bin = DEPCRUISE, timeoutMs = CRUISE_TIMEOUT_MS } = {}) {
+  if (!existsSync(bin)) throw new Error(`${bin} is missing — run pnpm install`)
   return new Promise((resolve, reject) => {
-    const child = spawn(DEPCRUISE, ['--config', CONFIG, '--output-type', 'json', '--no-cache', 'src'], {
+    const child = spawn(process.execPath, [bin, '--config', CONFIG, '--output-type', 'json', '--no-cache', 'src'], {
       cwd: root,
-      timeout: 300_000,
     })
     let out = ''
     let err = ''
+    /* OUR OWN TIMER, not `spawn`'s `timeout` option, and this is a measured
+       fault rather than a preference. Node arms that timer and does not clear
+       it when the SPAWN ITSELF fails: the `error` event arrives in a
+       millisecond and the process then sits until the timer expires. Measured
+       at `timeout: 3000` — error at 1 ms, exit at 3002 ms — which at the real
+       five minutes is what the Windows leg did after it had already printed
+       the `ENOENT`. Five minutes of a run that knew its answer immediately.
+       A timer held here is one that can be cleared on every path out. */
+    let settled = false
+    let timer
+    const finish = (fn, value) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      fn(value)
+    }
+    timer = setTimeout(() => {
+      child.kill('SIGKILL')
+      finish(reject, new Error(`depcruise did not answer within ${timeoutMs} ms`))
+    }, timeoutMs)
     child.stdout.setEncoding('utf8').on('data', (chunk) => (out += chunk))
     child.stderr.setEncoding('utf8').on('data', (chunk) => (err += chunk))
-    child.on('error', reject)
+    child.on('error', (cause) => finish(reject, cause))
     child.on('close', (status) => {
       let parsed
       try {
         parsed = JSON.parse(out)
       } catch (cause) {
-        reject(new Error(`depcruise did not answer in JSON (exit ${status}):\n${err}${out}`.trimEnd(), { cause }))
+        finish(reject, new Error(`depcruise did not answer in JSON (exit ${status}):\n${err}${out}`.trimEnd(), { cause }))
         return
       }
       if (!Array.isArray(parsed?.modules) || !Array.isArray(parsed?.summary?.violations)) {
-        reject(new Error('depcruise JSON has no modules/summary.violations'))
+        finish(reject, new Error('depcruise JSON has no modules/summary.violations'))
         return
       }
-      resolve(parsed)
+      finish(resolve, parsed)
     })
   })
 }
