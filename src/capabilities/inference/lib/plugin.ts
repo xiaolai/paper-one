@@ -80,6 +80,8 @@ export type UnusableReason =
   | 'signedOut'
   | 'versionUnsupported'
   | 'noKey'
+  | 'keyUnreadable'
+  | 'notRegistered'
 
 export interface Route {
   readonly id: string
@@ -121,11 +123,23 @@ export interface Probe {
   readonly runtimeVersion: string | null
 }
 
+/**
+ * Whether an endpoint's key is there — THREE answers, because the keychain
+ * gives three, as `endpoints.rs`'s `KeyState` says.
+ *
+ * `unreadable` is the one a boolean used to hide: the keychain refused to
+ * say (a denied prompt, a rebuilt binary the entry's ACL no longer trusts).
+ * The key is probably there, so "no key" — go and add one — was the wrong
+ * advice, and re-entering it would be refused again on the next read.
+ */
+export type KeyState = 'set' | 'missing' | 'unreadable'
+
 export interface Endpoint {
   readonly id: string
   readonly label: string
   readonly baseUrl: string
-  readonly hasKey: boolean
+  /** A STATE, never the key. */
+  readonly keyState: KeyState
 }
 
 export interface ResourceUsage {

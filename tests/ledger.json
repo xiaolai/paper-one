@@ -1095,6 +1095,7 @@
     "src/capabilities/inference/ui/endpointsModel.test.ts > rowFor > offers Remove, and confirmation once armed",
     "src/capabilities/inference/ui/endpointsModel.test.ts > rowFor > says so when there is no key, which is why the route cannot answer",
     "src/capabilities/inference/ui/endpointsModel.test.ts > rowFor > says the host and whether a key is stored, and never the key",
+    "src/capabilities/inference/ui/endpointsModel.test.ts > rowFor > says when the keychain would not read the key, rather than calling it missing",
     "src/capabilities/inference/ui/endpointsModel.test.ts > rowFor > shows the host of an address with a port or a path",
     "src/capabilities/inference/ui/endpointsModel.test.ts > the endpoints store > falls back to the name when no label was typed",
     "src/capabilities/inference/ui/endpointsModel.test.ts > the endpoints store > is empty and loading until the first read",

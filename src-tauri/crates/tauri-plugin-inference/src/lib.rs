@@ -61,7 +61,7 @@ mod testutil;
 pub use agent::{Agent, AgentProbe, AGENTS};
 pub use daemon::{Daemon, Health};
 pub use digest::{promote, sha256_file, verify, Expected};
-pub use endpoints::{Endpoint, EndpointStore};
+pub use endpoints::{Endpoint, EndpointStore, KeyState};
 pub use error::{Error, Result};
 pub use install::Progress;
 pub use manifest::{Manifest, Modality, ModelEntry, MANIFEST_VERSION};

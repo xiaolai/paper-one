@@ -31,7 +31,7 @@ use tauri::{AppHandle, Runtime, State};
 
 use crate::agent::{self, Agent};
 use crate::agentask;
-use crate::endpoints::{Endpoint, EndpointStore};
+use crate::endpoints::Endpoint;
 use crate::error::{Error, Result};
 use crate::generate::{self, ChatRequest, Message};
 use crate::install::{self, Progress};
@@ -285,9 +285,11 @@ pub async fn inference_probe<R: Runtime>(
     routes.push(probe::agent_route(&claude));
 
     /* Whether the DAEMON took each one, which is a separate fact from whether
-    Paper has it stored — see `UnusableReason::NotRegistered`. */
+    Paper has it stored — see `UnusableReason::NotRegistered`. The list reads
+    the keychain once per endpoint, so it goes through the blocking seam like
+    every other store call (WI-20.20). */
     let unregistered = state.unregistered().await;
-    for endpoint in state.endpoints(&app)?.list()? {
+    for endpoint in state.on_store(&app, |store| store.list()).await? {
         let registered = !unregistered.contains(&endpoint.id);
         routes.push(probe::endpoint_route(&endpoint, registered));
     }
@@ -395,9 +397,8 @@ async fn route_for<R: Runtime>(
     /* The daemon's own verdict, so a route it refused is refused here too
     rather than reaching it a second time to be refused again. */
     let unregistered = state.unregistered().await;
-    state
-        .endpoints(app)?
-        .list()?
+    let endpoints = state.on_store(app, |store| store.list()).await?;
+    endpoints
         .iter()
         .find(|endpoint| endpoint.id == model)
         .map(|endpoint| probe::endpoint_route(endpoint, !unregistered.contains(&endpoint.id)))
@@ -628,37 +629,15 @@ pub async fn agent_sign_in(route: String) -> Result<()> {
 
 /* ────────────────────────────── cloud endpoints ─────────────────────────── */
 
-/// Run one endpoint-store operation off the async runtime.
-///
-/// ⚠️ **THE STORE IS BLOCKING, AND SO IS THE KEYCHAIN.** `read`/`write` are
-/// `std::fs`, and every key operation goes through the OS keychain, which on
-/// macOS can put a modal prompt in front of the reader — an unbounded wait on
-/// a tokio worker thread. Calling either straight from an `async` command
-/// stalls the runtime, and with it every other command, the daemon's health
-/// poll and any streaming answer.
-async fn on_store<R, T>(
-    app: &AppHandle<R>,
-    state: &InferenceState,
-    work: impl FnOnce(&EndpointStore) -> Result<T> + Send + 'static,
-) -> Result<T>
-where
-    R: Runtime,
-    T: Send + 'static,
-{
-    // Cloned rather than borrowed: `spawn_blocking` needs `'static`, and the
-    // store is a path.
-    let store = state.endpoints(app)?.clone();
-    tokio::task::spawn_blocking(move || work(&store))
-        .await
-        .map_err(|join| Error::Io(std::io::Error::other(join.to_string())))?
-}
+/* Every store call below goes through `state.on_store` — the store is
+ * blocking and so is the keychain, and the seam is where that is explained. */
 
 #[tauri::command]
 pub async fn inference_endpoints<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, InferenceState>,
 ) -> Result<Vec<Endpoint>> {
-    on_store(&app, &state, |store| store.list()).await
+    state.on_store(&app, |store| store.list()).await
 }
 
 #[tauri::command]
@@ -674,7 +653,9 @@ pub async fn inference_add_endpoint<R: Runtime>(
      * and `#[tauri::command]`s run concurrently, so two at once lose an edit
      * or rename a half-written file over the reader's only copy. */
     let _writing = state.endpoint_writes().lock().await;
-    on_store(&app, &state, move |store| store.add(&id, &label, &base_url)).await?;
+    state
+        .on_store(&app, move |store| store.add(&id, &label, &base_url))
+        .await?;
     /* The daemon takes its keys and its provider registrations at spawn, so a
      * running one knows nothing about this until it is restarted. */
     state.reconfigure().await;
@@ -688,12 +669,13 @@ pub async fn inference_remove_endpoint<R: Runtime>(
     id: String,
 ) -> Result<()> {
     let _writing = state.endpoint_writes().lock().await;
-    on_store(&app, &state, move |store| store.remove(&id)).await?;
-    /* ⚠️ AND THIS IS THE HALF THAT MATTERS. Without it a key the reader
-     * deleted stayed live in the running child's environment, with its
-     * provider still registered, until the app was next launched. */
-    state.reconfigure().await;
-    Ok(())
+    /* ⚠️ THE RECONFIGURE IS THE HALF THAT MATTERS, and it is unconditional.
+     * Without it a key the reader deleted stayed live in the running child's
+     * environment, with its provider still registered, until the app was next
+     * launched — and a `?` between the removal and the reconfigure put it
+     * back for exactly the case where the keychain refused to give the key
+     * up. `remove_endpoint` holds the order; see it for why. */
+    state.remove_endpoint(&app, id).await
 }
 
 /// Store an endpoint's key. WRITE-ONLY — there is deliberately no command
@@ -707,7 +689,9 @@ pub async fn inference_set_endpoint_key<R: Runtime>(
     key: String,
 ) -> Result<()> {
     let _writing = state.endpoint_writes().lock().await;
-    on_store(&app, &state, move |store| store.set_key(&id, &key)).await?;
+    state
+        .on_store(&app, move |store| store.set_key(&id, &key))
+        .await?;
     // A changed key is a changed spawn environment; an empty one is a clear.
     state.reconfigure().await;
     Ok(())

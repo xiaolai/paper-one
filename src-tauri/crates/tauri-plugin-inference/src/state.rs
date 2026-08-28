@@ -28,6 +28,7 @@
 //! Nothing lets a caller choose a URL for either.
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 use serde::Serialize;
@@ -72,7 +73,9 @@ pub struct InferenceState {
     /// list is the only record of what the reader configured. Nothing
     /// serialised them; `#[tauri::command]`s run concurrently.
     endpoint_writes: Mutex<()>,
-    /// The endpoints the DAEMON refused at its last start.
+    /// The endpoints the DAEMON does not have, as of its last start: the ones
+    /// it refused to register, and the ones it was never offered because the
+    /// keychain would not read their key (WI-20.20).
     ///
     /// Registration is best-effort and per provider, so one endpoint the
     /// daemon will not take must not stop the local model working. But the
@@ -80,6 +83,9 @@ pub struct InferenceState {
     /// from Paper's own persisted state — so the reader could select a route
     /// that had already been turned down, and find out at the question.
     unregistered: Mutex<BTreeSet<String>>,
+    /// How many times the daemon has been dropped for a configuration change.
+    /// For a test and a diagnostic — see [`InferenceState::reconfigurations`].
+    reconfigured: AtomicU64,
     downloads: OnceLock<reqwest::Client>,
 }
 
@@ -87,6 +93,7 @@ impl std::fmt::Debug for InferenceState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InferenceState")
             .field("in_flight", &self.requests.in_flight())
+            .field("reconfigurations", &self.reconfigurations())
             .finish()
     }
 }
@@ -114,6 +121,99 @@ impl InferenceState {
     /// The lock every endpoint mutation takes — see `endpoint_writes`.
     pub fn endpoint_writes(&self) -> &Mutex<()> {
         &self.endpoint_writes
+    }
+
+    /// Run one endpoint-store operation off the async runtime.
+    ///
+    /// ⚠️ **THE STORE IS BLOCKING, AND SO IS THE KEYCHAIN.** `read`/`write` are
+    /// `std::fs`, and every key operation goes through the OS keychain, which
+    /// on macOS can put a modal prompt in front of the reader — an unbounded
+    /// wait on a tokio worker thread. Calling either straight from an `async`
+    /// command stalls the runtime, and with it every other command, the
+    /// daemon's health poll and any streaming answer.
+    ///
+    /// This is THE way to a store. The four endpoint commands went through it
+    /// and three other callers — the probe, `route_for`, the daemon start —
+    /// reached past it to call the store directly on the runtime (WI-20.20);
+    /// `the_store_is_reached_only_through_the_blocking_seam` now holds every
+    /// caller to it.
+    pub(crate) async fn on_store<R, T>(
+        &self,
+        app: &AppHandle<R>,
+        work: impl FnOnce(&EndpointStore) -> Result<T> + Send + 'static,
+    ) -> Result<T>
+    where
+        R: Runtime,
+        T: Send + 'static,
+    {
+        // Cloned rather than borrowed: `spawn_blocking` needs `'static`, and
+        // the store is a path and a handle.
+        let store = self.endpoints(app)?.clone();
+        Self::on_endpoints(store, work).await
+    }
+
+    /// [`InferenceState::on_store`] over a store already resolved — the half
+    /// a test can reach without an app.
+    async fn on_endpoints<T>(
+        store: EndpointStore,
+        work: impl FnOnce(&EndpointStore) -> Result<T> + Send + 'static,
+    ) -> Result<T>
+    where
+        T: Send + 'static,
+    {
+        tokio::task::spawn_blocking(move || work(&store))
+            .await
+            .map_err(|join| Error::Io(std::io::Error::other(join.to_string())))?
+    }
+
+    /// Forget an endpoint, then drop the daemon so it forgets the key too.
+    ///
+    /// ⚠️ REGARDLESS of whether the keychain let the key go. The command used
+    /// to `?` the store's answer before `reconfigure`, so a keychain refusal
+    /// on the clear left the key live in the running child's environment,
+    /// with its provider still registered — the exact outcome the reconfigure
+    /// exists to prevent, on the one path where the reader has just been told
+    /// something is wrong with that key. The refusal is still the answer; it
+    /// just no longer decides whether the daemon keeps the credential.
+    pub(crate) async fn remove_endpoint<R: Runtime>(
+        &self,
+        app: &AppHandle<R>,
+        id: String,
+    ) -> Result<()> {
+        self.then_reconfigure(self.on_store(app, move |store| store.remove(&id)))
+            .await
+    }
+
+    /// [`InferenceState::remove_endpoint`] over a store already resolved —
+    /// the half a test can reach without an app, and `#[cfg(test)]` because
+    /// nothing else has a store the state did not resolve.
+    #[cfg(test)]
+    pub(crate) async fn remove_endpoint_from(
+        &self,
+        store: EndpointStore,
+        id: String,
+    ) -> Result<()> {
+        self.then_reconfigure(Self::on_endpoints(store, move |store| store.remove(&id)))
+            .await
+    }
+
+    /// Await a removal, reconfigure WHATEVER it answered, and hand its answer
+    /// back. The order lives here once so the two entry points cannot drift
+    /// on it.
+    async fn then_reconfigure(
+        &self,
+        removal: impl std::future::Future<Output = Result<()>>,
+    ) -> Result<()> {
+        let removed = removal.await;
+        self.reconfigure().await;
+        removed
+    }
+
+    /// How many times [`InferenceState::reconfigure`] has run. For a test and
+    /// a diagnostic: it is the only trace a reconfigure leaves when no daemon
+    /// was up to be dropped.
+    pub fn reconfigurations(&self) -> u64 {
+        self.reconfigured.load(Ordering::Relaxed)
     }
 
     /// The in-flight request registry.
@@ -197,8 +297,19 @@ impl InferenceState {
         }
         let program = bundled_runtime(app)?;
         let layout = self.layout(app)?.clone();
-        let cloud_keys = self.endpoints(app)?.keys_for_spawn()?;
-        let registrations = self.endpoints(app)?.registrations()?;
+        /* OFF THE RUNTIME, and tolerant per endpoint. This was two direct
+         * store calls on a worker thread — the keychain prompt `on_store`'s
+         * header warns about, on the path every question takes — and each
+         * `?`'d a keychain refusal: a macOS "Deny", or a dev rebuild whose
+         * signature the entry's ACL no longer matches, stopped the daemon
+         * for the local model too. `provisioning` skips and names the
+         * endpoint instead; the daemon starts (WI-20.20). */
+        let provisioning = self.on_store(app, |store| store.provisioning()).await?;
+        for id in &provisioning.unreadable {
+            log::warn!(
+                "inference: endpoint {id} is not provisioned: the keychain would not read its key"
+            );
+        }
 
         let plan = plan_spawn(&SpawnInputs {
             program,
@@ -206,7 +317,7 @@ impl InferenceState {
             models_dir: layout.models_dir.clone(),
             port: free_port()?,
             api_key: mint_token(),
-            cloud_keys,
+            cloud_keys: provisioning.keys,
         });
         let port = plan.port;
         let daemon = Daemon::start(plan).await?;
@@ -221,8 +332,11 @@ impl InferenceState {
          * Best-effort per provider: one endpoint that will not register must
          * not stop the local model from working, and the route list already
          * reports a route that cannot answer. */
-        let mut refused = BTreeSet::new();
-        for registration in registrations {
+        /* An endpoint whose key could not be read was never offered, and the
+         * daemon does not have it either — so it goes in the same set the
+         * probe reads, and is not offered as a route that would fail. */
+        let mut refused = provisioning.unreadable;
+        for registration in provisioning.registrations {
             if let Err(failure) = daemon
                 .post_json::<_, serde_json::Value>("/api/v1/install", &registration)
                 .await
@@ -265,6 +379,7 @@ impl InferenceState {
     }
 
     pub async fn reconfigure(&self) {
+        self.reconfigured.fetch_add(1, Ordering::Relaxed);
         let taken = self.daemon.lock().await.take();
         if let Some(daemon) = taken {
             self.requests.cancel_all();
@@ -382,5 +497,83 @@ mod tests {
         let a = state.download_client();
         let b = state.download_client();
         assert!(std::ptr::eq(a, b));
+    }
+
+    /// WI-20.20 (d). `inference_remove_endpoint` used to `?` the store's
+    /// result BEFORE `reconfigure`, so a keychain that would not give the key
+    /// up left it live in the running child's environment, its provider still
+    /// registered — precisely the half the command's own comment calls "the
+    /// half that matters". The daemon is dropped regardless, and the refusal
+    /// is still the answer.
+    #[tokio::test]
+    async fn a_removal_the_keychain_refuses_still_reconfigures_the_daemon() {
+        let dir = crate::testutil::ScratchDir::new("state");
+        let keychain = crate::testutil::FakeKeychain::default()
+            .with_key("denied", "sk-denied")
+            .refusing(&["denied"]);
+        let store = crate::endpoints::EndpointStore::with_keychain(
+            dir.path(),
+            std::sync::Arc::new(keychain),
+        );
+        store
+            .add("denied", "D", "https://d.example.com/v1")
+            .unwrap();
+        let state = InferenceState::default();
+        assert_eq!(state.reconfigurations(), 0);
+
+        let err = state
+            .remove_endpoint_from(store.clone(), "denied".to_owned())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.kind(),
+            "keychain",
+            "the refusal is surfaced, not swallowed"
+        );
+        assert_eq!(
+            state.reconfigurations(),
+            1,
+            "the daemon is reconfigured whether or not the keychain let the key go"
+        );
+        assert!(store.list().unwrap().is_empty(), "the row is gone");
+    }
+
+    /// WI-20.20 (c). The store is `std::fs` and the keychain can put a modal
+    /// prompt in front of the reader — an unbounded wait — so neither may run
+    /// on a runtime worker. `on_store`'s header says so, and three callers
+    /// (`inference_probe`, `route_for`, `ensure_started`) reached past it to
+    /// call the store directly. This holds every store call behind the seam:
+    /// the only way to a store, in either file, is through `on_store`.
+    #[test]
+    fn the_store_is_reached_only_through_the_blocking_seam() {
+        let state_source = include_str!("state.rs");
+        let commands_source = include_str!("commands.rs");
+        /* The resolver's call syntax and nothing else's: the definition is
+         * `fn endpoints<R`, and the field reads are `endpoints.get`. So every
+         * occurrence is a caller taking a store. Built at runtime so this
+         * test's own source — which `include_str!` reads too — is not one. */
+        let needle = format!(".{}(", "endpoints");
+        let calls = |source: &str| source.matches(&needle).count();
+        assert_eq!(
+            calls(commands_source),
+            0,
+            "commands.rs resolves the store directly; go through state.on_store"
+        );
+        assert_eq!(
+            calls(state_source),
+            1,
+            "state.rs resolves the store outside on_store"
+        );
+        let seam = state_source
+            .find("async fn on_store")
+            .expect("on_store lives in state.rs");
+        let seam_end = state_source[seam..]
+            .find("\n    }\n")
+            .map(|end| seam + end)
+            .expect("on_store has a body");
+        assert!(
+            state_source[seam..seam_end].contains(&needle),
+            "the one resolution is not inside on_store"
+        );
     }
 }
