@@ -245,50 +245,62 @@ export function createPeerPort(wire: PeerWire): PeerPort {
          start at `refresh()` — so a subscription that threw synchronously
          left the earlier ones and the watcher installed, with `servingActive`
          stuck true and nothing serving. The registrations are now inside the
-         same rollback the refresh and readiness have. */
+         same rollback the refresh and readiness have.
+
+         ONE PUSH PER SUBSCRIPTION, and that is the load-bearing part: the
+         three used to be ARGUMENTS to a single `offs.push(...)`, and
+         arguments evaluate before the call. A throw from the second left the
+         first's unsubscribe in an argument list that was never delivered, so
+         the catch below rolled back an EMPTY array — the leak survived
+         inside its own fix. Each handle is registered for rollback the
+         moment it exists. */
       const offs: Unsubscribe[] = []
       try {
-      offs.push(
-        wire.onSessionOpen((event) => {
-          if (event.initiator) return
-          void (async () => {
-            try {
-              await refresh()
-              /* Torn down while the refresh was in flight: registering now
-               * would hand a connection to a server that no longer exists,
-               * and it would serve forever. */
-              if (!serving) return
-              const conn = router.connect(event.peerId, (bytes) =>
-                /* Return the send promise so the envelope serialises and awaits
-                 * it; a failure tears the connection AND the session down
-                 * rather than being swallowed, then re-throws so the envelope's
-                 * own chain also disconnects. */
-                wire.send(event.sessionId, bytes).catch((thrown) => {
-                  dropConnection(event.sessionId, true)
-                  throw thrown
-                }),
-              )
-              connections.set(event.sessionId, conn)
-              /* Frames that landed before the connection existed are in the
-               * inbox and raised their one edge event already — drain now. */
-              await drainInto(
-                event.sessionId,
-                (bytes) => conn.receive(bytes),
-                () => dropConnection(event.sessionId, false),
-              )
-            } catch {
-              dropConnection(event.sessionId, true)
-            }
-          })()
-        }),
-        wire.onSessionFrames((event) => {
-          const conn = connections.get(event.sessionId)
-          if (conn) void drainInto(event.sessionId, (bytes) => conn.receive(bytes), () => dropConnection(event.sessionId, false))
-        }),
-        wire.onSessionClosed((event) => {
-          dropConnection(event.sessionId, false)
-        }),
-      )
+        offs.push(
+          wire.onSessionOpen((event) => {
+            if (event.initiator) return
+            void (async () => {
+              try {
+                await refresh()
+                /* Torn down while the refresh was in flight: registering now
+                 * would hand a connection to a server that no longer exists,
+                 * and it would serve forever. */
+                if (!serving) return
+                const conn = router.connect(event.peerId, (bytes) =>
+                  /* Return the send promise so the envelope serialises and
+                   * awaits it; a failure tears the connection AND the session
+                   * down rather than being swallowed, then re-throws so the
+                   * envelope's own chain also disconnects. */
+                  wire.send(event.sessionId, bytes).catch((thrown) => {
+                    dropConnection(event.sessionId, true)
+                    throw thrown
+                  }),
+                )
+                connections.set(event.sessionId, conn)
+                /* Frames that landed before the connection existed are in the
+                 * inbox and raised their one edge event already — drain now. */
+                await drainInto(
+                  event.sessionId,
+                  (bytes) => conn.receive(bytes),
+                  () => dropConnection(event.sessionId, false),
+                )
+              } catch {
+                dropConnection(event.sessionId, true)
+              }
+            })()
+          }),
+        )
+        offs.push(
+          wire.onSessionFrames((event) => {
+            const conn = connections.get(event.sessionId)
+            if (conn) void drainInto(event.sessionId, (bytes) => conn.receive(bytes), () => dropConnection(event.sessionId, false))
+          }),
+        )
+        offs.push(
+          wire.onSessionClosed((event) => {
+            dropConnection(event.sessionId, false)
+          }),
+        )
       } catch (thrown) {
         grantWatchers.delete(onGrantsChanged)
         for (const off of offs) off()

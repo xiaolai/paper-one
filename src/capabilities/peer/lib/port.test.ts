@@ -226,3 +226,41 @@ describe('audit-fix round 1 — the port and the wire’s listeners', () => {
     expect(reasons).toHaveLength(1)
   })
 })
+
+describe('a serve() that fails part-way through its subscriptions', () => {
+  it('rolls back the subscriptions it had already taken', async () => {
+    /* THE LEAK THAT SURVIVED INSIDE ITS OWN FIX. The three registrations were
+       ARGUMENTS to one `offs.push(...)`, and arguments evaluate before the
+       call: a throw from the second discarded the first's unsubscribe along
+       with the argument list, so the rollback iterated an EMPTY array and the
+       listener stayed on the wire for the life of the process. */
+    const { shelf } = linkedWires()
+    let taken = 0
+    let released = 0
+    const brittle: typeof shelf = Object.assign(Object.create(Object.getPrototypeOf(shelf)), shelf, {
+      onSessionOpen: (fn: Parameters<typeof shelf.onSessionOpen>[0]) => {
+        taken += 1
+        const off = shelf.onSessionOpen(fn)
+        return () => {
+          released += 1
+          off()
+        }
+      },
+      /* The SECOND registration — the one whose throw skips the push. */
+      onSessionFrames: () => {
+        throw new Error('listen refused: event system gone')
+      },
+    })
+    const port = createPeerPort(brittle)
+    await expect(port.serve([])).rejects.toThrow(/listen refused/)
+    expect(taken, 'the first subscription was taken').toBe(1)
+    expect(released, 'and rolled back when the second threw').toBe(1)
+
+    /* The port-wide flag went with it: a `serve()` that rejected is not a
+       server, so the next attempt must reach the wire rather than be refused
+       as "already active" — and it must roll back the same way. */
+    await expect(port.serve([])).rejects.toThrow(/listen refused/)
+    expect(taken).toBe(2)
+    expect(released).toBe(2)
+  })
+})

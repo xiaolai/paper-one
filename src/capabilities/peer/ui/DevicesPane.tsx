@@ -19,8 +19,15 @@ import {
 /**
  * The Devices section (WI-C.5), rendered by the kernel's Settings pane as a
  * contributed section. Everything it DECIDES lives in `devicesModel.ts`,
- * which is where the tests are (the no-jsdom rule); this file only draws
- * the snapshot and forwards intents.
+ * which is where most of the tests are; this file mostly draws the snapshot
+ * and forwards intents.
+ *
+ * "MOSTLY". This said the model was where the tests are "(the no-jsdom rule)",
+ * and four other capability panes have carried jsdom tests since — so the
+ * sentence had stopped describing a rule and started describing this pane
+ * being the one with no tests at all. `DevicesPane.test.tsx` covers what the
+ * pane alone decides; the one that found this was where the invite appears
+ * when the clipboard refuses it.
  *
  * It draws with `CAPABILITY_UI`, the kernel's public class vocabulary. It used
  * to draw with two hand-rolled inline objects and bare form controls, which
@@ -169,6 +176,17 @@ export function DevicesPane({ model, syncNow }: DevicesPaneProps) {
               Cancel
             </button>
           </div>
+          {/* THE CODE ITSELF, AND ONLY WHEN THE BUTTON COULD NOT CARRY IT.
+              The failure said "select the code instead" while the invite was
+              nowhere on screen as text — a message naming an affordance that
+              does not exist is worse than the failure it reports, because it
+              sends the reader looking for something that was never drawn.
+              `.paper-cap-code` is `user-select: all`, so one click takes the
+              whole URI; the class was written for this string. It appears
+              only on the failure, because the deliberate design is the button
+              — a 100-character `paper://pair?…` with a key in it is not read
+              and cannot be retyped. */}
+          {copyFailed && <code className={ui.code}>{snapshot.offer.url}</code>}
           <div className={ui.hint}>
             Paste it into Devices on the other device. It is single-use and expires when you cancel.
           </div>

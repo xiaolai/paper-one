@@ -718,8 +718,11 @@ export function createLedger({
       }
     }
     /* The cover moves whenever it is offered and this device lacks it —
-     * INDEPENDENT of the content fetch (#21), and tracked for retry rather
-     * than dropped on failure. */
+     * INDEPENDENT of the content fetch (#21). A failure loses the jacket for
+     * this session and NOTHING RE-ASKS: the only retry is structural, the
+     * book's NEXT push offering the cover again, which may never come. This
+     * used to say "tracked for retry", which was true of a `coverRetry` set
+     * nothing ever read — see `ensureCover`, which carries the trade. */
     if (group.cover && group.book !== '') {
       await ensureCover(peer, folder, group.cover)
     }

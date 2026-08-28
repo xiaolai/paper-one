@@ -381,12 +381,22 @@ export function createDevicesModel({
 
   const offs: Unsubscribe[] = []
   if (port) {
-    offs.push(
-      port.onPairingPending((pending) => publish({ pending })),
-      port.onPairingResult((lastResult) => {
-        publish({ lastResult, pending: null, sas: null, offer: lastResult.ok ? null : snapshot.offer })
-        void refresh()
-      }),
+    /* ONE PUSH PER SUBSCRIPTION, AND ROLLED BACK. The two used to be
+       ARGUMENTS to a single `offs.push(...)` — the same shape `serve()` in
+       `port.ts` was caught with. Arguments evaluate before the call, so a
+       throw from the second discarded the first's unsubscribe along with the
+       argument list, and here the throw escapes the factory: the caller never
+       receives a model, so nothing can ever dispose the listener that
+       survived. Each handle is registered the moment it exists, and a throw
+       part-way unsubscribes what was taken before re-throwing. */
+    try {
+      offs.push(port.onPairingPending((pending) => publish({ pending })))
+      offs.push(
+        port.onPairingResult((lastResult) => {
+          publish({ lastResult, pending: null, sas: null, offer: lastResult.ok ? null : snapshot.offer })
+          void refresh()
+        }),
+      )
       /* NO TRANSFER SUBSCRIPTION. This kept the twenty most recent transfer
          events so the pane could list them — "Transfer 1 — done", the surface
          that per-book download progress replaced. The list went; the
@@ -394,7 +404,10 @@ export function createDevicesModel({
          pane held a rolling buffer of events nothing rendered. Progress now
          reaches the book's own row through sync's `BookStatus`, which is the
          only place a reader looks for it. */
-    )
+    } catch (thrown) {
+      for (const off of offs.splice(0)) off()
+      throw thrown
+    }
   }
 
   /* Refreshes overlap — a listener fires one while a command's own refresh
@@ -617,9 +630,30 @@ export function createDevicesModel({
       if (!snapshot.peersLoaded || !roleIsSettable(snapshot.peers)) return
       /* NOT WHILE A PAIRING IS IN FLIGHT: an offer on screen, a code being
          joined or a SAS being read means a peer record can land after this
-         check, and the pair that results has two of one side. */
-      if (snapshot.offer !== null || snapshot.pending !== null) {
-        publish({ error: 'Finish or cancel the pairing in progress before changing sides' })
+         check, and the pair that results has two of one side.
+
+         ALL THREE, NOT TWO. This named the joiner's window and then tested
+         only `offer` and `pending` — the shelf's two halves. A satchel that
+         has pasted a code holds neither: `pairWithCode` publishes `sas` and
+         nothing else, its peer list is still empty until the far shelf
+         confirms, so `roleIsSettable` says yes and the control is on screen.
+         Changing sides there is exactly the durable two-shelf pair this guard
+         exists to refuse. The window closes on its own — `from_uri` emits a
+         `pairing-result` either way, bounded by the ack timeout, and that
+         clears `sas` — so refusing here cannot wedge the control. */
+      if (snapshot.offer !== null || snapshot.pending !== null || snapshot.sas !== null) {
+        /* AND IT NAMES ONLY WHAT IS ON SCREEN. Cancel belongs to the invite —
+           the pane draws it inside the offer — so a joiner reading its SAS
+           told to "cancel" would go looking for a button that is not there.
+           Waiting is what that side actually does, and the wait is bounded:
+           the shelf answers or the attempt times out, and either way a
+           `pairing-result` clears the SAS. */
+        const canCancelHere = snapshot.offer !== null || snapshot.pending !== null
+        publish({
+          error: canCancelHere
+            ? 'Finish or cancel the pairing in progress before changing sides'
+            : 'Wait for the other device to answer this pairing before changing sides',
+        })
         return
       }
       /* CHOOSING WHAT IS ALREADY RUNNING IS NOT A CHANGE. Every successful

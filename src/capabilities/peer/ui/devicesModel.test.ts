@@ -397,6 +397,36 @@ describe('the role control, and what it refuses', () => {
     expect(shelfWire.pendingRole, 'a paired device may not change sides').toBeNull()
   })
 
+  it('refuses while the joiner is showing its SAS', async () => {
+    /* THE THIRD WINDOW, which the guard NAMED and did not test. A satchel
+       that has pasted a code holds no offer and no pending confirmation —
+       only a SAS — and its peer list is still empty until the far shelf
+       confirms, so `roleIsSettable` says yes and the control is on screen.
+       Changing sides there and letting the confirmation land afterwards is
+       exactly the durable two-shelf pair this guard exists to refuse. */
+    const shelfWire = fakeWire({ role: 'shelf', endpointId: 'shelf-sas' })
+    const satchelWire = fakeWire({ role: 'satchel', endpointId: 'satchel-sas' })
+    linkWires(shelfWire, satchelWire)
+    const shelf = createDevicesModel({ port: createPeerPort(shelfWire) })
+    const satchel = createDevicesModel({ port: createPeerPort(satchelWire) })
+    await satchel.refresh()
+    await shelf.beginPairing('My Mac')
+    await satchel.pairWithCode(shelf.getSnapshot().offer!.url)
+    expect(satchel.getSnapshot().sas, 'the code the human is reading out').not.toBeNull()
+    expect(satchel.getSnapshot().offer, 'the joiner holds no offer').toBeNull()
+    expect(satchel.getSnapshot().pending, 'and nothing pending its confirmation').toBeNull()
+    expect(satchel.getSnapshot().peers, 'no record until the shelf confirms').toEqual([])
+
+    await satchel.setRole('shelf')
+    expect(satchelWire.pendingRole, 'the plugin was never asked').toBeNull()
+    expect(satchel.getSnapshot().roleNeedsRestart).toBe(false)
+    /* AND IT DOES NOT NAME A BUTTON THIS SIDE HAS NOT GOT. Cancel is drawn
+       inside the invite, which the joiner does not hold; waiting is what it
+       does, and the shelf's answer or the attempt's timeout ends the wait. */
+    expect(satchel.getSnapshot().error).toMatch(/Wait for the other device/)
+    expect(satchel.getSnapshot().error).not.toMatch(/cancel/)
+  })
+
   it('reports the role the node is RUNNING, not the one just chosen', async () => {
     /* The plugin stores the choice for the next launch. The fake used to
        apply it at once, so this exact assertion would have PASSED against a
