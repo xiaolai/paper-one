@@ -68,6 +68,8 @@ export function protectionMessage(scheme: string): string {
  */
 export interface OpenedBook {
   readonly loadText?: (name: string) => Promise<string | null>
+  /** The zip loader's size lookup — the discriminator; see `protectionOf`. */
+  readonly getSize?: (name: string) => number
   /* `unknown`, because that is how the fork's types spell a section; the
      `id` is read off each one that has a string there. */
   readonly sections?: readonly unknown[]
@@ -75,8 +77,21 @@ export interface OpenedBook {
 
 /** Why this book must not be shown, or null. */
 export async function protectionOf(book: OpenedBook): Promise<string | null> {
-  if (typeof book.loadText !== 'function') return null
-  const xml = await book.loadText(ENCRYPTION_XML)
+  /* `loadText` ALONE IS NOT AN EPUB (audit round 1, #105). The fork's MOBI6
+   * and KF8 books expose a `loadText(section)` that takes a SECTION OBJECT,
+   * and KF8's destructures it — handed this archive path, it threw
+   * `Cannot read properties of undefined`, and every AZW3 failed to open
+   * with "This file could not be opened". Only the zip-backed EPUB carries
+   * `getSize` beside `loadText` (both come off the zip loader), so that pair
+   * is the discriminator; the catch below is the belt, because a check that
+   * exists to refuse DRM must never itself refuse an ordinary book. */
+  if (typeof book.loadText !== 'function' || typeof book.getSize !== 'function') return null
+  let xml: string | null
+  try {
+    xml = await book.loadText(ENCRYPTION_XML)
+  } catch {
+    return null
+  }
   if (!xml) return null
   const hrefs = (book.sections ?? []).flatMap((section) => {
     const id = typeof section === 'object' && section !== null ? (section as { id?: unknown }).id : undefined

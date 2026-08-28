@@ -1,4 +1,4 @@
-import { useState, type FormEvent, type KeyboardEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import { KeyRound } from 'lucide-react'
 import { ICON } from '../../core/metrics'
 import { OverlaySheet } from './OverlaySheet'
@@ -47,17 +47,30 @@ export function PasswordSheet({ name, reason, onSubmit, onCancel }: PasswordShee
    * its owner because §11 says Esc takes the topmost layer only — and this
    * sheet is not in the host's overlay stack, so the host's own Escape would
    * otherwise ALSO fire and peel a layer the reader could not see under the
-   * scrim. */
-  const onKeyDown = (event: KeyboardEvent) => {
-    if (event.key !== 'Escape') return
-    event.preventDefault()
-    event.stopPropagation()
-    onCancel()
-  }
+   * scrim.
+   *
+   * A DOCUMENT LISTENER IN THE CAPTURE PHASE, not a handler on the form: the
+   * sheet's focus fallback can land focus on the DIALOG itself (jsdom always,
+   * a click on the sheet's padding sometimes), and a keydown targeted there
+   * never reaches a descendant form's handler — so Escape sailed past the
+   * cancel and peeled the host's topmost layer instead, leaving the password
+   * request standing over a page that had just changed. While this sheet is
+   * mounted it is modal — everything behind it is inert — so every Escape in
+   * the document belongs to it. The same scope `OverlaySheet` uses for Tab. */
+  useEffect(() => {
+    const onEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      event.stopPropagation()
+      onCancel()
+    }
+    document.addEventListener('keydown', onEscape, true)
+    return () => document.removeEventListener('keydown', onEscape, true)
+  }, [onCancel])
 
   return (
     <OverlaySheet label="Password for this PDF" onDismiss={onCancel}>
-      <form onSubmit={submit} onKeyDown={onKeyDown}>
+      <form onSubmit={submit}>
         <div className={styles.field}>
           <KeyRound size={ICON.control} strokeWidth={ICON.stroke} aria-hidden />
           <input

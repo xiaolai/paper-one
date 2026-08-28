@@ -145,6 +145,38 @@ describe('Speaker', () => {
     synth.queued[0]?.dispatchEvent(new Event('error'))
     expect(onDone).toHaveBeenCalledTimes(1)
   })
+
+  it('reports one ending for an engine that sends error AND end', () => {
+    // One utterance is one ending, but an engine is free to deliver both
+    // events for it — WebKit does on some voices. Both handlers held the same
+    // live generation, so `onDone` fired twice and the second call cancelled
+    // the continuation the first had started (audit round 1, #503).
+    const { speaker, onDone } = make()
+    speaker.speak('first', null)
+    synth.queued[0]?.dispatchEvent(new Event('error'))
+    synth.queued[0]?.dispatchEvent(new Event('end'))
+    expect(onDone).toHaveBeenCalledTimes(1)
+    expect(onDone).toHaveBeenCalledWith('error')
+  })
+
+  it('does not run the boundary grace out over a pause', () => {
+    // The grace measures SPEECH. Paused inside the first 2.5 s, the timer
+    // used to run out over silence and drop the follow-along for the whole
+    // reading on an engine that reports boundaries perfectly well (audit
+    // round 1, #502). Cleared on pause, re-armed whole on resume.
+    const { speaker, onNoBoundaries } = make()
+    speaker.speak('first', null)
+    synth.queued[0]?.dispatchEvent(new Event('start'))
+    vi.advanceTimersByTime(1000)
+    speaker.pause()
+    vi.advanceTimersByTime(60_000)
+    expect(onNoBoundaries).not.toHaveBeenCalled()
+    speaker.resume()
+    vi.advanceTimersByTime(2499)
+    expect(onNoBoundaries).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(2)
+    expect(onNoBoundaries).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('wordLengthAt', () => {

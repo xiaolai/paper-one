@@ -11,11 +11,8 @@ afterEach(cleanup)
 const speech: Speech = {
   available: false,
   speaking: false,
-  paused: false,
   followsWords: false,
   start: () => {},
-  pause: () => {},
-  resume: () => {},
   stop: () => {},
 }
 

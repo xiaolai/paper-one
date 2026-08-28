@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from 'vitest'
-import { protectedScheme, protectionMessage, protectionOf } from './protection'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { describe, expect, it, vi } from 'vitest'
+import { DECODABLE_ALGORITHMS, protectedScheme, protectionMessage, protectionOf } from './protection'
 import {
   ADEPT_CHAPTER_ENCRYPTION,
   CHAPTER_HREF,
@@ -71,7 +73,54 @@ describe('protectedScheme — the element list, read the way the fork reads it',
 describe('protectionOf — the opened book', () => {
   it('answers null for a book that is not a zip and has no encryption.xml to read', async () => {
     await expect(protectionOf({})).resolves.toBeNull()
-    await expect(protectionOf({ loadText: async () => null, sections: [{ id: CHAPTER_HREF }] })).resolves.toBeNull()
+    await expect(
+      protectionOf({ loadText: async () => null, getSize: () => 0, sections: [{ id: CHAPTER_HREF }] }),
+    ).resolves.toBeNull()
+  })
+
+  it('never asks a book whose loadText is not the zip loader’s — a MOBI takes a section, not a path', async () => {
+    /* The fork's MOBI6 and KF8 books BOTH expose `loadText(section)`, and
+       KF8's destructures its argument — handed the archive path this check
+       reads, it threw `Cannot read properties of undefined`, and every AZW3
+       failed to open with "This file could not be opened" (audit round 1,
+       #105). Only the zip-backed EPUB carries `getSize` beside `loadText`;
+       a book without the pair is never asked at all. */
+    const kf8Shaped = vi.fn(async (section: { skel: { offset: number } }) => {
+      const { skel } = section
+      return String(skel.offset)
+    })
+    await expect(
+      protectionOf({ loadText: kf8Shaped as unknown as (name: string) => Promise<string | null> }),
+    ).resolves.toBeNull()
+    expect(kf8Shaped).not.toHaveBeenCalled()
+  })
+
+  it('treats a loadText that throws as no protection — the belt behind the discriminator', async () => {
+    await expect(
+      protectionOf({
+        loadText: async () => {
+          throw new Error('not an archive after all')
+        },
+        getSize: () => 0,
+      }),
+    ).resolves.toBeNull()
+  })
+
+  it('names exactly the algorithms the shipped fork decodes', () => {
+    /* `DECODABLE_ALGORITHMS` copies the fork's `deobfuscators` keys, and a
+       rebase that teaches the fork a third would make this reader refuse a
+       book the fork reads. A pin against the shipped source, on the
+       `pageTurn.test.ts` precedent — not a fake, so it cannot drift. */
+    /* From the vitest root, not `import.meta.url`: under jsdom that URL is
+       http-schemed and `fileURLToPath` refuses it. The suites run with the
+       repository as their working directory. */
+    const source = readFileSync(join(process.cwd(), 'node_modules/foliate-js/epub.js'), 'utf8')
+    const at = source.indexOf('const deobfuscators')
+    expect(at).toBeGreaterThan(-1)
+    const block = source.slice(at, source.indexOf('\n})', at))
+    const keys = [...block.matchAll(/'(https?:[^']+)':/g)].map((m) => m[1])
+    expect(keys.length).toBeGreaterThan(0)
+    expect(new Set(keys)).toEqual(DECODABLE_ALGORITHMS)
   })
 })
 

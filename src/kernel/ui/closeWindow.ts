@@ -74,6 +74,28 @@ export interface CloseSteps {
 }
 
 /**
+ * A reporter that cannot break the sequence it reports on.
+ *
+ * Every failure path here ends in `report`, and a REPORTER that throws — a
+ * diagnostics store that is itself failing is the likely case, since one
+ * failure rarely travels alone — escaped the very catch blocks it was called
+ * from: out of `closePrepare` before the drain, and out of the close sequence
+ * BEFORE `steps.destroy()`, leaving the reader the un-closable window this
+ * whole file exists to prevent. The guarantee is "always closes", so the
+ * reporter is wrapped once, here, rather than defended against at every call
+ * site — a site added later is safe by construction.
+ */
+function quiet(report: CloseSteps['report']): CloseSteps['report'] {
+  return (message, cause) => {
+    try {
+      report(message, cause)
+    } catch (reportFailure) {
+      console.error(message, cause, reportFailure)
+    }
+  }
+}
+
+/**
  * The kernel's own preparation, for a host with no composition to tear down:
  * hand what memory holds to the queue, then let the queue drain. Each half
  * reports its own failure and the other still runs — a note that will not
@@ -84,6 +106,7 @@ export function closePrepare(
   drain: () => Promise<unknown>,
   report: CloseSteps['report'],
 ): () => Promise<void> {
+  const say = quiet(report)
   return async () => {
     /* WHAT IS HELD IN MEMORY FIRST, then what is on the queue. A queue can
      * only drain what it has been given, and the thing most likely to be lost
@@ -91,12 +114,12 @@ export function closePrepare(
     try {
       flush()
     } catch (cause) {
-      report('Paper: could not hand over unsaved work before closing', cause)
+      say('Paper: could not hand over unsaved work before closing', cause)
     }
     try {
       await drain()
     } catch (cause) {
-      report('Paper: the write queue did not drain before closing', cause)
+      say('Paper: the write queue did not drain before closing', cause)
     }
   }
 }
@@ -110,8 +133,13 @@ export function closePrepare(
 export function createCloseSequence(steps: CloseSteps): () => Promise<void> {
   let running: Promise<void> | null = null
 
+  const say = quiet(steps.report)
   const run = async (): Promise<void> => {
     let finished = false
+    /* The timer handle is kept and cleared: a prepare that settles in ten
+     * milliseconds must not leave a multi-second timer and its closure alive
+     * for the rest of the bound. */
+    let timer: ReturnType<typeof setTimeout> | undefined
     try {
       await Promise.race([
         /* CAUGHT ON THE STEP ITSELF, not on the race. A rejection inside a
@@ -127,19 +155,23 @@ export function createCloseSequence(steps: CloseSteps): () => Promise<void> {
             },
             (cause: unknown) => {
               finished = true
-              steps.report('Paper: the teardown before closing failed', cause)
+              say('Paper: the teardown before closing failed', cause)
             },
           ),
-        new Promise((resolve) => setTimeout(resolve, steps.timeoutMs)),
+        new Promise((resolve) => {
+          timer = setTimeout(resolve, steps.timeoutMs)
+        }),
       ])
     } catch (cause) {
-      steps.report('Paper: could not wait for the teardown before closing', cause)
+      say('Paper: could not wait for the teardown before closing', cause)
+    } finally {
+      clearTimeout(timer)
     }
     /* SAID, because it is invisible otherwise: a teardown cut off by the bound
      * leaves the journal's flag up and the next launch re-verifying the shelf
      * — exactly the state the shell's own log line warns about on a quit. */
     if (!finished) {
-      steps.report('Paper: the teardown did not finish before the window closed; the sync journal may be left dirty', null)
+      say('Paper: the teardown did not finish before the window closed; the sync journal may be left dirty', null)
     }
 
     /* ALWAYS. `preventDefault` has already run, so this is the only thing that
@@ -149,7 +181,7 @@ export function createCloseSequence(steps: CloseSteps): () => Promise<void> {
     try {
       await steps.destroy()
     } catch (cause) {
-      steps.report('Paper: could not close the window', cause)
+      say('Paper: could not close the window', cause)
     }
   }
 

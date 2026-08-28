@@ -120,8 +120,10 @@ export function Companion({
   }
 
   const submit = (): void => {
-    thread.ask(draft)
-    setDraft('')
+    /* Cleared only when the question was TAKEN. `ask` refuses mid-stream and
+     * while unconfigured, and clearing regardless threw the reader's typed
+     * question away on exactly the press most likely to be accidental. */
+    if (thread.ask(draft)) setDraft('')
   }
 
   return (

@@ -94,11 +94,23 @@ export async function openAppStorage(): Promise<AppStorage> {
     /* Loud, and not fatal. A reader whose disk is unavailable should still get
      * an application — with their existing localStorage data, which is where
      * everything was until this phase and is left in place precisely so that
-     * this fallback still has something to offer. */
+     * this fallback still has something to offer.
+     *
+     * The notice says PLAINLY that this session's changes stay behind: a later
+     * healthy launch prefers the disk store, and nothing merges the fallback
+     * session back into it — merging cannot be told apart from resurrecting
+     * the pre-migration values the legacy keys deliberately still hold. An
+     * announced limit, not a silent one. And when window storage is itself
+     * disabled, the sentence must not claim a durability that does not exist:
+     * that session holds changes in memory only. */
     console.error('Paper: could not open the store on disk; falling back to localStorage', cause)
+    const fallback = localStore()
     return {
-      storage: localStore(),
-      notice: `Paper could not open its store on disk, so ${KEPT_THERE} are kept in the window's storage for this session.`,
+      storage: fallback,
+      notice:
+        fallback === null
+          ? `Paper could not open its store on disk, and window storage is disabled — changes to ${KEPT_THERE} will not outlive this session.`
+          : `Paper could not open its store on disk, so ${KEPT_THERE} are kept in the window's storage for this session — changes made now will not reach the disk store when it recovers.`,
     }
   }
 }

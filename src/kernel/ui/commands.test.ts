@@ -236,6 +236,37 @@ describe('advertised combos are bound', () => {
   })
 
   /**
+   * Repeat suppression comes from the ACTION'S KIND, not a second key list.
+   * The hand-kept set this replaced had drifted: `l` was bound and unlisted,
+   * so a held ⌘L flickered between reader and library, and a held ⌘D wrote a
+   * mark and a tombstone per repeat — ⌘B's defect on another key. The walks
+   * (⌘+, ⌘[) stay repeatable on purpose; everything else is one press.
+   */
+  it('suppresses a repeat for every binding that is not a walk — including the two the old list missed', () => {
+    expect(resolveAccel({ key: 'l', repeat: false }, anything)).toEqual({ kind: 'toggleScreen' })
+    expect(resolveAccel({ key: 'l', repeat: true }, anything)).toBeNull()
+    const selecting = { ...anything, hasSelection: true }
+    expect(resolveAccel({ key: 'd', repeat: false }, selecting)).toEqual({ kind: 'markSelection' })
+    expect(resolveAccel({ key: 'd', repeat: true }, selecting)).toBeNull()
+    /* The walks still repeat. */
+    expect(resolveAccel({ key: '=', repeat: true }, anything)).toEqual({ kind: 'stepBy', delta: 1 })
+    expect(
+      resolveAccel({ key: '[', repeat: true }, { ...anything, canJumpBack: true }),
+    ).toEqual({ kind: 'jumpBack' })
+  })
+
+  /**
+   * Caps Lock is not Shift. With it latched every letter arrives uppercase,
+   * and the letter shortcuts all went dead; with Shift genuinely down the
+   * combo is a different one and stays unbound.
+   */
+  it('reads a Caps-Locked letter as the letter, and a shifted one as a different combo', () => {
+    const bookmarkable = { ...anything, onReader: true, canBookmark: true }
+    expect(resolveAccel({ key: 'B', repeat: false }, bookmarkable)).toEqual({ kind: 'toggleBookmark' })
+    expect(resolveAccel({ key: 'B', repeat: false, shiftKey: true }, bookmarkable)).toBeNull()
+  })
+
+  /**
    * What a printed combo requires the handler to bind.
    *
    * Explicit rather than derived from the glyph, because the two are genuinely
@@ -667,6 +698,14 @@ describe('resolvePageKey', () => {
     expect(resolvePageKey(press('ArrowUp'))).toBeNull()
     expect(resolvePageKey(press('Home'))).toBeNull()
     expect(resolvePageKey(press('a'))).toBeNull()
+    /* A SYSTEM-MODIFIED KEY IS NOT A READING KEY. The caller strips only the
+       platform's primary accelerator, so Ctrl-, Meta- and Alt-arrows — window
+       management, word movement, history — arrived looking plain and turned
+       the page out from under the gesture they belong to. */
+    expect(resolvePageKey({ ...press('ArrowRight'), altKey: true })).toBeNull()
+    expect(resolvePageKey({ ...press('ArrowLeft'), ctrlKey: true })).toBeNull()
+    expect(resolvePageKey({ ...press('PageDown'), metaKey: true })).toBeNull()
+    expect(resolvePageKey({ ...press(' '), metaKey: true })).toBeNull()
   })
 
   /**

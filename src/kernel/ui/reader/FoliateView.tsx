@@ -15,10 +15,6 @@ import type { PageIntent } from './wheelPaging'
 
 export interface FoliateViewProps {
   /**
-   * The book to open — a picked/dropped File, or a URL for a book the app
-   * already has on disk. Null renders the empty state instead.
-   */
-  /**
    * How the book is SET — WI-14.4's fifteen. Handed down whole, exactly as
    * `spacing` is: they are one contract, and fifteen props would be fifteen
    * chances for one to be forgotten at a call site with nothing to say so.
@@ -90,14 +86,6 @@ export interface FoliateViewProps {
   onSelection: (selection: SelectionSnapshot | null) => void
   /** A mark was drawn, with the live Range it resolved to. */
   onMarkDrawn: (cfi: string, range: Range) => void
-  /** A drawn mark was clicked, identified by its CFI. */
-  /**
-   * A book was dropped onto the book itself.
-   *
-   * The window's own drop handling cannot see this: the reader is iframes once
-   * a book is open, and a drop over one goes to that document. Unhandled, the
-   * webview navigates to the file and the app is gone.
-   */
   /**
    * A link in the book, before foliate navigates it — cancelable, so calling
    * `preventDefault()` on the event takes the link over. See `LinkDetail`.
@@ -107,6 +95,13 @@ export interface FoliateViewProps {
   onExternalLink: (detail: ExternalLinkDetail, event: Event) => void
   /** A footnote was followed and rendered, or the note should close. */
   onFootnote: (note: FootnoteRender | null) => void
+  /**
+   * A book was dropped onto the book itself.
+   *
+   * The window's own drop handling cannot see this: the reader is iframes once
+   * a book is open, and a drop over one goes to that document. Unhandled, the
+   * webview navigates to the file and the app is gone.
+   */
   onFileDropped: (file: File) => void
   /** A wheel gesture asked for another page — see `wheelPaging`. */
   onPageIntent: (intent: PageIntent) => void
@@ -506,7 +501,13 @@ export function FoliateView({
    * whenever a section's overlay is built, which happens as the reader scrolls
    * — long after any value captured at startup went stale. */
   const marksRef = useRef(marks)
-  const settings = useRef<Settings>({ stepIdx, measure, pageMargins, theme, typeface, spacing, align, brightness, contrast, animated, paginated, style })
+  /* Built ONCE per render, like `currentHandlers` and for the same reason:
+   * this object used to be written out three times — the ref's initial value,
+   * the layout-effect commit, and the settings effect below — and a setting
+   * added to two of the copies is exactly the stale-value defect the handlers
+   * note describes (audit round 1, #484). */
+  const currentSettings: Settings = { stepIdx, measure, pageMargins, theme, typeface, spacing, align, brightness, contrast, animated, paginated, style }
+  const settings = useRef<Settings>(currentSettings)
   /* Through a ref for the same reason, and for one that is specific to it: the
    * saved position is derived from the book's content id, which resolves a few
    * milliseconds AFTER the reader mounts. A prop read at mount is read before
@@ -520,7 +521,7 @@ export function FoliateView({
   useLayoutEffect(() => {
     handlers.current = currentHandlers
     marksRef.current = marks
-    settings.current = { stepIdx, measure, pageMargins, theme, typeface, spacing, align, brightness, contrast, animated, paginated, style }
+    settings.current = currentSettings
     lastLocationRef.current = lastLocation
   })
 
@@ -706,13 +707,21 @@ export function FoliateView({
      * the effect and unmounted the React tree — the reader vanished instead of
      * the theme failing to change. */
     try {
-      applySettings(renderer, { stepIdx, measure: settings.current.measure, pageMargins: settings.current.pageMargins, theme, typeface, spacing, align, brightness, contrast, style, animated, paginated })
-      /* A theme change reaches the book through `setStyles`, which restyles the
-       * document WITHOUT rebuilding the section — so no `create-overlay` fires
-       * and the marks keep the colour they were painted in. Changing the step or
-       * the flow does rebuild, and re-attaching an already-attached mark replaces
-       * it rather than stacking a second copy, so this is safe to run for all
-       * three rather than only for the one that needs it. */
+      /* `settings.current` IS this commit's props — the layout effect above
+       * committed them before any passive effect ran — and reading it here is
+       * what keeps this the third construction site no longer (audit round 1,
+       * #484). The deps below still say which props re-run this effect;
+       * `measure` and `pageMargins` are deliberately not among them. */
+      applySettings(renderer, settings.current)
+      /* A theme change reaches open documents as VARIABLES — `applySettings`
+       * writes `applyBookVars` into each; the sheets themselves are
+       * identity-cached and almost never move — so no section rebuilds, no
+       * `create-overlay` fires, and the marks keep the colour they were
+       * painted in. Repainting them here is what picks the new palette up.
+       * Changing the step or the flow does rebuild, and re-attaching an
+       * already-attached mark replaces it rather than stacking a second copy,
+       * so this is safe to run for all three rather than only for the one
+       * that needs it. */
       session.redrawMarks()
     } catch (cause) {
       console.error('Paper: applying reader settings failed', cause)

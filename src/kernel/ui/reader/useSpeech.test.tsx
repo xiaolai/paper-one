@@ -3,6 +3,7 @@ import { act, cleanup, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { FakeSynth, FakeUtterance } from './speechSynth.testkit'
 import { CONTINUE_GRACE_MS, CONTINUE_TICK_MS, TURN_SETTLE_MS, useSpeech, type Speech } from './useSpeech'
+import { collectText } from './speech'
 
 /**
  * The wiring: a section's document in, page turns and utterances out.
@@ -300,5 +301,33 @@ describe('a section change while speaking', () => {
     expect(speech().speaking).toBe(false)
     expect(synth.cancelled).toBeGreaterThan(0)
     a.remove()
+  })
+})
+
+describe('collectText — the words between the words', () => {
+  /* Here rather than in `speech.test.ts`, whose header explains why it holds
+     no DOM: this is not a layout question — jsdom walks a tree the same way
+     WebKit does. */
+  it('keeps the space a standalone whitespace node carries between two inline spans', () => {
+    /* `<span>Hello</span> <span>world</span>` is three text nodes in ONE
+       block; rejecting the whitespace node fused the words — the voice said
+       "Helloworld", and every boundary offset after it was off by the missing
+       space (audit round 1, #500). The separator sits OUTSIDE the segments,
+       so an offset landing in it maps to no node rather than the wrong one. */
+    const doc = document.implementation.createHTMLDocument('s')
+    doc.body.innerHTML = '<p><span>Hello</span> <span>world</span></p>'
+    const spoken = collectText(doc)
+    expect(spoken.text).toBe('Hello world')
+    expect(spoken.segments).toHaveLength(2)
+    const worldAt = spoken.text.indexOf('world')
+    const seg = spoken.segments.find((one) => one.start <= worldAt && worldAt < one.end)
+    expect(seg?.node.textContent).toBe('world')
+  })
+
+  it('does not stack separators for a run of indentation nodes', () => {
+    const doc = document.implementation.createHTMLDocument('s')
+    doc.body.innerHTML = '<p>One</p>\n\n   \n<p>Two</p>'
+    const spoken = collectText(doc)
+    expect(spoken.text).toBe('One Two')
   })
 })

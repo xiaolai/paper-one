@@ -636,10 +636,14 @@ export function bookVars({
        the property is absent rather than set to zero — a max(1em, 0px) would
        be a rule that runs on every element in every book to accomplish
        nothing. See MINIMUM_SIZES for the 8.5px that bought this. */
-    '--paper-min-size': stepAt(MINIMUM_SIZES, set.minimumSize) === 0
-      ? null
-      : `${stepAt(MINIMUM_SIZES, set.minimumSize)}px`,
+    '--paper-min-size': minimumSizePx(set.minimumSize),
   }
+}
+
+/** The floor's pixel value, or null at step 0 — one `stepAt`, asked once. */
+function minimumSizePx(step: number): string | null {
+  const px = stepAt(MINIMUM_SIZES, step)
+  return px === 0 ? null : `${px}px`
 }
 
 /**
@@ -1516,7 +1520,7 @@ ${when('--paper-note-prose')}body > * { font-size: ${READING_RATIOS.footnote}rem
  * it silently rather than loudly.
  */
 let cachedNoteSheets: BookSheets | null = null
-let cachedNoteSheetsFrom: unknown = null
+let cachedNoteSheetsFrom: BookSheets | null = null
 
 export function noteSheets(): BookSheets {
   const sheets = bookSheets()

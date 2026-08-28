@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { Bookmark, ChevronLeft, ChevronRight, Library, Plus } from 'lucide-react'
 import type { ExternalLinkDetail, LinkDetail } from 'foliate-js/view.js'
 import { comboFor } from '../panes'
@@ -255,11 +255,18 @@ export function Reader({
    * showing the most recent departure rather than two racing timers where the
    * first clears the second's message.
    */
+  /* THE CALLBACK THROUGH A REF, so the timer is keyed on the JUMP and not on
+   * the callback's identity: an inline `onReturnDone` from the host is a new
+   * function every render, and every page turn re-rendered — so the hint's
+   * timer restarted on each and the line never cleared while the reader kept
+   * reading. */
+  const returnDone = useRef(onReturnDone)
+  returnDone.current = onReturnDone
   useEffect(() => {
-    if (!returnTo || !onReturnDone) return
-    const timer = setTimeout(onReturnDone, RETURN_HINT_MS)
+    if (!returnTo) return
+    const timer = setTimeout(() => returnDone.current?.(), RETURN_HINT_MS)
     return () => clearTimeout(timer)
-  }, [returnTo, onReturnDone])
+  }, [returnTo])
 
   const { selection, setSelection, ranges, onMarkDrawn, selected, mark, unmark } = marking
 
@@ -341,6 +348,14 @@ export function Reader({
   /* Derived from the book, not drawn at random — see `bookAccent`. Null with no
    * book open, which is also what stops the rule rendering. */
   const accent = bookAccent(book.bookId, state.theme === 'night')
+  /* ONE clamp for the progress track and the percentage under it. Each had
+   * its own, and they had diverged: `Math.min(1, Math.max(0, NaN))` is `NaN`,
+   * so a relocation with a malformed fraction drew the track at `NaN%` while
+   * the footer, with its `|| 0`, said 0%. Non-finite is 0 — the footer's
+   * reading, now both. */
+  const progress = Number.isFinite(book.position.fraction)
+    ? Math.min(1, Math.max(0, book.position.fraction))
+    : 0
 
   /* WHERE THE WORDS ARE. The selection bar has always needed it so the popup
    * cannot hang across the margin and cover the notes drawn there; the ribbon
@@ -560,7 +575,9 @@ export function Reader({
       else if (intent === 'next') book.next()
       else book.prev()
     },
-    [state, book, selection, paneVisible, setSelection],
+    /* `clearSelection` is what the body calls; `selection` and `setSelection`
+       were what an earlier body read, and had outlived it in this list. */
+    [state, book, paneVisible, clearSelection],
   )
 
   /**
@@ -636,7 +653,7 @@ export function Reader({
                       <div
                         className={styles.progressFill}
                         style={{
-                          height: `${Math.min(1, Math.max(0, book.position.fraction)) * 100}%`,
+                          height: `${progress * 100}%`,
                           background: accent,
                         }}
                       />
@@ -956,9 +973,11 @@ export function Reader({
                         Retry
                       </button>
                     )}
-                    <button type="button" className={styles.noticeDismiss} onClick={onDismissSaveFailure}>
-                      Dismiss
-                    </button>
+                    {onDismissSaveFailure && (
+                      <button type="button" className={styles.noticeDismiss} onClick={onDismissSaveFailure}>
+                        Dismiss
+                      </button>
+                    )}
                   </div>
                 )}
 
@@ -1026,10 +1045,12 @@ export function Reader({
                   <span>{book.position.chapterLabel}</span>
                   {book.position.chapterLabel && <span>·</span>}
                   <span style={{ fontVariantNumeric: 'tabular-nums' }}>
-                    {/* CLAMPED, like the track beside it. A relocation event
-                        with a malformed fraction drew "-3%" or "NaN%" under a
-                        bar that had already pinned itself to the end. */}
-                    {Math.round(Math.min(1, Math.max(0, book.position.fraction || 0)) * 100)}%
+                    {/* CLAMPED, like the track beside it — by the SAME clamp.
+                        A relocation event with a malformed fraction drew "-3%"
+                        or "NaN%" under a bar that had already pinned itself to
+                        the end; and the two copies had diverged, the track
+                        letting `NaN` through where this one caught it. */}
+                    {Math.round(progress * 100)}%
                   </span>
                 </div>
               </>

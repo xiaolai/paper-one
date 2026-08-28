@@ -91,6 +91,43 @@ describe('the close sequence', () => {
 
   /* CLOSES ONCE. A second request while the first was draining used to start a
      second teardown, so two drains and two destroys raced. */
+  /* THE REPORTER CANNOT BREAK THE SEQUENCE. A diagnostics sink that is
+     itself failing is the likely companion of any other failure, and a
+     reporter that threw escaped the very catch it was called from — past the
+     destroy, leaving the window the file exists to close. Every failure path
+     is exercised with a reporter that throws on every call. */
+  it('still closes, and still resolves, when the reporter itself throws at every turn', async () => {
+    const { base, done } = steps({
+      prepare: async () => {
+        throw new Error('the teardown failed')
+      },
+      report: () => {
+        throw new Error('the diagnostics store is gone too')
+      },
+    })
+    await expect(createCloseSequence(base)()).resolves.toBeUndefined()
+    expect(done).toEqual(['destroy'])
+    /* And the bound path, where the report used to sit outside any guard. */
+    const stalled = steps({
+      prepare: () => new Promise(() => {}),
+      report: () => {
+        throw new Error('still gone')
+      },
+    })
+    await expect(createCloseSequence(stalled.base)()).resolves.toBeUndefined()
+    expect(stalled.done).toEqual(['destroy'])
+    /* And a destroy that fails under a throwing reporter does not reject. */
+    const broken = steps({
+      destroy: async () => {
+        throw new Error('the window would not close')
+      },
+      report: () => {
+        throw new Error('gone')
+      },
+    })
+    await expect(createCloseSequence(broken.base)()).resolves.toBeUndefined()
+  })
+
   it('runs one teardown however many times it is asked', async () => {
     const { base, done } = steps()
     const close = createCloseSequence(base)
@@ -123,6 +160,20 @@ describe('closePrepare', () => {
     )()
     expect(done).toEqual(['drain'])
     expect(reports.join(' ')).toMatch(/hand over unsaved work/)
+  })
+
+  it('still drains when the flush throws AND the reporter throws — the two halves stay independent', async () => {
+    const done: string[] = []
+    await closePrepare(
+      () => {
+        throw new Error('a note would not serialise')
+      },
+      async () => void done.push('drain'),
+      () => {
+        throw new Error('and the reporter is broken')
+      },
+    )()
+    expect(done).toEqual(['drain'])
   })
 
   it('resolves when the drain rejects, and reports it', async () => {

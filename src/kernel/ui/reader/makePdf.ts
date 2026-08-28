@@ -314,6 +314,22 @@ html, body { margin: 0; padding: 0; }
   return URL.createObjectURL(new Blob([html], { type: 'text/html' }))
 }
 
+/**
+ * The outline as a table of contents, or none when it will not map — a
+ * malformed outline entry used to throw AFTER the worker was up, leaking it
+ * and the stylesheet URL with it (audit round 1, #492); `destIndex` already
+ * treats broken destinations as common, and a broken TREE gets the same
+ * treatment: the book opens, without a table of contents.
+ */
+function tocOf(outline: { title: string; dest: unknown; items?: unknown[] }[] | null): TocItem[] {
+  try {
+    return outline?.map(tocItem) ?? []
+  } catch (cause) {
+    console.warn('Paper: this PDF outline could not be read as a table of contents', cause)
+    return []
+  }
+}
+
 function tocItem(item: { title: string; dest: unknown; items?: unknown[] }): TocItem {
   const subitems = item.items?.length
     ? item.items.map((child) => tocItem(child as Parameters<typeof tocItem>[0]))
@@ -382,10 +398,11 @@ export interface PdfHooks {
  *
  * ⚠️ It was exported and referenced nowhere: callers took the weaker
  * `RangedSource` and this sat beside them as a public shape that could drift
- * from the real contract without anything noticing. `transportOf` narrows to it
- * now, so the check and the type say the same thing by construction.
+ * from the real contract without anything noticing. `transportOf` narrows to
+ * it now, so the check and the type say the same thing by construction — and
+ * it is not exported, because nothing imports it (audit round 1, #832).
  */
-export interface RangedPdf extends RangedSource {
+interface RangedPdf extends RangedSource {
   readonly range: PDFDataRangeTransport
 }
 
@@ -413,12 +430,14 @@ function transportOf(source: RangedSource): PDFDataRangeTransport {
 }
 
 export async function makePdf(file: BookSource, hooks: PdfHooks = {}): Promise<PdfBook> {
-  /* ONE STYLESHEET FOR THE BOOK — see `styleSheetUrl`. Minted before anything
-   * can fail, so every exit below has one thing to revoke. */
-  const styleHref = styleSheetUrl()
-  const task = pdfjs.getDocument({
-    ...(isRanged(file)
-      ? {
+  /* THE SOURCE FIRST, THE URL SECOND (audit round 1, #492). `transportOf`
+   * throws on a wrong transport and `arrayBuffer()` can reject, and both used
+   * to be evaluated inside the `getDocument` arguments AFTER the stylesheet
+   * URL was minted — every such failure leaked the URL, one per attempt, for
+   * the life of the window. Read the source before there is anything to
+   * leak; from `getDocument` on, the catch on `task.promise` owns cleanup. */
+  const source = isRanged(file)
+    ? {
           /* `length` COMES OFF THE TRANSPORT — `getDocument` reads
            * `src.range.length` and never looks at a `length` beside it, so
            * passing one here would be a field nothing reads.
@@ -444,9 +463,15 @@ export async function makePdf(file: BookSource, hooks: PdfHooks = {}): Promise<P
           disableAutoFetch: true,
           disableStream: true,
         }
-      : typeof file === 'string'
-        ? { url: file }
-        : { data: await file.arrayBuffer() }),
+    : typeof file === 'string'
+      ? { url: file }
+      : { data: await file.arrayBuffer() }
+  /* ONE STYLESHEET FOR THE BOOK — see `styleSheetUrl`. Minted once nothing
+   * before the loading task can fail, so every exit below has one thing to
+   * revoke. */
+  const styleHref = styleSheetUrl()
+  const task = pdfjs.getDocument({
+    ...source,
     cMapUrl: `${ASSET_BASE}cmaps/`,
     cMapPacked: true,
     standardFontDataUrl: `${ASSET_BASE}standard_fonts/`,
@@ -545,7 +570,7 @@ export async function makePdf(file: BookSource, hooks: PdfHooks = {}): Promise<P
        * two thousand strings does not belong in a file written that often. */
       pageCount: pdf.numPages,
     },
-    toc: outline?.map(tocItem) ?? [],
+    toc: tocOf(outline),
     sections: Array.from({ length: pdf.numPages }, (_, i) => ({
       id: i,
       load: async () => {
@@ -583,7 +608,10 @@ export async function makePdf(file: BookSource, hooks: PdfHooks = {}): Promise<P
       // foliate uses this to weight progress. Pages are equal enough.
       size: 1000,
     })),
-    isExternal: (uri) => /^\w+:/i.test(uri),
+    /* RFC 3986's scheme grammar, not `\w+`: `\w` rejects `+`, `-` and `.`
+       (so `web+paper:` was internal) and accepts a leading digit or `_`
+       (audit round 1, #833). */
+    isExternal: (uri) => /^[a-z][a-z0-9+.-]*:/i.test(uri),
     /* A destination that cannot be resolved REFUSES, rather than resolving to
      * page 0. Falling back sent the reader to the cover — from wherever they
      * were, with no way back but the history — and did it for exactly the

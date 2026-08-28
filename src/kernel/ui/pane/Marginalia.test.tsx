@@ -56,6 +56,7 @@ function marksView(over: Partial<MarksView> = {}): MarksView {
     allBookmarks: [],
     persistent: true,
     unreadable: false,
+    scanFailed: false,
     ready: true,
     add: vi.fn(),
     remove: vi.fn(),
@@ -76,6 +77,7 @@ function draw(over: {
   onShelf?: (bookId: string) => boolean
   onGoTo?: (target: JumpTarget) => void
   unreadable?: boolean
+  scanFailed?: boolean
 }) {
   const onGoTo = over.onGoTo ?? vi.fn()
   render(
@@ -84,6 +86,7 @@ function draw(over: {
         all: over.all ?? [],
         allBookmarks: over.allBookmarks ?? [],
         unreadable: over.unreadable ?? false,
+        scanFailed: over.scanFailed ?? false,
       })}
       cards={cardsView()}
       bookId="open-book"
@@ -346,5 +349,23 @@ describe('a marks file that could not be read', () => {
   it('is not said of a book whose file read', () => {
     draw({})
     expect(screen.queryByText(/could not be read/)).toBeNull()
+  })
+})
+
+/* The cross-book scan can FAIL, and until the store said so its catch
+   installed `[]` — indistinguishable from an empty library, so this panel
+   said "Nothing kept yet" over marks that were there and could not be read
+   (the 2026-08-28 audit, #101/#477). */
+describe('a cross-book scan that failed', () => {
+  it('is said instead of the empty state, never beside it', () => {
+    draw({ scanFailed: true })
+    expect(screen.getByText(/Your marks could not be read/)).not.toBeNull()
+    expect(screen.queryByText(/Nothing kept yet/)).toBeNull()
+  })
+
+  it('gives way to the empty state once a scan has landed', () => {
+    draw({ scanFailed: false })
+    expect(screen.queryByText(/Your marks could not be read/)).toBeNull()
+    expect(screen.getByText(/Nothing kept yet/)).not.toBeNull()
   })
 })

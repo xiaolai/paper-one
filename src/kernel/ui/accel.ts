@@ -86,29 +86,50 @@ export function canKeepPlace(context: Pick<AccelContext, 'onReader' | 'canBookma
 }
 
 /**
- * A REPEAT IS THE SAME PRESS, for every combo that TOGGLES.
+ * A REPEAT IS THE SAME PRESS, for everything that is not a WALK.
  *
  * Holding a combo delivers a keydown every few tens of milliseconds. For a
  * toggle that means the thing flickers for as long as the key is down and its
  * final state depends on where the reader let go — and for ⌘B it also means a
- * row and a tombstone written to the book's marks file on every cycle. Found on
- * ⌘B; the same shape was already on the palette, the pane, the tag sheet and
- * every panel digit, so it is refused as a class rather than one key at a time.
+ * row and a tombstone written to the book's marks file on every cycle.
  *
- * THE SIZE STEPS ARE DELIBERATELY ABSENT. Holding ⌘+ to walk up §09's ramp is a
- * real gesture with a real result at each repeat, and the reducer clamps at the
- * end; a guard there would break something that works.
+ * SUPPRESSED BY THE ACTION'S KIND, not by a second list of keys. The key set
+ * this replaced (`TOGGLES`) was a hand-kept classification of bindings the
+ * switch below already encodes, and it drifted exactly as a second list does:
+ * `l` was bound to `toggleScreen` and absent from the set, so holding ⌘L
+ * flickered between reader and library, and ⌘D re-marked the selection per
+ * repeat — a row and a tombstone each cycle, the ⌘B defect on another key.
+ * Deriving from the RESULT cannot miss a binding, including the next one.
+ *
+ * THE WALKS ARE THE DELIBERATE EXCEPTIONS. Holding ⌘+ up §09's ramp and ⌘[
+ * back through the jump stack are real gestures with a real result at each
+ * repeat; the reducer clamps and the stack bottoms out, so neither needs a
+ * guard here.
  */
-const TOGGLES = new Set(['k', '\\', 't', 'b', 'q'])
+const REPEATABLE: ReadonlySet<AccelAction['kind']> = new Set(['stepBy', 'jumpBack', 'jumpForward'])
 
 export function resolveAccel(
-  event: { readonly key: string; readonly repeat: boolean },
+  event: { readonly key: string; readonly repeat: boolean; readonly shiftKey?: boolean },
   context: AccelContext,
 ): AccelAction | null {
-  const digit = PANE_SHORTCUTS.find((entry) => entry.digit === event.key)
-  if (event.repeat && (TOGGLES.has(event.key) || digit)) return null
+  const action = bind(event, context)
+  if (action === null) return null
+  return event.repeat && !REPEATABLE.has(action.kind) ? null : action
+}
 
-  switch (event.key) {
+function bind(
+  event: { readonly key: string; readonly shiftKey?: boolean },
+  context: AccelContext,
+): AccelAction | null {
+  /* CAPS LOCK IS NOT SHIFT. With it latched, `key` for ⌘B is 'B', and every
+   * letter shortcut here went dead — while ⇧⌘B stays a different (unbound)
+   * combo, which is why the lowercase applies only when shift is UP. The
+   * shifted spellings the size steps bind ('+', '_') are unaffected: they
+   * arrive with shift down and pass through as themselves. */
+  const key = event.key.length === 1 && event.shiftKey !== true ? event.key.toLowerCase() : event.key
+  const digit = PANE_SHORTCUTS.find((entry) => entry.digit === key)
+
+  switch (key) {
     case 'k':
       return { kind: 'togglePalette' }
     case '\\':
@@ -221,7 +242,17 @@ export function resolvePageKey(event: {
   readonly key: string
   readonly code: string
   readonly shiftKey: boolean
+  readonly ctrlKey?: boolean
+  readonly metaKey?: boolean
+  readonly altKey?: boolean
 }): PageVerb | null {
+  /* A SYSTEM-MODIFIED KEY IS NOT A READING KEY. The caller strips only the
+   * platform's primary accelerator before asking here, so Ctrl-, Meta- and
+   * Alt-arrows — window management, word movement, history — arrived looking
+   * plain and turned the page out from under the gesture they belong to.
+   * Shift stays: it is handled below, where ⇧Space is the one shifted key
+   * this map owns. */
+  if (event.ctrlKey === true || event.metaKey === true || event.altKey === true) return null
   /* BY KEY OR BY CODE: `key` is ' ' on every current engine and 'Spacebar' on
      an older one, and `code` is the physical key either way. */
   const space = event.key === ' ' || event.code === 'Space'

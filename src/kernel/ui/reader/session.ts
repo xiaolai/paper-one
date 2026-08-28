@@ -17,7 +17,12 @@ import type { AskPassage } from '../../core/companion'
 import { screenPassages } from './passages'
 import { rangeBoxInHost, type HostRect } from './coordinates'
 import { isBacklink } from './backlink'
+import { directionOf } from './direction'
 import { refuseBookScripts, stripScripts } from './bookScripts'
+
+/* Re-exported where it always lived — the rule itself moved to `direction.ts`
+ * so speech could import it without carrying a copy (audit round 1, #842). */
+export { directionOf } from './direction'
 import { suppressEmptyGeneratedContent } from './generatedContent'
 import { markFigures } from './markFigures'
 import { matteFigures } from './matteFigures'
@@ -828,8 +833,19 @@ export class ReaderSession {
    * that method — which is how it came to be detached without being closed.
    */
   #footnoteView: View | null = null
-  /** Where the reference was, captured before the note resolves. */
-  #footnoteAt: HostRect | null = null
+  /**
+   * Where each pending note's reference was, captured at the click — a QUEUE,
+   * because `before-render` arrives asynchronously and two rapid clicks used
+   * to share one slot: the slower note was positioned by the faster note's
+   * anchor (audit round 1, #107). Paired to a view at `before-render`, read
+   * back at `render`; the sequence retires every request still in flight when
+   * a newer one starts, or the note closes — a superseded render is released
+   * rather than shown, which also stops a slow note popping up AFTER the
+   * reader closed it.
+   */
+  #noteRequests: { at: HostRect | null; seq: number }[] = []
+  #noteSeq = 0
+  readonly #noteMeta = new WeakMap<View, { at: HostRect | null; seq: number }>()
   /**
    * The box a note is rendered into, owned by the host.
    *
@@ -1404,8 +1420,16 @@ export class ReaderSession {
      * popover when `render` says the note is ready.
      */
     this.#footnotes.addEventListener('before-render', (event) => {
-      if (this.#disposed) return
       const { view } = (event as CustomEvent<{ view: View }>).detail
+      /* A session disposed between the click and this event still owns the
+       * detached view foliate just built — nothing else will ever see it, so
+       * bailing bare leaked its renderer and every blob it held (audit round
+       * 1, #106). Released the same way `dispose` releases a rendered one. */
+      if (this.#disposed) {
+        releaseNoteView(view)
+        return
+      }
+      this.#noteMeta.set(view, this.#noteRequests.shift() ?? { at: null, seq: this.#noteSeq })
       this.#watchNoteLinks(view)
       this.#cleanNoteDocument(view)
       /* BEFORE `goTo`, like everything else in here. `setStyles` writes into
@@ -1477,13 +1501,21 @@ export class ReaderSession {
     this.#footnotes.addEventListener('render', (event) => {
       if (this.#disposed) return
       const detail = (event as CustomEvent<FootnoteRenderDetail>).detail
+      const meta = this.#noteMeta.get(detail.view)
+      /* Superseded — a newer note was asked for, or the reader closed the
+       * flow, while this one rendered. Shown, it would replace the newer note
+       * and sit at the wrong anchor; released, the click that mattered wins. */
+      if (meta !== undefined && meta.seq !== this.#noteSeq) {
+        releaseNoteView(detail.view)
+        return
+      }
       /* `before-render` already attached this one and released the last. */
       this.#footnoteView = detail.view
       this.#cb.onFootnote({
         view: detail.view,
         href: detail.href,
         type: detail.type,
-        at: this.#footnoteAt,
+        at: meta?.at ?? null,
       })
     })
   }
@@ -1565,29 +1597,39 @@ export class ReaderSession {
     try {
       pending = this.#footnotes.handle(book, event)
     } catch (cause) {
-      console.warn('Paper: that note could not be resolved', detail.href, cause)
-      /* `preventDefault` may already have been called, so foliate will not
-         navigate — this has to, or the link does nothing at all. */
-      this.#cb.onLink(detail, event)
-      void view.goTo(detail.href).catch(reportNavigation('goTo', detail.href))
+      this.#noteFailed(view, 'that note could not be resolved', detail, event, cause)
       return true
     }
     if (!pending) return false
-    this.#footnoteAt = anchorRectInHost(detail.a, this.#noteSpace())
+    this.#noteRequests.push({ at: anchorRectInHost(detail.a, this.#noteSpace()), seq: ++this.#noteSeq })
     void pending.catch((cause: unknown) => {
       if (this.#disposed) return
-      /* FALL BACK TO THE JUMP, DO NOT SWALLOW IT. A note that will not render
-         in place is still a place in the book, and the reader asked to go
-         there. `preventDefault` has already stopped foliate navigating, so
-         this navigates instead — and tells the host first, so the origin is
-         recorded from where the reader still is and `⌘[` brings them back.
-         A control that silently does nothing is what this whole item deletes. */
-      console.warn('Paper: that note could not be shown in place', detail.href, cause)
-      this.#cb.onFootnote(null)
-      this.#cb.onLink(detail, event)
-      void view.goTo(detail.href).catch(reportNavigation('goTo', detail.href))
+      this.#noteFailed(view, 'that note could not be shown in place', detail, event, cause)
     })
     return true
+  }
+
+  /**
+   * FALL BACK TO THE JUMP, DO NOT SWALLOW IT. A note that will not resolve or
+   * render in place is still a place in the book, and the reader asked to go
+   * there. `preventDefault` has already stopped foliate navigating, so this
+   * navigates instead — and tells the host first, so the origin is recorded
+   * from where the reader still is and `⌘[` brings them back. A control that
+   * silently does nothing is what WI-16 deleted.
+   *
+   * ONE HANDLER FOR BOTH FAILURE ROADS (audit round 1, #835): the synchronous
+   * throw and the rejected render had drifted — only one of them dismissed an
+   * open popover. Both now do: the flow is over, anything still in flight is
+   * superseded, and the popover a previous note left open closes before the
+   * jump.
+   */
+  #noteFailed(view: View, what: string, detail: LinkDetail, event: Event, cause: unknown): void {
+    console.warn(`Paper: ${what}`, detail.href, cause)
+    this.#noteRequests = []
+    this.#noteSeq += 1
+    this.#cb.onFootnote(null)
+    this.#cb.onLink(detail, event)
+    void view.goTo(detail.href).catch(reportNavigation('goTo', detail.href))
   }
 
   /** See `noteSpace` — exported, because the choice is the whole of it. */
@@ -1611,7 +1653,8 @@ export class ReaderSession {
 
   closeFootnote(): void {
     this.#releaseFootnoteView()
-    this.#footnoteAt = null
+    this.#noteRequests = []
+    this.#noteSeq += 1
     if (!this.#disposed) this.#cb.onFootnote(null)
   }
 
@@ -2576,7 +2619,8 @@ export class ReaderSession {
        * assumption that made this invisible.
        */
       quietly('footnote view', () => this.#releaseFootnoteView())
-      this.#footnoteAt = null
+      this.#noteRequests = []
+      this.#noteSeq += 1
       /* AND THE HOST IS TOLD. `#disposed` is already true, so `closeFootnote`
          would skip this — and a host left holding a `FootnoteRender` for a
          session that is gone draws a note nothing can close. */
@@ -2660,8 +2704,13 @@ function destroyQuietly(prepared: Destroyable): void {
   try {
     /* Not awaited: disposal is synchronous by contract and the session is
        being torn down either way. The promise is there for the enrichment
-       pass, which parses serially and does need the worker gone. */
-    void prepared.destroy()
+       pass, which parses serially and does need the worker gone — and a
+       REJECTING destroy is caught too, not only a throwing one: the `try`
+       cannot see a rejection, and an unhandled one at teardown was the last
+       thing a closing book said (audit round 1, #837). */
+    Promise.resolve(prepared.destroy()).catch((cause: unknown) => {
+      console.error('Paper: failed to destroy the prepared book', cause)
+    })
   } catch (cause) {
     console.error('Paper: failed to destroy the prepared book', cause)
   }
@@ -2878,21 +2927,6 @@ const EMPTY_FILE = 'This file is empty.'
  * a quotation in another one, a bilingual edition — is the authority, and
  * overwriting it would hyphenate French by English rules.
  */
-/**
- * Which way this section's text runs.
- *
- * The COMPUTED value, so an author's stylesheet counts as much as a `dir`
- * attribute; falls back to the attribute where there is no view to compute
- * against, which is what a section that failed to parse hands back.
- */
-export function directionOf(doc: Document): 'ltr' | 'rtl' {
-  const html = doc.documentElement as HTMLElement | null
-  if (!html) return 'ltr'
-  const computed = doc.defaultView?.getComputedStyle(html).direction
-  const declared = computed || html.getAttribute('dir') || doc.body?.getAttribute('dir')
-  return declared === 'rtl' ? 'rtl' : 'ltr'
-}
-
 function ensureLang(doc: Document, view: { book?: { metadata?: unknown } }): void {
   /* A document need not have a root element — a section that failed to parse
      hands back an empty one, and this runs on every section that loads. */
@@ -2982,7 +3016,11 @@ function firstOf(value: unknown): Record<string, unknown> | null {
 }
 
 function finiteOrNull(value: unknown): number | null {
-  const n = typeof value === 'string' ? parseFloat(value) : value
+  /* `Number`, not `parseFloat`: the latter reads "1.5junk" as 1.5, and a
+     series position with trailing junk is malformed metadata to refuse, not
+     to half-read (audit round 1, #838). The empty string is `NaN`d explicitly
+     because `Number('')` is 0. */
+  const n = typeof value === 'string' ? (value.trim() === '' ? NaN : Number(value)) : value
   return typeof n === 'number' && Number.isFinite(n) ? n : null
 }
 

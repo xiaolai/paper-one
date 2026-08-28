@@ -326,16 +326,21 @@ export function Library({
        percentage. A burst inside one tick is one render; nothing is dropped,
        because the store is pulled and the last read wins either way. */
     let queued = false
+    /* A microtask already queued when the effect is torn down would still
+       fire — into a component that has unsubscribed, or whose providers have
+       just been swapped — so it checks it is still wanted before it ticks. */
+    let active = true
     const bump = () => {
       if (queued) return
       queued = true
       queueMicrotask(() => {
         queued = false
-        setStatusTick((n) => n + 1)
+        if (active) setStatusTick((n) => n + 1)
       })
     }
     const offs = bookStatuses.map((one) => one.subscribe(bump))
     return () => {
+      active = false
       for (const off of offs) off()
     }
   }, [bookStatuses])
@@ -956,7 +961,10 @@ export function Library({
                   onAdd={onTagBooks}
                   onRemove={onUntagBooks}
                   lastRemoval={lastRemoval ?? null}
-                  onUndoRemove={onUndoRemoveTag ?? (() => {})}
+                  /* Passed THROUGH, not defaulted to a no-op: the editor hides
+                     its Undo when there is nothing to call, and a stand-in
+                     made it draw a working-looking button that did nothing. */
+                  {...(onUndoRemoveTag ? { onUndoRemove: onUndoRemoveTag } : {})}
                 />
               )}
             </div>
@@ -971,7 +979,7 @@ export function Library({
           DOCUMENT ORDER, deliberately — `OverlaySheet` moves focus to the
           first focusable it finds, and a confirmation whose destructive
           button is focused on open turns Return into the act itself. */}
-      {removingSelection && selectedBooks.length > 0 && (
+      {removingSelection && selectedBooks.length > 0 && onRemove && (
         <OverlaySheet
           label={`Remove ${selectedBooks.length} books from the library`}
           onDismiss={() => setRemovingSelection(false)}
@@ -1017,7 +1025,10 @@ export function Library({
                      worse than none. */
                   setRemovingSelection(false)
                   clearSelection()
-                  for (const book of selectedBooks) onRemove?.(book)
+                  /* Not optional here: the sheet renders only with `onRemove`
+                     present, so a confirm that cleared the selection and
+                     removed nothing cannot happen. */
+                  for (const book of selectedBooks) onRemove(book)
                 }}
               >
                 <Trash2 size={ICON.control} strokeWidth={ICON.stroke} />
@@ -1237,9 +1248,13 @@ export function Library({
                 Retry
               </button>
             )}
-            <button type="button" className={styles.statusAction} onClick={onDismissSaveFailure}>
-              Dismiss
-            </button>
+            {/* Only with somebody to tell — a Dismiss that does nothing is
+                worse than none. */}
+            {onDismissSaveFailure && (
+              <button type="button" className={styles.statusAction} onClick={onDismissSaveFailure}>
+                Dismiss
+              </button>
+            )}
           </span>
         ) : work !== null ? (
           <span className={styles.statusWork} role="status">
@@ -1251,9 +1266,11 @@ export function Library({
              console line is not where they look for them. */
           <span className={styles.statusWork} role="status">
             {bootNotice}
-            <button type="button" className={styles.statusAction} onClick={onDismissBootNotice}>
-              Dismiss
-            </button>
+            {onDismissBootNotice && (
+              <button type="button" className={styles.statusAction} onClick={onDismissBootNotice}>
+                Dismiss
+              </button>
+            )}
           </span>
         ) : download !== null ? (
           /* A MODEL DOWNLOAD, as a THIRD RUNG below the import (WI-15.12).

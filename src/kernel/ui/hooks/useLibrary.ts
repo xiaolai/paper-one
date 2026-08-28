@@ -122,28 +122,49 @@ export function useLibrary(library: Library): LibraryView {
   const retries = useRef(new WeakMap<SaveFailure, () => void>())
   const [paired, setPaired] = useState(0)
   const verbs = useMemo(() => {
-    /** Let a write go, keeping the verb so a failure can offer its retry. */
-    const letGo = (run: () => Promise<unknown>): void => {
+    /**
+     * Let a write go, keeping the verb so a failure can offer its retry.
+     *
+     * PAIRED BY BOOK, not by recency. The store publishes one `lastFailure`,
+     * and two writes rejecting close together used to read it in whichever
+     * order their catches ran — so the displayed failure could carry the
+     * OTHER write's retry, and the button under "Couldn't save A" re-ran a
+     * write to B. A verb that knows its book pairs only with a failure
+     * naming that book; a shelf-wide verb (rename, undo) pairs only while
+     * the failure is unclaimed. Ambiguity now shows a failure with no retry,
+     * which is honest, rather than the wrong one.
+     *
+     * AND A RETRY RUNS ONCE: it unpairs itself before running, so a second
+     * click while the first is in flight is a no-op — a failed retry mints a
+     * fresh failure object and pairs anew.
+     */
+    const letGo = (run: () => Promise<unknown>, bookId?: string): void => {
       void run().catch((cause: unknown) => {
         console.error(SAVE_FAILED, cause)
         const failed = library.lastFailure()
         if (failed === null) return
-        retries.current.set(failed, () => letGo(run))
+        if (bookId !== undefined ? failed.bookId !== bookId : retries.current.has(failed)) return
+        retries.current.set(failed, () => {
+          retries.current.delete(failed)
+          setPaired((n) => n + 1)
+          letGo(run, bookId)
+        })
         setPaired((n) => n + 1)
       })
     }
     return {
       add: (bookId: string, record: BookRecord, sparse?: boolean) =>
-        letGo(() => library.add(bookId, record, sparse)),
+        letGo(() => library.add(bookId, record, sparse), bookId),
       addMany: library.addMany,
       update: (bookId: string, change: (record: BookRecord) => BookRecord) =>
-        letGo(() => library.update(bookId, change)),
-      remove: (bookId: string) => letGo(() => library.remove(bookId)),
+        letGo(() => library.update(bookId, change), bookId),
+      remove: (bookId: string) => letGo(() => library.remove(bookId), bookId),
       rememberPosition: (bookId: string, position: string, progress: number) =>
-        letGo(() => library.rememberPosition(bookId, position, progress)),
-      setFinished: (bookId: string, finished: boolean) => letGo(() => library.setFinished(bookId, finished)),
-      tag: (bookId: string, tag: string) => letGo(() => library.tag(bookId, tag)),
-      untag: (bookId: string, tag: string) => letGo(() => library.untag(bookId, tag)),
+        letGo(() => library.rememberPosition(bookId, position, progress), bookId),
+      setFinished: (bookId: string, finished: boolean) =>
+        letGo(() => library.setFinished(bookId, finished), bookId),
+      tag: (bookId: string, tag: string) => letGo(() => library.tag(bookId, tag), bookId),
+      untag: (bookId: string, tag: string) => letGo(() => library.untag(bookId, tag), bookId),
       tagBooks: (bookIds: readonly string[], tags: readonly string[]) =>
         letGo(() => library.tagBooks(bookIds, tags)),
       tagMany: library.tagMany,
@@ -153,7 +174,7 @@ export function useLibrary(library: Library): LibraryView {
       undoRemoveTag: () => letGo(() => library.undoRemoveTag()),
       renameTag: (from: string, to: string) => letGo(() => library.renameTag(from, to)),
       removeTag: (tag: string) => letGo(() => library.removeTag(tag)),
-      keepJacket: (bookId: string, cover: Blob) => letGo(() => library.keepJacket(bookId, cover)),
+      keepJacket: (bookId: string, cover: Blob) => letGo(() => library.keepJacket(bookId, cover), bookId),
       keepContent: library.keepContent,
       ownTagCount: library.ownTagCount,
       ownTagBooks: library.ownTagBooks,

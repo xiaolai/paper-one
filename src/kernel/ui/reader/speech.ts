@@ -22,6 +22,7 @@ import {
   overlaps,
   type HostRect,
 } from './coordinates'
+import { directionOf } from './direction'
 import type { SpokenBox } from './rulerBand'
 
 /** One text node's span within the collected string. */
@@ -49,10 +50,18 @@ export function collectText(doc: Document): SpokenText {
       const parent = node.parentElement
       if (!parent) return NodeFilter.FILTER_REJECT
       const tag = parent.tagName.toLowerCase()
-      if (tag === 'script' || tag === 'style' || tag === 'head') {
+      if (tag === 'script' || tag === 'style') {
         return NodeFilter.FILTER_REJECT
       }
-      if (!node.textContent?.trim()) return NodeFilter.FILTER_REJECT
+      /* WHITESPACE-ONLY NODES ARE ACCEPTED, and the loop below turns them into
+       * a separator rather than a segment. They used to be rejected here, and
+       * the words on either side fused: `<span>Hello</span> <span>world</span>`
+       * is three text nodes in ONE block, so the block separator below never
+       * fired and the voice said "Helloworld" — with every boundary offset
+       * after it off by the missing space (audit round 1, #500). Accepted
+       * before the style checks, because a separator needs no visibility
+       * answer and the style walk is the expensive half of this filter. */
+      if (!node.textContent?.trim()) return NodeFilter.FILTER_ACCEPT
 
       /* Actually hidden, not just hidden-looking by tag name.
        *
@@ -80,11 +89,20 @@ export function collectText(doc: Document): SpokenText {
        * on screen, so the parent's computed value is both sufficient and
        * correct: inheritance has already been resolved into it. */
       if (view) {
-        if (view.getComputedStyle(parent).visibility === 'hidden') {
+        /* `collapse` is `hidden` for anything that is not a table row, and a
+         * collapsed row's text is off the page either way. */
+        const visibility = view.getComputedStyle(parent).visibility
+        if (visibility === 'hidden' || visibility === 'collapse') {
           return NodeFilter.FILTER_REJECT
         }
         for (let el: Element | null = parent; el; el = el.parentElement) {
-          if (view.getComputedStyle(el).display === 'none') return NodeFilter.FILTER_REJECT
+          const style = view.getComputedStyle(el)
+          /* `content-visibility: hidden` hides like `display: none` but is not
+           * inherited into the computed style of descendants, so it is read on
+           * the same ancestor walk display needs anyway. */
+          if (style.display === 'none' || style.contentVisibility === 'hidden') {
+            return NodeFilter.FILTER_REJECT
+          }
         }
       }
       return NodeFilter.FILTER_ACCEPT
@@ -97,6 +115,17 @@ export function collectText(doc: Document): SpokenText {
   let node = walker.nextNode()
   while (node) {
     const value = node.textContent ?? ''
+
+    /* A whitespace-only node is a SEPARATOR, not a segment: one space, outside
+     * every segment range so an offset landing in it maps to no node, and only
+     * when the text does not already end in one — runs of indentation nodes in
+     * a pretty-printed chapter must not become runs of pauses. It does not
+     * move `previousBlock`, because it separates nothing by itself. */
+    if (!value.trim()) {
+      if (text.length > 0 && !text.endsWith(' ')) text += ' '
+      node = walker.nextNode()
+      continue
+    }
 
     /* A separator between BLOCKS, and only between blocks.
      *
@@ -117,7 +146,10 @@ export function collectText(doc: Document): SpokenText {
      * OUTSIDE the segment ranges on purpose, so an offset landing in it maps to
      * no node rather than to the wrong one. */
     const block = blockAncestor(node, view)
-    if (text.length > 0 && block !== previousBlock) text += ' '
+    /* Not when the text already ends in one: a whitespace node between two
+       blocks has already put the separator there, and stacking a second
+       shifts every offset after it. */
+    if (text.length > 0 && block !== previousBlock && !text.endsWith(' ')) text += ' '
     previousBlock = block
 
     const start = text.length
@@ -200,20 +232,6 @@ export function documentLang(doc: Document): string | null {
 }
 
 /**
- * Which way this section's columns run — the same question `directionOf` in
- * `session.ts` answers, asked here without importing the session: this module
- * is loaded by a suite that runs without a DOM, and the session's import graph
- * is the reader's. Computed first, so an author's stylesheet counts.
- */
-function readingDirection(doc: Document): 'ltr' | 'rtl' {
-  const html = doc.documentElement as HTMLElement | null
-  if (!html) return 'ltr'
-  const computed = doc.defaultView?.getComputedStyle(html).direction
-  const declared = computed || html.getAttribute('dir') || doc.body?.getAttribute('dir')
-  return declared === 'rtl' ? 'rtl' : 'ltr'
-}
-
-/**
  * Where a spoken word is relative to the page the reader can see.
  *
  * `ahead` and `behind` are in READING order, not screen order, and the
@@ -284,14 +302,17 @@ export function placeOfRange(
   const page = frameBoxInHost(doc, stage)
   const word = hostFromBookRect(rect, doc, stage)
   if (!page || !word || page.width === 0 || page.height === 0) return { box, place: 'visible' }
-  return { box, place: placeOf(word, page, readingDirection(doc)) }
+  return { box, place: placeOf(word, page, directionOf(doc)) }
 }
 
 /** Why an utterance is over. `ended` is the only one worth continuing from. */
 export type DoneReason = 'ended' | 'empty' | 'error'
 
 export interface SpeakerCallbacks {
-  /** A word began. Null when boundaries are not available on this engine. */
+  /**
+   * A word began. Called only for boundaries the engine reports — an engine
+   * that reports none says so ONCE through `onNoBoundaries` instead.
+   */
   onWord: (index: number, length: number) => void
   /**
    * Speech finished, and why. `ended` is the text running out — a section
@@ -417,11 +438,28 @@ export class Speaker {
   }
 
   pause(): void {
-    if (this.#synth.speaking && !this.#synth.paused) this.#synth.pause()
+    if (this.#synth.speaking && !this.#synth.paused) {
+      /* The grace timer measures SPEECH, not wall-clock. Left running, a pause
+       * inside the first 2.5 s ran it out over silence and `onNoBoundaries`
+       * dropped the follow-along for the whole reading on an engine that
+       * reports boundaries perfectly well (audit round 1, #502). Cleared here
+       * and re-armed whole on resume — generous twice is still cheap, and a
+       * false negative costs the highlight for the chapter. */
+      this.#clearGrace()
+      this.#synth.pause()
+    }
   }
 
   resume(): void {
-    if (this.#synth.paused) this.#synth.resume()
+    if (!this.#synth.paused) return
+    this.#synth.resume()
+    if (!this.#sawBoundary) {
+      const generation = this.#generation
+      this.#graceTimer = setTimeout(() => {
+        if (generation !== this.#generation) return
+        if (!this.#sawBoundary) this.#cb.onNoBoundaries()
+      }, BOUNDARY_GRACE_MS)
+    }
   }
 
   stop(): void {
@@ -436,6 +474,12 @@ export class Speaker {
 
   #finish(generation: number, reason: DoneReason): void {
     if (generation !== this.#generation) return
+    /* RETIRED BEFORE THE CALLBACK. An utterance is one ending, but an engine
+     * is free to send `error` AND `end` for it — WebKit does on some voices —
+     * and both handlers held the same live generation, so `onDone` fired
+     * twice and the second one cancelled the continuation the first had
+     * started (audit round 1, #503). */
+    this.#generation += 1
     this.#clearGrace()
     this.#cb.onDone(reason)
   }

@@ -35,6 +35,18 @@ function scriptedBook(): File {
  * resource it admits into one. Stubbed to RECORD: which blobs were minted is
  * exactly the observation — a refused script is never minted at all.
  */
+/** Like `mintedUrls`, but the BLOBS — for reading a served document back. */
+function mintedBlobs(): Blob[] {
+  const blobs: Blob[] = []
+  const url = URL as unknown as { createObjectURL?: (b: Blob) => string; revokeObjectURL?: (u: string) => void }
+  url.createObjectURL = (blob: Blob) => {
+    blobs.push(blob)
+    return `blob:fake/${blobs.length}`
+  }
+  url.revokeObjectURL = () => {}
+  return blobs
+}
+
 function mintedUrls() {
   const minted: string[] = []
   const url = URL as unknown as { createObjectURL?: (b: Blob) => string; revokeObjectURL?: (u: string) => void }
@@ -83,6 +95,45 @@ describe('refuseBookScripts, through the fork’s own loader', () => {
 
   it('is a no-op for a backend that has no loader to refuse', () => {
     expect(() => refuseBookScripts({})).not.toThrow()
+  })
+
+  it('strips the served chapter BEFORE its URL exists — nothing left to run at parse time', async () => {
+    /* The view-level strip runs after the iframe's `load`, which is after
+       parse: were the CSP ever absent, an inline script would already have
+       run. The loader's `data` event carries the serialized chapter before
+       the URL is minted, and the strip there is what makes "a document with
+       nothing left to run" true at the only moment it matters (audit round
+       1, #104). */
+    const blobs = mintedBlobs()
+    const { book, section } = await open(scriptedBook())
+    refuseBookScripts(book)
+    await section.load()
+    const chapter = blobs.find((b) => b.type === 'application/xhtml+xml')
+    expect(chapter).toBeDefined()
+    const served = await chapter!.text()
+    expect(served).toContain('Call me Ishmael.')
+    expect(served).not.toContain('<script')
+    expect(served).not.toContain('onclick')
+    expect(served).not.toContain('onload')
+  })
+
+  it('a script the manifest mislabels is stripped with the element that named it', async () => {
+    /* `isScript` trusts the manifest's declared type, so a book declaring its
+       script `text/plain` slipped the loader refusal (audit round 1, #103).
+       The element is gone from the served document either way now, so the
+       mislabeled resource has nothing left to reference it. */
+    const blobs = mintedBlobs()
+    const { book, section } = await open(
+      epubFixture({
+        chapter: SCRIPTED_CHAPTER,
+        extra: [{ href: SCRIPT_HREF, mediaType: 'text/plain', data: 'parent.ran = "external"' }],
+      }),
+    )
+    refuseBookScripts(book)
+    await section.load()
+    const chapter = blobs.find((b) => b.type === 'application/xhtml+xml')
+    const served = await chapter!.text()
+    expect(served).not.toContain('<script')
   })
 })
 

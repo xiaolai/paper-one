@@ -41,19 +41,69 @@ interface ResourceLoad {
 }
 
 /**
- * Refuse every script resource this book asks its loader for.
+ * The loader's OTHER event: `data`, dispatched from `createURL` with the
+ * serialized content and its type, and awaited — a listener may replace
+ * `detail.data` before the object URL is minted. The EPUB loader sends every
+ * replaced document through it, and KF8 sends its skeletons.
+ */
+interface ResourceData {
+  readonly type?: unknown
+  data?: unknown
+}
+
+/** The types the loader serialises documents as — the ones worth parsing. */
+const DOCUMENT_TYPES = new Set(['application/xhtml+xml', 'text/html', 'image/svg+xml'])
+
+/**
+ * Refuse every script resource this book asks its loader for, and strip the
+ * ones a document CARRIES before the loader turns it into a URL.
  *
  * Takes any object, because the fork's `Book` type declares no
  * `transformTarget` and an all-optional parameter type is one TypeScript
- * refuses a `Book` for; the check is on the value, which is the honest one.
+ * refuses a `Book` for; the check is on the value — structural, not
+ * `instanceof EventTarget`, which is realm-bound and would silently decline a
+ * book built in another window (audit round 1, #829).
+ *
+ * TWO LISTENERS, AND THE `data` ONE IS THE LOAD-BEARING HALF (audit round 1,
+ * #103/#104). The view-level strip in `session.ts` runs after the iframe's
+ * `load`, which is after parse — an inline script would already have run were
+ * the CSP ever absent, and a `<script src>` whose manifest entry LIES about
+ * its type slips the `isScript` refusal. Stripping the serialized document
+ * here, before the URL exists, closes both: the document the iframe parses
+ * has nothing left to run, whatever the manifest claimed. The post-load strip
+ * stays for the backends whose documents never pass through a loader.
  */
 export function refuseBookScripts(book: object): void {
-  const gate = (book as { readonly transformTarget?: unknown }).transformTarget
-  if (!(gate instanceof EventTarget)) return
+  const gate = (book as { readonly transformTarget?: unknown }).transformTarget as
+    | Pick<EventTarget, 'addEventListener'>
+    | null
+    | undefined
+  if (typeof gate?.addEventListener !== 'function') return
   gate.addEventListener('load', (event) => {
     const detail = (event as CustomEvent<ResourceLoad | undefined>).detail
     if (detail?.isScript === true) detail.allow = false
   })
+  gate.addEventListener('data', (event) => {
+    const detail = (event as CustomEvent<ResourceData | undefined>).detail
+    if (!detail || typeof detail.type !== 'string' || !DOCUMENT_TYPES.has(detail.type)) return
+    if (typeof detail.data !== 'string') return
+    detail.data = stripSerialized(detail.data, detail.type)
+  })
+}
+
+/**
+ * Strip a serialized document, answering the original text when it will not
+ * parse — a malformed section is the renderer's problem to report, and a
+ * strip that replaced it with a parser-error document would be this module
+ * breaking a book the engine might have shown.
+ */
+function stripSerialized(text: string, type: string): string {
+  const doc = new DOMParser().parseFromString(text, type as DOMParserSupportedType)
+  if (doc.getElementsByTagName('parsererror').length > 0) return text
+  if (stripScripts(doc) === 0) return text
+  return type === 'text/html'
+    ? (doc.documentElement?.outerHTML ?? text)
+    : new XMLSerializer().serializeToString(doc)
 }
 
 /**

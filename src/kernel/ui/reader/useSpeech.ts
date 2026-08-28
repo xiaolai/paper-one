@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   Speaker,
   collectText,
@@ -33,14 +33,17 @@ import { placeSpokenWord, removeSpokenWord } from './rulerBand'
 export interface Speech {
   readonly available: boolean
   readonly speaking: boolean
-  readonly paused: boolean
   /** False once the engine has shown it does not report word boundaries. */
   readonly followsWords: boolean
   start: () => void
-  pause: () => void
-  resume: () => void
   stop: () => void
 }
+
+/* NO pause HERE, deliberately (audit round 1, #845). The hook published
+ * `paused`/`pause`/`resume` that no control consumed — state, callbacks and
+ * re-renders behind a surface nothing reached — and this codebase grows a
+ * public surface in the change that mounts it, not ahead of one. `Speaker`
+ * keeps its engine-level pair for the control that will want them. */
 
 /**
  * What the reading needs from the reader: one page forward, in READING
@@ -83,13 +86,10 @@ export const CONTINUE_GRACE_MS = 4000
 
 export function useSpeech(doc: Document | null, paging: SpeechPaging): Speech {
   const [speaking, setSpeaking] = useState(false)
-  const [paused, setPaused] = useState(false)
   const [followsWords, setFollowsWords] = useState(true)
 
   const docRef = useRef<Document | null>(doc)
-  docRef.current = doc
   const pagingRef = useRef(paging)
-  pagingRef.current = paging
   /* The collected text AND the document it was collected from, together.
    *
    * Kept as one value on purpose. Held apart, `docRef` is reassigned during
@@ -103,7 +103,6 @@ export function useSpeech(doc: Document | null, paging: SpeechPaging): Speech {
   /* Read inside the boundary handler, which is created once per utterance —
    * a captured `followsWords` would be the value at the time speech started. */
   const followsRef = useRef(true)
-  followsRef.current = followsWords
   /* THE READING: true from the reader's Listen until their stop, the end of
    * the book or an engine error. A ref, not state, because it is consulted
    * from engine callbacks and from the document effect, and both need the
@@ -114,6 +113,19 @@ export function useSpeech(doc: Document | null, paging: SpeechPaging): Speech {
   const turnedAt = useRef<number | null>(null)
   /** The end-of-section tick, while it runs. */
   const continuing = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  /* COMMITTED, NOT ASSIGNED DURING RENDER (audit round 1, #505). These refs
+   * used to be written in the render body, so a render React abandoned — or a
+   * concurrent one it had not committed — left engine callbacks and the
+   * continuation tick reading a document the tree never showed. A LAYOUT
+   * effect runs after commit and before the passive document effect below, so
+   * the continuation's own ordering claim — "docRef is reassigned before that
+   * effect runs" — stays true, now of committed values only. */
+  useLayoutEffect(() => {
+    docRef.current = doc
+    pagingRef.current = paging
+    followsRef.current = followsWords
+  })
 
   const available = useMemo(() => speechAvailable(), [])
 
@@ -132,7 +144,6 @@ export function useSpeech(doc: Document | null, paging: SpeechPaging): Speech {
       readingRef.current = false
       clearContinuation()
       setSpeaking(false)
-      setPaused(false)
       removeSpokenWord(docRef.current)
     }
 
@@ -152,8 +163,9 @@ export function useSpeech(doc: Document | null, paging: SpeechPaging): Speech {
         if (!readingRef.current) return
         /* Already moved: the new document's effect is about to speak it, or
          * has. Asking `next` again here would turn its first page away before
-         * a word of it was read. `docRef` is reassigned during render, which
-         * is before that effect runs, so this sees the arrival first. */
+         * a word of it was read. `docRef` commits in the layout effect above,
+         * which runs before that document effect, so this sees the arrival
+         * first. */
         if (docRef.current !== from) return
         if (Date.now() - started >= CONTINUE_GRACE_MS) {
           finish()
@@ -240,32 +252,13 @@ export function useSpeech(doc: Document | null, paging: SpeechPaging): Speech {
     const queued = speakDocument(target)
     readingRef.current = queued
     setSpeaking(queued)
-    setPaused(false)
   }, [speaker, speakDocument, clearContinuation])
-
-  /* The flag follows the ENGINE, not the call. `pause()` does nothing unless
-   * something is speaking and `resume()` does nothing unless it is paused, so
-   * setting the state unconditionally left the controls describing a state the
-   * synthesiser was never in — a Resume button over silence, or a Pause button
-   * that had already been ignored. */
-  const pause = useCallback(() => {
-    if (!speaker) return
-    speaker.pause()
-    setPaused(speaker.paused)
-  }, [speaker])
-
-  const resume = useCallback(() => {
-    if (!speaker) return
-    speaker.resume()
-    setPaused(speaker.paused)
-  }, [speaker])
 
   const stop = useCallback(() => {
     readingRef.current = false
     clearContinuation()
     speaker?.stop()
     setSpeaking(false)
-    setPaused(false)
     removeSpokenWord(docRef.current)
   }, [speaker, clearContinuation])
 
@@ -289,14 +282,10 @@ export function useSpeech(doc: Document | null, paging: SpeechPaging): Speech {
       readingRef.current = false
       speaker?.stop()
       setSpeaking(false)
-      setPaused(false)
       return
     }
     const queued = speakDocument(doc)
-    if (queued) {
-      setSpeaking(true)
-      setPaused(false)
-    }
+    if (queued) setSpeaking(true)
   }, [speaker, doc, speakDocument, clearContinuation])
 
   useEffect(() => {
@@ -319,7 +308,7 @@ export function useSpeech(doc: Document | null, paging: SpeechPaging): Speech {
   )
 
   return useMemo<Speech>(
-    () => ({ available, speaking, paused, followsWords, start, pause, resume, stop }),
-    [available, speaking, paused, followsWords, start, pause, resume, stop],
+    () => ({ available, speaking, followsWords, start, stop }),
+    [available, speaking, followsWords, start, stop],
   )
 }

@@ -165,3 +165,23 @@ describe('the library panel', () => {
     expect(screen.queryByText(/not being saved/)).toBeNull()
   })
 })
+
+/**
+ * The rail's exhaustiveness check (`RailCoversEveryPane`) catches a MISSING
+ * pane and cannot catch a DUPLICATE one: a second row for an id compiles,
+ * then renders two buttons under one React key. A pin on the source, on the
+ * `pageTurn.test.ts` precedent, because the entries are a module constant
+ * nothing exports.
+ */
+describe('the rail', () => {
+  it('lists every kernel pane once — a duplicated row would draw two buttons under one key', async () => {
+    const { readFileSync } = await import('node:fs')
+    /* From the repository root, not `import.meta.url`: under jsdom that URL
+       carries an http scheme and `readFileSync` refuses it. */
+    const source = readFileSync(`${process.cwd()}/src/kernel/ui/pane/SidePane.tsx`, 'utf8')
+    const block = source.slice(source.indexOf('const RAIL_ENTRIES'), source.indexOf('as const satisfies'))
+    const ids = [...block.matchAll(/id: '([a-z]+)'/g)].map((m) => m[1])
+    expect(ids.length, 'the pin found the rail').toBeGreaterThan(3)
+    expect(new Set(ids).size).toBe(ids.length)
+  })
+})

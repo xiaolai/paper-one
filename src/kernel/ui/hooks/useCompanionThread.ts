@@ -51,7 +51,13 @@ export interface ThreadMessage {
 export interface CompanionThread {
   readonly messages: readonly ThreadMessage[]
   readonly busy: boolean
-  ask(question: string): void
+  /**
+   * Whether the question was TAKEN. One question streams at a time, and a
+   * refused one — mid-stream Enter, an unconfigured provider — used to
+   * disappear silently while the composer cleared the draft anyway: the
+   * reader's typed question, gone. The composer clears only on `true`.
+   */
+  ask(question: string): boolean
   cancel(): void
   clear(): void
 }
@@ -72,10 +78,13 @@ let nextId = 0
  * sentence is for a rejection with no text at all.
  */
 function failureLine(error: unknown): string {
-  if (error instanceof Error) return error.message
+  /* TRIMMED before it is believed: an `Error` whose message is empty — or one
+   * space — otherwise produced a failure notice with nothing in it, which is
+   * the flattening this function exists to prevent, inverted. */
+  if (error instanceof Error && error.message.trim() !== '') return error.message
   if (typeof error === 'object' && error !== null) {
     const { message } = error as { message?: unknown }
-    if (typeof message === 'string' && message !== '') return message
+    if (typeof message === 'string' && message.trim() !== '') return message
   }
   return 'The companion could not answer'
 }
@@ -125,11 +134,11 @@ export function useCompanionThread(
   const ask = useCallback(
     (question: string) => {
       const trimmed = question.trim()
-      if (trimmed === '' || !provider.configured) return
+      if (trimmed === '' || !provider.configured) return false
       /* One at a time. A second question while the first is streaming would
        * interleave two answers into one thread with no way to tell them
        * apart. */
-      if (abort.current !== null) return
+      if (abort.current !== null) return false
 
       const controller = new AbortController()
       abort.current = controller
@@ -198,10 +207,18 @@ export function useCompanionThread(
             patch({ text, streaming: false, failure: failureLine(error) })
           }
         } finally {
-          if (abort.current === controller) abort.current = null
-          setBusy(false)
+          /* BOTH under the identity check. A cancelled request settles LATE —
+           * the reader pressed Stop and asked again — and its `finally` used
+           * to clear `busy` unconditionally, marking the new request idle:
+           * Stop control gone, mid-stream. Only the request that still owns
+           * the slot may clear the shared state. */
+          if (abort.current === controller) {
+            abort.current = null
+            setBusy(false)
+          }
         }
       })()
+      return true
     },
     [provider],
   )

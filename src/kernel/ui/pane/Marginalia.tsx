@@ -27,6 +27,22 @@ import { ICON, type Platform } from '../../core/metrics'
 import { onBeforeClose } from '../../core/beforeClose'
 import { relativeTime } from '../../core/relativeTime'
 import type { CardsView } from '../hooks/useCards'
+
+/**
+ * Whether an annotation carries a note the reader can see.
+ *
+ * ONE predicate for the filter and the count — `note !== ''` in two places
+ * counted an imported or legacy note that was nothing but whitespace as
+ * writing, and drew it as one: a "Notes" chip with a number under it and a
+ * row with nothing on it.
+ */
+const hasNote = (mark: { readonly note: string }): boolean => mark.note.trim() !== ''
+
+/** The one sentence for a marks file that would not read, wherever it stands. */
+const UNREADABLE_MARKS =
+  "This book's marks file could not be read. It is left as it is, and marks made now are not being saved over it."
+/** The cross-book scan failed — said instead of the empty state, never beside it. */
+export const SCAN_FAILED_MARKS = 'Your marks could not be read'
 import type { MarksView } from '../hooks/useMarks'
 import { comboFor } from '../panes'
 import { FilterChips } from './FilterChips'
@@ -99,7 +115,7 @@ function matches(mark: Mark, filter: KindFilter): boolean {
      * chip means, and "notes" meaning "anything with writing on it" is the
      * whole rule. */
     case 'Notes':
-      return isAnnotation(mark) && mark.note !== ''
+      return isAnnotation(mark) && hasNote(mark)
     case 'Marks':
       return mark.kind === 'highlight'
     case 'Bookmarks':
@@ -331,6 +347,12 @@ export interface MarginaliaProps {
      * fine". The desktop's `MarksView` always answers.
      */
     readonly unreadable?: MarksView['unreadable']
+    /** Whether the cross-book scan is still running — optional for the same
+     *  reason `unreadable` is: the browser client's wire-fed store has no
+     *  scan, and never reports one. */
+    readonly scanning?: MarksView['scanning']
+    /** Optional for the same reason as `scanning`. */
+    readonly scanFailed?: MarksView['scanFailed']
     /**
      * ⚠️ OPTIONAL, AND ABSENT MEANS THE NOTE IS READ-ONLY.
      *
@@ -358,7 +380,9 @@ export interface MarginaliaProps {
    * cannot answer that shape, and a stub returning a fabricated card would put
    * a made thing on screen that the shelf never received.
    */
-  cards?: CardsView | undefined
+  /* `make` is all this panel asks of the cards — the whole `CardsView` coupled
+   * it to card state and verbs it never reads. */
+  cards?: Pick<CardsView, 'make'> | undefined
   /** The open book, so its marks can be shown first. Null when none is open. */
   bookId: string | null
   /**
@@ -558,6 +582,11 @@ export function Marginalia({
     honoured.current = focus.nonce
     setRevealed(focus.id)
     if (!matches(target, filter)) setFilter('All')
+    /* AND THE SCOPE, on the same reasoning as the kind filter: a request for
+       a mark in ANOTHER book, arriving while the panel was scoped to this
+       one, was marked honoured with its row hidden — a click that did
+       nothing, again. */
+    if (scope === 'This book' && bookId && target.bookId !== bookId) setScope('All books')
     if (focus.edit) setEditing(focus.id)
     /* After paint, so the row exists to scroll to when the filter just
        changed. Not cancelled when the deps change — a later republish would
@@ -570,7 +599,7 @@ export function Marginalia({
     onFocusDone?.(focus.nonce)
     // `filter` is deliberately absent: this reacts to a focus request, not to
     // the reader changing the filter themselves afterwards.
-  }, [focus, everything, onFocusDone])
+  }, [focus, everything, onFocusDone, scope, bookId])
   useEffect(() => () => cancelAnimationFrame(frame.current), [])
 
   /* Counted from what exists rather than written as prose: the fixture said
@@ -585,24 +614,42 @@ export function Marginalia({
          canonicalisation existed would have been counted as a piece of
          writing. Two guards for one invariant, deliberately: the store's is
          the fix and this is the surface refusing to depend on it. */
-      notes: inScope.filter((mark) => isAnnotation(mark) && mark.note !== '').length,
+      notes: inScope.filter((mark) => isAnnotation(mark) && hasNote(mark)).length,
       places: inScope.filter(isBookmark).length,
     }),
     [inScope],
   )
 
   if (everything.length === 0) {
+    /* NOT YET AN ANSWER. The cross-book scan costs a read per book and the
+       panel mounts before it lands, so "Nothing kept yet" stood over a
+       library that had not finished being read — a false empty state for as
+       long as the scan took, which on a large shelf is long enough to believe. */
+    if (marks.scanning) {
+      return (
+        <div className={styles.empty}>
+          <div className={styles.emptyBody}>Reading your marks…</div>
+        </div>
+      )
+    }
+    /* A FAILED SCAN IS NOT AN EMPTY SHELF. The store used to install `[]`
+       on a failed read and this branch said "Nothing kept yet" over marks
+       that were there and could not be read — the same false sentence the
+       unreadable case below guards against, one level up (audit #101/#477). */
+    if (marks.scanFailed) {
+      return (
+        <div className={styles.empty}>
+          <div className={styles.emptyTitle}>{SCAN_FAILED_MARKS}</div>
+          <div className={styles.emptyBody}>Nothing on disk has been changed. Close and reopen the panel to try again.</div>
+        </div>
+      )
+    }
     return (
       <div className={styles.empty}>
         {/* THE CASE THIS MATTERS MOST IN: a reader whose marks file is damaged
             reaches exactly this branch, and "Nothing kept yet" is the one
             sentence that must not stand alone over it (WI-20.36). */}
-        {marks.unreadable && (
-          <div className={styles.emptyBody}>
-            This book's marks file could not be read. It is left as it is, and marks made now are
-            not being saved over it.
-          </div>
-        )}
+        {marks.unreadable && <div className={styles.emptyBody}>{UNREADABLE_MARKS}</div>}
         <div className={styles.emptyTitle}>Nothing kept yet</div>
         <div className={styles.emptyBody}>
           Select a passage and choose Mark — notes you write on a mark appear
@@ -638,10 +685,7 @@ export function Marginalia({
           alone, and this says so. */}
       {marks.unreadable && (
         <div className={styles.panelMeta}>
-          <span>
-            This book's marks file could not be read. It is left as it is, and marks made now are
-            not being saved over it.
-          </span>
+          <span>{UNREADABLE_MARKS}</span>
         </div>
       )}
 

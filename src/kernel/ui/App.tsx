@@ -240,9 +240,24 @@ export function App({
    * dropped afterwards, and landed on top of the one they had chosen. */
   const openGenerations = useRef(createGenerations())
 
+  /**
+   * What to undo if the open now starting never lands — see the arming site
+   * in `goToJump` and the fuller note above `openFailed`.
+   *
+   * DECLARED HERE, above `openBook`, because every open OWNS this ref for its
+   * own duration: an open that starts clears or re-arms it. It used to be
+   * armed by the jump and cleared only by the jump's own landing — so a jump
+   * superseded by a direct open left its rollback loaded, and a LATER,
+   * unrelated open failure fired it, clearing a jump hint and an override
+   * that belonged to somebody else.
+   */
+  const undoOpen = useRef<(() => void) | null>(null)
+
   const openBook = useCallback(
     (source: File | string, path: string | null = null) => {
       openGenerations.current.claim()
+      /* A direct open supersedes whatever rollback a pending open armed. */
+      undoOpen.current = null
       dispatch({ type: 'goScreen', screen: 'reader' })
       /* Handed over WITH its source rather than set directly, so the effect that
        * notices the new source is the single place the path is decided. Set here
@@ -349,10 +364,10 @@ export function App({
    * a failed jump moved a later, unrelated open to the wrong place.
    *
    * A ref rather than a dependency because `openStored` is declared eight
-   * hundred lines above the state it has to undo. It is set immediately before
-   * the read and consumed by whichever settles first.
+   * hundred lines above the state it has to undo. It is armed by the open
+   * that starts (`openStored`'s `undo` argument) and consumed by whichever
+   * settles first; the ref itself is declared above `openBook`, which see.
    */
-  const undoOpen = useRef<(() => void) | null>(null)
   const openFailed = useCallback(() => {
     const undo = undoOpen.current
     undoOpen.current = null
@@ -360,9 +375,13 @@ export function App({
   }, [])
 
   const openStored = useCallback(
-    (entry: IndexedBook) => {
+    (entry: IndexedBook, undo?: () => void) => {
       if (!fs) return
       const fresh = openGenerations.current.claim()
+      /* THIS open owns the rollback slot now: armed with its own undo, or
+       * cleared — a stale rollback from a superseded open must never fire on
+       * this one's failure. */
+      undoOpen.current = undo ?? null
       const name = storedBookName(entry)
       void readOwnedBook(fs, contentPathIn(entry.bookId, name), name)
         .then((file) => {
@@ -669,7 +688,16 @@ export function App({
 
   const addBooks = useCallback(() => {
     void pickBooks()
-      .then((picked) => addAndOpen(picked))
+      .then((picked) =>
+        /* ITS OWN CATCH, so the sentence matches the stage. One catch over
+         * both used to answer a rejected ADD with "The file picker failed" —
+         * files had been selected and partly copied, and the reader was sent
+         * to re-pick them. */
+        addAndOpen(picked).catch((cause: unknown) => {
+          console.error('Paper: could not add the picked books', cause)
+          setImportNotice('Those books could not be added.')
+        }),
+      )
       .catch((cause: unknown) => {
         /* SAID, not only logged. A cancelled picker resolves empty, so
          * reaching here is a real failure — and a reader whose "Add books"
@@ -722,7 +750,11 @@ export function App({
         books.map((file) => ({ file, path: null })),
         notes.length ? notes.join(' ') : undefined,
       ).catch((cause: unknown) => {
+        /* SAID, like every other route in. The drop was the one intake whose
+         * failure went to the console alone — the silent-failure shape this
+         * callback's own header says it exists to remove. */
         console.error('Paper: could not add what was dropped', cause)
+        setImportNotice('Those books could not be added.')
       })
     },
     [addAndOpen],
@@ -739,10 +771,18 @@ export function App({
    * tells the shell it may release what it held (`openedFiles.ts`). */
   useEffect(() => {
     if (!openRequests) return
+    /* IN ORDER, one launch at a time. Two deliveries close together — the
+     * reader double-clicks A, then B — used to run concurrently, and a slow
+     * A (a big PDF off a network volume) could finish its `addAndOpen` AFTER
+     * B's, leaving A open when B was the later ask. The chain survives a
+     * failure: one launch that cannot be read must not dam the next. */
+    let chain: Promise<void> = Promise.resolve()
     return openRequests.subscribe((paths) => {
-      void takeOpened(paths, { addAndOpen, notice: setImportNotice }).catch((cause: unknown) => {
-        console.error('Paper: could not open what the launch carried', cause)
-      })
+      chain = chain
+        .then(() => takeOpened(paths, { addAndOpen, notice: setImportNotice }))
+        .catch((cause: unknown) => {
+          console.error('Paper: could not open what the launch carried', cause)
+        })
     })
   }, [openRequests, addAndOpen])
 
@@ -836,7 +876,14 @@ export function App({
           },
         },
       )
-    })()
+    })().catch((cause: unknown) => {
+      /* THE TERMINAL CATCH. `run` reports its own failures through
+       * `onFailure`, but its settle — the shelving handover — can still
+       * reject past that, and a detached IIFE turned it into an unhandled
+       * rejection with no notice anywhere. */
+      console.error('Paper: the folder import failed to settle', cause)
+      setImportNotice('That folder could not be imported.')
+    })
   }, [importFs, imports])
 
 
@@ -1237,18 +1284,19 @@ export function App({
         setImportNotice('That book is no longer on your shelf.')
         return false
       }
-      /* ARMED BEFORE THE READ, consumed if it fails. The override and the
+      /* ARMED WITH THE READ, consumed if it fails. The override and the
          "← Back to …" line are both committed here on the assumption that the
          open lands, and it can fail seconds later — missing content, an origin
          that has moved. Without this the override stayed armed and was spent
          by the NEXT book the reader opened, sending it to a place from a book
-         they never reached. */
-      undoOpen.current = () => {
+         they never reached. Handed to `openStored` rather than written to the
+         ref here, so the open that carries it is the only one that can be
+         rolled back by it. */
+      setOpenAt(target)
+      openStored(row, () => {
         setOpenAt(null)
         setReturnTo(null)
-      }
-      setOpenAt(target)
-      openStored(row)
+      })
       return true
     },
     [book, library.books, openStored, setReturnTo],

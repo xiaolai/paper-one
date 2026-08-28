@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import { findMark } from '../../core/markMatch'
 import type { Annotation, MarkAppearance } from '../../core/marks'
 import type { SelectionSnapshot } from '../reader/session'
@@ -92,20 +92,28 @@ export function useMarking(book: Book, marks: MarksView): Marking {
 
   /* A section render rebuilds its overlay and re-resolves every mark in it, so
    * ranges from the previous document are stale the moment a new one loads.
-   * Clearing here is what stops a note from the last chapter being measured
-   * against this one's layout. */
-  useEffect(() => {
+   * Clearing is what stops a note from the last chapter being measured
+   * against this one's layout.
+   *
+   * DURING RENDER, NOT IN AN EFFECT. An effect runs after paint, so the first
+   * render that saw a new `doc` still published the OLD document's ranges and
+   * selection: children measured detached Ranges against a layout they never
+   * belonged to, and the selection popup drew for a frame over a chapter that
+   * had just been replaced. This is React's own pattern for state that
+   * follows a prop — set it while rendering and React re-renders before
+   * anything commits, so no frame carries the mismatch.
+   *
+   * And the selection with the ranges. A `SelectionSnapshot` holds a Range in
+   * the document that has just been replaced, plus the CFI and section index
+   * it was resolved under. Kept across the change it is worse than stale:
+   * marking from it writes the OLD chapter's anchor against the new chapter's
+   * label — a note that points at one passage and says it came from another. */
+  const [rangesDoc, setRangesDoc] = useState(doc)
+  if (rangesDoc !== doc) {
+    setRangesDoc(doc)
     setRanges(new Map())
-    /* And the selection with them.
-     *
-     * A `SelectionSnapshot` holds a Range in the document that has just been
-     * replaced, plus the CFI and section index it was resolved under. Kept
-     * across the change it is worse than stale: the selection popup stays up
-     * over the new chapter, and marking from it writes the OLD chapter's
-     * anchor against the new chapter's label — a note that points at one
-     * passage and says it came from another. */
     setSelection(null)
-  }, [doc])
+  }
 
   const onMarkDrawn = useCallback((cfi: string, range: Range) => {
     setRanges((prev) => {

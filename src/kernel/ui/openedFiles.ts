@@ -36,7 +36,8 @@ export interface OpenRequests {
 
 /** What one launch yielded: the books that read, and how many did not. */
 export interface OpenedHaul {
-  readonly books: PickedBook[]
+  /** Deeply readonly: a haul is a fact about one launch, not a worklist. */
+  readonly books: readonly PickedBook[]
   /** Paths that could not be read. Distinct from "not a book" — the shell
    *  already kept only books, so a miss here is a real failure. */
   readonly unreadable: number
