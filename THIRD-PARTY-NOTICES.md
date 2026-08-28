@@ -16,11 +16,12 @@ their own licences, whose terms require this notice to travel with every copy.
 
 ## JavaScript libraries
 
-The application code every build ships. Each licence is reproduced whole
-below, under the packages it covers; where a package offers a choice of
-terms, the table names the ones this copy travels under. A dependency that
-reaches no build is not listed — `scripts/lib/notices.mjs` records which,
-and the notices test holds this list against `package.json`.
+The application code every build ships — the packages Paper depends on and
+the ones those bring with them. Each licence is reproduced whole below,
+under the packages it covers; where a package offers a choice of terms, the
+table names the ones this copy travels under. A dependency that reaches no
+build is not listed — `scripts/lib/notices.mjs` records which, and the
+notices test walks what is installed to hold this list to it.
 
 | Package | Version | Licence |
 | --- | --- | --- |
@@ -32,8 +33,9 @@ and the notices test holds this list against `package.json`.
 | `@tauri-apps/api` | 2.11.1 | MIT |
 | `@tauri-apps/plugin-dialog` | 2.7.2 | MIT |
 | `@tauri-apps/plugin-fs` | 2.5.1 | MIT |
+| `scheduler` | 0.27.0 | MIT |
 
-### `react`, `react-dom`
+### `react`, `react-dom`, `scheduler`
 
 MIT, reproduced whole:
 

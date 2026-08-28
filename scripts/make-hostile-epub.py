@@ -367,7 +367,9 @@ def main() -> None:
         "--origin",
         default=None,
         help=(
-            "the client's origin, e.g. https://192.168.1.9:7433 or tauri://localhost. "
+            "the client's origin, e.g. https://192.0.2.9:7433 — RFC 5737 reserves "
+            "that range for documentation, and a real one is the LAN address the "
+            "phone reaches — or tauri://localhost. "
             "ABSOLUTE, because the book is loaded from a blob: URL and nothing "
             "relative can resolve against one. Without it the script-free framing "
             "probe is emitted disabled rather than emitted broken."
