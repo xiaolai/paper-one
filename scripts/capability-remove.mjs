@@ -332,11 +332,44 @@ function gitRmCached(root, rel) {
  * that then fails `cargo fmt --check` would present the operation as
  * broken; `--no-rustfmt` skips this for a tree without a toolchain.
  */
+/**
+ * Whether `rustfmt` can actually run here — one answer, for the code and its tests.
+ *
+ * EXPORTED SO THERE IS ONLY ONE. The test beside this had its own copy of the
+ * question (`spawnSync('rustfmt', ['--version']).status === 0`) and chose which
+ * assertion to make from it, while `runRustfmt` decided the same thing from
+ * `result.error` alone. On any machine where the two agree — every Mac and
+ * Linux box this has run on — nothing shows. On `windows-latest`, where the
+ * rustup shim is present and the component is not, the probe said "unavailable"
+ * and the code said "refused", and the case failed on the difference between
+ * two spellings of one fact.
+ *
+ * A tool whose `--version` does not answer cannot format anything, whatever the
+ * reason, so this is the honest question in both places.
+ */
+export function rustfmtAvailable() {
+  const probe = spawnSync('rustfmt', ['--version'], { encoding: 'utf8' })
+  return probe.error === undefined && probe.status === 0
+}
+
 export function runRustfmt(text, libPath) {
   const dir = path.dirname(libPath)
   const tmp = path.join(dir, `.lib.rs.capability-remove.${process.pid}.rs`)
   writeFileSync(tmp, text)
   try {
+    /* ASKED WHETHER IT CAN RUN BEFORE BEING ASKED WHAT IT THINKS, because the
+       two answers were being confused for one another. `result.error` catches
+       only a MISSING binary, and `rustfmt` on a machine with rustup is never
+       missing — it is a shim, always present, which fails with a non-zero
+       status when the component is not installed for the active toolchain.
+       That took the second branch, so a reader with no rustfmt was told
+       "rustfmt refused the edited lib.rs" and shown a rustup message about
+       components: the tool blaming their code for its own absence.
+       `windows-latest` is exactly that machine — this repository's Windows CI
+       leg installs no `rustfmt` component, where the macOS and Linux legs do. */
+    if (!rustfmtAvailable()) {
+      throw new RemovalRefused('rustfmt is not available; install it (rustup component add rustfmt) or pass --no-rustfmt')
+    }
     const result = spawnSync('rustfmt', ['--edition', '2021', tmp], { encoding: 'utf8' })
     if (result.error) throw new RemovalRefused(`rustfmt is not available (${result.error.code}); install it or pass --no-rustfmt`)
     if (result.status !== 0) throw new RemovalRefused(`rustfmt refused the edited lib.rs:\n${result.stderr.trim()}`)

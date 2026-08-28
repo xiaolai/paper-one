@@ -261,7 +261,13 @@ describe('the walk', () => {
       'pkg/index.ts': "import { a } from '@tauri-apps/api/core'\nexport const x = a",
       'top.ts': "import { x } from './pkg'\nexport const y = x",
     })
-    expect(blockedFiles(root, 'top.ts')).toEqual([join('pkg', 'index.ts')])
+    /* SPELLED WITH A FORWARD SLASH, not built with `join`. A module path is
+       reported the way this repository writes one, and `join` gives
+       `pkg\\index.ts` on Windows — so this asserted the HOST's separator and
+       agreed with the bug its sibling case exists for. Same shape as the
+       `defaultDataDir` expectation: a test and a defect matching each other
+       everywhere except on the platform where neither had run. */
+    expect(blockedFiles(root, 'top.ts')).toEqual(['pkg/index.ts'])
   })
 
   /* A CYCLE MUST NOT HANG. Kernel modules import each other freely and a walk

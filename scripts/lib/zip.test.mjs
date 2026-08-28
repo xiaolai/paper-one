@@ -1,9 +1,9 @@
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path, { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { afterAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { UNREADABLE, matchesPattern, readMatching, writeDeflatedZip, writeZip } from './zip.mjs'
 
 const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url))
@@ -188,40 +188,89 @@ describe('the writers take bytes as readily as text', () => {
 })
 
 /**
- * AGAINST THE TOOL IT REPLACED, on the book in this repository.
+ * AGAINST THE TOOL IT REPLACED.
  *
  * This module exists because `unzip` does not ship with Windows, and a
- * replacement for a tool is only worth having if it answers the same. Byte for
- * byte, including the case that cost a silent under-report once: asked for
- * `*.xhtml *.html *.htm`, `unzip` EXITS 11 while writing every matching member
- * to stdout, because 11 means "some pattern matched nothing" rather than "none
- * did".
+ * replacement for a tool is only worth having if it answers the same thing.
+ * Byte for byte, including the case that cost a silent under-report once:
+ * asked for two patterns where only one matches, `unzip` EXITS 11 while
+ * writing every matching member to stdout, because 11 means "some pattern
+ * matched nothing" rather than "none did".
  *
- * Skipped at RUN time where `unzip` is absent — never with `skipIf`, which
- * does not collect the name, and `tests/ledger.json` is one file for all three
- * platforms.
+ * ⚠️ **THE FIXTURE IS BUILT HERE, NOT TAKEN FROM `public/`.** This first read
+ * `public/sample.epub`, which is GITIGNORED — so it passed on the machine that
+ * wrote it and failed on all three CI legs at once, macOS included, for a file
+ * no fresh checkout has. That is the second time in this branch that a case
+ * leaned on something only a working machine carries; the first was a fixture
+ * planting into `public/` and `bin/`. A test's inputs have to come from the
+ * repository or from the test.
+ *
+ * Deflated and nested, because that is what a real book is: STORE-only or flat
+ * members would agree trivially and prove nothing about the `inflateRaw` path
+ * or about `*` crossing a separator.
+ *
+ * Skipped at RUN time where `unzip` is absent — never with `skipIf`, which does
+ * not collect the name, and `tests/ledger.json` is one file for all platforms.
  */
 describe('the reader agrees with unzip', () => {
-  const book = path.join(REPO_ROOT, 'public', 'sample.epub')
-  const unzipAt = (patterns) => spawnSync('unzip', ['-p', book, ...patterns], { maxBuffer: 64 * 1024 * 1024 })
+  const BOOK = [
+    ['mimetype', 'application/epub+zip'],
+    ['META-INF/container.xml', '<container/>'],
+    ['OEBPS/content.opf', '<package/>'],
+    ['OEBPS/styles/main.css', 'p { font-size: 1rem }\n'.repeat(40)],
+    ['OEBPS/styles/extra.css', 'em { font-style: italic }\n'.repeat(40)],
+    ['OEBPS/text/one.xhtml', '<p>one</p>\n'.repeat(40)],
+    ['OEBPS/text/two.xhtml', '<p>two</p>\n'.repeat(40)],
+  ]
+  const noUnzip = () => spawnSync('unzip', ['-v']).error !== undefined
+  let book
+  beforeAll(() => {
+    book = archive(writeDeflatedZip(BOOK))
+  })
 
-  it.each([[['*.css']], [['*.opf']], [['*.xhtml', '*.html', '*.htm']], [['*.nosuchthing']]])(
-    'answers what `unzip -p %j` writes',
-    (patterns, { skip } = {}) => {
-      if (spawnSync('unzip', ['-v']).error) return skip?.('unzip is not installed here')
-      const theirs = unzipAt(patterns)
+  it('answers exactly what `unzip -p` writes, for every shape of pattern', ({ skip }) => {
+    /* ONE CASE OVER FIVE PATTERN SETS, not `it.each`: the each-callback does
+       not receive the test context in this version, so `{ skip }` came through
+       undefined and the run-time skip could not be written. A loop keeps one
+       collected name and still names the pattern set that disagreed. */
+    if (noUnzip()) skip('unzip is not installed here')
+    for (const patterns of [['*.css'], ['*.opf'], ['*.xhtml', '*.html', '*.htm'], ['*.nosuchthing'], ['mimetype', '*.css']]) {
+      const theirs = spawnSync('unzip', ['-p', book, ...patterns], { maxBuffer: 64 * 1024 * 1024 })
       const mine = readMatching(book, patterns)
-      expect(mine).not.toBe(UNREADABLE)
-      expect(Buffer.concat(mine).equals(theirs.stdout)).toBe(true)
-    },
-  )
+      expect(mine, patterns.join(' ')).not.toBe(UNREADABLE)
+      expect(Buffer.concat(mine).equals(theirs.stdout), patterns.join(' ')).toBe(true)
+    }
+  })
 
-  it('reads a book unzip cannot be asked about the same way, and still agrees on the count', ({ skip }) => {
-    if (spawnSync('unzip', ['-v']).error) skip('unzip is not installed here')
-    /* The exit-11 trap, named: four members written, failure reported. */
-    const theirs = unzipAt(['*.xhtml', '*.html', '*.htm'])
+  it('agrees on the case where unzip writes every member AND reports failure', ({ skip }) => {
+    if (noUnzip()) skip('unzip is not installed here')
+    /* The exit-11 trap, reproduced rather than described: two patterns, one of
+       which matches nothing. `unzip` writes both stylesheets and exits 11, so
+       a caller reading the STATUS concludes the book has no CSS. Reading the
+       OUTPUT is the only honest signal, and this reader has no status at all. */
+    const patterns = ['*.css', '*.nosuchthing']
+    const theirs = spawnSync('unzip', ['-p', book, ...patterns], { maxBuffer: 64 * 1024 * 1024 })
     expect(theirs.status).toBe(11)
     expect(theirs.stdout.length).toBeGreaterThan(0)
-    expect(Buffer.concat(readMatching(book, ['*.xhtml', '*.html', '*.htm'])).equals(theirs.stdout)).toBe(true)
+    const mine = readMatching(book, patterns)
+    expect(mine).not.toBe(UNREADABLE)
+    expect(mine).toHaveLength(2)
+    expect(Buffer.concat(mine).equals(theirs.stdout)).toBe(true)
+  })
+
+  /* AND AGAINST A REAL BOOK WHERE THERE IS ONE. `public/sample.epub` is
+     gitignored, so this is present on a working machine and absent from every
+     clean checkout — which is why it is an EXTRA case and not the basis of the
+     ones above. */
+  it('agrees with unzip on a real book, where the machine has one', ({ skip }) => {
+    if (noUnzip()) skip('unzip is not installed here')
+    const real = path.join(REPO_ROOT, 'public', 'sample.epub')
+    if (!existsSync(real)) skip('no sample.epub in this checkout — it is gitignored')
+    for (const patterns of [['*.css'], ['*.opf'], ['*.xhtml', '*.html', '*.htm']]) {
+      const theirs = spawnSync('unzip', ['-p', real, ...patterns], { maxBuffer: 64 * 1024 * 1024 })
+      const mine = readMatching(real, patterns)
+      expect(mine, patterns.join(' ')).not.toBe(UNREADABLE)
+      expect(Buffer.concat(mine).equals(theirs.stdout), patterns.join(' ')).toBe(true)
+    }
   })
 })
