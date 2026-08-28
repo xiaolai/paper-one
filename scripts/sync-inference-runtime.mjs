@@ -1,30 +1,75 @@
 #!/usr/bin/env node
 /**
- * Stage the inference runtime (`lemond`) into `vendor/inference/current/`.
+ * Stage the inference runtime — `lemond` AND its llama.cpp backend — into
+ * `vendor/inference/current/`, under a per-file manifest.
  *
- * WI-15.0's missing half. `tauri-plugin-inference` resolves the daemon from
- * the bundle — `resource_dir()/runtime/lemond`, never from `PATH`, because a
- * `PATH` lookup is the reader's shell deciding which binary Paper supervises
- * and that one is handed a bearer token and a backend installer. So something
- * has to put it there, and this is it.
+ * WI-15.0's missing half, and WI-20.24's. `tauri-plugin-inference` resolves
+ * the daemon from the bundle — `resource_dir()/runtime/lemond`, never from
+ * `PATH`, because a `PATH` lookup is the reader's shell deciding which binary
+ * Paper supervises and that one is handed a bearer token and a backend
+ * installer. So something has to put it there, and this is it.
+ *
+ * # The backend is staged too, and that is the point of WI-20.24
+ *
+ * The staged tree used to hold `lemond` alone. The backend it actually runs
+ * — `llama-server` and the ten `@rpath` libraries beside it, sixty-two files
+ * on macOS — was fetched by the daemon from GitHub inside the FIRST GLOSS,
+ * with no hash Paper controlled, needing the network, and `spawn.rs` called
+ * it "the vetted builtin". Upstream publishes neither signatures nor a
+ * codesign step; `lemond`'s own checksum table has no llama.cpp entry; and a
+ * file libcurl downloaded carries no quarantine flag, so Gatekeeper never
+ * looks at it. Only a hash Paper records itself stands between GitHub and
+ * `exec`. So the archive pinned below is unpacked beside `lemond`, and the
+ * plugin is told `no_fetch_executables: true` and where the executable is.
  *
  * # Why a download rather than a committed binary
  *
- * Four platforms × ~6 MB of compiled artifact is not a thing to keep in git
+ * Four platforms × ~40 MB of compiled artifact is not a thing to keep in git
  * history, and `vendor/pdfjs/` sets the precedent for staged-not-committed
  * (see `.gitignore`). The safety that a committed binary would buy — you can
- * see exactly what ships — is bought instead by the DIGEST TABLE below, which
- * is committed, reviewable, and checked on every run.
+ * see exactly what ships — is bought instead by the DIGEST TABLES below,
+ * which are committed, reviewable, and checked on every run.
  *
- * # The digest is the whole point
+ * # Two digests, two jobs
  *
- * Each archive is verified against a pinned SHA-256 before anything is
+ * Each ARCHIVE is verified against a pinned SHA-256 before anything is
  * unpacked. A mismatch FAILS THE BUILD rather than warning: this is an
  * executable Paper will launch with a credential, and "the download looked
- * different today" is the one case where carrying on is indefensible.
+ * different today" is the one case where carrying on is indefensible. Every
+ * archive digest below was computed from the bytes actually fetched from the
+ * GitHub release — `lemond` on 2026-08-23, the backend on 2026-08-28 — and
+ * the backend's also match the per-asset digests GitHub now publishes.
  *
- * Every digest below was computed from the bytes actually fetched from the
- * GitHub release on 2026-08-23, not read off a release page.
+ * Then every FILE of the unpacked tree is recorded in `runtime.manifest.json`
+ * — size and SHA-256 each — which the plugin reads back and checks against
+ * the tree BEFORE EVERY SPAWN (`runtime.rs`). A byte flipped in a library, a
+ * file missing, or a file the manifest never heard of, refuses the launch
+ * and names itself. The manifest is what the reader's machine can verify;
+ * the archive digest is what this build could.
+ *
+ * # No symlinks, and the reason is measured
+ *
+ * The llama.cpp archives carry each library as a versioned file plus
+ * bare-name symlinks to it (`libggml.dylib → libggml.0.dylib`). The first
+ * draft recorded a link by its target — and `tauri-build` copies resources
+ * with `fs::copy`, which DEREFERENCES: `target/debug/runtime/` held a
+ * 59 872-byte regular file where the staged tree held a link, and would have
+ * failed its own manifest on the first spawn. So every link is turned into
+ * the file it named before the manifest is built (`dereferenceLinks`), the
+ * manifest lists regular files only, and the plugin refuses a link anywhere
+ * in the tree. The bundle is byte-for-byte what it would have been; only
+ * `vendor/` grows, by the copies the bundle would have made anyway.
+ *
+ * # Replaced by rename, never in place
+ *
+ * macOS caches a Mach-O's signature in the kernel by inode and does not
+ * flush it when the bytes change (Apple, "Updating Mac software"), so
+ * overwriting a staged binary is how a "killed: 9" appears after a re-stage.
+ * The new tree is built whole under `current.staging`, the old one is moved
+ * to `current.previous`, the new one takes the name, and only then is the
+ * old one removed. An interrupted run leaves one or both behind; they are
+ * swept before the next run begins, so a stale `.previous` cannot outlive
+ * the run that made it.
  *
  * # It is not fatal to be unable to fetch
  *
@@ -33,14 +78,30 @@
  * ABSENT IS A NORMAL STATE. The plugin reports `Absent`, the settings section
  * says `Not installed`, and the Codex and Claude routes — which need no
  * download at all — go on working. A sync script that failed the build here
- * would do exactly what F2 spends a page forbidding.
+ * would do exactly what F2 spends a page forbidding. A runtime staged WITHOUT
+ * its backend is not staged at all: with fetching forbidden it could not
+ * answer, and a stamp that said otherwise would be a lie the plugin cannot
+ * see through.
  */
 
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  copyFileSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { isProcessEntry } from './lib/entry.mjs'
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
 
@@ -91,10 +152,84 @@ export const ARTIFACTS = Object.freeze({
 
 const RELEASE = `https://github.com/lemonade-sdk/lemonade/releases/download/v${VERSION}`
 
+/**
+ * The llama.cpp build the backend is pinned to.
+ *
+ * `lemond`'s OWN pin for the metal and cpu backends — `llamacpp.metal` and
+ * `llamacpp.cpu` in the staged `resources/backend_versions.json` — so what
+ * ships is the build the daemon would have fetched, not a different version
+ * that happened to be current when this was written. Bump it with `VERSION`,
+ * and read it off the new runtime's file rather than off a release page.
+ */
+export const LLAMACPP_TAG = 'b10375'
+
+/**
+ * One backend per platform: the one `lemond` picks on a machine with no
+ * GPU, which is the one that runs everywhere the platform does.
+ *
+ * `metal` on Apple silicon is the whole story there. `cpu` on Linux and
+ * Windows is a decision rather than an oversight: `lemond`'s `auto` would
+ * pick `vulkan` or `cuda` on a machine with the GPU for it, and those would
+ * be a second staged directory each (32–35 MB for Vulkan, 250 MB for CUDA)
+ * behind a detection Paper does not make at build time. Adding one is a row
+ * here and nothing else; until then a GPU on those platforms is not used.
+ *
+ * `sha256` is of the ARCHIVE, computed from the bytes fetched on 2026-08-28,
+ * and equal to the digest GitHub publishes for the asset. `server` is the
+ * executable `lemond` is pointed at — `llamacpp.<backend>_bin` takes the
+ * executable's path and execs it directly.
+ */
+export const BACKENDS = Object.freeze({
+  'darwin-arm64': {
+    backend: 'metal',
+    asset: `llama-${LLAMACPP_TAG}-bin-macos-arm64.tar.gz`,
+    sha256: 'ebbeed128cde32077c5b430feafe57ce20b1bca545f430ff142472014f03bcec',
+    server: 'llama-server',
+  },
+  'linux-x64': {
+    backend: 'cpu',
+    asset: `llama-${LLAMACPP_TAG}-bin-ubuntu-x64.tar.gz`,
+    sha256: 'b6a7ed005240eccd61e1af42debd75b876c639c1416bfa90985fd02618919a88',
+    server: 'llama-server',
+  },
+  'linux-arm64': {
+    backend: 'cpu',
+    asset: `llama-${LLAMACPP_TAG}-bin-ubuntu-arm64.tar.gz`,
+    sha256: '36fb8a1d1836f575db78e56a875d040ddcd19694a60b67f4cce8bb6531d872ac',
+    server: 'llama-server',
+  },
+  'win32-x64': {
+    backend: 'cpu',
+    asset: `llama-${LLAMACPP_TAG}-bin-win-cpu-x64.zip`,
+    sha256: 'c18ad6aa9cef9d119e957472d71e34eb5183848eb9c57f51647fd18692a456c7',
+    server: 'llama-server.exe',
+  },
+})
+
+const LLAMACPP_RELEASE = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMACPP_TAG}`
+
+/** The manifest the plugin verifies the tree against, beside `lemond`. */
+export const MANIFEST_FILE = 'runtime.manifest.json'
+
+/** The manifest format; `runtime.rs` reads the same number. */
+export const MANIFEST_VERSION = 1
+
+/**
+ * Files that may sit in the tree without a manifest entry: the stamp, the
+ * manifest's own slot, and the Finder's droppings. `runtime.rs` ignores the
+ * same three by name; none is loadable.
+ */
+const UNLISTED_BY_DESIGN = new Set(['.version', MANIFEST_FILE, '.DS_Store'])
+
+/** Where a backend's files go under the runtime directory. */
+export function backendDir(backend) {
+  return path.join('backend', 'llamacpp', backend)
+}
+
 /** The key for a platform/arch pair, or null when Paper ships no runtime. */
 export function artifactKey(platform, arch) {
   const key = `${platform}-${arch}`
-  return Object.hasOwn(ARTIFACTS, key) ? key : null
+  return Object.hasOwn(ARTIFACTS, key) && Object.hasOwn(BACKENDS, key) ? key : null
 }
 
 /** Lowercase hex SHA-256 of a buffer. */
@@ -103,7 +238,17 @@ export function sha256(bytes) {
 }
 
 /**
- * Whether `dir` already holds this version's runtime.
+ * What the stamp says for a fully staged tree. It names the backend pin as
+ * well as the runtime's, so a tree staged before the backend was part of it
+ * reads as NOT staged and `predev` re-stages it rather than shipping a
+ * runtime that cannot answer under `no_fetch_executables`.
+ */
+export function stampFor(key) {
+  return `${VERSION} ${key} llamacpp-${LLAMACPP_TAG} ${BACKENDS[key].backend}`
+}
+
+/**
+ * Whether `dir` already holds this version's runtime and backend.
  *
  * Keyed on the STAMP file rather than on the executable's presence: a
  * half-unpacked directory has the executable and the wrong `resources/`, and
@@ -113,9 +258,158 @@ export function isStaged(dir, key) {
   const stamp = path.join(dir, '.version')
   if (!existsSync(stamp)) return false
   try {
-    return readFileSync(stamp, 'utf8').trim() === `${VERSION} ${key}`
+    return readFileSync(stamp, 'utf8').trim() === stampFor(key)
   } catch {
     return false
+  }
+}
+
+/**
+ * Turn every symbolic link under `root` into the regular file it names —
+ * see the header. A link that resolves outside the tree, or to nothing, is
+ * refused: it is not something the archive was expected to contain, and a
+ * manifest must not be built over it.
+ */
+export function dereferenceLinks(root) {
+  const top = realpathSync(root)
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name)
+      if (entry.isDirectory()) {
+        walk(full)
+      } else if (entry.isSymbolicLink()) {
+        let target
+        try {
+          target = realpathSync(full)
+        } catch (cause) {
+          throw new Error(`${full} links to nothing (${readlinkSync(full)})`, { cause })
+        }
+        if (!target.startsWith(`${top}${path.sep}`) || !lstatSync(target).isFile()) {
+          throw new Error(`${full} links outside the staged tree, to ${target}`)
+        }
+        rmSync(full)
+        copyFileSync(target, full)
+      }
+    }
+  }
+  walk(root)
+}
+
+/**
+ * The manifest for the tree under `root`: every regular file by size and
+ * SHA-256, paths forward-slashed and sorted, and nothing that is unlisted
+ * by design. Pure over the directory.
+ *
+ * Throws on a symbolic link — `dereferenceLinks` runs first, and a link that
+ * reaches here is a tree the plugin would refuse — and when the server
+ * executable the pin names is not in the tree: a manifest that vouches for
+ * a backend with no server is a manifest for a runtime that cannot answer.
+ */
+export function buildManifest(root, { platform, lemonade, llamacpp }) {
+  const files = []
+  const walk = (dir, prefix) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const relative = prefix === '' ? entry.name : `${prefix}/${entry.name}`
+      const full = path.join(dir, entry.name)
+      if (entry.isDirectory()) {
+        walk(full, relative)
+      } else if (entry.isSymbolicLink()) {
+        throw new Error(`${relative} is a symbolic link; the manifest lists regular files only`)
+      } else if (entry.isFile()) {
+        if (UNLISTED_BY_DESIGN.has(relative)) continue
+        const bytes = readFileSync(full)
+        files.push({ path: relative, bytes: bytes.length, sha256: sha256(bytes) })
+      }
+    }
+  }
+  walk(root, '')
+  files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+  if (!files.some((f) => f.path === llamacpp.server)) {
+    throw new Error(`the staged tree has no ${llamacpp.server}; a runtime without its server cannot answer`)
+  }
+  return { version: MANIFEST_VERSION, platform, lemonade, llamacpp: { ...llamacpp }, files }
+}
+
+/**
+ * Remove what an interrupted run may have left: a half-unpacked `.staging`
+ * and a displaced `.previous`. Both are named for `dir`, both are ours, and
+ * neither is the live tree.
+ */
+export function sweepStale(dir) {
+  rmSync(`${dir}.staging`, { recursive: true, force: true })
+  rmSync(`${dir}.previous`, { recursive: true, force: true })
+}
+
+/**
+ * Make `staging` the live tree at `dir`, by rename — see the header. The
+ * displaced tree is removed only once the new one has the name; a failure
+ * between the two renames leaves the old tree under `.previous`, which the
+ * next run sweeps.
+ */
+export function promote(staging, dir) {
+  const previous = `${dir}.previous`
+  rmSync(previous, { recursive: true, force: true })
+  const hadPrevious = existsSync(dir)
+  if (hadPrevious) renameSync(dir, previous)
+  try {
+    renameSync(staging, dir)
+  } catch (cause) {
+    if (hadPrevious) renameSync(previous, dir)
+    throw cause
+  }
+  rmSync(previous, { recursive: true, force: true })
+}
+
+/**
+ * Fetch a release asset and verify it against its pinned digest.
+ *
+ * Unreachable is `null` — absent is a normal state. A digest that does not
+ * match is FATAL, and the one case in this file that is: the bytes were
+ * meant to be executed with a credential.
+ */
+async function fetchVerified(url, expected, label) {
+  let bytes
+  try {
+    const response = await fetch(url)
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    bytes = Buffer.from(await response.arrayBuffer())
+  } catch (cause) {
+    console.warn(
+      `sync-inference-runtime: could not fetch ${label} (${cause instanceof Error ? cause.message : cause}) — the local route will report Absent`,
+    )
+    return null
+  }
+  const digest = sha256(bytes)
+  if (digest !== expected) {
+    console.error(
+      `sync-inference-runtime: ${label} does not match its pinned digest\n  expected ${expected}\n  got      ${digest}`,
+    )
+    process.exit(1)
+  }
+  return bytes
+}
+
+/**
+ * Unpack an archive into `into`, flattening the single wrapper directory
+ * both upstreams put at the top (`lemonade-embeddable-…/`, `llama-b…/`).
+ * A zip has no `--strip-components`, so the wrapper is moved up by hand;
+ * llama.cpp's Windows zips have no wrapper at all, which the same code
+ * handles by finding nothing to flatten.
+ */
+function unpack(archive, into) {
+  mkdirSync(into, { recursive: true })
+  if (archive.endsWith('.zip')) {
+    execFileSync('unzip', ['-q', '-o', archive, '-d', into], { stdio: 'inherit' })
+    const entries = readdirSync(into, { withFileTypes: true })
+    if (entries.length === 1 && entries[0].isDirectory()) {
+      const wrapper = path.join(into, entries[0].name)
+      for (const name of readdirSync(wrapper)) {
+        renameSync(path.join(wrapper, name), path.join(into, name))
+      }
+      rmSync(wrapper, { recursive: true, force: true })
+    }
+  } else {
+    execFileSync('tar', ['xzf', archive, '-C', into, '--strip-components', '1'], { stdio: 'inherit' })
   }
 }
 
@@ -127,73 +421,65 @@ async function main() {
     )
     return
   }
-  const entry = ARTIFACTS[key]
+  const runtime = ARTIFACTS[key]
+  const backend = BACKENDS[key]
   const dir = path.join(REPO_ROOT, VENDOR)
   if (isStaged(dir, key)) {
-    console.log(`sync-inference-runtime: ${key} ${VERSION} already staged`)
+    console.log(`sync-inference-runtime: ${key} ${VERSION} + llama.cpp ${LLAMACPP_TAG} (${backend.backend}) already staged`)
     return
   }
 
-  const url = `${RELEASE}/${entry.asset}`
-  let bytes
-  try {
-    const response = await fetch(url)
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    bytes = Buffer.from(await response.arrayBuffer())
-  } catch (cause) {
-    /* NOT FATAL. See the header: absent is a normal state, and a build with
-       no network must still produce an app whose agent routes work. */
-    console.warn(
-      `sync-inference-runtime: could not fetch ${entry.asset} (${cause instanceof Error ? cause.message : cause}) — the local route will report Absent`,
-    )
-    return
-  }
+  sweepStale(dir)
+  const runtimeBytes = await fetchVerified(`${RELEASE}/${runtime.asset}`, runtime.sha256, runtime.asset)
+  if (runtimeBytes === null) return
+  const backendBytes = await fetchVerified(`${LLAMACPP_RELEASE}/${backend.asset}`, backend.sha256, backend.asset)
+  if (backendBytes === null) return
 
-  const digest = sha256(bytes)
-  if (digest !== entry.sha256) {
-    /* FATAL, and the one case in this file that is. This is an executable
-       Paper launches with a credential and a control plane that installs
-       backends; "the download looked different today" is not something to
-       carry on from. */
-    console.error(
-      `sync-inference-runtime: ${entry.asset} does not match its pinned digest\n  expected ${entry.sha256}\n  got      ${digest}`,
-    )
-    process.exit(1)
-  }
-
-  rmSync(dir, { recursive: true, force: true })
-  mkdirSync(dir, { recursive: true })
-  const archive = path.join(dir, entry.asset)
-  writeFileSync(archive, bytes)
+  const staging = `${dir}.staging`
+  mkdirSync(staging, { recursive: true })
+  const runtimeArchive = path.join(staging, runtime.asset)
+  const backendArchive = path.join(staging, backend.asset)
   try {
-    if (entry.asset.endsWith('.zip')) {
-      /* `--strip-components` for zip does not exist, so the wrapper directory
-         is flattened after the fact. */
-      execFileSync('unzip', ['-q', '-o', archive, '-d', dir], { stdio: 'inherit' })
-      const inner = path.join(dir, entry.asset.replace(/\.zip$/, ''))
-      if (existsSync(inner)) {
-        for (const name of ['lemond.exe', 'lemonade.exe', 'LICENSE', 'resources']) {
-          const from = path.join(inner, name)
-          if (existsSync(from)) execFileSync('mv', [from, path.join(dir, name)])
-        }
-        rmSync(inner, { recursive: true, force: true })
-      }
-    } else {
-      execFileSync('tar', ['xzf', archive, '-C', dir, '--strip-components', '1'], { stdio: 'inherit' })
-    }
+    writeFileSync(runtimeArchive, runtimeBytes)
+    unpack(runtimeArchive, staging)
+    rmSync(runtimeArchive, { force: true })
+    /* The embeddable zip's wrapper carries more than the four names the old
+       flatten moved; `unpack` moves everything, which is what a manifest
+       over the whole tree wants. */
+    writeFileSync(backendArchive, backendBytes)
+    unpack(backendArchive, path.join(staging, backendDir(backend.backend)))
+    rmSync(backendArchive, { force: true })
   } finally {
-    rmSync(archive, { force: true })
+    rmSync(runtimeArchive, { force: true })
+    rmSync(backendArchive, { force: true })
   }
 
-  const exe = path.join(dir, entry.exe)
+  const exe = path.join(staging, runtime.exe)
   if (!existsSync(exe)) {
-    console.error(`sync-inference-runtime: ${entry.asset} unpacked without ${entry.exe}`)
+    console.error(`sync-inference-runtime: ${runtime.asset} unpacked without ${runtime.exe}`)
     process.exit(1)
   }
-  writeFileSync(path.join(dir, '.version'), `${VERSION} ${key}\n`)
-  console.log(`sync-inference-runtime: staged ${key} ${VERSION} into ${VENDOR}`)
+  const serverRelative = `${backendDir(backend.backend).split(path.sep).join('/')}/${backend.server}`
+  const server = path.join(staging, backendDir(backend.backend), backend.server)
+  if (!existsSync(server) || !lstatSync(server).isFile()) {
+    console.error(`sync-inference-runtime: ${backend.asset} unpacked without ${backend.server}`)
+    process.exit(1)
+  }
+
+  dereferenceLinks(staging)
+  const manifest = buildManifest(staging, {
+    platform: key,
+    lemonade: VERSION,
+    llamacpp: { tag: LLAMACPP_TAG, backend: backend.backend, server: serverRelative },
+  })
+  writeFileSync(path.join(staging, MANIFEST_FILE), `${JSON.stringify(manifest, null, 2)}\n`)
+  writeFileSync(path.join(staging, '.version'), `${stampFor(key)}\n`)
+  promote(staging, dir)
+  console.log(
+    `sync-inference-runtime: staged ${key} ${VERSION} + llama.cpp ${LLAMACPP_TAG} (${backend.backend}, ${manifest.files.length} files) into ${VENDOR}`,
+  )
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isProcessEntry(import.meta)) {
   await main()
 }

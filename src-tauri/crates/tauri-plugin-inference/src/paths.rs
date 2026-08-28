@@ -95,6 +95,14 @@ impl Layout {
         let name = format!("{}-{}", safe_component(id)?, safe_component(file)?);
         Ok(self.staging_dir.join(name))
     }
+
+    /// The daemon's process-group record — `lineage.rs`. Under `base` rather
+    /// than the cache, because the cache is the directory Paper may delete to
+    /// fix a bad state, and the record is what makes the next launch able to
+    /// collect a daemon the last one left running.
+    pub fn daemon_record(&self) -> PathBuf {
+        crate::lineage::record_path(&self.base)
+    }
 }
 
 /// A single path component from a closed alphabet.
@@ -132,17 +140,24 @@ pub fn data_root<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf> {
 /// bundled file is missing the answer is [`Error::RuntimeMissing`] — never a
 /// fallback to whatever else answers to the name.
 pub fn bundled_runtime<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf> {
-    let dir = app
-        .path()
-        .resource_dir()
-        .map_err(Error::from)?
-        .join("runtime");
-    let exe = dir.join(runtime_exe_name());
+    let exe = bundled_runtime_dir(app)?.join(runtime_exe_name());
     if exe.is_file() {
         Ok(exe)
     } else {
         Err(Error::RuntimeMissing(exe))
     }
+}
+
+/// The staged runtime directory: `lemond`, its `resources/`, the backend
+/// under `backend/llamacpp/<name>/`, and the manifest that vouches for all
+/// of it (`runtime.rs`). `bundle.resources` in `tauri.conf.json` copies
+/// `vendor/inference/current/` here as `runtime/`.
+pub fn bundled_runtime_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf> {
+    Ok(app
+        .path()
+        .resource_dir()
+        .map_err(Error::from)?
+        .join("runtime"))
 }
 
 /// `lemond`, plus the extension Windows needs.

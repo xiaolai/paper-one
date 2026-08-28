@@ -49,6 +49,7 @@ describe('detailFor', () => {
     expect(detailFor({ kind: 'runtimeMissing' })).toBe('The runtime is not installed')
     expect(detailFor({ kind: 'notReady' })).toBe('The runtime did not start')
     expect(detailFor({ kind: 'digestMismatch' })).toMatch(/nothing was changed/)
+    expect(detailFor({ kind: 'runtimeUnverified' })).toBe('The runtime did not verify — nothing was started')
   })
 
   it('has a sentence for a rejection that is not the plugin’s', () => {

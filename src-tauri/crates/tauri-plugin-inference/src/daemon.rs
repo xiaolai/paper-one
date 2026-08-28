@@ -34,6 +34,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
 use crate::error::{unreachable, Error, Result};
+use crate::lineage::{GroupHold, GroupRecord, OsProcesses, Processes};
 use crate::spawn::SpawnPlan;
 
 /// How long to wait for the daemon to answer its health route before giving
@@ -108,7 +109,10 @@ const MODEL_CEILING: Duration = Duration::from_secs(600);
 /// (`Unload all models` → `Evict all completed` → `Cleanup complete` in the
 /// smoke test's log), and a loaded 2.4 GB model takes a moment to let go of.
 /// Past this, the reader closing the app matters more than a clean unload.
-const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+///
+/// `pub(crate)`: the launch-time recovery of a group a previous Paper left
+/// running (`lineage.rs`) gives it the same grace, for the same reason.
+pub(crate) const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 /// How many lines of the child's output to keep.
 ///
@@ -120,9 +124,13 @@ const LOG_TAIL_LINES: usize = 40;
 /// A running daemon.
 pub struct Daemon {
     child: Child,
-    /// The process group, captured at spawn — see `procgroup::group_of`.
-    /// `Child::id()` is `None` after a reap, and the grace loop reaps.
-    group: Option<u32>,
+    /// The process group, captured at spawn — see `procgroup::group_of`;
+    /// `Child::id()` is `None` after a reap, and the grace loop reaps — and
+    /// the record on disk that names it. Both go when this does, by ANY
+    /// route: `stop` is the ordered teardown, and the hold's `Drop` is what
+    /// still runs when a future is cancelled mid-await or a panic unwinds
+    /// through here (WI-20.23).
+    hold: GroupHold,
     plan: SpawnPlan,
     client: reqwest::Client,
     /// The client for requests a MODEL answers — see `MODEL_SILENCE`.
@@ -191,13 +199,15 @@ impl Daemon {
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            // A Paper that is killed outright must not leave a daemon holding
-            // the port. This is the backstop under the ordered shutdown, not
-            // a replacement for it.
+            // A Paper that EXITS must not leave a daemon holding the port.
+            // This is the backstop under the ordered shutdown, not a
+            // replacement for it — and it does nothing for a Paper that is
+            // killed, which `lineage.rs` and the death signal below are for.
             .kill_on_drop(true);
         crate::procgroup::configure(&mut cmd);
+        arm_death_signal(&mut cmd);
 
-        let mut child = cmd.spawn().map_err(|e| {
+        let mut child = spawn_child(cmd).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 Error::RuntimeMissing(plan.program.clone())
             } else {
@@ -207,6 +217,28 @@ impl Daemon {
 
         #[cfg(windows)]
         let job = crate::procgroup::JobHandle::hold(&child)?;
+
+        /* WRITTEN BEFORE ANYTHING IS AWAITED. A Paper killed between here
+         * and readiness has still spawned a group, and the record is the
+         * only thing the next launch can find it by. Best-effort: a record
+         * that could not be written is logged, and the daemon still runs —
+         * the reader asked for an answer, not for bookkeeping. */
+        let group = crate::procgroup::group_of(&child);
+        let leader = child.id().unwrap_or(0);
+        let record = GroupRecord {
+            pgid: group.unwrap_or(leader),
+            leader_pid: leader,
+            leader_started_at: OsProcesses.started_at(leader).unwrap_or(0),
+            exe: plan.program.clone(),
+            port: plan.port,
+        };
+        if let Err(err) = crate::lineage::write_record(&plan.record_path, &record) {
+            log::warn!(
+                "inference: could not record the runtime's process group at {}: {err}",
+                plan.record_path.display()
+            );
+        }
+        let hold = GroupHold::new(group, plan.record_path.clone());
 
         let log = LogTail::default();
         // Both pipes are drained. Not for the log alone: a child whose stdout
@@ -245,10 +277,9 @@ impl Daemon {
             .build()
             .map_err(|e| unreachable("model client", e))?;
 
-        let group = crate::procgroup::group_of(&child);
         let mut daemon = Daemon {
             child,
-            group,
+            hold,
             plan,
             client,
             model_client,
@@ -488,10 +519,105 @@ impl Daemon {
          * a backend that ignored SIGTERM outlives its parent. Returning early
          * meant the group never received SIGKILL and the model stayed
          * resident. SIGKILL to an empty group is a harmless ESRCH. */
-        if let Err(err) = crate::procgroup::kill(&mut self.child, self.group).await {
+        if let Err(err) = crate::procgroup::kill(&mut self.child, self.hold.group()).await {
             log::warn!("inference: could not kill the runtime group: {err}");
         }
+        // The group is gone, so the record that named it goes too. The hold's
+        // `Drop`, which runs when `self` goes out of scope here, would do the
+        // same — this is the ordered path saying so in its own words.
+        let _ = std::fs::remove_file(self.hold.record());
     }
+}
+
+/// Arm a death signal on the child where the platform has one.
+///
+/// Linux: `PR_SET_PDEATHSIG(SIGKILL)`, the mechanism Lemonade itself uses on
+/// `llama-server`. Two things about it are easy to get wrong and are handled
+/// here. First, the signal fires when the THREAD that forked the child dies,
+/// not the process — so the child is spawned from a keeper thread that lives
+/// for the process ([`spawn_child`]), never from a blocking-pool thread that
+/// tokio retires after ten idle seconds. Second, it arms only from the
+/// `prctl` on, so a parent that died between `fork` and `prctl` has already
+/// reparented the child; `getppid` is re-checked against the pid captured
+/// before the fork, and a child that finds a stranger there exits instead of
+/// becoming the orphan this exists to prevent.
+///
+/// macOS has no such signal (verified: no `prctl.h` in the SDK); Windows has
+/// the Job Object. Both are covered by the record and the hold instead.
+#[cfg(target_os = "linux")]
+fn arm_death_signal(cmd: &mut Command) {
+    let parent = std::process::id() as libc::pid_t;
+    // SAFETY: the closure runs between fork and exec and calls only
+    // async-signal-safe syscalls; it allocates nothing and touches no lock.
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::getppid() != parent {
+                return Err(std::io::Error::other(
+                    "the parent exited before the death signal was armed",
+                ));
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn arm_death_signal(_cmd: &mut Command) {}
+
+/// Spawn the child from a thread that lives as long as the process.
+///
+/// On Unix every spawn goes through ONE keeper thread, started on first use
+/// and never retired. The death signal above is the reason it exists — a
+/// child whose forking thread has gone is a child whose death signal has
+/// already fired, or never will — and it runs on macOS too, so the thread
+/// and the channel are exercised on the platform the tests run on rather
+/// than only on the one that needs them. `tokio::process::Command::spawn`
+/// needs a runtime context for its reaper; the keeper enters the caller's.
+#[cfg(unix)]
+async fn spawn_child(cmd: Command) -> std::io::Result<Child> {
+    use std::sync::OnceLock;
+    use tokio::sync::oneshot;
+
+    struct Job {
+        cmd: Command,
+        runtime: tokio::runtime::Handle,
+        reply: oneshot::Sender<std::io::Result<Child>>,
+    }
+
+    static KEEPER: OnceLock<std::sync::mpsc::Sender<Job>> = OnceLock::new();
+
+    let keeper = KEEPER.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<Job>();
+        std::thread::Builder::new()
+            .name("inference-keeper".to_owned())
+            .spawn(move || {
+                for mut job in rx {
+                    let _entered = job.runtime.enter();
+                    let _ = job.reply.send(job.cmd.spawn());
+                }
+            })
+            .expect("the inference keeper thread could not be started");
+        tx
+    });
+    let (reply, answer) = oneshot::channel();
+    keeper
+        .send(Job {
+            cmd,
+            runtime: tokio::runtime::Handle::current(),
+            reply,
+        })
+        .map_err(|_| std::io::Error::other("the inference keeper thread is gone"))?;
+    answer
+        .await
+        .map_err(|_| std::io::Error::other("the inference keeper thread dropped the spawn"))?
+}
+
+#[cfg(windows)]
+async fn spawn_child(mut cmd: Command) -> std::io::Result<Child> {
+    cmd.spawn()
 }
 
 /// What `/api/v1/health` answers. Only the fields Paper acts on.
@@ -661,6 +787,25 @@ mod tests {
                 "{expected} no longer reaches a model through the model client; found {answered:?}"
             );
         }
+    }
+
+    /// The keeper thread spawns for a runtime it is not on, and the child it
+    /// hands back is one this runtime can wait on. A current-thread test
+    /// runtime is the harder case: the reaper it registers with is driven by
+    /// the very task that is awaiting the exit.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_keeper_thread_spawns_a_child_this_runtime_can_reap() {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg("exit 3");
+        let mut child = spawn_child(cmd).await.expect("spawn through the keeper");
+        let status = child.wait().await.expect("wait");
+        assert_eq!(status.code(), Some(3));
+
+        let mut again = Command::new("/bin/sh");
+        again.arg("-c").arg("exit 4");
+        let mut child = spawn_child(again).await.expect("the keeper is still there");
+        assert_eq!(child.wait().await.unwrap().code(), Some(4));
     }
 
     #[test]

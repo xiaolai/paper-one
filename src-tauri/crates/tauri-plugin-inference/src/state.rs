@@ -35,12 +35,14 @@ use serde::Serialize;
 use tauri::{AppHandle, Runtime};
 use tokio::sync::Mutex;
 
-use crate::daemon::Daemon;
+use crate::daemon::{Daemon, SHUTDOWN_GRACE};
 use crate::endpoints::EndpointStore;
 use crate::error::{Error, Result};
+use crate::lineage::{self, Recovery};
 use crate::manifest::Manifest;
-use crate::paths::{bundled_runtime, data_root, Layout};
+use crate::paths::{bundled_runtime, bundled_runtime_dir, data_root, Layout};
 use crate::requests::Registry;
+use crate::runtime::RuntimeManifest;
 use crate::spawn::{mint_token, plan_spawn, SpawnInputs};
 
 /// Where the runtime is in its lifecycle, as the settings section shows it.
@@ -296,7 +298,26 @@ impl InferenceState {
             }
         }
         let program = bundled_runtime(app)?;
+        /* VERIFIED BEFORE EVERY SPAWN, not once at install. The manifest
+         * names every file of the staged runtime — `lemond`, its resources,
+         * `llama-server` and the libraries it loads by name from its own
+         * directory — and a byte that differs, a file that is missing, or a
+         * file the manifest never heard of refuses the launch and names
+         * itself. This is the whole of what stands between the bytes on disk
+         * and `exec` (WI-20.24): upstream signs nothing, and a file that was
+         * never quarantined is a file Gatekeeper never looks at. */
+        let runtime_dir = bundled_runtime_dir(app)?;
+        let backend = RuntimeManifest::load(&runtime_dir)
+            .await?
+            .verify(&runtime_dir)
+            .await?;
         let layout = self.layout(app)?.clone();
+        /* A DAEMON A PREVIOUS PAPER LEFT RUNNING is collected before a new
+         * one is spawned, under the lock this function holds — so the
+         * record it reads can only be an earlier process's, never the one a
+         * daemon of this process just wrote. `recover_orphans` does the
+         * same at launch; whichever runs first finds it (WI-20.23). */
+        self.collect_orphans(&layout).await;
         /* OFF THE RUNTIME, and tolerant per endpoint. This was two direct
          * store calls on a worker thread — the keychain prompt `on_store`'s
          * header warns about, on the path every question takes — and each
@@ -313,8 +334,10 @@ impl InferenceState {
 
         let plan = plan_spawn(&SpawnInputs {
             program,
+            backend,
             cache_dir: layout.cache_dir.clone(),
             models_dir: layout.models_dir.clone(),
+            record_path: layout.daemon_record(),
             port: free_port()?,
             api_key: mint_token(),
             cloud_keys: provisioning.keys,
@@ -355,6 +378,45 @@ impl InferenceState {
 
         *slot = Some(daemon);
         Ok(port)
+    }
+
+    /// Collect a daemon a previous Paper left running, if the record beside
+    /// the layout names one that is still ours — see `lineage.rs`.
+    ///
+    /// Called at launch, from the plugin's setup. Takes the daemon slot and
+    /// does nothing when it is occupied: a record on disk while a daemon of
+    /// THIS process holds the slot is that daemon's own, and reading it
+    /// would kill the runtime the reader is using.
+    pub async fn recover_orphans<R: Runtime>(&self, app: &AppHandle<R>) {
+        let layout = match self.layout(app) {
+            Ok(layout) => layout.clone(),
+            Err(err) => {
+                log::warn!("inference: no layout to look for an orphaned runtime under: {err}");
+                return;
+            }
+        };
+        let slot = self.daemon.lock().await;
+        if slot.is_some() {
+            return;
+        }
+        self.collect_orphans(&layout).await;
+    }
+
+    /// The half that does the work. Called with the daemon slot LOCKED and
+    /// EMPTY, by both entry points.
+    async fn collect_orphans(&self, layout: &Layout) {
+        let record = layout.daemon_record();
+        match lineage::recover(&record, &lineage::OsProcesses, SHUTDOWN_GRACE).await {
+            Recovery::Nothing => {}
+            Recovery::Stale => log::info!(
+                "inference: the runtime record at {} named nothing of ours; removed",
+                record.display()
+            ),
+            Recovery::Collected { pgid, port, forced } => log::warn!(
+                "inference: collected a runtime a previous Paper left running — group {pgid}, port {port}{}",
+                if forced { ", killed after the grace" } else { "" }
+            ),
+        }
     }
 
     /// Drop a running daemon so the next start picks up new endpoint config.

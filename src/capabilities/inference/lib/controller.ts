@@ -112,6 +112,11 @@ export function detailFor(error: unknown): string {
   switch (kind) {
     case 'runtimeMissing':
       return 'The runtime is not installed'
+    /* WI-20.24: the staged runtime is checked file by file against its
+     * manifest before every spawn, and a byte that differs refuses the
+     * launch. The plugin's message names the file; this is the sentence. */
+    case 'runtimeUnverified':
+      return 'The runtime did not verify — nothing was started'
     case 'notReady':
       return 'The runtime did not start'
     case 'runtimeExited':

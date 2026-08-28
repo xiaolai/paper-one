@@ -47,11 +47,13 @@ mod error;
 mod generate;
 mod install;
 mod limits;
+mod lineage;
 mod manifest;
 mod paths;
 mod probe;
 mod procgroup;
 mod requests;
+mod runtime;
 mod spawn;
 mod speech;
 mod state;
@@ -64,12 +66,16 @@ pub use digest::{promote, sha256_file, verify, Expected};
 pub use endpoints::{Endpoint, EndpointStore, KeyState};
 pub use error::{Error, Result};
 pub use install::Progress;
+pub use lineage::{GroupRecord, Processes, Recovery, RECORD_FILE};
 pub use manifest::{Manifest, Modality, ModelEntry, MANIFEST_VERSION};
-pub use paths::{bundled_runtime, data_root, runtime_exe_name, Layout, TEST_DATA_DIR_ENV};
+pub use paths::{
+    bundled_runtime, bundled_runtime_dir, data_root, runtime_exe_name, Layout, TEST_DATA_DIR_ENV,
+};
 pub use probe::{Probe, Route, RouteKind};
+pub use runtime::{RuntimeManifest, VerifiedBackend, MANIFEST_FILE, RUNTIME_MANIFEST_VERSION};
 pub use spawn::{
-    cloud_key_var, mint_token, plan_spawn, SpawnInputs, SpawnPlan, API_KEY_ENV, CACHE_DIR_ENV,
-    LOOPBACK,
+    backend_bin_var, cloud_key_var, mint_token, plan_spawn, SpawnInputs, SpawnPlan, API_KEY_ENV,
+    CACHE_DIR_ENV, LOOPBACK,
 };
 pub use state::InferenceState;
 
@@ -102,6 +108,18 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
         ])
         .setup(|app, _api| {
             app.manage(InferenceState::default());
+            /* A DAEMON THE LAST PAPER LEFT RUNNING is collected now, at
+             * launch, rather than at the first gloss — it is holding the GPU
+             * and the model's several gigabytes the whole time in between.
+             * Off the main thread: it may wait the shutdown grace on a group
+             * that is slow to let go (`lineage.rs`, WI-20.23). */
+            let handle = app.clone();
+            tauri::async_runtime::spawn(async move {
+                handle
+                    .state::<InferenceState>()
+                    .recover_orphans(&handle)
+                    .await;
+            });
             Ok(())
         })
         .on_event(|app, event| {

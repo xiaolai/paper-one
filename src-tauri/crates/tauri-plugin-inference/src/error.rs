@@ -42,6 +42,14 @@ pub enum Error {
     #[error("the inference runtime is not installed at {}", .0.display())]
     RuntimeMissing(PathBuf),
 
+    /// The staged runtime does not match its manifest, and nothing was
+    /// started. `path` is the file that failed — a flipped byte in a
+    /// library, a stranger beside the executable, a manifest that is not
+    /// there — because "the runtime did not verify" with no name is a
+    /// message nobody can act on (WI-20.24).
+    #[error("the inference runtime did not verify: {} {why}", .path.display())]
+    RuntimeUnverified { path: PathBuf, why: String },
+
     // ── the daemon's lifecycle ──────────────────────────────────────────
     /// A command needing the daemon arrived while nothing was running, and
     /// the state machine is not in a state that starts one.
@@ -169,6 +177,7 @@ impl Error {
             Error::PathNotUnicode(_) => "pathNotUnicode",
             Error::RootNotAbsolute(_) => "rootNotAbsolute",
             Error::RuntimeMissing(_) => "runtimeMissing",
+            Error::RuntimeUnverified { .. } => "runtimeUnverified",
             Error::NotRunning => "notRunning",
             Error::NotReady { .. } => "notReady",
             Error::RuntimeExited { .. } => "runtimeExited",
@@ -258,6 +267,11 @@ mod tests {
             Error::PathNotUnicode(PathBuf::new()).kind(),
             Error::RootNotAbsolute(PathBuf::new()).kind(),
             Error::RuntimeMissing(PathBuf::new()).kind(),
+            Error::RuntimeUnverified {
+                path: PathBuf::new(),
+                why: String::new(),
+            }
+            .kind(),
             Error::NotRunning.kind(),
             Error::NotReady {
                 secs: 0,
