@@ -35,13 +35,54 @@ import { stagePoint, tapIntent } from './tapToTurn'
  * form advanced the reader out of it.
  *
  * `closest` walks up, so a tap on a `<span>` inside a `<button>` is caught by
- * the button. `[role]` covers the widget roles as a class rather than by
- * enumeration; a role is only ever put on something meant to be interacted
- * with, and treating one as inert is the direction that turns pages by
- * accident.
+ * the button.
+ *
+ * ⚠️ **AND THEN THE LIST HELD A BARE `[role]`**, on the reasoning that a role
+ * is only ever put on something meant to be interacted with. It is not. EPUB 3
+ * puts one on every chapter — `<section role="doc-chapter">` is the structural
+ * semantics inflection the spec recommends, and every current authoring tool
+ * maps `epub:type="chapter"` to it — so `closest` walked up from any paragraph
+ * to the section that held it, found a role, and refused. A book that followed
+ * the spec could be opened and never advanced by tapping, and the gesture
+ * this whole module exists for was dead on exactly the well-formed books.
+ *
+ * So the roles are enumerated after all: the WAI-ARIA widget roles a press
+ * already belongs to. `menuitemcheckbox`, `menuitemradio`, `searchbox` and
+ * `spinbutton` are the subclasses of roles on that list and take a press the
+ * same way. A document role (`doc-*`), a landmark, a live region name what
+ * the text IS; a tap on the prose inside one is a tap on prose.
  */
-const INTERACTIVE =
-  'a[href], button, input, select, textarea, summary, label, [contenteditable]:not([contenteditable="false"]), audio[controls], video[controls], [role]'
+const WIDGET_ROLES = [
+  'button',
+  'link',
+  'menuitem',
+  'menuitemcheckbox',
+  'menuitemradio',
+  'tab',
+  'checkbox',
+  'radio',
+  'switch',
+  'textbox',
+  'searchbox',
+  'combobox',
+  'slider',
+  'spinbutton',
+  'option',
+]
+
+const INTERACTIVE = [
+  'a[href]',
+  'button',
+  'input',
+  'select',
+  'textarea',
+  'summary',
+  'label',
+  '[contenteditable]:not([contenteditable="false"])',
+  'audio[controls]',
+  'video[controls]',
+  ...WIDGET_ROLES.map((role) => `[role="${role}"]`),
+].join(', ')
 
 function onInteractive(target: EventTarget | null): boolean {
   return (target as Element | null)?.closest?.(INTERACTIVE) != null

@@ -705,6 +705,7 @@
     "src/app/web/Reader.test.tsx > Reader > says so plainly when the shelf does not have the pages",
     "src/app/web/Reader.test.tsx > Reader > starts at the beginning for a book it has never opened",
     "src/app/web/Reader.test.tsx > Reader > surfaces a failed range read instead of leaving the page blank",
+    "src/app/web/Reader.test.tsx > Reader > turns the page from a tap inside a chapter that carries a role, and not on a widget",
     "src/app/web/Reader.test.tsx > Reader > turns the page from a tap on the book, and lets go of the document after",
     "src/app/web/Reader.test.tsx > a note the reader taps > is drawn once the session says it has rendered one",
     "src/app/web/Reader.test.tsx > a note the reader taps > is given somewhere to render, and somewhere to be shown",

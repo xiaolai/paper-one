@@ -882,6 +882,81 @@ describe('Reader', () => {
     vi.doUnmock('../../kernel/ui/reader/FoliateView')
     vi.resetModules()
   })
+
+  /**
+   * ⚠️ **NO TAP IN AN EPUB 3 BOOK TURNED A PAGE.**
+   *
+   * The control list held a bare `[role]`, on the reasoning that a role is
+   * only ever put on something meant to be interacted with. EPUB 3 puts one
+   * on every chapter: `<section role="doc-chapter">` is the structural
+   * semantics inflection the spec recommends, and `epub:type="chapter"` is
+   * mapped to it by every current authoring tool. `closest` walked up from
+   * the tapped paragraph to that section, found a role, and refused — so a
+   * book that followed the spec could be opened and never advanced.
+   *
+   * The widget roles are the ones a press already belongs to; a document role
+   * names what the text IS, and a tap on prose is a tap on prose.
+   */
+  it('turns the page from a tap inside a chapter that carries a role, and not on a widget', async () => {
+    const { content } = shelf({ ext: 'epub' })
+    const seen: string[] = []
+    const nav = {
+      next: () => seen.push('next'),
+      prev: () => seen.push('prev'),
+      goLeft: () => seen.push('goLeft'),
+      goRight: () => seen.push('goRight'),
+    }
+
+    const captured: Record<string, unknown> = {}
+    vi.doMock('../../kernel/ui/reader/FoliateView', () => ({
+      FoliateView: (props: Record<string, unknown>) => {
+        Object.assign(captured, props)
+        return null
+      },
+    }))
+    vi.resetModules()
+    const { Reader: Fresh } = await import('./Reader')
+    render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />)
+    await waitFor(() => expect(captured['onDocument']).toBeTypeOf('function'))
+    ;(captured['onNavigator'] as (g: number, n: unknown) => void)(0, nav)
+
+    const doc = document.implementation.createHTMLDocument('a chapter')
+    Object.defineProperty(doc.documentElement, 'clientWidth', { value: 300, configurable: true })
+    ;(captured['onDocument'] as (g: number, d: Document | null) => void)(0, doc)
+
+    const tapAt = (x: number, target: Element) => {
+      target.dispatchEvent(new PointerEvent('pointerdown', { clientX: x, clientY: 100, bubbles: true }))
+      target.dispatchEvent(new PointerEvent('pointerup', { clientX: x, clientY: 100, bubbles: true }))
+    }
+
+    /* The shape EPUB 3 prescribes and the tools produce: the whole chapter
+       under one roled section, the reader's finger on a paragraph inside it. */
+    const chapter = doc.createElement('section')
+    chapter.setAttribute('role', 'doc-chapter')
+    const paragraph = doc.createElement('p')
+    paragraph.textContent = 'Call me Ishmael.'
+    chapter.append(paragraph)
+    doc.body.append(chapter)
+
+    tapAt(290, paragraph)
+    tapAt(10, paragraph)
+    expect(seen, 'a tap on prose inside a roled chapter is a page turn').toEqual(['goRight', 'goLeft'])
+
+    /* AND A WIDGET INSIDE THAT SAME CHAPTER STILL WINS. The narrowing must
+       not have thrown the widget roles out with the document ones. */
+    seen.length = 0
+    for (const role of ['button', 'link', 'checkbox', 'textbox', 'slider']) {
+      const widget = doc.createElement('div')
+      widget.setAttribute('role', role)
+      chapter.append(widget)
+      tapAt(290, widget)
+    }
+    expect(seen, 'a tap on an ARIA widget must not also turn the page').toEqual([])
+
+    ;(captured['onDocument'] as (g: number, d: Document | null) => void)(0, null)
+    vi.doUnmock('../../kernel/ui/reader/FoliateView')
+    vi.resetModules()
+  })
 })
 
 /**
