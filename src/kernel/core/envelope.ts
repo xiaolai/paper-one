@@ -1162,7 +1162,7 @@ export function createClient(options: ClientOptions): Client {
     const id = nextId()
     const promise = new Promise<Frame>((resolve, reject) => {
       if (!open) {
-        reject(new ServiceCallError(service, serviceError(ENVELOPE_ERRORS.disconnected, 'client is disconnected')))
+        reject(new ServiceCallError(service, serviceError(ENVELOPE_ERRORS.disconnected, 'client is disconnected', true)))
         return
       }
       const signal = call.signal
@@ -1228,12 +1228,23 @@ export function createClient(options: ClientOptions): Client {
     return { id, promise }
   }
 
+  /**
+   * RETRYABLE, on both roads out of a disconnect.
+   *
+   * ⚠️ It was `false` here and `false` above, and the browser client's channel
+   * marked only the call made AFTER its socket closed as retryable
+   * (`channel.ts`). So the request that was in flight when the socket dropped
+   * — the one a replay exists for — rejected `retryable: false`, and a replay
+   * keyed on the flag never saw it (WI-20.30, Codex round 2). A disconnect is
+   * retryable by nature: it says nothing about the request, only that the
+   * answer, if there was one, went into a socket that is gone.
+   */
   const disconnect = () => {
     if (!open) return
     open = false
     for (const id of [...pending.keys()]) {
       const entry = finish(id)
-      entry?.reject(new ServiceCallError(entry.service, serviceError(ENVELOPE_ERRORS.disconnected, 'disconnected')))
+      entry?.reject(new ServiceCallError(entry.service, serviceError(ENVELOPE_ERRORS.disconnected, 'disconnected', true)))
     }
   }
 

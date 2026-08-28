@@ -179,6 +179,7 @@ export function serveTable(options: {
     'card:*',
     'device:*',
     'shelf:*',
+    'position:*',
   ]
   const ran: string[] = []
   /**

@@ -3,7 +3,7 @@ import { contentPathIn, coverPathIn, legacyCoverPathIn, folderOf } from '../book
 import { CONTENT_EXTENSIONS, readRangeOf } from '../bookVault'
 import { CONTENT_BLOB_NAMES, REMOVABLE_BLOB_NAMES, type RemovableBlobName } from '../ports'
 import { findBook as find, type ServiceEnvironment } from './environment'
-import { descriptorOf, readInput, reqStr } from './input'
+import { descriptorOf, readInput, reqStr, str } from './input'
 import { SERVICE_ERRORS, refuse } from './refusals'
 import type { ContentChunk, ContentLocation } from './rows'
 
@@ -131,6 +131,25 @@ export function contentRead(env: ServiceEnvironment) {
     const input = readInput(descriptorOf('content.read'), req)
     const bookId = reqStr(input, 'book')
     const book = find(env, bookId)
+
+    /* THE BYTES THE CALLER WAS TOLD ABOUT, OR NONE (WI-20.30). A browser that
+     * lost its socket restarts the whole read on a fresh one; between the two
+     * the book may have been re-imported or rewritten by an enrichment, and
+     * nothing in the chunks says so. `expect` is the `contentHash` that
+     * `content.locate` answered. A shelf that holds a DIFFERENT hash refuses,
+     * and so does one that holds NONE: null is "nobody here can say", and a
+     * caller who was told a hash and is now told nothing cannot know whether
+     * this is the same book. Serving would be vouching for bytes this shelf
+     * never hashed. */
+    const expected = str(input, 'expect')
+    if (expected !== undefined && book.contentHash !== expected) {
+      throw refuse(
+        SERVICE_ERRORS.conflict,
+        book.contentHash === null || book.contentHash === undefined
+          ? `this shelf cannot confirm the content of ${bookId}`
+          : `the content of ${bookId} changed since it was located`,
+      )
+    }
 
     const fs = env.services.fs
     /* NOT AN EMPTY STREAM. A caller that cannot tell "this shelf has no

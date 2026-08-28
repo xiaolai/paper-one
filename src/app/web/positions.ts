@@ -1,23 +1,30 @@
 /**
  * Where a reader stopped, kept in the browser (phase 18).
  *
- * ## Why this is not `book.set`
+ * ## Why this is not `book.set` — and what it is beside now
  *
  * The desktop keeps a reading position on the book's record, and it syncs. The
- * browser client cannot: the pump grants it `readingGrant` and nothing else, so
- * every write in the service table is refused — deliberately, because a hostile
- * EPUB shares this origin and a socket it opens carries the reader's session.
+ * browser client could not: the pump granted it `readingGrant` and nothing
+ * else, so every write in the service table was refused — deliberately,
+ * because a hostile EPUB shares this origin and a socket it opens carries the
+ * reader's session. Widening that for a position would have been widening it
+ * for `book.set`, which carries every field of the record.
  *
- * Widening that for a position would be widening it for `book.set`, which also
- * carries a title, an author and a tag list. So the position stays here.
+ * Since WI-20.30 the position ALSO travels: `book.position` is its own row
+ * under its own grant, `position:write`, which covers nothing else and which
+ * the pump binds to the book this session opened — after the CSP was measured
+ * to stop a book's script on both engines and the loader was taught to refuse
+ * one. `remotePositions.ts` is that side. This store is the device's own
+ * copy: the place to start from when the shelf is asleep, and the stamp the
+ * shelf's is compared against when it is not — newer wins, whichever device
+ * wrote it.
  *
- * ## What that costs, said plainly
+ * ## What it still costs, said plainly
  *
- * **A position kept here is device-local and does not sync.** Read three
- * chapters on a phone and the desktop still opens where the desktop left off.
- * That is a real limitation and not a temporary one — closing it needs a write
- * path the plan deliberately does not create, and the day it exists this module
- * is what it replaces.
+ * A position written while the link is down reaches the shelf when the link
+ * is back, not before; and two devices reading the same book at once will
+ * each open where the OTHER left off, which is the honest meaning of a
+ * shared position and not a defect.
  *
  * ## Why `localStorage` is not the credential problem
  *
@@ -63,6 +70,13 @@ interface Stored {
 export interface ReadingPositions {
   /** Where this book was left, or null. */
   get(bookId: string): string | null
+  /**
+   * Where this book was left AND when, or null — what the start-of-reading
+   * decision compares against the shelf's stamp (WI-20.30). `at` is this
+   * device's clock at the last write, epoch milliseconds; a row read from a
+   * store that never recorded one answers 0, which loses to any shelf stamp.
+   */
+  held(bookId: string): { readonly cfi: string; readonly at: number } | null
   /** Remember where this book is now. Safe to call on every page turn. */
   set(bookId: string, cfi: string | null): void
   /**
@@ -163,6 +177,11 @@ export function readingPositions(
 
   return {
     get: (bookId) => read(store)[bookId]?.cfi ?? null,
+
+    held: (bookId) => {
+      const row = read(store)[bookId]
+      return row === undefined ? null : { cfi: row.cfi, at: row.at }
+    },
 
     set: (bookId, cfi) => {
       /* A NULL CFI IS NOT A POSITION. The fixed-layout renderer reports one for

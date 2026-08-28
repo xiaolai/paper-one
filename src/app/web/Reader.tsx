@@ -36,6 +36,7 @@ import {
 } from '../../kernel/core/metrics'
 import type { RemoteContent } from './content'
 import { browserPositions, type ReadingPositions } from './positions'
+import { startingPlace, type RemotePositions } from './remotePositions'
 import type { MarkRef, MarksStore } from './marks'
 import styles from './Reader.module.css'
 
@@ -90,6 +91,13 @@ export interface ReaderProps {
   /** Injected so a test needs no browser storage. */
   readonly positions?: ReadingPositions
   /**
+   * The shelf's copy of the position (WI-20.30, D7). Absent, the book opens
+   * where this device left it and nothing travels — a host with no write
+   * grant. Present, the book opens at whichever of the two places is newer,
+   * and every settled turn is written back through `book.position`.
+   */
+  readonly remote?: RemotePositions
+  /**
    * The shelf's marks, or null when this host has none.
    *
    * Absent means the Notes control is not drawn — the same convention as
@@ -116,7 +124,7 @@ export interface ReaderProps {
 
 
 
-export function Reader({ content, bookId, name, onClose, positions, marks = null, titleOf, canWrite = false }: ReaderProps) {
+export function Reader({ content, bookId, name, onClose, positions, remote, marks = null, titleOf, canWrite = false }: ReaderProps) {
   /* ONE STORE FOR THE LIFE OF THE COMPONENT. Built in a ref rather than on
    * every render, because `browserPositions` touches `localStorage`, which is a
    * getter that THROWS in some configurations. */
@@ -132,7 +140,52 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
    * book that could not be read at all". Captured at mount, in state, so the
    * prop is stable for as long as the book is open.
    */
-  const [lastLocation] = useState(() => store.current?.get(bookId) ?? null)
+  const [start, setStart] = useState<{ readonly decided: boolean; readonly cfi: string | null }>(() =>
+    remote === undefined ? { decided: true, cfi: store.current?.get(bookId) ?? null } : { decided: false, cfi: null },
+  )
+  const lastLocation = start.cfi
+
+  /**
+   * WHICH PLACE, when there is a shelf to ask (WI-20.30). The shelf's stamp
+   * against this device's clock — newer wins — decided BEFORE the book is
+   * handed to the renderer, because `lastLocation` is read once when the
+   * book finishes parsing and a position that arrives after that is a
+   * position nobody has. The read costs one `book.get` over the same link the
+   * bytes take, so it cannot make the book slower to open than the shelf
+   * already is; a shelf that cannot be asked at all leaves this device's
+   * place standing, which is what it would have opened at before.
+   *
+   * When the shelf's is newer this device's copy follows it, so the next
+   * open with the shelf asleep starts from the same place. When THIS
+   * device's is newer — read here, closed before the write could land — the
+   * shelf is told now rather than at the next turn.
+   */
+  useEffect(() => {
+    if (remote === undefined) return
+    let live = true
+    const local = store.current?.held(bookId) ?? null
+    void remote.read(bookId).then(
+      (shelf) => {
+        if (!live) return
+        const place = startingPlace(local, shelf)
+        if (place.from === 'shelf' && place.cfi !== null) store.current?.set(bookId, place.cfi)
+        if (place.from === 'device' && place.cfi !== null && (shelf === null || shelf.cfi !== place.cfi)) {
+          remote.write(bookId, place.cfi, undefined)
+        }
+        setStart({ decided: true, cfi: place.cfi })
+      },
+      () => {
+        if (live) setStart({ decided: true, cfi: local?.cfi ?? null })
+      },
+    )
+    return () => {
+      live = false
+    }
+  }, [remote, bookId])
+
+  /* WHAT IS PENDING GOES WHEN THE BOOK CLOSES — the desktop flushes its tick
+     on close for the same reason. */
+  useEffect(() => () => void remote?.flush(), [remote])
 
   /* OPENING A BOOK IS READING IT, and the eviction order has to hear about it.
    *
@@ -464,10 +517,13 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
   const remember = useCallback(
     (_generation: number, position: { cfi: string | null; chapterHref?: string; fraction?: number }) => {
       store.current?.set(bookId, position.cfi)
+      /* AND THE SHELF, debounced there: a run of turns is one write, after
+         the reader has settled — the desktop's own tick. */
+      if (position.cfi !== null && position.cfi !== '') remote?.write(bookId, position.cfi, position.fraction)
       if (typeof position.chapterHref === 'string') setHere(position.chapterHref)
       if (typeof position.fraction === 'number') setFraction(position.fraction)
     },
-    [bookId],
+    [bookId, remote],
   )
 
   /**
@@ -680,7 +736,8 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
         }}
       >
         <FoliateView
-          file={opening.kind === 'reading' ? opening.source : null}
+          /* NOT UNTIL THE PLACE IS DECIDED — see `start`. */
+          file={opening.kind === 'reading' && start.decided ? opening.source : null}
           generation={0}
           style={readingStyle}
           stepIdx={stepIdx}

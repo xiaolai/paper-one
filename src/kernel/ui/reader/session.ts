@@ -17,6 +17,7 @@ import type { AskPassage } from '../../core/companion'
 import { screenPassages } from './passages'
 import { rangeBoxInHost, type HostRect } from './coordinates'
 import { isBacklink } from './backlink'
+import { refuseBookScripts, stripScripts } from './bookScripts'
 import { suppressEmptyGeneratedContent } from './generatedContent'
 import { markFigures } from './markFigures'
 import { matteFigures } from './matteFigures'
@@ -970,6 +971,11 @@ export class ReaderSession {
     view.addEventListener('load', (event) => {
       if (this.#disposed) return
       const { doc, index } = (event as CustomEvent<LoadDetail>).detail
+      /* FIRST, before a watcher, a mark or a measurement reads it: the
+         loader refuses a script RESOURCE, and leaves inline scripts and
+         `on*` handlers to whoever receives the document — its own source
+         says so. That is here. */
+      stripScripts(doc)
       // A section re-loaded is the same document with fresh content, so its
       // previous listeners are dropped before new ones go on — otherwise every
       // return to a section doubles them.
@@ -1281,6 +1287,13 @@ export class ReaderSession {
     }
     if (!this.#settle(view)) return false
 
+    /* BEFORE ANY SECTION LOADS. The fork's loader asks its book, per
+     * resource, whether it may load it; the answer for a script is no — the
+     * CSP is the wall and this is what stands behind it (`bookScripts.ts`,
+     * WI-20.30). Wired here, between `open` and the first `init`, because a
+     * listener added later meets a chapter already loaded. */
+    refuseBookScripts(view.book)
+
     /* OPENED IS NOT THE SAME AS READABLE. The container, the package and the
      * navigation of a DRM'd EPUB are in the clear — that is why `open`
      * succeeds and why nothing said anything — and the first section loaded
@@ -1492,6 +1505,8 @@ export class ReaderSession {
     noteView.addEventListener('load', (event) => {
       if (this.#disposed) return
       const { doc } = (event as CustomEvent<LoadDetail>).detail
+      /* A note is a document of the same book, loaded by the same loader. */
+      stripScripts(doc)
       /* The note's document gets the contract too, and for the same reason the
          page's does: the sheets it was handed at `before-render` are static and
          read `var(--paper-*)` from the root. Without this the popover is the

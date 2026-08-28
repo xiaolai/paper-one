@@ -1,4 +1,5 @@
 import { BOOK_MAX_BYTES, tooLarge } from '../../kernel'
+import { ServiceCallError } from '../../kernel/core/envelope'
 import type { ShelfChannel } from './channel'
 
 /**
@@ -33,6 +34,55 @@ import type { ShelfChannel } from './channel'
  * an error. Nothing below treats it as one.
  */
 
+/*
+ * ## A read that lost its channel is restarted WHOLE (WI-20.30)
+ *
+ * The channel rejects every call in flight when its socket drops — as
+ * `retryable`, since the envelope says a disconnect is retryable by nature —
+ * and this is the one place that can act on it: a read is a request the
+ * reader is waiting on, and "the shelf went away" is not an answer to it.
+ *
+ * Codex refuted two drafts. Reconnecting alone cannot complete a read already
+ * in flight, because `shut()` rejects it. And a replay that RESUMED after the
+ * chunks already delivered either repeated offset 0 and tripped the
+ * contiguity check in `collect`, or spliced two versions of the book
+ * together, because neither the chunks nor the shelf's facts carried a hash.
+ * So: the partial is discarded, the channel is waited for, and the whole read
+ * — the whole file, or the whole RANGE — is asked for again. Every read
+ * carries the `contentHash` `locate` learned, and the shelf refuses a book
+ * that changed in between rather than serving it. Bounded, so a shelf that
+ * keeps dropping mid-read ends in the failure that ended it and not in a loop.
+ */
+
+/**
+ * How many times one read is asked for again after a retryable failure.
+ *
+ * Three, because the failures this covers are one socket dropping — the
+ * reconnecting link is what brings it back, and a read that loses three
+ * channels in a row is a shelf that is not staying up, which the reader
+ * should hear about rather than wait through.
+ */
+export const MAX_RESTARTS = 3
+
+/** A failure a retry might change: the envelope's own word for it. */
+export function isRetryable(cause: unknown): boolean {
+  return cause instanceof ServiceCallError && cause.error.retryable
+}
+
+/**
+ * A channel that can say when it is back.
+ *
+ * The plain `ShelfChannel` closes once and stays closed; the reconnecting
+ * link (`reconnect.ts`) implements this on top of it. Optional here so a
+ * test — and a caller with no link — can hand a bare channel: a restart then
+ * goes straight back to the same channel, which refuses it, and the read
+ * ends after `MAX_RESTARTS` with that refusal.
+ */
+export interface ContentChannel extends ShelfChannel {
+  /** Resolves when a channel is open; rejects when there will never be one again. */
+  whenOpen?(): Promise<void>
+}
+
 /** One chunk, as `content.read` sends it. */
 interface Chunk {
   readonly bookId: string
@@ -56,6 +106,12 @@ export interface ContentFacts {
    * nothing.
    */
   readonly size: number | null
+  /**
+   * The shelf's BLAKE3 of the bytes, hex — or null when nothing has hashed
+   * them. What a restarted read hands back as `expect`, so the shelf refuses
+   * a book that changed under the reader instead of serving a second version.
+   */
+  readonly contentHash: string | null
 }
 
 /** Base64 to bytes, without a `Buffer` and without a per-byte string. */
@@ -107,7 +163,14 @@ export interface RemoteContent {
  * — the first version of that test yielded megabyte pages until the real
  * ceiling stopped it, which is a slow way to prove a comparison.
  */
-export function remoteContent(channel: ShelfChannel, maxBytes = BOOK_MAX_BYTES): RemoteContent {
+export function remoteContent(channel: ContentChannel, maxBytes = BOOK_MAX_BYTES): RemoteContent {
+  /**
+   * The hash `locate` last learned for each book, sent back as `expect` on
+   * every read of it. Forgotten with the object, not persisted: a hash is a
+   * fact about one session's view of the shelf.
+   */
+  const hashes = new Map<string, string>()
+
   /**
    * Every chunk of one read, in order, CHECKED.
    *
@@ -123,7 +186,7 @@ export function remoteContent(channel: ShelfChannel, maxBytes = BOOK_MAX_BYTES):
    * what it expected — a caller debugging one is looking at a wire, and "the
    * book was corrupt" would send them to the shelf's disk instead.
    */
-  const collect = async (bookId: string, from: number, body: Record<string, unknown>): Promise<Uint8Array[]> => {
+  const collectOnce = async (bookId: string, from: number, body: Record<string, unknown>): Promise<Uint8Array[]> => {
     const parts: Uint8Array[] = []
     let expected = from
     /* THE BACKSTOP for a shelf that could not measure the book — `fileOf`
@@ -131,7 +194,12 @@ export function remoteContent(channel: ShelfChannel, maxBytes = BOOK_MAX_BYTES):
      * case where there is not. Counted as the bytes arrive, so it stops in the
      * middle rather than after. */
     let held = 0
-    for await (const page of channel.stream('content.read', { book: bookId, ...body })) {
+    const expect = hashes.get(bookId)
+    for await (const page of channel.stream('content.read', {
+      book: bookId,
+      ...body,
+      ...(expect === undefined ? {} : { expect }),
+    })) {
       /* PAGES, not chunks. Every stream in the service table yields an array of
        * rows; a reader that assumed a bare object worked against one shelf and
        * silently read nothing from another. Flattened here so both shapes land
@@ -164,13 +232,39 @@ export function remoteContent(channel: ShelfChannel, maxBytes = BOOK_MAX_BYTES):
     return parts
   }
 
+  /**
+   * One read, restarted WHOLE after a retryable failure — see the header.
+   *
+   * The partial is dropped on the floor, not resumed: `from` is the read's
+   * own start, so a range restarts from its beginning and a file from byte 0.
+   * `whenOpen` is awaited before each restart, so the retries wait for the
+   * link rather than hammering a socket that is gone.
+   */
+  const collect = async (bookId: string, from: number, body: Record<string, unknown>): Promise<Uint8Array[]> => {
+    for (let restarts = 0; ; restarts += 1) {
+      try {
+        return await collectOnce(bookId, from, body)
+      } catch (cause) {
+        if (!isRetryable(cause) || restarts >= MAX_RESTARTS) throw cause
+        await channel.whenOpen?.()
+      }
+    }
+  }
+
   /** Named, so `fileOf` can ask before it starts collecting. */
   const locate = async (bookId: string) => {
     const answer = (await channel.call('content.locate', { book: bookId })) as Record<string, unknown>
+    const contentHash = typeof answer['contentHash'] === 'string' && answer['contentHash'] !== '' ? answer['contentHash'] : null
+    /* REMEMBERED FOR EVERY READ THAT FOLLOWS, and forgotten when the shelf
+     * stops vouching: a book whose hash went to null is one this side may
+     * not claim to know. */
+    if (contentHash === null) hashes.delete(bookId)
+    else hashes.set(bookId, contentHash)
     return {
       here: answer['here'] === true,
       ext: typeof answer['ext'] === 'string' ? answer['ext'] : null,
       size: typeof answer['size'] === 'number' ? answer['size'] : null,
+      contentHash,
     }
   }
 

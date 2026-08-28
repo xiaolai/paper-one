@@ -146,6 +146,24 @@ export interface BookDetail extends BookRow {
   readonly tagClock: Readonly<Record<string, { readonly on: boolean; readonly at: string; readonly spelling: string }>> | null
 }
 
+/** What `book.position` answers: the register it just wrote. */
+export interface PositionSetRow {
+  readonly bookId: string
+  readonly position: string
+  readonly progress: number
+  /** The stamp the shelf gave the write — what another device compares against its own. */
+  readonly positionAt: string | null
+}
+
+export function positionSet(book: IndexedBook): PositionSetRow {
+  return {
+    bookId: book.bookId,
+    position: book.position ?? '',
+    progress: book.progress ?? 0,
+    positionAt: book.positionAt ?? null,
+  }
+}
+
 export function bookDetail(book: IndexedBook): BookDetail {
   return {
     ...bookRow(book),

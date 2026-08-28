@@ -127,7 +127,13 @@ describe('connect', () => {
     const { socket, channel } = await connected()
     const pending = channel.call('book.list', {}).catch((e: unknown) => e)
     socket.drop()
-    expect(String(await pending)).toMatch(/disconnect/i)
+    const failure = await pending
+    expect(String(failure)).toMatch(/disconnect/i)
+    /* AND IT SAYS SO. A call made AFTER the close was already marked
+       retryable (below); the one that was in flight when the socket dropped
+       carried `retryable: false` from the envelope, so a replay keyed on the
+       flag never fired for exactly the failure it was built for. */
+    expect((failure as { error: { retryable: boolean } }).error.retryable).toBe(true)
   })
 
   it('refuses a call made after the channel closed, without waiting for a timeout', async () => {

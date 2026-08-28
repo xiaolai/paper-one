@@ -1,4 +1,4 @@
-import { createRouter, readingGrant, type ServiceContribution } from '../../../kernel'
+import { SERVICE_ERRORS, createRouter, readingGrant, refuse, type ServiceContribution } from '../../../kernel'
 import type { WebHostWire } from './wire'
 
 /**
@@ -88,18 +88,89 @@ export interface Pump {
  * **The day the browser needs to write** — a reading position, a mark — that is
  * a decision to take deliberately, by widening this predicate and saying which
  * verbs and why. It is not a line to delete.
+ *
+ * ## That day came for ONE verb, and here is the widening (WI-20.30, D7)
+ *
+ * `book.position`, under `position:write` — a grant family that covers
+ * nothing else, so `book:*` does not include it and it does not include
+ * `book.set`. Admitted only after the CSP was measured to stop a book's
+ * script on both engines (`csp-effect.mjs`) and the loader was taught to
+ * refuse one (`bookScripts.ts`); and bound further, HERE, to the book this
+ * session opened: `content.locate` is how the thin client opens a book, so
+ * the last book a session located is the one — and the only one — it may
+ * move. A call naming any other is refused `forbidden` before the handler
+ * runs. That bounds what a script with its own socket could do to the one
+ * book it is running inside of, which it already knows about.
  */
+/** The one write's grant, by its spelling — `serviceTable.ts` declares it. */
+const POSITION_GRANT = 'position:write'
+const OPENS_A_BOOK = 'content.locate'
+const MOVES_A_BOOK = 'book.position'
+
+/** The book id a request names, or null when it names none. */
+function bookOf(req: unknown): string | null {
+  if (typeof req !== 'object' || req === null) return null
+  const book = (req as Record<string, unknown>)['book']
+  return typeof book === 'string' && book !== '' ? book : null
+}
+
+/**
+ * The contributions, with the binding: `content.locate` RECORDS the book a
+ * session opened (once it has answered — a book the shelf does not hold
+ * binds nothing), and `book.position` is REFUSED for any other book, before
+ * its handler runs. Every other service passes through untouched.
+ */
+function boundToOpenedBook(services: readonly ServiceContribution[], openedBy: Map<string, string>): ServiceContribution[] {
+  return services.map((service) => {
+    if (service.name === OPENS_A_BOOK) {
+      return {
+        ...service,
+        handler: async (req, ctx) => {
+          const answer = await service.handler(req, ctx)
+          const book = bookOf(req)
+          if (book !== null) openedBy.set(ctx.peer, book)
+          return answer
+        },
+      }
+    }
+    if (service.name === MOVES_A_BOOK) {
+      return {
+        ...service,
+        handler: (req, ctx) => {
+          const book = bookOf(req)
+          const opened = openedBy.get(ctx.peer)
+          if (book === null || opened === undefined || opened !== book) {
+            throw refuse(
+              SERVICE_ERRORS.forbidden,
+              opened === undefined
+                ? 'this session has opened no book'
+                : `this session opened ${opened} and may not move ${book ?? 'nothing'}`,
+            )
+          }
+          return service.handler(req, ctx)
+        },
+      }
+    }
+    return service
+  })
+}
+
 export function servePipe(options: PumpOptions): Pump {
   const { wire, services } = options
   const pollMs = options.pollMs ?? POLL_MS
   const sessionsMs = options.sessionsMs ?? SESSIONS_MS
   const onError = options.onError ?? (() => {})
+  /** Session → the book it opened last. Dropped with the session. */
+  const openedBy = new Map<string, string>()
 
   /* THE KERNEL'S OWN SPLIT, not a list kept here. `readServices()` filters the
    * table with this exact predicate, so a service added to the table lands on
    * the correct side for the browser without anybody remembering to update a
-   * second register. */
-  const router = createRouter({ services: [...services], hasGrant: (_session, grant) => readingGrant(grant) })
+   * second register. Plus the one write, by its exact spelling. */
+  const router = createRouter({
+    services: boundToOpenedBook([...services], openedBy),
+    hasGrant: (_session, grant) => readingGrant(grant) || grant === POSITION_GRANT,
+  })
   const live = new Map<number, { connection: ReturnType<typeof router.connect>; stop: () => void }>()
   let stopped = false
 
@@ -212,6 +283,9 @@ export function servePipe(options: PumpOptions): Pump {
     held.stop()
     held.connection.disconnect()
     live.delete(session)
+    /* And the book it had opened. A session id the plugin reuses must not
+       inherit a binding from the browser that held it before. */
+    openedBy.delete(String(session))
   }
 
   const reconcile = async () => {

@@ -169,3 +169,59 @@ describe('pdfRangeTransport', () => {
     expect(onFailure).toHaveBeenCalledOnce()
   })
 })
+
+/**
+ * A RETRYABLE FAILURE DOES NOT END THE TRANSPORT (WI-20.30).
+ *
+ * `stopped` was latched on ANY rejection, so a dropped socket — which the
+ * content layer restarts, and which the envelope now marks retryable — ended
+ * the document for good: every later range pdf.js asked for was silently
+ * ignored, on a book whose shelf was back a second later.
+ */
+import { ENVELOPE_ERRORS, ServiceCallError, serviceError } from '../../kernel/core/envelope'
+
+describe('a retryable failure', () => {
+  function flaky(text: string, failures: number) {
+    const asked: { offset: number; length: number }[] = []
+    let left = failures
+    const content = {
+      locate: async () => ({ here: true, ext: 'pdf', size: text.length }),
+      fileOf: async () => new File([], 'x.pdf'),
+      readRange: async (_book: string, offset: number, length: number) => {
+        asked.push({ offset, length })
+        if (left > 0) {
+          left -= 1
+          throw new ServiceCallError('content.read', serviceError(ENVELOPE_ERRORS.disconnected, 'disconnected', true))
+        }
+        return new TextEncoder().encode(text.slice(offset, offset + length))
+      },
+    } as unknown as RemoteContent
+    return { content, asked }
+  }
+
+  it('is reported, and the next range is still read', async () => {
+    const { content, asked } = flaky('0123456789', 1)
+    const onFailure = vi.fn()
+    const transport = await pdfRangeTransport(content, 'one', 10, { onFailure })
+    const got = listen(transport)
+    transport.requestDataRange(0, 4)
+    await settle()
+    expect(onFailure).toHaveBeenCalledOnce()
+    transport.requestDataRange(4, 8)
+    await settle()
+    expect(asked).toHaveLength(2)
+    expect(got).toEqual([{ begin: 4, chunk: '4567' }])
+  })
+
+  it('still ends the transport on a failure that is not retryable', async () => {
+    const { content } = shelf('0123456789', { fail: true })
+    const onFailure = vi.fn()
+    const transport = await pdfRangeTransport(content, 'one', 10, { onFailure })
+    listen(transport)
+    transport.requestDataRange(0, 4)
+    await settle()
+    transport.requestDataRange(4, 8)
+    await settle()
+    expect(onFailure).toHaveBeenCalledOnce()
+  })
+})

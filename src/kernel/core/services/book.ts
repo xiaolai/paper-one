@@ -12,7 +12,7 @@ import { bool, descriptorOf, num, readInput, reqStr, str, type ServiceInput } fr
 import { pages } from './paging'
 import { trashFs } from './trash'
 import { SERVICE_ERRORS, refuse } from './refusals'
-import { bookDetail, bookRow, type BookDetail, type BookRow, type RemovedRow, type RestoredRow } from './rows'
+import { bookDetail, bookRow, positionSet, type BookDetail, type BookRow, type PositionSetRow, type RemovedRow, type RestoredRow } from './rows'
 
 /**
  * `book.*` — the noun the whole library hangs off (phase 11, WI-11.3/11.5).
@@ -247,6 +247,26 @@ export function bookSet(env: ServiceEnvironment) {
       ...(position === undefined ? {} : { position: { position, ...(progress === undefined ? {} : { progress }) } }),
     })
     return bookDetail(find(env, bookId))
+  }
+}
+
+/**
+ * `book.position` — one register, under its own grant. See the row.
+ *
+ * The same store verb `book.set` reaches for a position, so the two cannot
+ * disagree about what a position write does; what differs is the door. A
+ * progress not given keeps the record's — a device that knows where it is
+ * but not how far through (a fixed-layout page) must not zero the bar.
+ */
+export function bookPosition(env: ServiceEnvironment) {
+  return async (req: unknown): Promise<PositionSetRow> => {
+    const input = readInput(descriptorOf('book.position'), req)
+    const bookId = reqStr(input, 'book')
+    const book = find(env, bookId)
+    const position = reqStr(input, 'position')
+    const progress = num(input, 'progress') ?? book.progress ?? 0
+    await env.services.library.rememberPosition(bookId, position, progress)
+    return positionSet(find(env, bookId))
   }
 }
 

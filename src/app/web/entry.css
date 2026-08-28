@@ -213,3 +213,17 @@
   padding: 0 var(--space-20);
   font-size: var(--text-ui);
 }
+
+/* THE NOTE'S ONE ACTION — "Try now", inside the amber note, when the link is
+   between attempts. Inline with the sentence rather than a block button: it
+   is a shortcut past a wait, not a form. */
+.shelf-note-action {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 1px solid currentColor;
+  border-radius: var(--radius-chip);
+  padding: 0 var(--space-8);
+  margin-left: var(--space-8);
+  cursor: pointer;
+}

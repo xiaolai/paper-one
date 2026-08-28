@@ -18,6 +18,7 @@ import type {
   TagChange,
   TagCountRow,
   TrashRow,
+  PositionSetRow,
 } from './services/rows'
 import { MAX_MARK_NOTE, MAX_MARK_TEXT } from './marks'
 import type { ClientContribution } from './capability'
@@ -86,7 +87,7 @@ import type { ClientContribution } from './capability'
  * `blob:*`", which was true while nothing here carried bytes and stopped being
  * true when `content.read` did. See that row.
  */
-export const GRANT_FAMILIES = ['book', 'blob', 'mark', 'card', 'device', 'shelf'] as const
+export const GRANT_FAMILIES = ['book', 'blob', 'mark', 'card', 'device', 'shelf', 'position'] as const
 export type GrantFamily = (typeof GRANT_FAMILIES)[number]
 
 /**
@@ -111,6 +112,11 @@ export const SERVICE_GRANTS = [
   'device:manage',
   'shelf:read',
   'shelf:admin',
+  /* WHERE THE READER IS, and nothing else (WI-20.30, D7). Its own family so
+   * that `book:*` does not include it and it does not include `book.set` —
+   * the one write a browser session is admitted to, and the browser shares
+   * its origin with the book it is reading. */
+  'position:write',
 ] as const
 export type ServiceGrant = (typeof SERVICE_GRANTS)[number]
 
@@ -190,6 +196,10 @@ export const SERVICE_VERBS = [
   'rename',
   'locate',
   'evict',
+  /* `position` is `book.position` (phase 20) — the reader's place, as its own
+     verb under its own grant. `set` carries it too, under `book:write`; this
+     is the narrow door. */
+  'position',
   /* `read` is `content.read` (phase 18) — a slice of a book's bytes. The one
      verb in this table that carries CONTENT rather than a description of it;
      the note at the head of the file says why that exception is safe. */
@@ -322,6 +332,7 @@ export interface WireShapes {
   TagChange: TagChange
   ContentChunk: ContentChunk
   ContentLocation: ContentLocation
+  PositionSet: PositionSetRow
   ShelfStatus: ShelfStatus
   DeviceRow: DeviceRow
   Removed: RemovedRow
@@ -441,6 +452,9 @@ export interface WithdrawnField {
 
 const BOOK_ID: ServiceField = { name: 'book', type: 'string', required: true, nonEmpty: true, maxLength: MAX_RECORD_FIELD, doc: 'The book id.', positional: 0 }
 
+/** A BLAKE3 digest, hex, as `contentHash` carries it — 32 bytes, 64 characters. */
+const MAX_CONTENT_HASH = 64
+
 /**
  * The table. Ordered by noun as the phase document lists them, and within a
  * noun by the six regular verbs then the irregulars, so this file and the
@@ -510,6 +524,30 @@ const TABLE = [
       { name: 'author', why: 'a rename is not offered — an edit with no stamp loses to the next parse of the file' },
     ],
     output: { many: false, of: 'BookDetail', columns: ['bookId', 'title', 'author', 'tags', 'progress', 'finished', 'hasContent'] },
+  },
+  {
+    name: 'book.position',
+    noun: 'book',
+    verb: 'position',
+    /**
+     * THE NARROW DOOR (WI-20.30, D7). A phone's position never reached the
+     * shelf: the browser client holds `readingGrant`, every write is refused,
+     * and the position lived in `localStorage`. `book.set` carries a position
+     * — under `book:write`, beside `finished` and every other field, which
+     * is everything a hostile book's script could reach through the cookie
+     * the browser attaches to any socket the page opens. So the position has
+     * its own row under its own family, which covers nothing else; the
+     * webhost pump binds it further, to the book the client opened.
+     */
+    grant: 'position:write',
+    kind: 'req',
+    summary: 'Where the reader is in one book — the one write a reading device is granted.',
+    input: [
+      BOOK_ID,
+      { name: 'position', type: 'string', required: true, nonEmpty: true, maxLength: MAX_RECORD_POSITION, doc: 'Where the reader is, as a CFI.', positional: 1 },
+      { name: 'progress', type: 'number', min: 0, max: 1, doc: 'How far through, in [0, 1]. Absent keeps what the record has.' },
+    ],
+    output: { many: false, of: 'PositionSet' },
   },
   {
     name: 'book.remove',
@@ -770,6 +808,19 @@ const TABLE = [
         integer: true,
         min: 0,
         doc: 'How many bytes at most. Absent means to the end of the file.',
+      },
+      /* THE HASH THE CALLER WAS TOLD (WI-20.30). A browser that lost its
+         socket mid-read asks for the whole read again on a fresh one, and
+         nothing else can tell it the book changed in between — a re-import,
+         an enrichment that rewrote the file. `content.locate` answers
+         `contentHash`; this hands it back, and the read is REFUSED rather
+         than served when the bytes are no longer the ones described. */
+      {
+        name: 'expect',
+        type: 'string',
+        nonEmpty: true,
+        maxLength: MAX_CONTENT_HASH,
+        doc: "The `contentHash` `content.locate` answered. Refused with `conflict` when this shelf's bytes are no longer the ones that hash describes, or when it cannot say.",
       },
     ],
     output: { many: true, of: 'ContentChunk', columns: ['bookId', 'offset', 'bytes'] },

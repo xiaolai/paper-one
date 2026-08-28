@@ -1,5 +1,5 @@
 import type { PDFDataRangeTransport } from 'pdfjs-dist'
-import type { RemoteContent } from './content'
+import { isRetryable, type RemoteContent } from './content'
 
 /**
  * pdf.js's range transport, backed by `content.read` (phase 18, WI-18.8).
@@ -116,7 +116,14 @@ export async function pdfRangeTransport(
         })
         .catch((cause: unknown) => {
           if (this.stopped) return
-          this.stopped = true
+          /* LATCHED ONLY BY A FAILURE A RETRY CANNOT CHANGE (WI-20.30). A
+           * dropped socket is retryable — the envelope says so now, and the
+           * content layer restarts a read that lost its channel — so ending
+           * the transport on one ignored every range pdf.js asked for after
+           * the shelf was back a second later: a document stuck on the page
+           * it had, for good. A refusal, a missing book or a changed one is
+           * terminal and ends it as before; the reader is told either way. */
+          if (!isRetryable(cause)) this.stopped = true
           options.onFailure(cause)
         })
     }

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, useSyncExternalStore } from 'react'
 import { createRemoteCards, type CardsStore } from './cards'
 import { createRemoteMarks, type MarksStore } from './marks'
 import type { ShelfChannel } from './channel'
+import type { ShelfLink } from './reconnect'
 import type { Card } from '../../kernel'
 
 /**
@@ -59,6 +60,20 @@ export function useRemoteStores(channel: ShelfChannel): RemoteStores {
       setCards(null)
     }
   }, [channel])
+
+  /* READ AGAIN WHEN THE CHANNEL IS BACK (WI-20.30). The link outlives its
+     channels, so these stores are not rebuilt on a drop — and a store built
+     over a link that later reconnected would otherwise show the marks as they
+     were at the drop, for the rest of the session. A bare channel has no
+     `onOpened`; then there is nothing to hear. */
+  useEffect(() => {
+    const link = channel as ShelfChannel & Partial<Pick<ShelfLink, 'onOpened'>>
+    if (link.onOpened === undefined) return
+    return link.onOpened(() => {
+      marks?.refresh()
+      cards?.refresh()
+    })
+  }, [channel, marks, cards])
 
   const cardRows = useSyncExternalStore(
     useCallback((l: () => void) => cards?.subscribe(l) ?? (() => {}), [cards]),

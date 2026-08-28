@@ -3671,3 +3671,51 @@ describe('ReaderSession — a book that cannot open says why', () => {
     expect(view.initCalls).toHaveLength(1)
   })
 })
+
+/**
+ * A BOOK'S SCRIPTS DO NOT RUN — the session's two hooks (WI-20.30, D7).
+ *
+ * `bookScripts.test.ts` proves the two functions on the real fork; this proves
+ * the session CALLS them, which is the half a pure test cannot see: the
+ * loader's refusal is wired the moment the book is open, and the strip runs
+ * on every loaded document before the watchers, the marks or the measurements
+ * read it.
+ */
+describe('ReaderSession and a book that carries scripts', () => {
+  it('refuses the book’s script resources at its loader, from the moment it is open', async () => {
+    const view = fakeView()
+    const gate = new EventTarget()
+    ;(view.book as unknown as Record<string, unknown>)['transformTarget'] = gate
+    const session = new ReaderSession(fakeHost(), callbacks())
+    await session.start('book.epub', deps(view))
+
+    const script = new CustomEvent('load', { detail: { type: 'application/javascript', isScript: true, allow: true } })
+    gate.dispatchEvent(script)
+    expect(script.detail.allow).toBe(false)
+
+    /* And ONLY scripts — a stylesheet or an image is the book's to load. */
+    const sheet = new CustomEvent('load', { detail: { type: 'text/css', isScript: false, allow: true } })
+    gate.dispatchEvent(sheet)
+    expect(sheet.detail.allow).toBe(true)
+    session.dispose()
+  })
+
+  it('strips a loaded document’s scripts and handlers before anything else reads it', async () => {
+    const view = fakeView()
+    const session = new ReaderSession(fakeHost(), callbacks())
+    await session.start('book.epub', deps(view))
+
+    const doc = fakeDocument().asDocument()
+    const removedScript = vi.fn()
+    const removedAttribute = vi.fn()
+    const fake = doc as unknown as Record<string, unknown>
+    fake['getElementsByTagNameNS'] = () => [{ remove: removedScript }]
+    fake['querySelectorAll'] = () => [{ attributes: [{ name: 'onclick' }, { name: 'class' }], removeAttribute: removedAttribute }]
+    view.emit('load', { doc, index: 0 })
+
+    expect(removedScript).toHaveBeenCalledOnce()
+    expect(removedAttribute).toHaveBeenCalledWith('onclick')
+    expect(removedAttribute).not.toHaveBeenCalledWith('class')
+    session.dispose()
+  })
+})

@@ -257,3 +257,18 @@ describe('readingPositions', () => {
     })
   })
 })
+
+describe('held', () => {
+  it('answers the position with the clock it was written at, and null for a book it does not have', () => {
+    const { store } = fakeStore()
+    const positions = readingPositions(store, () => 1_700_000_000_000)
+    positions.set('one', 'epubcfi(/6/4)')
+    expect(positions.held('one')).toEqual({ cfi: 'epubcfi(/6/4)', at: 1_700_000_000_000 })
+    expect(positions.held('two')).toBeNull()
+  })
+
+  it('reads a row that recorded no clock as written at 0, so any shelf stamp beats it', () => {
+    const { store } = fakeStore(JSON.stringify({ one: { cfi: 'epubcfi(/6/4)' } }))
+    expect(readingPositions(store).held('one')).toEqual({ cfi: 'epubcfi(/6/4)', at: 0 })
+  })
+})

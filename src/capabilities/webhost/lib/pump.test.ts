@@ -434,3 +434,129 @@ describe('servePipe', () => {
     vi.useRealTimers()
   })
 })
+
+/**
+ * THE ONE WRITE, BOUND TO THE BOOK THIS SESSION OPENED (WI-20.30, D7).
+ *
+ * `book.position` is under `position:write`, which the pump admits — but only
+ * for the book the session located, because a browser session's socket is
+ * one a hostile book's script could open too. The kernel's OWN services over
+ * a real shelf, so the binding is proved against `content.locate` and
+ * `book.position` as shipped, and the record is read back through
+ * `book.get`.
+ */
+import { buildServices, createKernelServices, recordPath, sizePortOver, type IndexedBook } from '../../../kernel'
+import { fakeFs } from '../../../kernel/testkit'
+
+function realShelf(ids: readonly string[]) {
+  const books: IndexedBook[] = ids.map((bookId) => ({ bookId, title: `Title ${bookId}`, author: '', addedAt: 1 }))
+  const files = Object.fromEntries(books.map((book) => [recordPath(book.bookId), JSON.stringify(book)]))
+  const fs = fakeFs(files)
+  const services = createKernelServices({ fs, storage: null, initialBooks: books })
+  /* `content.locate` measures through the size port; a shelf with none bound
+     is the phase-11 desktop, and not the shape a browser ever meets. */
+  services.bindSizePort(
+    sizePortOver({
+      bytesAt: async (path) => fs.store.get(path)?.byteLength ?? null,
+      readDir: async (path) => (await fs.readDir(path)).map((entry) => ({ name: entry.name, isDirectory: entry.isDirectory })),
+    }),
+  )
+  return { services, contributions: buildServices({ services }) }
+}
+
+const CFI = 'epubcfi(/6/24!/4/2/1:0)'
+
+describe('book.position through the pump', () => {
+  it('lands the position of the book this session opened, and the record carries it', async () => {
+    vi.useFakeTimers()
+    const { wire, client } = browser()
+    const { contributions } = realShelf(['a', 'b'])
+    const pump = servePipe({ wire, services: contributions, pollMs: 5, sessionsMs: 10 })
+
+    const located = client.call('content.locate', { book: 'a' })
+    await tick()
+    await located
+    const set = client.call('book.position', { book: 'a', position: CFI, progress: 0.5 })
+    await tick()
+    expect(await set).toMatchObject({ bookId: 'a', position: CFI, progress: 0.5 })
+    const detail = client.call('book.get', { book: 'a' })
+    await tick()
+    expect(await detail).toMatchObject({ position: CFI, progress: 0.5 })
+
+    pump.stop()
+    vi.useRealTimers()
+  })
+
+  it('refuses to move any other book, by grant, and the handler never runs', async () => {
+    vi.useFakeTimers()
+    const { wire, client } = browser()
+    const { contributions, services } = realShelf(['a', 'b'])
+    const pump = servePipe({ wire, services: contributions, pollMs: 5, sessionsMs: 10 })
+
+    const located = client.call('content.locate', { book: 'a' })
+    await tick()
+    await located
+    /* THE HOSTILE FIXTURE: a second book id in the call. */
+    const refused = client.call('book.position', { book: 'b', position: CFI }).then(
+      () => 'RESOLVED',
+      (thrown: unknown) => String(thrown),
+    )
+    await tick()
+    expect(await refused).toMatch(/forbidden/i)
+    expect(services.library.getSnapshot().find((row) => row.bookId === 'b')?.position).toBeUndefined()
+
+    pump.stop()
+    vi.useRealTimers()
+  })
+
+  it('refuses a session that has opened nothing, and one whose book changed follows the newest locate', async () => {
+    vi.useFakeTimers()
+    const { wire, client } = browser()
+    const { contributions } = realShelf(['a', 'b'])
+    const pump = servePipe({ wire, services: contributions, pollMs: 5, sessionsMs: 10 })
+
+    const cold = client.call('book.position', { book: 'a', position: CFI }).then(
+      () => 'RESOLVED',
+      (thrown: unknown) => String(thrown),
+    )
+    await tick()
+    expect(await cold).toMatch(/forbidden/i)
+
+    for (const book of ['a', 'b']) {
+      const located = client.call('content.locate', { book })
+      await tick()
+      await located
+    }
+    /* Opened `b` last: `a` is no longer this session's book. */
+    const stale = client.call('book.position', { book: 'a', position: CFI }).then(
+      () => 'RESOLVED',
+      (thrown: unknown) => String(thrown),
+    )
+    await tick()
+    expect(await stale).toMatch(/forbidden/i)
+    const current = client.call('book.position', { book: 'b', position: CFI })
+    await tick()
+    expect(await current).toMatchObject({ bookId: 'b' })
+
+    pump.stop()
+    vi.useRealTimers()
+  })
+
+  it('still refuses every other write', async () => {
+    vi.useFakeTimers()
+    const { wire, client } = browser()
+    const { contributions } = realShelf(['a'])
+    const pump = servePipe({ wire, services: contributions, pollMs: 5, sessionsMs: 10 })
+    const located = client.call('content.locate', { book: 'a' })
+    await tick()
+    await located
+    const refused = client.call('book.set', { book: 'a', position: CFI }).then(
+      () => 'RESOLVED',
+      (thrown: unknown) => String(thrown),
+    )
+    await tick()
+    expect(await refused).toMatch(/forbidden/i)
+    pump.stop()
+    vi.useRealTimers()
+  })
+})

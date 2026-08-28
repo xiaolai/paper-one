@@ -67,7 +67,7 @@ afterEach(() => {
 
 function shelf() {
   return {
-    locate: async (): Promise<ContentFacts> => ({ here: true, ext: 'epub', size: 10 }),
+    locate: async (): Promise<ContentFacts> => ({ here: true, ext: 'epub', size: 10, contentHash: null }),
     readRange: async () => new Uint8Array(0),
     fileOf: async (_book: string, name: string) => new File(['PK'], name),
   } as unknown as RemoteContent

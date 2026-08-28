@@ -109,7 +109,7 @@ describe('readRange', () => {
 describe('locate', () => {
   it('reports what the shelf holds', async () => {
     const { content } = shelfOf({ one: 'call me ishmael' })
-    expect(await content.locate('one')).toEqual({ here: true, ext: 'epub', size: 15 })
+    expect(await content.locate('one')).toEqual({ here: true, ext: 'epub', size: 15, contentHash: null })
   })
 
   /**
@@ -121,7 +121,7 @@ describe('locate', () => {
    */
   it('keeps an unmeasurable size as null rather than zero', async () => {
     const { content } = shelfOf({})
-    expect(await content.locate('missing')).toEqual({ here: false, ext: null, size: null })
+    expect(await content.locate('missing')).toEqual({ here: false, ext: null, size: null, contentHash: null })
   })
 })
 
@@ -269,5 +269,127 @@ describe('an assembled book is checked, not trusted', () => {
 
     const wrong = badShelf([[chunk(0, 'abcd')]])
     await expect(wrong.readRange('one', 16, 4)).rejects.toThrow(/expected byte 16/)
+  })
+})
+
+/**
+ * A READ THAT LOST ITS CHANNEL IS RESTARTED WHOLE (WI-20.30).
+ *
+ * Codex refuted two drafts of this. Reconnecting alone cannot finish a read
+ * already in flight: `shut()` rejects every pending call. And a replay that
+ * RESUMED after the chunks already delivered either repeated offset 0 and
+ * tripped the contiguity check above, or spliced two versions of the book —
+ * because neither the chunks nor `locate`'s facts carried a hash. So the
+ * partial is discarded, the whole read is asked for again once the channel is
+ * back, and every read carries the hash `locate` learned so a changed book is
+ * a refusal rather than a splice.
+ */
+import { ENVELOPE_ERRORS, ServiceCallError, serviceError } from '../../kernel/core/envelope'
+import { MAX_RESTARTS } from './content'
+
+const dropped = () => new ServiceCallError('content.read', serviceError(ENVELOPE_ERRORS.disconnected, 'disconnected', true))
+const chunkOf = (offset: number, bytes: string, bookId = 'one') => ({ bookId, offset, bytes: btoa(bytes) })
+
+/**
+ * A shelf whose `content.read` answers from a script, one entry per call:
+ * the pages to yield, then optionally a throw. `whenOpen` counts how often
+ * the client waited for the channel to come back.
+ */
+function flakyShelf(
+  script: readonly { pages: readonly unknown[][]; then?: unknown }[],
+  facts: { contentHash: string | null } = { contentHash: null },
+) {
+  const asked: { service: string; body: Record<string, unknown> }[] = []
+  let waited = 0
+  let call = 0
+  const channel = {
+    call: async (service: string, body: unknown) => {
+      asked.push({ service, body: body as Record<string, unknown> })
+      return { bookId: 'one', here: true, ext: 'epub', size: 4, contentHash: facts.contentHash }
+    },
+    stream: (service: string, body: unknown) => ({
+      [Symbol.asyncIterator]: async function* () {
+        asked.push({ service, body: body as Record<string, unknown> })
+        const step = script[Math.min(call, script.length - 1)]!
+        call += 1
+        for (const page of step.pages) yield page
+        if (step.then !== undefined) throw step.then
+      },
+    }),
+    close: () => {},
+    onClosed: () => () => {},
+    whenOpen: async () => {
+      waited += 1
+    },
+  }
+  return { content: remoteContent(channel), asked, waits: () => waited }
+}
+
+describe('a read that lost its channel', () => {
+  it('is restarted whole on the channel that comes back, and the original promise resolves to one exact copy', async () => {
+    const { content, asked, waits } = flakyShelf([
+      { pages: [[chunkOf(0, 'AB')]], then: dropped() },
+      { pages: [[chunkOf(0, 'AB')], [chunkOf(2, 'CD')]] },
+    ])
+    const file = await content.fileOf('one', 'x.epub')
+    expect(text(new Uint8Array(await file.arrayBuffer()))).toBe('ABCD')
+    /* FROM THE START, not from byte 2. The two reads ask for the same thing;
+       what was delivered before the drop is thrown away. */
+    const reads = asked.filter((one) => one.service === 'content.read')
+    expect(reads).toHaveLength(2)
+    expect(reads[1]!.body['offset']).toBe(reads[0]!.body['offset'])
+    expect(waits()).toBe(1)
+  })
+
+  it('restarts a RANGE from the range’s own start, never from where the drop left it', async () => {
+    const { content, asked } = flakyShelf([
+      { pages: [[chunkOf(4, 'ef')]], then: dropped() },
+      { pages: [[chunkOf(4, 'ef')], [chunkOf(6, 'gh')]] },
+    ])
+    expect(text(await content.readRange('one', 4, 4))).toBe('efgh')
+    const reads = asked.filter((one) => one.service === 'content.read')
+    expect(reads.map((one) => one.body['offset'])).toEqual([4, 4])
+  })
+
+  it('carries the hash locate learned on every read, and refuses a book that changed rather than splicing it', async () => {
+    const HASH = 'a'.repeat(64)
+    const changed = new ServiceCallError('content.read', serviceError('conflict', 'the content of one changed'))
+    const { content, asked } = flakyShelf(
+      [
+        { pages: [[chunkOf(0, 'AB')]], then: dropped() },
+        /* The shelf, asked with `expect`, no longer holds that hash. A fake
+           that served `YZ` here is what the old design would have spliced
+           onto the `AB` already delivered. */
+        { pages: [], then: changed },
+      ],
+      { contentHash: HASH },
+    )
+    await content.locate('one')
+    await expect(content.fileOf('one', 'x.epub')).rejects.toThrow(/changed/)
+    const reads = asked.filter((one) => one.service === 'content.read')
+    expect(reads).toHaveLength(2)
+    expect(reads.every((one) => one.body['expect'] === HASH)).toBe(true)
+  })
+
+  it('sends no expectation when the shelf could not hash the book', async () => {
+    const { content, asked } = flakyShelf([{ pages: [[chunkOf(0, 'ABCD')]] }], { contentHash: null })
+    await content.locate('one')
+    await content.fileOf('one', 'x.epub')
+    const read = asked.find((one) => one.service === 'content.read')!
+    expect('expect' in read.body).toBe(false)
+  })
+
+  it('gives up after a bounded number of restarts, with the failure that ended it', async () => {
+    const { content, asked } = flakyShelf([{ pages: [], then: dropped() }])
+    await expect(content.fileOf('one', 'x.epub')).rejects.toThrow(/disconnected/)
+    expect(asked.filter((one) => one.service === 'content.read')).toHaveLength(1 + MAX_RESTARTS)
+  })
+
+  it('does not restart a read that failed for a reason a retry cannot change', async () => {
+    const refused = new ServiceCallError('content.read', serviceError('not-found', 'no content for one'))
+    const { content, asked, waits } = flakyShelf([{ pages: [], then: refused }])
+    await expect(content.fileOf('one', 'x.epub')).rejects.toThrow(/no content/)
+    expect(asked.filter((one) => one.service === 'content.read')).toHaveLength(1)
+    expect(waits()).toBe(0)
   })
 })

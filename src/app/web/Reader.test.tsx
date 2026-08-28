@@ -92,7 +92,7 @@ function shelf(facts: Partial<ContentFacts>) {
   const readRange = vi.fn(async () => new Uint8Array(0))
   const fileOf = vi.fn(async (_book: string, name: string) => new File(['PK'], name))
   const content = {
-    locate: async (): Promise<ContentFacts> => ({ here: true, ext: 'epub', size: 10, ...facts }),
+    locate: async (): Promise<ContentFacts> => ({ here: true, ext: 'epub', size: 10, contentHash: null, ...facts }),
     readRange,
     fileOf,
   } as unknown as RemoteContent
@@ -204,7 +204,7 @@ describe('Reader', () => {
    */
   it('surfaces a failed range read instead of leaving the page blank', async () => {
     const failing = {
-      locate: async (): Promise<ContentFacts> => ({ here: true, ext: 'pdf', size: 64 }),
+      locate: async (): Promise<ContentFacts> => ({ here: true, ext: 'pdf', size: 64, contentHash: null }),
       readRange: async () => {
         throw new Error('the shelf went away')
       },
@@ -288,14 +288,13 @@ describe('Reader', () => {
   /**
    * A BOOK REOPENS WHERE IT WAS LEFT.
    *
-   * Kept in the browser rather than on the book's record: the pump grants this
-   * client `readingGrant` and nothing else, so every write in the service table
-   * is refused — deliberately, because a hostile EPUB shares this origin and a
-   * socket it opens carries the reader's session. Widening that for a position
-   * would widen it for `book.set`, which also carries a title and a tag list.
-   *
-   * **The cost is that a position does not sync**, and that is a real
-   * limitation rather than a temporary one.
+   * This device's copy, in `localStorage`, is what a host with no `remote`
+   * opens at — a session with no write grant, or a shelf that is asleep. It
+   * used to be the ONLY place, because the pump granted this client
+   * `readingGrant` and every write was refused; since WI-20.30 the shelf's
+   * copy travels too (`remotePositions.ts`, below), and the device's is the
+   * fallback and the comparison. With no `remote` prop the old behaviour is
+   * exactly the behaviour.
    */
   it('opens a book where it was left', async () => {
     const positions = fakePositions({ one: { cfi: 'epubcfi(/6/4!/4/2/10)', at: 1 } })
@@ -1031,5 +1030,99 @@ describe('a note the reader taps', () => {
       document.querySelector('[data-footnote]') ?? screen.queryByRole('dialog'),
       'the note was rendered and nowhere on this screen shows it',
     ).not.toBeNull()
+  })
+})
+
+/**
+ * THE SHELF'S PLACE, both ways (WI-20.30, D7).
+ *
+ * `remotePositions.test.ts` proves the module; this proves the WIRING: the
+ * reader asks the shelf before the book is handed to the renderer, hands the
+ * renderer whichever place is newer, and reports every settled turn back.
+ */
+describe('Reader and the shelf’s copy of the position', () => {
+  const SHELF = 'epubcfi(/6/24!/4/2/12)'
+  const DEVICE = 'epubcfi(/6/4!/4/2/10)'
+
+  function remoteWith(answer: { cfi: string; progress: number; at: number } | null | Error) {
+    return {
+      read: vi.fn(async () => {
+        if (answer instanceof Error) throw answer
+        return answer
+      }),
+      write: vi.fn(),
+      flush: vi.fn(async () => {}),
+      dispose: vi.fn(),
+    }
+  }
+
+  it('opens at the shelf’s place when it is newer — desktop at chapter 12, phone opens at 12 — and follows it locally', async () => {
+    const positions = fakePositions({ one: { cfi: DEVICE, at: 1 } })
+    const remote = remoteWith({ cfi: SHELF, progress: 0.5, at: 2 })
+    const { content } = shelf({ ext: 'epub' })
+    const captured = await withView((Fresh) =>
+      render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={positions} remote={remote} />),
+    )
+    await waitFor(() => expect(sourcesOf(captured)).toHaveLength(1))
+    expect(captured['lastLocation']).toBe(SHELF)
+    expect(positions.get('one')).toBe(SHELF)
+    expect(remote.read).toHaveBeenCalledWith('one')
+  })
+
+  it('opens at this device’s place when it is the newer, and tells the shelf', async () => {
+    const positions = fakePositions({ one: { cfi: DEVICE, at: 5 } })
+    const remote = remoteWith({ cfi: SHELF, progress: 0.5, at: 2 })
+    const { content } = shelf({ ext: 'epub' })
+    const captured = await withView((Fresh) =>
+      render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={positions} remote={remote} />),
+    )
+    await waitFor(() => expect(sourcesOf(captured)).toHaveLength(1))
+    expect(captured['lastLocation']).toBe(DEVICE)
+    expect(remote.write).toHaveBeenCalledWith('one', DEVICE, undefined)
+  })
+
+  it('does not hand the book to the renderer until the place is decided', async () => {
+    let answer: ((place: null) => void) | null = null
+    const remote = {
+      read: vi.fn(() => new Promise<null>((resolve) => (answer = resolve))),
+      write: vi.fn(),
+      flush: vi.fn(async () => {}),
+      dispose: vi.fn(),
+    }
+    const { content } = shelf({ ext: 'epub' })
+    const captured = await withView((Fresh) =>
+      render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} remote={remote} />),
+    )
+    await waitFor(() => expect(remote.read).toHaveBeenCalled())
+    /* The bytes may well be here; the renderer is not given them yet. */
+    expect(sourcesOf(captured)).toHaveLength(0)
+    answer!(null)
+    await waitFor(() => expect(sourcesOf(captured)).toHaveLength(1))
+    expect(captured['lastLocation']).toBeNull()
+  })
+
+  it('falls back to this device’s place when the shelf cannot be asked', async () => {
+    const positions = fakePositions({ one: { cfi: DEVICE, at: 1 } })
+    const remote = remoteWith(new Error('the link is reconnecting'))
+    const { content } = shelf({ ext: 'epub' })
+    const captured = await withView((Fresh) =>
+      render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={positions} remote={remote} />),
+    )
+    await waitFor(() => expect(sourcesOf(captured)).toHaveLength(1))
+    expect(captured['lastLocation']).toBe(DEVICE)
+  })
+
+  it('reports a turn to the shelf — the phone turns a page, book.json on the shelf carries it', async () => {
+    const remote = remoteWith(null)
+    const { content } = shelf({ ext: 'epub' })
+    const captured = await withView((Fresh) =>
+      render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} remote={remote} />),
+    )
+    await waitFor(() => expect(captured['onRelocate']).toBeTypeOf('function'))
+    ;(captured['onRelocate'] as (g: number, p: unknown) => void)(0, { cfi: SHELF, fraction: 0.5 })
+    expect(remote.write).toHaveBeenCalledWith('one', SHELF, 0.5)
+    /* A null cfi — the fixed-layout renderer reports one — is not a place. */
+    ;(captured['onRelocate'] as (g: number, p: unknown) => void)(0, { cfi: null, fraction: 0.6 })
+    expect(remote.write).toHaveBeenCalledTimes(1)
   })
 })

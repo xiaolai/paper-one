@@ -892,10 +892,19 @@ describe('the client', () => {
     const b = client.call('example.ping', 2)
     client.disconnect()
     for (const p of [a, b]) {
-      expect(((await p.catch((e: unknown) => e)) as ServiceCallError).error.code).toBe(ENVELOPE_ERRORS.disconnected)
+      const failure = (await p.catch((e: unknown) => e)) as ServiceCallError
+      expect(failure.error.code).toBe(ENVELOPE_ERRORS.disconnected)
+      /* RETRYABLE BY NATURE. A disconnect says nothing about the request —
+         the shelf may have answered into a socket that was already gone — and
+         a client deciding whether to ask again keys on this flag. It was
+         false, so a replay built on `retryable` never saw the one failure it
+         existed for (WI-20.30, Codex round 2). */
+      expect(failure.error.retryable, 'a disconnect is retryable').toBe(true)
     }
     expect(sent.map((f) => f.kind)).toEqual(['req', 'req'])
-    await expect(client.call('example.ping', 3)).rejects.toBeInstanceOf(ServiceCallError)
+    const late = (await client.call('example.ping', 3).catch((e: unknown) => e)) as ServiceCallError
+    expect(late).toBeInstanceOf(ServiceCallError)
+    expect(late.error.retryable, 'a call after the disconnect is retryable too').toBe(true)
     expect(sent).toHaveLength(2)
     expect(timers.pending()).toBe(0)
   })
@@ -1366,13 +1375,18 @@ describe('hardening against a hostile peer', () => {
        * was written about. It is no longer the whole of it. */
       expect((failure as ServiceCallError).error.code).toBe(ENVELOPE_ERRORS.disconnected)
       expect((failure as ServiceCallError).error.code).not.toBe(ENVELOPE_ERRORS.timeout)
-      /* AND NOT RETRYABLE — pinned because it is the surprising half. `retryable`
-         here means "ask this client again", and this client is finished: `send`
-         threw, so every later call on it rejects `disconnected` too. Retrying
-         is the caller's job with a NEW connection, which the code is what tells
-         them. A flag that said otherwise would send a retry loop at a socket
-         that will never open. */
-      expect((failure as ServiceCallError).error.retryable).toBe(false)
+      /* AND RETRYABLE — and this pin used to say the opposite, on the reading
+         that `retryable` means "ask THIS client again". This client is indeed
+         finished: `send` threw, so every later call on it rejects
+         `disconnected` too. But the flag is about the REQUEST, not the socket
+         — "may this be asked again?" — and a request that never reached the
+         shelf may be, on a fresh connection, which is exactly what the
+         `disconnected` code tells the caller to open. The browser client's
+         replay keys on this flag (WI-20.30), and while it read `false` the
+         replay never fired for the one failure it was written for. A retry
+         loop aimed at the dead socket is what `disconnected` + a reconnecting
+         link prevents, not what a `false` here did. */
+      expect((failure as ServiceCallError).error.retryable).toBe(true)
     })
   })
 

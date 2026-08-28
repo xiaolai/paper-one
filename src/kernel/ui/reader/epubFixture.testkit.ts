@@ -123,7 +123,15 @@ const CONTAINER = `<?xml version="1.0" encoding="UTF-8"?>
   <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
 </container>`
 
-const OPF = `<?xml version="1.0" encoding="UTF-8"?>
+/** A manifest item beyond the fixture's own three — a script, an image. */
+export interface ExtraItem {
+  /** Zip path, under `OEBPS/`. */
+  readonly href: string
+  readonly mediaType: string
+  readonly data: Uint8Array | string
+}
+
+const opfFor = (extra: readonly ExtraItem[]): string => `<?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
     <dc:identifier id="uid">${UID}</dc:identifier>
@@ -134,6 +142,7 @@ const OPF = `<?xml version="1.0" encoding="UTF-8"?>
     <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
     <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
     <item id="font" href="fonts/plain.otf" media-type="font/otf"/>
+${extra.map((one, i) => `    <item id="extra${i}" href="${one.href.replace(/^OEBPS\//, '')}" media-type="${one.mediaType}"/>`).join('\n')}
   </manifest>
   <spine><itemref idref="ch1"/></spine>
 </package>`
@@ -188,16 +197,20 @@ export const LCP_CHAPTER_ENCRYPTION = `<?xml version="1.0" encoding="UTF-8"?>
  * bytes — an encrypted one is ciphertext, and a test that wants the fork to
  * see what a real DRM'd file looks like passes noise.
  */
-export function epubFixture(options: { encryption?: string; chapter?: Uint8Array | string } = {}): File {
+export function epubFixture(
+  options: { encryption?: string; chapter?: Uint8Array | string; extra?: readonly ExtraItem[] } = {},
+): File {
   const font = new Uint8Array(2048)
   for (let i = 0; i < font.length; i += 1) font[i] = (i * 7) & 0xff
+  const extra = options.extra ?? []
   const entries: Entry[] = [
     { name: 'mimetype', data: 'application/epub+zip' },
     { name: 'META-INF/container.xml', data: CONTAINER },
-    { name: 'OEBPS/content.opf', data: OPF },
+    { name: 'OEBPS/content.opf', data: opfFor(extra) },
     { name: 'OEBPS/nav.xhtml', data: NAV },
     { name: CHAPTER_HREF, data: options.chapter ?? CHAPTER },
     { name: FONT_HREF, data: font },
+    ...extra.map((one) => ({ name: one.href, data: one.data })),
   ]
   if (options.encryption) entries.splice(2, 0, { name: 'META-INF/encryption.xml', data: options.encryption })
   const bytes = storeZip(entries)
