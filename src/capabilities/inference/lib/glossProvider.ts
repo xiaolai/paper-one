@@ -116,21 +116,28 @@ export function createGlossProvider({ plugin, controller, report }: GlossProvide
     },
 
     /**
-     * ALWAYS TRUE, and it is a constant rather than an oversight.
+     * TRUE WHILE THERE IS A RUNTIME TO INSTALL A MODEL INTO.
      *
-     * This object exists only because `inference` composed, and `inference`
+     * ⚠️ **THIS WAS THE CONSTANT `true`**, on the argument that `inference`
      * composing is exactly what puts the Local models section in Settings —
-     * `start()` never fails on absence (F2), so there is no state in which
-     * this provider is bound and the reader has nowhere to install a model.
-     * A build that did not compose it keeps the port's `NO_GLOSS` default,
-     * where the same field is `false`.
+     * `start()` never fails on absence (F2) — so there was "no state in which
+     * this provider is bound and the reader has nowhere to install a model".
+     * There is one, and WI-20.21 measured what it cost: with the runtime
+     * absent, Look up offered "Install one", the pane took the download, 2.5 GB
+     * landed, and every lookup then failed with "The runtime is not
+     * installed". Somewhere to send the reader is only worth sending them if
+     * something can be done there.
      *
-     * So the two objects that implement `GlossProvider` answer this with two
-     * constants, and between them they say the thing the reader UI actually
-     * needs to know: whether Look up should offer a download or not be drawn
-     * at all. See `GlossProvider.installable`.
+     * So this follows the runtime, read per call like `available` — and with
+     * it false the reader UI draws no Look up control at all, which is the
+     * same answer a browser or a phone gets (`decideLookUp` → `none`), and the
+     * honest one: nothing the reader can do from here changes it. A build that
+     * did not compose `inference` keeps the port's `NO_GLOSS` default, where
+     * the field is `false` for the other reason. See `GlossProvider.installable`.
      */
-    installable: true,
+    get installable(): boolean {
+      return controller.getSnapshot().runtime.kind !== 'absent'
+    },
 
     async gloss(term: string, context: GlossContext, signal: AbortSignal): Promise<string> {
       const model = controller.textModel()

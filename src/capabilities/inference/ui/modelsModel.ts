@@ -149,6 +149,14 @@ export function isActiveInstall(runtime: RuntimeState, modelId: string): boolean
   return (runtime.kind === 'installing' || runtime.kind === 'verifying') && runtime.model === modelId
 }
 
+/**
+ * What an uninstalled row says when there is no runtime to run it.
+ *
+ * The routes pane's wording for the same fact (`probe.rs` emits it for a
+ * local route whose runtime is missing), so the two panes agree.
+ */
+export const RUNTIME_MISSING_VALUE = 'Runtime not installed'
+
 /** The right-hand value for one model's row. */
 export function modelValue(
   model: { readonly id: string; readonly bytes: number; readonly installed: boolean },
@@ -156,22 +164,35 @@ export function modelValue(
 ): string {
   if (isActiveInstall(runtime, model.id)) return runtimeValue(runtime)
   if (model.installed) return `Installed · ${formatBytes(model.bytes)}`
+  /* THE REASON, NOT THE PRICE. Quoting a download cost beside a row that
+     offers no download reads as an offer. */
+  if (runtime.kind === 'absent') return RUNTIME_MISSING_VALUE
   return formatBytes(model.bytes)
 }
 
 /**
- * What the model's action button says.
+ * What the model's action button says — or that there is none.
  *
  * `[Install]` becomes `[Remove]` once installed, and `[Cancel]` during the
  * download — one button whose label is the action available now, rather than
  * three controls two of which are always disabled.
+ *
+ * ⚠️ **`runtime-missing` IS NOT A BUTTON**, and it is the case this ignored.
+ * WI-20.21: `runtime.kind` was never read, so with the runtime absent every
+ * row offered Install, the download succeeded, 2.5 GB landed, and every lookup
+ * after it failed with "The runtime is not installed" — a model the reader
+ * paid for and nothing could run. A row that cannot act shows why and no
+ * control (§07), which is the routes pane's own rule for a route that cannot
+ * answer. Removal is still offered for a model on disk: the file can be
+ * deleted whether or not anything could have run it.
  */
 export function modelAction(
   model: { readonly id: string; readonly installed: boolean },
   runtime: RuntimeState,
-): 'install' | 'remove' | 'cancel' {
+): 'install' | 'remove' | 'cancel' | 'runtime-missing' {
   if (isActiveInstall(runtime, model.id)) return 'cancel'
-  return model.installed ? 'remove' : 'install'
+  if (model.installed) return 'remove'
+  return runtime.kind === 'absent' ? 'runtime-missing' : 'install'
 }
 
 export interface ModelsModelOptions {

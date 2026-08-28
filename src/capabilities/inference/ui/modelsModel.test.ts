@@ -560,3 +560,31 @@ describe('the models store', () => {
     models.dispose()
   })
 })
+
+/**
+ * INSTALL IS OFFERED ONLY WHEN IT CAN RUN — WI-20.21.
+ *
+ * `modelAction` ignored `runtime.kind`, so with the runtime absent every row
+ * offered Install, the download succeeded, 2.5 GB landed, and every lookup
+ * after it failed with "The runtime is not installed". A model that cannot
+ * run is not something to offer; the row says why instead, which is the
+ * routes pane's own rule for a route that cannot answer.
+ */
+describe('a model without a runtime', () => {
+  const absent: RuntimeState = { kind: 'absent', reason: 'the inference runtime is not installed' }
+
+  it('is not offered for install', () => {
+    expect(modelAction({ id: 'qwen', installed: false }, absent)).toBe('runtime-missing')
+  })
+
+  /* A file that is on disk can still be deleted; only the download is
+     pointless. */
+  it('can still be removed once it is on disk', () => {
+    expect(modelAction({ id: 'qwen', installed: true }, absent)).toBe('remove')
+  })
+
+  it('says why in the value slot, rather than quoting a download it will not offer', () => {
+    expect(modelValue(MODELS[0]!, absent)).toBe('Runtime not installed')
+    expect(modelValue({ ...MODELS[0]!, installed: true }, absent)).toBe('Installed · 2.5 GB')
+  })
+})

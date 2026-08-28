@@ -507,3 +507,35 @@ describe('the gloss provider', () => {
     expect(agentAsk).not.toHaveBeenCalled()
   })
 })
+
+/**
+ * `installable` FOLLOWS THE RUNTIME — WI-20.21.
+ *
+ * It was the constant `true`, on the argument that `inference` composing is
+ * what puts the Local models section in Settings. It is — but a models pane
+ * whose runtime is absent has nothing to install a model INTO: the Look up
+ * strip offered "Install one", the pane took the download, and every lookup
+ * then failed with "The runtime is not installed". Whether there is somewhere
+ * useful to send the reader is what this answers, and with no runtime there is
+ * not.
+ */
+describe('installable', () => {
+  const withRuntime = (kind: 'absent' | 'installed' | 'ready') => {
+    const runtime = kind === 'absent' ? { kind, reason: 'x' } : kind === 'ready' ? { kind, version: '1' } : { kind }
+    const controller = {
+      textModel: () => null,
+      ensureReady: async () => true,
+      getSnapshot: () => ({ runtime, models: [], installing: null, failure: null }),
+    } as unknown as Controller
+    return createGlossProvider({ plugin: {} as InferencePlugin, controller })
+  }
+
+  it('is false while the runtime is absent, so nothing offers a download that cannot run', () => {
+    expect(withRuntime('absent').installable).toBe(false)
+  })
+
+  it('is true once there is a runtime to install a model into', () => {
+    expect(withRuntime('installed').installable).toBe(true)
+    expect(withRuntime('ready').installable).toBe(true)
+  })
+})

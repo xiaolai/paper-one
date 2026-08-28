@@ -52,6 +52,15 @@ export function ModelsPane({ model }: { readonly model: ModelsModel }) {
           this the reader pressed Remove, nothing happened, and nothing said
           why. Same slot and same voice as `Test voice`'s failure line. */}
       {snapshot.failure === null ? null : <div className={ui.hint}>{snapshot.failure}</div>}
+      {/* WHY NOTHING BELOW OFFERS INSTALL (WI-20.21). Said once here rather
+          than once per row: the rows show the reason in their value slot, and
+          this is the sentence that says what would change it. */}
+      {runtime.kind === 'absent' ? (
+        <div className={ui.hint}>
+          The runtime is not installed, so no model could run — nothing is
+          offered until it is.
+        </div>
+      ) : null}
 
       {snapshot.models.map((entry) => {
         const action = modelAction(entry, runtime)
@@ -62,7 +71,10 @@ export function ModelsPane({ model }: { readonly model: ModelsModel }) {
               {entry.quantization ? ` ${entry.quantization}` : ''}
             </span>
             <span className={ui.value}>{modelValue(entry, runtime)}</span>
-            {action === 'cancel' ? (
+            {/* NO CONTROL for a model that cannot run — §07's disabled-and-
+                says-why, with the why already in the value slot. A disabled
+                Install would be a control that cannot act, dressed as one. */}
+            {action === 'runtime-missing' ? null : action === 'cancel' ? (
               <button type="button" className={ui.button} onClick={() => model.cancelInstall()}>
                 Cancel
               </button>
