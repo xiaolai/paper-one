@@ -299,7 +299,12 @@ export const inference: Capability = {
  * them dead and documented as live, is how the live one comes to be changed
  * without the dead one and nobody notices which is which. See `start`. */
 
-export { DEPTHS, reasonOf } from './lib/plugin'
+export { DEPTHS, errorKind, reasonOf } from './lib/plugin'
+/* `detailFor` and `errorKind` are what `companion` translates a failed answer
+ * with (WI-20.18) — the same pair `glossProvider` uses, and for the same
+ * reason: the reader's sentence for a `kind` has one home, and the kernel's
+ * thread cannot reach it. */
+export { detailFor } from './lib/controller'
 /* ⚠️ EXACTLY WHAT `companion` IMPORTS, AND NOTHING ELSE. This list carried
  * `InstallProgress`, `ModelRow` and `RouteKind` too, plus `KEEP_LOADED_SETTING`,
  * `useInference` and three controller types on their own lines — none of which

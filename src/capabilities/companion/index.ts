@@ -124,6 +124,9 @@ export const companion: Capability = {
          `companion.route` and `companion.depth`, which `scopeSettings` allows
          and the kernel's own settings are not. */
       depth: () => api.settings.get(DEPTH_SETTING),
+      /* The maintainer's half of a failed answer (WI-20.18) — the same sink
+         the routes model and the gloss report to. */
+      report: (event, fields) => api.diagnostics.warn(event, fields),
     })
     const unbindCompanion = api.services.bindCompanion(boundProvider)
     session.own('unbindCompanion', () => unbindCompanion.dispose())

@@ -154,6 +154,25 @@ export function detailFor(error: unknown): string {
       return 'The runtime’s answer could not be read'
     case 'cancelled':
       return 'The runtime stopped before it answered'
+    /* ── REACHABLE FROM THE COMPANION, and added because they were not ──
+     *
+     * WI-20.18. An agent route rejects with the four `agent*` kinds and a
+     * cloud endpoint's key read with `keychain`, and every one of them landed
+     * on the default — so a reader signed out of Codex was told "Something
+     * went wrong" by a thread that knew exactly what was wrong. "That agent"
+     * rather than its name, for the reason the two above say "That request":
+     * this is worded for every caller, and the crate's own message names the
+     * agent in the maintainer's half. */
+    case 'agentSignedOut':
+      return 'That agent is not signed in'
+    case 'agentMissing':
+      return 'That agent is not installed'
+    case 'agentUnsupportedVersion':
+      return 'That agent’s version is not supported'
+    case 'agentMalformed':
+      return 'That agent’s answer could not be read'
+    case 'keychain':
+      return 'The keychain refused'
     default:
       return 'Something went wrong'
   }

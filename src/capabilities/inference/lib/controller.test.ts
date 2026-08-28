@@ -55,6 +55,19 @@ describe('detailFor', () => {
     expect(detailFor(new Error('boom'))).toBe('Something went wrong')
     expect(detailFor(null)).toBe('Something went wrong')
   })
+
+  /* ── REACHABLE FROM THE COMPANION, and added because they were not ────
+   * WI-20.18. An agent route rejects with the four `agent*` kinds and the
+   * keychain with its own, and every one of them landed on the default — so a
+   * reader signed out of Codex was told "Something went wrong" by a thread
+   * that knew exactly what was wrong. */
+  it('has a sentence for each way an agent route fails', () => {
+    expect(detailFor({ kind: 'agentSignedOut' })).toBe('That agent is not signed in')
+    expect(detailFor({ kind: 'agentMissing' })).toBe('That agent is not installed')
+    expect(detailFor({ kind: 'agentUnsupportedVersion' })).toBe('That agent’s version is not supported')
+    expect(detailFor({ kind: 'agentMalformed' })).toBe('That agent’s answer could not be read')
+    expect(detailFor({ kind: 'keychain' })).toBe('The keychain refused')
+  })
 })
 
 describe('the controller', () => {
