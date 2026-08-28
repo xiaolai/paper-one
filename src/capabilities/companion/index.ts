@@ -90,11 +90,9 @@ export const companion: Capability = {
       return { dispose: session.stop }
     }
 
-    const routes = createRoutesModel({
-      port,
-      settings: api.settings,
-      report: (event, fields) => api.diagnostics.warn(event, fields),
-    })
+    /* ONE reporter for both consumers — it was spelled twice. */
+    const report = (event: string, fields: Record<string, unknown>): void => api.diagnostics.warn(event, fields)
+    const routes = createRoutesModel({ port, settings: api.settings, report })
     session.own('routesModel', () => routes.dispose())
     /* HELD NOW, released later — `hold` is the acquisition and the disposer it
        returns is what the session owns. */
@@ -124,6 +122,9 @@ export const companion: Capability = {
          `companion.route` and `companion.depth`, which `scopeSettings` allows
          and the kernel's own settings are not. */
       depth: () => api.settings.get(DEPTH_SETTING),
+      /* The maintainer's half of a failed answer (WI-20.18) — the same sink
+         the routes model and the gloss report to. */
+      report,
     })
     const unbindCompanion = api.services.bindCompanion(boundProvider)
     session.own('unbindCompanion', () => unbindCompanion.dispose())

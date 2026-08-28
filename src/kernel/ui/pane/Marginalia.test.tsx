@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Marginalia } from './Marginalia'
 import type { Annotation, Bookmark, Mark } from '../../core/marks'
@@ -55,6 +55,8 @@ function marksView(over: Partial<MarksView> = {}): MarksView {
     bookmarks: [],
     allBookmarks: [],
     persistent: true,
+    unreadable: false,
+    scanFailed: false,
     ready: true,
     add: vi.fn(),
     remove: vi.fn(),
@@ -74,6 +76,8 @@ function draw(over: {
   allBookmarks?: readonly Bookmark[]
   onShelf?: (bookId: string) => boolean
   onGoTo?: (target: JumpTarget) => void
+  unreadable?: boolean
+  scanFailed?: boolean
 }) {
   const onGoTo = over.onGoTo ?? vi.fn()
   render(
@@ -81,6 +85,8 @@ function draw(over: {
       marks={marksView({
         all: over.all ?? [],
         allBookmarks: over.allBookmarks ?? [],
+        unreadable: over.unreadable ?? false,
+        scanFailed: over.scanFailed ?? false,
       })}
       cards={cardsView()}
       bookId="open-book"
@@ -231,5 +237,135 @@ describe('a read-only host', () => {
     expect(screen.getByRole('button', { name: /delete mark/i })).toBeTruthy()
     expect(screen.getByRole('button', { name: /remove this bookmark/i })).toBeTruthy()
     expect(screen.getByRole('button', { name: /add a note/i })).toBeTruthy()
+  })
+})
+
+/**
+ * A FOCUS REQUEST IS HONOURED ONCE.
+ *
+ * The reveal effect depended on the whole list of marks, and the list
+ * republishes after every write — including the note's own save. So the
+ * editor the reader had just closed re-opened on the next render, and any
+ * mark made anywhere afterwards re-opened it again, pulling keyboard focus out
+ * of the book each time. "The first blur doesn't stick" was the symptom; a
+ * request that was never consumed was the cause.
+ *
+ * jsdom has no `scrollIntoView`; the panel's reveal calls it after paint, and
+ * these mount with a request, so the stub is what lets the effect run at all.
+ */
+Element.prototype.scrollIntoView = vi.fn()
+
+describe('a focus request', () => {
+  const NOTED = ANNOTATION({ id: 'm1', note: 'the whiteness of the whale' })
+  const editor = () => screen.queryByPlaceholderText('Write a note')
+
+  /** The panel, with the request and the list varied across a rerender. */
+  function drawFocused(all: readonly Annotation[], focus: { id: string; edit: boolean; nonce: number }) {
+    const onFocusDone = vi.fn()
+    const view = (rows: readonly Annotation[]) => marksView({ all: rows })
+    const props = (rows: readonly Annotation[], request: typeof focus) => (
+      <Marginalia
+        marks={view(rows)}
+        cards={cardsView()}
+        bookId="open-book"
+        onDelete={vi.fn()}
+        onDeleteBookmark={vi.fn()}
+        platform="macos"
+        focus={request}
+        onFocusDone={onFocusDone}
+        onGoTo={vi.fn()}
+      />
+    )
+    const mounted = render(props(all, focus))
+    return {
+      onFocusDone,
+      /* A NEW `marks` VIEW EACH TIME, which is what the store hands out after
+         any write: the list's identity changes even when its rows do not. */
+      republish: (rows: readonly Annotation[] = all, request: typeof focus = focus) =>
+        mounted.rerender(props(rows, request)),
+    }
+  }
+
+  it('opens the editor once, and the marks republishing after the save leaves it closed', () => {
+    const { republish, onFocusDone } = drawFocused([NOTED], { id: 'm1', edit: true, nonce: 1 })
+    expect(editor()).not.toBeNull()
+    expect(onFocusDone).toHaveBeenCalledWith(1)
+
+    fireEvent.blur(editor()!)
+    expect(editor()).toBeNull()
+
+    /* The save itself republishes the list — this is the render that used to
+       re-open the editor the reader had just left. */
+    republish([ANNOTATION({ id: 'm1', note: 'the whiteness of the whale, revised' })])
+    expect(editor()).toBeNull()
+  })
+
+  it('does not re-open the old editor when a mark is made somewhere else', () => {
+    const { republish } = drawFocused([NOTED], { id: 'm1', edit: true, nonce: 1 })
+    fireEvent.blur(editor()!)
+    expect(editor()).toBeNull()
+
+    republish([NOTED, ANNOTATION({ id: 'm2', text: 'a second passage' })])
+    expect(editor()).toBeNull()
+  })
+
+  it('still opens twice when asked twice for the same mark', () => {
+    /* Keyed on the nonce, so the second request is a request and not a
+       repeat of the first: clicking the same margin note again brings it back. */
+    const { republish } = drawFocused([NOTED], { id: 'm1', edit: true, nonce: 1 })
+    fireEvent.blur(editor()!)
+    expect(editor()).toBeNull()
+
+    republish([NOTED], { id: 'm1', edit: true, nonce: 2 })
+    expect(editor()).not.toBeNull()
+  })
+
+  it('waits for a mark the cross-book list has not loaded yet', () => {
+    /* `marks.all` is empty until `loadAll` has run, and the panel mounts on the
+       very click that asks for the mark — so on a first open the request
+       arrives BEFORE the row it names. It has to wait for the list, which is
+       why the list stays a dependency of the reveal: a request honoured once
+       is not the same as a request that can only be looked at once. */
+    const { republish, onFocusDone } = drawFocused([], { id: 'm1', edit: true, nonce: 1 })
+    expect(editor()).toBeNull()
+    expect(onFocusDone).not.toHaveBeenCalled()
+
+    republish([NOTED])
+    expect(editor()).not.toBeNull()
+    expect(onFocusDone).toHaveBeenCalledWith(1)
+  })
+})
+
+/* A file that is there and will not read is a different fact from a store
+   that will not write, and the panel says which (WI-20.36): the reader whose
+   marks vanished from the list deserves to hear that the file is damaged and
+   is being left alone, not that "storage is unavailable". */
+describe('a marks file that could not be read', () => {
+  it('is said so, in the panel', () => {
+    draw({ unreadable: true })
+    expect(screen.getByText(/could not be read/).textContent).toContain('left as it is')
+  })
+
+  it('is not said of a book whose file read', () => {
+    draw({})
+    expect(screen.queryByText(/could not be read/)).toBeNull()
+  })
+})
+
+/* The cross-book scan can FAIL, and until the store said so its catch
+   installed `[]` — indistinguishable from an empty library, so this panel
+   said "Nothing kept yet" over marks that were there and could not be read
+   (the 2026-08-28 audit, #101/#477). */
+describe('a cross-book scan that failed', () => {
+  it('is said instead of the empty state, never beside it', () => {
+    draw({ scanFailed: true })
+    expect(screen.getByText(/Your marks could not be read/)).not.toBeNull()
+    expect(screen.queryByText(/Nothing kept yet/)).toBeNull()
+  })
+
+  it('gives way to the empty state once a scan has landed', () => {
+    draw({ scanFailed: false })
+    expect(screen.queryByText(/Your marks could not be read/)).toBeNull()
+    expect(screen.getByText(/Nothing kept yet/)).not.toBeNull()
   })
 })

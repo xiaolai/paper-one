@@ -135,3 +135,24 @@ describe('createDiagnostics', () => {
     expect(defaultDiagnostics(false)).toBe(NOOP_DIAGNOSTICS)
   })
 })
+
+describe('a sink that throws', () => {
+  it('loses the diagnostic and nothing else — the caller in a catch block is not handed a second failure', () => {
+    const sink = {
+      info: () => {
+        throw new Error('channel closed')
+      },
+      warn: () => {
+        throw new Error('channel closed')
+      },
+      error: () => {
+        throw new Error('channel closed')
+      },
+    }
+    const diagnostics = createDiagnostics({ sink })
+    expect(() => diagnostics.info('boot', {})).not.toThrow()
+    expect(() => diagnostics.warn('boot', { why: 'x' })).not.toThrow()
+    expect(() => diagnostics.error('boot', {})).not.toThrow()
+    expect(() => diagnostics.child('sync').warn('push', {})).not.toThrow()
+  })
+})

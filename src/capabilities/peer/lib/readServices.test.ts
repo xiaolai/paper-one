@@ -395,17 +395,15 @@ describe('what an audit of the published surface found', () => {
 
     await shelf.client.call('book.set', {
       book: 'one',
-      title: 'Moby-Dick',
       finished: true,
       position: 'epubcfi(/6/4)',
     })
 
-    /* ONE write of the record, carrying all three fields — and the position
-     * did not reset the progress it never named. */
+    /* ONE write of the record, carrying both fields — and the position did
+     * not reset the progress it never named. */
     expect(writes).toHaveLength(1)
     const landed = JSON.parse(writes[0] as string)
     expect(landed).toMatchObject({
-      title: 'Moby-Dick',
       finished: true,
       position: 'epubcfi(/6/4)',
       progress: 0.5,
@@ -463,23 +461,26 @@ describe('what an audit of the published surface found', () => {
   })
 
   it('pages by BYTES as well as rows, so one long highlight cannot burst a frame', async () => {
-    /* A mark's `text` is the passage the reader selected and nothing bounds
-     * it. Twenty of these are far past the byte budget and nowhere near the
-     * row budget — a row-only pager would have put them in one frame. */
-    const long = 'x'.repeat(64 * 1024)
+    /* A mark's `text` is bounded at `MAX_MARK_TEXT` (8 000) — at the table
+     * on the way in and, since round 1 of the audit, at the storage door on
+     * the way out, so a planted 64 KiB row is cut to the bound before it can
+     * be paged. At the bound, 120 marks are ~960 KB: well past `PAGE_BYTES`
+     * (512 KiB) and well under `PAGE_ROWS` (200) — a row-only pager would
+     * have put them in one frame. */
+    const long = 'x'.repeat(8_000)
     const shelf = serveTable({
       books: [seedBook('one')],
       files: {
         'books/one/marks.json': JSON.stringify(
-          Array.from({ length: 20 }, (_one, index) => markRow(`m${index}`, 'one', { text: long })),
+          Array.from({ length: 120 }, (_one, index) => markRow(`m${index}`, 'one', { text: long })),
         ),
       },
     })
     const seen: number[] = []
     for await (const page of shelf.client.stream('mark.list', { book: 'one' })) seen.push((page as unknown[]).length)
     expect(seen.length).toBeGreaterThan(1)
-    expect(Math.max(...seen)).toBeLessThan(20)
-    expect(seen.reduce((total, one) => total + one, 0)).toBe(20)
+    expect(Math.max(...seen)).toBeLessThan(120)
+    expect(seen.reduce((total, one) => total + one, 0)).toBe(120)
   })
 
   it('gives book.get the registers a shelf listing does not carry', async () => {
@@ -591,11 +592,38 @@ describe('what the third pass found', () => {
   it('refuses a field past the bound the record enforces, rather than storing a shorter one', async () => {
     const shelf = serveTable({ books: [seedBook('one')] })
     const tooLong = 'x'.repeat(MAX_RECORD_FIELD + 1)
-    const failure = await shelf.client.call('book.set', { book: 'one', title: tooLong }).catch((e: unknown) => e)
+    /* `book.add`, since WI-20.7: `book.set` no longer takes a title at all, and
+     * `add` is the one write left that carries a prose field to the record. */
+    const failure = await shelf.client.call('book.add', { book: 'two', title: tooLong }).catch((e: unknown) => e)
     expect(refusalCode(failure)).toBe('malformed')
     expect(String(failure)).toContain(String(MAX_RECORD_FIELD))
     /* Exactly at the bound is fine — the refusal is past it, not near it. */
-    await expect(shelf.client.call('book.set', { book: 'one', title: 'y'.repeat(MAX_RECORD_FIELD) })).resolves.toBeDefined()
+    await expect(shelf.client.call('book.add', { book: 'three', title: 'y'.repeat(MAX_RECORD_FIELD) })).resolves.toBeDefined()
+  })
+
+  /**
+   * WI-20.7 — A RENAME IS NOT OFFERED, and the refusal says so by name.
+   *
+   * `book.set --title` wrote through `patch` with no stamp, so the next open
+   * or enrichment let the parse win again and sync's metadata group — taken
+   * whole by `parsedAt`, which `patch` never moved — carried the old title
+   * back. The service shipped an edit the kernel could not keep. Withdrawn
+   * from the row rather than silently dropped: a caller sending the field is
+   * told why, not "no such field", and the record is untouched.
+   */
+  it('refuses a title or an author on book.set by name — a rename is not offered', async () => {
+    const shelf = serveTable({ books: [seedBook('one', { author: 'Melville' })] })
+    for (const [field, value] of [
+      ['title', 'Renamed'],
+      ['author', 'Somebody Else'],
+    ] as const) {
+      const failure = await shelf.client.call('book.set', { book: 'one', [field]: value }).catch((e: unknown) => e)
+      expect(refusalCode(failure)).toBe('malformed')
+      expect(String(failure)).toContain(field)
+      expect(String(failure)).toMatch(/rename/i)
+    }
+    const record = JSON.parse(new TextDecoder().decode(shelf.fs.store.get('books/one/book.json') as Uint8Array))
+    expect(record).toMatchObject({ title: 'Title one', author: 'Melville' })
   })
 
   /* `hasContent` is derived from the folder and CACHED, and the index is

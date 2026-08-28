@@ -1,4 +1,4 @@
-import { createRouter, readingGrant, type ServiceContribution } from '../../../kernel'
+import { SERVICE_ERRORS, createRouter, readingGrant, refuse, type ServiceContribution } from '../../../kernel'
 import type { WebHostWire } from './wire'
 
 /**
@@ -22,9 +22,11 @@ import type { WebHostWire } from './wire'
  *
  * ## Polling, and what it costs
  *
- * `webhost_session_recv` answers immediately — empty means "nothing right
- * now" — so this polls. Every service call therefore carries up to one poll
- * interval of latency, which is real and is the price of not having an event.
+ * `webhost_session_recv` WAITS — up to a second — for a frame and answers the
+ * instant one lands; empty means "nothing in that second". So this polls, but
+ * at one round trip per idle second, and a request's first frame is answered
+ * as soon as it arrives rather than after a timer (the `drain` note below
+ * records the measured cost of the 40 ms timer this replaced).
  *
  * **The improvement is named rather than left to be discovered:** the peer
  * plugin wakes its drain from a Tauri event, and this should too. That is a
@@ -45,6 +47,12 @@ export interface PumpOptions {
   readonly pollMs?: number
   readonly sessionsMs?: number
   readonly onError?: (thrown: unknown) => void
+  /**
+   * The router's per-connection outbound budget, for tests: the router hangs
+   * up on its own when a browser stops reading, and the pump must hear it
+   * (`onDisconnect`). The default is the router's.
+   */
+  readonly maxOutboundBytes?: number
 }
 
 export interface Pump {
@@ -88,41 +96,145 @@ export interface Pump {
  * **The day the browser needs to write** — a reading position, a mark — that is
  * a decision to take deliberately, by widening this predicate and saying which
  * verbs and why. It is not a line to delete.
+ *
+ * ## That day came for ONE verb, and here is the widening (WI-20.30, D7)
+ *
+ * `book.position`, under `position:write` — a grant family that covers
+ * nothing else, so `book:*` does not include it and it does not include
+ * `book.set`. Admitted only after the CSP was measured to stop a book's
+ * script on both engines (`csp-effect.mjs`) and the loader was taught to
+ * refuse one (`bookScripts.ts`); and bound further, HERE, to the book this
+ * session opened: `content.locate` is how the thin client opens a book, so
+ * the last book a session located is the one — and the only one — it may
+ * move. A call naming any other is refused `forbidden` before the handler
+ * runs.
+ *
+ * ⚠️ **WHAT THAT BOUND IS, EXACTLY.** It is ONE BOOK AT A TIME, not "the book
+ * the script is running inside of" — this comment used to claim the second,
+ * and the difference matters to anyone reasoning about the boundary. The
+ * binding is set by a request the CLIENT makes, and a book's script shares
+ * the session's credential: it can `book.list`, `content.locate` any id it
+ * finds, and then move that book's position, one after another. Nothing on
+ * this side can tell the reader's own locate from the script's, because they
+ * arrive on the same socket with the same cookie.
+ *
+ * So this is a blast-radius bound on ONE write — the last read page of a book
+ * — and the wall is upstream: the CSP that stops a book's script running at
+ * all, and `readingGrant`, which keeps every other write off this socket
+ * entirely. Widening that grant on the strength of "the session is bound to
+ * its book" would be leaning on a rail that is not there.
  */
+/** The one write's grant, by its spelling — `serviceTable.ts` declares it. */
+const POSITION_GRANT = 'position:write'
+const OPENS_A_BOOK = 'content.locate'
+const MOVES_A_BOOK = 'book.position'
+
+/** The book id a request names, or null when it names none. */
+function bookOf(req: unknown): string | null {
+  if (typeof req !== 'object' || req === null) return null
+  const book = (req as Record<string, unknown>)['book']
+  return typeof book === 'string' && book !== '' ? book : null
+}
+
+/**
+ * The contributions, with the binding: `content.locate` RECORDS the book a
+ * session opened (once it has answered — a book the shelf does not hold
+ * binds nothing), and `book.position` is REFUSED for any other book, before
+ * its handler runs. Every other service passes through untouched.
+ */
+function boundToOpenedBook(services: readonly ServiceContribution[], openedBy: Map<string, string>): ServiceContribution[] {
+  /* The NEWEST locate owns the binding, by the order the requests were MADE:
+   * two locates in flight used to bind in completion order, so a slow older
+   * one could land last and re-point the write at the book the browser had
+   * already left. */
+  const latest = new Map<string, number>()
+  return services.map((service) => {
+    if (service.name === OPENS_A_BOOK) {
+      return {
+        ...service,
+        handler: async (req, ctx) => {
+          const mine = (latest.get(ctx.peer) ?? 0) + 1
+          latest.set(ctx.peer, mine)
+          const answer = await service.handler(req, ctx)
+          const book = bookOf(req)
+          if (book !== null && latest.get(ctx.peer) === mine) openedBy.set(ctx.peer, book)
+          return answer
+        },
+      }
+    }
+    if (service.name === MOVES_A_BOOK) {
+      return {
+        ...service,
+        handler: (req, ctx) => {
+          const book = bookOf(req)
+          const opened = openedBy.get(ctx.peer)
+          if (book === null || opened === undefined || opened !== book) {
+            throw refuse(
+              SERVICE_ERRORS.forbidden,
+              opened === undefined
+                ? 'this session has opened no book'
+                : `this session opened ${opened} and may not move ${book ?? 'nothing'}`,
+            )
+          }
+          return service.handler(req, ctx)
+        },
+      }
+    }
+    return service
+  })
+}
+
 export function servePipe(options: PumpOptions): Pump {
   const { wire, services } = options
   const pollMs = options.pollMs ?? POLL_MS
   const sessionsMs = options.sessionsMs ?? SESSIONS_MS
+  for (const [name, value] of [['pollMs', pollMs], ['sessionsMs', sessionsMs]] as const) {
+    /* A zero, negative, NaN or infinite interval is a tight loop or a
+     * never-firing timer, and either looks like a pump that works. */
+    if (!Number.isFinite(value) || value <= 0) throw new Error(`servePipe: ${name} must be a positive finite number, got ${String(value)}`)
+  }
   const onError = options.onError ?? (() => {})
+  /* A REPORTER THAT CANNOT TAKE THE PUMP DOWN WITH IT. Every failure path
+   * here reported and then cleaned up; a reporter that threw skipped the
+   * cleanup — a failed session stayed in `live` for the life of the app —
+   * or became an unhandled rejection out of a `.catch(onError)`. */
+  const report = (thrown: unknown): void => {
+    try {
+      onError(thrown)
+    } catch (again) {
+      console.error('webhost pump: the error reporter itself threw', again, 'while reporting', thrown)
+    }
+  }
+  /** Session → the book it opened last. Dropped with the session. */
+  const openedBy = new Map<string, string>()
 
   /* THE KERNEL'S OWN SPLIT, not a list kept here. `readServices()` filters the
    * table with this exact predicate, so a service added to the table lands on
    * the correct side for the browser without anybody remembering to update a
-   * second register. */
-  const router = createRouter({ services: [...services], hasGrant: (_session, grant) => readingGrant(grant) })
+   * second register. Plus the one write, by its exact spelling. */
+  const router = createRouter({
+    services: boundToOpenedBook([...services], openedBy),
+    hasGrant: (_session, grant) => readingGrant(grant) || grant === POSITION_GRANT,
+    ...(options.maxOutboundBytes === undefined ? {} : { maxOutboundBytes: options.maxOutboundBytes }),
+  })
   const live = new Map<number, { connection: ReturnType<typeof router.connect>; stop: () => void }>()
   let stopped = false
 
   const drain = (session: number) => {
-    let running = false
-    let again = false
     let aborted = false
 
+    /* ONE CALLER, `again_` below, which AWAITS this before scheduling the
+     * next pass — so the loop can never be entered while it runs. It carried
+     * a `running` guard and an `again` rerun flag against an overlap that
+     * had no way to happen; the peer port's note that the flag was borrowed
+     * from describes a port with two entry points. This has one. */
     const loop = async () => {
-      if (aborted || running) {
-        again = true
-        return
-      }
-      running = true
-      try {
-        do {
-          again = false
-          for (;;) {
-            if (aborted) return
-            let frames: readonly Uint8Array[]
-            try {
-              frames = await wire.sessionRecv(session)
-            } catch (thrown) {
+      for (;;) {
+        if (aborted) return
+        let frames: readonly Uint8Array[]
+        try {
+          frames = await wire.sessionRecv(session)
+        } catch (thrown) {
               /* ⚠️ **ABORTING LEFT THE SESSION IN `live`, WHICH MADE IT
                * PERMANENT.** This loop stopped and reported, and the record
                * stayed — so the next `reconcile` saw the id as already open and
@@ -134,20 +246,16 @@ export function servePipe(options: PumpOptions): Pump {
                * reconciliation finds an id the webview is not serving and opens
                * it again. `close` is safe to call from in here — it stops this
                * loop, which is already aborting. */
-              aborted = true
-              onError(thrown)
-              close(session)
-              return
-            }
-            if (frames.length === 0) break
-            for (const frame of frames) {
-              if (aborted) return
-              live.get(session)?.connection.receive(frame)
-            }
-          }
-        } while (again)
-      } finally {
-        running = false
+          aborted = true
+          close(session)
+          report(thrown)
+          return
+        }
+        if (frames.length === 0) return
+        for (const frame of frames) {
+          if (aborted) return
+          live.get(session)?.connection.receive(frame)
+        }
       }
     }
 
@@ -197,13 +305,24 @@ export function servePipe(options: PumpOptions): Pump {
      * next reconciliation finds an unserved id and opens it again. */
     const connection = router.connect(String(session), (bytes) =>
       wire.send(session, bytes).catch((thrown: unknown) => {
-        onError(thrown)
         close(session)
+        report(thrown)
         throw thrown
       }),
     )
     const { stop } = drain(session)
     live.set(session, { connection, stop })
+    /* THE ROUTER HANGS UP ON ITS OWN — on a rejected write (handled above) and
+     * on its outbound budget overflowing, which a browser that stopped reading
+     * causes and nothing here could see: the record stayed in `live`, the
+     * plugin went on reporting the socket, and every later request drained
+     * into a connection answered by nobody (the 2026-08-28 audit, #61). The
+     * listener takes the same road the drain path takes; `close` guards on
+     * the record still being this connection, so a session id the plugin has
+     * since reused is left alone. */
+    connection.onDisconnect(() => {
+      if (live.get(session)?.connection === connection) close(session)
+    })
   }
 
   const close = (session: number) => {
@@ -212,6 +331,9 @@ export function servePipe(options: PumpOptions): Pump {
     held.stop()
     held.connection.disconnect()
     live.delete(session)
+    /* And the book it had opened. A session id the plugin reuses must not
+       inherit a binding from the browser that held it before. */
+    openedBy.delete(String(session))
   }
 
   const reconcile = async () => {
@@ -220,7 +342,7 @@ export function servePipe(options: PumpOptions): Pump {
     try {
       sessions = await wire.sessions()
     } catch (thrown) {
-      onError(thrown)
+      report(thrown)
       return
     }
     if (stopped) return
@@ -242,15 +364,24 @@ export function servePipe(options: PumpOptions): Pump {
    * REJECTED, which is the case where the plugin will never deliver anything at
    * all. The interval is armed by the readiness, so the ordering is structural
    * rather than a race that usually goes the right way. */
-  let sessionsTimer: ReturnType<typeof setInterval> | undefined
+  /* COMPLETION-DRIVEN, ONE IN FLIGHT: `setInterval` could start a second
+   * reconciliation while the previous `wire.sessions()` was still pending,
+   * and two snapshots landing out of order could close a current session or
+   * reopen one that had just gone. The next pass is armed only after the
+   * last one settled. */
+  let sessionsTimer: ReturnType<typeof setTimeout> | undefined
+  const reconcileThenRearm = async () => {
+    await reconcile()
+    if (stopped) return
+    sessionsTimer = setTimeout(() => void reconcileThenRearm(), sessionsMs)
+  }
   void wire
     .ready()
     .then(() => {
       if (stopped) return
-      sessionsTimer = setInterval(() => void reconcile(), sessionsMs)
-      return reconcile()
+      return reconcileThenRearm()
     })
-    .catch(onError)
+    .catch(report)
 
   return {
     get serving() {
@@ -258,7 +389,7 @@ export function servePipe(options: PumpOptions): Pump {
     },
     stop: () => {
       stopped = true
-      if (sessionsTimer !== undefined) clearInterval(sessionsTimer)
+      if (sessionsTimer !== undefined) clearTimeout(sessionsTimer)
       for (const id of [...live.keys()]) close(id)
     },
   }

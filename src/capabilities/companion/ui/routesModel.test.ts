@@ -30,6 +30,8 @@ const REASONS: Readonly<Record<UnusableReason, string>> = {
   signedOut: 'Signed out',
   versionUnsupported: 'Version not supported',
   noKey: 'No key',
+  keyUnreadable: 'The keychain would not read its key',
+  notRegistered: 'The runtime would not accept it',
 }
 
 const because = (reason: UnusableReason | null) =>

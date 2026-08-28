@@ -41,11 +41,23 @@ fn mcp_bridge_port() -> u16 {
     match std::env::var("PAPER_MCP_PORT") {
         Ok(value) => value
             .trim()
-            .parse()
-            .unwrap_or_else(|_| panic!("PAPER_MCP_PORT must be a port number, got {value:?}")),
+            .parse::<std::num::NonZeroU16>()
+            /* `NonZeroU16`: port 0 would bind an ephemeral port the MCP
+             * client — configured with the number it ASKED for — could
+             * never find. */
+            .unwrap_or_else(|_| {
+                panic!("PAPER_MCP_PORT must be a non-zero port number, got {value:?}")
+            })
+            .get(),
         Err(_) => MCP_BRIDGE_PORT,
     }
 }
+
+/// The tray menu's Quit item. Its own id, beside `shutdown::QUIT_ID` for the
+/// macOS application menu's, because the two menus are different objects and
+/// an id shared between them would be a coincidence the handlers rely on.
+#[cfg(feature = "desktop")]
+const TRAY_QUIT_ID: &str = "paper-tray-quit";
 
 /// Put the menu-bar icon up and make it toggle the window.
 ///
@@ -66,18 +78,35 @@ fn mcp_bridge_port() -> u16 {
 fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     use tauri::{
         image::Image,
+        menu::{Menu, MenuItem},
         tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
         Manager,
     };
 
     let icon = Image::from_bytes(include_bytes!("../icons/tray-iconTemplate@2x.png"))?;
 
+    /* A WAY TO QUIT THAT IS NOT THE CLOSE BUTTON. macOS has the application
+     * menu; Windows and Linux have no menu bar here, so until this the only
+     * quit off macOS was closing the window. The item goes to `AppHandle::exit`
+     * — the same call the macOS Quit item makes — which the run loop reports as
+     * `ExitRequested` and defers for the shutdown handshake, so the journal is
+     * closed on this path exactly as on every other. Never `process::exit`. */
+    let quit = MenuItem::with_id(app, TRAY_QUIT_ID, "Quit Paper", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&quit])?;
+
     TrayIconBuilder::with_id("main")
         .icon(icon)
         .icon_as_template(true)
         .tooltip("Paper")
+        .menu(&menu)
+        .on_menu_event(|app, event| {
+            if event.id() == TRAY_QUIT_ID {
+                app.exit(0);
+            }
+        })
         // Left click is the direct action. Enabling a left-click menu as well
-        // would fire both, which reads as the window flickering.
+        // would fire both, which reads as the window flickering. The menu is
+        // on the right button.
         .show_menu_on_left_click(false)
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
@@ -89,11 +118,16 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                 if let Some(window) = tray.app_handle().get_webview_window("main") {
                     let showing = window.is_visible().unwrap_or(false)
                         && window.is_focused().unwrap_or(false);
-                    if showing {
-                        let _ = window.hide();
+                    /* Logged, not discarded: a toggle whose `show` failed
+                     * reads as a tray that does nothing, and the log is the
+                     * only place that says which half failed. */
+                    let outcome = if showing {
+                        ("hide", window.hide())
                     } else {
-                        let _ = window.show();
-                        let _ = window.set_focus();
+                        ("show", window.show().and_then(|()| window.set_focus()))
+                    };
+                    if let (what, Err(cause)) = outcome {
+                        log::warn!("tray: could not {what} the window: {cause}");
                     }
                 }
             }
@@ -173,7 +207,15 @@ fn open_external(url: String) -> Result<(), String> {
     if trimmed.is_empty() || trimmed.len() > MAX_URL {
         return Err("that link cannot be opened".into());
     }
-    if trimmed.chars().any(char::is_control) {
+    /* The same rule as `externalTarget` in `externalLink.ts`: everything up
+     * to AND INCLUDING `U+0020`, plus DEL and the C1 controls. The first
+     * spelling here was `is_control` alone, which admits the space the doc
+     * above says cannot arrive — the two validators are twins and must
+     * refuse the same set. */
+    if trimmed
+        .chars()
+        .any(|c| c <= '\u{0020}' || c == '\u{007f}' || c.is_control())
+    {
         return Err("that link is malformed".into());
     }
     let lower = trimmed.to_ascii_lowercase();
@@ -197,10 +239,16 @@ fn open_external(url: String) -> Result<(), String> {
             c.arg("url.dll,FileProtocolHandler");
             c
         };
-        command
+        let mut child = command
             .arg(trimmed)
             .spawn()
             .map_err(|cause| format!("could not open that link: {cause}"))?;
+        /* Reaped, not dropped: on Unix a dropped child is a zombie until
+         * Paper exits, one per opened link. The launcher exits in
+         * milliseconds; a thread that waits for it costs nothing. */
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
         Ok(())
     }
 
@@ -266,12 +314,63 @@ fn nudge_traffic_lights(window: &tauri::WebviewWindow) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let mut builder = tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+
+    /* FIRST, before any other plugin and before `setup`. The plugin decides
+     * in its own setup whether this process is the second one; if it is, it
+     * hands its `argv` to the first and exits right there — so the newcomer
+     * never reaches the library lock below, never opens a second window, and
+     * the reader who double-clicked a book while Paper was running gets that
+     * book in the window they already have. Registered later, the lock would
+     * refuse the second process with a dialog first, which is the wrong
+     * answer to "open this file".
+     *
+     * The callback runs in the FIRST process: raise the window, then treat
+     * the newcomer's argv exactly as this process's own was treated at launch
+     * (`opened`). `dbus_id` names the Linux service; the plugin's default is
+     * the bundle identifier, which is also what we give it, spelled out here
+     * because the default is what Flathub objected to in other apps and the
+     * explicit form is what their review asks for. */
+    #[cfg(feature = "desktop")]
+    {
+        builder = builder.plugin(
+            tauri_plugin_single_instance::Builder::new()
+                .callback(|app, argv, cwd| {
+                    if let Some(window) = tauri::Manager::get_webview_window(app, "main") {
+                        /* Logged, not ignored: a forwarded book that arrives
+                         * while the window could not be raised reads as a
+                         * launch that did nothing. */
+                        for (what, outcome) in [
+                            ("unminimize", window.unminimize()),
+                            ("show", window.show()),
+                            ("focus", window.set_focus()),
+                        ] {
+                            if let Err(cause) = outcome {
+                                log::warn!("second launch: could not {what} the window: {cause}");
+                            }
+                        }
+                    }
+                    /* The newcomer's OWN cwd: `paper book.epub` typed in
+                     * ~/Books lands in THIS process, whose cwd is wherever
+                     * the first launch started. */
+                    let base = std::path::PathBuf::from(cwd);
+                    opened::deliver(app, opened::books_in_argv(argv, Some(&base)));
+                })
+                .dbus_id("one.paper.reader")
+                .build(),
+        );
+    }
+
+    builder = builder
         /* This application's own commands. Unlike a plugin's, they are not
         gated by the capability file — an app command is reachable from the
         webview the moment it is registered here, which is why `open_external`
         validates its own argument rather than trusting the caller. */
-        .invoke_handler(tauri::generate_handler![open_external])
+        .invoke_handler(tauri::generate_handler![
+            open_external,
+            atomic::write_atomic,
+            atomic::fsync_in_data_dir
+        ])
         // Scoped by `capabilities/default.json`, not by these registrations —
         // registering a plugin grants nothing on its own.
         .plugin(tauri_plugin_fs::init())
@@ -305,6 +404,24 @@ pub fn run() {
     #[cfg(feature = "desktop")]
     {
         builder = builder.plugin(tauri_plugin_persisted_scope::init());
+    }
+
+    /* THE WINDOW REMEMBERS ITSELF. Size, position and whether it was
+     * maximised, restored on the window's ready event and saved on close —
+     * and only those three: `VISIBLE` would restore a hidden window hidden,
+     * `DECORATIONS` would fight the off-macOS branch in `setup` below, and
+     * `FULLSCREEN` on macOS restores into a Space the reader left. The
+     * sanitiser runs immediately before it, on the file it is about to read —
+     * see `window_state.rs` for the Windows sentinel that otherwise stops the
+     * app launching at all. */
+    #[cfg(feature = "desktop")]
+    {
+        use tauri_plugin_window_state::StateFlags;
+        builder = builder.plugin(window_state::init()).plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED)
+                .build(),
+        );
     }
 
     /* The local inference runtime (crates/tauri-plugin-inference). Its
@@ -347,6 +464,40 @@ pub fn run() {
         // `peer:default` in capabilities/default.json.
         .plugin(tauri_plugin_peer::init())
         .setup(|app| {
+            /* ONE PROCESS OWNS THE LIBRARY, and this is where it is decided —
+             * before the webview boots, before the journal opens. The same
+             * file, record and protocol as `paper`'s advisory lock, so the CLI
+             * beside a running app is refused by name (it used to guess from a
+             * `pgrep` that could not see a dev build), a second Paper over one
+             * directory is refused rather than racing the first's trash sweep,
+             * and a crashed holder on this host is reclaimed. The refusal is a
+             * native dialog: there is no webview yet to draw one. */
+            #[cfg(feature = "desktop")]
+            {
+                use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+                let root = paper_data_root::data_root(app.handle()).map_err(|e| e.to_string())?;
+                match lock::acquire(&root, "Paper") {
+                    Ok(held) => {
+                        log::info!(
+                            "lock: holding the library as pid {} ({})",
+                            held.owner().pid,
+                            root.display()
+                        );
+                        tauri::Manager::manage(app, held);
+                    }
+                    Err(refused) => {
+                        let (title, body) = lock::refusal_text(&refused, &root);
+                        log::error!("lock: {refused}");
+                        app.dialog()
+                            .message(body)
+                            .title(title)
+                            .kind(MessageDialogKind::Error)
+                            .blocking_show();
+                        std::process::exit(1);
+                    }
+                }
+            }
+
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
@@ -364,6 +515,41 @@ pub fn run() {
             if let Some(main) = tauri::Manager::get_webview_window(app, "main") {
                 nudge_traffic_lights(&main);
             }
+
+            /* ONE TITLEBAR OFF macOS. The window config is one entry for
+             * every platform, and `titleBarStyle: Overlay` is a macOS setting
+             * — Windows and Linux read only `decorations: true`, drew the OS
+             * caption, and the app drew its own bar with its own buttons
+             * BENEATH it: two titlebars, and the close button hundreds of
+             * pixels from the corner. The window exists by the time `setup`
+             * runs, so the decorations come off here rather than in the
+             * config, where there is no per-platform switch. `TitleBar.tsx`
+             * already draws minimise, maximise and close for these platforms
+             * and marks itself a drag region; with the caption gone they are
+             * the window's controls rather than a copy of them. */
+            #[cfg(all(feature = "desktop", not(target_os = "macos")))]
+            if let Some(main) = tauri::Manager::get_webview_window(app, "main") {
+                main.set_decorations(false)?;
+            }
+
+            /* Books the launch carried — `argv` here, `RunEvent::Opened`
+             * on macOS below, the single-instance callback for a second
+             * launch. Held until the webview says it is listening. */
+            #[cfg(feature = "desktop")]
+            {
+                tauri::Manager::manage(app, opened::Opens::default());
+                opened::watch(app.handle());
+                let cwd = std::env::current_dir().ok();
+                opened::deliver(
+                    app.handle(),
+                    opened::books_in_argv(std::env::args(), cwd.as_deref()),
+                );
+            }
+
+            /* Before anything can answer: a window close runs the teardown
+             * and answers `paper://shutdown-done` BEFORE it destroys the
+             * window, and the exit request only arrives after. */
+            shutdown::watch(app.handle());
 
             #[cfg(all(feature = "desktop", target_os = "macos"))]
             shutdown::install_quit_item(app.handle())?;
@@ -410,6 +596,23 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
+            /* THE LOCK GOES WITH THE PROCESS, here and not in a `Drop`: the
+             * exit comes through `app.exit` after the shutdown handshake, and
+             * the file must go then — while it is still ours to remove. */
+            #[cfg(feature = "desktop")]
+            if let tauri::RunEvent::Exit = &event {
+                if let Some(held) = tauri::Manager::try_state::<lock::DataLock>(app) {
+                    held.release();
+                }
+            }
+            /* macOS hands an app its files here — at launch, when the
+             * webview does not exist yet, and later, when the reader
+             * double-clicks a book with Paper already up. Both go through
+             * `opened`, which holds the first until the webview is listening. */
+            #[cfg(all(feature = "desktop", target_os = "macos"))]
+            if let tauri::RunEvent::Opened { urls } = &event {
+                opened::deliver(app, opened::books_in_urls(urls.iter()));
+            }
             // ONLY the quit path is logged. A `match` over every RunEvent
             // was what established which event a macOS quit produces — the
             // answer was "none that can be deferred, unless the Quit item is
@@ -429,21 +632,52 @@ pub fn run() {
                 // `started()` alone is what prevents recursion: the first
                 // request defers and sets it, and the `app.exit(0)` below comes
                 // back through here and passes straight out.
-                if !shutdown::started() {
-                    shutdown::begin();
-                    api.prevent_exit();
-                    let app = app.clone();
-                    // A plain OS thread, not the async runtime: the whole wait
-                    // is one blocking `recv_timeout`, and this adds no
-                    // dependency the app crate did not already have.
-                    std::thread::spawn(move || {
-                        shutdown::run(&app);
-                        app.exit(0);
-                    });
+                match shutdown::exit_action(shutdown::started(), shutdown::finished()) {
+                    shutdown::Exit::Defer => {
+                        shutdown::begin();
+                        api.prevent_exit();
+                        let app = app.clone();
+                        // A plain OS thread, not the async runtime: the whole wait
+                        // is one blocking `recv_timeout`, and this adds no
+                        // dependency the app crate did not already have.
+                        std::thread::spawn(move || {
+                            shutdown::run(&app);
+                            shutdown::finish();
+                            app.exit(0);
+                        });
+                    }
+                    // A SECOND ⌘Q DURING THE HANDSHAKE used to pass straight
+                    // out: `started()` was true, nothing deferred it, and the
+                    // app exited with the webview mid-teardown — the journal
+                    // close it was waiting for, cut off by the reader pressing
+                    // the key twice. Absorbed; the handshake's own `exit(0)`
+                    // arrives after `finish()` and passes.
+                    shutdown::Exit::Absorb => {
+                        log::info!(
+                            "shutdown: a second exit request during the handshake; absorbed"
+                        );
+                        api.prevent_exit();
+                    }
+                    shutdown::Exit::Pass => {}
                 }
             }
         });
 }
+
+/// The kernel's durable writes — see the module.
+mod atomic;
+
+/// The library lock — see the module.
+#[cfg(feature = "desktop")]
+mod lock;
+
+/// Books a launch carried — see the module.
+#[cfg(feature = "desktop")]
+mod opened;
+
+/// The window-state file, made safe to read — see the module.
+#[cfg(feature = "desktop")]
+mod window_state;
 
 /// The quit handshake with the webview.
 mod shutdown {
@@ -461,10 +695,65 @@ mod shutdown {
     pub const ASK: &str = "paper://shutdown";
     pub const DONE: &str = "paper://shutdown-done";
 
-    /// Our own Quit item's id.
+    /// Our own Quit item's id. Gated with the item it names: the menu is
+    /// macOS-only (below), so on every other target this constant is dead
+    /// code — which the iOS build reported the moment it compiled again, and
+    /// which a `-D warnings` clippy on the Linux leg would refuse outright.
+    #[cfg(target_os = "macos")]
     pub const QUIT_ID: &str = "paper-quit";
 
     static STARTED: AtomicBool = AtomicBool::new(false);
+    /// Set once `run` has returned — the handshake's own `exit(0)` follows.
+    static FINISHED: AtomicBool = AtomicBool::new(false);
+    /// Set by `watch` when the webview has answered on its own initiative:
+    /// a WINDOW CLOSE runs the whole teardown and answers before it destroys
+    /// the window, and the exit request only arrives after. `run` used to
+    /// register its listener then, ask a webview that no longer existed, and
+    /// wait out the whole grace period — on Windows and Linux, on every quit.
+    static DONE_SEEN: AtomicBool = AtomicBool::new(false);
+
+    /// What an exit request gets, given where the handshake stands.
+    #[derive(Debug, PartialEq, Eq)]
+    pub enum Exit {
+        /// The first request: defer it, ask the webview, exit when it answers.
+        Defer,
+        /// A request during the handshake: absorb it, or the teardown is cut off.
+        Absorb,
+        /// The handshake's own exit, after `finish`: let it through.
+        Pass,
+    }
+
+    /// The decision, as a function of the two flags — so it can be tested
+    /// without an `AppHandle`, which is where the second-⌘Q defect lived.
+    pub fn exit_action(started: bool, finished: bool) -> Exit {
+        if !started {
+            Exit::Defer
+        } else if !finished {
+            Exit::Absorb
+        } else {
+            Exit::Pass
+        }
+    }
+
+    /// Whether `run` has anything left to ask: not when the webview has
+    /// already answered, which a window close does before the request.
+    pub fn must_ask(done_seen: bool) -> bool {
+        !done_seen
+    }
+
+    /// Hear a `DONE` that arrives before anyone asked. Registered at setup,
+    /// for the life of the app.
+    pub fn watch<R: Runtime>(app: &AppHandle<R>) {
+        app.listen(DONE, |_| DONE_SEEN.store(true, Ordering::SeqCst));
+    }
+
+    pub fn finish() {
+        FINISHED.store(true, Ordering::SeqCst);
+    }
+
+    pub fn finished() -> bool {
+        FINISHED.load(Ordering::SeqCst)
+    }
 
     /// Replace macOS's predefined Quit with one that goes through
     /// `AppHandle::exit`.
@@ -519,6 +808,10 @@ mod shutdown {
     }
 
     pub fn run<R: Runtime>(app: &AppHandle<R>) {
+        if !must_ask(DONE_SEEN.load(Ordering::SeqCst)) {
+            log::info!("shutdown: the webview had already finished its teardown before the exit request; nothing to ask");
+            return;
+        }
         let (tx, rx) = mpsc::channel::<()>();
         // LISTENED FOR BEFORE THE ASK, or a webview that answers immediately
         // answers into nothing and the quit waits out the whole grace period.
@@ -541,6 +834,29 @@ mod shutdown {
             }
         }
         app.unlisten(id);
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::shutdown::{exit_action, must_ask, Exit};
+
+    /// The first request defers; a second during the handshake is absorbed —
+    /// it used to pass straight out and cut the teardown off; the handshake's
+    /// own exit, after `finish`, passes.
+    #[test]
+    fn a_second_exit_request_during_the_handshake_is_absorbed() {
+        assert_eq!(exit_action(false, false), Exit::Defer);
+        assert_eq!(exit_action(true, false), Exit::Absorb);
+        assert_eq!(exit_action(true, true), Exit::Pass);
+    }
+
+    /// A window close answers before the exit request arrives; asking then
+    /// waited out the whole grace period against a webview that was gone.
+    #[test]
+    fn a_done_that_arrived_before_the_ask_means_there_is_nothing_to_wait_for() {
+        assert!(must_ask(false));
+        assert!(!must_ask(true));
     }
 }
 

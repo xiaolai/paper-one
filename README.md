@@ -57,5 +57,10 @@ touching the reader: some failures are visible only to a real build.
 
 ## Licence
 
-ISC — see [`LICENSE`](LICENSE). Bundled typefaces are OFL-1.1 and carry their
-own notices in [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
+MIT — see [`LICENSE`](LICENSE).
+
+What Paper ships alongside its own code carries its own terms, and they travel
+in [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md): four typefaces under
+OFL-1.1, the JavaScript libraries bundled into every build, and the Rust crates
+the binary links — MIT and Apache-2.0 almost throughout, each reproduced in
+full because those licences make the notice a condition of redistribution.

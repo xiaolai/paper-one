@@ -23,7 +23,10 @@ import './styles/global.css'
 import './styles/capability.css'
 
 export { App } from './App'
-export type { AppProps } from './App'
+/* The shell's opened-files contract, for the root that listens for it and
+   says when it is listening — see `openedFiles.ts`. */
+export { OPEN_FILES_EVENT, OPEN_FILES_READY_EVENT } from './openedFiles'
+export type { OpenRequests } from './openedFiles'
 
 /* Boot: the store, the filesystem, the shelf, the migration and the sweep. */
 export { openAppStorage } from './appStorage'
@@ -37,8 +40,6 @@ export { libraryFs } from '../core/bookFiles'
  * door, which is the same reason `libraryFs` sits on the line above. */
 export { tauriSizePort } from '../core/bookSizesTauri'
 export { loadShelf } from '../core/bookIndex'
-export type { IndexedBook } from '../core/bookIndex'
-export { emptyExpired } from '../core/bookTrash'
 export { migrateToFolders, summariseMigration } from '../core/migrateToFolders'
 export { installFatalHandlers } from '../core/reportFatal'
 /* ONE DRAIN BOUND for both shutdowns — see `closeWindow.ts`. */

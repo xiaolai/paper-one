@@ -259,12 +259,10 @@ export interface KernelServicesOptions {
  * returned. Weak because the entry should die with the token; a bracket left
  * open by a crash must not pin one forever.
  */
-const issuedAt = new WeakMap<MutationToken, number>()
-
 function exclusiveSlot<T>(
   alreadyBound: string,
   fallback: T,
-): { get(): T; bind(next: T): Disposable; generation(): number; bound(): boolean } {
+): { get(): T; bind(next: T): Disposable; generation(): number } {
   let target = fallback
   /* Bumped on every bind AND every unbind, so "the binding that issued this"
    * is answerable later without holding a reference to the value itself. Used
@@ -278,9 +276,6 @@ function exclusiveSlot<T>(
   return {
     get: () => target,
     generation: () => generation,
-    /* Whether anything is bound, as opposed to the fallback answering. The
-       service host needs it: only the FALLBACK may return no disposer. */
-    bound: () => owner !== null,
     bind: (next) => {
       if (owner !== null) throw new Error(alreadyBound)
       const token = {}
@@ -314,6 +309,12 @@ function routedRecorder(
   slot: { get(): MutationRecorder; generation(): number },
   fallback: MutationRecorder,
 ): MutationRecorder {
+  /* PER RECORDER PORT, not module-wide. Token uniqueness is not something
+   * `MutationRecorder` promises, so a recorder that reused one token object
+   * across two `KernelServices` instances had each overwriting the other's
+   * routing generation in a shared map. Weak, so an entry dies with its
+   * token — a bracket left open by a crash must not pin one forever. */
+  const issuedAt = new WeakMap<MutationToken, number>()
   /* A COMMIT GOES TO THE RECORDER THAT ISSUED ITS BEGIN, OR TO THE DEFAULT —
    * never to a DIFFERENT one.
    *
@@ -397,12 +398,18 @@ async function removeBlob(
      * folder belongs to a DIFFERENT, live book is refused rather than
      * quietly honoured. */
     const folder = folderOf(bookId)
-    const owner = library.getSnapshot().find((one) => folderOf(one.bookId) === folder)
-    if (owner !== undefined && owner.bookId !== bookId) {
-      throw new Error(
-        `removeBlob: ${JSON.stringify(bookId)} does not own ${folder} — ${JSON.stringify(owner.bookId)} does`,
-      )
-    }
+    /* ANY row on the folder that is not this id refuses — not the FIRST row
+     * found. A snapshot holding both the requested id and a colliding alias
+     * (a corrupt index, a caller-supplied initial set) let ordering decide
+     * whether the shared blob could be deleted. */
+    /* AND FOLDED, because the filesystem folds: on macOS's default volume
+     * `books/Book_A` and `books/book_a` are one directory, so a row spelled
+     * the other way round owns these very bytes. Compared exactly, the guard
+     * looked straight past it. `book.add` and the store's lane key fold for
+     * the same reason. */
+    const owner = (id: string) => folderOf(id).toLowerCase()
+    const mine = owner(bookId)
+    const claimant = () => library.getSnapshot().find((one) => owner(one.bookId) === mine && one.bookId !== bookId)
     /* `folderOf` sanitises the id into `books/<safeId>` — a slash, a dot,
      * anything outside [A-Za-z0-9] becomes `_` — so the joined path cannot
      * leave the book's folder whatever the id says. And the delete runs
@@ -433,6 +440,20 @@ async function removeBlob(
      * told every peer the book's bytes had changed. */
     const kind = REMOVABLE_BLOB_KINDS[name]
     await writes.append(library.lane(bookId), async () => {
+      /* ⚠️ **ASKED INSIDE THE LANE, where the answer cannot go stale.** The
+       * shelf was read before the queue was joined — a check-then-act across
+       * a lane boundary — so an add or a rekey already queued for this folder
+       * could claim it while the deletion waited its turn, and the delete
+       * then ran against a snapshot describing a book that no longer owned
+       * these bytes. This is the same repair `AddGuard.fresh` and
+       * `RestoreGuard` are: the scan is the diagnosis, the lane is the
+       * decision. */
+      const other = claimant()
+      if (other !== undefined) {
+        throw new Error(
+          `removeBlob: ${JSON.stringify(bookId)} does not own ${folder} — ${JSON.stringify(other.bookId)} does`,
+        )
+      }
       const path = `${folder}/${name}`
       /* ⚠️ CHECKED BEFORE THE BRACKET IS OPENED, not inside it. An absent
        * blob is the documented no-op, and opening a bracket around it wrote
@@ -560,10 +581,17 @@ export function createKernelServices({
 
   const reportDisposeFailures = (where: string, failures: readonly unknown[]): void => {
     for (const cause of failures) {
-      diagnostics.warn('services.host-dispose-failed', {
-        where,
-        message: cause instanceof Error ? cause.message : String(cause),
-      })
+      /* The diagnostics port is injected, and a throwing one must not abort
+       * the remaining reports, make ordinary disposal throw, or REPLACE the
+       * host-start failure this is reporting on. Every report on its own. */
+      try {
+        diagnostics.warn('services.host-dispose-failed', {
+          where,
+          message: cause instanceof Error ? cause.message : String(cause),
+        })
+      } catch (reporting) {
+        console.error('Paper: the diagnostics port threw while reporting a dispose failure', reporting, cause)
+      }
     }
   }
 
@@ -675,6 +703,11 @@ export function createKernelServices({
       }
     },
     drain: async () => {
+      /* THE INDEX FIRST (phase 20, D4): a page turn writes `book.json` and
+       * leaves the index dirty behind a throttle, and a drain is the one
+       * moment — quit, window close — that must not wait for the timer. The
+       * flush queues the rewrite; the idle below is what waits for it. */
+      await library.flushIndex()
       await writes.idle()
       await storage?.flush?.()
     },

@@ -3,7 +3,7 @@ name = "paper-webhost"
 version = "0.1.0"
 description = "Paper's shelf-side HTTP surface for the browser client: the six-digit endpoints, the session cookie and the policy headers"
 authors = ["Paper"]
-license = ""
+license = "MIT"
 edition = "2021"
 rust-version = "1.91"
 publish = false
@@ -16,18 +16,25 @@ serde = { version = "1", features = ["derive"] }
 # `sync` for the per-socket outbound channel, `rt` because the socket loop is a
 # task. Already in this tree; no new resolution.
 tokio = { version = "1", features = ["sync", "rt", "macros"] }
+# A sign-out whose revocation reached memory and not the disk has nobody to
+# tell but the log: the browser is gone either way, and the shelf's owner is
+# not on this request. Already in the tree.
+log = "0.4"
 
 [dev-dependencies]
 # `ServiceExt::oneshot` drives the router in-process, so the tests exercise the
 # real handlers, the real extractors and the real headers without binding a
 # port. `tower` is already in this tree; only the `util` feature is new.
 tower = { version = "0.5", features = ["util"] }
-http-body-util = "0.1"
 # `net` and `rt-multi-thread` are for `upgrade.rs`: an in-process `oneshot`
 # cannot perform a WebSocket handshake, and the handshake is where this surface
 # actually lives. A real listener needs a real reactor.
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "net", "time"] }
-# A REAL CLIENT for the real handshake. Already in this tree — axum's `ws`
-# feature resolves the same 0.28 — so this adds a dev edge, not a dependency.
-tokio-tungstenite = "0.28"
+# `test-util` is `start_paused` — the stale-permit pin waits out a timeout in
+# virtual time rather than real milliseconds.
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "net", "time", "test-util"] }
+# A REAL CLIENT for the real handshake. The version FOLLOWS AXUM'S: 0.8.9
+# resolves tokio-tungstenite 0.29, and this pin said 0.28 under a comment
+# claiming they matched — so the workspace compiled BOTH, and the tests drove
+# the server with a different WebSocket implementation than it runs.
+tokio-tungstenite = "0.29"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }

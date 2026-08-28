@@ -236,6 +236,91 @@ describe('the import coordinator', () => {
     world.unmount()
   })
 
+  /**
+   * ⚠️ **THE BAR OUTLIVED A BARE `supersede()`.**
+   *
+   * A retiring run returns before clearing the bar so it cannot pull down the
+   * one its replacement raised — which assumed every supersession comes from
+   * another `run`. A single-book pick or drop supersedes and runs nothing, so
+   * the bar had no owner and stayed up: `busy` true for the rest of the
+   * session, and the folder route refuses to start while busy.
+   */
+  it('takes the bar down when the run that raised it is retired by nothing', async () => {
+    const world = harness(async () => 0)
+    const gate = deferred()
+    let running: Promise<void> | null = null
+    await act(async () => {
+      running = world.imports().run(
+        async (run) => {
+          run.report({ done: 1, total: 4 })
+          await gate.promise
+          return []
+        },
+        { summarise: () => 'x', onFailure: () => {} },
+      )
+      await Promise.resolve()
+    })
+    expect(world.imports().busy).toBe(true)
+
+    /* No replacement run — this is `addAndOpen`'s single-book path. */
+    act(() => world.imports().supersede())
+    await act(async () => {
+      gate.open()
+      await running
+    })
+    expect(world.imports().progress, 'the bar was left up with nothing running').toBeNull()
+    expect(world.imports().busy, 'every later import would be refused').toBe(false)
+    world.unmount()
+  })
+
+  /* AND THE REPLACEMENT'S BAR IS LEFT ALONE, which is what the bare return was
+     protecting. */
+  it('leaves the replacement run’s bar up when the older one settles', async () => {
+    const world = harness(async () => 0)
+    const older = deferred()
+    const newer = deferred()
+    let first: Promise<void> | null = null
+    let second: Promise<void> | null = null
+    await act(async () => {
+      first = world.imports().run(
+        async (run) => {
+          run.report({ done: 1, total: 9 })
+          await older.promise
+          return []
+        },
+        { summarise: () => 'first', onFailure: () => {} },
+      )
+      await Promise.resolve()
+    })
+    await act(async () => {
+      second = world.imports().run(
+        async (run) => {
+          run.report({ done: 2, total: 5 })
+          await newer.promise
+          return []
+        },
+        { summarise: () => 'second', onFailure: () => {} },
+      )
+      await Promise.resolve()
+    })
+
+    await act(async () => {
+      older.open()
+      await first
+    })
+    expect(world.imports().progress, 'the older run took down the newer one’s bar').toEqual({
+      done: 2,
+      total: 5,
+    })
+
+    await act(async () => {
+      newer.open()
+      await second
+    })
+    expect(world.imports().progress).toBeNull()
+    world.unmount()
+  })
+
   /* A failure is the caller's to word — the two routes say different things —
      and the lifecycle closes either way. */
   it('closes the lifecycle when the work throws, and hands the cause over', async () => {
@@ -274,6 +359,72 @@ describe('the import coordinator', () => {
       )
     })
     expect(written.map((one) => one.name)).toEqual(['landed'])
+    world.unmount()
+  })
+
+  /**
+   * ⚠️ AND WHEN THE SETTLE ITSELF REJECTS, WHICH IS NOT THE WORK FAILING.
+   *
+   * `settled()` is the chain of shelf writes, and one rejected write used to
+   * throw straight out of `run` — past `setProgress(null)`, past `onFailure`,
+   * past everything. The bar stayed on screen and `busy` stayed true for the
+   * rest of the session: the folder route refuses to start while busy, so it
+   * refused every later import, and the drop route went on superseding a run
+   * that had already finished. A terminal catch was added at the call site and
+   * said the right sentence; it could not put the bar away, because the state
+   * is in here. This is the assertion that stops it coming back — `run` must
+   * not reject for anything a caller can produce.
+   */
+  it('closes the lifecycle when a shelf write rejects', async () => {
+    const onFailure = vi.fn()
+    const world = harness(async () => {
+      throw new Error('the disk is full')
+    })
+
+    await act(async () => {
+      await world.imports().run(
+        async (run) => {
+          run.shelve(kept('a'))
+          return [kept('a')]
+        },
+        { summarise: () => 'never', onFailure },
+      )
+    })
+
+    expect(onFailure, 'a rejected shelf write was never reported').toHaveBeenCalledTimes(1)
+    expect((onFailure.mock.calls[0]?.[0] as Error).message).toBe('the disk is full')
+    expect(world.notices, 'a failed import was summarised as a success').toEqual([])
+    expect(world.imports().progress, 'the bar was stranded by the settle').toBeNull()
+    expect(world.imports().busy, 'every later import would now be refused').toBe(false)
+    world.unmount()
+  })
+
+  /* WHEN BOTH FAIL, THE WORK'S CAUSE IS THE ONE REPORTED — it is the one that
+     explains the other — and the settle's is logged rather than dropped. */
+  it('reports the work’s failure over the settle’s, and loses neither', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const onFailure = vi.fn()
+    const world = harness(async () => {
+      throw new Error('the disk is full')
+    })
+
+    await act(async () => {
+      await world.imports().run(
+        async (run) => {
+          run.shelve(kept('a'))
+          throw new Error('the walk failed')
+        },
+        { summarise: () => 'never', onFailure },
+      )
+    })
+
+    expect((onFailure.mock.calls[0]?.[0] as Error).message).toBe('the walk failed')
+    expect(
+      logged.mock.calls.some((call) => (call[1] as Error | undefined)?.message === 'the disk is full'),
+      'the settle’s cause was swallowed',
+    ).toBe(true)
+    expect(world.imports().busy).toBe(false)
+    logged.mockRestore()
     world.unmount()
   })
 

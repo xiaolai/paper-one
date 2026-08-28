@@ -1,4 +1,4 @@
-import { chmod, mkdir, rm, stat } from 'node:fs/promises'
+import { chmod, mkdir, readdir, readFile, rm, stat } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { build } from 'vite'
@@ -57,12 +57,21 @@ export async function buildCli(root = REPO_ROOT) {
    * over the floor and report success. The same trap `actool` sets, and the
    * same answer: make the artifact's existence mean this run wrote it. */
   await rm(path.join(outDir, OUT_FILE), { force: true })
+  /* What `bin/` held BEFORE this build, so the residue sweep below can tell
+   * the old build's leftovers from anything this build wrote. */
+  const before = new Set(await readdir(outDir))
   await build({
     root,
     /* Vite's own config file is the APP's: it installs the composition
      * resolver, the React plugin and the pdf.js copy step, none of which a
      * CLI wants and one of which would fail without a platform. */
     configFile: false,
+    /* NOTHING FROM `public/`. `configFile: false` leaves Vite's DEFAULT
+     * `publicDir`, which is `public/` — the app's static assets, and whatever
+     * a developer drops there to try the reader on. Every `build:cli` copied
+     * all of it into `bin/`: measured 2026-08-28, three books beside the
+     * bundle, one of them a 3 MB PDF. This build owns exactly one file. */
+    publicDir: false,
     logLevel: 'warn',
     /* See the note in `build` below: this is the option that bundles the
      * dependencies in rather than leaving them as bare imports. */
@@ -105,7 +114,11 @@ export async function buildCli(root = REPO_ROOT) {
        * work. `scripts/build-cli.mjs`'s own test asserts it. */
       rollupOptions: {
         input: path.join(root, ENTRY),
-        output: { format: 'es', entryFileNames: OUT_FILE, banner: BANNER },
+        /* `inlineDynamicImports` is the single-file invariant ENFORCED, not
+         * assumed: a reachable dynamic import would otherwise emit a second
+         * chunk beside `paper.mjs`, and the size check below only looks at
+         * the one file it names. */
+        output: { format: 'es', entryFileNames: OUT_FILE, banner: BANNER, inlineDynamicImports: true },
       },
     },
   })
@@ -120,7 +133,82 @@ export async function buildCli(root = REPO_ROOT) {
     throw new Error(`build:cli wrote ${OUT_DIR}/${OUT_FILE} at ${size} bytes, under the ${MIN_BYTES}-byte floor`)
   }
   await chmod(out, 0o755)
+  const removed = await removePublicResidue(root, outDir, before)
+  /* Said out loud: a deletion this build decided on is not something to do
+   * in silence, however right the inference. */
+  for (const name of removed) process.stdout.write(`build:cli: removed old public/ residue ${OUT_DIR}/${name}\n`)
   return out
+}
+
+/**
+ * Remove from `bin/` what the OLD build copied there from `public/`.
+ *
+ * `emptyOutDir: false` is right — `bin/` is not this build's to empty — but
+ * it also means the copies the `publicDir` defect left behind would sit
+ * beside the bundle on every machine that ever ran `build:cli`, until a
+ * human noticed. A name that `public/` has AND that was in `bin/` before
+ * this build ran is that residue by construction: the app's static assets
+ * had no other way into `bin/`. Files `public/` does not name are left
+ * alone.
+ *
+ * ONLY WHAT WAS THERE BEFORE. A sweep of every shared name would also erase
+ * a copy THIS build made — so a `publicDir` that quietly came back would be
+ * swept clean after the fact, and the test that plants a file in `public/`
+ * could not tell "never copied" from "copied and swept". Confined to the
+ * pre-build listing, a fresh copy survives to fail that test.
+ *
+ * AND ONLY WHAT IS THE COPY. A name shared with `public/` was the old
+ * heuristic, and it deletes by inference: a file a human left in `bin/`
+ * that merely COLLIDES with a public name — different bytes, theirs — went
+ * with the residue. What the old build made is a byte-for-byte copy of
+ * `public/`'s entry, so identity is checkable rather than guessable, and
+ * anything that does not match stays put.
+ */
+export async function removePublicResidue(root, outDir, before) {
+  const publicDir = path.join(root, 'public')
+  let names
+  try {
+    names = await readdir(publicDir)
+  } catch (cause) {
+    if (cause?.code === 'ENOENT') return []
+    throw cause
+  }
+  const removed = []
+  for (const name of names) {
+    if (!before.has(name)) continue
+    if (!(await sameEntry(path.join(publicDir, name), path.join(outDir, name)))) continue
+    await rm(path.join(outDir, name), { recursive: true, force: true })
+    removed.push(name)
+  }
+  return removed
+}
+
+/** Whether `theirs` is a copy of `ours`: equal bytes for a file, the same
+ *  names each themselves copies for a directory. Anything else — a type
+ *  mismatch, a vanished entry — is `false`, and `false` means KEEP. */
+async function sameEntry(ours, theirs) {
+  let a
+  let b
+  try {
+    a = await stat(ours)
+    b = await stat(theirs)
+  } catch {
+    return false
+  }
+  if (a.isFile() && b.isFile()) {
+    if (a.size !== b.size) return false
+    const [x, y] = await Promise.all([readFile(ours), readFile(theirs)])
+    return x.equals(y)
+  }
+  if (a.isDirectory() && b.isDirectory()) {
+    const [ins, outs] = await Promise.all([readdir(ours), readdir(theirs)])
+    if (outs.some((name) => !ins.includes(name))) return false
+    for (const name of outs) {
+      if (!(await sameEntry(path.join(ours, name), path.join(theirs, name)))) return false
+    }
+    return true
+  }
+  return false
 }
 
 if (isProcessEntry(import.meta)) {

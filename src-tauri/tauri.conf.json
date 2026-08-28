@@ -34,13 +34,78 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' blob:; img-src 'self' data: blob:; font-src 'self' data: blob:; media-src 'self' data: blob:; frame-src 'self' data: blob:; connect-src 'self' ipc: http://ipc.localhost; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'none'",
-      "devCsp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' blob:; img-src 'self' data: blob:; font-src 'self' data: blob:; media-src 'self' data: blob:; frame-src 'self' data: blob:; connect-src 'self' ipc: http://ipc.localhost ws://localhost:14201 http://localhost:14201; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'none'"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' blob:; img-src 'self' data: blob:; font-src 'self' data: blob:; media-src 'self' data: blob:; frame-src blob:; connect-src 'self' ipc: http://ipc.localhost; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'none'",
+      "devCsp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' blob:; img-src 'self' data: blob:; font-src 'self' data: blob:; media-src 'self' data: blob:; frame-src blob:; connect-src 'self' ipc: http://ipc.localhost ws://localhost:14201 http://localhost:14201; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'none'"
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
+    "fileAssociations": [
+      {
+        "name": "EPUB Document",
+        "ext": ["epub"],
+        "contentTypes": ["org.idpf.epub-container"],
+        "description": "EPUB file",
+        "mimeType": "application/epub+zip",
+        "role": "Viewer",
+        "rank": "Alternate"
+      },
+      {
+        "name": "PDF Document",
+        "ext": ["pdf"],
+        "contentTypes": ["com.adobe.pdf"],
+        "description": "PDF file",
+        "mimeType": "application/pdf",
+        "role": "Viewer",
+        "rank": "Alternate"
+      },
+      {
+        "name": "MOBI Document",
+        "ext": ["mobi"],
+        "contentTypes": ["org.mobipocket.mobi"],
+        "description": "MOBI file",
+        "mimeType": "application/x-mobipocket-ebook",
+        "role": "Viewer",
+        "rank": "Alternate"
+      },
+      {
+        "name": "AZW3 Document",
+        "ext": ["azw3"],
+        "contentTypes": ["com.amazon.azw", "com.amazon.azw3"],
+        "description": "AZW3 file",
+        "mimeType": "application/vnd.amazon.mobi8-ebook",
+        "role": "Viewer",
+        "rank": "Alternate"
+      },
+      {
+        "name": "FB2 Document",
+        "ext": ["fb2"],
+        "contentTypes": ["one.paper.reader.fb2"],
+        "description": "FB2 file",
+        "mimeType": "application/x-fictionbook+xml",
+        "role": "Viewer",
+        "rank": "Alternate"
+      },
+      {
+        "name": "FB2 Archive",
+        "ext": ["fbz"],
+        "contentTypes": ["one.paper.reader.fbz"],
+        "description": "Zipped FB2 file",
+        "mimeType": "application/x-zip-compressed-fb2",
+        "role": "Viewer",
+        "rank": "Alternate"
+      },
+      {
+        "name": "CBZ Archive",
+        "ext": ["cbz"],
+        "contentTypes": ["one.paper.reader.cbz"],
+        "description": "Comic book archive",
+        "mimeType": "application/vnd.comicbook+zip",
+        "role": "Viewer",
+        "rank": "Alternate"
+      }
+    ],
     "resources": {
       "../THIRD-PARTY-NOTICES.md": "THIRD-PARTY-NOTICES.md",
       "../vendor/inference/current/": "runtime/"

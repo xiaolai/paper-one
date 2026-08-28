@@ -53,6 +53,29 @@ describe('blob deletion and the folder it names', () => {
     expect(fs.store.has('books/book_a_b/content.epub')).toBe(false)
   })
 
+  /* ⚠️ **AND THE OWNER IS READ INSIDE THE LANE.** The shelf was consulted
+     before the queue was joined, which is a check-then-act across a lane
+     boundary: the restore below is already queued for this folder when the
+     deletion is asked for, and it publishes its row only when it runs. Judged
+     on the snapshot from a moment earlier, the delete took the bytes of a book
+     that had just come back. */
+  it('refuses a folder claimed by a write already queued when the deletion arrives', async () => {
+    const fs = fakeFs({
+      'trash/book_a_b/book.json': JSON.stringify({ bookId: 'book:a_b', title: 'X' }),
+      'trash/book_a_b/content.epub': 'bytes',
+    })
+    const services = createKernelServices({ fs, storage: null, initialBooks: [], recorder: spyRecorder().recorder })
+
+    // The shelf is EMPTY here, so a check made now sees an unowned folder.
+    const restoring = services.library.restore('book:a_b')
+    const removing = services.removeBlob('book:a/b', 'content.epub')
+
+    expect(await restoring).toEqual({ state: 'restored' })
+    await expect(removing).rejects.toThrow(/does not own/)
+    await services.drain()
+    expect(fs.store.has('books/book_a_b/content.epub'), 'the restored book’s bytes were taken').toBe(true)
+  })
+
   /* An id the shelf does not hold at all is an already-removed book, and
      absence is this operation's documented no-op — refusing it would turn a
      removal racing an eviction into an error for a caller doing the right

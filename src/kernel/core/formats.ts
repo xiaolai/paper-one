@@ -53,6 +53,19 @@ export const isRanged = (source: BookSource): source is RangedSource =>
   typeof source !== 'string' && 'range' in source
 
 /**
+ * A source with NO BYTES — a zero-length file.
+ *
+ * Asked BEFORE the fork sees the file, because the fork's words for
+ * `!file.size` are "File not found" (`view.js`), which reached the reader
+ * verbatim through the open path's catch: true of nothing, since the file was
+ * right there, and a message that sends the reader looking for a file they
+ * just picked. A URL and a ranged source carry no size here — their bytes are
+ * somewhere else — and are never empty by this measure.
+ */
+export const isEmptySource = (source: BookSource): boolean =>
+  typeof source !== 'string' && !isRanged(source) && source.size === 0
+
+/**
  * Which of the two readers a source belongs to.
  *
  * Here rather than in `reader/pdf.ts` because that module imports pdf.js, which
@@ -187,18 +200,28 @@ export function sniffFormat(bytes: Uint8Array): Format | null {
     const names = zipNames(bytes)
     if (names[0] === 'mimetype') return 'epub'
     if (names.some((name) => /\.fb2$/i.test(name))) return 'fbz'
-    return 'cbz'
+    /* A COMIC HOLDS PICTURES. Every other zip — a DOCX, a JAR, an archive
+     * truncated before its entries — used to be called a comic, which both
+     * stored a wrong format and stopped `formatOf` falling back to the name.
+     * No credible image entry among the ones read, no verdict. */
+    if (names.some((name) => /\.(?:jpe?g|png|gif|webp|avif|bmp)$/i.test(name))) return 'cbz'
+    return null
   }
   if (ascii(bytes, 60, 'BOOKMOBI')) {
-    /* The MOBI header follows the 78-byte PalmDOC header at the first record's
-     * offset (a big-endian u32 at byte 78). Its file version is a u32 at
-     * header+36; version 8 is KF8, which is what an `.azw3` holds. Older
-     * files, and any whose first record is out of reach, are MOBI. */
+    /* Record 0 starts at the big-endian u32 at byte 78 of the PalmDB header.
+     * Its 16-byte PalmDOC header is followed by the MOBI header: `MOBI` at
+     * record+16, and the FILE VERSION at record+36 — i.e. twenty bytes past
+     * the identifier, the field calibre reads as `mobi_version`. Version 8
+     * is KF8, which is what an `.azw3` holds. ⚠️ This read record+52 — the
+     * identifier's offset added twice — which is the "index names" field,
+     * so real MOBI files were labelled by an unrelated number; the fixture
+     * repeated the arithmetic and hid it. Older files, and any whose first
+     * record is out of reach, are MOBI. */
     if (bytes.length >= 82) {
       const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
       const record0 = view.getUint32(78, false)
-      if (record0 + 16 + 40 <= bytes.length && ascii(bytes, record0 + 16, 'MOBI')) {
-        const version = view.getUint32(record0 + 16 + 36, false)
+      if (record0 + 40 <= bytes.length && ascii(bytes, record0 + 16, 'MOBI')) {
+        const version = view.getUint32(record0 + 36, false)
         return version >= 8 ? 'azw3' : 'mobi'
       }
     }
@@ -207,7 +230,10 @@ export function sniffFormat(bytes: Uint8Array): Format | null {
   // A UTF-8 byte order mark is not part of the document; step over one.
   const bom = bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf ? 3 : 0
   const text = head(bytes.subarray(bom), 1024)
-  if (/^\s*<\?xml/i.test(text) && /<FictionBook[\s>]/i.test(text)) return 'fb2'
+  /* The XML declaration is OPTIONAL in XML, so a `<FictionBook>` document
+   * without one is still one: the root element decides, after whatever
+   * prolog — declaration, comments, a doctype — the file opens with. */
+  if (/^\s*(?:<\?xml[\s\S]*?\?>\s*)?(?:<!--[\s\S]*?-->\s*|<!DOCTYPE[^>]*>\s*)*<FictionBook[\s>]/i.test(text)) return 'fb2'
   return null
 }
 

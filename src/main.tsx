@@ -28,12 +28,13 @@ import '@fontsource/ibm-plex-mono/500.css'
  * dependency-cruiser the specifier maps to the desktop file
  * (`tsconfig.base.json` `paths`): all three export the same shape.
  * `.dependency-cruiser.cjs` holds this file to exactly these imports. */
-import { buildServices, composeCapabilities, flushBeforeClose, createKernelServices, defaultDiagnostics, kernelApi, serviceClients } from './kernel'
+import { buildServices, composeCapabilities, flushBeforeClose, createKernelServices, defaultDiagnostics, finishPendingRemovals, kernelApi, serviceClients } from './kernel'
 import {
   App,
   CLOSE_DRAIN_MS,
+  OPEN_FILES_EVENT,
+  OPEN_FILES_READY_EVENT,
   countingFs,
-  emptyExpired,
   inTauri,
   installFatalHandlers,
   libraryFs,
@@ -47,14 +48,12 @@ import {
   summariseMigration,
   timed,
   watchFs,
-  type IndexedBook,
   tauriSizePort,
 } from './kernel/ui'
+import type { OpenRequests } from './kernel/ui'
 import { armShutdownInBackground } from './app/shutdown'
+import { bootShelf } from './app/boot'
 import { capabilities } from 'virtual:paper-composition'
-
-/** Bounded like `App`'s close handler, and under the shell's 5 s grace: a
- *  wedged queue must delay a quit, never prevent one. */
 
 installFatalHandlers()
 
@@ -83,7 +82,10 @@ async function boot(root: HTMLElement): Promise<void> {
   /* FIRST, so the window's own cost is on the record before the app adds any of
    * its own. Everything above this line ran before `boot` was called at all. */
   reportStartup()
-  const storage = await timed('open the store', () => openAppStorage())
+  /* AND WHAT OPENING IT HAD TO SAY — a damaged file moved aside, a disk it
+   * could not open — carried to the shelf's foot rather than to the console,
+   * which is not where a reader looks for their cards and settings. */
+  const { storage, notice: storeNotice } = await timed('open the store', () => openAppStorage())
   /* THE SHELF IS AWAITED TOO, for the same reason the store is: rendering first
    * and filling in afterwards gives every reader one frame of an empty library,
    * and this one would be a frame of "Your library is empty" over a full one.
@@ -96,96 +98,54 @@ async function boot(root: HTMLElement): Promise<void> {
    * `countingFs` is the identity function in a build. */
   const fs = inTauri() ? countingFs(libraryFs) : null
 
-  /* CARRY A PHASE-3 LIBRARY ACROSS, before the shelf is read.
+  /* THE SHELF'S BOOT ORDER — carry a phase-3 library across, finish the
+   * removals a crash left half done, then read the shelf — lives in
+   * `app/boot.ts`, where its order is tested. Timing wraps each step here,
+   * because the timing is this file's concern and the order is not.
    *
-   * Before, because the shelf is built by scanning book folders and a book that
-   * has not been migrated has no folder to find — so running it after would show
-   * an empty library to a reader who has one, exactly once, which is precisely
-   * the alarming failure this project has already produced.
-   *
-   * Awaited, unlike the trash sweep: this decides what the shelf contains.
-   * Idempotent, so the second launch does almost nothing — it reads one record
-   * per book and stops.
-   *
-   * Failure is SWALLOWED rather than fatal. A migration that cannot run leaves
-   * the phase-3 files untouched, which is recoverable; refusing to start is not.
-   */
-  if (fs && storage) {
-    try {
-      /* PARSED SEPARATELY. One `try` around both meant a malformed marks value
-       * stopped every valid library row migrating — and the migration itself
-       * already treats unreadable marks as none, so the strict read was the only
-       * thing standing between a reader and their books. */
-      const outcomes = await timed('carry a legacy library across', () =>
-        migrateToFolders(fs, {
-        /* CHECKED, not asserted. `as []` told the compiler this was a list and
-         * told the runtime nothing — so a store holding a valid JSON OBJECT
-         * threw inside the migration and skipped every legacy book, which is
-         * exactly the whole-or-nothing failure the separate parse above exists
-         * to prevent. */
-        rows: asRows(readJson(storage.getItem('paper.library.v1'), [])),
-        marks: readJson(storage.getItem('paper.marks.v1'), []),
-        }),
-      )
-      const said = summariseMigration(outcomes)
-      if (said) console.info(`Paper: ${said}`)
-    } catch (cause) {
-      console.error('Paper: could not carry the previous library across', cause)
-    }
-  }
-  /* A SHELF THAT WILL NOT LOAD IS NOT AN EMPTY SHELF, and the reader is told
-   * which. Swallowing it drew "Your library is empty" over a library that is
-   * still on disk — the single most alarming thing this app can say, produced by
-   * a transient read. */
-  let initialBooks: readonly IndexedBook[] = []
-  let shelfUnread = false
-  if (fs) {
-    try {
-      /* THE ANSWER TO "why is launch slow" IS USUALLY `rescanned`. A trusted
-       * cache is one file read and one listing; a rescan is two round-trips per
-       * book, and a library of a few thousand feels every one of them. If this
-       * says `rescanned=true` on every launch, the cache is being distrusted
-       * rather than the scan being slow, and that is a different bug. */
-      const shelf = await timed('load the shelf', () => loadShelf(fs), (one) => ({
+   * THE ANSWER TO "why is launch slow" IS USUALLY `rescanned`. A trusted
+   * cache is one file read and one listing; a rescan is two round-trips per
+   * book, and a library of a few thousand feels every one of them. If this
+   * says `rescanned=true` on every launch, the cache is being distrusted
+   * rather than the scan being slow, and that is a different bug. */
+  const { initialBooks, shelfUnread } = await bootShelf({
+    fs,
+    legacy:
+      storage === null
+        ? null
+        : () => {
+            /* CHECKED, not asserted. `as []` told the compiler this was a list and
+             * told the runtime nothing — so a store holding a valid JSON OBJECT
+             * threw inside the migration and skipped every legacy book. Parsed
+             * separately, so a malformed marks value does not stop the rows.
+             *
+             * AND A VALUE THAT WOULD NOT PARSE IS SAID, not silently emptied:
+             * a corrupt legacy blob used to make the library simply appear
+             * empty, with nothing anywhere explaining where the books went. */
+            const rawRows = storage.getItem('paper.library.v1')
+            const parsedRows = readJson(rawRows, null)
+            if (rawRows !== null && parsedRows === null) {
+              console.error('paper: the legacy library value exists but would not parse; migration sees no rows')
+            }
+            return {
+              rows: asRows(parsedRows ?? []),
+              marks: readJson(storage.getItem('paper.marks.v1'), []),
+            }
+          },
+    migrate: (target, legacy) => timed('carry a legacy library across', () => migrateToFolders(target, legacy)),
+    summarise: summariseMigration,
+    finishPendingRemovals: (target) => timed('finish pending removals', () => finishPendingRemovals(target), (ids) => ({ finished: ids.length })),
+    loadShelf: (target) =>
+      timed('load the shelf', () => loadShelf(target), (one) => ({
         books: one.books.length,
         rescanned: one.rescanned,
         why: one.why,
-      }))
-      initialBooks = shelf.books
-    } catch (cause) {
-      /* SAID, not swallowed. Logging it and carrying on with `[]` still drew
-       * "Your library is empty" over a library that is sitting on disk, which is
-       * the most alarming thing this app can say and the least true. The flag
-       * travels so the screen can say "could not be read" instead. */
-      console.error('Paper: could not read the library', cause)
-      shelfUnread = true
-    }
-  }
-  /* Emptied at BOOT, not on a timer and not when the reader removes something.
-   *
-   * It has to happen somewhere, and every other candidate is worse: a timer
-   * deletes a reader's work while they are looking at the shelf, and doing it
-   * during a removal makes an undoable action wait on unrelated disk work. At
-   * launch nothing is waiting, and being a fortnight late is not a failure.
-   *
-   * Deliberately not awaited. A slow or failing sweep must not delay the window,
-   * and `emptyExpired` errs towards keeping anything it cannot age. */
-  if (fs) {
-    /* REPORTED, not swallowed twice. `emptyExpired` already turns filesystem
-     * failures into `[]` — that is its documented erring-towards-keeping — so
-     * a `.catch(() => [])` on top could only ever hide something it did NOT
-     * expect: a programming error inside the sweep, silently, at boot, on a
-     * path nobody watches. */
-    void emptyExpired(fs).catch((error: unknown) => {
-      /* `defaultDiagnostics`, not `services.diagnostics`: the sweep starts
-       * BEFORE the services exist, so reaching for them here would be a
-       * temporal-dead-zone error thrown inside a catch on the boot path —
-       * a worse failure than the one being reported. */
-      defaultDiagnostics().warn('trash.sweep-failed', {
-        message: error instanceof Error ? error.message : String(error),
-      })
-    })
-  }
+      })),
+    report: {
+      info: (message) => console.info(message),
+      error: (message, cause) => console.error(message, cause),
+    },
+  })
 
   moment('everything before the first render', { ms: Math.round(performance.now() - bootFrom) })
   reportFs('filesystem, up to the first render')
@@ -207,6 +167,25 @@ async function boot(root: HTMLElement): Promise<void> {
      * asking whether this device was healthy. */
     shelfRead: !shelfUnread,
     diagnostics: defaultDiagnostics(),
+  })
+
+  /* THE TRASH IS EMPTIED AT BOOT, ON EACH BOOK'S LANE. Not on a timer and
+   * not when the reader removes something: a timer deletes a reader's work
+   * while they are looking at the shelf, and doing it during a removal makes
+   * an undoable action wait on unrelated disk work. At launch nothing is
+   * waiting, and being a fortnight late is not a failure.
+   *
+   * THROUGH THE LIBRARY, NOT `emptyExpired` DIRECT. The direct sweep read a
+   * stamp and deleted off every queue, so a restore that landed between the
+   * two — one that had kept files back and given them a fresh fortnight —
+   * lost exactly those files. The purge now runs on the book's lane with the
+   * stamp re-read there, so it is ordered against every restore and remove
+   * of that book. Deliberately not awaited: a slow sweep must not delay the
+   * window, and the library errs towards keeping anything it cannot age. */
+  void services.library.emptyExpiredTrash().catch((error: unknown) => {
+    services.diagnostics.warn('trash.sweep-failed', {
+      message: error instanceof Error ? error.message : String(error),
+    })
   })
 
   /* WHAT THIS HOST CAN MEASURE, bound here rather than by a capability.
@@ -241,13 +220,19 @@ async function boot(root: HTMLElement): Promise<void> {
    * (`device`, `shelf`, sizes) at CALL time, so building them here, before
    * any capability has started, is not too early: `peer.start` and
    * `sync.start` bind theirs on the way past. */
-  /* ARMED BEFORE THE SLOW PART, not after it.
+  /* ARMED BEFORE COMPOSITION, which is the window that matters — and said
+   * precisely, because the first spelling of this note overclaimed.
    *
    * This used to sit below `composeCapabilities`, so a quit arriving during
-   * storage loading, migration, the shelf scan or composition reached no
-   * handler at all: the shell deferred the exit, waited out its whole grace
-   * period, and quit anyway with the journal left dirty — the exact state the
-   * handshake exists to prevent, during the window most likely to be slow.
+   * composition reached no handler: the shell deferred the exit, waited out
+   * its whole grace period, and quit anyway with the journal left dirty —
+   * composition is where sync OPENS the journal, so that was the exact
+   * window the handshake exists for. Storage loading, migration and the
+   * shelf scan still run above this line unarmed, deliberately: the journal
+   * does not exist yet there, so a quit in that window costs the shell's
+   * grace period and nothing else — a slow quit, never a dirty flag — and
+   * arming earlier would mean late-binding `services` through a mutable
+   * reference in the one file no test can mount.
    *
    * Everything it needs already exists here: `lifetime` and `services` are
    * built above, and `quiesce()` resolves at once when no capability has
@@ -264,7 +249,10 @@ async function boot(root: HTMLElement): Promise<void> {
    * returned, and the quit handshake timed out for five seconds every time
    * while looking like it had been wired. A silent capability check written
    * into the fix for a silent failure. */
-  armShutdownInBackground({
+  /* THE TEARDOWN IS HANDED TO THE WINDOW AS WELL. Arming answers the shell's
+     ask; the same function goes to `App` as `beforeWindowClose`, so the red
+     button — the only quit on Windows and Linux — closes the journal too. */
+  const teardown = armShutdownInBackground({
     listen: async (event, handler) => {
       const { listen } = await import('@tauri-apps/api/event')
       return listen(event, () => handler())
@@ -304,14 +292,6 @@ async function boot(root: HTMLElement): Promise<void> {
     diagnostics: services.diagnostics,
   })
 
-  const composition = await composeCapabilities(capabilities, kernelApi(services), lifetime.signal, {
-    services: buildServices({ services }),
-    /* The satchel side of the same table, declared: what this composition may
-     * CALL on a shelf, as opposed to what it answers. Derived, so it cannot
-     * name a service that does not exist. */
-    clients: serviceClients(),
-  })
-
   /* THE LIFETIME ENDS WITH THE PAGE, which nothing used to do.
    *
    * A reload builds a SECOND set of capabilities while the first is still
@@ -322,11 +302,26 @@ async function boot(root: HTMLElement): Promise<void> {
    * here runs each capability's teardown: sync unbinds the recorder at once, so
    * no further bracket reaches the old journal, and closes it behind the queue.
    *
+   * REGISTERED BEFORE COMPOSITION IS AWAITED, not after. Below the await, a
+   * reload landing MID-composition — the very window in which sync opens the
+   * journal — found no listener, so the half-started first set was never
+   * aborted and overlapped the reload's second set: the incident above,
+   * reachable through the one gap in its fix. Only `lifetime` is needed here,
+   * and it exists.
+   *
    * `pagehide`, not `beforeunload`: it fires on a reload and on a navigation,
    * it does not ask to block the unload, and it is the event the platform
    * actually guarantees here. Idempotent — `dispose()` and the abort listener
    * both no-op after the first. */
   window.addEventListener('pagehide', () => lifetime.abort(), { once: true })
+
+  const composition = await composeCapabilities(capabilities, kernelApi(services), lifetime.signal, {
+    services: buildServices({ services }),
+    /* The satchel side of the same table, declared: what this composition may
+     * CALL on a shelf, as opposed to what it answers. Derived, so it cannot
+     * name a service that does not exist. */
+    clients: serviceClients(),
+  })
 
   /* AND THE SAME TEARDOWN ON QUIT, which `pagehide` does not cover.
    *
@@ -341,9 +336,49 @@ async function boot(root: HTMLElement): Promise<void> {
    * bounded, so a teardown that hangs delays the quit rather than preventing
    * it. Failing to reach the shell is not fatal here: this is a best-effort
    * flush, and the unclean path still works exactly as it does today. */
+  /* BOOKS THE LAUNCH CARRIED. The shell holds what the Finder, the command
+   * line or a second launch handed it until the webview says it is listening
+   * — a file opened at launch is known to Rust before this module exists, and
+   * an event emitted then is emitted into nothing. So READY is sent HERE,
+   * after the listener is registered and never before, and the shell hands
+   * over what it held. StrictMode's mount/unmount/mount sends READY twice;
+   * the shell's queue answers the second with nothing, by design. Outside
+   * Tauri there is no shell and nothing to subscribe to. */
+  const openRequests: OpenRequests = {
+    subscribe: (handler) => {
+      if (!inTauri()) return () => {}
+      let stopped = false
+      let stop: (() => void) | null = null
+      void (async () => {
+        const { emit, listen } = await import('@tauri-apps/api/event')
+        const off = await listen<string[]>(OPEN_FILES_EVENT, (event) => handler(event.payload))
+        if (stopped) {
+          off()
+          return
+        }
+        stop = off
+        await emit(OPEN_FILES_READY_EVENT)
+      })().catch((cause: unknown) => {
+        console.error('Paper: could not listen for the files the launch carried', cause)
+      })
+      return () => {
+        stopped = true
+        stop?.()
+      }
+    },
+  }
+
   createRoot(root).render(
     <StrictMode>
-      <App services={services} fs={fs} shelfUnread={shelfUnread} composition={composition} />
+      <App
+        services={services}
+        fs={fs}
+        shelfUnread={shelfUnread}
+        bootNotice={storeNotice}
+        composition={composition}
+        beforeWindowClose={teardown}
+        openRequests={openRequests}
+      />
     </StrictMode>,
   )
 

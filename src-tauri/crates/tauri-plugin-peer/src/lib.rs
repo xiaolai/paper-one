@@ -53,7 +53,6 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::peer_local_role,
             commands::peer_set_local_role,
             commands::paper_data_root,
-            commands::fs_fsync,
             commands::peer_list_peers,
             commands::peer_forget_peer,
             commands::peer_set_grants,
@@ -71,7 +70,24 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::peer_hash_file,
         ])
         .setup(|app, _api| {
-            app.manage(PeerState::default());
+            let state = PeerState::default();
+            /* THE `.part` SWEEP RUNS BEFORE THE NODE, NOT BEFORE THE WINDOW. A
+             * walk of `books/` at launch is a walk the shelf otherwise avoids
+             * — its index is the whole point of `index.json` — so it goes to
+             * a blocking thread, and the node waits for it instead of the
+             * reader: the node is the only route to a transfer, and a fetch
+             * that resumed from a `.part` the sweep then unlinked would land
+             * its bytes in an unnamed inode and fail at the rename with the
+             * wrong diagnosis. Ordered, the race cannot exist. */
+            match data_root(app) {
+                Ok(root) => state.start_after(tauri::async_runtime::spawn_blocking(move || {
+                    blobs::sweep_abandoned_parts(&root, std::time::SystemTime::now()).log();
+                })),
+                Err(err) => log::warn!(
+                    "peer: no data root at setup; abandoned .part files are not swept this run: {err}"
+                ),
+            }
+            app.manage(state);
             Ok(())
         })
         .on_event(|app, event| {

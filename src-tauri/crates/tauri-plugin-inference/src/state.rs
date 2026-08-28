@@ -28,18 +28,21 @@
 //! Nothing lets a caller choose a URL for either.
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 use serde::Serialize;
 use tauri::{AppHandle, Runtime};
 use tokio::sync::Mutex;
 
-use crate::daemon::Daemon;
+use crate::daemon::{Daemon, SHUTDOWN_GRACE};
 use crate::endpoints::EndpointStore;
 use crate::error::{Error, Result};
+use crate::lineage::{self, Recovery};
 use crate::manifest::Manifest;
-use crate::paths::{bundled_runtime, data_root, Layout};
+use crate::paths::{bundled_runtime, bundled_runtime_dir, data_root, Layout};
 use crate::requests::Registry;
+use crate::runtime::RuntimeManifest;
 use crate::spawn::{mint_token, plan_spawn, SpawnInputs};
 
 /// Where the runtime is in its lifecycle, as the settings section shows it.
@@ -72,7 +75,9 @@ pub struct InferenceState {
     /// list is the only record of what the reader configured. Nothing
     /// serialised them; `#[tauri::command]`s run concurrently.
     endpoint_writes: Mutex<()>,
-    /// The endpoints the DAEMON refused at its last start.
+    /// The endpoints the DAEMON does not have, as of its last start: the ones
+    /// it refused to register, and the ones it was never offered because the
+    /// keychain would not read their key (WI-20.20).
     ///
     /// Registration is best-effort and per provider, so one endpoint the
     /// daemon will not take must not stop the local model working. But the
@@ -80,6 +85,9 @@ pub struct InferenceState {
     /// from Paper's own persisted state — so the reader could select a route
     /// that had already been turned down, and find out at the question.
     unregistered: Mutex<BTreeSet<String>>,
+    /// How many times the daemon has been dropped for a configuration change.
+    /// For a test and a diagnostic — see [`InferenceState::reconfigurations`].
+    reconfigured: AtomicU64,
     downloads: OnceLock<reqwest::Client>,
 }
 
@@ -87,6 +95,7 @@ impl std::fmt::Debug for InferenceState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InferenceState")
             .field("in_flight", &self.requests.in_flight())
+            .field("reconfigurations", &self.reconfigurations())
             .finish()
     }
 }
@@ -116,6 +125,99 @@ impl InferenceState {
         &self.endpoint_writes
     }
 
+    /// Run one endpoint-store operation off the async runtime.
+    ///
+    /// ⚠️ **THE STORE IS BLOCKING, AND SO IS THE KEYCHAIN.** `read`/`write` are
+    /// `std::fs`, and every key operation goes through the OS keychain, which
+    /// on macOS can put a modal prompt in front of the reader — an unbounded
+    /// wait on a tokio worker thread. Calling either straight from an `async`
+    /// command stalls the runtime, and with it every other command, the
+    /// daemon's health poll and any streaming answer.
+    ///
+    /// This is THE way to a store. The four endpoint commands went through it
+    /// and three other callers — the probe, `route_for`, the daemon start —
+    /// reached past it to call the store directly on the runtime (WI-20.20);
+    /// `the_store_is_reached_only_through_the_blocking_seam` now holds every
+    /// caller to it.
+    pub(crate) async fn on_store<R, T>(
+        &self,
+        app: &AppHandle<R>,
+        work: impl FnOnce(&EndpointStore) -> Result<T> + Send + 'static,
+    ) -> Result<T>
+    where
+        R: Runtime,
+        T: Send + 'static,
+    {
+        // Cloned rather than borrowed: `spawn_blocking` needs `'static`, and
+        // the store is a path and a handle.
+        let store = self.endpoints(app)?.clone();
+        Self::on_endpoints(store, work).await
+    }
+
+    /// [`InferenceState::on_store`] over a store already resolved — the half
+    /// a test can reach without an app.
+    async fn on_endpoints<T>(
+        store: EndpointStore,
+        work: impl FnOnce(&EndpointStore) -> Result<T> + Send + 'static,
+    ) -> Result<T>
+    where
+        T: Send + 'static,
+    {
+        tokio::task::spawn_blocking(move || work(&store))
+            .await
+            .map_err(|join| Error::Io(std::io::Error::other(join.to_string())))?
+    }
+
+    /// Forget an endpoint, then drop the daemon so it forgets the key too.
+    ///
+    /// ⚠️ REGARDLESS of whether the keychain let the key go. The command used
+    /// to `?` the store's answer before `reconfigure`, so a keychain refusal
+    /// on the clear left the key live in the running child's environment,
+    /// with its provider still registered — the exact outcome the reconfigure
+    /// exists to prevent, on the one path where the reader has just been told
+    /// something is wrong with that key. The refusal is still the answer; it
+    /// just no longer decides whether the daemon keeps the credential.
+    pub(crate) async fn remove_endpoint<R: Runtime>(
+        &self,
+        app: &AppHandle<R>,
+        id: String,
+    ) -> Result<()> {
+        self.then_reconfigure(self.on_store(app, move |store| store.remove(&id)))
+            .await
+    }
+
+    /// [`InferenceState::remove_endpoint`] over a store already resolved —
+    /// the half a test can reach without an app, and `#[cfg(test)]` because
+    /// nothing else has a store the state did not resolve.
+    #[cfg(test)]
+    pub(crate) async fn remove_endpoint_from(
+        &self,
+        store: EndpointStore,
+        id: String,
+    ) -> Result<()> {
+        self.then_reconfigure(Self::on_endpoints(store, move |store| store.remove(&id)))
+            .await
+    }
+
+    /// Await a removal, reconfigure WHATEVER it answered, and hand its answer
+    /// back. The order lives here once so the two entry points cannot drift
+    /// on it.
+    async fn then_reconfigure(
+        &self,
+        removal: impl std::future::Future<Output = Result<()>>,
+    ) -> Result<()> {
+        let removed = removal.await;
+        self.reconfigure().await;
+        removed
+    }
+
+    /// How many times [`InferenceState::reconfigure`] has run. For a test and
+    /// a diagnostic: it is the only trace a reconfigure leaves when no daemon
+    /// was up to be dropped.
+    pub fn reconfigurations(&self) -> u64 {
+        self.reconfigured.load(Ordering::Relaxed)
+    }
+
     /// The in-flight request registry.
     pub fn requests(&self) -> &Registry {
         &self.requests
@@ -131,7 +233,18 @@ impl InferenceState {
                 .read_timeout(std::time::Duration::from_secs(60))
                 .user_agent(concat!("Paper/", env!("CARGO_PKG_VERSION")))
                 .build()
-                .unwrap_or_else(|_| reqwest::Client::new())
+                .unwrap_or_else(|err| {
+                    /* Building fails only if the TLS backend cannot
+                     * initialise — practically never. The fallback keeps
+                     * downloads possible but LOSES the read timeout and the
+                     * user agent, so it does not get to happen silently:
+                     * behaviour changing exactly on the exceptional path is
+                     * how a stall on a broken network became undiagnosable. */
+                    log::warn!(
+                        "inference: the download client could not be built ({err}); using a bare client with no read timeout"
+                    );
+                    reqwest::Client::new()
+                })
         })
     }
 
@@ -142,17 +255,29 @@ impl InferenceState {
 
     /// Where the runtime is, without starting anything.
     pub async fn status<R: Runtime>(&self, app: &AppHandle<R>) -> RuntimeStatus {
-        if let Some(daemon) = self.daemon.lock().await.as_ref() {
+        /* The request is BUILT under the lock and SENT outside it. The
+         * health client's timeout is ten seconds, and a status probe that
+         * held the daemon mutex across a wedged check queued stop,
+         * reconfiguration and every request-builder behind a read-only
+         * question — the same trap `inference_resource_usage` already
+         * documents at its `health_request` call. */
+        let probe = self
+            .daemon
+            .lock()
+            .await
+            .as_ref()
+            .map(|daemon| (daemon.plan().port, daemon.health_request()));
+        if let Some((port, request)) = probe {
             /* A HELD DAEMON IS NOT A LIVE ONE. This reported `Ready` for
              * anything in the slot and turned a failed health check into an
              * EMPTY VERSION STRING — so a daemon that had crashed read as
              * running with an unknown version, and the settings row said so.
              * A health check that will not answer is the definition of not
              * ready. Found by audit. */
-            return match daemon.health().await {
+            return match crate::daemon::Daemon::read_health(request).await {
                 Ok(health) if health.status == "ok" => RuntimeStatus::Ready {
                     version: health.version,
-                    port: daemon.plan().port,
+                    port,
                 },
                 _ => RuntimeStatus::Stopped,
             };
@@ -196,17 +321,49 @@ impl InferenceState {
             }
         }
         let program = bundled_runtime(app)?;
+        /* VERIFIED BEFORE EVERY SPAWN, not once at install. The manifest
+         * names every file of the staged runtime — `lemond`, its resources,
+         * `llama-server` and the libraries it loads by name from its own
+         * directory — and a byte that differs, a file that is missing, or a
+         * file the manifest never heard of refuses the launch and names
+         * itself. This is the whole of what stands between the bytes on disk
+         * and `exec` (WI-20.24): upstream signs nothing, and a file that was
+         * never quarantined is a file Gatekeeper never looks at. */
+        let runtime_dir = bundled_runtime_dir(app)?;
+        let backend = RuntimeManifest::load(&runtime_dir)
+            .await?
+            .verify(&runtime_dir)
+            .await?;
         let layout = self.layout(app)?.clone();
-        let cloud_keys = self.endpoints(app)?.keys_for_spawn()?;
-        let registrations = self.endpoints(app)?.registrations()?;
+        /* A DAEMON A PREVIOUS PAPER LEFT RUNNING is collected before a new
+         * one is spawned, under the lock this function holds — so the
+         * record it reads can only be an earlier process's, never the one a
+         * daemon of this process just wrote. `recover_orphans` does the
+         * same at launch; whichever runs first finds it (WI-20.23). */
+        self.collect_orphans(&layout).await;
+        /* OFF THE RUNTIME, and tolerant per endpoint. This was two direct
+         * store calls on a worker thread — the keychain prompt `on_store`'s
+         * header warns about, on the path every question takes — and each
+         * `?`'d a keychain refusal: a macOS "Deny", or a dev rebuild whose
+         * signature the entry's ACL no longer matches, stopped the daemon
+         * for the local model too. `provisioning` skips and names the
+         * endpoint instead; the daemon starts (WI-20.20). */
+        let provisioning = self.on_store(app, |store| store.provisioning()).await?;
+        for id in &provisioning.unreadable {
+            log::warn!(
+                "inference: endpoint {id} is not provisioned: the keychain would not read its key"
+            );
+        }
 
         let plan = plan_spawn(&SpawnInputs {
             program,
+            backend,
             cache_dir: layout.cache_dir.clone(),
             models_dir: layout.models_dir.clone(),
+            record_path: layout.daemon_record(),
             port: free_port()?,
             api_key: mint_token(),
-            cloud_keys,
+            cloud_keys: provisioning.keys,
         });
         let port = plan.port;
         let daemon = Daemon::start(plan).await?;
@@ -221,8 +378,11 @@ impl InferenceState {
          * Best-effort per provider: one endpoint that will not register must
          * not stop the local model from working, and the route list already
          * reports a route that cannot answer. */
-        let mut refused = BTreeSet::new();
-        for registration in registrations {
+        /* An endpoint whose key could not be read was never offered, and the
+         * daemon does not have it either — so it goes in the same set the
+         * probe reads, and is not offered as a route that would fail. */
+        let mut refused = provisioning.unreadable;
+        for registration in provisioning.registrations {
             if let Err(failure) = daemon
                 .post_json::<_, serde_json::Value>("/api/v1/install", &registration)
                 .await
@@ -243,6 +403,56 @@ impl InferenceState {
         Ok(port)
     }
 
+    /// Collect a daemon a previous Paper left running, if the record beside
+    /// the layout names one that is still ours — see `lineage.rs`.
+    ///
+    /// Called at launch, from the plugin's setup. Takes the daemon slot and
+    /// does nothing when it is occupied: a record on disk while a daemon of
+    /// THIS process holds the slot is that daemon's own, and reading it
+    /// would kill the runtime the reader is using.
+    pub async fn recover_orphans<R: Runtime>(&self, app: &AppHandle<R>) {
+        let layout = match self.layout(app) {
+            Ok(layout) => layout.clone(),
+            Err(err) => {
+                log::warn!("inference: no layout to look for an orphaned runtime under: {err}");
+                return;
+            }
+        };
+        let slot = self.daemon.lock().await;
+        if slot.is_some() {
+            return;
+        }
+        self.collect_orphans(&layout).await;
+    }
+
+    /// The half that does the work. Called with the daemon slot LOCKED and
+    /// EMPTY, by both entry points.
+    async fn collect_orphans(&self, layout: &Layout) {
+        let record = layout.daemon_record();
+        match lineage::recover(&record, &lineage::OsProcesses, SHUTDOWN_GRACE).await {
+            Recovery::Nothing => {}
+            Recovery::Stale => log::info!(
+                "inference: the runtime record at {} named nothing of ours; removed",
+                record.display()
+            ),
+            Recovery::Collected { pgid, port, forced } => log::warn!(
+                "inference: collected a runtime a previous Paper left running — group {pgid}, port {port}{}",
+                if forced { ", killed after the grace" } else { "" }
+            ),
+            // The OS would not enumerate the group, so nothing was signalled
+            // and the record stays; the next launch asks again.
+            Recovery::Unknown { pgid } => log::warn!(
+                "inference: could not tell what is in runtime group {pgid}; the record at {} stays for the next launch",
+                record.display()
+            ),
+        }
+    }
+
+    /// The endpoint ids the daemon refused. Empty when it has not started.
+    pub async fn unregistered(&self) -> BTreeSet<String> {
+        self.unregistered.lock().await.clone()
+    }
+
     /// Drop a running daemon so the next start picks up new endpoint config.
     ///
     /// ⚠️ **KEYS ARE INJECTED AT SPAWN AND PROVIDERS REGISTERED AT START.**
@@ -256,18 +466,37 @@ impl InferenceState {
     /// Stopping rather than restarting: `ensure_started` runs before every
     /// question, so the next use brings it back with the current
     /// configuration, and a settings command does not spend a process launch.
-    /// `stop` trips the in-flight tokens first, so a reader watching an answer
-    /// gets a cancellation rather than a stall — the same contract every other
-    /// daemon teardown has.
-    /// The endpoint ids the daemon refused. Empty when it has not started.
-    pub async fn unregistered(&self) -> BTreeSet<String> {
-        self.unregistered.lock().await.clone()
+    /// The teardown trips the in-flight tokens, so a reader watching an
+    /// answer gets a cancellation rather than a stall — the same contract
+    /// every other daemon teardown has.
+    pub async fn reconfigure(&self) {
+        self.reconfigured.fetch_add(1, Ordering::Relaxed);
+        self.take_down().await;
     }
 
-    pub async fn reconfigure(&self) {
-        let taken = self.daemon.lock().await.take();
+    /// The one teardown, shared by [`Self::reconfigure`] and [`Self::stop`].
+    ///
+    /// The slot lock is HELD ACROSS the child's shutdown, deliberately. Both
+    /// callers used to `take()` and release before awaiting `Daemon::stop`,
+    /// and `ensure_started` could spawn a REPLACEMENT while the old teardown
+    /// still ran — whose `GroupHold` then removed the daemon record the new
+    /// daemon had just written, leaving the new group unrecoverable after a
+    /// kill. `ensure_started` already holds the same lock across the whole
+    /// start; teardown gets the same discipline. The tokens are tripped
+    /// AFTER the slot empties: a request arriving mid-teardown finds
+    /// `NotRunning` instead of registering against a process on its way out,
+    /// and before the process goes, so a watched answer still ends in a
+    /// cancellation rather than a stall.
+    ///
+    /// `unregistered` is cleared with the daemon it described: a repaired
+    /// endpoint must not stay refused on the strength of the LAST daemon's
+    /// registration failures.
+    async fn take_down(&self) {
+        let mut slot = self.daemon.lock().await;
+        let taken = slot.take();
+        self.unregistered.lock().await.clear();
+        self.requests.cancel_all();
         if let Some(daemon) = taken {
-            self.requests.cancel_all();
             daemon.stop().await;
         }
     }
@@ -289,14 +518,7 @@ impl InferenceState {
 
     /// Stop the daemon if it is running. Idempotent.
     pub async fn stop(&self) {
-        // Everything streaming from it is about to have nothing to stream
-        // from, so the tokens are tripped BEFORE the process goes — a reader
-        // watching an answer gets a cancellation rather than a stall.
-        self.requests.cancel_all();
-        let taken = self.daemon.lock().await.take();
-        if let Some(daemon) = taken {
-            daemon.stop().await;
-        }
+        self.take_down().await;
     }
 
     /// The app is exiting.
@@ -322,14 +544,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_free_port_is_not_zero_and_differs_between_calls() {
+    fn a_free_port_is_not_zero() {
         let a = free_port().unwrap();
         let b = free_port().unwrap();
         assert_ne!(a, 0);
         assert_ne!(b, 0);
-        // Not strictly guaranteed by the OS, but a same-port pair twice in a
-        // row would mean the bind is not actually reserving anything.
-        assert!(a != b || a != 0);
+        /* No cross-call inequality assertion: the OS genuinely may hand the
+         * same ephemeral port twice once the first listener closes, so
+         * `a != b` would be a flake — and the disjunction that stood here
+         * (`a != b || a != 0`) was satisfied by the line above already,
+         * asserting nothing. Distinctness is the OS's business; non-zero and
+         * bindable is this function's. */
     }
 
     #[test]
@@ -382,5 +607,83 @@ mod tests {
         let a = state.download_client();
         let b = state.download_client();
         assert!(std::ptr::eq(a, b));
+    }
+
+    /// WI-20.20 (d). `inference_remove_endpoint` used to `?` the store's
+    /// result BEFORE `reconfigure`, so a keychain that would not give the key
+    /// up left it live in the running child's environment, its provider still
+    /// registered — precisely the half the command's own comment calls "the
+    /// half that matters". The daemon is dropped regardless, and the refusal
+    /// is still the answer.
+    #[tokio::test]
+    async fn a_removal_the_keychain_refuses_still_reconfigures_the_daemon() {
+        let dir = crate::testutil::ScratchDir::new("state");
+        let keychain = crate::testutil::FakeKeychain::default()
+            .with_key("denied", "sk-denied")
+            .refusing(&["denied"]);
+        let store = crate::endpoints::EndpointStore::with_keychain(
+            dir.path(),
+            std::sync::Arc::new(keychain),
+        );
+        store
+            .add("denied", "D", "https://d.example.com/v1")
+            .unwrap();
+        let state = InferenceState::default();
+        assert_eq!(state.reconfigurations(), 0);
+
+        let err = state
+            .remove_endpoint_from(store.clone(), "denied".to_owned())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.kind(),
+            "keychain",
+            "the refusal is surfaced, not swallowed"
+        );
+        assert_eq!(
+            state.reconfigurations(),
+            1,
+            "the daemon is reconfigured whether or not the keychain let the key go"
+        );
+        assert!(store.list().unwrap().is_empty(), "the row is gone");
+    }
+
+    /// WI-20.20 (c). The store is `std::fs` and the keychain can put a modal
+    /// prompt in front of the reader — an unbounded wait — so neither may run
+    /// on a runtime worker. `on_store`'s header says so, and three callers
+    /// (`inference_probe`, `route_for`, `ensure_started`) reached past it to
+    /// call the store directly. This holds every store call behind the seam:
+    /// the only way to a store, in either file, is through `on_store`.
+    #[test]
+    fn the_store_is_reached_only_through_the_blocking_seam() {
+        let state_source = include_str!("state.rs");
+        let commands_source = include_str!("commands.rs");
+        /* The resolver's call syntax and nothing else's: the definition is
+         * `fn endpoints<R`, and the field reads are `endpoints.get`. So every
+         * occurrence is a caller taking a store. Built at runtime so this
+         * test's own source — which `include_str!` reads too — is not one. */
+        let needle = format!(".{}(", "endpoints");
+        let calls = |source: &str| source.matches(&needle).count();
+        assert_eq!(
+            calls(commands_source),
+            0,
+            "commands.rs resolves the store directly; go through state.on_store"
+        );
+        assert_eq!(
+            calls(state_source),
+            1,
+            "state.rs resolves the store outside on_store"
+        );
+        let seam = state_source
+            .find("async fn on_store")
+            .expect("on_store lives in state.rs");
+        let seam_end = state_source[seam..]
+            .find("\n    }\n")
+            .map(|end| seam + end)
+            .expect("on_store has a body");
+        assert!(
+            state_source[seam..seam_end].contains(&needle),
+            "the one resolution is not inside on_store"
+        );
     }
 }

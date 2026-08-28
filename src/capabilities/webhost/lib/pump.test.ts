@@ -172,6 +172,68 @@ describe('servePipe', () => {
     vi.useRealTimers()
   })
 
+  /**
+   * BACKPRESSURE IS A WAIT, NOT A FAILURE.
+   *
+   * ⚠️ The plugin used to answer `backpressure` the instant a browser's budget
+   * was full, and this pump treated EVERY rejected send as a dead session —
+   * `onError`, then `close`. `content.read` yields 512 KiB chunks as fast as
+   * IPC accepts them, the session budget is 8 MiB, and every book larger than
+   * twelve chunks aborted mid-stream on the phone, under a variant whose own
+   * doc said "NOT an error… retry".
+   *
+   * The wait lives in Rust now (`Pipe::send_wait`): `webhost_send` holds the
+   * call until room appears and answers only then. So what this pump has to
+   * do is the thing it already did — AWAIT the send — and what it must not do
+   * is treat a slow answer as a lost session. The wire below holds the first
+   * frame for a while, the way a plugin waiting on a full browser does; the
+   * frame must arrive once, late, with nothing reported and nothing closed.
+   */
+  it('awaits a send the plugin is holding for room, rather than closing the session', async () => {
+    vi.useFakeTimers()
+    const onError = vi.fn()
+    const inbox: Uint8Array[] = []
+    const client = createClient({ send: (bytes) => void inbox.push(bytes) })
+    let release: (() => void) | undefined
+    let sends = 0
+    const wire = fakeWire({
+      sessions: async () => [{ id: 1 }],
+      sessionRecv: async () => inbox.splice(0, inbox.length),
+      send: (_session, frame) => {
+        sends += 1
+        /* ROOM APPEARS LATER. The plugin is parked on its broadcast; the
+           promise it handed the webview is still pending. */
+        return new Promise<void>((resolve) => {
+          release = () => {
+            client.receive(frame)
+            resolve()
+          }
+        })
+      },
+    })
+    const pump = servePipe({ wire, services: [PING], pollMs: 5, sessionsMs: 10, onError })
+
+    const answer = client.call('example.ping', 'a slow phone')
+    let settled = false
+    void answer.then(() => (settled = true))
+    await tick(20)
+
+    /* Held, not failed: the session is still served, nothing was reported,
+       and the frame was offered exactly once — the retry is Rust's. */
+    expect(settled).toBe(false)
+    expect(pump.serving, 'a slow send was taken for a dead session').toBe(1)
+    expect(onError).not.toHaveBeenCalled()
+    expect(sends).toBe(1)
+
+    release?.()
+    await tick()
+    expect(await answer).toEqual({ echoed: 'a slow phone' })
+    expect(sends).toBe(1)
+
+    pump.stop()
+    vi.useRealTimers()
+  })
+
   it('serves a browser that arrives after it started', async () => {
     vi.useFakeTimers()
     const inbox: Uint8Array[] = []
@@ -369,6 +431,271 @@ describe('servePipe', () => {
     await tick(2)
     expect(settled).toBe(false)
 
+    vi.useRealTimers()
+  })
+})
+
+/**
+ * THE ONE WRITE, BOUND TO THE BOOK THIS SESSION OPENED (WI-20.30, D7).
+ *
+ * `book.position` is under `position:write`, which the pump admits — but only
+ * for the book the session located, because a browser session's socket is
+ * one a hostile book's script could open too. The kernel's OWN services over
+ * a real shelf, so the binding is proved against `content.locate` and
+ * `book.position` as shipped, and the record is read back through
+ * `book.get`.
+ */
+import { buildServices, createKernelServices, recordPath, sizePortOver, type IndexedBook } from '../../../kernel'
+import { fakeFs } from '../../../kernel/testkit'
+
+function realShelf(ids: readonly string[]) {
+  const books: IndexedBook[] = ids.map((bookId) => ({ bookId, title: `Title ${bookId}`, author: '', addedAt: 1 }))
+  const files = Object.fromEntries(books.map((book) => [recordPath(book.bookId), JSON.stringify(book)]))
+  const fs = fakeFs(files)
+  const services = createKernelServices({ fs, storage: null, initialBooks: books })
+  /* `content.locate` measures through the size port; a shelf with none bound
+     is the phase-11 desktop, and not the shape a browser ever meets. */
+  services.bindSizePort(
+    sizePortOver({
+      bytesAt: async (path) => fs.store.get(path)?.byteLength ?? null,
+      readDir: async (path) => (await fs.readDir(path)).map((entry) => ({ name: entry.name, isDirectory: entry.isDirectory })),
+    }),
+  )
+  return { services, contributions: buildServices({ services }) }
+}
+
+const CFI = 'epubcfi(/6/24!/4/2/1:0)'
+
+describe('book.position through the pump', () => {
+  it('lands the position of the book this session opened, and the record carries it', async () => {
+    vi.useFakeTimers()
+    const { wire, client } = browser()
+    const { contributions } = realShelf(['a', 'b'])
+    const pump = servePipe({ wire, services: contributions, pollMs: 5, sessionsMs: 10 })
+
+    const located = client.call('content.locate', { book: 'a' })
+    await tick()
+    await located
+    const set = client.call('book.position', { book: 'a', position: CFI, progress: 0.5 })
+    await tick()
+    expect(await set).toMatchObject({ bookId: 'a', position: CFI, progress: 0.5 })
+    const detail = client.call('book.get', { book: 'a' })
+    await tick()
+    expect(await detail).toMatchObject({ position: CFI, progress: 0.5 })
+
+    pump.stop()
+    vi.useRealTimers()
+  })
+
+  it('refuses to move any other book, by grant, and the handler never runs', async () => {
+    vi.useFakeTimers()
+    const { wire, client } = browser()
+    const { contributions, services } = realShelf(['a', 'b'])
+    const pump = servePipe({ wire, services: contributions, pollMs: 5, sessionsMs: 10 })
+
+    const located = client.call('content.locate', { book: 'a' })
+    await tick()
+    await located
+    /* THE HOSTILE FIXTURE: a second book id in the call. */
+    const refused = client.call('book.position', { book: 'b', position: CFI }).then(
+      () => 'RESOLVED',
+      (thrown: unknown) => String(thrown),
+    )
+    await tick()
+    expect(await refused).toMatch(/forbidden/i)
+    expect(services.library.getSnapshot().find((row) => row.bookId === 'b')?.position).toBeUndefined()
+
+    pump.stop()
+    vi.useRealTimers()
+  })
+
+  it('refuses a session that has opened nothing, and one whose book changed follows the newest locate', async () => {
+    vi.useFakeTimers()
+    const { wire, client } = browser()
+    const { contributions } = realShelf(['a', 'b'])
+    const pump = servePipe({ wire, services: contributions, pollMs: 5, sessionsMs: 10 })
+
+    const cold = client.call('book.position', { book: 'a', position: CFI }).then(
+      () => 'RESOLVED',
+      (thrown: unknown) => String(thrown),
+    )
+    await tick()
+    expect(await cold).toMatch(/forbidden/i)
+
+    for (const book of ['a', 'b']) {
+      const located = client.call('content.locate', { book })
+      await tick()
+      await located
+    }
+    /* Opened `b` last: `a` is no longer this session's book. */
+    const stale = client.call('book.position', { book: 'a', position: CFI }).then(
+      () => 'RESOLVED',
+      (thrown: unknown) => String(thrown),
+    )
+    await tick()
+    expect(await stale).toMatch(/forbidden/i)
+    const current = client.call('book.position', { book: 'b', position: CFI })
+    await tick()
+    expect(await current).toMatchObject({ bookId: 'b' })
+
+    pump.stop()
+    vi.useRealTimers()
+  })
+
+  it('still refuses every other write', async () => {
+    vi.useFakeTimers()
+    const { wire, client } = browser()
+    const { contributions } = realShelf(['a'])
+    const pump = servePipe({ wire, services: contributions, pollMs: 5, sessionsMs: 10 })
+    const located = client.call('content.locate', { book: 'a' })
+    await tick()
+    await located
+    const refused = client.call('book.set', { book: 'a', position: CFI }).then(
+      () => 'RESOLVED',
+      (thrown: unknown) => String(thrown),
+    )
+    await tick()
+    expect(await refused).toMatch(/forbidden/i)
+    pump.stop()
+    vi.useRealTimers()
+  })
+})
+
+describe('audit-fix round 1 — the pump', () => {
+  const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
+
+  it('binds the position write to the NEWEST locate by request order, not by which answered last', async () => {
+    /* Two locates in flight: the older answers last. The binding used to
+       follow completion order, re-pointing the write at a book the browser
+       had already left. */
+    const answers = new Map<string, () => void>()
+    const locate: ServiceContribution = {
+      name: 'content.locate',
+      grant: 'book:read',
+      handler: (req: unknown) =>
+        new Promise((resolve) => {
+          answers.set((req as { book: string }).book, () => resolve({ located: true }))
+        }),
+    }
+    const moved: string[] = []
+    const position: ServiceContribution = {
+      name: 'book.position',
+      grant: 'position:write',
+      handler: async (req: unknown) => {
+        moved.push((req as { book: string }).book)
+        return {}
+      },
+    }
+    const { wire, client } = browser()
+    const pump = servePipe({ wire, services: [locate, position], pollMs: 5, sessionsMs: 10 })
+    const older = client.call('content.locate', { book: 'book:old' })
+    const newer = client.call('content.locate', { book: 'book:new' })
+    await new Promise<void>((resolve) => setTimeout(resolve, 30))
+    answers.get('book:new')!()
+    await newer
+    answers.get('book:old')!()
+    await older
+    await client.call('book.position', { book: 'book:new', position: 'cfi', progress: 0.5 })
+    await expect(client.call('book.position', { book: 'book:old', position: 'cfi', progress: 0.5 })).rejects.toMatchObject({
+      error: { code: 'forbidden' },
+    })
+    expect(moved).toEqual(['book:new'])
+    pump.stop()
+  })
+
+  it('refuses an interval that is not a positive finite number', () => {
+    for (const bad of [0, -5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => servePipe({ wire: fakeWire(), services: [], pollMs: bad })).toThrow(/pollMs/)
+      expect(() => servePipe({ wire: fakeWire(), services: [], sessionsMs: bad })).toThrow(/sessionsMs/)
+    }
+  })
+
+  it('never has two reconciliations in flight, however slow the plugin answers', async () => {
+    /* `setInterval` fired the next pass while the previous `sessions()` was
+       still pending; two snapshots landing out of order could close a current
+       session or reopen a departed one. The next pass is armed only after the
+       last one settled. */
+    let inFlight = 0
+    let peak = 0
+    const wire = fakeWire({
+      sessions: async () => {
+        inFlight += 1
+        peak = Math.max(peak, inFlight)
+        await new Promise<void>((resolve) => setTimeout(resolve, 30))
+        inFlight -= 1
+        return []
+      },
+    })
+    const pump = servePipe({ wire, services: [], sessionsMs: 5 })
+    await new Promise<void>((resolve) => setTimeout(resolve, 120))
+    pump.stop()
+    expect(peak).toBe(1)
+  })
+
+  it('a reporter that throws does not strand the session, and the loop reports the plugin failure once', async () => {
+    let asked = 0
+    const wire = fakeWire({
+      sessions: async () => [{ id: 7 }],
+      sessionRecv: async () => {
+        asked += 1
+        throw new Error('ipc gone')
+      },
+    })
+    const reported: unknown[] = []
+    const pump = servePipe({
+      wire,
+      services: [],
+      pollMs: 5,
+      sessionsMs: 1000,
+      onError: (thrown) => {
+        reported.push(thrown)
+        throw new Error('the reporter itself is broken')
+      },
+    })
+    await tick()
+    await tick()
+    await tick()
+    /* The session was opened, its drain failed, and the failure path CLOSED
+       it before reporting — so a throwing reporter cannot leave the record
+       in `live`, which is what used to make the failure permanent. */
+    expect(reported.map((one) => (one as Error).message)).toContain('ipc gone')
+    expect(pump.serving).toBe(0)
+    expect(asked).toBe(1)
+    pump.stop()
+  })
+})
+
+describe('a router that hung up on its own', () => {
+  it('lets go of the session, so the next reconciliation serves the browser afresh', async () => {
+    /* A browser that stops reading: writes queue on the router's outbound
+       chain until its budget overflows and the router disconnects — a decision
+       taken inside the envelope, which the pump could not hear until
+       `onDisconnect` existed (audit #61). Without it the dead connection kept
+       its record, the plugin went on reporting the socket, and every later
+       request drained into a router answered by nobody. A stalled `send`
+       models the browser; the tiny budget makes the overflow cheap; the
+       browser then starts reading again and asks once more. */
+    vi.useFakeTimers()
+    const { wire, client } = browser()
+    const delivering = wire.send
+    wire.send = async () => new Promise<void>(() => {})
+    const pump = servePipe({ wire, services: [PING], pollMs: 5, sessionsMs: 10, maxOutboundBytes: 600 })
+    await tick()
+    expect(pump.serving).toBe(1)
+
+    for (let i = 0; i < 40; i++) void client.call('example.ping', { i }).catch(() => {})
+    await tick()
+
+    /* The browser reads again. The old connection is gone either way; only a
+       pump that heard the hang-up has let the record go, so that the next
+       reconciliation opens a fresh one and this call is answered. */
+    wire.send = delivering
+    await tick()
+    const again = client.call('example.ping', { again: true })
+    await tick()
+    expect(await again).toEqual({ echoed: { again: true } })
+
+    pump.stop()
     vi.useRealTimers()
   })
 })

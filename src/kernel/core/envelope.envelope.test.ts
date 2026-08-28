@@ -161,6 +161,48 @@ describe('the codec', () => {
       refused({ size: 1n }, /bigint|cannot be serialised/)
     })
 
+    /**
+     * ⚠️ **THE BODY WAS ENCODED FROM ONE GRAPH AND VALIDATED AGAINST ANOTHER.**
+     *
+     * `JSON.stringify` ran, and then the check walked the LIVE object a second
+     * time — re-invoking every getter and every `toJSON`. Nothing obliges the
+     * second answer to match the first, and the direction that fails is the
+     * silent one: the first read is what went on the wire, so a value that
+     * behaves itself on the second reading shipped a `null` the peer took for
+     * "no value", past a check that had just approved a different graph.
+     *
+     * The read count is the assertion that keeps this fixed. A refusal alone
+     * would still pass with two walks in the wrong order.
+     */
+    it('judges the value it encoded, not what the body answers the second time', () => {
+      let reads = 0
+      const body = {
+        get ratio() {
+          reads += 1
+          return reads === 1 ? Infinity : 1
+        },
+      }
+      expect(() => encodeFrame(frame({ body }))).toThrow(/non-finite/)
+      expect(reads).toBe(1)
+    })
+
+    /* THE SAME DEFECT THROUGH `toJSON`, which is the likelier one in practice:
+       a `Date` is the common case, but anything may implement it, and what it
+       returns the first time is what the peer receives. */
+    it('takes what toJSON returned the first time, and calls it once', () => {
+      let calls = 0
+      const body = {
+        at: {
+          toJSON: () => {
+            calls += 1
+            return calls === 1 ? undefined : 'fine'
+          },
+        },
+      }
+      expect(() => encodeFrame(frame({ body }))).toThrow(/undefined/)
+      expect(calls).toBe(1)
+    })
+
     /* AND A CYCLE DOES NOT HANG. The walk assumes an acyclic graph — a visited
        set would also reject a shared subgraph, which is legitimate — so
        `JSON.stringify` runs first and proves it. Written the other way round
@@ -666,6 +708,31 @@ describe('the router', () => {
     expect(JSON.stringify(rude)).not.toContain('secret')
   })
 
+  it('answers a thrown value that raises when it is inspected, rather than leaving the peer waiting', async () => {
+    /* The normalisation read the thrown value four times — an `instanceof`
+     * and three field reads — with the request already settled and its clock
+     * cleared. A getter that raised became an unhandled rejection: no `err`
+     * frame, and no timeout left to end the wait either. */
+    const hostile = new Proxy(
+      {},
+      {
+        get: () => {
+          throw new Error('/Users/someone/books/secret.epub')
+        },
+        getPrototypeOf: () => {
+          throw new Error('no')
+        },
+      },
+    )
+    const h = harness([{ ...ping, handler: async () => Promise.reject(hostile) }])
+    h.send(frame())
+    await settle()
+    expect(h.sent).toHaveLength(1)
+    expect(errBody(h.sent[0])).toEqual({ code: ENVELOPE_ERRORS.internal, retryable: false, message: 'the service failed' })
+    expect(JSON.stringify(h.sent[0])).not.toContain('secret')
+    expect(h.connection.inFlight).toBe(0)
+  })
+
   it('an answer over the cap is refused as frame-too-large, and the request is settled', async () => {
     const h = harness([{ ...ping, handler: async () => 'x'.repeat(MAX_FRAME_BYTES) }])
     h.send(frame())
@@ -892,10 +959,19 @@ describe('the client', () => {
     const b = client.call('example.ping', 2)
     client.disconnect()
     for (const p of [a, b]) {
-      expect(((await p.catch((e: unknown) => e)) as ServiceCallError).error.code).toBe(ENVELOPE_ERRORS.disconnected)
+      const failure = (await p.catch((e: unknown) => e)) as ServiceCallError
+      expect(failure.error.code).toBe(ENVELOPE_ERRORS.disconnected)
+      /* RETRYABLE BY NATURE. A disconnect says nothing about the request —
+         the shelf may have answered into a socket that was already gone — and
+         a client deciding whether to ask again keys on this flag. It was
+         false, so a replay built on `retryable` never saw the one failure it
+         existed for (WI-20.30, Codex round 2). */
+      expect(failure.error.retryable, 'a disconnect is retryable').toBe(true)
     }
     expect(sent.map((f) => f.kind)).toEqual(['req', 'req'])
-    await expect(client.call('example.ping', 3)).rejects.toBeInstanceOf(ServiceCallError)
+    const late = (await client.call('example.ping', 3).catch((e: unknown) => e)) as ServiceCallError
+    expect(late).toBeInstanceOf(ServiceCallError)
+    expect(late.error.retryable, 'a call after the disconnect is retryable too').toBe(true)
     expect(sent).toHaveLength(2)
     expect(timers.pending()).toBe(0)
   })
@@ -1366,13 +1442,18 @@ describe('hardening against a hostile peer', () => {
        * was written about. It is no longer the whole of it. */
       expect((failure as ServiceCallError).error.code).toBe(ENVELOPE_ERRORS.disconnected)
       expect((failure as ServiceCallError).error.code).not.toBe(ENVELOPE_ERRORS.timeout)
-      /* AND NOT RETRYABLE — pinned because it is the surprising half. `retryable`
-         here means "ask this client again", and this client is finished: `send`
-         threw, so every later call on it rejects `disconnected` too. Retrying
-         is the caller's job with a NEW connection, which the code is what tells
-         them. A flag that said otherwise would send a retry loop at a socket
-         that will never open. */
-      expect((failure as ServiceCallError).error.retryable).toBe(false)
+      /* AND RETRYABLE — and this pin used to say the opposite, on the reading
+         that `retryable` means "ask THIS client again". This client is indeed
+         finished: `send` threw, so every later call on it rejects
+         `disconnected` too. But the flag is about the REQUEST, not the socket
+         — "may this be asked again?" — and a request that never reached the
+         shelf may be, on a fresh connection, which is exactly what the
+         `disconnected` code tells the caller to open. The browser client's
+         replay keys on this flag (WI-20.30), and while it read `false` the
+         replay never fired for the one failure it was written for. A retry
+         loop aimed at the dead socket is what `disconnected` + a reconnecting
+         link prevents, not what a `false` here did. */
+      expect((failure as ServiceCallError).error.retryable).toBe(true)
     })
   })
 
@@ -1412,5 +1493,89 @@ describe('hardening against a hostile peer', () => {
     /* The cancel still reaches the wire, despite there being no id at the
        moment the teardown decided to send one. */
     expect(sent.some((f) => f.kind === 'cancel')).toBe(true)
+  })
+})
+
+/* --------------------------------------------- what audit-fix round 1 found */
+
+describe('what the audit found in the envelope (round 1)', () => {
+  it('treats a grant check that THROWS as a refusal, and keeps receiving', async () => {
+    /* `hasGrant` is injected — a capability's binding, a pump's book-bound
+       rule — and an exception from it escaped `receive`, which promises never
+       to throw, and took the whole receive loop down over one frame. */
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const h = harness([ping], () => {
+      throw new Error('the binding is broken')
+    })
+    expect(() => h.send(frame({ id: 'r1' }))).not.toThrow()
+    await settle()
+    expect(h.sent[0]?.kind).toBe('err')
+    expect(errBody(h.sent[0]).code).toBe(ENVELOPE_ERRORS.forbidden)
+    quiet.mockRestore()
+  })
+
+  it('finishes a pending call at once when the router sends it a request frame', async () => {
+    /* A `req` or `cancel` arriving on the client side for a pending call is
+       a protocol violation, like a wrong-direction frame on the router — and it
+       used to be ignored, leaving the call to fail only on its timeout. */
+    const timers = fakeTimers()
+    const client = createClient({ send: () => {}, timers, timeoutMs: 1_000 })
+    const answer = client.call('example.ping', null).catch((e: unknown) => e)
+    await settle()
+    client.receive(encodeFrame(frame({ id: 'c1', kind: 'req', body: { hello: 'wrong way' } })))
+    const failure = await answer
+    expect((failure as ServiceCallError).error.code).toBe(ENVELOPE_ERRORS.protocol)
+    expect(timers.pending(), "the call's clock outlived the call").toBe(0)
+  })
+})
+
+describe('onDisconnect', () => {
+  it('fires once when the router hangs up on its outbound budget, and at once for a listener that arrives late', async () => {
+    /* THE HANG-UP NOBODY OUTSIDE THE ROUTER COULD SEE. The webhost pump holds a
+       record per session and learned of a rejected write through its own
+       catch — but a budget overflow is decided in here, and the pump went on
+       serving a connection that had already gone silent (audit #61). */
+    const timers = fakeTimers()
+    const held = new Promise<void>(() => {})
+    const conn = createRouter({ services: [], hasGrant: () => true, timers, maxOutboundBytes: 600 }).connect(
+      'peer-a',
+      () => held,
+    )
+    let heard = 0
+    const unsubscribe = conn.onDisconnect(() => {
+      heard += 1
+    })
+    for (let i = 0; i < 200; i++) {
+      conn.receive(encodeFrame(frame({ service: 'nobody.home', id: `r${i}`, body: null })))
+    }
+    await settle()
+    expect(heard).toBe(1)
+    conn.disconnect()
+    expect(heard).toBe(1)
+    let late = 0
+    conn.onDisconnect(() => {
+      late += 1
+    })
+    expect(late).toBe(1)
+    unsubscribe()
+  })
+
+  it('does not fire for a listener that unsubscribed, and a throwing listener does not silence the next', () => {
+    const conn = createRouter({ services: [], hasGrant: () => true }).connect('peer-a', () => undefined)
+    let gone = 0
+    const off = conn.onDisconnect(() => {
+      gone += 1
+    })
+    off()
+    let after = 0
+    conn.onDisconnect(() => {
+      throw new Error('a listener that fails')
+    })
+    conn.onDisconnect(() => {
+      after += 1
+    })
+    conn.disconnect()
+    expect(gone).toBe(0)
+    expect(after).toBe(1)
   })
 })

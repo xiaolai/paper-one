@@ -92,7 +92,7 @@ function shelf(facts: Partial<ContentFacts>) {
   const readRange = vi.fn(async () => new Uint8Array(0))
   const fileOf = vi.fn(async (_book: string, name: string) => new File(['PK'], name))
   const content = {
-    locate: async (): Promise<ContentFacts> => ({ here: true, ext: 'epub', size: 10, ...facts }),
+    locate: async (): Promise<ContentFacts> => ({ here: true, ext: 'epub', size: 10, contentHash: null, ...facts }),
     readRange,
     fileOf,
   } as unknown as RemoteContent
@@ -204,7 +204,7 @@ describe('Reader', () => {
    */
   it('surfaces a failed range read instead of leaving the page blank', async () => {
     const failing = {
-      locate: async (): Promise<ContentFacts> => ({ here: true, ext: 'pdf', size: 64 }),
+      locate: async (): Promise<ContentFacts> => ({ here: true, ext: 'pdf', size: 64, contentHash: null }),
       readRange: async () => {
         throw new Error('the shelf went away')
       },
@@ -288,14 +288,13 @@ describe('Reader', () => {
   /**
    * A BOOK REOPENS WHERE IT WAS LEFT.
    *
-   * Kept in the browser rather than on the book's record: the pump grants this
-   * client `readingGrant` and nothing else, so every write in the service table
-   * is refused — deliberately, because a hostile EPUB shares this origin and a
-   * socket it opens carries the reader's session. Widening that for a position
-   * would widen it for `book.set`, which also carries a title and a tag list.
-   *
-   * **The cost is that a position does not sync**, and that is a real
-   * limitation rather than a temporary one.
+   * This device's copy, in `localStorage`, is what a host with no `remote`
+   * opens at — a session with no write grant, or a shelf that is asleep. It
+   * used to be the ONLY place, because the pump granted this client
+   * `readingGrant` and every write was refused; since WI-20.30 the shelf's
+   * copy travels too (`remotePositions.ts`, below), and the device's is the
+   * fallback and the comparison. With no `remote` prop the old behaviour is
+   * exactly the behaviour.
    */
   it('opens a book where it was left', async () => {
     const positions = fakePositions({ one: { cfi: 'epubcfi(/6/4!/4/2/10)', at: 1 } })
@@ -848,6 +847,33 @@ describe('Reader', () => {
     )
     expect(seen, "the second finger's release is not the first finger's tap").toEqual([])
 
+    /**
+     * ⚠️ **AND THE FIRST FINGER'S OWN RELEASE IS NOT A TAP EITHER.**
+     *
+     * The second press was merely IGNORED, which left the first still
+     * tracked: a pinch whose first finger happened to land near an edge
+     * turned the page the moment that finger came up. `pointercancel` is what
+     * would have saved it and the browser does not promise one — least of all
+     * when the finger it keeps is the second. Two pointers down means the
+     * gesture is a pinch, however it ends.
+     */
+    doc.body.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1, clientX: 150, clientY: 100, bubbles: true }))
+    seen.length = 0
+    doc.body.dispatchEvent(
+      new PointerEvent('pointerdown', { pointerId: 4, clientX: 290, clientY: 100, bubbles: true }),
+    )
+    doc.body.dispatchEvent(
+      new PointerEvent('pointerdown', { pointerId: 5, clientX: 150, clientY: 100, bubbles: true }),
+    )
+    doc.body.dispatchEvent(
+      new PointerEvent('pointerup', { pointerId: 4, clientX: 290, clientY: 100, bubbles: true }),
+    )
+    expect(seen, 'a two-finger gesture must not turn the page, whichever finger lifts first').toEqual([])
+    /* Both fingers off the glass again, so what follows starts from nothing. */
+    doc.body.dispatchEvent(
+      new PointerEvent('pointerup', { pointerId: 5, clientX: 150, clientY: 100, bubbles: true }),
+    )
+
     /* `pointercancel` IS THE BROWSER TAKING THE GESTURE OVER, and no
        `pointerup` follows it — so an origin left behind waits to be paired with
        an unrelated release. */
@@ -879,6 +905,81 @@ describe('Reader', () => {
     tapAt(10)
     expect(seen, 'the listener must be gone with the document').toEqual([])
 
+    vi.doUnmock('../../kernel/ui/reader/FoliateView')
+    vi.resetModules()
+  })
+
+  /**
+   * ⚠️ **NO TAP IN AN EPUB 3 BOOK TURNED A PAGE.**
+   *
+   * The control list held a bare `[role]`, on the reasoning that a role is
+   * only ever put on something meant to be interacted with. EPUB 3 puts one
+   * on every chapter: `<section role="doc-chapter">` is the structural
+   * semantics inflection the spec recommends, and `epub:type="chapter"` is
+   * mapped to it by every current authoring tool. `closest` walked up from
+   * the tapped paragraph to that section, found a role, and refused — so a
+   * book that followed the spec could be opened and never advanced.
+   *
+   * The widget roles are the ones a press already belongs to; a document role
+   * names what the text IS, and a tap on prose is a tap on prose.
+   */
+  it('turns the page from a tap inside a chapter that carries a role, and not on a widget', async () => {
+    const { content } = shelf({ ext: 'epub' })
+    const seen: string[] = []
+    const nav = {
+      next: () => seen.push('next'),
+      prev: () => seen.push('prev'),
+      goLeft: () => seen.push('goLeft'),
+      goRight: () => seen.push('goRight'),
+    }
+
+    const captured: Record<string, unknown> = {}
+    vi.doMock('../../kernel/ui/reader/FoliateView', () => ({
+      FoliateView: (props: Record<string, unknown>) => {
+        Object.assign(captured, props)
+        return null
+      },
+    }))
+    vi.resetModules()
+    const { Reader: Fresh } = await import('./Reader')
+    render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} />)
+    await waitFor(() => expect(captured['onDocument']).toBeTypeOf('function'))
+    ;(captured['onNavigator'] as (g: number, n: unknown) => void)(0, nav)
+
+    const doc = document.implementation.createHTMLDocument('a chapter')
+    Object.defineProperty(doc.documentElement, 'clientWidth', { value: 300, configurable: true })
+    ;(captured['onDocument'] as (g: number, d: Document | null) => void)(0, doc)
+
+    const tapAt = (x: number, target: Element) => {
+      target.dispatchEvent(new PointerEvent('pointerdown', { clientX: x, clientY: 100, bubbles: true }))
+      target.dispatchEvent(new PointerEvent('pointerup', { clientX: x, clientY: 100, bubbles: true }))
+    }
+
+    /* The shape EPUB 3 prescribes and the tools produce: the whole chapter
+       under one roled section, the reader's finger on a paragraph inside it. */
+    const chapter = doc.createElement('section')
+    chapter.setAttribute('role', 'doc-chapter')
+    const paragraph = doc.createElement('p')
+    paragraph.textContent = 'Call me Ishmael.'
+    chapter.append(paragraph)
+    doc.body.append(chapter)
+
+    tapAt(290, paragraph)
+    tapAt(10, paragraph)
+    expect(seen, 'a tap on prose inside a roled chapter is a page turn').toEqual(['goRight', 'goLeft'])
+
+    /* AND A WIDGET INSIDE THAT SAME CHAPTER STILL WINS. The narrowing must
+       not have thrown the widget roles out with the document ones. */
+    seen.length = 0
+    for (const role of ['button', 'link', 'checkbox', 'textbox', 'slider']) {
+      const widget = doc.createElement('div')
+      widget.setAttribute('role', role)
+      chapter.append(widget)
+      tapAt(290, widget)
+    }
+    expect(seen, 'a tap on an ARIA widget must not also turn the page').toEqual([])
+
+    ;(captured['onDocument'] as (g: number, d: Document | null) => void)(0, null)
     vi.doUnmock('../../kernel/ui/reader/FoliateView')
     vi.resetModules()
   })
@@ -956,5 +1057,99 @@ describe('a note the reader taps', () => {
       document.querySelector('[data-footnote]') ?? screen.queryByRole('dialog'),
       'the note was rendered and nowhere on this screen shows it',
     ).not.toBeNull()
+  })
+})
+
+/**
+ * THE SHELF'S PLACE, both ways (WI-20.30, D7).
+ *
+ * `remotePositions.test.ts` proves the module; this proves the WIRING: the
+ * reader asks the shelf before the book is handed to the renderer, hands the
+ * renderer whichever place is newer, and reports every settled turn back.
+ */
+describe('Reader and the shelf’s copy of the position', () => {
+  const SHELF = 'epubcfi(/6/24!/4/2/12)'
+  const DEVICE = 'epubcfi(/6/4!/4/2/10)'
+
+  function remoteWith(answer: { cfi: string; progress: number; at: number } | null | Error) {
+    return {
+      read: vi.fn(async () => {
+        if (answer instanceof Error) throw answer
+        return answer
+      }),
+      write: vi.fn(),
+      flush: vi.fn(async () => {}),
+      dispose: vi.fn(),
+    }
+  }
+
+  it('opens at the shelf’s place when it is newer — desktop at chapter 12, phone opens at 12 — and follows it locally', async () => {
+    const positions = fakePositions({ one: { cfi: DEVICE, at: 1 } })
+    const remote = remoteWith({ cfi: SHELF, progress: 0.5, at: 2 })
+    const { content } = shelf({ ext: 'epub' })
+    const captured = await withView((Fresh) =>
+      render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={positions} remote={remote} />),
+    )
+    await waitFor(() => expect(sourcesOf(captured)).toHaveLength(1))
+    expect(captured['lastLocation']).toBe(SHELF)
+    expect(positions.get('one')).toBe(SHELF)
+    expect(remote.read).toHaveBeenCalledWith('one')
+  })
+
+  it('opens at this device’s place when it is the newer, and tells the shelf', async () => {
+    const positions = fakePositions({ one: { cfi: DEVICE, at: 5 } })
+    const remote = remoteWith({ cfi: SHELF, progress: 0.5, at: 2 })
+    const { content } = shelf({ ext: 'epub' })
+    const captured = await withView((Fresh) =>
+      render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={positions} remote={remote} />),
+    )
+    await waitFor(() => expect(sourcesOf(captured)).toHaveLength(1))
+    expect(captured['lastLocation']).toBe(DEVICE)
+    expect(remote.write).toHaveBeenCalledWith('one', DEVICE, undefined)
+  })
+
+  it('does not hand the book to the renderer until the place is decided', async () => {
+    let answer: ((place: null) => void) | null = null
+    const remote = {
+      read: vi.fn(() => new Promise<null>((resolve) => (answer = resolve))),
+      write: vi.fn(),
+      flush: vi.fn(async () => {}),
+      dispose: vi.fn(),
+    }
+    const { content } = shelf({ ext: 'epub' })
+    const captured = await withView((Fresh) =>
+      render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} remote={remote} />),
+    )
+    await waitFor(() => expect(remote.read).toHaveBeenCalled())
+    /* The bytes may well be here; the renderer is not given them yet. */
+    expect(sourcesOf(captured)).toHaveLength(0)
+    answer!(null)
+    await waitFor(() => expect(sourcesOf(captured)).toHaveLength(1))
+    expect(captured['lastLocation']).toBeNull()
+  })
+
+  it('falls back to this device’s place when the shelf cannot be asked', async () => {
+    const positions = fakePositions({ one: { cfi: DEVICE, at: 1 } })
+    const remote = remoteWith(new Error('the link is reconnecting'))
+    const { content } = shelf({ ext: 'epub' })
+    const captured = await withView((Fresh) =>
+      render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={positions} remote={remote} />),
+    )
+    await waitFor(() => expect(sourcesOf(captured)).toHaveLength(1))
+    expect(captured['lastLocation']).toBe(DEVICE)
+  })
+
+  it('reports a turn to the shelf — the phone turns a page, book.json on the shelf carries it', async () => {
+    const remote = remoteWith(null)
+    const { content } = shelf({ ext: 'epub' })
+    const captured = await withView((Fresh) =>
+      render(<Fresh content={content} bookId="one" name="Moby-Dick" onClose={vi.fn()} positions={fakePositions()} remote={remote} />),
+    )
+    await waitFor(() => expect(captured['onRelocate']).toBeTypeOf('function'))
+    ;(captured['onRelocate'] as (g: number, p: unknown) => void)(0, { cfi: SHELF, fraction: 0.5 })
+    expect(remote.write).toHaveBeenCalledWith('one', SHELF, 0.5)
+    /* A null cfi — the fixed-layout renderer reports one — is not a place. */
+    ;(captured['onRelocate'] as (g: number, p: unknown) => void)(0, { cfi: null, fraction: 0.6 })
+    expect(remote.write).toHaveBeenCalledTimes(1)
   })
 })

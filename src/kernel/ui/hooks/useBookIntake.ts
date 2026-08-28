@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { legacyBookIdFor } from '../../core/idMigration'
 import { contentPathIn, recordPath, recordFromMeta } from '../../core/bookFolder'
+import { extensionFor } from '../../core/bookVault'
 import type { BookMeta } from '../../core/bookMeta'
 import type { IndexFs } from '../../core/bookIndex'
 import type { BookRecord } from '../../core/bookFolder'
@@ -53,6 +54,19 @@ export interface BookIntakeInput {
   readonly bookId: string | null
   readonly meta: BookMeta | null
   readonly source: File | string | null
+  /**
+   * Which open this is — `useBook`'s counter, advanced by every `open`.
+   *
+   * ⚠️ **THE SOURCE IS NOT AN IDENTITY, and `useBook` says so in its own
+   * words**: `setSource(same)` bails on an unchanged reference, "whereas the
+   * generation always advances". Reopening one URL — `?book=`, the bundled
+   * sample, any string origin — hands this hook a `source` it has already
+   * seen, so the removal baseline was never restamped and the path never
+   * re-adopted. A book removed since the FIRST open of that string was still
+   * `removedSince` on the second, and the reader opening it again was refused
+   * by a guard meant for a removal that arrived mid-intake.
+   */
+  readonly generation: number
   readonly fs: IndexFs | null
   readonly add: (bookId: string, record: BookRecord, sparse?: boolean) => void
   /**
@@ -70,6 +84,7 @@ export function useBookIntake({
   bookId,
   meta,
   source,
+  generation,
   fs,
   add,
   keepContent,
@@ -107,7 +122,7 @@ export function useBookIntake({
   const removedWhileOpen = useRef(new Map<string, number>())
   const removals = useRef(0)
   /** The tick when the current book was ASKED FOR — see the effect below. */
-  const openedAt = useRef<{ source: File | string; at: number } | null>(null)
+  const openedAt = useRef<{ generation: number; at: number } | null>(null)
 
 
   /**
@@ -138,11 +153,12 @@ export function useBookIntake({
    * resurrected under its new id with its tags and marks left in the trash.
    *
    * `useLayoutEffect` so it runs before the intake effect that reads it, and on
-   * `source` because that is set the moment an open begins, long before there
-   * is an id or a parse. */
+   * the GENERATION rather than the source — see `BookIntakeInput.generation`.
+   * Both are set the moment an open begins, long before there is an id or a
+   * parse; only one of them tells two opens of the same URL apart. */
   useLayoutEffect(() => {
-    if (source && openedAt.current?.source !== source) {
-      openedAt.current = { source, at: removals.current }
+    if (source && openedAt.current?.generation !== generation) {
+      openedAt.current = { generation, at: removals.current }
       /* AND THE PATH BELONGS TO THE SOURCE, not to whatever was opened last.
        * `openBook` set it and the routes that bypass `openBook` did not clear
        * it — so dropping a book onto the open reader recorded it with the
@@ -150,22 +166,24 @@ export function useBookIntake({
        * wrong book. A source that arrived with no path of its own has none. */
       setOpenedPath(pendingPath.current?.source === source ? pendingPath.current.path : null)
     }
-  }, [source])
+  }, [source, generation])
 
   useEffect(() => {
     if (!bookId || !meta) return
     /* CLEARED FOR THIS BOOK, ONCE PER OPEN.
      *
-     * Keyed on the SOURCE, because this effect also runs when the parse lands —
-     * and metadata arriving is not the reader asking for the book back. Clearing
-     * unconditionally there undid a removal made in the seconds between opening
-     * a book and it finishing parsing. A fresh open produces a new `File`, or a
-     * different path, so identity is exactly the right test. */
+     * Keyed on the GENERATION, because this effect also runs when the parse
+     * lands — and metadata arriving is not the reader asking for the book back.
+     * Clearing unconditionally there undid a removal made in the seconds
+     * between opening a book and it finishing parsing. This used to key on the
+     * source, which is right for a fresh `File` and wrong for the same URL
+     * opened twice; see `BookIntakeInput.generation`. */
     /* From the OPEN, not from here: this effect does not run until the book has
      * been hashed and parsed, and a removal during that window belongs to the
      * reader's current intent rather than a previous one. Falls back to now for
      * a book that arrived without going through `openBook`. */
-    const startedAt = openedAt.current?.source === source ? openedAt.current.at : removals.current
+    const startedAt =
+      openedAt.current?.generation === generation ? openedAt.current.at : removals.current
     const removedSince = (...ids: readonly string[]): boolean =>
       ids.some((id) => (removedWhileOpen.current.get(id) ?? 0) > startedAt)
     let cancelled = false
@@ -195,7 +213,15 @@ export function useBookIntake({
       try {
         if (source) legacy = await legacyBookIdFor(source)
       } catch (cause) {
-        console.error('Paper: could not check the legacy book id', cause)
+        /* STOP, do not shrug. Proceeding as though no migration were needed
+         * `add`s the book under its new id while a legacy-id folder may still
+         * hold the reader's marks — the permanent split-book state the
+         * migration exists to prevent. An aborted add, by contrast, is
+         * self-healing: the book is still open in the reader, and the next
+         * open of the same file finishes the job (step 3's own rule). The
+         * throw here is a transient read/digest failure, so retrying is real. */
+        console.error('Paper: could not check the legacy book id; leaving intake for the next open', cause)
+        return
       }
       if (legacy !== bookId) {
         const carried = await rekeyBook(legacy, bookId)
@@ -220,6 +246,10 @@ export function useBookIntake({
        * with the tags and marks it owned left in the old id's trash entry for
        * the sweep. */
       if (cancelled || removedSince(bookId, legacy)) return
+      /* Whether the bytes are already in the folder by the time the record is
+         written. False also means "there was no record to write into yet" —
+         see the second attempt below. */
+      let stored = false
       if (source instanceof File && fs) {
         try {
           /* THE LIBRARY WRITES IT — on this book's queue, in line with its
@@ -228,7 +258,7 @@ export function useBookIntake({
            * temp-and-rename here, outside the queue, which is the one place a
            * removal could interleave with. The checks below still stand,
            * because the write is the long part either way. */
-          await keepContent(bookId, source.name, source)
+          stored = await keepContent(bookId, source.name, source)
         } catch (cause) {
           /* Reported and not fatal. The record is still written, and the shelf
            * says the copy is missing rather than pretending the open failed. */
@@ -245,7 +275,10 @@ export function useBookIntake({
          * position and marks — before `trashBook` has moved anything, so there
          * is no copy to recover. A stray file is worth incomparably less than
          * the chance of that. */
-        if (removedSince(bookId, legacy) && fs && source instanceof File) {
+        if (removedSince(bookId, legacy)) {
+          /* `fs` and the `File` were proved at the branch above and neither is
+           * reassigned; rechecking them here read as a third condition where
+           * there are only the two that matter. */
           const at = contentPathIn(bookId, source.name)
           if (!(await fs.exists(recordPath(bookId)))) await fs.remove(at).catch(() => {})
           return
@@ -256,6 +289,10 @@ export function useBookIntake({
        * never forgot — so removing the open book and then deliberately opening
        * the same file again was refused for the rest of the session. */
       if (cancelled || removedSince(bookId, legacy)) return
+      /* ONE clock reading for one event: the open stamps three markers, and
+       * three separate `Date.now()` calls could hand one record three slightly
+       * different times for it. */
+      const now = Date.now()
       /* `add`, which FOLDS a fresh parse into what the reader owns rather than
        * replacing it — see `mergeParsed`. Phase 3 spread the parse over the row
        * and erased the reader's tags on every reopen.
@@ -266,9 +303,9 @@ export function useBookIntake({
         /* The parse's own fields — see `recordFromMeta`, which the enrichment
          * pass shares, so a book parsed in the background and a book opened
          * agree about what a parse knows. */
-        ...recordFromMeta(meta),
-        openedAt: Date.now(),
-        addedAt: Date.now(),
+        ...recordFromMeta(meta, source instanceof File ? source : undefined),
+        openedAt: now,
+        addedAt: now,
         /* THIS IS A PARSE, so it stamps the parse marker — the enrichment pass
          * must not come back for a book the reader has just read. `mergeParsed`
          * gives the parse authority over `parsedAt`, which is right: it is the
@@ -277,7 +314,7 @@ export function useBookIntake({
          * put it back in the queue, and every book the reader actually read was
          * re-parsed on the next launch, forever. The pass converged only for
          * books nobody opened, which is the opposite of the intended guarantee. */
-        parsedAt: Date.now(),
+        parsedAt: now,
         /* NO `description`. It was passed here and dropped on the floor:
          * `BookRecord` has no such field and `parseRecord` discards it, so every
          * write serialised it and every read threw it away. Nothing displays a
@@ -294,9 +331,55 @@ export function useBookIntake({
         ...(openedPath ?? (typeof source === 'string' ? source : null)
           ? { origin: openedPath ?? (source as string) }
           : {}),
-        ...(source instanceof File ? { ext: source.name.split('.').pop() ?? '' } : {}),
+        /* THE VAULT'S OWN RULE, not a second one. `split('.').pop()` accepted
+         * any suffix and answered a dotless name with the WHOLE name — so a
+         * record could claim `ext: "README"` while `keepContent`, which
+         * normalises through `extensionFor`, stored the bytes as
+         * `content.bin`. One validated rule for both. */
+        ...(source instanceof File ? { ext: extensionFor(source.name) } : {}),
       })
-    })()
+      /* ⚠️ **AND AGAIN, AFTER THE RECORD — WHICH IS THE CALL THAT ACTUALLY
+       * WRITES FOR A BOOK PAPER HAS NOT SEEN BEFORE.**
+       *
+       * `Library.keepContent` refuses to write unless `book.json` is already
+       * there — `keepJacket`'s rule, for `keepJacket`'s reason: `atomicWrite`
+       * MAKES the folder it writes into, so a content task queued behind a
+       * removal would politely recreate the folder the removal had just
+       * carried to the trash. Step 3 above deliberately runs BEFORE the
+       * record, so on a first open it met exactly that refusal and returned
+       * `false`, silently. Every book opened once and only once was shelved
+       * with no copy of its own: a drop with an origin still opened, through
+       * the fallback, until the file moved; a drop with no origin at all
+       * became a row that could never be opened.
+       *
+       * The result was discarded, which is why nothing said so — "green is not
+       * evidence that anything happened", from the one call whose whole job is
+       * to make the copy.
+       *
+       * ORDERED BY THE LANE, not by an await on `add`: `add` is let go through
+       * the hook, but it reaches `queue.append(laneFor(bookId))` synchronously,
+       * and `keepContent` takes the same lane. So the record write is already
+       * ahead of this one, and a removal queued between them still wins —
+       * `keepContent` re-reads the record inside the lane and declines.
+       *
+       * The first attempt stays where it is. It is the one that repairs a book
+       * already on the shelf whose bytes went missing, and having the copy in
+       * place before the row appears is worth keeping for every reopen. */
+      if (source instanceof File && fs && !stored) {
+        try {
+          await keepContent(bookId, source.name, source)
+        } catch (cause) {
+          console.error('Paper: could not keep our own copy of the book', cause)
+        }
+      }
+    })().catch((cause: unknown) => {
+      /* THE TERMINAL CATCH. The steps that can fail for a reason worth acting
+       * on are handled where they happen; this is for the rest — an `exists`
+       * on a vanished folder, a store rekey rejecting unexpectedly — which
+       * otherwise surface as an unhandled rejection with no file or book name
+       * attached. The next open retries; see the header. */
+      console.error('Paper: taking the book in failed', cause)
+    })
     return () => {
       cancelled = true
     }

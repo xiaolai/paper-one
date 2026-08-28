@@ -26,7 +26,7 @@ function deferred(): { readonly promise: Promise<void>; open(): void } {
 const endpoint = (over: Partial<Endpoint> & Pick<Endpoint, 'id'>): Endpoint => ({
   label: over.id,
   baseUrl: 'https://api.example.com/v1',
-  hasKey: true,
+  keyState: 'set',
   ...over,
 })
 
@@ -178,11 +178,21 @@ describe('rowFor', () => {
     const row = rowFor(endpoint({ id: 'p', label: 'My proxy' }), null)
     expect(row.label).toBe('My proxy')
     expect(row.value).toBe('api.example.com · key set')
-    expect(row.hasKey).toBe(true)
+    expect(row.keyState).toBe('set')
   })
 
   it('says so when there is no key, which is why the route cannot answer', () => {
-    expect(rowFor(endpoint({ id: 'p', hasKey: false }), null).value).toMatch(/no key$/)
+    expect(rowFor(endpoint({ id: 'p', keyState: 'missing' }), null).value).toMatch(/no key$/)
+  })
+
+  /* WI-20.20. The keychain refusing to read a key is not "no key": the key is
+     probably there, and telling the reader to add one sends them to re-enter a
+     credential the next read will refuse again. The row says which it is. */
+  it('says when the keychain would not read the key, rather than calling it missing', () => {
+    const row = rowFor(endpoint({ id: 'p', keyState: 'unreadable' }), null)
+    expect(row.value).toMatch(/key unreadable$/)
+    expect(row.value).not.toMatch(/no key/)
+    expect(row.keyState).toBe('unreadable')
   })
 
   it('falls back to the id when the endpoint was given no label', () => {
@@ -211,13 +221,13 @@ function fakePlugin(over: Partial<EndpointsPlugin> = {}) {
   const spies = {
     endpoints: vi.fn(async (): Promise<readonly Endpoint[]> => listed),
     addEndpoint: vi.fn(async (id: string, label: string, baseUrl: string) => {
-      listed = [...listed.filter((one) => one.id !== id), { id, label, baseUrl, hasKey: false }]
+      listed = [...listed.filter((one) => one.id !== id), { id, label, baseUrl, keyState: 'missing' }]
     }),
     removeEndpoint: vi.fn(async (id: string) => {
       listed = listed.filter((one) => one.id !== id)
     }),
     setEndpointKey: vi.fn(async (id: string, key: string) => {
-      listed = listed.map((one) => (one.id === id ? { ...one, hasKey: key !== '' } : one))
+      listed = listed.map((one) => (one.id === id ? { ...one, keyState: key !== '' ? 'set' : 'missing' } : one))
     }),
   }
   return {
@@ -266,7 +276,7 @@ describe('the endpoints store', () => {
     await expect(model.save(draft({ label: 'My proxy', key: 'sk-secret' }))).resolves.toBe(true)
     expect(world.addEndpoint.mock.calls).toEqual([['my-proxy', 'My proxy', 'https://api.example.com/v1']])
     expect(world.setEndpointKey.mock.calls).toEqual([['my-proxy', 'sk-secret']])
-    expect(model.getSnapshot().rows[0]?.hasKey).toBe(true)
+    expect(model.getSnapshot().rows[0]?.keyState).toBe('set')
     model.dispose()
   })
 
@@ -278,7 +288,7 @@ describe('the endpoints store', () => {
    */
   it('leaves the stored key alone when the field is blank', async () => {
     const world = fakePlugin()
-    world.seed([endpoint({ id: 'my-proxy', hasKey: true })])
+    world.seed([endpoint({ id: 'my-proxy', keyState: 'set' })])
     const model = createEndpointsModel({ plugin: world.plugin })
     await model.refresh()
 
@@ -457,5 +467,18 @@ describe('the endpoints store', () => {
     model.dispose()
     await model.refresh()
     expect(after, 'a read landing after dispose notified a torn-down pane').toBe(0)
+  })
+})
+
+describe('audit-fix round 1 — a base URL is a host, measured in bytes', () => {
+  it('refuses a malformed host the old character class let through', () => {
+    for (const bad of ['https://a:99999', 'https://a..b', 'https://-host', 'https://host-.example']) {
+      expect(validBaseUrl(bad), bad).toBe(false)
+    }
+    expect(validBaseUrl('https://api.example.com:8443/v1')).toBe(true)
+  })
+  it('bounds the length in UTF-8 bytes, as the crate does', () => {
+    const long = `https://${'é'.repeat(1200)}.example`
+    expect(validBaseUrl(long)).toBe(false)
   })
 })

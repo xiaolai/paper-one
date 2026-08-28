@@ -32,7 +32,9 @@ import './app/web/entry.css'
 
 import { PairScreen } from './app/web/PairScreen'
 import { checkSession, type SessionState } from './app/web/session'
-import { connect, type ShelfChannel } from './app/web/channel'
+import { connect } from './app/web/channel'
+import { openLink, type LinkState, type ShelfLink } from './app/web/reconnect'
+import { remotePositions, type RemotePositions } from './app/web/remotePositions'
 import { asIndexedBook, createRemoteBooks, type RemoteBooks } from './app/web/books'
 import { remoteContent, type RemoteContent } from './app/web/content'
 import { remoteCovers } from './app/web/covers'
@@ -120,60 +122,96 @@ const WEB_BOOK_ACTIONS: readonly BookAction[] = capabilities.flatMap(
  * side, for the same reason: the store owns the state and the view is an
  * adapter over `getSnapshot`/`subscribe`.
  */
+/** Before the link has said anything: what `openLink` reports on creation. */
+const FIRST_ATTEMPT: LinkState = { kind: 'connecting', attempt: 1 }
+
 function Shelf({ onSignOut }: { readonly onSignOut: () => void }) {
-  const [books, setBooks] = useState<RemoteBooks | null>(null)
-  const [content, setContent] = useState<RemoteContent | null>(null)
-  /* THE SAME SOCKET the listing and the bytes travel. The shelf's row verbs —
-   * `book.set`, `tag.add`, `tag.remove` — go over it too, so a dropped
-   * connection takes all three down together, which is the truth. */
-  const [wire, setWire] = useState<ShelfChannel | null>(null)
-  const [failed, setFailed] = useState<string | null>(null)
-
+  /* THE LINK, NOT A CHANNEL (WI-20.30). This called `connect()` once, with
+   * `[]` deps, and nothing re-ran it: when the socket closed the next
+   * `content.read` failed and the phone stopped for good, on a page it could
+   * not turn. `openLink` owns the socket's lifetime — it reconnects with a
+   * bounded, jittered wait, refuses calls made in the gap at once, and tells
+   * the stores when a channel is back. Built in an effect rather than a ref,
+   * because it opens a socket and StrictMode renders twice. */
+  const [link, setLink] = useState<ShelfLink | null>(null)
   useEffect(() => {
-    let live = true
-    let opened: { channel: Awaited<ReturnType<typeof connect>>; store: RemoteBooks } | null = null
-    void connect()
-      .then((channel) => {
-        if (!live) {
-          channel.close()
-          return
-        }
-        const store = createRemoteBooks(channel)
-        opened = { channel, store }
-        setBooks(store)
-        /* ONE CHANNEL, both uses. The shelf listing and a book's bytes travel
-         * the same socket, so opening a book costs no second handshake and a
-         * dropped connection takes both down together — which is the truth. */
-        setContent(remoteContent(channel))
-        setWire(channel)
-      })
-      .catch((thrown: unknown) => {
-        if (live) setFailed(thrown instanceof Error ? thrown.message : String(thrown))
-      })
-    return () => {
-      live = false
-      /* BOTH, and in this order. Disposing first stops a late answer waking a
-       * listener that no longer has anywhere to render; closing after it means
-       * the socket's own close cannot re-enter a store already gone. */
-      opened?.store.dispose()
-      opened?.channel.close()
-    }
+    const opened = openLink({ connect })
+    setLink(opened)
+    return () => opened.close()
   }, [])
+  const state = useSyncExternalStore(
+    useCallback((listener: () => void) => link?.subscribe(listener) ?? (() => {}), [link]),
+    useCallback(() => link?.getSnapshot() ?? FIRST_ATTEMPT, [link]),
+  )
+  /* Whether a channel has EVER opened. The gate below is for the first wait
+   * — there is nothing to show behind it — and `ShelfList`'s own note is for
+   * every later one, over the books it already has. */
+  const [everOpen, setEverOpen] = useState(false)
+  useEffect(() => {
+    if (link === null) return
+    if (link.getSnapshot().kind === 'open') setEverOpen(true)
+    return link.onOpened(() => setEverOpen(true))
+  }, [link])
 
-  if (failed !== null) {
-    return (
-      <main className="gate">
-        <h1>Could not open a channel</h1>
-        <p>{failed}</p>
-        <button type="button" onClick={onSignOut}>
-          Disconnect this browser
-        </button>
-      </main>
-    )
+  /* ONE STORE PER LINK, and the link outlives every channel — so the shelf
+   * listing survives a drop and is re-read when a channel is back, rather
+   * than rebuilt from nothing. */
+  const books = useMemo(() => (link === null ? null : createRemoteBooks(link)), [link])
+  useEffect(() => () => books?.dispose(), [books])
+  useEffect(() => {
+    if (link === null || books === null) return
+    if (link.getSnapshot().kind === 'open') void books.refresh()
+    return link.onOpened(() => void books.refresh())
+  }, [link, books])
+  /* ONE CHANNEL, both uses. The shelf listing and a book's bytes travel the
+   * same socket, so opening a book costs no second handshake and a dropped
+   * connection takes both down together — which is the truth. */
+  const content = useMemo(() => (link === null ? null : remoteContent(link)), [link])
+  /* THE READER'S PLACE, both ways — see `remotePositions.ts`. One per link,
+   * because its pending writes are retried when the link reopens. */
+  const remote = useMemo(() => (link === null ? null : remotePositions(link)), [link])
+  useEffect(() => () => remote?.dispose(), [remote])
+
+  if (link === null || books === null || content === null || remote === null) return null
+  if (!everOpen) {
+    return state.kind === 'waiting' ? <LinkWaiting state={state} onRetry={link.retryNow} onSignOut={onSignOut} /> : null
   }
+  return <ShelfList books={books} content={content} link={link} remote={remote} onSignOut={onSignOut} />
+}
 
-  if (books === null || content === null || wire === null) return null
-  return <ShelfList books={books} content={content} channel={wire} onSignOut={onSignOut} />
+/**
+ * The first connection has not been made, and the link is between attempts.
+ *
+ * NOT the code screen, and not the old "Could not open a channel" either:
+ * that one was terminal, with a reload as the only way back. This one says
+ * the link is trying, lets the reader hurry it, and still offers the exit.
+ */
+function LinkWaiting({
+  state,
+  onRetry,
+  onSignOut,
+}: {
+  readonly state: Extract<LinkState, { kind: 'waiting' }>
+  readonly onRetry: () => void
+  readonly onSignOut: () => void
+}) {
+  return (
+    <main className="gate">
+      <h1>Your library is not answering</h1>
+      <p>
+        {state.reason === 'refused'
+          ? 'The shelf refused the connection.'
+          : 'The computer holding your books may be asleep, or off the network.'}{' '}
+        Paper keeps trying{state.attempt > 1 ? ` — attempt ${state.attempt}` : ''}.
+      </p>
+      <button type="button" onClick={onRetry}>
+        Try now
+      </button>
+      <button type="button" onClick={onSignOut}>
+        Disconnect this browser
+      </button>
+    </main>
+  )
 }
 
 /**
@@ -201,16 +239,23 @@ function Shelf({ onSignOut }: { readonly onSignOut: () => void }) {
 function ShelfList({
   books,
   content,
-  channel,
+  link,
+  remote,
   onSignOut,
 }: {
   readonly books: RemoteBooks
   readonly content: RemoteContent
-  readonly channel: ShelfChannel
+  /* ONE OBJECT, ONE PROP. This took a `channel: ShelfChannel` beside `link`,
+     and the caller passed the link as both — two names for one thing, hiding
+     that the covers and stores read through the SAME reconnecting link the
+     screen's status describes. `ShelfLink` IS a `ShelfChannel`. */
+  readonly link: ShelfLink
+  readonly remote: RemotePositions
   readonly onSignOut: () => void
 }) {
   const rows = useSyncExternalStore(books.subscribe, books.getSnapshot)
   const status = useSyncExternalStore(books.subscribe, books.status)
+  const linkState = useSyncExternalStore(link.subscribe, link.getSnapshot)
   const [reading, setReading] = useState<{ bookId: string; name: string } | null>(null)
   /**
    * THE FOUR TABS — Library · Reading · Cards · You. "The titlebar chip becomes
@@ -245,9 +290,16 @@ function ShelfList({
    * would leave a Reading tab that opens a book the shelf refuses. */
   useEffect(() => {
     if (reading === null) return
-    if (rows.length === 0) return
+    /* JUDGED ONLY AGAINST A CURRENT LIST. The guard used to be `rows.length
+     * === 0`, which protected the reload case (the list is empty while it
+     * loads) but also the one it should not have: a shelf that has
+     * LEGITIMATELY become empty could never clear `reading`, and the Reading
+     * tab kept pointing at a book the shelf refuses. `status` says which
+     * empty this is — while loading, stale or failed the list proves
+     * nothing; once `ready`, absence is absence. */
+    if (status !== 'ready') return
     if (!rows.some((row) => row.bookId === reading.bookId)) setReading(null)
-  }, [rows, reading])
+  }, [rows, reading, status])
 
   /* THE SAME ARRAY UNTIL THE ROWS CHANGE. `getSnapshot`'s whole contract is
    * identity stability, and mapping on every render would throw it away — the
@@ -299,29 +351,38 @@ function ShelfList({
   /* ONE BINDING PER CHANNEL, not one per render. `BookCover` lists `coverFor`
    * in its effect's dependencies, so a new identity would refetch and revoke an
    * object URL for every visible row on every render. */
-  const covers = useMemo(() => remoteCovers(channel), [channel])
+  const covers = useMemo(() => remoteCovers(link), [link])
 
   /* THE SHELF'S NOTES AND CARDS — `useRemoteStores`, which builds one of each
      per channel and disposes them with it. A store outliving its channel goes
      on refreshing over a socket that has closed. */
-  const { marks, cards, cardRows } = useRemoteStores(channel)
+  const { marks, cards, cardRows } = useRemoteStores(link)
 
   /* THE READER'S PREFERENCES, for the You tab. One store, like `positions`. */
   const prefs = useRef<ReturnType<typeof browserSettings> | null>(null)
   prefs.current ??= browserSettings()
   const prefsStore = prefs.current
-  useSyncExternalStore(prefsStore.subscribe, prefsStore.getSnapshot)
   /* The PERSISTENCE flag and the faces moved with the panel that reads them —
-     see `YouScreen`. This subscription stays because the shelf itself renders
-     nothing from a preference and only needs the store to exist. */
+     see `YouScreen`. NO SUBSCRIPTION here: the shelf renders nothing from a
+     preference, and "needs the store to exist" is what the ref above already
+     provides — the `useSyncExternalStore` this note used to defend was a
+     whole-`ShelfList` re-render on every preference change, bought for
+     nothing. The screens that read preferences subscribe themselves. */
 
   if (tab === 'reading' && reading !== null) {
     return (
       <Reader
+        /* KEYED BY THE BOOK. `Reader` reads its starting place ONCE, at
+           mount, by design — so a `bookId` that changed under a mounted
+           Reader would open the new book at the OLD book's place. No
+           navigation does that today; the key makes the once-only contract
+           hold whatever navigation grows later. */
+        key={reading.bookId}
         content={content}
         bookId={reading.bookId}
         name={reading.name}
         onClose={close}
+        remote={remote}
         marks={marks}
         titleOf={titleOf}
       />
@@ -333,10 +394,28 @@ function ShelfList({
       {/* STALE IS SAID, NOT HIDDEN. The books on screen are real and no longer
           current; a reader deciding whether to trust a progress figure needs to
           know which. */}
-      {status === 'stale' && (
+      {/* AND THAT IT IS COMING BACK. The link says when it is between
+          attempts, and a reader who just woke the laptop up need not wait
+          out the delay. */}
+      {linkState.kind !== 'open' && (
         <p className="shelf-note">
-          Your library stopped answering. These are the books as they were — nothing here is
-          current until it is back.
+          Your library stopped answering. These are the books as they were — Paper is trying
+          again{linkState.kind === 'waiting' && linkState.attempt > 1 ? ` (attempt ${linkState.attempt})` : ''}.{' '}
+          <button type="button" className="shelf-note-action" onClick={link.retryNow}>
+            Try now
+          </button>
+        </p>
+      )}
+      {linkState.kind === 'open' && status === 'stale' && (
+        <p className="shelf-note">
+          {/* THE REASON RIDES ALONG when the store holds one. The link being
+              open with the listing stale means the REQUEST failed, not the
+              connection — saying only "stopped answering" told the reader the
+              wrong story and threw away the one line that says what actually
+              refused. */}
+          Your library stopped answering
+          {books.reason() !== null ? ` (${books.reason()})` : ''}. These are the books as they
+          were — nothing here is current until it is back.
         </p>
       )}
       {status === 'failed' && (
@@ -373,7 +452,12 @@ function ShelfList({
               importing={null}
               enriching={0}
               importNotice={null}
-              shelfUnread={status === 'failed'}
+              /* `loading` COUNTS AS UNREAD: while the first `book.list` page
+                 is still in flight the rows are `[]`, and without this the
+                 screen's first frame claimed "Your library is empty" — a
+                 statement about a shelf nobody had read yet. Literally
+                 unread, so the unread face is the honest one. */
+              shelfUnread={status === 'failed' || status === 'loading'}
               libraryQuery={query}
               onQueryChange={setQuery}
               bookActions={WEB_BOOK_ACTIONS}
@@ -482,7 +566,24 @@ function App() {
        * that persists means `unreachable` is about to be shown anyway. */
       return null
     case 'connected':
-      return <Shelf onSignOut={onSignOut} />
+      return (
+        <>
+          {/* THE SIGN-OUT THAT DID NOT HAPPEN, on the screen it actually
+              lands on. A failed sign-out leaves the cookie GOOD, so the
+              session check answers `connected` and the reader is returned to
+              the shelf — the `needs-code` copy of this notice below was
+              written for a landing that never happens in exactly the failure
+              case it describes. Borrowed-laptop rule: the warning must be
+              wherever the reader IS. */}
+          {signOutFailed !== null && (
+            <div className="gate-notice" role="alert">
+              Sign-out did not finish ({signOutFailed}). This browser is still paired — revoke it
+              from Settings → Browsers on the shelf itself.
+            </div>
+          )}
+          <Shelf onSignOut={onSignOut} />
+        </>
+      )
     case 'unreachable':
       return <Unreachable onRetry={refresh} />
     case 'needs-code':

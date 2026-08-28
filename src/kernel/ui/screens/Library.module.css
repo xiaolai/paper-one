@@ -115,6 +115,21 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* The foot's one control: the retry and the dismiss beside a save that did
+   not land. The reader's own notice-dismiss link, in the foot's caption
+   size, and no box — it is a word in a sentence, not a button in a row. */
+.statusAction {
+  border: none;
+  background: none;
+  padding: 0;
+  margin-left: var(--space-6);
+  color: var(--muted);
+  font-family: inherit;
+  font-size: var(--text-caption);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
 .library[data-platform='macos'] {
   padding-top: var(--titlebar-h);
 }
@@ -195,6 +210,10 @@
  * title pushes the row wider than the window instead of ellipsising, and the
  * whole list scrolls sideways.
  */
+/* A GRID OF ONE COLUMN, which is what lets the same virtualiser drive this
+   view as drives the shelf: it reads the resolved `grid-template-columns` for
+   the count and the first child's height for the row, and both answers are
+   right here without it knowing there are two views. */
 .list {
   /* The jacket's own width, the two elastic text columns, and the three fixed
      ones. Each named where it is decided: the thumbnail is a cover at
@@ -204,17 +223,14 @@
   --list-cols:
     var(--row-thumb) minmax(0, 3fr) minmax(0, 2fr)
     var(--col-progress) var(--col-when) var(--control-sm);
-}
-
-/* A GRID OF ONE COLUMN, which is what lets the same virtualiser drive this
-   view as drives the shelf: it reads the resolved `grid-template-columns` for
-   the count and the first child's height for the row, and both answers are
-   right here without it knowing there are two views. */
-.list {
   flex: 0 0 auto;
   display: grid;
   grid-template-columns: 1fr;
-  padding: 0 var(--space-40) var(--space-40);
+  /* THE SHELF'S OWN GUTTER, which narrows at the breakpoints. A fixed 40px
+     here kept the list rows at the wide gutter while the toolbar, the chips
+     and the status line above them had already stepped in to 24 — two
+     columns of left edges on one screen. */
+  padding: 0 var(--shelf-pad-x) var(--space-40);
 }
 
 .row {
@@ -713,7 +729,12 @@ button.noCopy:hover {
   position: relative;
   display: flex;
   flex-direction: column;
-  block-size: var(--cell-height, 268px);
+  /* NO FALLBACK. `applyMetrics` publishes `--cell-height` beside `--card-w`
+     as a constant; the 268px that used to sit here was the number from a
+     fluid-column era and was already known to be wrong. A wrong fallback is
+     worse than none: absent the variable the cell sizes to its content, which
+     is visible, where a stale constant clipped covers quietly. */
+  block-size: var(--cell-height);
   overflow: hidden;
 }
 

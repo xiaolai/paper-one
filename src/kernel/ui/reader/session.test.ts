@@ -42,8 +42,9 @@ interface FakeView extends View {
    * entire contract of `link` and `external-link`.
    */
   emit: (type: string, detail: unknown, cancelable?: boolean) => CustomEvent
-  /** Every `goTo` target, so a fallback navigation can be asserted. */
-  navigations: string[]
+  /** Every `goTo` target, so a fallback navigation can be asserted. A number
+   *  is a section index — the by-index fallback of `#display`. */
+  navigations: (string | number)[]
   /** Every addAnnotation call, so the drawing contract can be asserted. */
   annotations: { value: string; kind: string; remove: boolean }[]
   deselected: number
@@ -81,9 +82,28 @@ type ViewCalls = Pick<
   | 'deselect'
 >
 
-function fakeView(overrides: Partial<Record<'open' | 'init', () => Promise<void>>> = {}): FakeView {
+interface FakeViewOptions {
+  readonly open?: () => Promise<void>
+  readonly init?: () => Promise<void>
+  /**
+   * Whether `init` REPORTS A LOCATION before it resolves, which is what both
+   * renderers do: the paginator's `#afterScroll` and the fixed-layout
+   * `#reportLocation` dispatch `relocate` synchronously on the navigation
+   * path, so a `goTo` that lands has said where before its promise settles.
+   *
+   * `false` is the silent renderer — `init` resolves and nothing is on screen,
+   * which is what the fork's `goTo` produces for a target it cannot resolve:
+   * it catches its own error and resolves, and the paginator no-ops on an
+   * index it cannot go to. Defaults to landing, because a fake that resolved
+   * silently modelled that defect in every test, and the session now treats
+   * the silence as a book that displayed nothing (WI-20.14).
+   */
+  readonly landed?: boolean
+}
+
+function fakeView(overrides: FakeViewOptions = {}): FakeView {
   const listeners: Record<string, ((e: unknown) => void)[]> = {}
-  const navigations: string[] = []
+  const navigations: (string | number)[] = []
   const view: ViewCalls & Omit<FakeView, keyof View> & Record<string, unknown> = {
     style: {} as CSSStyleDeclaration,
     closed: 0,
@@ -119,11 +139,14 @@ function fakeView(overrides: Partial<Record<'open' | 'init', () => Promise<void>
      * observable here: `init` is the one call that receives the saved position,
      * and a fake that swallowed its argument would let every assertion about
      * restoring pass against a session that never passed it on. */
-    init: (options?: { lastLocation?: string | null }) => {
+    init: async (options?: { lastLocation?: string | null }) => {
       view.initCalls.push(options?.lastLocation ?? null)
-      return (overrides.init ?? (() => Promise.resolve()))()
+      await (overrides.init ?? (() => Promise.resolve()))()
+      /* Landed — see `FakeViewOptions.landed`. The detail is the least a
+         renderer sends; tests about WHERE emit their own relocation after. */
+      if (overrides.landed !== false) view.emit('relocate', { fraction: 0 })
     },
-    goTo: (target: string) => {
+    goTo: (target: string | number) => {
       navigations.push(target)
       return Promise.resolve()
     },
@@ -265,6 +288,9 @@ const deps = (view: View) => ({
   prepare: (source: BookSource) => Promise.resolve(source),
   applySettings: () => {},
   applyVars: () => {},
+  /* Nothing these fixtures open is protected. Required — see
+     `SessionDeps.protection` — so a caller cannot forget the check. */
+  protection: () => Promise.resolve(null),
 })
 
 describe('ReaderSession disposal', () => {
@@ -319,6 +345,7 @@ describe('ReaderSession disposal', () => {
       prepare: (source: BookSource) => Promise.resolve(source),
       applySettings: () => {},
       applyVars: () => {},
+      protection: () => Promise.resolve(null),
     })
 
     session.dispose()
@@ -412,6 +439,8 @@ describe('ReaderSession disposal', () => {
     await session.start('book.epub', deps(view))
 
     const docsBefore = cb.calls['onDocument']?.length ?? 0
+    // One, from the landing `init` reports — see `FakeViewOptions.landed`.
+    const relocationsBefore = cb.calls['onRelocate']?.length ?? 0
     session.dispose()
     view.emit('load', { doc: {} })
     view.emit('relocate', { fraction: 0.5, tocItem: { label: 'X', href: 'x' } })
@@ -419,7 +448,7 @@ describe('ReaderSession disposal', () => {
     // dispose() itself reports one null document; nothing after it counts.
     expect(cb.calls['onDocument']).toHaveLength(docsBefore + 1)
     expect(cb.calls['onDocument']?.at(-1)?.[0]).toBeNull()
-    expect(cb.calls['onRelocate'] ?? []).toHaveLength(0)
+    expect(cb.calls['onRelocate'] ?? []).toHaveLength(relocationsBefore)
   })
 
   it('flattens foliate\'s mixed search yields into plain hits', async () => {
@@ -485,6 +514,7 @@ describe('ReaderSession disposal', () => {
       prepare: (source: BookSource) => Promise.resolve(source),
       applySettings: () => {},
       applyVars: () => {},
+      protection: () => Promise.resolve(null),
     })
     expect(cb.calls['onError']?.[0]?.[0]).toBe('module missing')
   })
@@ -499,6 +529,7 @@ describe('ReaderSession disposal', () => {
       prepare: (source: BookSource) => Promise.resolve(source),
       applySettings: () => {},
       applyVars: () => {},
+      protection: () => Promise.resolve(null),
     })
     expect(cb.calls['onError'] ?? []).toHaveLength(0)
   })
@@ -606,6 +637,139 @@ describe('ReaderSession restore', () => {
     expect(cb.calls['onError'] ?? []).toHaveLength(0)
   })
 
+  /**
+   * ⚠️ **A BOOK THAT OPENED TO NOTHING, WITH NOTHING TO SAY ABOUT IT.** The
+   * retry above fires only when `init` REJECTS — and the fork's `goTo` catches
+   * its own errors and resolves, the paginator no-ops on an index it cannot go
+   * to, and a section that fails to load resolves `#display({})`. A stored CFI
+   * whose idref no longer resolves, a fake-CFI index past the section count on
+   * MOBI/FB2/CBZ, a landmark pointing at a missing file: each resolved `init`
+   * having displayed nothing, and the reader got a blank stage with a populated
+   * table of contents and no error anywhere.
+   *
+   * THE SIGNAL IS THE RELOCATION. Both renderers report where they landed
+   * BEFORE the navigation's promise settles — see `FakeViewOptions.landed` —
+   * so an `init` that resolves with no `relocate` behind it displayed nothing,
+   * and the session can know that without a timer.
+   *
+   * AND THE FALLBACK BYPASSES THE LANDMARKS. `init(null)` is not enough:
+   * `goToTextStart` prefers the bodymatter landmark, so a landmark whose href
+   * is missing fails the same silent way twice. The fallback goes to the first
+   * spine item with `linear !== 'no'` BY INDEX, which the paginator honours
+   * whatever the landmarks say.
+   */
+  describe('a book that opens to nothing', () => {
+    /** A view whose `init` resolves silently, with a spine to fall back into. */
+    function silent(sections: readonly { linear?: string }[]) {
+      const view = fakeView({ landed: false })
+      ;(view.book as { sections: unknown }).sections = sections
+      /* `goTo` by index LANDS, as a spine item that exists does; the landmark
+         path never did. Wrapped rather than overridden so the navigation is
+         still recorded. */
+      const goTo = view.goTo
+      view.goTo = (target: string | number) => {
+        const done = goTo(target)
+        if (typeof target === 'number') view.emit('relocate', { fraction: 0 })
+        return done
+      }
+      return view
+    }
+
+    /** The fallback's own notices, apart from the fixture's `getCover` warning
+     *  — the fake book declares none, and `#publish` says so on every start. */
+    const notices = (warn: { mock: { calls: unknown[][] } }) =>
+      warn.mock.calls.map((call) => String(call[0])).filter((line) => line.includes('opening at the first section'))
+
+    it('falls back to section 0 by index, once, and says the saved place was lost', async () => {
+      const view = silent([{}, {}])
+      const cb = callbacks()
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const session = new ReaderSession(fakeHost(), cb)
+      await session.start('book.epub', { ...deps(view), lastLocation: () => AT })
+
+      /* NOT `init(null)`: that is the landmark path, and the landmark is the
+         thing that fails silently. One navigation, to the section itself. */
+      expect(view.initCalls).toEqual([AT])
+      expect(view.navigations).toEqual([0])
+      /* One notice, on the channel a lost position already uses — findable,
+         and not an error bar over a book that is now readable. */
+      expect(notices(warn)).toHaveLength(1)
+      expect(notices(warn)[0]).toMatch(/saved position/)
+      expect(cb.calls['onError'] ?? []).toHaveLength(0)
+      warn.mockRestore()
+    })
+
+    it('skips a non-linear front item — the first section the reader can turn to', async () => {
+      const view = silent([{ linear: 'no' }, {}, {}])
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const session = new ReaderSession(fakeHost(), callbacks())
+      await session.start('book.epub', { ...deps(view), lastLocation: () => AT })
+      expect(view.navigations).toEqual([1])
+      warn.mockRestore()
+    })
+
+    /* No saved place, so nothing was LOST — but a book that opens blank from
+       its own start is still a book nobody could read. Same fallback, and the
+       notice says what happened rather than blaming a position that did not
+       exist. */
+    it('falls back from a silent first open too, without blaming a saved place', async () => {
+      const view = silent([{}])
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const session = new ReaderSession(fakeHost(), callbacks())
+      await session.start('book.epub', deps(view))
+      expect(view.initCalls).toEqual([null])
+      expect(view.navigations).toEqual([0])
+      expect(notices(warn)).toHaveLength(1)
+      expect(notices(warn)[0]).not.toMatch(/saved position/)
+      warn.mockRestore()
+    })
+
+    /* The fallback is the LAST resort. When it too lands nowhere, the reader
+       is told rather than left with a blank stage — the failure this whole
+       block exists to end. */
+    it('reports a book whose fallback also displays nothing', async () => {
+      const view = fakeView({ landed: false })
+      ;(view.book as { sections: unknown }).sections = [{}]
+      const cb = callbacks()
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const session = new ReaderSession(fakeHost(), cb)
+      await session.start('book.epub', { ...deps(view), lastLocation: () => AT })
+      expect(view.navigations).toEqual([0])
+      expect(cb.calls['onError']?.[0]?.[0]).toBe('This book could not be displayed.')
+      warn.mockRestore()
+    })
+
+    /* A spine with nothing linear has nowhere to fall back to: reported,
+       not navigated to index -1. */
+    it('reports a book with no linear section at all', async () => {
+      const view = fakeView({ landed: false })
+      ;(view.book as { sections: unknown }).sections = [{ linear: 'no' }]
+      const cb = callbacks()
+      const session = new ReaderSession(fakeHost(), cb)
+      await session.start('book.epub', deps(view))
+      expect(view.navigations).toEqual([])
+      expect(cb.calls['onError']?.[0]?.[0]).toBe('This book could not be displayed.')
+    })
+
+    /* Disposal during the fallback: the same latch every other await honours. */
+    it('does not report or navigate for a book closed while it was falling back', async () => {
+      let session: ReaderSession | null = null
+      const view = fakeView({
+        landed: false,
+        init: () => {
+          session?.dispose()
+          return Promise.resolve()
+        },
+      })
+      ;(view.book as { sections: unknown }).sections = [{}]
+      const cb = callbacks()
+      session = new ReaderSession(fakeHost(), cb)
+      await session.start('book.epub', deps(view))
+      expect(view.navigations).toEqual([])
+      expect(cb.calls['onError'] ?? []).toHaveLength(0)
+    })
+  })
+
   it('reports the CFI foliate publishes on relocate, so there is one to save', async () => {
     const view = fakeView()
     const cb = callbacks()
@@ -613,7 +777,7 @@ describe('ReaderSession restore', () => {
     await session.start('book.epub', deps(view))
 
     view.emit('relocate', { fraction: 0.5, tocItem: { label: 'One', href: 'a' }, cfi: AT })
-    expect(cb.calls['onRelocate']?.[0]?.[0]).toEqual({
+    expect(cb.calls['onRelocate']?.at(-1)?.[0]).toEqual({
       fraction: 0.5,
       chapterLabel: 'One',
       chapterHref: 'a',
@@ -636,7 +800,7 @@ describe('ReaderSession restore', () => {
 
     view.emit('relocate', { fraction: 0.5 })
     expect(
-      (cb.calls['onRelocate']?.[0]?.[0] as { cfi: unknown }).cfi,
+      (cb.calls['onRelocate']?.at(-1)?.[0] as { cfi: unknown }).cfi,
     ).toBeNull()
   })
 })
@@ -673,7 +837,7 @@ describe('ReaderSession places', () => {
   }
 
   const relocated = (cb: ReturnType<typeof callbacks>) =>
-    cb.calls['onRelocate']?.[0]?.[0] as { sectionIndex: number | null }
+    cb.calls['onRelocate']?.at(-1)?.[0] as { sectionIndex: number | null }
 
   async function reading() {
     const view = fakeView()
@@ -1567,6 +1731,7 @@ describe('ReaderSession marks', () => {
       prepare: (source: BookSource) => Promise.resolve(source),
       applySettings: () => {},
       applyVars: () => {},
+      protection: () => Promise.resolve(null),
     })
 
     expect(cb.calls['onError']?.[0]?.[0]).toBe('overlayer missing')
@@ -2429,6 +2594,82 @@ describe('ReaderSession — a pointer gesture always publishes', () => {
 
     expect(published(cb)).toEqual([{ ...SNAPPED, range: selection.getRangeAt(0) }])
     expect(selection.mutations).toBe(1)
+  })
+
+  /**
+   * ⚠️ **A HELD ⌘B WROTE A ROW AND A TOMBSTONE PER REPEAT.** The forwarded
+   * copy carried the key, the code and the four modifiers, and not `repeat` —
+   * so `accel.ts`'s toggle guard, which refuses a repeating ⌘B/⌘K/⌘\/⌘T/⌘1–4
+   * for exactly that reason, saw a fresh press on every auto-repeat whenever
+   * focus was inside the book. Two independent audits found it on the same
+   * day. The event's own init is what is asserted, because that is the whole
+   * defect: a field the constructor was never handed.
+   */
+  it('forwards repeat, location and isComposing — the fields the host keymap guards on', async () => {
+    const inits: Record<string, unknown>[] = []
+    class RecordingKeyboardEvent extends Event {
+      constructor(type: string, init: Record<string, unknown> = {}) {
+        super(type, init as EventInit)
+        inits.push(init)
+      }
+    }
+    vi.stubGlobal('KeyboardEvent', RecordingKeyboardEvent)
+    const { doc } = await gesture()
+
+    doc.dispatch('keydown', { key: 'b', code: 'KeyB', metaKey: true, repeat: true, location: 0, isComposing: false, target: null })
+    expect(inits.at(-1)).toMatchObject({ key: 'b', code: 'KeyB', metaKey: true, repeat: true, location: 0, isComposing: false })
+
+    doc.dispatch('keydown', { key: 'Enter', code: 'NumpadEnter', repeat: false, location: 3, isComposing: true, target: null })
+    expect(inits.at(-1)).toMatchObject({ key: 'Enter', repeat: false, location: 3, isComposing: true })
+  })
+
+  /**
+   * ⚠️ **A KEY ON A CONTROL INSIDE THE BOOK TURNED THE PAGE AND ATE THE
+   * CONTROL'S OWN KEY.** The typing guard above covered fields and nothing
+   * else, so Space on a focused `<button>` or an arrow on a `<select>` inside
+   * an interactive EPUB was forwarded, the host turned the page, and the
+   * cancellation carried back cancelled the control's default too — the
+   * platform's meaning of those keys taken from under the reader's focus.
+   * The host has a guard for exactly this on its own controls, and it could
+   * never fire for the book: the forwarded copy's target is the WINDOW.
+   *
+   * Decided here, where the real target is visible, with the same outcome as
+   * typing: not forwarded, and therefore not cancelled.
+   */
+  it('leaves a key on a control inside the book with the control — neither forwarded nor cancelled', async () => {
+    const { doc } = await gesture()
+    const forwarded: Event[] = []
+    /* The host, consuming what reaches it — so the difference between the two
+       dispatches below is visible on the ORIGINAL event's `preventDefault`. */
+    window.addEventListener('keydown', (event) => {
+      forwarded.push(event)
+      event.preventDefault()
+    })
+    const control = (tag: string) => {
+      const el = {
+        tagName: tag,
+        isContentEditable: false,
+        closest: (selector: string) => (selector.split(',').some((s) => s.trim() === tag.toLowerCase()) ? el : null),
+      }
+      return el
+    }
+
+    const onSelect = { key: 'ArrowDown', code: 'ArrowDown', target: control('SELECT'), preventDefault: vi.fn() }
+    doc.dispatch('keydown', onSelect)
+    expect(forwarded).toHaveLength(0)
+    expect(onSelect.preventDefault).not.toHaveBeenCalled()
+
+    const onButton = { key: ' ', code: 'Space', target: control('BUTTON'), preventDefault: vi.fn() }
+    doc.dispatch('keydown', onButton)
+    expect(forwarded).toHaveLength(0)
+    expect(onButton.preventDefault).not.toHaveBeenCalled()
+
+    /* The control case, not the reading case: the same key from prose is
+       forwarded and, once the host consumes it, cancelled in the book. */
+    const onProse = { key: ' ', code: 'Space', target: control('P'), preventDefault: vi.fn() }
+    doc.dispatch('keydown', onProse)
+    expect(forwarded).toHaveLength(1)
+    expect(onProse.preventDefault).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -3333,6 +3574,7 @@ describe('readMeta', () => {
 describe('directionOf', () => {
   const asDoc = (over: {
     computed?: string
+    bodyComputed?: string
     htmlDir?: string | null
     bodyDir?: string | null
     root?: boolean
@@ -3341,12 +3583,21 @@ describe('directionOf', () => {
       over.root === false
         ? null
         : ({ getAttribute: () => over.htmlDir ?? null } as unknown as HTMLElement)
+    const body =
+      over.bodyDir === undefined && over.bodyComputed === undefined
+        ? null
+        : ({ getAttribute: () => over.bodyDir ?? null } as unknown as HTMLElement)
     return {
       documentElement: html,
-      body: over.bodyDir === undefined ? null : { getAttribute: () => over.bodyDir },
-      defaultView: over.computed
-        ? { getComputedStyle: () => ({ direction: over.computed }) }
-        : null,
+      body,
+      defaultView:
+        over.computed || over.bodyComputed
+          ? {
+              getComputedStyle: (el: unknown) => ({
+                direction: el === body ? (over.bodyComputed ?? over.computed) : over.computed,
+              }),
+            }
+          : null,
     } as unknown as Document
   }
 
@@ -3355,6 +3606,15 @@ describe('directionOf', () => {
        and it can overrule the attribute in either direction. */
     expect(directionOf(asDoc({ computed: 'rtl', htmlDir: 'ltr' }))).toBe('rtl')
     expect(directionOf(asDoc({ computed: 'ltr', htmlDir: 'rtl' }))).toBe('ltr')
+  })
+
+  it("believes the BODY's computed direction when the root computes ltr", () => {
+    /* `dir` does not propagate upward: `<body dir="rtl">` leaves `html`'s
+       computed direction at `ltr` in every real engine, so reading the root
+       alone answered `ltr` for every such book and the arrows ran backwards
+       (audit round 1, #499). */
+    expect(directionOf(asDoc({ computed: 'ltr', bodyComputed: 'rtl' }))).toBe('rtl')
+    expect(directionOf(asDoc({ computed: 'ltr', bodyComputed: 'ltr', bodyDir: 'rtl' }))).toBe('ltr')
   })
 
   it('falls back to the declared direction with no view to compute against', () => {
@@ -3366,5 +3626,115 @@ describe('directionOf', () => {
   it('answers ltr for a document that says nothing, and for one with no root', () => {
     expect(directionOf(asDoc({}))).toBe('ltr')
     expect(directionOf(asDoc({ root: false }))).toBe('ltr')
+  })
+})
+
+/**
+ * WI-20.13 — the book that cannot open says why.
+ *
+ * Three outcomes were silent: a zero-length file said "File not found" (the
+ * fork's words for `!file.size`), a DRM'd EPUB opened and rendered as noise,
+ * and a password-protected PDF showed pdf.js's own "No password given". The
+ * PDF half is `makePdf.test.ts`'s and the parsing half `protection.test.ts`'s;
+ * what is proven here is the session's part — the refusal is named, and a
+ * refused book is never displayed.
+ */
+describe('ReaderSession — a book that cannot open says why', () => {
+  it('says a zero-length file is empty, before anything tries to open it', async () => {
+    let opened = 0
+    const view = fakeView({
+      open: () => {
+        opened += 1
+        return Promise.reject(new Error('File not found'))
+      },
+    })
+    const cb = callbacks()
+    const session = new ReaderSession(fakeHost(), cb)
+    await session.start(new File([], 'empty.epub'), deps(view))
+
+    expect(cb.calls['onError']?.[0]?.[0]).toBe('This file is empty.')
+    expect(opened, 'an empty file reached the fork, which calls it "not found"').toBe(0)
+    expect(view.initCalls).toEqual([])
+  })
+
+  it('refuses a protected book by name, and never displays it', async () => {
+    const view = fakeView()
+    const cb = callbacks()
+    const session = new ReaderSession(fakeHost(), cb)
+    const refusal = 'This book is protected by ADEPT and cannot be opened here.'
+    await session.start('locked.epub', { ...deps(view), protection: () => Promise.resolve(refusal) })
+
+    expect(cb.calls['onError']?.[0]?.[0]).toBe(refusal)
+    /* Refused means NOT SHOWN: no first page, no contents, no navigator — a
+       page of ciphertext behind a notice is still a page of ciphertext. */
+    expect(view.initCalls).toEqual([])
+    expect(cb.calls['onToc'] ?? []).toHaveLength(0)
+    expect(cb.calls['onNavigator'] ?? []).toHaveLength(0)
+    /* And the book stays closable, exactly as a failed open does. */
+    session.dispose()
+    expect(view.closed).toBe(1)
+  })
+
+  it('asks the check about the OPENED book, so it can read the archive the fork already parsed', async () => {
+    const view = fakeView()
+    const seen: unknown[] = []
+    const session = new ReaderSession(fakeHost(), callbacks())
+    await session.start('book.epub', {
+      ...deps(view),
+      protection: (book) => {
+        seen.push(book)
+        return Promise.resolve(null)
+      },
+    })
+    expect(seen).toEqual([view.book])
+    expect(view.initCalls).toHaveLength(1)
+  })
+})
+
+/**
+ * A BOOK'S SCRIPTS DO NOT RUN — the session's two hooks (WI-20.30, D7).
+ *
+ * `bookScripts.test.ts` proves the two functions on the real fork; this proves
+ * the session CALLS them, which is the half a pure test cannot see: the
+ * loader's refusal is wired the moment the book is open, and the strip runs
+ * on every loaded document before the watchers, the marks or the measurements
+ * read it.
+ */
+describe('ReaderSession and a book that carries scripts', () => {
+  it('refuses the book’s script resources at its loader, from the moment it is open', async () => {
+    const view = fakeView()
+    const gate = new EventTarget()
+    ;(view.book as unknown as Record<string, unknown>)['transformTarget'] = gate
+    const session = new ReaderSession(fakeHost(), callbacks())
+    await session.start('book.epub', deps(view))
+
+    const script = new CustomEvent('load', { detail: { type: 'application/javascript', isScript: true, allow: true } })
+    gate.dispatchEvent(script)
+    expect(script.detail.allow).toBe(false)
+
+    /* And ONLY scripts — a stylesheet or an image is the book's to load. */
+    const sheet = new CustomEvent('load', { detail: { type: 'text/css', isScript: false, allow: true } })
+    gate.dispatchEvent(sheet)
+    expect(sheet.detail.allow).toBe(true)
+    session.dispose()
+  })
+
+  it('strips a loaded document’s scripts and handlers before anything else reads it', async () => {
+    const view = fakeView()
+    const session = new ReaderSession(fakeHost(), callbacks())
+    await session.start('book.epub', deps(view))
+
+    const doc = fakeDocument().asDocument()
+    const removedScript = vi.fn()
+    const removedAttribute = vi.fn()
+    const fake = doc as unknown as Record<string, unknown>
+    fake['getElementsByTagNameNS'] = () => [{ remove: removedScript }]
+    fake['querySelectorAll'] = () => [{ attributes: [{ name: 'onclick' }, { name: 'class' }], removeAttribute: removedAttribute }]
+    view.emit('load', { doc, index: 0 })
+
+    expect(removedScript).toHaveBeenCalledOnce()
+    expect(removedAttribute).toHaveBeenCalledWith('onclick')
+    expect(removedAttribute).not.toHaveBeenCalledWith('class')
+    session.dispose()
   })
 })

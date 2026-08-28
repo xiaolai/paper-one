@@ -104,7 +104,13 @@ export function usageOf(descriptor: ServiceDescriptor): string {
 
 /** Everything `paper` can do, by noun. */
 export function overview(): string {
-  const lines = ['paper <noun> <verb> [arguments] [--json]', '', 'Nouns:']
+  /* THE GLOBAL OPTIONS, from the one list the parser honours — the usage
+   * line named `[--json]` alone and left `--shelf <key>` for the reader to
+   * discover by reading source. */
+  const globals = GLOBAL_FLAGS.filter((flag) => flag !== '--help' && flag !== '-h')
+    .map((flag) => (flag === '--shelf' ? '[--shelf <key>]' : `[${flag}]`))
+    .join(' ')
+  const lines = [`paper <noun> <verb> [arguments] ${globals}`, '', 'Nouns:']
   for (const noun of SERVICE_NOUNS) {
     lines.push(`  ${noun.padEnd(8)} ${servicesOn(noun).map((one) => one.verb).join(' · ')}`)
   }
@@ -144,6 +150,12 @@ export function serviceHelp(descriptor: ServiceDescriptor): string {
   if (descriptor.atLeastOne !== undefined) {
     lines.push('', `  At least one of ${descriptor.atLeastOne.map((one) => `--${one}`).join(', ')} is required.`)
   }
+  /* AND WHAT IS REFUSED ON PURPOSE, with its reason — printed here so a
+   * caller reading `book set --help` for a rename learns there is none,
+   * rather than by typing `--title` and being refused. */
+  for (const gone of descriptor.withdrawn ?? []) {
+    lines.push('', `  --${gone.name} is not taken: ${gone.why}.`)
+  }
   return lines.join('\n')
 }
 
@@ -180,6 +192,11 @@ function coerce(field: ServiceField, raw: string): { value: unknown } | { error:
        * Empty segments are dropped: `--book a,,b` is two books. */
       {
         const parts = raw.split(',').map((one) => one.trim()).filter((one) => one !== '')
+        /* NOTHING BUT SEPARATORS IS NOT A LIST. `--book ,` became `book: []`,
+         * which satisfied the required-field check below and reached the
+         * handler as an empty list — refused there, later, in the service's
+         * words rather than beside the usage line where the typo is. */
+        if (parts.length === 0) return { error: `--${field.name} needs at least one value, not ${JSON.stringify(raw)}` }
         const bad = parts.find((one) => field.choices && !field.choices.includes(one))
         return bad === undefined ? { value: parts } : (outside(bad) as { error: string })
       }
@@ -296,6 +313,13 @@ function readBody(descriptor: ServiceDescriptor, words: readonly string[], json:
     const name = negated ? word.slice('--no-'.length) : word.slice(2)
     const field = byName.get(name)
     if (!field) {
+      /* WITHDRAWN BEFORE UNKNOWN, as `readInput` orders it. `--title` on
+       * `book set` is not a misspelling with a nearest match; it is an edit
+       * the row refuses on purpose, and the row's own sentence says why. */
+      const gone = descriptor.withdrawn?.find((one) => one.name === name)
+      if (gone) {
+        return { kind: 'error', message: `${descriptor.name} does not take --${name}: ${gone.why}`, text: serviceHelp(descriptor) }
+      }
       const near = suggestion(name, [...byName.keys()])
       return { kind: 'error', message: `${descriptor.name} has no --${name}${near}`, text: serviceHelp(descriptor) }
     }
@@ -308,7 +332,13 @@ function readBody(descriptor: ServiceDescriptor, words: readonly string[], json:
     }
     if (negated) {
       if (field.type !== 'boolean') {
-        return { kind: 'error', message: `--no-${name} is only for flags, and --${name} takes a ${field.type}` }
+        return {
+          kind: 'error',
+          message: `--no-${name} is only for flags, and --${name} takes a ${field.type}`,
+          /* WITH THE USAGE, like every other refusal of a service argument —
+           * this one alone sent the caller away without it. */
+          text: serviceHelp(descriptor),
+        }
       }
       body[name] = false
       continue

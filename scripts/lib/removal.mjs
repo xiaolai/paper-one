@@ -1,5 +1,5 @@
 import { featureItemNames, readCargoManifest, splitComment } from './cargo.mjs'
-import { parseCompositionImports, stripComments } from './compositions.mjs'
+import { maskRustCode, parseCompositionImports, stripComments } from './compositions.mjs'
 
 /**
  * The edits `pnpm capability:remove <id>` makes, as pure functions over text:
@@ -519,15 +519,19 @@ export function removePluginRegistration(source, name) {
      * referenced in a shape this tool cannot edit (a multi-line
      * `.plugin(...)`, a `use`). Returning `changed: false` here once let a
      * caller prune the crate while its registration stayed live; a
-     * reference it cannot remove is a refusal. String literals are masked
-     * first — a log line MENTIONING the crate is prose, not a reference. */
-    if (new RegExp(`(?<![\\w$])${escapeRegExp(name)}(?![\\w$])`).test(maskStrings(stripComments(source)))) {
+     * reference it cannot remove is a refusal. Comments and string literals
+     * are masked first — a log line MENTIONING the crate is prose, not a
+     * reference — through `maskRustCode` rather than the JavaScript lexer
+     * this used to call: `stripComments` reads `'a` as an unterminated
+     * string, so the first LIFETIME in `lib.rs` left every comment after it
+     * visible and a commented-out mention refused a removal that was fine. */
+    if (new RegExp(`(?<![\\w$])${escapeRegExp(name)}(?![\\w$])`).test(maskRustCode(source))) {
       throw new RemovalRefused(`lib.rs references ${name} in a shape this tool cannot edit (a multi-line .plugin(...) call, a use, or another call); edit it by hand`)
     }
     return { text: source, changed: false }
   }
   const text = lines.join('\n')
-  if (new RegExp(`(?<![\\w$])${escapeRegExp(name)}(?![\\w$])`).test(maskStrings(stripComments(text)))) {
+  if (new RegExp(`(?<![\\w$])${escapeRegExp(name)}(?![\\w$])`).test(maskRustCode(text))) {
     throw new RemovalRefused(`lib.rs still references ${name} after removing its .plugin() registration (a \`use\`, or another call); edit it by hand`)
   }
   return { text, changed: true }

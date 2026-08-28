@@ -45,14 +45,23 @@
 //! ## Revocation reaches in here
 //!
 //! Plan §7 lists four things a revocation must touch, and the one
-//! `paper_webauth` could not own is the live channel. [`Pipe::close_credential`]
+//! `paper_webauth` could not own is the live channel. [`Pipe::close_browser`]
 //! is that half: revoking a credential closes every session it opened, so a
 //! browser cannot keep answering on a socket it already had.
+//!
+//! ## No credential is held here, and that is a decision
+//!
+//! A session record used to carry the browser's plaintext credential, so a
+//! revocation could name the sockets to close. Since WI-20.29 the credential
+//! set is on disk as hashes and the plaintext exists in exactly one place —
+//! the browser's cookie — so the record carries the durable [`SessionId`]
+//! instead and sockets are closed by that. Nothing this module does needs the
+//! secret, and a module that does not hold a secret cannot leak it.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use paper_webauth::sessions::{Credential, SessionId};
+use paper_webauth::sessions::SessionId;
 use tokio::sync::{mpsc, Notify};
 
 /// The largest frame this side will accept. The peer transport's number, so a
@@ -119,8 +128,13 @@ pub enum OpenRefused {
 pub enum Send {
     /// Queued for the socket.
     Sent,
-    /// The browser is not keeping up. Nothing dropped; try again after a wait.
-    Backpressure,
+    /// The browser is not keeping up. **Carries the frame back**, as
+    /// [`Push::Backpressure`] does and for the same reason: "nothing dropped"
+    /// has to be something the type says. From [`Pipe::send`] it means "no
+    /// room right now"; from [`Pipe::send_wait`] it means the deadline passed
+    /// with no room appearing, which is a browser that drained nothing for
+    /// that long.
+    Backpressure(Vec<u8>),
     /// Over [`MAX_FRAME`]. Refused WITHOUT closing — a frame this big coming
     /// from our own webview is a bug on this side, not a hostile peer, and
     /// killing the reader's session over it would hide the bug behind a
@@ -153,9 +167,9 @@ pub enum Push {
 }
 
 struct WebSession {
-    credential: Credential,
-    /// The authorization session this socket belongs to, kept so a caller can
-    /// tie a socket back to what admitted it.
+    /// The authorization session this socket belongs to — the DURABLE id of
+    /// the credential behind it. What a revocation closes by, and what ties
+    /// a socket back to the browser the pane lists.
     admitted: SessionId,
     inbox: VecDeque<Vec<u8>>,
     inbox_bytes: usize,
@@ -187,7 +201,7 @@ struct Inner {
 /// directions. Returns the outbound bytes the host's total should release.
 ///
 /// ⚠️ ONE PLACE, because there were three and one of them was wrong. `close`,
-/// `close_credential` and `reap` each abandoned a session's queues by hand;
+/// `close_browser` and `reap` each abandoned a session's queues by hand;
 /// dropping the outbound sender discards whatever tokio had buffered, and the
 /// per-session byte count went with the record — but `outbound_bytes_total` was
 /// left holding bytes no longer queued anywhere. It only ever grew. A few
@@ -217,6 +231,18 @@ fn abandon(session: &mut WebSession, reason: &str) -> usize {
 #[derive(Default)]
 pub struct Pipe {
     inner: Mutex<Inner>,
+    /// Fired — as a BROADCAST — whenever outbound room may have appeared: every
+    /// drain and every close. What [`Pipe::send_wait`] parks on.
+    ///
+    /// ONE for the host rather than one per session, because the limits are
+    /// not per session: the host's budget is shared, so a drain on A is what
+    /// frees room for B, and a per-session notify on B would never hear it.
+    /// `notify_waiters` rather than `notify_one`, because a single drain can
+    /// free room for several waiters and a close has to reach every waiter on
+    /// the closing session — a permit wakes one and leaves the rest parked
+    /// until their deadline. Every woken waiter re-checks, so a wake is a
+    /// hint and not a permission.
+    room: Notify,
 }
 
 impl Pipe {
@@ -226,13 +252,13 @@ impl Pipe {
 
     /// Accept a socket that has already been admitted.
     ///
-    /// Takes the [`SessionId`] rather than a credential alone so a socket
-    /// cannot exist without an admission having happened — the two-phase check
-    /// in `paper_webauth::sessions` is what produces one.
+    /// Takes the [`SessionId`] rather than a credential so a socket cannot
+    /// exist without an admission having happened — the two-phase check in
+    /// `paper_webauth::sessions` is what produces one — and so the plaintext
+    /// never comes this far.
     pub fn open(
         &self,
         admitted: SessionId,
-        credential: Credential,
         outbound: mpsc::Sender<Vec<u8>>,
     ) -> Result<WebSessionId, OpenRefused> {
         let mut guard = self.inner.lock().expect("pipe mutex poisoned");
@@ -242,7 +268,7 @@ impl Pipe {
         let held = guard
             .sessions
             .values()
-            .filter(|s| s.credential == credential && s.closed.is_none())
+            .filter(|s| s.admitted == admitted && s.closed.is_none())
             .count();
         if held >= MAX_SESSIONS_PER_CREDENTIAL {
             return Err(OpenRefused::TooManyForCredential);
@@ -252,7 +278,6 @@ impl Pipe {
         guard.sessions.insert(
             id,
             WebSession {
-                credential,
                 admitted,
                 inbox: VecDeque::new(),
                 inbox_bytes: 0,
@@ -278,9 +303,16 @@ impl Pipe {
          * an oversized frame arriving at a full inbox still closes rather than
          * being reported as backpressure and retried forever. */
         if frame.len() > MAX_FRAME {
-            session.closed = Some("frame too large".to_owned());
-            session.inbox.clear();
-            session.inbox_bytes = 0;
+            /* THROUGH `abandon`, not a hand-rolled half of it. The hand-rolled
+             * version cleared the inbox and left everything else: the outbound
+             * sender stayed live, the session's outbound bytes stayed counted
+             * in the host's total, and no waiter was woken — the same
+             * leak-by-partial-close `abandon`'s own note says it exists to
+             * end. */
+            let freed = abandon(session, "frame too large");
+            guard.outbound_bytes_total = guard.outbound_bytes_total.saturating_sub(freed);
+            drop(guard);
+            self.room.notify_waiters();
             return Push::TooLarge;
         }
         if session.inbox.len() >= INBOX_CAP
@@ -300,6 +332,9 @@ impl Pipe {
     }
 
     /// A frame from the webview, bound for the browser. Never waits.
+    ///
+    /// `Backpressure` HANDS THE FRAME BACK; [`Pipe::send_wait`] is the caller
+    /// that turns it into a wait rather than a refusal.
     pub fn send(&self, id: WebSessionId, frame: Vec<u8>) -> Send {
         let mut guard = self.inner.lock().expect("pipe mutex poisoned");
         /* THE HOST'S BUDGET FIRST, before the session's. Sixty-four sessions
@@ -310,17 +345,24 @@ impl Pipe {
         let Some(session) = guard.sessions.get_mut(&id) else {
             return Send::Gone;
         };
-        if total.saturating_add(frame.len()) > OUTBOUND_BYTE_CAP_GLOBAL {
-            return Send::Backpressure;
+        if session.closed.is_some() {
+            return Send::Gone;
         }
+        /* THE SIZE CHECK COMES BEFORE EVERY BUDGET. An oversized frame at a
+         * full budget answered `Backpressure`, and `send_wait` then held and
+         * retried a frame that could never fit — out to its whole deadline —
+         * instead of refusing it as the protocol violation it is. */
         if frame.len() > MAX_FRAME {
             return Send::TooLarge;
+        }
+        if total.saturating_add(frame.len()) > OUTBOUND_BYTE_CAP_GLOBAL {
+            return Send::Backpressure(frame);
         }
         /* THE BYTE BUDGET, checked before the channel's slot count. A browser
          * that stops reading holds whatever is queued; 256 slots said nothing
          * about how much that is. See `OUTBOUND_BYTE_CAP`. */
         if session.outbound_bytes.saturating_add(frame.len()) > OUTBOUND_BYTE_CAP {
-            return Send::Backpressure;
+            return Send::Backpressure(frame);
         }
         let Some(outbound) = session.outbound.as_ref() else {
             return Send::Gone;
@@ -332,8 +374,55 @@ impl Pipe {
                 guard.outbound_bytes_total += len;
                 Send::Sent
             }
-            Err(mpsc::error::TrySendError::Full(_)) => Send::Backpressure,
+            Err(mpsc::error::TrySendError::Full(frame)) => Send::Backpressure(frame),
             Err(mpsc::error::TrySendError::Closed(_)) => Send::Gone,
+        }
+    }
+
+    /// A frame from the webview, bound for the browser — WAITING for room.
+    ///
+    /// ⚠️ **BACKPRESSURE WAS A FAILURE, AND IT ENDED THE SESSION.** The plugin
+    /// mapped `Backpressure` to an error, and the webview's pump treated every
+    /// error from a send as a dead session: it closed the router connection.
+    /// `content.read` yields 512 KiB chunks as fast as IPC accepts them, the
+    /// session's 8 MiB budget fills within twelve, and a book larger than that
+    /// aborted mid-stream on the phone — under a variant whose own doc said
+    /// "NOT an error… retry". The phase-18 two-device runs used a 600 KB book.
+    ///
+    /// The wait lives HERE and not in the webview, because two drafts that put
+    /// it there were refuted. An event answered after a synchronous refusal has
+    /// a lost wakeup — capacity can free before the listener exists. A single
+    /// permit wakes one waiter when a drain may have freed room for several,
+    /// and a close must wake every waiter on the closing session. So this is a
+    /// LOOP: check all three limits, `Sent` if it fits, otherwise park on the
+    /// host's broadcast, re-check when woken, until the deadline.
+    ///
+    /// The interest in `room` is REGISTERED BEFORE THE CHECK (`enable`), which
+    /// is the whole lost-wakeup answer: a drain that lands between the check
+    /// and the park still completes the wait, because the waiter already
+    /// existed when the broadcast fired. The mutex is never held across the
+    /// await.
+    pub async fn send_wait(
+        &self,
+        id: WebSessionId,
+        frame: Vec<u8>,
+        timeout: std::time::Duration,
+    ) -> Send {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut frame = frame;
+        loop {
+            let room = self.room.notified();
+            tokio::pin!(room);
+            room.as_mut().enable();
+            match self.send(id, frame) {
+                Send::Backpressure(held) => frame = held,
+                answered => return answered,
+            }
+            if tokio::time::timeout_at(deadline, room).await.is_err() {
+                /* Handed back, not dropped — the caller decides what a
+                 * browser that drained nothing for this long deserves. */
+                return Send::Backpressure(frame);
+            }
         }
     }
 
@@ -363,6 +452,13 @@ impl Pipe {
             session.outbound_bytes -= taken;
             guard.outbound_bytes_total = guard.outbound_bytes_total.saturating_sub(taken);
         }
+        drop(guard);
+        /* ROOM MAY HAVE APPEARED — for this session, and for every session
+         * waiting on the host's budget. Broadcast after the lock is released,
+         * so a woken waiter can take it at once. Unconditional: the channel's
+         * slot count freed at the `recv` this reports, whatever the byte
+         * arithmetic above concluded. */
+        self.room.notify_waiters();
     }
 
     /// Bytes queued toward every browser at once. For tests and diagnostics.
@@ -424,18 +520,35 @@ impl Pipe {
             let Some(session) = guard.sessions.get(&id) else {
                 return Vec::new();
             };
+            Arc::clone(&session.arrived)
+        };
+        /* THE WAITER REGISTERS BEFORE IT LOOKS. `Notify` stores one permit;
+         * draining frames without consuming the permit their `push` stored
+         * left it behind, and the NEXT call — with an empty inbox — returned
+         * from it immediately: an empty answer the caller reads as a timeout,
+         * one spurious IPC round per leftover permit. `enable` consumes a
+         * stored permit up front, and the re-check under the lock below is
+         * what keeps a frame arriving in between from being missed. */
+        let notified = arrived.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        {
+            let guard = self.inner.lock().expect("pipe mutex poisoned");
+            let Some(session) = guard.sessions.get(&id) else {
+                return Vec::new();
+            };
             /* ALREADY WAITING FRAMES SHORT-CIRCUIT, so a busy session never
              * pays the wait at all. */
             if !session.inbox.is_empty() || session.closed.is_some() {
                 drop(guard);
                 return self.drain(id, max);
             }
-            Arc::clone(&session.arrived)
-        };
-        /* The timeout is what makes this a poll rather than a subscription: a
-         * session closed while we wait wakes nobody, and the caller has to come
-         * back and see that for itself. */
-        let _ = tokio::time::timeout(timeout, arrived.notified()).await;
+        }
+        /* The timeout is what makes this a poll rather than a subscription —
+         * and a close DOES wake a parked waiter (`abandon` notifies), so a
+         * revocation costs a wake, not a timeout. The caller sees the close
+         * on its next ask either way. */
+        let _ = tokio::time::timeout(timeout, notified).await;
         self.drain(id, max)
     }
 
@@ -447,24 +560,44 @@ impl Pipe {
             None => 0,
         };
         guard.outbound_bytes_total = guard.outbound_bytes_total.saturating_sub(freed);
+        drop(guard);
+        /* A close frees the host's budget AND must reach a sender parked on
+         * the closing session, which re-checks and answers `Gone` rather than
+         * sitting out its deadline. */
+        self.room.notify_waiters();
     }
 
-    /// Close every socket a credential opened, and say which.
+    /// Close every socket a browser opened, and say which.
     ///
     /// **This is the half of revocation `paper_webauth` cannot do.** Its
     /// `revoke` forgets the credential; without this the browser keeps a live
-    /// socket and goes on answering, which its doc comment warns about.
-    pub fn close_credential(&self, credential: &Credential, reason: &str) -> Vec<WebSessionId> {
+    /// socket and goes on answering, which its doc comment warns about. By
+    /// the durable [`SessionId`], which is what `revoke` hands back — the
+    /// credential itself is not held on either side.
+    pub fn close_browser(&self, browser: SessionId, reason: &str) -> Vec<WebSessionId> {
+        self.close_where(reason, |session| session.admitted == browser)
+    }
+
+    /// Close every socket there is. The "this laptop was stolen" button's
+    /// second half: the credential set has just been emptied, so no socket
+    /// still belongs to a browser the shelf trusts.
+    pub fn close_all(&self, reason: &str) -> Vec<WebSessionId> {
+        self.close_where(reason, |_| true)
+    }
+
+    fn close_where(&self, reason: &str, pick: impl Fn(&WebSession) -> bool) -> Vec<WebSessionId> {
         let mut guard = self.inner.lock().expect("pipe mutex poisoned");
         let mut closed = Vec::new();
         let mut freed = 0;
         for (id, session) in guard.sessions.iter_mut() {
-            if &session.credential == credential && session.closed.is_none() {
+            if session.closed.is_none() && pick(session) {
                 freed += abandon(session, reason);
                 closed.push(*id);
             }
         }
         guard.outbound_bytes_total = guard.outbound_bytes_total.saturating_sub(freed);
+        drop(guard);
+        self.room.notify_waiters();
         closed.sort();
         closed
     }
@@ -484,6 +617,8 @@ impl Pipe {
                 .outbound_bytes_total
                 .saturating_sub(session.outbound_bytes);
         }
+        drop(guard);
+        self.room.notify_waiters();
     }
 
     /// Why a socket closed, if it has.
@@ -519,17 +654,6 @@ impl Pipe {
         ids
     }
 
-    /// The credential behind a socket, so a caller can revoke the whole
-    /// browser rather than the one connection it happened to name.
-    pub fn credential_of(&self, id: WebSessionId) -> Option<Credential> {
-        self.inner
-            .lock()
-            .expect("pipe mutex poisoned")
-            .sessions
-            .get(&id)
-            .map(|s| s.credential.clone())
-    }
-
     pub fn live_count(&self) -> usize {
         self.inner
             .lock()
@@ -544,9 +668,10 @@ impl Pipe {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use paper_webauth::sessions::Sessions;
+    use paper_webauth::sessions::{Credential, Sessions};
     use paper_webauth::{DeviceAuth, Outcome};
     use std::time::Instant;
+    use std::time::SystemTime;
 
     /// A channel whose receiver is kept alive by the caller. Dropping the
     /// receiver would make every `send` report `Gone`, which is correct
@@ -556,7 +681,8 @@ mod tests {
     }
 
     /// A real credential and the admission behind it, because `open` should not
-    /// be reachable without one.
+    /// be reachable without one. The credential comes back too, for the tests
+    /// that revoke it; `open` itself never sees it.
     fn admitted(sessions: &Sessions) -> (SessionId, Credential) {
         let auth = DeviceAuth::new();
         let now = Instant::now();
@@ -566,16 +692,25 @@ mod tests {
             Outcome::Granted(g) => g,
             other => panic!("expected a grant, got {other:?}"),
         };
-        let credential = sessions.issue(grant, now);
-        let admission = sessions.validate(&credential, now).expect("valid");
-        (sessions.admit(admission).expect("admitted"), credential)
+        let credential = sessions
+            .issue(grant, SystemTime::now(), "test")
+            .expect("an in-memory set issues");
+        let admission = sessions
+            .validate(&credential, SystemTime::now())
+            .expect("valid");
+        (
+            sessions
+                .admit(admission, SystemTime::now())
+                .expect("admitted"),
+            credential,
+        )
     }
 
     #[test]
     fn frames_round_trip_oldest_first() {
         let (pipe, sessions) = (Pipe::new(), Sessions::new());
-        let (id, credential) = admitted(&sessions);
-        let socket = pipe.open(id, credential, wire().0).expect("open");
+        let (id, _) = admitted(&sessions);
+        let socket = pipe.open(id, wire().0).expect("open");
 
         assert_eq!(pipe.push(socket, b"one".to_vec()), Push::Accepted);
         assert_eq!(pipe.push(socket, b"two".to_vec()), Push::Accepted);
@@ -589,8 +724,8 @@ mod tests {
     #[test]
     fn drain_respects_its_maximum_and_keeps_the_rest() {
         let (pipe, sessions) = (Pipe::new(), Sessions::new());
-        let (id, credential) = admitted(&sessions);
-        let socket = pipe.open(id, credential, wire().0).expect("open");
+        let (id, _) = admitted(&sessions);
+        let socket = pipe.open(id, wire().0).expect("open");
         for n in 0..5u8 {
             assert_eq!(pipe.push(socket, vec![n]), Push::Accepted);
         }
@@ -601,8 +736,8 @@ mod tests {
     #[test]
     fn an_oversized_frame_closes_the_session_rather_than_backpressuring() {
         let (pipe, sessions) = (Pipe::new(), Sessions::new());
-        let (id, credential) = admitted(&sessions);
-        let socket = pipe.open(id, credential, wire().0).expect("open");
+        let (id, _) = admitted(&sessions);
+        let socket = pipe.open(id, wire().0).expect("open");
 
         assert_eq!(pipe.push(socket, vec![0u8; MAX_FRAME + 1]), Push::TooLarge);
         assert_eq!(
@@ -618,8 +753,8 @@ mod tests {
         /* The ordering that matters: checking the budget first would report
          * this as backpressure and leave a protocol-violating socket open. */
         let (pipe, sessions) = (Pipe::new(), Sessions::new());
-        let (id, credential) = admitted(&sessions);
-        let socket = pipe.open(id, credential, wire().0).expect("open");
+        let (id, _) = admitted(&sessions);
+        let socket = pipe.open(id, wire().0).expect("open");
         while pipe.push(socket, vec![0u8; 64 * 1024]) == Push::Accepted {}
         assert_eq!(pipe.push(socket, vec![0u8; MAX_FRAME + 1]), Push::TooLarge);
     }
@@ -627,8 +762,8 @@ mod tests {
     #[test]
     fn the_byte_budget_backpressures_and_a_drain_clears_it() {
         let (pipe, sessions) = (Pipe::new(), Sessions::new());
-        let (id, credential) = admitted(&sessions);
-        let socket = pipe.open(id, credential, wire().0).expect("open");
+        let (id, _) = admitted(&sessions);
+        let socket = pipe.open(id, wire().0).expect("open");
         let chunk = vec![0u8; 1024 * 1024];
 
         let mut accepted = 0;
@@ -666,14 +801,14 @@ mod tests {
     #[test]
     fn the_outbound_budget_bounds_bytes_and_a_drain_clears_it() {
         let (pipe, sessions) = (Pipe::new(), Sessions::new());
-        let (id, credential) = admitted(&sessions);
+        let (id, _) = admitted(&sessions);
         /* THE RECEIVER IS HELD. Elsewhere in this file `wire().0` drops it,
          * which is harmless for `push` and fatal here: a closed channel makes
          * `try_send` return `Closed` and every `send` answer `Gone`, so the
          * whole test would pass through its loop zero times and assert nothing
          * about the budget. */
         let (sender, _receiver) = wire();
-        let socket = pipe.open(id, credential, sender).expect("open");
+        let socket = pipe.open(id, sender).expect("open");
         let chunk = vec![0u8; 1024 * 1024];
 
         let mut sent = 0;
@@ -689,7 +824,11 @@ mod tests {
             "the byte budget must bite first; a test that fills the slots proves nothing"
         );
         assert_eq!(pipe.outbound_bytes(socket), OUTBOUND_BYTE_CAP);
-        assert_eq!(pipe.send(socket, chunk.clone()), Send::Backpressure);
+        assert_eq!(
+            pipe.send(socket, chunk.clone()),
+            Send::Backpressure(chunk.clone()),
+            "backpressure must return the frame it would not take"
+        );
         assert!(
             pipe.closed_reason(socket).is_none(),
             "a slow browser is not a bad one"
@@ -725,10 +864,10 @@ mod tests {
             "the test needs more sessions than the host allows"
         );
         for _ in 0..needed {
-            let (id, credential) = admitted(&sessions);
+            let (id, _) = admitted(&sessions);
             let (sender, receiver) = wire();
             wires.push(receiver);
-            sockets.push(pipe.open(id, credential, sender).expect("open"));
+            sockets.push(pipe.open(id, sender).expect("open"));
         }
 
         let mut accepted = 0;
@@ -736,7 +875,7 @@ mod tests {
             loop {
                 match pipe.send(*socket, chunk.clone()) {
                     Send::Sent => accepted += 1,
-                    Send::Backpressure => break,
+                    Send::Backpressure(_) => break,
                     other => panic!("unexpected {other:?}"),
                 }
                 if pipe.outbound_bytes_total() >= OUTBOUND_BYTE_CAP_GLOBAL {
@@ -759,7 +898,10 @@ mod tests {
          * not. That is the whole difference between the two ceilings. */
         let last = *sockets.last().expect("a socket");
         assert!(pipe.outbound_bytes(last) < OUTBOUND_BYTE_CAP);
-        assert_eq!(pipe.send(last, chunk.clone()), Send::Backpressure);
+        assert_eq!(
+            pipe.send(last, chunk.clone()),
+            Send::Backpressure(chunk.clone())
+        );
 
         /* And a drain frees the host's budget, not just the session's. */
         pipe.drained(sockets[0], chunk.len());
@@ -780,9 +922,9 @@ mod tests {
         let chunk = vec![0u8; 1024 * 1024];
 
         for close_first in [true, false] {
-            let (id, credential) = admitted(&sessions);
+            let (id, _) = admitted(&sessions);
             let (sender, _receiver) = wire();
-            let socket = pipe.open(id, credential.clone(), sender).expect("open");
+            let socket = pipe.open(id, sender).expect("open");
             for _ in 0..4 {
                 assert_eq!(pipe.send(socket, chunk.clone()), Send::Sent);
             }
@@ -823,12 +965,12 @@ mod tests {
 
         /* One session that will be closed mid-write, and one that keeps its
          * queue — so the host's total has a known non-zero value to check. */
-        let (id_a, cred_a) = admitted(&sessions);
+        let (id_a, _) = admitted(&sessions);
         let (sender_a, _recv_a) = wire();
-        let closing = pipe.open(id_a, cred_a, sender_a).expect("open");
-        let (id_b, cred_b) = admitted(&sessions);
+        let closing = pipe.open(id_a, sender_a).expect("open");
+        let (id_b, _) = admitted(&sessions);
         let (sender_b, _recv_b) = wire();
-        let keeping = pipe.open(id_b, cred_b, sender_b).expect("open");
+        let keeping = pipe.open(id_b, sender_b).expect("open");
 
         assert_eq!(pipe.send(closing, chunk.clone()), Send::Sent);
         assert_eq!(pipe.send(keeping, chunk.clone()), Send::Sent);
@@ -855,13 +997,13 @@ mod tests {
     #[test]
     fn closing_a_credential_releases_the_host_budget() {
         let (pipe, sessions) = (Pipe::new(), Sessions::new());
-        let (id, credential) = admitted(&sessions);
+        let (id, _) = admitted(&sessions);
         let (sender, _receiver) = wire();
-        let socket = pipe.open(id, credential.clone(), sender).expect("open");
+        let socket = pipe.open(id, sender).expect("open");
         assert_eq!(pipe.send(socket, vec![0u8; 1024 * 1024]), Send::Sent);
         assert!(pipe.outbound_bytes_total() > 0);
 
-        pipe.close_credential(&credential, "revoked");
+        pipe.close_browser(id, "revoked");
         assert_eq!(pipe.outbound_bytes_total(), 0);
     }
 
@@ -875,8 +1017,8 @@ mod tests {
     #[tokio::test]
     async fn waiting_returns_as_soon_as_a_frame_arrives() {
         let (pipe, sessions) = (Arc::new(Pipe::new()), Sessions::new());
-        let (id, credential) = admitted(&sessions);
-        let socket = pipe.open(id, credential, wire().0).expect("open");
+        let (id, _) = admitted(&sessions);
+        let socket = pipe.open(id, wire().0).expect("open");
 
         /* Nothing waiting: the call parks rather than answering empty. */
         let waiter = {
@@ -903,8 +1045,8 @@ mod tests {
     #[tokio::test]
     async fn waiting_does_not_wait_at_all_when_frames_are_already_there() {
         let (pipe, sessions) = (Pipe::new(), Sessions::new());
-        let (id, credential) = admitted(&sessions);
-        let socket = pipe.open(id, credential, wire().0).expect("open");
+        let (id, _) = admitted(&sessions);
+        let socket = pipe.open(id, wire().0).expect("open");
         pipe.push(socket, b"already here".to_vec());
 
         /* A busy session must never pay the wait. The timeout is long enough
@@ -922,8 +1064,8 @@ mod tests {
     #[tokio::test]
     async fn closing_wakes_a_waiting_reader() {
         let (pipe, sessions) = (Arc::new(Pipe::new()), Sessions::new());
-        let (id, credential) = admitted(&sessions);
-        let socket = pipe.open(id, credential, wire().0).expect("open");
+        let (id, _) = admitted(&sessions);
+        let socket = pipe.open(id, wire().0).expect("open");
 
         let waiter = {
             let pipe = Arc::clone(&pipe);
@@ -946,12 +1088,266 @@ mod tests {
     #[tokio::test]
     async fn waiting_gives_up_after_its_timeout() {
         let (pipe, sessions) = (Pipe::new(), Sessions::new());
-        let (id, credential) = admitted(&sessions);
-        let socket = pipe.open(id, credential, wire().0).expect("open");
+        let (id, _) = admitted(&sessions);
+        let socket = pipe.open(id, wire().0).expect("open");
         let frames = pipe
             .wait_for_frames(socket, usize::MAX, std::time::Duration::from_millis(30))
             .await;
         assert!(frames.is_empty());
+    }
+
+    /// BACKPRESSURE IS A WAIT, NOT A FAILURE — and the wait is a broadcast.
+    ///
+    /// `webhost_send` mapped `Send::Backpressure` to an error, and the webview's
+    /// pump treated any error as the session being dead: it closed the router
+    /// connection, and a book larger than the 8 MiB session budget — twelve
+    /// 512 KiB chunks, which `content.read` yields as fast as IPC accepts —
+    /// aborted mid-stream on the phone. The phase-18 two-device runs used a
+    /// 600 KB book and never reached it.
+    ///
+    /// Two drafts of the fix were refuted before this one. A `drained` EVENT
+    /// answered after a synchronous `Backpressure` has a lost wakeup: capacity
+    /// can free before the listener exists. A single `Notify` permit wakes ONE
+    /// waiter when a drain may have freed room for several, and a close must
+    /// wake every waiter to return `Gone`. So: a stateful loop over all three
+    /// limits, parked on a BROADCAST fired by every free and every close,
+    /// re-checking each time. This is Codex's own case: the host's budget is
+    /// full through other sessions, two waiters for EMPTY sessions are parked
+    /// on it, one drain frees room for both, and both are sent.
+    #[tokio::test]
+    async fn a_send_waits_for_room_and_one_drain_wakes_every_waiter_that_fits() {
+        let (pipe, sessions) = (Arc::new(Pipe::new()), Sessions::new());
+        let chunk = vec![0u8; 1024 * 1024];
+        let half = vec![1u8; 512 * 1024];
+
+        /* THE HOST'S BUDGET, FILLED THROUGH OTHER SESSIONS. Each stops at its
+         * own 8 MiB, so it takes sixteen to reach the host's 128 MiB — B and C
+         * below are then refused while still holding nothing at all, which is
+         * exactly the case a per-session wait cannot see. */
+        let mut wires = Vec::new();
+        let mut fillers = Vec::new();
+        while pipe.outbound_bytes_total() < OUTBOUND_BYTE_CAP_GLOBAL {
+            let (id, _) = admitted(&sessions);
+            let (sender, receiver) = wire();
+            wires.push(receiver);
+            let socket = pipe.open(id, sender).expect("open");
+            fillers.push(socket);
+            while pipe.outbound_bytes_total() < OUTBOUND_BYTE_CAP_GLOBAL
+                && pipe.send(socket, chunk.clone()) == Send::Sent
+            {}
+        }
+        assert_eq!(pipe.outbound_bytes_total(), OUTBOUND_BYTE_CAP_GLOBAL);
+
+        let (id_b, _) = admitted(&sessions);
+        let (sender_b, _recv_b) = wire();
+        let b = pipe.open(id_b, sender_b).expect("open");
+        let (id_c, _) = admitted(&sessions);
+        let (sender_c, _recv_c) = wire();
+        let c = pipe.open(id_c, sender_c).expect("open");
+        assert_eq!(pipe.outbound_bytes(b), 0);
+
+        /* Without the wait, this is the failure: refused, frame handed back. */
+        assert_eq!(pipe.send(b, half.clone()), Send::Backpressure(half.clone()));
+
+        let deadline = std::time::Duration::from_secs(5);
+        let waiting_b = {
+            let pipe = Arc::clone(&pipe);
+            let half = half.clone();
+            tokio::spawn(async move { pipe.send_wait(b, half, deadline).await })
+        };
+        let waiting_c = {
+            let pipe = Arc::clone(&pipe);
+            let half = half.clone();
+            tokio::spawn(async move { pipe.send_wait(c, half, deadline).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert!(
+            !waiting_b.is_finished() && !waiting_c.is_finished(),
+            "a full host must be waited on, not answered"
+        );
+
+        /* ONE drain, 1 MiB — room for BOTH 512 KiB waiters, and only a
+         * broadcast lets both see it. A single permit would wake one and
+         * leave the other parked until its deadline. */
+        pipe.drained(fillers[0], chunk.len());
+        let (sent_b, sent_c) = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            (
+                waiting_b.await.expect("task"),
+                waiting_c.await.expect("task"),
+            )
+        })
+        .await
+        .expect("both waiters must be woken by the one drain");
+        assert_eq!(sent_b, Send::Sent);
+        assert_eq!(sent_c, Send::Sent);
+        assert_eq!(pipe.outbound_bytes(b), half.len());
+        assert_eq!(pipe.outbound_bytes(c), half.len());
+        assert_eq!(pipe.outbound_bytes_total(), OUTBOUND_BYTE_CAP_GLOBAL);
+    }
+
+    /// AND A SECOND WAITER THAT DOES NOT FIT KEEPS WAITING, then goes.
+    ///
+    /// The broadcast wakes both; the re-check is what stops the second from
+    /// being sent into a budget the first just used up. Without it a wake would
+    /// be a permission, and two waiters would overshoot the cap together.
+    #[tokio::test]
+    async fn a_woken_waiter_that_still_does_not_fit_goes_back_to_waiting() {
+        let (pipe, sessions) = (Arc::new(Pipe::new()), Sessions::new());
+        let chunk = vec![0u8; 1024 * 1024];
+        let half = vec![1u8; 512 * 1024];
+
+        let mut wires = Vec::new();
+        let mut fillers = Vec::new();
+        while pipe.outbound_bytes_total() < OUTBOUND_BYTE_CAP_GLOBAL {
+            let (id, _) = admitted(&sessions);
+            let (sender, receiver) = wire();
+            wires.push(receiver);
+            let socket = pipe.open(id, sender).expect("open");
+            fillers.push(socket);
+            while pipe.outbound_bytes_total() < OUTBOUND_BYTE_CAP_GLOBAL
+                && pipe.send(socket, chunk.clone()) == Send::Sent
+            {}
+        }
+
+        let (id_b, _) = admitted(&sessions);
+        let (sender_b, _recv_b) = wire();
+        let b = pipe.open(id_b, sender_b).expect("open");
+        let (id_c, _) = admitted(&sessions);
+        let (sender_c, _recv_c) = wire();
+        let c = pipe.open(id_c, sender_c).expect("open");
+
+        let deadline = std::time::Duration::from_secs(5);
+        let waiting_b = {
+            let pipe = Arc::clone(&pipe);
+            let half = half.clone();
+            tokio::spawn(async move { pipe.send_wait(b, half, deadline).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let waiting_c = {
+            let pipe = Arc::clone(&pipe);
+            let half = half.clone();
+            tokio::spawn(async move { pipe.send_wait(c, half, deadline).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        /* Room for exactly ONE of them. */
+        pipe.drained(fillers[0], half.len());
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let finished = usize::from(waiting_b.is_finished()) + usize::from(waiting_c.is_finished());
+        assert_eq!(finished, 1, "one fits, the other must go back to waiting");
+        assert_eq!(pipe.outbound_bytes_total(), OUTBOUND_BYTE_CAP_GLOBAL);
+
+        /* Room for the other. */
+        pipe.drained(fillers[0], half.len());
+        let both = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            (
+                waiting_b.await.expect("task"),
+                waiting_c.await.expect("task"),
+            )
+        })
+        .await
+        .expect("the second drain must release the second waiter");
+        assert_eq!(both, (Send::Sent, Send::Sent));
+    }
+
+    /// A CLOSE DURING A WAIT RETURNS `Gone`, at once — every waiter, not one.
+    ///
+    /// A session revoked while its sender is parked must not sit out the whole
+    /// deadline: the pump is awaiting this call and the router behind it is
+    /// stalled on the answer.
+    #[tokio::test]
+    async fn a_close_during_a_wait_returns_gone_without_waiting_out_the_deadline() {
+        let (pipe, sessions) = (Arc::new(Pipe::new()), Sessions::new());
+        let (id, _) = admitted(&sessions);
+        let (sender, _receiver) = wire();
+        let socket = pipe.open(id, sender).expect("open");
+        let chunk = vec![0u8; 1024 * 1024];
+        while pipe.send(socket, chunk.clone()) == Send::Sent {}
+
+        let waiting = {
+            let pipe = Arc::clone(&pipe);
+            let chunk = chunk.clone();
+            tokio::spawn(async move {
+                pipe.send_wait(socket, chunk, std::time::Duration::from_secs(30))
+                    .await
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!waiting.is_finished());
+
+        pipe.close_browser(id, "revoked");
+        let answer = tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+            .await
+            .expect("the close must wake the waiter")
+            .expect("task");
+        assert_eq!(answer, Send::Gone);
+    }
+
+    /// A WAIT THAT RUNS OUT HANDS THE FRAME BACK, byte for byte — the same
+    /// promise `Push::Backpressure` makes, for the same reason: what the caller
+    /// can still do with the bytes is the property, not the variant.
+    #[tokio::test]
+    async fn a_wait_that_times_out_hands_the_frame_back() {
+        let (pipe, sessions) = (Pipe::new(), Sessions::new());
+        let (id, _) = admitted(&sessions);
+        let (sender, _receiver) = wire();
+        let socket = pipe.open(id, sender).expect("open");
+        let chunk = vec![0u8; 1024 * 1024];
+        while pipe.send(socket, chunk.clone()) == Send::Sent {}
+
+        let held = vec![9u8; 1024];
+        let answer = pipe
+            .send_wait(socket, held.clone(), std::time::Duration::from_millis(30))
+            .await;
+        assert_eq!(answer, Send::Backpressure(held));
+        assert!(
+            pipe.closed_reason(socket).is_none(),
+            "a slow browser is still not a bad one; closing is the caller's decision"
+        );
+    }
+
+    /// AND ROOM THAT APPEARS BEFORE THE WAITER PARKS IS NOT MISSED.
+    ///
+    /// The lost wakeup the first draft had, as a loop: room is freed
+    /// concurrently and repeatedly while a sender waits, and every frame lands
+    /// without a single wait running to its deadline. A wakeup that could be
+    /// lost between the check and the park would show here as a deadline hit.
+    #[tokio::test]
+    async fn room_freed_while_a_sender_is_between_its_check_and_its_park_is_seen() {
+        let (pipe, sessions) = (Arc::new(Pipe::new()), Sessions::new());
+        let (id, _) = admitted(&sessions);
+        let (sender, mut receiver) = wire();
+        let socket = pipe.open(id, sender).expect("open");
+        let chunk = vec![0u8; 1024 * 1024];
+        while pipe.send(socket, chunk.clone()) == Send::Sent {}
+
+        /* A pump that drains one frame at a time, as fast as it can. */
+        let draining = {
+            let pipe = Arc::clone(&pipe);
+            tokio::spawn(async move {
+                let mut taken = 0;
+                while let Some(frame) = receiver.recv().await {
+                    pipe.drained(socket, frame.len());
+                    taken += 1;
+                    if taken == 40 {
+                        break;
+                    }
+                }
+                taken
+            })
+        };
+
+        for _ in 0..32 {
+            let answer = pipe
+                .send_wait(socket, chunk.clone(), std::time::Duration::from_millis(500))
+                .await;
+            assert_eq!(
+                answer,
+                Send::Sent,
+                "a wait ran to its deadline: a wakeup was lost"
+            );
+        }
+        assert_eq!(draining.await.expect("task"), 40);
     }
 
     #[test]
@@ -959,8 +1355,8 @@ mod tests {
         /* The bound the byte budget cannot provide: empty frames cost no bytes
          * and would grow the queue without limit. */
         let (pipe, sessions) = (Pipe::new(), Sessions::new());
-        let (id, credential) = admitted(&sessions);
-        let socket = pipe.open(id, credential, wire().0).expect("open");
+        let (id, _) = admitted(&sessions);
+        let socket = pipe.open(id, wire().0).expect("open");
         for _ in 0..INBOX_CAP {
             assert_eq!(pipe.push(socket, Vec::new()), Push::Accepted);
         }
@@ -973,13 +1369,12 @@ mod tests {
     #[test]
     fn one_credential_cannot_hold_more_than_its_share() {
         let (pipe, sessions) = (Pipe::new(), Sessions::new());
-        let (id, credential) = admitted(&sessions);
+        let (id, _) = admitted(&sessions);
         for _ in 0..MAX_SESSIONS_PER_CREDENTIAL {
-            pipe.open(id, credential.clone(), wire().0)
-                .expect("within the share");
+            pipe.open(id, wire().0).expect("within the share");
         }
         assert_eq!(
-            pipe.open(id, credential, wire().0),
+            pipe.open(id, wire().0),
             Err(OpenRefused::TooManyForCredential)
         );
     }
@@ -987,14 +1382,14 @@ mod tests {
     #[test]
     fn a_closed_session_frees_the_credentials_share() {
         let (pipe, sessions) = (Pipe::new(), Sessions::new());
-        let (id, credential) = admitted(&sessions);
+        let (id, _) = admitted(&sessions);
         let mut sockets = Vec::new();
         for _ in 0..MAX_SESSIONS_PER_CREDENTIAL {
-            sockets.push(pipe.open(id, credential.clone(), wire().0).expect("open"));
+            sockets.push(pipe.open(id, wire().0).expect("open"));
         }
         pipe.close(sockets[0], "done");
         assert!(
-            pipe.open(id, credential, wire().0).is_ok(),
+            pipe.open(id, wire().0).is_ok(),
             "a reconnect after a close must not be refused"
         );
     }
@@ -1005,13 +1400,13 @@ mod tests {
          * without this the browser keeps answering on a live socket. */
         let (pipe, sessions) = (Pipe::new(), Sessions::new());
         let (mine_id, mine) = admitted(&sessions);
-        let (other_id, other) = admitted(&sessions);
-        let a = pipe.open(mine_id, mine.clone(), wire().0).expect("open");
-        let b = pipe.open(mine_id, mine.clone(), wire().0).expect("open");
-        let spared = pipe.open(other_id, other, wire().0).expect("open");
+        let (other_id, _) = admitted(&sessions);
+        let a = pipe.open(mine_id, wire().0).expect("open");
+        let b = pipe.open(mine_id, wire().0).expect("open");
+        let spared = pipe.open(other_id, wire().0).expect("open");
 
-        assert!(sessions.revoke(&mine).is_some());
-        let closed = pipe.close_credential(&mine, "revoked");
+        assert!(sessions.revoke(&mine).applied.is_some());
+        let closed = pipe.close_browser(mine_id, "revoked");
 
         assert_eq!(closed, vec![a.min(b), a.max(b)]);
         assert_eq!(pipe.closed_reason(a).as_deref(), Some("revoked"));
@@ -1027,18 +1422,18 @@ mod tests {
         /* A revoked socket's queued frames must not be drainable afterwards —
          * they were sent by a browser that is no longer trusted. */
         let (pipe, sessions) = (Pipe::new(), Sessions::new());
-        let (id, credential) = admitted(&sessions);
-        let socket = pipe.open(id, credential.clone(), wire().0).expect("open");
+        let (id, _) = admitted(&sessions);
+        let socket = pipe.open(id, wire().0).expect("open");
         assert_eq!(pipe.push(socket, b"queued".to_vec()), Push::Accepted);
-        pipe.close_credential(&credential, "revoked");
+        pipe.close_browser(id, "revoked");
         assert!(pipe.drain(socket, 10).is_empty());
     }
 
     #[test]
     fn close_is_idempotent_and_keeps_the_first_reason() {
         let (pipe, sessions) = (Pipe::new(), Sessions::new());
-        let (id, credential) = admitted(&sessions);
-        let socket = pipe.open(id, credential, wire().0).expect("open");
+        let (id, _) = admitted(&sessions);
+        let socket = pipe.open(id, wire().0).expect("open");
         pipe.close(socket, "first");
         pipe.close(socket, "second");
         assert_eq!(pipe.closed_reason(socket).as_deref(), Some("first"));
@@ -1047,9 +1442,9 @@ mod tests {
     #[test]
     fn live_ids_lists_the_open_sockets_only() {
         let (pipe, sessions) = (Pipe::new(), Sessions::new());
-        let (id, credential) = admitted(&sessions);
-        let first = pipe.open(id, credential.clone(), wire().0).expect("open");
-        let second = pipe.open(id, credential.clone(), wire().0).expect("open");
+        let (id, _) = admitted(&sessions);
+        let first = pipe.open(id, wire().0).expect("open");
+        let second = pipe.open(id, wire().0).expect("open");
         assert_eq!(pipe.live_ids(), vec![first, second]);
 
         pipe.close(first, "done");
@@ -1057,23 +1452,23 @@ mod tests {
     }
 
     #[test]
-    fn a_socket_knows_the_credential_behind_it() {
+    fn a_socket_knows_the_browser_behind_it() {
         /* Revoking by socket must cut the whole BROWSER off, not the one
          * connection the caller happened to name. */
         let (pipe, sessions) = (Pipe::new(), Sessions::new());
-        let (id, credential) = admitted(&sessions);
-        let one = pipe.open(id, credential.clone(), wire().0).expect("open");
-        let two = pipe.open(id, credential.clone(), wire().0).expect("open");
+        let (id, _) = admitted(&sessions);
+        let one = pipe.open(id, wire().0).expect("open");
+        let two = pipe.open(id, wire().0).expect("open");
 
-        let found = pipe.credential_of(one).expect("a credential");
-        assert_eq!(pipe.close_credential(&found, "revoked"), vec![one, two]);
+        let found = pipe.admitted(one).expect("a browser");
+        assert_eq!(pipe.close_browser(found, "revoked"), vec![one, two]);
     }
 
     #[test]
     fn a_reaped_session_is_gone_entirely() {
         let (pipe, sessions) = (Pipe::new(), Sessions::new());
-        let (id, credential) = admitted(&sessions);
-        let socket = pipe.open(id, credential, wire().0).expect("open");
+        let (id, _) = admitted(&sessions);
+        let socket = pipe.open(id, wire().0).expect("open");
         pipe.close(socket, "done");
         pipe.reap(socket);
         assert_eq!(pipe.push(socket, b"x".to_vec()), Push::Gone);
@@ -1087,15 +1482,70 @@ mod tests {
         /* Distinct credentials, so the per-credential share is not what bites. */
         let mut opened = 0;
         while opened < MAX_SESSIONS {
-            let (id, credential) = admitted(&sessions);
-            pipe.open(id, credential, wire().0)
-                .expect("under the ceiling");
+            let (id, _) = admitted(&sessions);
+            pipe.open(id, wire().0).expect("under the ceiling");
             opened += 1;
         }
-        let (id, credential) = admitted(&sessions);
-        assert_eq!(
-            pipe.open(id, credential, wire().0),
-            Err(OpenRefused::TooManySessions)
+        let (id, _) = admitted(&sessions);
+        assert_eq!(pipe.open(id, wire().0), Err(OpenRefused::TooManySessions));
+    }
+
+    /// AN OVERSIZED FRAME IS A PROTOCOL VIOLATION WHATEVER THE BUDGET SAYS.
+    ///
+    /// The size check sat AFTER the host-budget check, so an oversized frame
+    /// arriving while the host was full answered `Backpressure` — and
+    /// `send_wait` then held a frame that could never fit against its whole
+    /// deadline, instead of refusing it as `TooLarge` at once.
+    #[tokio::test]
+    async fn an_oversized_send_is_too_large_even_when_the_host_is_full() {
+        let (pipe, sessions) = (Pipe::new(), Sessions::new());
+        let chunk = vec![0u8; 1024 * 1024];
+        let mut wires = Vec::new();
+        while pipe.outbound_bytes_total() < OUTBOUND_BYTE_CAP_GLOBAL {
+            let (id, _) = admitted(&sessions);
+            let (sender, receiver) = wire();
+            wires.push(receiver);
+            let socket = pipe.open(id, sender).expect("open");
+            while pipe.outbound_bytes_total() < OUTBOUND_BYTE_CAP_GLOBAL
+                && pipe.send(socket, chunk.clone()) == Send::Sent
+            {}
+        }
+        let (id, _) = admitted(&sessions);
+        let (sender, _receiver) = wire();
+        let socket = pipe.open(id, sender).expect("open");
+        let oversized = vec![0u8; MAX_FRAME + 1];
+        assert_eq!(pipe.send(socket, oversized), Send::TooLarge);
+    }
+
+    /// DRAINING THROUGH THE WAIT CONSUMES THE PERMIT ITS PUSH STORED.
+    ///
+    /// `Notify` keeps one permit. The short-circuit drained waiting frames
+    /// WITHOUT consuming it, so the next call — inbox empty — returned from
+    /// the stale permit immediately: an empty answer the webview reads as a
+    /// timeout, one spurious IPC round per leftover permit.
+    #[tokio::test(start_paused = true)]
+    async fn draining_through_the_wait_leaves_no_stale_permit() {
+        let (pipe, sessions) = (Pipe::new(), Sessions::new());
+        let (id, _) = admitted(&sessions);
+        let socket = pipe.open(id, wire().0).expect("open");
+
+        pipe.push(socket, b"stored a permit".to_vec());
+        let frames = pipe
+            .wait_for_frames(socket, usize::MAX, std::time::Duration::from_secs(1))
+            .await;
+        assert_eq!(frames, vec![b"stored a permit".to_vec()]);
+
+        /* Nothing waiting now: the call must sit out its timeout, not return
+         * early from the permit the drained push left behind. Virtual time —
+         * the clock is paused, so a full wait costs nothing real. */
+        let before = tokio::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(100);
+        let empty = pipe.wait_for_frames(socket, usize::MAX, timeout).await;
+        assert!(empty.is_empty());
+        assert!(
+            before.elapsed() >= timeout,
+            "an empty inbox returned in {:?} — a stale permit answered for it",
+            before.elapsed()
         );
     }
 }

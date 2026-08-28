@@ -636,10 +636,14 @@ export function bookVars({
        the property is absent rather than set to zero — a max(1em, 0px) would
        be a rule that runs on every element in every book to accomplish
        nothing. See MINIMUM_SIZES for the 8.5px that bought this. */
-    '--paper-min-size': stepAt(MINIMUM_SIZES, set.minimumSize) === 0
-      ? null
-      : `${stepAt(MINIMUM_SIZES, set.minimumSize)}px`,
+    '--paper-min-size': minimumSizePx(set.minimumSize),
   }
+}
+
+/** The floor's pixel value, or null at step 0 — one `stepAt`, asked once. */
+function minimumSizePx(step: number): string | null {
+  const px = stepAt(MINIMUM_SIZES, step)
+  return px === 0 ? null : `${px}px`
 }
 
 /**
@@ -1184,6 +1188,22 @@ p, li, blockquote, dd {
   line-height: max(var(--paper-line), 1.2em) !important; /* constant: the floor, one-and-a-fifth of the enlarged text own size */
   letter-spacing: var(--paper-letter) !important;
   word-spacing: var(--paper-word) !important;
+  /* THE FACE IS THE READER'S TOO, AND IT WAS THE ONE CONTROL LEFT TO INHERIT.
+   *
+   * Every other setting in this rule reaches the prose marked; the family was
+   * declared once, on body above, and left to inheritance — which loses to any
+   * rule that matches the element. Calibre writes p { font-family } as a
+   * matter of course, so on every such book the Typeface setting did nothing
+   * while its four siblings worked, and nothing said so: the body rule was
+   * there, the variable was set, and the paragraph was set in Georgia.
+   *
+   * On the element list and not the prose marker, because a face is not an
+   * alignment: forcing justify on a centred dedication flattens it, forcing the
+   * reader's face on it does exactly what the reader asked. Code is not here
+   * and must not be — code, kbd and samp carry their own family rule, and pre
+   * is code by definition — so a monospace run inside a paragraph keeps its
+   * face while the paragraph takes the reader's. */
+  font-family: var(--paper-family) !important;
 }
 
 /* ALIGNMENT IS THE READER'S TOO, BUT IT CANNOT SIMPLY JOIN THE RULE ABOVE.
@@ -1500,7 +1520,7 @@ ${when('--paper-note-prose')}body > * { font-size: ${READING_RATIOS.footnote}rem
  * it silently rather than loudly.
  */
 let cachedNoteSheets: BookSheets | null = null
-let cachedNoteSheetsFrom: unknown = null
+let cachedNoteSheetsFrom: BookSheets | null = null
 
 export function noteSheets(): BookSheets {
   const sheets = bookSheets()

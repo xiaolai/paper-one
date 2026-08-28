@@ -3,7 +3,7 @@ name = "paper-webauth"
 version = "0.1.0"
 description = "Paper's browser device-authorization: a one-time 6-digit code, atomically rate-limited"
 authors = ["Paper"]
-license = ""
+license = "MIT"
 edition = "2021"
 # Matches the app crate and tauri-plugin-peer; the toolchain itself is pinned
 # by the root rust-toolchain.toml.
@@ -20,3 +20,13 @@ rand = "0.10"
 # Constant-time comparison. The 6-digit code is a secret compared against
 # attacker-supplied input; `==` on bytes short-circuits and leaks position.
 subtle = "2"
+# One place a fallback has to say what it did with an unreadable file
+# (`Sessions::fresh_at`); already resolved in the tree via every other crate.
+log = "0.4"
+# THE SESSION FILE HOLDS `sha256(credential)`, never the credential (WI-20.29,
+# the phase-20 plan's D6). The same `sha2` the inference plugin already
+# resolves, so this is an edge in the graph and not a new crate.
+sha2 = "0.10"
+# The file's shape. Both already in this tree many times over.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

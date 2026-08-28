@@ -1,73 +1,30 @@
 //! Where Paper's data lives, and the guard that keeps the plugin's file
 //! commands inside it.
 //!
-//! The root is `app_data_dir()` — `$APPDATA`, the same root the fs plugin's
-//! ACL scope is written against — except in debug builds, where
-//! `PAPER_TEST_DATA_DIR` overrides it, letting a test point THIS PLUGIN at a
-//! scratch directory. It is compiled out of release builds:
-//! `cfg!(debug_assertions)`, not a runtime check, so a release binary never
-//! consults the environment.
-//!
-//! ⚠️ **THE OVERRIDE MOVES THIS PLUGIN ONLY, AND IS NOT A SECOND-INSTANCE
-//! SWITCH.** It used to be described as one here, and that was wrong. The
-//! kernel's own storage — `bookVault.ts`, `appStorage.ts`, `bookFiles.ts` —
-//! passes `BaseDirectory.AppData`, so `index.json`, every book folder, the flat
-//! store and `sync/journal.*` stay in the real `$APPDATA` no matter what this
-//! variable says. Two app instances started with two different values share one
-//! book vault while holding separate identities, and nothing complains until
-//! the first journal append hands `fs_fsync` a path from THIS root for a file
-//! the kernel wrote in the other one. Measured 2026-08-20; the two-instance
-//! harness is two machines (`scripts/second-instance.sh`, `dev-docs/sync.md`).
+//! THE ROOT ITSELF IS RESOLVED BY `paper-data-root` — one crate, shared by the
+//! app (its library lock), this plugin and `tauri-plugin-inference`, so a test
+//! that moves one moves all of them and no capability's removal takes the
+//! rule with it. What the override does and does not move is in that crate's
+//! header. This file keeps what is this plugin's: the guard.
 //!
 //! The sync capability asks for the root through `paper_data_root` rather than
 //! computing `appDataDir()` itself, so ITS paths agree with this plugin's. The
 //! kernel's do not yet — closing that is what would make the override honest.
 
-use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Runtime};
 
 use crate::error::{Error, Result};
 
-/// The debug-only override. Absolute; created if missing.
-pub const TEST_DATA_DIR_ENV: &str = "PAPER_TEST_DATA_DIR";
+/// The debug-only override. Absolute; created if missing. ONE copy, in
+/// `paper-data-root`, which the app and every plugin share — see its header.
+pub use paper_data_root::TEST_DATA_DIR_ENV;
 
-/// The storage root for this process. Exists on return.
+/// The storage root for this process. Exists on return. Resolved by
+/// `paper-data-root`; only the error is this plugin's.
 pub fn data_root<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf> {
-    resolve(debug_override(), || {
-        app.path().app_data_dir().map_err(Error::from)
-    })
-}
-
-#[cfg(debug_assertions)]
-fn debug_override() -> Option<OsString> {
-    std::env::var_os(TEST_DATA_DIR_ENV)
-}
-
-#[cfg(not(debug_assertions))]
-fn debug_override() -> Option<OsString> {
-    None
-}
-
-/// The pure half of [`data_root`]: pick the override or the default, insist
-/// on an absolute path, and make sure the directory exists.
-fn resolve(
-    override_: Option<OsString>,
-    default: impl FnOnce() -> Result<PathBuf>,
-) -> Result<PathBuf> {
-    let root = match override_ {
-        Some(value) => {
-            let path = PathBuf::from(value);
-            if !path.is_absolute() {
-                return Err(Error::DataRootNotAbsolute(path));
-            }
-            path
-        }
-        None => default()?,
-    };
-    std::fs::create_dir_all(&root)?;
-    Ok(root)
+    paper_data_root::data_root(app).map_err(Error::from)
 }
 
 /// Refuse anything that is not lexically inside `root`.
@@ -85,6 +42,12 @@ fn resolve(
 /// This is the lexical guard only. [`checked_target`] adds the symlink check,
 /// which needs the filesystem.
 pub fn guard_inside_root(root: &Path, path: &Path) -> Result<()> {
+    /* The ROOT is validated too: an empty or relative root has no components
+     * to disagree with, so `starts_with` on it would admit every absolute
+     * path — a guard that guards nothing looks exactly like one that works. */
+    if !root.is_absolute() {
+        return Err(Error::PathNotAbsolute(root.to_path_buf()));
+    }
     if !path.is_absolute() {
         return Err(Error::PathNotAbsolute(path.to_path_buf()));
     }
@@ -195,35 +158,20 @@ mod tests {
         );
     }
 
+    /// The resolver moved to `paper-data-root`; the KINDS the wire sees are
+    /// this plugin's, and the mapping is what keeps them where they were.
     #[test]
-    fn override_must_be_absolute() {
-        let err = resolve(Some(OsString::from("relative/dir")), || {
-            unreachable!("default must not be consulted when the override is set")
-        })
-        .unwrap_err();
-        assert_eq!(err.kind(), "dataRootNotAbsolute");
-    }
-
-    #[test]
-    fn override_wins_and_is_created() {
-        let dir = scratch_dir("override");
-        let nested = dir.join("nested").join("root");
-        let got = resolve(Some(nested.clone().into_os_string()), || {
-            unreachable!("default must not be consulted when the override is set")
-        })
-        .unwrap();
-        assert_eq!(got, nested);
-        assert!(nested.is_dir());
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn default_is_used_when_no_override() {
-        let dir = scratch_dir("default");
-        let got = resolve(None, || Ok(dir.clone())).unwrap();
-        assert_eq!(got, dir);
-        assert!(dir.is_dir());
-        std::fs::remove_dir_all(&dir).unwrap();
+    fn the_shared_resolvers_failures_keep_this_plugins_kinds() {
+        let relative =
+            paper_data_root::resolve(Some(std::ffi::OsString::from("relative/dir")), || {
+                unreachable!("the override wins")
+            })
+            .unwrap_err();
+        assert_eq!(Error::from(relative).kind(), "dataRootNotAbsolute");
+        assert_eq!(
+            Error::from(paper_data_root::Error::Io(std::io::Error::other("x"))).kind(),
+            "io"
+        );
     }
 
     #[cfg(unix)]
@@ -267,7 +215,14 @@ mod tests {
                 .unwrap_or("t")
                 .replace("::", "-")
         ));
-        let _ = std::fs::remove_dir_all(&dir);
+        /* A stale directory that CANNOT be removed must fail here, loudly —
+         * a test running over leftover state fails somewhere downstream with
+         * a message about the wrong thing. Absent is fine. */
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => panic!("could not clear stale scratch {}: {err}", dir.display()),
+        }
         dir
     }
 }

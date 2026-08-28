@@ -20,6 +20,9 @@
  */
 
 export { fakeFs } from './core/indexFsFake.testkit'
+/** The fake that is a `TrashFs` as well — for a test that runs the real
+ *  trash, presence and shelf functions over one in-memory tree. */
+export { fakeFs as fakeTrashFs } from './core/fakeFs.testkit'
 /* The size port's conformance fixture — one library, asked of every host. See
    that module's header for the two-walks-one-contract defect it exists for. */
 export { BOOKS_ONLY_BYTES, LIBRARY_FIXTURE, LIBRARY_FIXTURE_BYTES } from './core/librarySizes.testkit'

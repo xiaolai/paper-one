@@ -84,6 +84,12 @@ export interface Imports {
    * `work` returns the outcomes to summarise. Whatever it throws is passed to
    * `onFailure` — the two routes word that differently — and the lifecycle is
    * closed either way.
+   *
+   * SO IS A SHELF WRITE THAT REJECTS. The settle is part of the lifecycle and
+   * not part of the work, and it used to be the one failure that escaped:
+   * `onFailure` was never called, the bar never came down, and this promise
+   * rejected instead. It does not reject any more, for any reason a caller
+   * can produce — every ending goes out through `onFailure` or the notice.
    */
   run(
     work: (run: ImportRun) => Promise<readonly ImportOutcome[]>,
@@ -112,6 +118,21 @@ export function useImportRun({ shelve, batch, notice }: ImportRunOptions): Impor
      makes it stop WORKING — the walk takes the signal and checks it between
      books. */
   const abort = useRef<AbortController | null>(null)
+  /**
+   * Which generation the progress bar belongs to.
+   *
+   * ⚠️ **A BARE `supersede()` LEFT THE BAR UP FOR THE REST OF THE SESSION.**
+   * A retiring run returns before `setProgress(null)` — it must, or it would
+   * pull down the bar its REPLACEMENT has already raised — and that reasoning
+   * silently assumed every supersession comes from another `run`. It does not:
+   * a single-book pick or drop supersedes without running anything, so nobody
+   * owned the bar and nobody took it down. `busy` stayed true, the folder
+   * route refuses to start while busy, and every later import was refused.
+   *
+   * A run claims the bar when it raises it; the retiring run clears it only
+   * while the claim is still its own.
+   */
+  const bar = useRef(0)
 
   /* A NEW INTAKE RETIRES THE OLD ONE'S WORK, not just its reporting: the
      token stops it REPORTING and the signal stops it COPYING. */
@@ -129,6 +150,7 @@ export function useImportRun({ shelve, batch, notice }: ImportRunOptions): Impor
       const mine = generation.current
       const current = (): boolean => generation.current === mine
 
+      bar.current = mine
       setProgress({ done: 0, total: 0 })
       const handed = createHandover<ImportOutcome>(batch, shelve)
       let outcomes: readonly ImportOutcome[] = []
@@ -150,7 +172,28 @@ export function useImportRun({ shelve, batch, notice }: ImportRunOptions): Impor
          bytes are on disk either way, and leaving them recordless is the
          orphan this pipeline exists to avoid. */
       handed.flush()
-      const unsaved = await handed.settled()
+      /* ⚠️ AND THE SETTLE ITSELF CAN REJECT, WHICH IS STILL THIS LIFECYCLE'S
+         TO CLOSE. `settled()` is a chain of `shelve` calls, so one rejected
+         shelf write threw straight out of `run` — past `setProgress(null)`,
+         past `onFailure`, past everything below. The bar stayed on screen and
+         `busy` stayed true for the rest of the session: the folder route
+         refuses to start while busy, so it refused every later import, and the
+         drop route went on superseding a run that had already finished. A
+         terminal catch at the call site caught the rejection and said so; it
+         could not put the bar away, because the state lives in here.
+
+         FOLDED INTO THE SAME `failed` THE WORK USES, so a settle failure is
+         reported through `onFailure` exactly like a copy failure — one
+         sentence to the reader either way. The work's cause wins when both
+         fail, because it is the one that explains the other; the second is
+         logged rather than dropped. */
+      let unsaved = 0
+      try {
+        unsaved = await handed.settled()
+      } catch (cause) {
+        if (failed === null) failed = { cause }
+        else console.error('Paper: the import also failed to record what it copied', cause)
+      }
 
       /* ⚠️ CLEARED AFTER THE SHELF WRITES LAND, NOT BEFORE THEM. One route had
          this in a `finally` that ran before the settle, so the bar went away
@@ -158,7 +201,15 @@ export function useImportRun({ shelve, batch, notice }: ImportRunOptions): Impor
          the reader could start a second import into a shelf the first had not
          finished writing. The bar is what says "this is still happening". */
       if (abort.current === controller) abort.current = null
-      if (!current()) return
+      if (!current()) {
+        /* Superseded, so this run says nothing — but the bar is not a thing it
+           says, it is a thing it raised. Cleared only while the claim is still
+           this run's: a replacement `run` has already raised its own, and
+           pulling that one down is what the bare return was protecting. See
+           `bar`. */
+        if (bar.current === mine) setProgress(null)
+        return
+      }
       setProgress(null)
       if (failed !== null) say.onFailure(failed.cause)
       else notice(say.summarise(outcomes, unsaved))

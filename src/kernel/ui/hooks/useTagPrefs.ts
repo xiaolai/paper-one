@@ -30,6 +30,16 @@ import {
 
 export interface TagPrefsStore {
   readonly prefs: TagPrefs
+  /**
+   * Whether the next launch will see any of this.
+   *
+   * False with no storage, and false from a write the storage refused until
+   * one it takes. The write effect used to advance its "last written" marker
+   * BEFORE `setItem` and report a throw to the console only — so a pin, a
+   * colour, a hidden subject or a saved view showed as kept until the next
+   * launch, when it was gone, and nothing on screen had said otherwise.
+   */
+  readonly persistent: boolean
   togglePinned: (tag: string) => void
   setColour: (tag: string, colour: TagColour | null) => void
   toggleHidden: (subject: string) => void
@@ -51,32 +61,56 @@ function newViewId(): string {
   return `v-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
 }
 
+/* `storage` is IMMUTABLE by composition: it is resolved once, before React
+ * mounts (`openAppStorage` in `main.tsx`), and never replaced. The hook reads
+ * it on first render only, which is correct under that contract — a swapped
+ * storage identity would silently keep the old store's preferences, so if a
+ * composition ever needs to swap it, remount the tree instead. */
 export function useTagPrefs(storage: MarkStorage | null): TagPrefsStore {
-  const [prefs, setPrefs] = useState<TagPrefs>(() => {
-    if (!storage) return NO_TAG_PREFS
-    try {
-      return parseTagPrefs(storage.getItem(TAG_PREFS_STORAGE_KEY))
-    } catch {
-      // `getItem` throws outright when storage is disabled — see `localStore`.
-      return NO_TAG_PREFS
+  /* ONE first read, and whether it was readable. `getItem` throws outright
+   * when storage is disabled — and `persistent` seeded from `storage !== null`
+   * alone claimed durability for exactly that store, until the first change
+   * tried to write and flipped it. The claim is honest from the start now:
+   * a store whose read threw will not take a write either. */
+  const first = useRef<{ prefs: TagPrefs; readable: boolean } | null>(null)
+  if (first.current === null) {
+    if (!storage) {
+      first.current = { prefs: NO_TAG_PREFS, readable: false }
+    } else {
+      try {
+        first.current = { prefs: parseTagPrefs(storage.getItem(TAG_PREFS_STORAGE_KEY)), readable: true }
+      } catch {
+        first.current = { prefs: NO_TAG_PREFS, readable: false }
+      }
     }
-  })
+  }
+  const [prefs, setPrefs] = useState<TagPrefs>(first.current.prefs)
 
   /* What was last written, so an unchanged value writes nothing. Seeded with
    * what was READ: a launch that changes nothing must not rewrite the file. */
   const written = useRef<TagPrefs | null>(null)
   if (written.current === null) written.current = prefs
+  const [persistent, setPersistent] = useState(storage !== null && first.current.readable)
 
   useEffect(() => {
     if (!storage || written.current === prefs) return
-    written.current = prefs
     try {
       storage.setItem(TAG_PREFS_STORAGE_KEY, JSON.stringify(prefs))
+      /* ADVANCED AFTER THE WRITE, not before it. Advanced first, a refused
+       * write was recorded as done, and the value stayed on screen as though
+       * kept. Left behind, the next change writes the whole current value —
+       * which carries this one — so a store that recovers (the file store
+       * queues the retry before it throws for the previous failure) takes
+       * everything the reader decided in between. */
+      written.current = prefs
+      setPersistent(true)
     } catch (cause) {
-      /* Reported, not thrown. These are conveniences — the tags themselves are
-       * on the books — so a reader whose disk is full keeps their library and
-       * loses a pin. */
+      /* Reported AND published. These are conveniences — the tags themselves
+       * are on the books — so a reader whose disk is full keeps their library
+       * and loses a pin; but they are told the pin is what they are losing,
+       * in the panel where they made it. */
       console.error('Paper: could not save your tag preferences', cause)
+      setPersistent(false)
     }
   }, [storage, prefs])
 
@@ -104,5 +138,5 @@ export function useTagPrefs(storage: MarkStorage | null): TagPrefsStore {
     setPrefs((current) => removeViewIn(current, id))
   }, [])
 
-  return { prefs, togglePinned, setColour, toggleHidden, saveView, renameView, removeView }
+  return { prefs, persistent, togglePinned, setColour, toggleHidden, saveView, renameView, removeView }
 }

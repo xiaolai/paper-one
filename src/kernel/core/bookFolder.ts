@@ -28,10 +28,10 @@
  * the truth.
  */
 
-import type { VaultFs } from './bookVault'
+import type { SyncLevel, VaultFs } from './bookVault'
 import { extensionFor } from './bookVault'
-import { isFormat, type Format } from './formats'
-import { hlcOf, isHlc, type Hlc } from './hlc'
+import { isFormat, type Format, type NamedSource } from './formats'
+import { compareHlc, hlcOf, isHlc, type Hlc } from './hlc'
 import { TAG_MAX, normalizeTag, tagKey } from './tags'
 
 export const BOOKS_DIR = 'books'
@@ -109,6 +109,13 @@ export function setTag(record: BookRecord, spelling: string, on: boolean, at: Hl
   const key = tagKey(spelling)
   if (!key) return record
   const held = tagRegisters(record) ?? {}
+  /* THE SAME CAP THE READER APPLIES. `parseRecord` keeps `MAX_TAGS`
+   * registers and drops the rest on the next read — so a write that grew
+   * the clock past it succeeded, and the register silently vanished later.
+   * A capacity error at the write is a failure the reader is shown. */
+  if (!(key in held) && Object.keys(held).length >= MAX_TAGS) {
+    throw new Error(`a record can carry at most ${MAX_TAGS} tag registers`)
+  }
   const clock: Record<string, TagClockEntry> = { ...held, [key]: { at, on, spelling } }
   const tags = tagsFromClock(clock)
   const { tags: _replaced, ...rest } = record
@@ -386,8 +393,13 @@ const CONTENT_HASH = /^[0-9a-f]{64}$/
 function readTagClock(raw: unknown): TagClock | undefined {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
   const clock: Record<string, TagClockEntry> = Object.create(null) as Record<string, TagClockEntry>
-  const keys = Object.keys(raw).sort().slice(0, MAX_TAGS)
+  /* VALIDATED FIRST, CAPPED SECOND. Capping the raw keys let alphabetically
+   * earlier junk consume the slots and push valid registers out — tag loss
+   * on the next write. The cap counts registers that are registers. */
+  const keys = Object.keys(raw).sort()
+  let kept = 0
   for (const key of keys) {
+    if (kept >= MAX_TAGS) break
     const value = (raw as Record<string, unknown>)[key]
     if (typeof value !== 'object' || value === null || Array.isArray(value)) continue
     const entry = value as Record<string, unknown>
@@ -408,6 +420,7 @@ function readTagClock(raw: unknown): TagClock | undefined {
     if (!isHlc(entry['at'])) continue
     if (typeof entry['on'] !== 'boolean') continue
     clock[key] = { at: entry['at'], on: entry['on'], spelling }
+    kept += 1
   }
   return clock
 }
@@ -443,7 +456,9 @@ export function parseRecord(raw: string | null): BookRecord | null {
   const clock = readTagClock(r['tagClock'])
   const derivedTags = clock ? tagsFromClock(clock) : undefined
   return {
-    ...(text(r['bookId']) ? { bookId: text(r['bookId'])! } : {}),
+    /* NEVER CUT: an id sliced to five hundred characters is a different
+     * identity, and everything after it would target a different folder. */
+    ...(typeof r['bookId'] === 'string' && r['bookId'] !== '' && r['bookId'].length <= MAX_FIELD ? { bookId: r['bookId'] } : {}),
     title,
     author: text(r['author']) ?? '',
     ...(text(r['sortAs']) ? { sortAs: text(r['sortAs'])! } : {}),
@@ -525,6 +540,7 @@ export async function writeBook(
   fs: VaultFs,
   bookId: string,
   record: BookRecord,
+  level: SyncLevel = 'full',
 ): Promise<void> {
   // Stamped on every write, so the record always knows its own id even if the
   // caller passed one that was not in it.
@@ -533,11 +549,13 @@ export async function writeBook(
     fs,
     recordPath(bookId),
     new TextEncoder().encode(JSON.stringify(stamped, null, 2)),
+    level,
   )
 }
 
 /**
- * Write a file so that a crash cannot leave half of one.
+ * Write a file so that a crash cannot leave half of one — and, where the
+ * filesystem can, so that a power cut cannot either.
  *
  * A temporary neighbour, then a rename — atomic within a filesystem, so readers
  * see the old bytes or the new bytes and never a truncated file. That matters
@@ -548,11 +566,27 @@ export async function writeBook(
  * folder import, and the reader's own copy on open — and four copies of an
  * invariant is three chances for one of them to drift out of it.
  *
- * The temporary path is derived from the destination, so two writers racing for
- * ONE file still collide. That is deliberate and is why both stores serialise
- * their writes per book; see `writeQueue`.
+ * SYNCED WHERE IT CAN BE (phase 20, D3). A filesystem with `writeAtomic` does
+ * the whole thing itself — write, sync the file at `level`, rename, sync the
+ * directory — in one call; the app's is one Rust command, the CLI's is
+ * `node:fs`. Without it, the temp-and-rename below: what the vault had for
+ * its whole life, which survives a crash and not a power loss, and is what a
+ * fake filesystem offers.
+ *
+ * The fallback's temporary path is derived from the destination, so two
+ * writers racing for ONE file still collide. That is deliberate and is why
+ * both stores serialise their writes per book; see `writeQueue`.
  */
-export async function atomicWrite(fs: VaultFs, path: string, bytes: Uint8Array): Promise<void> {
+export async function atomicWrite(
+  fs: VaultFs,
+  path: string,
+  bytes: Uint8Array,
+  level: SyncLevel = 'full',
+): Promise<void> {
+  if (fs.writeAtomic) {
+    await fs.writeAtomic(path, bytes, level)
+    return
+  }
   const writing = `${path}.writing`
   /* ONLY WHEN THERE IS ONE. `index.json` sits at the root of the data directory
    * and has no slash in it, so `slice(0, lastIndexOf('/'))` returns `index.jso`
@@ -593,6 +627,7 @@ export async function updateBook(
   fs: VaultFs,
   bookId: string,
   change: (record: BookRecord) => BookRecord,
+  level: SyncLevel = 'full',
 ): Promise<BookRecord | null> {
   /* THE CHANGE IS APPLIED TO WHAT IS ON DISK, which is the point of taking a
    * function rather than a value. A caller holding an in-memory copy may be
@@ -616,7 +651,7 @@ export async function updateBook(
   }
   const next = change(current)
   if (next === current) return current
-  await writeBook(fs, bookId, next)
+  await writeBook(fs, bookId, next, level)
   /* CHECKED AFTER THE WRITE, because a removal can rename the folder between
    * the read above and the write — and `writeBook` calls `mkdir`, so it happily
    * recreates the folder containing nothing but this record. That is a book
@@ -651,15 +686,18 @@ export async function updateBook(
  * when the book actually arrived.
  */
 export function mergeStranded(stranded: BookRecord, live: BookRecord): BookRecord {
-  const tags = [...(stranded.tags ?? [])]
-  const seen = new Set(tags.map((tag) => tag.trim().normalize('NFC').toLowerCase()))
-  for (const tag of live.tags ?? []) {
-    const key = tag.trim().normalize('NFC').toLowerCase()
-    if (key && !seen.has(key)) {
-      seen.add(key)
-      tags.push(tag)
-    }
-  }
+  /* THE CLOCKS, NOT THE LISTS. This used to union `tags` and spread `live`
+   * — which carried `live.tagClock` through untouched. `parseRecord` treats
+   * a clock as the authority and re-derives `tags` from it, so the union
+   * lasted exactly until the record was read back: in memory `["Sea",
+   * "Mine"]`, on the next launch `["Mine"]`. Every record tagged since the
+   * clock existed has one, so that was the ordinary case, not the legacy
+   * one. Merging the REGISTERS — last writer per tag, a legacy list
+   * synthesised at its documented stamp by `tagRegisters` — and deriving
+   * the list from the result is the only shape a read cannot undo. */
+  const { tags: _tags, tagClock: _clock, ...rest } = live
+  const clock = mergeTagClocks(tagRegisters(stranded), tagRegisters(live))
+  const tags = clock ? tagsFromClock(clock) : []
   const addedAt =
     stranded.addedAt === undefined
       ? live.addedAt
@@ -667,7 +705,8 @@ export function mergeStranded(stranded: BookRecord, live: BookRecord): BookRecor
         ? stranded.addedAt
         : Math.min(stranded.addedAt, live.addedAt)
   return {
-    ...live,
+    ...rest,
+    ...(clock ? { tagClock: clock } : {}),
     ...(tags.length ? { tags } : {}),
     ...(live.position ?? stranded.position ? { position: live.position ?? stranded.position! } : {}),
     ...((live.progress ?? stranded.progress) === undefined
@@ -676,6 +715,34 @@ export function mergeStranded(stranded: BookRecord, live: BookRecord): BookRecor
     ...(stranded.finished || live.finished ? { finished: true } : {}),
     ...(addedAt === undefined ? {} : { addedAt }),
   }
+}
+
+/**
+ * Two tag clocks as one: every register from either, and where both hold a
+ * key, the LATER stamp — a tie going to the second, which `mergeStranded`
+ * passes the live record as. The same rule the sync merge applies to the
+ * same registers, so a rescue and a replica cannot disagree about a tag.
+ */
+function mergeTagClocks(a: TagClock | undefined, b: TagClock | undefined): TagClock | undefined {
+  if (!a) return b
+  if (!b) return a
+  const merged: Record<string, TagClockEntry> = Object.create(null) as Record<string, TagClockEntry>
+  for (const clock of [a, b]) {
+    for (const key of Object.keys(clock)) {
+      const entry = clock[key]!
+      const held = merged[key]
+      if (held === undefined || compareHlc(entry.at, held.at) >= 0) merged[key] = entry
+    }
+  }
+  /* ROUND-TRIP STABLE: two full clocks merge to twice `MAX_TAGS`, and the
+   * next read would keep the first `MAX_TAGS` by key and drop the rest
+   * silently. The same deterministic rule is applied here, so what is
+   * written is what will be read. */
+  const keys = Object.keys(merged).sort()
+  if (keys.length <= MAX_TAGS) return merged
+  const capped: Record<string, TagClockEntry> = Object.create(null) as Record<string, TagClockEntry>
+  for (const key of keys.slice(0, MAX_TAGS)) capped[key] = merged[key]!
+  return capped
 }
 
 /**
@@ -695,20 +762,29 @@ export function mergeStranded(stranded: BookRecord, live: BookRecord): BookRecor
  * It deliberately does NOT carry `title` and `author` conditionally — those two
  * are `BookRecord`'s only required fields and a parse always has an answer for
  * them, even if the answer is empty.
+ *
+ * `source` is the file the parser was handed, when there was one. It is the
+ * evidence `titleAsParsed` needs to tell a title from a file name, and every
+ * caller that has the file should pass it — the reader opening a book and the
+ * enrichment pass both do — so that the two routes keep agreeing about what a
+ * comic is called.
  */
-export function recordFromMeta(meta: {
-  readonly title: string
-  readonly author: string
-  readonly sortAs?: string
-  readonly series?: string
-  readonly seriesIndex?: number | null
-  readonly subjects?: readonly string[]
-  readonly publisher?: string
-  readonly published?: string
-  readonly languages?: readonly string[]
-}): BookRecord {
+export function recordFromMeta(
+  meta: {
+    readonly title: string
+    readonly author: string
+    readonly sortAs?: string
+    readonly series?: string
+    readonly seriesIndex?: number | null
+    readonly subjects?: readonly string[]
+    readonly publisher?: string
+    readonly published?: string
+    readonly languages?: readonly string[]
+  },
+  source?: NamedSource,
+): BookRecord {
   return {
-    title: meta.title,
+    title: titleAsParsed(meta.title, source),
     author: meta.author,
     ...(meta.sortAs ? { sortAs: meta.sortAs } : {}),
     ...(meta.series ? { series: meta.series } : {}),
@@ -723,6 +799,56 @@ export function recordFromMeta(meta: {
 }
 
 /**
+ * The formats whose parser NAMES THE BOOK AFTER ITS FILE.
+ *
+ * A comic archive carries no metadata, so foliate's `comic-book.js` sets
+ * `metadata.title = file.name` — extension included — and that is the whole
+ * of what a parse knows about its title. Typed over `Format` so that a second
+ * comic format (`cbr`, which Paper does not yet accept — see `FORMATS` and
+ * `ACCEPT_FORMATS`, and foliate routes only `.cbz` to that parser) has to be
+ * admitted there before it can be listed here.
+ */
+const FILE_NAMED_FORMATS: readonly Format[] = ['cbz']
+
+/**
+ * A parsed title, with a file-naming parser's extension taken back off.
+ *
+ * "Batman.cbz" → "Batman.cbz.cbz" → "Batman.cbz.cbz.cbz", one step per open
+ * and per enrichment pass. `comic-book.js` titles a comic after the file it is
+ * given; the vault hands it back named `storedBookName(entry)`, which is
+ * `${title}.${ext}`; and `mergeParsed` lets the parse's title replace the
+ * record's. So each open handed the parser a name one extension longer than
+ * the last, and wrote it back as the title.
+ *
+ * The rule is as narrow as the defect. It fires only when the file's own
+ * extension belongs to a parser that names the file, AND the title IS that
+ * file name — the evidence that it was never a title at all. An EPUB whose
+ * declared title happens to be "Batman.cbz" was opened from `Batman.cbz.epub`
+ * and is left alone; so is an EPUB whose title equals its own file name,
+ * because its parser does not invent titles; so is a comic whose title has
+ * since been corrected, since a corrected title no longer equals the name.
+ *
+ * EVERY trailing repeat of the extension comes off, not just one. A record
+ * this defect already wrote as "Batman.cbz.cbz" reaches the parser as
+ * "Batman.cbz.cbz.cbz", and stripping once would hand back exactly the damaged
+ * title it started with — stable, and still wrong. A name that is nothing but
+ * its extension is kept, which is what the parser said.
+ */
+function titleAsParsed(title: string, source: NamedSource | undefined): string {
+  if (!source || title !== source.name) return title
+  const dot = source.name.lastIndexOf('.')
+  if (dot <= 0) return title
+  const ext = source.name.slice(dot + 1).toLowerCase()
+  if (!isFormat(ext) || !FILE_NAMED_FORMATS.includes(ext)) return title
+  const suffix = `.${ext}`
+  let stem = title
+  while (stem.length > suffix.length && stem.slice(-suffix.length).toLowerCase() === suffix) {
+    stem = stem.slice(0, -suffix.length)
+  }
+  return stem
+}
+
+/**
  * Fold what a parse learned into what the reader owns.
  *
  * The book is the authority on its own metadata; the reader is the authority on
@@ -734,7 +860,11 @@ export function mergeParsed(previous: BookRecord | null, parsed: BookRecord): Bo
   if (!previous) return parsed
   return {
     ...parsed,
+    /* TAGS AND THEIR CLOCK TOGETHER: they are one register in two forms, and
+     * keeping the reader's list beside a parse's clock made the returned
+     * record show one set of tags while a reread derived another. */
     ...(previous.tags ? { tags: previous.tags } : {}),
+    ...(previous.tagClock ? { tagClock: previous.tagClock } : {}),
     ...(previous.position ? { position: previous.position } : {}),
     ...(previous.progress === undefined ? {} : { progress: previous.progress }),
     ...(previous.finished === undefined ? {} : { finished: previous.finished }),

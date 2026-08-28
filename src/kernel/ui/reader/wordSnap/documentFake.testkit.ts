@@ -192,6 +192,19 @@ export class FakeDocument extends FakeEventTarget {
     return null
   }
 
+  /**
+   * Empty, and present: the session strips a loaded document's scripts
+   * before anything else reads it (`bookScripts.ts`), which asks for every
+   * `script` and every element. A test about scripts replaces these two.
+   */
+  querySelectorAll(_selectors: string): Element[] {
+    return []
+  }
+
+  getElementsByTagNameNS(_namespace: string, _name: string): Element[] {
+    return []
+  }
+
   /** Give this document some CSS to be read. Returns itself, for chaining. */
   withStyleSheets(sheets: { cssRules: unknown[] }[]): this {
     this.styleSheets = sheets

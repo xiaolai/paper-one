@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   BOOKMARK_TEXT_MAX,
   MARKS_STORAGE_KEY,
+  MAX_MARK_TEXT,
   annotationsIn,
   bookIdFor,
   bookmarkFrom,
@@ -243,6 +244,19 @@ describe('parseMarks and the context fields', () => {
     expect(parsed[0]?.prefix).toBe('Call me ')
     expect(parsed[0]?.suffix).toBe('. Some')
   })
+
+  /* THE SAME BOUND `text` AND `note` ARE CUT AT, on the two fields beside them.
+     `book.mark.add` refuses a prefix past `MAX_MARK_TEXT`, but a hand-edited
+     file and a peer's merge do not pass the table — and a mark carrying a
+     chapter in `prefix` made every later answer that included it too large for
+     the transport. Cut, not dropped: the reader's highlight survives. */
+  it('cuts an over-long context at the bound the service table refuses at', () => {
+    const long = 'x'.repeat(MAX_MARK_TEXT + 500)
+    const parsed = parseMarks(JSON.stringify([mark({ prefix: long, suffix: long })]))
+    expect(parsed).toHaveLength(1)
+    expect(parsed[0]?.prefix).toHaveLength(MAX_MARK_TEXT)
+    expect(parsed[0]?.suffix).toHaveLength(MAX_MARK_TEXT)
+  })
 })
 
 describe('compareCfi', () => {
@@ -330,9 +344,9 @@ describe('upsertMark', () => {
 describe('upsertMark is idempotent by id', () => {
   /* Two rows sharing an id is a state everything downstream assumes cannot
    * happen: `remove(id)` drops every match and `setNote(id)` rewrites every
-   * one. `dedupeById` resolves it on load by keeping the FIRST — which, when
-   * the duplicate came from a tombstone-then-append, is the tombstone. The
-   * mark is then gone, from a write that looked like an update. */
+   * one. `dedupeById` resolves it on load by the merge rule — latest action
+   * wins — but the pair should never be written in the first place, which is
+   * what this describes. */
   it('replaces a row of the same id rather than tombstoning it and appending a twin', () => {
     const held = mark({ id: 'same', note: 'first' })
     const again = mark({ id: 'same', note: 'second', createdAt: 2000 })
@@ -432,8 +446,37 @@ describe('parseMarks', () => {
     const parsed = parseMarks(JSON.stringify(dupe))
     expect(parsed).toHaveLength(2)
     expect(parsed.map((m) => m.id)).toEqual(['shared', 'other'])
-    // First wins — the oldest surviving row, not the later probable corruption.
-    expect(parsed[0]?.bookId).toBe('book-a')
+    /* The FIRST row's position, and `mergeMarks`'s winner. These two carry
+       one stamp, so the tie falls to the serialised row — arbitrary, and the
+       same arbitrary a peer's merge of the same pair reaches, which is the
+       point of the two using one rule. */
+    expect(parsed[0]?.bookId).toBe('book-b')
+  })
+
+  /* ⚠️ **A TOMBSTONE FIRST AND ITS REPLACEMENT SECOND.** Keeping the first row
+     kept the tombstone and discarded the mark written after it — a mark the
+     reader could see, gone at the next load, deleted by the deduplicator
+     rather than by anybody. `upsertMark` no longer writes such a pair; a store
+     from before it stopped still holds them. */
+  it('keeps the later action when a duplicate id pairs a tombstone with a replacement', () => {
+    const dupe = [
+      { ...mark(), id: 'shared', note: 'deleted', deletedAt: '000000001000-0000-aaaaaaaaaaaaaaaa' },
+      { ...mark(), id: 'shared', note: 'written after', updatedAt: '000000002000-0000-aaaaaaaaaaaaaaaa' },
+    ]
+    const parsed = parseMarks(JSON.stringify(dupe))
+    expect(parsed).toHaveLength(1)
+    expect(parsed[0]?.note).toBe('written after')
+    expect(parsed[0]?.deletedAt).toBeUndefined()
+  })
+
+  it('keeps the tombstone when it is the later action', () => {
+    const dupe = [
+      { ...mark(), id: 'shared', note: 'edited', updatedAt: '000000001000-0000-aaaaaaaaaaaaaaaa' },
+      { ...mark(), id: 'shared', note: 'then deleted', deletedAt: '000000002000-0000-aaaaaaaaaaaaaaaa' },
+    ]
+    const parsed = parseMarks(JSON.stringify(dupe))
+    expect(parsed).toHaveLength(1)
+    expect(parsed[0]?.deletedAt).toBe('000000002000-0000-aaaaaaaaaaaaaaaa')
   })
 
   it('drops rows that fail validation and keeps the rest', () => {

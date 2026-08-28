@@ -221,6 +221,27 @@ describe('a tree with crates', () => {
     expect(code).toBe(1)
   })
 
+  /**
+   * THE iOS BUILD, IN ONE LINE. `mob` composes on iOS alone; granting it from
+   * the platform-less `default.json` is what `inference:default` did to the
+   * real tree, and tauri-build refuses that file on every other target. The
+   * forward rule is satisfied — the grant exists — so this is the inverse
+   * rule's finding and nobody else's.
+   */
+  it('reports a manifest plugin granted where it is not compiled, naming the file and the platforms, exit 1', () => {
+    const root = fixture({
+      'src-tauri/capabilities/default.json': JSON.stringify({ permissions: ['core:default', 'peer:default', 'mob:default'] }, null, 2),
+    })
+    const { code, out } = run(['--root', root])
+    const lines = out.trimEnd().split('\n')
+    expect(lines.map((l) => l.split(' ')[0])).toEqual(['GRANT_UNCOMPILED', 'CRATE_UNCLAIMED', 'compositions-check:'])
+    expect(lines[0]).toContain('src-tauri/capabilities/default.json')
+    expect(lines[0]).toContain('"mob:default"')
+    expect(lines[0]).toContain('on macOS, windows, linux, android')
+    expect(lines[0]).toContain('[ios]')
+    expect(code).toBe(1)
+  })
+
   it('exit 2 for an invalid manifest, a missing manifest, or bad usage', () => {
     const invalid = fixture({ 'capabilities.manifest.json': JSON.stringify({ capabilities: [{ id: 'X' }] }) })
     expect(run(['--root', invalid])).toMatchObject({ code: 2, out: '', err: expect.stringContaining('ID_INVALID') })

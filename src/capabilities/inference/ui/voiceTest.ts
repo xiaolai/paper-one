@@ -1,3 +1,4 @@
+import { messageOf } from '../lib/messageOf'
 import type { ReportFailure } from '../lib/controller'
 import { mintRequestId, type InferencePlugin } from '../lib/plugin'
 
@@ -129,7 +130,6 @@ export interface VoiceTesterOptions {
   readonly report?: ReportFailure
 }
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
 export function createVoiceTester({
   plugin,

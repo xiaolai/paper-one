@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process'
+import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isProcessEntry } from './lib/entry.mjs'
 
@@ -19,7 +20,10 @@ import { isProcessEntry } from './lib/entry.mjs'
  * bookkeeping, not a gate.
  *
  * `--list` prints the steps and exits; `--from <name>` starts at a step
- * (for re-running the tail after a fix); `--only <name>` runs one.
+ * (for re-running the tail after a fix); `--until <name>` stops after one
+ * (the JS half of the gate on a platform whose Cargo half is a separate
+ * job — see `.github/workflows/verify.yml`'s Windows leg); `--only <name>`
+ * runs one.
  */
 
 export const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
@@ -117,7 +121,34 @@ export const STEPS = Object.freeze([
    * harness wait longer for a machine that is still oversubscribed: the number
    * would move, the race would not. */
   { name: 'cargo test --workspace', cmd: 'cargo', args: ['test', ...CARGO, '--workspace', '--all-targets', '--', '--test-threads=1'] },
-])
+  /* THE RUST HALF OF THE THIRD-PARTY NOTICE, and it is LAST for a reason.
+   *
+   * `THIRD-PARTY-NOTICES.md` has to enumerate the several hundred crates the
+   * desktop binary statically links — MIT and Apache-2.0 almost throughout,
+   * and both condition permission to redistribute on the licence travelling
+   * with the copy. Answering "which crates" needs `cargo metadata` over four
+   * target triples and a populated registry, which is exactly what the steps
+   * above have just guaranteed: by here, cargo has fetched, built and tested
+   * the whole workspace.
+   *
+   * ⚠️ IT CANNOT MOVE EARLIER, AND THE REASON IS THE DEFECT IT REPLACES. The
+   * notices test used to ask cargo itself, from inside `test:coverage` —
+   * step eleven, before any cargo step — with `--offline`, which exits 101
+   * when a lockfile package is missing from the local registry. A fresh
+   * clone has that shape, and so does a CI runner restoring a rust-cache
+   * keyed on an older lockfile, so a pull request touching `Cargo.lock`
+   * could redden the gate for a reason unrelated to the change. That call is
+   * gone; `check-third-party-notices.test.mjs` now reads `Cargo.lock` and a
+   * committed manifest, and this step is the one place a lockfile bump that
+   * adds a shipping crate is caught.
+   *
+   * It costs about four seconds on a machine whose registry holds all four
+   * targets, and a minute on one that has only ever built for its own. */
+  { name: 'docs:rust-notices --check', cmd: 'pnpm', args: ['docs:rust-notices', '--check'] },
+  /* Frozen ALL THE WAY DOWN: `Object.freeze` on the array left every step
+   * object and args array mutable, so an importer could quietly rewrite what
+   * a "step" runs while the definition still read as frozen. */
+].map((step) => Object.freeze({ ...step, args: Object.freeze(step.args) })))
 
 /**
  * Run `steps` in order with `run(step)` → exit code (0 ok), writing headers
@@ -143,12 +174,61 @@ export function runSteps(steps, run, log = (line) => process.stdout.write(`${lin
   return 0
 }
 
+/** What cmd.exe cannot misread: word characters and the handful of
+ *  punctuation the real steps use. Exported so the refusal is testable on
+ *  the platforms whose spawn never consults a shell. */
+export const plainToken = (arg) => /^[\w@:./=-]+$/.test(arg)
+
+/**
+ * Whether this command can only be STARTED through cmd.exe.
+ *
+ * `pnpm` on Windows is `pnpm.cmd`, and since Node 20.12 a `.cmd` cannot be
+ * spawned without a shell (EINVAL, by design). A command named by a full path
+ * — `process.execPath`, which the tests spawn — is an executable Node starts
+ * directly, and putting cmd.exe in front of one hands the shell arguments it
+ * was never meant to parse.
+ *
+ * ⚠️ **THE REFUSAL BELOW IS DERIVED FROM THIS, NOT FROM THE PLATFORM.** Keyed
+ * on `win32` alone it refused `node -e "process.exit(0)"` — parentheses,
+ * quotes and a space — so every `spawnStep` assertion in `verify.test.mjs`
+ * returned 126 on the Windows leg, which reaches `test:coverage` through
+ * `pnpm verify --until build:cli`. A guard that reddens the gate on every run
+ * is not a guard; it is the gate's own failure wearing the guard's name.
+ *
+ * `platform` is a parameter so both answers are reachable from one machine:
+ * the Windows arm of a Windows-only rule is otherwise asserted by nobody
+ * until CI runs it. `path.win32.isAbsolute` for the same reason — the
+ * question only ever arises about a Windows path.
+ */
+export const needsShell = (cmd, platform = process.platform) => platform === 'win32' && !path.win32.isAbsolute(cmd)
+
 /** Run one step as a child process in `cwd`, inheriting the terminal (or
  *  discarding stdout for a `quiet` step, whose output is a JSON blob). */
 export function spawnStep(step, cwd = REPO_ROOT, extraEnv = undefined) {
+  /* THE SHELL MAKES EVERY ARGUMENT A PROMISE. Where the step runs through
+   * cmd.exe, cmd.exe interprets metacharacters in arguments — so an argument
+   * that is not a plain token is a command injection waiting for a caller to
+   * pass one. `STEPS` is all plain tokens today, but `spawnStep` is exported
+   * and `verify-without` feeds it a capability id straight from argv. Refused
+   * HERE, at the one place the shell is decided, rather than trusted to every
+   * present and future caller — and ONLY where a shell exists to misread
+   * anything: without one, arguments reach the child verbatim, which is why
+   * this is keyed on `needsShell` and not on the platform. */
+  const shell = needsShell(step.cmd)
+  if (shell) {
+    const unsafe = step.args.find((arg) => !plainToken(arg))
+    if (unsafe !== undefined) {
+      process.stderr.write(`verify: refusing to run ${step.name}: argument ${JSON.stringify(unsafe)} is not a plain token\n`)
+      return 126
+    }
+  }
   const result = spawnSync(step.cmd, step.args, {
     cwd,
     stdio: step.quiet ? ['inherit', 'ignore', 'inherit'] : 'inherit',
+    /* See `needsShell`: cmd.exe for the `.cmd` shims that cannot start
+     * without it, and nothing else. A shell between this runner and the gate
+     * it runs is one more thing to trust. */
+    shell,
     /* `extraEnv` is how `verify:without` tells the gates inside its copy which
        capability it has just deleted — see `DELETED_ENV`. Nothing sets it on
        the real tree, which is exactly the distinction the gates need. */
@@ -168,16 +248,25 @@ export function spawnStep(step, cwd = REPO_ROOT, extraEnv = undefined) {
 /** `{ steps }` to run, or `{ error }`; `{ list: true }` for `--list`. */
 export function parseArgs(argv, steps = STEPS) {
   let from
+  let until
   let only
   let list = false
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     if (arg === '--list') list = true
-    else if (arg === '--from' || arg === '--only') {
+    else if (arg === '--from' || arg === '--until' || arg === '--only') {
       const value = argv[i + 1]
       if (value === undefined || value.startsWith('--')) return { error: `${arg} needs a step name` }
       if (!steps.some((s) => s.name === value)) return { error: `no step named ${JSON.stringify(value)}; see --list` }
+      /* A REPEATED SELECTOR USED TO WIN SILENTLY: `--only build --only
+         typecheck` ran only typecheck, and the reader's first selector
+         vanished without a word — the same shape as `--list` winning below,
+         refused for the same reason. */
+      if ((arg === '--from' && from !== undefined) || (arg === '--until' && until !== undefined) || (arg === '--only' && only !== undefined)) {
+        return { error: `${arg} was given twice` }
+      }
       if (arg === '--from') from = value
+      else if (arg === '--until') until = value
       else only = value
       i++
     } else return { error: `unknown argument ${JSON.stringify(arg)}` }
@@ -186,20 +275,28 @@ export function parseArgs(argv, steps = STEPS) {
      ran nothing, which reads as "here is what I am about to do" and is not. A
      selector the reader typed and this ignored is the shape worth refusing. */
   if (list) {
-    if (from !== undefined || only !== undefined) {
-      return { error: '--list cannot be combined with --from or --only' }
+    if (from !== undefined || until !== undefined || only !== undefined) {
+      return { error: '--list cannot be combined with --from, --until or --only' }
     }
     return { list: true }
   }
   let selected = [...steps]
   if (from !== undefined) selected = selected.slice(selected.findIndex((s) => s.name === from))
+  /* INCLUSIVE, and on the already-narrowed list, so `--from a --until b` with
+     b before a is the same empty selection `--from`/`--only` already refuse
+     below — a window that names two real steps and contains none is an
+     error, not a pass. */
+  if (until !== undefined) selected = selected.slice(0, selected.findIndex((s) => s.name === until) + 1)
   if (only !== undefined) selected = selected.filter((s) => s.name === only)
   /* AN EMPTY SELECTION IS AN ERROR, NOT A PASS. `--from build --only typecheck`
      names two real steps and intersects to nothing, and this used to print
      "all 0 steps passed" and exit 0 — a gate reporting success having verified
      literally nothing, which is the worst failure a gate has. */
   if (selected.length === 0) {
-    return { error: `--from ${JSON.stringify(from)} and --only ${JSON.stringify(only)} select no steps; --only must name a step at or after --from` }
+    const named = [from !== undefined && `--from ${JSON.stringify(from)}`, until !== undefined && `--until ${JSON.stringify(until)}`, only !== undefined && `--only ${JSON.stringify(only)}`]
+      .filter(Boolean)
+      .join(' and ')
+    return { error: `${named} select no steps; --until and --only must name a step at or after --from` }
   }
   return { steps: selected }
 }
@@ -207,7 +304,7 @@ export function parseArgs(argv, steps = STEPS) {
 function main(argv) {
   const args = parseArgs(argv)
   if (args.error !== undefined) {
-    process.stderr.write(`verify: ${args.error}\nusage: node scripts/verify.mjs [--list] [--from <step>] [--only <step>]\n`)
+    process.stderr.write(`verify: ${args.error}\nusage: node scripts/verify.mjs [--list] [--from <step>] [--until <step>] [--only <step>]\n`)
     return 2
   }
   if (args.list) {

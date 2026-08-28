@@ -205,18 +205,90 @@ impl AgentProbe {
         }
     }
 
+    /// Installed, but a version this build does not support — either it
+    /// would not say what it is (`version: None`) or it said something too
+    /// old. One constructor, because the two return sites differed only in
+    /// that field and drifted as a pair.
+    pub fn unsupported(agent: Agent, path: String, version: Option<Version>) -> AgentProbe {
+        AgentProbe {
+            agent,
+            path: Some(path),
+            version,
+            auth: Some(AuthState::VersionUnsupported),
+            unusable: Some(VERSION_NOT_SUPPORTED),
+        }
+    }
+
     /// Whether this route can answer a question.
     pub fn usable(&self) -> bool {
         self.unusable.is_none()
     }
 }
 
-/// Find an executable by walking `PATH` in Rust.
+/// Find an executable: on `PATH`, then where a CLI lives when the launch
+/// environment has never heard of it.
 ///
 /// Never a shell, never `which`. See the module header.
 pub fn which(exe: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
+    which_in(
+        std::env::var_os("PATH").as_deref(),
+        home_dir().as_deref(),
+        exe,
+    )
+}
+
+/// Where the reader's shell looks and a Finder launch does not (WI-20.22).
+///
+/// ⚠️ A `.app` opened from the Finder or the Dock inherits launchd's `PATH` —
+/// `/usr/bin:/bin:/usr/sbin:/sbin` — not the shell's. Homebrew's prefix and
+/// `~/.local/bin`, where `codex` and `claude` actually live on this machine,
+/// are in the second and not the first, so the probe told a reader who had
+/// just used both in a terminal that neither was installed. Phase 15's live
+/// probe ran under `tauri dev` from a terminal, whose `PATH` hid it. Same
+/// class, same fix, as `tailscale` in the webhost plugin's `address.rs`.
+///
+/// Searched AFTER `PATH`, so a reader who put a different build first still
+/// gets the one they chose. Off macOS these are simply directories that are
+/// not there, and a stat that fails costs nothing.
+const FALLBACK_DIRS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin"];
+
+/// The same, under the reader's home. `claude`'s own installer puts the
+/// binary in `~/.local/bin`.
+const HOME_FALLBACK_DIRS: &[&str] = &[".local/bin"];
+
+/// The reader's home, from the variable every launch — Finder or shell —
+/// sets. `HOME` on Unix, `USERPROFILE` on Windows.
+fn home_dir() -> Option<PathBuf> {
+    let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(var).map(PathBuf::from)
+}
+
+/// [`which`] over an explicit `PATH` and home, so a test can hand it a
+/// `PATH` with nothing on it and a home it planted a CLI under.
+fn which_in(path: Option<&std::ffi::OsStr>, home: Option<&Path>, exe: &str) -> Option<PathBuf> {
+    let on_path = path.into_iter().flat_map(std::env::split_paths);
+    let system = FALLBACK_DIRS.iter().map(PathBuf::from);
+    let under_home = home
+        .into_iter()
+        .flat_map(|home| HOME_FALLBACK_DIRS.iter().map(move |dir| home.join(dir)));
+    on_path
+        .chain(system)
+        .chain(under_home)
+        /* ABSOLUTE, before the stat. A relative `PATH` entry — `.`, or the
+         * empty entry a trailing colon leaves, which `split_paths` yields as
+         * `""` — would be probed against the process's current directory and
+         * later executed against a DIFFERENT one; the run contract below says
+         * "the program is an absolute path". Anchored here, once, so the
+         * path that passed the stat is the path that runs. */
+        .map(|dir| {
+            if dir.as_os_str().is_empty() || dir.is_relative() {
+                std::env::current_dir()
+                    .map(|cwd| cwd.join(&dir))
+                    .unwrap_or(dir)
+            } else {
+                dir
+            }
+        })
         .map(|dir| dir.join(exe))
         .find(|candidate| is_executable_file(candidate))
 }
@@ -302,23 +374,11 @@ pub async fn probe(agent: Agent) -> AgentProbe {
     let Some(version) = version else {
         // It is on PATH but would not say what it is. Not a crash, and not a
         // guess: an unusable route that says why.
-        return AgentProbe {
-            agent,
-            path: Some(path_text),
-            version: None,
-            auth: Some(AuthState::VersionUnsupported),
-            unusable: Some(VERSION_NOT_SUPPORTED),
-        };
+        return AgentProbe::unsupported(agent, path_text, None);
     };
 
     if version < agent.minimum_version() {
-        return AgentProbe {
-            agent,
-            path: Some(path_text),
-            version: Some(version),
-            auth: Some(AuthState::VersionUnsupported),
-            unusable: Some(VERSION_NOT_SUPPORTED),
-        };
+        return AgentProbe::unsupported(agent, path_text, Some(version));
     }
 
     let auth = match agent {
@@ -344,8 +404,24 @@ pub async fn probe(agent: Agent) -> AgentProbe {
 /// `codex login status` answers in PROSE. See [`read_codex_status`].
 async fn probe_codex_auth(path: &Path) -> AuthState {
     match run(path, &["login", "status"]).await {
-        Ok(out) => read_codex_status(&out.text()),
+        Ok(out) => guard_signed_in(read_codex_status(&out.text()), out.ok),
         Err(_) => AuthState::VersionUnsupported,
+    }
+}
+
+/// A SIGNED-IN answer must come from a run that SUCCEEDED.
+///
+/// The exit code cannot gate the whole parse — `codex login status` exits
+/// non-zero when signed out, which is an ordinary answer — but a CLI that
+/// printed a signed-in-shaped sentence on its way to failing (a wrapper
+/// script dying after banner output, a Store stub) must not mark the route
+/// usable on the strength of that sentence alone. Signed-out with any exit
+/// stands; signed-in without a clean exit is an answer this version's
+/// grammar does not cover.
+fn guard_signed_in(state: AuthState, ok: bool) -> AuthState {
+    match state {
+        AuthState::SignedIn { .. } if !ok => AuthState::VersionUnsupported,
+        other => other,
     }
 }
 
@@ -385,7 +461,11 @@ pub fn read_codex_status(text: &str) -> AuthState {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaudeAuth {
-    #[serde(default)]
+    /* NOT `#[serde(default)]`: with a default, `{}` — or a future object
+     * that renamed the field — parsed cleanly and read as SIGNED OUT, which
+     * is a claim about the account. The module's own rule is that a shape
+     * this version does not know reports "Version not supported" rather
+     * than guessing; a missing `loggedIn` is exactly that shape. */
     pub logged_in: bool,
     #[serde(default)]
     pub auth_method: Option<String>,
@@ -395,7 +475,7 @@ pub struct ClaudeAuth {
 
 async fn probe_claude_auth(path: &Path) -> AuthState {
     match run(path, &["auth", "status", "--json"]).await {
-        Ok(out) => read_claude_status(&out.stdout),
+        Ok(out) => guard_signed_in(read_claude_status(&out.stdout), out.ok),
         Err(_) => AuthState::VersionUnsupported,
     }
 }
@@ -585,6 +665,59 @@ mod tests {
         assert!(which("paper-definitely-not-a-real-binary-xyzzy").is_none());
     }
 
+    /// A missing `loggedIn` is an unknown shape, not a signed-out account.
+    #[test]
+    fn an_empty_status_object_is_an_unsupported_version_not_signed_out() {
+        assert!(matches!(
+            read_claude_status("{}"),
+            AuthState::VersionUnsupported
+        ));
+        assert!(matches!(
+            read_claude_status("null"),
+            AuthState::VersionUnsupported
+        ));
+        assert!(matches!(
+            read_claude_status(r#"{"authMethod":"api-key"}"#),
+            AuthState::VersionUnsupported
+        ));
+    }
+
+    /// A signed-in sentence from a run that FAILED does not mark the route
+    /// usable; a signed-out answer stands whatever the exit, because `codex
+    /// login status` exits non-zero when signed out.
+    #[test]
+    fn a_signed_in_answer_needs_a_clean_exit_and_a_signed_out_one_does_not() {
+        let signed_in = AuthState::SignedIn { plan: None };
+        assert!(matches!(
+            guard_signed_in(signed_in.clone(), false),
+            AuthState::VersionUnsupported
+        ));
+        assert!(matches!(
+            guard_signed_in(signed_in, true),
+            AuthState::SignedIn { .. }
+        ));
+        assert!(matches!(
+            guard_signed_in(AuthState::SignedOut, false),
+            AuthState::SignedOut
+        ));
+    }
+
+    /// A relative `PATH` entry — `.` or the empty string a trailing colon
+    /// leaves — must still yield an ABSOLUTE program path: the probe and the
+    /// later run may hold different current directories.
+    #[cfg(unix)]
+    #[test]
+    fn a_relative_path_entry_yields_an_absolute_candidate() {
+        let scratch = crate::testutil::ScratchDir::new("which-relative");
+        plant_cli(scratch.path(), "paper-relative-cli");
+        let old = std::env::current_dir().unwrap();
+        std::env::set_current_dir(scratch.path()).unwrap();
+        let found = which_in(Some(std::ffi::OsStr::new(".")), None, "paper-relative-cli");
+        std::env::set_current_dir(old).unwrap();
+        let found = found.expect("found through the relative entry");
+        assert!(found.is_absolute(), "{}", found.display());
+    }
+
     /// The resolver works on this platform, proven against a binary every
     /// unix has. Not asserting a specific path — that is the machine's
     /// business — only that resolution returns something absolute and
@@ -595,6 +728,74 @@ mod tests {
         let found = which("sh").expect("sh is on PATH");
         assert!(found.is_absolute());
         assert!(is_executable_file(&found));
+    }
+
+    /// A fake CLI: a file with the executable bit, which is all `which` reads.
+    #[cfg(unix)]
+    fn plant_cli(dir: &Path, name: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(dir).unwrap();
+        let exe = dir.join(name);
+        std::fs::write(&exe, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        exe
+    }
+
+    /// WI-20.22. A `.app` opened from the Finder gets launchd's `PATH`, which
+    /// has never heard of `~/.local/bin` — where `claude`'s own installer puts
+    /// it — so the probe reported a CLI the reader had just used in a terminal
+    /// as "Not installed". Phase 15's live probe ran under `tauri dev` from a
+    /// terminal, whose `PATH` hid this. With no `PATH` at all, the candidate
+    /// directories are still searched.
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_off_path_is_found_in_a_candidate_directory() {
+        let home = crate::testutil::ScratchDir::new("agent-home");
+        let exe = plant_cli(&home.path().join(".local/bin"), "paper-fake-agent");
+
+        let empty_path = std::ffi::OsString::new();
+        assert_eq!(
+            which_in(Some(&empty_path), Some(home.path()), "paper-fake-agent"),
+            Some(exe.clone()),
+            "an empty PATH still reaches ~/.local/bin"
+        );
+        assert_eq!(
+            which_in(None, Some(home.path()), "paper-fake-agent"),
+            Some(exe),
+            "no PATH at all still reaches ~/.local/bin"
+        );
+        /* Nowhere to look: no PATH and no home is honestly nothing. */
+        assert_eq!(which_in(None, None, "paper-fake-agent"), None);
+    }
+
+    /// The reader's own `PATH` outranks the fallbacks: a CLI they put first
+    /// is the one that runs, and the fallbacks only fill a `PATH` that has
+    /// nothing to say.
+    #[cfg(unix)]
+    #[test]
+    fn the_path_wins_over_the_candidate_directories() {
+        let home = crate::testutil::ScratchDir::new("agent-home");
+        let on_path = crate::testutil::ScratchDir::new("agent-path");
+        let chosen = plant_cli(on_path.path(), "paper-fake-agent");
+        let _fallback = plant_cli(&home.path().join(".local/bin"), "paper-fake-agent");
+
+        let path = std::env::join_paths([on_path.path()]).unwrap();
+        assert_eq!(
+            which_in(Some(&path), Some(home.path()), "paper-fake-agent"),
+            Some(chosen)
+        );
+    }
+
+    /// A file in a candidate directory without the executable bit is not a
+    /// CLI — the same rule the `PATH` walk already applies.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_executable_file_in_a_candidate_directory_is_not_found() {
+        let home = crate::testutil::ScratchDir::new("agent-home");
+        let bin = home.path().join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("paper-fake-agent"), "not a program").unwrap();
+        assert_eq!(which_in(None, Some(home.path()), "paper-fake-agent"), None);
     }
 
     #[test]

@@ -1,6 +1,7 @@
+import { messageOf } from '../lib/messageOf'
 import { createGenerations } from '../../../kernel'
 import type { ReportFailure } from '../lib/controller'
-import type { Endpoint, InferencePlugin } from '../lib/plugin'
+import type { Endpoint, InferencePlugin, KeyState } from '../lib/plugin'
 
 /**
  * The **Cloud endpoints** section's decisions — no React, so they can be
@@ -55,7 +56,7 @@ export interface EndpointRow {
   readonly label: string
   /** The row's right-hand value: the host, and whether a key is stored. */
   readonly value: string
-  readonly hasKey: boolean
+  readonly keyState: KeyState
   /**
    * `confirm` once Remove has been pressed and not yet acted on.
    *
@@ -103,7 +104,10 @@ export function validId(id: string): boolean {
 
 export function validBaseUrl(url: string): boolean {
   const scheme = 'https://'
-  if (!url.startsWith(scheme) || url.length > MAX_BASE_URL) return false
+  /* BYTES, NOT CODE UNITS: the crate bounds `url.len()`, which is UTF-8 bytes,
+     and `url.length` is UTF-16 units — a Unicode-heavy address passed here
+     and was refused there. */
+  if (!url.startsWith(scheme) || new TextEncoder().encode(url).length > MAX_BASE_URL) return false
   /* No whitespace or control characters anywhere: they cannot appear in a URL
      unescaped, and a header built from one would be split by them. */
   if (/[\s\p{Cc}]/u.test(url)) return false
@@ -114,7 +118,20 @@ export function validBaseUrl(url: string): boolean {
   const authority = rest.split(/[/?]/)[0] ?? ''
   /* There has to BE a host: an empty authority is `https://` wearing a URL's
      clothes, and it reaches the daemon as a registration that cannot resolve. */
-  return authority.length > 0 && /^[A-Za-z0-9.:-]+$/.test(authority) && /[A-Za-z0-9]/.test(authority)
+  if (!(authority.length > 0 && /^[A-Za-z0-9.:-]+$/.test(authority) && /[A-Za-z0-9]/.test(authority))) return false
+  /* AND IT HAS TO BE A HOST. The character class let `a:99999`, `a..b` and
+     `-host` through with the message promising a valid address; the platform
+     parser knows what a host and a port are, and refuses those. */
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return false
+  }
+  if (parsed.hostname === '' || parsed.username !== '' || parsed.password !== '') return false
+  const labels = parsed.hostname.replace(/^\[|\]$/g, '').split('.')
+  if (!parsed.hostname.startsWith('[') && labels.some((label) => label === '' || label.startsWith('-') || label.endsWith('-'))) return false
+  return true
 }
 
 /** Why this draft cannot be saved, in the reader's words, or null. */
@@ -132,6 +149,13 @@ export function refuseDraft(draft: EndpointDraft): string | null {
 
 /* ------------------------------- the row --------------------------------- */
 
+/** What the row says about the key, per state — and never the key. */
+const KEY_STATE_WORDS: Readonly<Record<KeyState, string>> = {
+  set: 'key set',
+  missing: 'no key',
+  unreadable: 'key unreadable',
+}
+
 /** The host an address points at, for the row's value. */
 export function hostOf(baseUrl: string): string {
   const rest = baseUrl.replace(/^https:\/\//, '')
@@ -145,9 +169,11 @@ export function rowFor(endpoint: Endpoint, arming: string | null): EndpointRow {
     label: endpoint.label === '' ? endpoint.id : endpoint.label,
     /* WHETHER A KEY IS STORED, never the key — there is deliberately no
        command that reads one back, and a row showing one is the easiest place
-       for that absence to be quietly undone. */
-    value: `${hostOf(endpoint.baseUrl)} · ${endpoint.hasKey ? 'key set' : 'no key'}`,
-    hasKey: endpoint.hasKey,
+       for that absence to be quietly undone. Three words for three states:
+       "no key" on a key the keychain would not read sent the reader to
+       re-enter a credential they already had. */
+    value: `${hostOf(endpoint.baseUrl)} · ${KEY_STATE_WORDS[endpoint.keyState]}`,
+    keyState: endpoint.keyState,
     action: endpoint.id === arming ? 'confirm' : 'remove',
   }
 }
@@ -184,7 +210,6 @@ export interface EndpointsModelOptions {
 
 const EMPTY: EndpointsSnapshot = { rows: [], loading: true, busy: false, failure: null }
 
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
 export function createEndpointsModel({ plugin, report }: EndpointsModelOptions): EndpointsModel {
   const listeners = new Set<() => void>()

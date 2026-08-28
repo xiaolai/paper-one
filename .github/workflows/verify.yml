@@ -1,11 +1,32 @@
 # The unified gate, on a clean clone. `pnpm verify` is the copy‑paste command a
 # developer runs locally; CI runs exactly the same thing so "green here" and
 # "green there" are one fact. (dev-docs/plans/phase-05-kernel-capabilities.md, K.12)
+#
+# THREE LEGS SINCE PHASE 20 (WI-20.38, D10), and what each one is for:
+#
+#   host     macOS — the full gate, as it always was, plus the deletion proof.
+#   linux    Ubuntu 24.04 — the SAME `pnpm verify`, unchanged, after Tauri's
+#            system libraries. Every Tauri app surveyed runs its tests on one
+#            primary Linux runner; this is the first time this repository's
+#            gate has run anywhere but a Mac. The app's Rust tests are pure
+#            functions and the peer fixtures are "relays off, no discovery"
+#            over loopback, so nothing here needs a display.
+#   windows  check only — `cargo check --workspace --all-targets` plus the JS
+#            half of the gate. A full Windows gate is the ~33-minute leg the
+#            survey found, for a platform nothing here is yet marked Shipped
+#            on; the check is what catches a `cfg(target_os = "macos")` that
+#            leaked into shared code.
+#
+# Bundling is NOT here. It lives in `bundle.yml`, tag-triggered, on the glibc
+# floor (Ubuntu 22.04) — a release artifact is a different event from a green
+# commit, and the surveyed apps keep the two apart.
 name: verify
 
 on:
   push:
-    branches: [main, ui-polish, kernel-carve]
+    # `main` only: `ui-polish` and `kernel-carve` were merged and deleted, and
+    # every other branch reaches CI through its pull request below.
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -28,8 +49,10 @@ jobs:
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
         with:
-          # rust-toolchain.toml at the repo root pins the channel; this action
-          # installs rustup and defers to it.
+          # rust-toolchain.toml at the repo root pins the channel to this same
+          # version; this input is not deferral — dtolnay/rust-toolchain
+          # installs exactly what it is given — so the two must move together,
+          # and `bump`-style changes to the toolchain touch both.
           toolchain: 1.97.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -61,3 +84,67 @@ jobs:
       # import, fail in the suite instead of here.
       - name: Deletion is an operation (temp checkout)
         run: pnpm verify:without companion
+
+  linux:
+    name: linux (Ubuntu 24.04, full gate)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      # Tauri 2's own list for a Debian-family host: the WebKitGTK the webview
+      # is, the appindicator the tray icon needs, and librsvg for icons.
+      # `tauri-plugin-mcp-bridge` (debug builds only, behind the `desktop`
+      # feature) carries a Linux screenshot module of its own; whether it
+      # compiles here is the one thing D10 left unverified, and this job is
+      # what answers it.
+      - name: Tauri system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm verify
+
+  windows:
+    name: windows (check only)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      # pnpm runs package scripts through cmd.exe on Windows, and the scripts
+      # are written for a POSIX shell (`typecheck` begins `rm -rf .types`).
+      # Git for Windows is on every runner; this points pnpm's script shell at
+      # it, so the same scripts run rather than a second, Windows-only set.
+      npm_config_script_shell: C:\Program Files\Git\bin\bash.exe
+    steps:
+      # Every source-reading gate — the CSP test, the footprint allowlist, the
+      # ledger — compares bytes. A checkout that rewrote line endings would
+      # fail them for a reason that has nothing to do with the code.
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - run: pnpm install --frozen-lockfile
+      # The JS half of the gate, through `build:cli`; the Cargo half is the
+      # check below. `--until` exists for this line (scripts/verify.mjs).
+      - run: pnpm verify --until build:cli
+      - run: cargo check --manifest-path src-tauri/Cargo.toml --workspace --all-targets

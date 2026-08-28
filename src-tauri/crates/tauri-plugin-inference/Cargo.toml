@@ -3,7 +3,7 @@ name = "tauri-plugin-inference"
 version = "0.1.0"
 description = "Paper's local inference runtime: a supervised lemond child, a per-launch bearer token, verified model artifacts, and agent probes, behind Tauri commands"
 authors = ["Paper"]
-license = ""
+license = "MIT"
 edition = "2021"
 # The app crate and tauri-plugin-peer both say 1.91; the toolchain itself is
 # pinned by the root rust-toolchain.toml.
@@ -37,6 +37,9 @@ tauri-plugin = { version = "2.6", features = ["build"] }
 # default-features = false: the plugin does not choose the webview or the
 # app-level features; the app does. Only the runtime types are needed here.
 tauri = { version = "2.11.3", default-features = false }
+# The one resolution of the data root, shared with the app and the other plugin.
+paper-data-root = { path = "../paper-data-root" }
+paper-process = { path = "../paper-process" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -116,6 +119,29 @@ log = "0.4"
 # three hand-rolled platform bindings: on macOS it is `security-framework`,
 # which is already in the tree, and hand-rolling Keychain + DPAPI + Secret
 # Service is more liability than the dependency it would save.
+#
+# ⚠️ **THE LINUX SESSION IS UNENCRYPTED, AND THAT IS NOT A CHOICE ANYONE MADE
+# HERE.** `sync-secret-service` without `crypto-rust` (or `crypto-openssl`)
+# leaves keyring passing `EncryptionType::Plain` — its `secret_service.rs`
+# gates on exactly those two features — so a cloud API key crosses the
+# session D-Bus in the clear on Linux, where the whole point of the Secret
+# Service was that it does not.
+#
+# The one-line fix is `"crypto-rust"` on this list, and it is MEASURED AS
+# BLOCKED rather than left out: enabling it resolves keyring's weak feature
+# references and adds 22 packages to `Cargo.lock` — `secret-service`, the
+# `zbus` tree, `num` — none of which are COMPILED (the weak `?/` reference
+# does not activate them; `cargo tree --target x86_64-unknown-linux-gnu -e
+# features` shows only `dbus-secret-service feature "crypto-rust"`). Lockfile
+# entries alone are enough to break the gate: `check-third-party-notices`
+# runs `cargo metadata --offline --locked` inside `test:coverage`, which is
+# BEFORE `verify.mjs`'s own online `cargo metadata --locked`, and offline
+# metadata fails on any lockfile package missing from the local registry —
+# verified by holding `zbus-4.4.0` out of `~/.cargo/registry` and watching it
+# exit 101. A CI runner restoring a rust-cache keyed on the OLD lockfile has
+# exactly that shape, and so does a fresh clone. Fetching first (a `cargo
+# fetch` step, or the notices call dropping `--offline`) is what unblocks
+# this, and neither lives in this directory.
 keyring = { version = "3", features = [
     "apple-native",
     "windows-native",
@@ -132,6 +158,10 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    # Console is used directly (`GenerateConsoleCtrlEvent` in procgroup.rs) and
+    # compiled only because tokio's `signal` feature happened to enable it —
+    # a dependency's feature choice is not this crate's to lean on.
+    "Win32_System_Console",
     "Win32_System_JobObjects",
     "Win32_System_Threading",
 ] }

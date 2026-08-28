@@ -17,6 +17,12 @@ import type { AskPassage } from '../../core/companion'
 import { screenPassages } from './passages'
 import { rangeBoxInHost, type HostRect } from './coordinates'
 import { isBacklink } from './backlink'
+import { directionOf } from './direction'
+import { refuseBookScripts, stripScripts } from './bookScripts'
+
+/* Re-exported where it always lived — the rule itself moved to `direction.ts`
+ * so speech could import it without carrying a copy (audit round 1, #842). */
+export { directionOf } from './direction'
 import { suppressEmptyGeneratedContent } from './generatedContent'
 import { markFigures } from './markFigures'
 import { matteFigures } from './matteFigures'
@@ -31,7 +37,8 @@ import {
   type MarkTint,
 } from '../../core/marks'
 import type { BookMeta, ReaderPosition } from '../../core/bookMeta'
-import type { BookSource } from '../../core/formats'
+import { isEmptySource, type BookSource } from '../../core/formats'
+import type { OpenedBook } from './protection'
 import { coverFrom } from '../../core/coverArt'
 import { deferSnap } from './wordSnap/deferredSnap'
 import { watchGestureProvenance } from './wordSnap/gestureProvenance'
@@ -365,6 +372,33 @@ export interface FootnoteRender {
   readonly at: HostRect | null
 }
 
+/**
+ * One click on a note reference: where its marker was, and which click it is.
+ *
+ * ⚠️ **A SHARED `FootnoteHandler` CANNOT SAY WHICH NOTE A VIEW BELONGS TO.**
+ * It emits `before-render` carrying `{ view }` and nothing else, so a session
+ * holding one handler had to pair views to clicks by ARRIVAL ORDER — a FIFO
+ * queue — and neither `resolveHref` nor the note's own render settles in click
+ * order. Two notes in flight could cross: the older one was shown, at the
+ * newer one's anchor, and the note the reader actually clicked was released.
+ *
+ * The same queue could also come up EMPTY, when the reader closed the note
+ * before it rendered, and the fallback then handed the arriving view the
+ * current sequence — which passed the supersession check and reopened the note
+ * they had just dismissed.
+ *
+ * So a request owns its own handler and its own two listeners (see
+ * `#openFootnote`), and the pairing is an identity rather than a guess. A
+ * handler holds only the `detectFootnotes` switch, left at its default, so a
+ * fresh one per click is equivalent — and it becomes unreachable with its
+ * listeners once its note is done, which is why "one per session, or a
+ * listener leaks per note followed" no longer applies.
+ */
+interface NoteRequest {
+  readonly at: HostRect | null
+  readonly seq: number
+}
+
 export interface SessionCallbacks {
   /**
    * A link inside the book was followed, BEFORE foliate acts on it.
@@ -598,6 +632,20 @@ export interface SessionDeps {
    * `applyVars` just below, which is required for the same reason.
    */
   prepare: (source: BookSource) => Promise<unknown>
+  /**
+   * Why the OPENED book must not be shown, or null.
+   *
+   * Asked after `view.open` and before `init` — the fork has parsed the
+   * archive by then and loaded no section yet, so the answer costs one small
+   * read and a refused book never puts a page of ciphertext on screen. See
+   * `protection.ts` for what it decides and why the rule is narrow.
+   *
+   * Injected rather than imported so the session's lifecycle tests, which
+   * run with no DOM, can hand it a verdict; REQUIRED, on the same reasoning as
+   * `prepare` above — a caller that left it out would reopen exactly the
+   * failure it exists to prevent, a DRM'd book rendered as noise.
+   */
+  protection: (book: OpenedBook) => Promise<string | null>
   applySettings: (view: View) => void
   /**
    * The reader's settings, as custom properties on ONE document's root.
@@ -800,11 +848,6 @@ export class ReaderSession {
   /** A book this session synthesised, which `View.close()` will not release. */
   #prepared: Destroyable | null = null
   /**
-   * Upstream's footnote detection. One per session, because it holds only the
-   * `detectFootnotes` switch and its listeners.
-   */
-  readonly #footnotes = new FootnoteHandler()
-  /**
    * The rendered note's view, so it can be released on dismiss.
    *
    * Typed as `View`, not `HTMLElement`: releasing it means calling `close()`
@@ -812,8 +855,25 @@ export class ReaderSession {
    * that method — which is how it came to be detached without being closed.
    */
   #footnoteView: View | null = null
-  /** Where the reference was, captured before the note resolves. */
-  #footnoteAt: HostRect | null = null
+  /**
+   * Which note the reader is waiting for.
+   *
+   * Every click takes the next number and carries it in its own `NoteRequest`;
+   * anything arriving under an older one is released rather than shown. That
+   * retires a note superseded by a newer click, and a note still rendering when
+   * the reader closed the flow — `closeFootnote`, `#noteFailed` and `dispose`
+   * all advance it, which is how "nothing is pending" is expressed.
+   *
+   * ⚠️ **THIS USED TO BE HALF OF A PAIRING SCHEME, and the other half was a
+   * FIFO queue.** The anchor was queued at the click and shifted off at
+   * `before-render`, which pairs by arrival rather than by identity — see
+   * `NoteRequest`. Two consequences, both real: two notes in flight could
+   * cross, and a `before-render` arriving with the queue EMPTY (the reader had
+   * closed the note) fell back to `{ at: null, seq: <current> }`, which then
+   * passed this very check and reopened the note they had just dismissed. A
+   * request that owns its own listeners has neither.
+   */
+  #noteSeq = 0
   /**
    * The box a note is rendered into, owned by the host.
    *
@@ -890,8 +950,8 @@ export class ReaderSession {
     if (!view) return
 
     this.#mount(view)
-    /* HELD, because notes are styled long after this returns. `#watchFootnotes`
-       is wired once here and fires whenever a reader opens a note, by which
+    /* HELD, because notes are styled long after this returns. `#watchOneNote`
+       is wired at each click and fires whenever a reader opens a note, by which
        time `deps` is three call frames gone. */
     this.#styleNote = deps.styleNote ?? null
     this.#applyVars = deps.applyVars
@@ -951,10 +1011,14 @@ export class ReaderSession {
    * document and position of the one that replaced it.
    */
   #bind(view: View): void {
-    this.#watchFootnotes()
     view.addEventListener('load', (event) => {
       if (this.#disposed) return
       const { doc, index } = (event as CustomEvent<LoadDetail>).detail
+      /* FIRST, before a watcher, a mark or a measurement reads it: the
+         loader refuses a script RESOURCE, and leaves inline scripts and
+         `on*` handlers to whoever receives the document — its own source
+         says so. That is here. */
+      stripScripts(doc)
       // A section re-loaded is the same document with fresh content, so its
       // previous listeners are dropped before new ones go on — otherwise every
       // return to a section doubles them.
@@ -1222,8 +1286,24 @@ export class ReaderSession {
     })
   }
 
-  /** Parse the source and open it. False means stop — failed or disposed. */
+  /**
+   * Parse the source and open it. False means stop — failed, refused or
+   * disposed.
+   *
+   * THREE OUTCOMES USED TO BE SILENT, or worse than silent (WI-20.13). A
+   * zero-length file reached the fork, whose words for it are "File not
+   * found". A DRM'd EPUB opened and rendered its chapters as noise, because
+   * the fork passes an algorithm it cannot decode through as ciphertext and
+   * nothing here asked. And a password-protected PDF showed pdf.js's own "No
+   * password given" — `makePdf` owns that one; its refusal arrives through
+   * the catch below with a sentence of its own.
+   */
   async #openBook(view: View, source: BookSource, deps: SessionDeps): Promise<boolean> {
+    /* Before the fork sees it — see `isEmptySource`. */
+    if (isEmptySource(source)) {
+      this.#cb.onError(EMPTY_FILE)
+      return false
+    }
     try {
       /* REQUIRED — see `SessionDeps.prepare`. The cast at `view.open` below is
          only sound because something has converted whatever this was into
@@ -1248,7 +1328,29 @@ export class ReaderSession {
       this.#cb.onError(message(cause, 'This file could not be opened.'))
       return false
     }
-    return this.#settle(view)
+    if (!this.#settle(view)) return false
+
+    /* BEFORE ANY SECTION LOADS. The fork's loader asks its book, per
+     * resource, whether it may load it; the answer for a script is no — the
+     * CSP is the wall and this is what stands behind it (`bookScripts.ts`,
+     * WI-20.30). Wired here, between `open` and the first `init`, because a
+     * listener added later meets a chapter already loaded. */
+    refuseBookScripts(view.book)
+
+    /* OPENED IS NOT THE SAME AS READABLE. The container, the package and the
+     * navigation of a DRM'd EPUB are in the clear — that is why `open`
+     * succeeds and why nothing said anything — and the first section loaded
+     * is where the ciphertext would appear. Asked here, after the parse and
+     * before any section, so a refused book is never displayed at all: not a
+     * first page, not its contents, not a navigator. `dispose` closes it like
+     * any other open that stopped. */
+    const refused = await deps.protection(view.book)
+    if (!this.#settle(view)) return false
+    if (refused !== null) {
+      this.#cb.onError(refused)
+      return false
+    }
+    return true
   }
 
   /** Hand the book's contents and its navigation to the host. */
@@ -1314,21 +1416,18 @@ export class ReaderSession {
   }
 
   /**
-   * Offer a link to the footnote handler; true when it took it.
+   * Listen for what ONE request's handler renders.
    *
-   * SYNCHRONOUS ANSWER, ASYNCHRONOUS NOTE. `handle` returns a promise when it
-   * took the link and `undefined` when it did not, and it has already called
-   * `preventDefault()` by then — so the caller knows immediately whether
-   * foliate will navigate, without waiting for the note to render.
+   * PER CLICK, WITH THE REQUEST IN THE CLOSURE — see `NoteRequest` for the
+   * pairing defect this removes. The handler is built for one `handle` call
+   * and nothing else refers to it, so these two listeners die with it.
    */
-  /**
-   * Listen once for what the handler renders.
-   *
-   * ON THE HANDLER, NOT PER CLICK. `FootnoteHandler` is an `EventTarget` and
-   * one listener serves every note; attaching per click would leak one for
-   * each footnote the reader ever followed.
-   */
-  #watchFootnotes(): void {
+  #watchOneNote(handler: FootnoteHandler, request: NoteRequest): void {
+    /* This request's view has been let go, so `render` has nothing left to do
+       with it. A `render` for a view already closed would otherwise close it
+       twice — tolerated by `releaseNoteView`, and still a teardown running
+       over a torn-down renderer. */
+    let released = false
     /**
      * ATTACH THE VIEW BEFORE IT RENDERS. This is what `before-render` is for,
      * and ignoring it is not a missing nicety — it is a crash.
@@ -1344,9 +1443,25 @@ export class ReaderSession {
      * the paginator needs a real size to column into. It is moved into the
      * popover when `render` says the note is ready.
      */
-    this.#footnotes.addEventListener('before-render', (event) => {
-      if (this.#disposed) return
+    handler.addEventListener('before-render', (event) => {
       const { view } = (event as CustomEvent<{ view: View }>).detail
+      /* A session disposed between the click and this event still owns the
+       * detached view foliate just built — nothing else will ever see it, so
+       * bailing bare leaked its renderer and every blob it held (audit round
+       * 1, #106). Released the same way `dispose` releases a rendered one.
+       *
+       * AND A CANCELLED REQUEST IS THE SAME SITUATION. The reader closed the
+       * note, or clicked another one, while this was resolving: nothing will
+       * ever show this view, so it is released here rather than attached,
+       * styled and mounted on the way to being discarded at `render`. This is
+       * the case the FIFO queue could not tell from a fresh one — it handed
+       * the arriving view the CURRENT sequence, which then passed `render`'s
+       * supersession check and reopened the note the reader had dismissed. */
+      if (this.#disposed || request.seq !== this.#noteSeq) {
+        released = true
+        releaseNoteView(view)
+        return
+      }
       this.#watchNoteLinks(view)
       this.#cleanNoteDocument(view)
       /* BEFORE `goTo`, like everything else in here. `setStyles` writes into
@@ -1415,16 +1530,29 @@ export class ReaderSession {
       this.#footnoteView = view
     })
 
-    this.#footnotes.addEventListener('render', (event) => {
-      if (this.#disposed) return
+    handler.addEventListener('render', (event) => {
+      if (this.#disposed || released) return
       const detail = (event as CustomEvent<FootnoteRenderDetail>).detail
+      /* Superseded — a newer note was asked for, or the reader closed the
+       * flow, while this one rendered. Shown, it would replace the newer note
+       * and sit at the wrong anchor; released, the click that mattered wins.
+       * `before-render` will usually have released it already; this is the
+       * request that was still current then and is not now. */
+      if (request.seq !== this.#noteSeq) {
+        released = true
+        releaseNoteView(detail.view)
+        return
+      }
       /* `before-render` already attached this one and released the last. */
       this.#footnoteView = detail.view
       this.#cb.onFootnote({
         view: detail.view,
         href: detail.href,
         type: detail.type,
-        at: this.#footnoteAt,
+        /* THIS REQUEST'S OWN ANCHOR, not whichever one came off a queue
+           first — the popover is positioned against the reference that was
+           clicked, and pairing by arrival could hand it another note's. */
+        at: request.at,
       })
     })
   }
@@ -1446,6 +1574,8 @@ export class ReaderSession {
     noteView.addEventListener('load', (event) => {
       if (this.#disposed) return
       const { doc } = (event as CustomEvent<LoadDetail>).detail
+      /* A note is a document of the same book, loaded by the same loader. */
+      stripScripts(doc)
       /* The note's document gets the contract too, and for the same reason the
          page's does: the sheets it was handed at `before-render` are static and
          read `var(--paper-*)` from the root. Without this the popover is the
@@ -1479,6 +1609,14 @@ export class ReaderSession {
     })
   }
 
+  /**
+   * Offer a link to the footnote handler; true when it took it.
+   *
+   * SYNCHRONOUS ANSWER, ASYNCHRONOUS NOTE. `handle` returns a promise when it
+   * took the link and `undefined` when it did not, and it has already called
+   * `preventDefault()` by then — so the caller knows immediately whether
+   * foliate will navigate, without waiting for the note to render.
+   */
   #openFootnote(view: View, detail: LinkDetail, event: Event): boolean {
     const book = view.book
     if (!book) return false
@@ -1500,33 +1638,67 @@ export class ReaderSession {
        — so a backend without that method throws rather than rejecting, and the
        throw escapes into `#handleLinks`. Caught here and treated as a note
        that would not open, which is the same outcome by a different route. */
+    /* THIS CLICK'S OWN HANDLER, AND ITS LISTENERS ARE ON BEFORE IT RUNS —
+       see `NoteRequest`. Registered first rather than after `handle` returns
+       because that ordering is then not something to reason about: a
+       `before-render` emitted anywhere in `handle`'s chain is already covered.
+       A handler that DECLINES the link emits nothing at all, so the listeners
+       simply go with it. */
+    const request: NoteRequest = {
+      at: anchorRectInHost(detail.a, this.#noteSpace()),
+      /* CLAIMED, NOT COMMITTED. A declined link must not supersede a note the
+         reader has open — following an ordinary link is not dismissing one —
+         so `#noteSeq` only advances once the handler has taken it. */
+      seq: this.#noteSeq + 1,
+    }
+    const handler = new FootnoteHandler()
+    this.#watchOneNote(handler, request)
     let pending: Promise<void> | undefined
     try {
-      pending = this.#footnotes.handle(book, event)
+      pending = handler.handle(book, event)
     } catch (cause) {
-      console.warn('Paper: that note could not be resolved', detail.href, cause)
-      /* `preventDefault` may already have been called, so foliate will not
-         navigate — this has to, or the link does nothing at all. */
-      this.#cb.onLink(detail, event)
-      void view.goTo(detail.href).catch(reportNavigation('goTo', detail.href))
+      this.#noteFailed(view, 'that note could not be resolved', detail, event, cause)
       return true
     }
     if (!pending) return false
-    this.#footnoteAt = anchorRectInHost(detail.a, this.#noteSpace())
+    this.#noteSeq = request.seq
     void pending.catch((cause: unknown) => {
       if (this.#disposed) return
-      /* FALL BACK TO THE JUMP, DO NOT SWALLOW IT. A note that will not render
-         in place is still a place in the book, and the reader asked to go
-         there. `preventDefault` has already stopped foliate navigating, so
-         this navigates instead — and tells the host first, so the origin is
-         recorded from where the reader still is and `⌘[` brings them back.
-         A control that silently does nothing is what this whole item deletes. */
-      console.warn('Paper: that note could not be shown in place', detail.href, cause)
-      this.#cb.onFootnote(null)
-      this.#cb.onLink(detail, event)
-      void view.goTo(detail.href).catch(reportNavigation('goTo', detail.href))
+      /* ⚠️ **A STALE REJECTION USED TO CLOSE THE NOTE THAT REPLACED IT.**
+         `#noteFailed` dismisses the popover and navigates the reader to ITS
+         href — so an older request failing after a newer note had opened tore
+         down the newer note and sent the reader to the older note's target, a
+         place they had already moved on from. The same supersession the render
+         path applies, on the road that was missing it. */
+      if (request.seq !== this.#noteSeq) {
+        console.warn('Paper: a superseded note could not be shown in place', detail.href, cause)
+        return
+      }
+      this.#noteFailed(view, 'that note could not be shown in place', detail, event, cause)
     })
     return true
+  }
+
+  /**
+   * FALL BACK TO THE JUMP, DO NOT SWALLOW IT. A note that will not resolve or
+   * render in place is still a place in the book, and the reader asked to go
+   * there. `preventDefault` has already stopped foliate navigating, so this
+   * navigates instead — and tells the host first, so the origin is recorded
+   * from where the reader still is and `⌘[` brings them back. A control that
+   * silently does nothing is what WI-16 deleted.
+   *
+   * ONE HANDLER FOR BOTH FAILURE ROADS (audit round 1, #835): the synchronous
+   * throw and the rejected render had drifted — only one of them dismissed an
+   * open popover. Both now do: the flow is over, anything still in flight is
+   * superseded, and the popover a previous note left open closes before the
+   * jump.
+   */
+  #noteFailed(view: View, what: string, detail: LinkDetail, event: Event, cause: unknown): void {
+    console.warn(`Paper: ${what}`, detail.href, cause)
+    this.#noteSeq += 1
+    this.#cb.onFootnote(null)
+    this.#cb.onLink(detail, event)
+    void view.goTo(detail.href).catch(reportNavigation('goTo', detail.href))
   }
 
   /** See `noteSpace` — exported, because the choice is the whole of it. */
@@ -1550,7 +1722,7 @@ export class ReaderSession {
 
   closeFootnote(): void {
     this.#releaseFootnoteView()
-    this.#footnoteAt = null
+    this.#noteSeq += 1
     if (!this.#disposed) this.#cb.onFootnote(null)
   }
 
@@ -1602,7 +1774,55 @@ export class ReaderSession {
     }
 
     if (!this.#settle(view)) return
-    if (failed) this.#cb.onError(message(failed.cause, 'This book could not be displayed.'))
+    if (failed) {
+      this.#cb.onError(message(failed.cause, 'This book could not be displayed.'))
+      return
+    }
+
+    /*
+     * ⚠️ **RESOLVED IS NOT DISPLAYED.** The retry above catches a RENDER that
+     * throws, and that is the rarer failure. The fork's `goTo` catches its own
+     * errors and resolves; the paginator no-ops on an index it cannot go to;
+     * a section that fails to load resolves `#display({})`. A stored CFI whose
+     * idref no longer resolves, a fake-CFI index past the section count on
+     * MOBI/FB2/CBZ, a landmark pointing at a missing file — each resolved
+     * `init` having displayed nothing, and the reader got a blank stage with a
+     * populated table of contents and no error anywhere.
+     *
+     * THE SIGNAL IS THE RELOCATION, AND IT NEEDS NO TIMER. Both renderers
+     * report where they landed BEFORE the navigation's promise settles: the
+     * paginator's `#afterScroll` runs synchronously inside `#scrollTo` on the
+     * navigation path, and the fixed-layout renderer's `#reportLocation` is
+     * the last line of `goToSpread`. So an `init` that resolves with no
+     * `relocate` behind it displayed nothing, and `#relocated` — set by that
+     * event and by nothing else — is the whole test.
+     *
+     * AND THE FALLBACK BYPASSES THE LANDMARKS. Retrying `init(null)` is not
+     * enough: `goToTextStart` prefers the bodymatter landmark, so a landmark
+     * whose href is missing fails the same silent way twice. The fallback goes
+     * to the first spine item with `linear !== 'no'` BY INDEX, which the
+     * paginator honours whatever the landmarks say. One navigation, one
+     * notice on the channel a lost position already uses — findable, and not
+     * an error bar over a book that is about to be readable. Only when that
+     * too lands nowhere is the reader told.
+     */
+    if (this.#relocated) return
+    const first = firstLinearSection(view.book)
+    if (first !== -1) {
+      console.warn(
+        saved !== null
+          ? 'Paper: the saved position displayed nothing; opening at the first section instead'
+          : 'Paper: the book opened to nothing; opening at the first section instead',
+      )
+      try {
+        await view.goTo(first)
+      } catch (cause) {
+        failed = { cause }
+      }
+      if (!this.#settle(view)) return
+      if (this.#relocated) return
+    }
+    this.#cb.onError(message(failed?.cause, 'This book could not be displayed.'))
   }
 
   /**
@@ -2027,6 +2247,18 @@ export class ReaderSession {
         return
       }
 
+      /* AND A KEY ON A CONTROL STAYS WITH THE CONTROL, for the same reason.
+       *
+       * The host guards its own reading keys against a focused control — Space
+       * on a toolbar button reached by Tab presses the button — and that guard
+       * could never fire for the book, because the forwarded copy's target is
+       * the window. So Space on a `<button>` or an arrow on a `<select>` inside
+       * an interactive EPUB was forwarded, the host turned the page, and the
+       * cancellation carried back below cancelled the control's own default
+       * too: the platform's meaning of the key, taken from under the reader's
+       * focus. Same outcome as typing — not forwarded, hence not cancelled. */
+      if (onBookControl(target)) return
+
       const forwarded = new KeyboardEvent('keydown', {
         key: event.key,
         code: event.code,
@@ -2034,6 +2266,16 @@ export class ReaderSession {
         ctrlKey: event.ctrlKey,
         shiftKey: event.shiftKey,
         altKey: event.altKey,
+        /* AND THE THREE THE HOST'S GUARDS READ. `repeat` was not copied, so a
+         * key held inside the book arrived at the keymap as a fresh press
+         * every auto-repeat: the toggle guard in `accel.ts` — whose own note
+         * says a held ⌘B writes a row and a tombstone per cycle — could not
+         * fire, because focus is in the book whenever the reader has clicked
+         * the page, which is most of the time. `location` tells a keypad
+         * Enter from the other one; `isComposing` is an IME mid-word. */
+        repeat: event.repeat,
+        location: event.location,
+        isComposing: event.isComposing,
         bubbles: true,
         cancelable: true,
       })
@@ -2445,7 +2687,7 @@ export class ReaderSession {
        * assumption that made this invisible.
        */
       quietly('footnote view', () => this.#releaseFootnoteView())
-      this.#footnoteAt = null
+      this.#noteSeq += 1
       /* AND THE HOST IS TOLD. `#disposed` is already true, so `closeFootnote`
          would skip this — and a host left holding a `FootnoteRender` for a
          session that is gone draws a note nothing can close. */
@@ -2455,10 +2697,60 @@ export class ReaderSession {
       if (prepared) destroyQuietly(prepared)
       const built = this.#view
       this.#view = null
-      if (built) closeQuietly(built)
+      if (built) {
+        closeQuietly(built)
+        /**
+         * ⚠️ **`View.close()` CLOSES THE RENDERER AND NEVER THE BOOK.** The
+         * fork's `close` destroys and removes the renderer and nulls its own
+         * progress state; the `Book` — the backend's parse — is not its to
+         * release, and until now nothing else released it either. A
+         * fixed-layout EPUB keeps every visited section's blob URLs in
+         * `Loader.#cache`; CBZ holds two object URLs per page; FB2 mints one
+         * per section at parse; MOBI holds `#resourceCache`. The enrichment
+         * pass found and fixed this for ITS parse (`parseBook.ts`); the
+         * reader's own path was missed — one book's resources per book opened.
+         *
+         * AFTER the note view and after the close, because the note view
+         * SHARES the book (which is why `releaseNoteView` correctly leaves it
+         * alone) and a book destroyed under a renderer still tearing down is a
+         * renderer reading revoked URLs. And NOT AGAIN for a PDF: there the
+         * book IS `#prepared`, destroyed just above, and `makePdf`'s teardown
+         * releases a worker that is not there to release twice.
+         */
+        const book: unknown = built.book
+        if (book !== prepared && destroyable(book)) destroyQuietly(book)
+      }
       quietly('host cleanup', () => this.#host.replaceChildren())
     }
   }
+}
+
+/**
+ * The first spine item a reader can turn to, or -1 for a spine with none.
+ *
+ * `linear === 'no'` marks an item the reading order skips — a cover page's
+ * standalone image, an in-book popup — and the paginator's own `#adjacentIndex`
+ * skips them by exactly this test. The by-index fallback in `#display` lands
+ * where a page turn would.
+ */
+function firstLinearSection(book: { readonly sections?: readonly unknown[] }): number {
+  return (book.sections ?? []).findIndex((section) => (section as { linear?: unknown } | null)?.linear !== 'no')
+}
+
+/**
+ * The controls whose keys are their own — see `#watchKeys`.
+ *
+ * The host's guard (`App.tsx`) also lists `a[href]`, and this one deliberately
+ * does not. Chromium focuses a clicked link and foliate's click handler cancels
+ * the CLICK, not the focus — so on the browser client a footnote the reader had
+ * just tapped would leave its `<a>` focused, and → to read on would be swallowed
+ * until they clicked the prose. Space and the arrows are not a link's own keys
+ * in any case: Enter is, and Enter turns no page.
+ */
+const IN_BOOK_CONTROL = 'button, select, summary, [role="menu"], [role="listbox"], [role="dialog"]'
+
+function onBookControl(target: HTMLElement | null): boolean {
+  return typeof target?.closest === 'function' && target.closest(IN_BOOK_CONTROL) !== null
 }
 
 /**
@@ -2479,8 +2771,13 @@ function destroyQuietly(prepared: Destroyable): void {
   try {
     /* Not awaited: disposal is synchronous by contract and the session is
        being torn down either way. The promise is there for the enrichment
-       pass, which parses serially and does need the worker gone. */
-    void prepared.destroy()
+       pass, which parses serially and does need the worker gone — and a
+       REJECTING destroy is caught too, not only a throwing one: the `try`
+       cannot see a rejection, and an unhandled one at teardown was the last
+       thing a closing book said (audit round 1, #837). */
+    Promise.resolve(prepared.destroy()).catch((cause: unknown) => {
+      console.error('Paper: failed to destroy the prepared book', cause)
+    })
   } catch (cause) {
     console.error('Paper: failed to destroy the prepared book', cause)
   }
@@ -2675,6 +2972,9 @@ function message(cause: unknown, fallback: string): string {
   return cause instanceof Error ? cause.message : fallback
 }
 
+/** What a zero-length file is told it is — see `isEmptySource`. */
+const EMPTY_FILE = 'This file is empty.'
+
 /** foliate's metadata is loosely typed: title may be a language map, author a
  *  string, an object, or an array of either. */
 /**
@@ -2694,21 +2994,6 @@ function message(cause: unknown, fallback: string): string {
  * a quotation in another one, a bilingual edition — is the authority, and
  * overwriting it would hyphenate French by English rules.
  */
-/**
- * Which way this section's text runs.
- *
- * The COMPUTED value, so an author's stylesheet counts as much as a `dir`
- * attribute; falls back to the attribute where there is no view to compute
- * against, which is what a section that failed to parse hands back.
- */
-export function directionOf(doc: Document): 'ltr' | 'rtl' {
-  const html = doc.documentElement as HTMLElement | null
-  if (!html) return 'ltr'
-  const computed = doc.defaultView?.getComputedStyle(html).direction
-  const declared = computed || html.getAttribute('dir') || doc.body?.getAttribute('dir')
-  return declared === 'rtl' ? 'rtl' : 'ltr'
-}
-
 function ensureLang(doc: Document, view: { book?: { metadata?: unknown } }): void {
   /* A document need not have a root element — a section that failed to parse
      hands back an empty one, and this runs on every section that loads. */
@@ -2798,7 +3083,11 @@ function firstOf(value: unknown): Record<string, unknown> | null {
 }
 
 function finiteOrNull(value: unknown): number | null {
-  const n = typeof value === 'string' ? parseFloat(value) : value
+  /* `Number`, not `parseFloat`: the latter reads "1.5junk" as 1.5, and a
+     series position with trailing junk is malformed metadata to refuse, not
+     to half-read (audit round 1, #838). The empty string is `NaN`d explicitly
+     because `Number('')` is 0. */
+  const n = typeof value === 'string' ? (value.trim() === '' ? NaN : Number(value)) : value
   return typeof n === 'number' && Number.isFinite(n) ? n : null
 }
 

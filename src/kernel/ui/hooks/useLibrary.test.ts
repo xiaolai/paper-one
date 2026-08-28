@@ -550,3 +550,175 @@ describe('addMany, the shape a folder import writes in', () => {
     expect(library.getSnapshot()).toHaveLength(9)
   })
 })
+
+/**
+ * A failed save is SHOWN, with its retry (WI-20.36).
+ *
+ * `letGo` reported every rejection to the console and nothing else — so a
+ * tag that never reached the disk looked, on the shelf, exactly like one that
+ * had. The store publishes the failure; the hook, which is the one holding
+ * the verb that failed, is what can offer to run it again.
+ */
+describe('useLibrary and a save that did not land', () => {
+  afterEach(cleanup)
+
+  const quiet = () => vi.spyOn(console, 'error').mockImplementation(() => {})
+
+  function failing() {
+    let refuse = true
+    const fs = fakeFs({
+      [`${BOOKS_DIR}/book_a/book.json`]: JSON.stringify({ title: 'Moby-Dick', author: '' }),
+      [`${BOOKS_DIR}/book_a/content.epub`]: 'B',
+    })
+    const wrapped = {
+      ...fs,
+      writeFile: async (path: string, bytes: Uint8Array) => {
+        if (refuse && path.startsWith(`${BOOKS_DIR}/book_a/`)) throw new Error('disk full')
+        return fs.writeFile(path, bytes)
+      },
+    }
+    const library = createLibrary({
+      fs: wrapped,
+      queue: writeQueue(),
+      initial: [{ bookId: 'book_a', title: 'Moby-Dick', author: '', hasContent: true }],
+    })
+    const hook = renderHook(() => useLibrary(library))
+    return { fs, library, hook, heal: () => (refuse = false) }
+  }
+
+  it('shows the failure with a retry, and the retry that lands clears it', async () => {
+    const warn = quiet()
+    const { fs, hook, heal } = failing()
+    await act(async () => {
+      hook.result.current.tag('book_a', 'Sea')
+      await vi.waitFor(() => expect(hook.result.current.saveFailure).not.toBeNull())
+    })
+    expect(hook.result.current.saveFailure?.message).toBe('Couldn’t save “Moby-Dick”')
+    expect(hook.result.current.saveFailure?.retry).toBeTypeOf('function')
+
+    heal()
+    await act(async () => {
+      hook.result.current.saveFailure?.retry?.()
+      await vi.waitFor(() => expect(hook.result.current.saveFailure).toBeNull())
+    })
+    const record = JSON.parse(new TextDecoder().decode(fs.store.get(`${BOOKS_DIR}/book_a/book.json`))) as {
+      tags?: string[]
+    }
+    expect(record.tags).toEqual(['Sea'])
+    warn.mockRestore()
+  })
+
+  /* A failure the hook did not run — a capability's handler writing through
+     the store directly — is shown, and offers no retry: the hook holds no verb
+     for it, and re-running the wrong one would be worse than none. */
+  it('offers no retry for a failure it did not run', async () => {
+    const warn = quiet()
+    const { library, hook } = failing()
+    await act(async () => {
+      await library.tag('book_a', 'Sea').catch(() => {})
+    })
+    expect(hook.result.current.saveFailure?.message).toBe('Couldn’t save “Moby-Dick”')
+    expect(hook.result.current.saveFailure?.retry).toBeNull()
+    warn.mockRestore()
+  })
+
+  it('can be dismissed', async () => {
+    const warn = quiet()
+    const { hook } = failing()
+    await act(async () => {
+      hook.result.current.tag('book_a', 'Sea')
+      await vi.waitFor(() => expect(hook.result.current.saveFailure).not.toBeNull())
+    })
+    act(() => hook.result.current.dismissSaveFailure())
+    expect(hook.result.current.saveFailure).toBeNull()
+    warn.mockRestore()
+  })
+
+  /**
+   * ⚠️ **TWO WRITES TO ONE BOOK BOTH MATCH THE BOOK.**
+   *
+   * Pairing by book stops the button under "Couldn't save A" re-running a
+   * write to B. It cannot tell two writes to A apart — the store publishes one
+   * failure, and both catches read whatever is current when they run — so the
+   * later claim quietly replaced the earlier one and the retry shown was
+   * whichever verb happened to arrive second. One of those verbs is `remove`.
+   *
+   * The failure is pinned here rather than raced, because the defect is the
+   * pairing rule and not the timing: a store answering one `SaveFailure` to
+   * both catches is exactly what a race produces, without the race.
+   */
+  describe('when two writes to the same book both fail', () => {
+    /** A store whose every failure is the SAME one, and whose writes reject. */
+    function oneFailure() {
+      const real = createLibrary({
+        fs: null,
+        queue: writeQueue(),
+        initial: [{ bookId: 'book_a', title: 'Moby-Dick', author: '', hasContent: true }],
+      })
+      const failure = {
+        bookId: 'book_a',
+        title: 'Moby-Dick',
+        what: 'record',
+        message: 'disk full',
+      } as const
+      const library = {
+        ...real,
+        lastFailure: () => failure,
+        tag: () => Promise.reject(new Error('disk full')),
+        remove: () => Promise.reject(new Error('disk full')),
+        renameTag: () => Promise.reject(new Error('disk full')),
+      }
+      return renderHook(() => useLibrary(library))
+    }
+
+    /* The failure is here from the first render, so `waitFor` on it resolving
+       would resolve BEFORE the rejection's catch has run. A turn of the event
+       loop is what the pairing actually waits on. */
+    const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
+
+    it('offers the retry when only one verb claims it', async () => {
+      const warn = quiet()
+      const hook = oneFailure()
+      await act(async () => {
+        hook.result.current.tag('book_a', 'Sea')
+        await settle()
+      })
+      expect(hook.result.current.saveFailure?.retry).toBeTypeOf('function')
+      warn.mockRestore()
+    })
+
+    it('offers no retry rather than the wrong one', async () => {
+      const warn = quiet()
+      const hook = oneFailure()
+      await act(async () => {
+        hook.result.current.tag('book_a', 'Sea')
+        hook.result.current.remove('book_a')
+        await settle()
+      })
+      expect(
+        hook.result.current.saveFailure?.retry,
+        'the failure carried a verb nothing proved was the one that failed',
+      ).toBeNull()
+      warn.mockRestore()
+    })
+
+    /* A SHELF-WIDE VERB STILL STANDS ASIDE. It cannot tell whether the failure
+       is its own, so it is the weaker claim rather than a rival one, and it
+       must not spoil a claim that names the book. */
+    it('leaves a book-scoped claim alone when a shelf-wide verb also fails', async () => {
+      const warn = quiet()
+      const hook = oneFailure()
+      await act(async () => {
+        hook.result.current.tag('book_a', 'Sea')
+        await settle()
+      })
+      expect(hook.result.current.saveFailure?.retry).toBeTypeOf('function')
+      await act(async () => {
+        hook.result.current.renameTag('Sea', 'Ocean')
+        await settle()
+      })
+      expect(hook.result.current.saveFailure?.retry).toBeTypeOf('function')
+      warn.mockRestore()
+    })
+  })
+})

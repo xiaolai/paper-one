@@ -3,7 +3,7 @@ import { contentPathIn, coverPathIn, legacyCoverPathIn, folderOf } from '../book
 import { CONTENT_EXTENSIONS, readRangeOf } from '../bookVault'
 import { CONTENT_BLOB_NAMES, REMOVABLE_BLOB_NAMES, type RemovableBlobName } from '../ports'
 import { findBook as find, type ServiceEnvironment } from './environment'
-import { descriptorOf, readInput, reqStr } from './input'
+import { descriptorOf, readInput, reqStr, str } from './input'
 import { SERVICE_ERRORS, refuse } from './refusals'
 import type { ContentChunk, ContentLocation } from './rows'
 
@@ -132,6 +132,25 @@ export function contentRead(env: ServiceEnvironment) {
     const bookId = reqStr(input, 'book')
     const book = find(env, bookId)
 
+    /* THE BYTES THE CALLER WAS TOLD ABOUT, OR NONE (WI-20.30). A browser that
+     * lost its socket restarts the whole read on a fresh one; between the two
+     * the book may have been re-imported or rewritten by an enrichment, and
+     * nothing in the chunks says so. `expect` is the `contentHash` that
+     * `content.locate` answered. A shelf that holds a DIFFERENT hash refuses,
+     * and so does one that holds NONE: null is "nobody here can say", and a
+     * caller who was told a hash and is now told nothing cannot know whether
+     * this is the same book. Serving would be vouching for bytes this shelf
+     * never hashed. */
+    const expected = str(input, 'expect')
+    if (expected !== undefined && book.contentHash !== expected) {
+      throw refuse(
+        SERVICE_ERRORS.conflict,
+        book.contentHash === null || book.contentHash === undefined
+          ? `this shelf cannot confirm the content of ${bookId}`
+          : `the content of ${bookId} changed since it was located`,
+      )
+    }
+
     const fs = env.services.fs
     /* NOT AN EMPTY STREAM. A caller that cannot tell "this shelf has no
      * filesystem" from "this book is zero bytes" will write a zero-byte file
@@ -170,6 +189,15 @@ export function contentRead(env: ServiceEnvironment) {
        * terminates when no `length` was given. Treating it as an error would
        * make reading a whole book impossible without knowing its size first. */
       if (slice.length === 0) return
+      /* RE-CHECKED PER CHUNK, not once at the top. The hash was compared to
+       * the record before the first read; a re-import or an enrichment that
+       * rewrote the file mid-stream moved the record's hash, and chunks from
+       * two versions of the book were spliced into one answer. The record is
+       * the version the shelf vouches for, so the stream is refused the
+       * moment it stops describing what is being served. */
+      if (expected !== undefined && find(env, bookId).contentHash !== expected) {
+        throw refuse(SERVICE_ERRORS.conflict, `the content of ${bookId} changed while it was being read`)
+      }
       yield [{ bookId, offset: at, bytes: base64Of(slice) }]
       at += slice.length
       sent += slice.length
@@ -255,52 +283,39 @@ export function contentEvict(env: ServiceEnvironment) {
   return async (req: unknown): Promise<ContentLocation> => {
     const input = readInput(descriptorOf('content.evict'), req)
     const book = find(env, reqStr(input, 'book'))
-    /* EVERY stored content file, not the first. A folder holding both a
-     * `content.epub` and a `content.pdf` is not supposed to happen — but an
-     * eviction that removed one and answered `here: false` would leave the
-     * other on disk under a row that says the bytes are gone, which is the
-     * shape of a lie the reader cannot see. */
-    const names = await blobNames(env, book)
-    /* Nothing to delete is not a failure — evicting what is not there is
-     * done — and `locationOf` below reports what the folder now holds. */
-    /* THE ROW IS SETTLED EVEN WHEN THERE WAS NOTHING TO DELETE.
+    /* ONE OPERATION, not four. This was: enumerate, `removeBlob` per file
+     * (a queued task each), then `refreshContent` (another). Content landing
+     * concurrently could interleave between them, and a crash after the
+     * deletions but before the refresh left the bytes gone, the mutation
+     * unjournalled, and the row still saying the book was downloaded —
+     * invisible until a rescan, because `hasContent` is cached.
      *
-     * A listing that succeeds and finds no content, against a row still
-     * saying `hasContent: true`, is exactly a stale cache — and skipping the
-     * refresh left `content.evict` answering `here: false` while the shelf
-     * went on offering the book as downloaded until a rescan disagreed. */
-    if (names.length === 0 && book.hasContent === true) {
-      await env.services.library.refreshContent(book.bookId)
-    }
-    if (names.length > 0) {
-      /* ONE OPERATION, not four. This was: enumerate, `removeBlob` per file
-       * (a queued task each), then `refreshContent` (another). Content landing
-       * concurrently could interleave between them, and a crash after the
-       * deletions but before the refresh left the bytes gone, the mutation
-       * unjournalled, and the row still saying the book was downloaded —
-       * invisible until a rescan, because `hasContent` is cached.
-       *
-       * `evictContent` does the existence check, every delete and the row
-       * refresh inside a single task on the book's lane and a single journal
-       * bracket, so none of those can be separated by another writer. It keeps
-       * the same guard `removeBlob` had: a name outside the kernel's closed
-       * set is refused rather than turned into a path. */
-      /* EVERY removable name, not the ones that happened to be there a moment
-       * ago. `blobNames` reads the folder outside the lane, so a landing of a
-       * DIFFERENT extension queued ahead of the eviction runs first and is
-       * absent from that list — it survives an evict that reports success.
-       * The set is small and closed, so offering all of it costs an `exists`
-       * apiece and removes the window entirely; which of them are really
-       * there is decided inside the lane task.
-       *
-       * CONTENT NAMES ONLY. This offered `REMOVABLE_BLOB_NAMES`, which also
-       * holds `cover.jpg` and the legacy `cover.webp` — so a verb documented
-       * as deleting THIS DEVICE'S COPY OF THE BOOK also destroyed its jacket,
-       * and the satchel fetched it again over the wire. The cover has its own
-       * eviction, in the cache that knows how many jackets this device can
-       * afford. */
-      await env.services.library.evictContent(book.bookId, CONTENT_BLOB_NAMES)
-    }
+     * `evictContent` does the existence check, every delete and the row
+     * refresh inside a single task on the book's lane and a single journal
+     * bracket, so none of those can be separated by another writer. It keeps
+     * the same guard `removeBlob` had: a name outside the kernel's closed set
+     * is refused rather than turned into a path. */
+    /* EVERY removable name, not the ones that happened to be there a moment
+     * ago — and UNCONDITIONALLY, which is the other half of the same rule.
+     * This listed the folder out here and called in only when the listing
+     * found something, so content that landed between the listing and the
+     * lane survived an eviction that reported success: exactly the window the
+     * closed set was widened to remove, left open by the `if` around it. A
+     * listing taken outside the lane cannot decide anything; it is a
+     * diagnosis. The set is small and closed, so offering all of it costs an
+     * `exists` apiece, and `evictContent` opens no journal bracket when there
+     * turns out to be nothing to do — including the stale-row case this used
+     * to reach for `refreshContent` to settle.
+     *
+     * CONTENT NAMES ONLY. This offered `REMOVABLE_BLOB_NAMES`, which also
+     * holds `cover.jpg` and the legacy `cover.webp` — so a verb documented
+     * as deleting THIS DEVICE'S COPY OF THE BOOK also destroyed its jacket,
+     * and the satchel fetched it again over the wire. The cover has its own
+     * eviction, in the cache that knows how many jackets this device can
+     * afford. */
+    await env.services.library.evictContent(book.bookId, CONTENT_BLOB_NAMES)
+    /* Nothing to delete is not a failure — evicting what is not there is
+     * done — and `locationOf` reports what the folder now holds. */
     return locationOf(env, find(env, book.bookId))
   }
 }
@@ -355,8 +370,10 @@ async function storedNames(env: ServiceEnvironment, bookId: string): Promise<rea
    * book whose folder had gone was reported as still holding content on the
    * strength of a stale `hasContent`. Absence is an empty list, which is the
    * truth; anything else keeps the honest "could not look". */
-  if (!(await fs.exists(folderOf(bookId)))) return []
   try {
+    /* INSIDE the try: a folder that cannot be STATTED is the "could not
+     * look" answer, not a throw out of a service that promised one. */
+    if (!(await fs.exists(folderOf(bookId)))) return []
     return (await fs.readDir(folderOf(bookId)))
       .filter((entry) => !entry.isDirectory && entry.name.startsWith('content.'))
       .map((entry) => entry.name)

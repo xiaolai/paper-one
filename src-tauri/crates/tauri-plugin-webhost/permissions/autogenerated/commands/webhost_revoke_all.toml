@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-webhost-revoke-all"
+description = "Enables the webhost_revoke_all command without any pre-configured scope."
+commands.allow = ["webhost_revoke_all"]
+
+[[permission]]
+identifier = "deny-webhost-revoke-all"
+description = "Denies the webhost_revoke_all command without any pre-configured scope."
+commands.deny = ["webhost_revoke_all"]

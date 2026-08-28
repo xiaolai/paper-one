@@ -36,6 +36,7 @@ import {
 } from '../../kernel/core/metrics'
 import type { RemoteContent } from './content'
 import { browserPositions, type ReadingPositions } from './positions'
+import { startingPlace, type RemotePositions } from './remotePositions'
 import type { MarkRef, MarksStore } from './marks'
 import styles from './Reader.module.css'
 
@@ -90,6 +91,13 @@ export interface ReaderProps {
   /** Injected so a test needs no browser storage. */
   readonly positions?: ReadingPositions
   /**
+   * The shelf's copy of the position (WI-20.30, D7). Absent, the book opens
+   * where this device left it and nothing travels — a host with no write
+   * grant. Present, the book opens at whichever of the two places is newer,
+   * and every settled turn is written back through `book.position`.
+   */
+  readonly remote?: RemotePositions
+  /**
    * The shelf's marks, or null when this host has none.
    *
    * Absent means the Notes control is not drawn — the same convention as
@@ -116,7 +124,7 @@ export interface ReaderProps {
 
 
 
-export function Reader({ content, bookId, name, onClose, positions, marks = null, titleOf, canWrite = false }: ReaderProps) {
+export function Reader({ content, bookId, name, onClose, positions, remote, marks = null, titleOf, canWrite = false }: ReaderProps) {
   /* ONE STORE FOR THE LIFE OF THE COMPONENT. Built in a ref rather than on
    * every render, because `browserPositions` touches `localStorage`, which is a
    * getter that THROWS in some configurations. */
@@ -132,7 +140,60 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
    * book that could not be read at all". Captured at mount, in state, so the
    * prop is stable for as long as the book is open.
    */
-  const [lastLocation] = useState(() => store.current?.get(bookId) ?? null)
+  const [start, setStart] = useState<{ readonly decided: boolean; readonly cfi: string | null }>(() =>
+    remote === undefined ? { decided: true, cfi: store.current?.get(bookId) ?? null } : { decided: false, cfi: null },
+  )
+  const lastLocation = start.cfi
+
+  /**
+   * WHICH PLACE, when there is a shelf to ask (WI-20.30). The shelf's stamp
+   * against this device's clock — newer wins — decided BEFORE the book is
+   * handed to the renderer, because `lastLocation` is read once when the
+   * book finishes parsing and a position that arrives after that is a
+   * position nobody has. The read costs one `book.get` over the same link the
+   * bytes take, so it cannot make the book slower to open than the shelf
+   * already is; a shelf that cannot be asked at all leaves this device's
+   * place standing, which is what it would have opened at before.
+   *
+   * When the shelf's is newer this device's copy follows it, so the next
+   * open with the shelf asleep starts from the same place. When THIS
+   * device's is newer — read here, closed before the write could land — the
+   * shelf is told now rather than at the next turn.
+   */
+  useEffect(() => {
+    if (remote === undefined) return
+    let live = true
+    const local = store.current?.held(bookId) ?? null
+    void remote.read(bookId).then(
+      (shelf) => {
+        if (!live) return
+        const place = startingPlace(local, shelf)
+        if (place.from === 'shelf' && place.cfi !== null) store.current?.set(bookId, place.cfi)
+        if (place.from === 'device' && place.cfi !== null && (shelf === null || shelf.cfi !== place.cfi)) {
+          remote.write(bookId, place.cfi, undefined)
+        }
+        setStart({ decided: true, cfi: place.cfi })
+      },
+      () => {
+        if (live) setStart({ decided: true, cfi: local?.cfi ?? null })
+      },
+    )
+    return () => {
+      live = false
+    }
+  }, [remote, bookId])
+
+  /* WHAT IS PENDING GOES WHEN THE BOOK CLOSES — the desktop flushes its tick
+     on close for the same reason. Caught, because this is a cleanup: a final
+     write that fails must be SAID somewhere, and an unhandled rejection on
+     unmount is said nowhere. */
+  useEffect(
+    () => () =>
+      void remote?.flush().catch((error: unknown) => {
+        console.error('paper: the final position write did not land', error)
+      }),
+    [remote],
+  )
 
   /* OPENING A BOOK IS READING IT, and the eviction order has to hear about it.
    *
@@ -269,7 +330,14 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
   /* THIS BOOK'S HIGHLIGHTS, drawn when the store has them. The store holds
    * every book's marks; the page wants this one's, as anchors. */
   useEffect(() => {
-    if (marks === null) return
+    if (marks === null) {
+      /* A STORE THAT WENT AWAY TAKES ITS HIGHLIGHTS WITH IT. Between
+       * channels the stores are null; leaving `drawn` standing painted the
+       * OLD store's anchors over a session the new store has not answered
+       * yet. */
+      setDrawn([])
+      return
+    }
     const mine = () =>
       /* `marks.all` is annotations only — bookmarks are split off at the
        * store's door — so every one here can be drawn. The anchor carries
@@ -310,6 +378,14 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
   const [stage, setStage] = useState(() => Math.min(window.innerWidth, 1200))
   /** The reading area, which is wider than the book — see `watchTaps`. */
   const stageEl = useRef<HTMLDivElement | null>(null)
+  /* ONE REF CALLBACK, not a new one per render: React detaches and
+   * reattaches a callback ref whose identity changed, calling it with `null`
+   * and then the node on EVERY commit — two `setStageBox` calls and an extra
+   * pass each time, for a stage that had not moved. */
+  const takeStage = useCallback((node: HTMLDivElement | null) => {
+    stageEl.current = node
+    setStageBox(node)
+  }, [])
 
   useEffect(() => {
     const onResize = () => setStage(Math.min(window.innerWidth, 1200))
@@ -464,10 +540,13 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
   const remember = useCallback(
     (_generation: number, position: { cfi: string | null; chapterHref?: string; fraction?: number }) => {
       store.current?.set(bookId, position.cfi)
+      /* AND THE SHELF, debounced there: a run of turns is one write, after
+         the reader has settled — the desktop's own tick. */
+      if (position.cfi !== null && position.cfi !== '') remote?.write(bookId, position.cfi, position.fraction)
       if (typeof position.chapterHref === 'string') setHere(position.chapterHref)
       if (typeof position.fraction === 'number') setFraction(position.fraction)
     },
-    [bookId],
+    [bookId, remote],
   )
 
   /**
@@ -481,6 +560,10 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
 
   const searchable = useMemo(
     () => ({
+      /* A CAST, CONFINED AND SAID: a ranged PDF's source is not a `File`,
+       * but `SearchPanel` provably reads `source` for PRESENCE only (its
+       * `searchable` gate) — the honest fix is widening `Book['source']` in
+       * the kernel's types, which is not this file's to change. */
       source: opening.kind === 'reading' ? (opening.source as File) : null,
       meta,
       error: problem,
@@ -550,7 +633,11 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
           aria-label="Tools"
           title="Tools"
           aria-expanded={tool !== null}
-          onClick={() => setTool((was) => (was === null ? 'contents' : null))}
+          /* CONTENTS ONLY WHEN THERE ARE CONTENTS. The tab itself is hidden
+             for a book with no TOC, so landing the sheet on `contents` there
+             opened a pane no tab names — a blank sheet during loading and
+             for TOC-less books. Search is the tab every book has. */
+          onClick={() => setTool((was) => (was === null ? (toc.length > 0 ? 'contents' : 'search') : null))}
         >
           <List size={ICON.control} strokeWidth={ICON.stroke} />
         </button>
@@ -572,17 +659,21 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
 
       <ProgressFooter fraction={fraction} visible={chrome && selection === null} />
 
-      {selection !== null && marks !== null && (
+      {/* THE BAR NEEDS A SELECTION, NOT A MARKS STORE. Gated on both, a
+          reconnect gap (stores are null between channels) took COPY away —
+          the one selection verb this read-only client actually owns. The
+          write verbs still require the store they write to. */}
+      {selection !== null && (
         <SelectionBar
           text={selection.text}
           tint={tint}
           onTint={setTint}
-          onHighlight={canWrite ? () => highlight('') : undefined}
+          onHighlight={canWrite && marks !== null ? () => highlight('') : undefined}
           /* A NOTE is a highlight with words. There is no note editor on this
              surface yet; the mark is made and the note is written in Notes,
              which is where the desktop writes them too. */
           onNote={
-            canWrite
+            canWrite && marks !== null
               ? () => {
                   highlight('')
                   setTool('notes')
@@ -672,15 +763,10 @@ export function Reader({ content, bookId, name, onClose, positions, marks = null
         </BottomSheet>
       )}
 
-      <div
-        className={styles.stage}
-        ref={(node) => {
-          stageEl.current = node
-          setStageBox(node)
-        }}
-      >
+      <div className={styles.stage} ref={takeStage}>
         <FoliateView
-          file={opening.kind === 'reading' ? opening.source : null}
+          /* NOT UNTIL THE PLACE IS DECIDED — see `start`. */
+          file={opening.kind === 'reading' && start.decided ? opening.source : null}
           generation={0}
           style={readingStyle}
           stepIdx={stepIdx}

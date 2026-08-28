@@ -64,9 +64,9 @@ export function timeLeft(expiresAt: number | null, now: number): string {
 }
 
 export interface TrashFs extends VaultFs {
+  /* Only what `VaultFs` lacks. `removeDir` was redeclared here for years —
+   * a duplicate contract that could drift from the one it shadowed. */
   readDir: (path: string) => Promise<{ name: string; isDirectory: boolean }[]>
-  /** Remove a directory and everything in it. */
-  removeDir: (path: string) => Promise<void>
 }
 
 /**
@@ -111,14 +111,14 @@ export async function trashBook(fs: TrashFs, bookId: string): Promise<boolean> {
        * other way round. A book split across two directories is worse than a
        * removal that did not happen, and only one of those is recoverable by
        * pressing the button again. */
-      /* Anything a previous, interrupted removal held aside. It is superseded by
-       * whatever this one is about to move, and leaving it would collide with
-       * the name this run wants to use. */
-      for (const entry of await fs.readDir(trashOf(bookId))) {
-        if (entry.name.endsWith('.displaced')) {
-          await fs.remove(`${trashOf(bookId)}/${entry.name}`).catch(() => {})
-        }
-      }
+      /* Anything a previous, interrupted removal held aside is swept AFTER
+       * this one commits, not before. Swept first, a removal that then failed
+       * part way had already discarded the only recovery copies the earlier
+       * failure kept — the rollback below could put THIS run's entries back
+       * and had nothing of the earlier run's to leave in place. A collision
+       * with a name this run displaces is no argument for the early sweep:
+       * `rename` replaces, which loses the same bytes the sweep would have,
+       * and only on the names actually displaced. */
       const moved: { from: string; to: string }[] = []
       /* The trashed copies displaced by a collision, held aside rather than
        * deleted. Deleting them first made the rollback a half-measure: it could
@@ -140,18 +140,46 @@ export async function trashBook(fs: TrashFs, bookId: string): Promise<boolean> {
           moved.push({ from, to })
         }
       } catch (cause) {
-        // Back where they came from, in reverse, best effort — the live entries
-        // first, then the trashed copies they displaced.
+        /* Back where they came from, in reverse — the live entries first,
+         * then the trashed copies they displaced. Best effort, and a failed
+         * step is NAMED rather than swallowed whole: the contract's "the
+         * rollback put everything back" is a claim this loop cannot always
+         * make true, and a book split across two directories deserves a line
+         * in the log saying which entries are stranded. The caller's
+         * folder-still-there check catches the live half either way. */
+        const stranded: string[] = []
         for (const one of moved.reverse()) {
-          await fs.rename(one.to, one.from).catch(() => {})
+          await fs.rename(one.to, one.from).catch(() => stranded.push(one.to))
         }
         for (const one of displaced.reverse()) {
-          await fs.rename(one.held, one.original).catch(() => {})
+          /* ONLY ONTO A NAME NOTHING IS AT. A live entry whose move back
+           * failed is still sitting at `one.original`, and `rename` REPLACES
+           * — so putting the displaced copy back would destroy the newer live
+           * bytes in the name of putting things back, which is the one thing
+           * a rollback must not do. It stays under its `.displaced` name
+           * instead: a restore skips those, the next removal that gets
+           * further sweeps them, and the reader keeps the copy that matters.
+           * A stat that will not answer is read as occupied, because the
+           * cheap wrong answer here is the one that overwrites. */
+          if (await fs.exists(one.original).catch(() => true)) {
+            stranded.push(one.held)
+            continue
+          }
+          await fs.rename(one.held, one.original).catch(() => stranded.push(one.held))
+        }
+        if (stranded.length > 0) {
+          console.warn(`Paper: the rollback of removing ${bookId} could not put back: ${stranded.join(', ')}`, cause)
         }
         throw cause
       }
-      // Only now, with everything moved, is the displaced copy redundant.
+      /* Only now, with everything moved, are the displaced copies redundant —
+       * this run's, and whatever an earlier interrupted removal held aside. */
       for (const one of displaced) await fs.remove(one.held).catch(() => {})
+      for (const entry of await fs.readDir(trashOf(bookId)).catch(() => [])) {
+        if (entry.name.endsWith('.displaced')) {
+          await fs.remove(`${trashOf(bookId)}/${entry.name}`).catch(() => {})
+        }
+      }
       await fs.removeDir(folderOf(bookId)).catch(() => {})
     } else {
       await fs.rename(folderOf(bookId), trashOf(bookId))
@@ -217,6 +245,67 @@ export type RestoreOutcome =
   | { readonly state: 'partial'; readonly held: readonly string[] }
   /** There is no trash entry for this book. Nothing to do, and not a fault. */
   | { readonly state: 'absent' }
+
+/**
+ * Whose book the trash is holding under this id's folder, or `null` when it is
+ * holding none.
+ *
+ * ⚠️ **THE FOLDER IS NOT THE IDENTITY.** `folderOf` is many-to-one — every
+ * character outside `[A-Za-z0-9]` becomes `_` — so `book:a/b` and `book:a_b`
+ * are two books and one directory, and anything that decided by the PATH alone
+ * brought somebody else's book back relabelled as the caller's id, or wrote a
+ * fresh record over it.
+ *
+ * The rule is `listTrash`'s, and reading it off one folder rather than off a
+ * whole scan is the point: this is what a caller can afford INSIDE the book's
+ * write lane, where the answer cannot go stale between the asking and the act.
+ * The record's own `bookId` when there is a readable one, and the FOLDER NAME
+ * when there is not — which is the name every other trash caller addresses a
+ * recordless entry by, so the sheet that lists a trashed book and the verb that
+ * refuses to restore it cannot name it differently.
+ */
+export type TrashIdentity =
+  /** Nothing in the trash under this id's folder. */
+  | { readonly state: 'absent' }
+  /**
+   * Whose it is: the record's own `bookId`, or the FOLDER NAME for an entry
+   * carrying no record at all — the name every other trash surface uses for
+   * one.
+   */
+  | { readonly state: 'named'; readonly bookId: string }
+  /**
+   * There IS a `book.json` here and it could not be read. Whose book the
+   * folder holds cannot be established, so a guard must refuse.
+   *
+   * ABSENT AND UNREADABLE ARE NOT THE SAME ANSWER — this file's rule for the
+   * trash listing and for the removal stamp, and the one this function broke.
+   * Every read failure fell back to the folder name, so a transient I/O error
+   * over an ALIASING entry (`folderOf` is many-to-one) made the identity
+   * guard approve, and somebody else's book came back relabelled — the exact
+   * outcome the guard exists to prevent.
+   */
+  | { readonly state: 'unknown' }
+
+export async function trashedIdentity(fs: TrashFs, bookId: string): Promise<TrashIdentity> {
+  const at = trashOf(bookId)
+  if (!(await fs.exists(at))) return { state: 'absent' }
+  const named = (): TrashIdentity => ({ state: 'named', bookId: at.slice(at.lastIndexOf('/') + 1) })
+  let raw: string
+  try {
+    raw = new TextDecoder().decode(await fs.readFile(`${at}/book.json`))
+  } catch {
+    /* A read that failed over a file that is THERE is the unknown case; one
+     * over a file that is not is the recordless entry the folder names. An
+     * `exists` that will not answer decides the same way the failed read did:
+     * closed. */
+    return (await fs.exists(`${at}/book.json`).catch(() => true)) ? { state: 'unknown' } : named()
+  }
+  const record: BookRecord | null = parseRecord(raw)
+  /* A `book.json` that is not a record is NOT a recordless entry: something
+   * wrote a book's identity here and it cannot be read. */
+  if (record === null) return { state: 'unknown' }
+  return record.bookId === undefined ? named() : { state: 'named', bookId: record.bookId }
+}
 
 export async function restoreBook(fs: TrashFs, bookId: string): Promise<RestoreOutcome> {
   if (!(await fs.exists(trashOf(bookId)))) return { state: 'absent' }
@@ -387,30 +476,65 @@ export async function listTrash(fs: TrashFs, signal?: AbortSignal): Promise<Tras
  * missing, is LEFT rather than deleted. Erring towards keeping is the only
  * direction that cannot lose a reader's work, and the cost of being wrong is
  * disk rather than words.
+ *
+ * ⚠️ NO PRODUCTION CALLER, ON PURPOSE — do not wire this anywhere. The app
+ * sweeps through `Library.emptyExpiredTrash`, one lane-safe purge per folder
+ * with the stamp re-read there (WI-20.2); THIS list-then-delete runs off
+ * every queue and can eat a restore that lands between its read and its
+ * delete. It stays because its test is the CONTROL that demonstrates exactly
+ * that, beside the fix.
  */
 export async function emptyExpired(fs: TrashFs, now = Date.now()): Promise<string[]> {
+  const gone: string[] = []
+  for (const name of await expiredTrash(fs, now)) {
+    try {
+      await fs.removeDir(`trash/${name}`)
+      gone.push(name)
+    } catch {
+      // A delete that failed. Left alone on purpose.
+      continue
+    }
+  }
+  return gone
+}
+
+/** The trash's whole stay, in milliseconds — `TRASH_DAYS`, spent. */
+export const TRASH_WINDOW_MS = TRASH_DAYS * DAY_MS
+
+/**
+ * The trashed folders whose stay is over at `now`, by folder name — the
+ * LISTING half of the sweep, with the sweep's rules: a folder whose stamp is
+ * missing, unreadable or not a positive integer is left, and so is one that
+ * cannot be listed. Reads and decides; deletes nothing.
+ *
+ * SPLIT OUT so the app's sweep can delete on each book's LANE instead
+ * (`Library.emptyExpiredTrash`). `emptyExpired` above listed and deleted in
+ * one pass, off every queue — so a restore that landed between its stamp
+ * read and its `removeDir` lost the files the restore had deliberately kept
+ * back, and the fresh stamp with them. The decision is made here once and
+ * re-made inside the lane by the purge, against the stamp as it is then.
+ */
+export async function expiredTrash(fs: TrashFs, now = Date.now()): Promise<string[]> {
   let entries: { name: string; isDirectory: boolean }[]
   try {
     entries = await fs.readDir('trash')
   } catch {
     return []
   }
-  const gone: string[] = []
+  const expired: string[] = []
   for (const entry of entries) {
     if (!entry.isDirectory) continue
-    const at = `trash/${entry.name}`
     try {
-      const stamp = readStamp(new TextDecoder().decode(await fs.readFile(`${at}/.removed`)))
+      const stamp = readStamp(new TextDecoder().decode(await fs.readFile(`trash/${entry.name}/.removed`)))
       if (stamp === null) continue
-      if (now - stamp < TRASH_DAYS * DAY_MS) continue
-      await fs.removeDir(at)
-      gone.push(entry.name)
+      if (now - stamp < TRASH_WINDOW_MS) continue
+      expired.push(entry.name)
     } catch {
-      // Unreadable stamp, or a delete that failed. Left alone on purpose.
+      // Unreadable stamp. Left alone on purpose.
       continue
     }
   }
-  return gone
+  return expired
 }
 
 /**
@@ -431,7 +555,7 @@ export async function rescueStrandedMarks(fs: TrashFs, bookId: string): Promise<
     if (!(await fs.exists(at))) return false
     const stranded = JSON.parse(new TextDecoder().decode(await fs.readFile(at))) as unknown
     if (!Array.isArray(stranded)) return false
-    const live = (await readMarks(fs as never, bookId)) as { id?: unknown }[]
+    const live = (await readMarks(fs, bookId)) as { id?: unknown }[]
     const held = new Set(live.map((mark) => mark?.id).filter((id) => typeof id === 'string'))
     const fresh = stranded.filter((mark) => {
       const id = (mark as { id?: unknown })?.id
@@ -441,7 +565,7 @@ export async function rescueStrandedMarks(fs: TrashFs, bookId: string): Promise<
        * note to tidy bookkeeping is the wrong way round. */
       return typeof id !== 'string' || !held.has(id)
     })
-    if (fresh.length) await writeMarks(fs as never, bookId, [...live, ...fresh])
+    if (fresh.length) await writeMarks(fs, bookId, [...live, ...fresh])
     await fs.remove(at).catch(() => {})
     return fresh.length > 0
   } catch (cause) {

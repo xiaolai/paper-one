@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import {
   Highlighter,
   Layers,
@@ -97,6 +98,10 @@ const RAIL = RAIL_ENTRIES.map(({ id, Icon }) => ({
  */
 const railFor = (screen: AppState['screen']) => RAIL.filter((tab) => paneFits(screen, tab.id))
 
+/** The companion's passages when the host supplies none — one function, not a
+ *  fresh `() => []` per render that re-rendered the pane for nothing. */
+const NO_PASSAGES = (): AskPassage[] => []
+
 export interface SidePaneProps {
   state: AppState
   dispatch: AppDispatch
@@ -117,6 +122,19 @@ export interface SidePaneProps {
   onDeleteMark: (mark: Annotation) => void
   /** The mark Notes should reveal, if one has been asked for. */
   markFocus: MarkFocus | null
+  /** Notes has revealed it — the request is spent. See `Marking.clearFocus`. */
+  onMarkFocusDone: (nonce: number) => void
+  /**
+   * The reader's live selection, as text, for the companion.
+   *
+   * REQUIRED, NOT OPTIONAL. `Companion` takes `selection` and defaults it to
+   * null, and this pane mounted it without one — so every question ever asked
+   * went out with no passage, while `core/companion.ts`, the ledger and
+   * `numberPassages` all described one. An optional prop is a prop a host can
+   * forget with nothing said; a required one is the compile-time half of
+   * `SidePane.test.tsx`.
+   */
+  selection: string | null
   /**
    * The companion's provider.
    *
@@ -195,6 +213,8 @@ export function SidePane({
   onGoTo,
   onDeleteMark,
   markFocus,
+  onMarkFocusDone,
+  selection,
   companion,
   companionPassages,
   books,
@@ -223,30 +243,70 @@ export function SidePane({
   const shown = shownPane(wanted, contributed, fallback)
   const pane = shown.id
 
+  /* THE SHELF, INDEXED ONCE. Marginalia and Cards ask "what is this book
+   * called" and "is it here" per row, and each answer was a linear `find` or
+   * `some` over the whole shelf through a callback minted fresh every render
+   * — so a panel of a few hundred rows rescanned a two-thousand-book shelf
+   * on every keystroke in a note. One map, keyed on the list's identity, and
+   * two stable lookups over it. */
+  const byId = useMemo(() => new Map(books.map((row) => [row.bookId, row] as const)), [books])
+  const titleOf = useMemo(() => (id: string) => byId.get(id)?.title, [byId])
+  const onShelf = useMemo(() => (id: string) => byId.has(id), [byId])
+  /* Once, not five times: the exact-optional-property workaround for a host
+   * with no jump stack, spelled at every panel that takes one. */
+  const goToProps = onGoTo ? { onGoTo } : {}
+  /* THE RAIL, BUILT WHEN ITS INPUTS CHANGE and not per render — the
+   * contributed half asked `paneFits` per entry, which rescans `contributed`,
+   * so a rail of n contributed panes cost n² on every keystroke anywhere. */
+  const rail = useMemo(
+    () => [
+      ...railFor(state.screen).map(({ id, label, Icon }) => ({ id, label, Icon })),
+      ...contributed
+        .filter((entry) => paneFits(state.screen, entry.id, contributed))
+        .map(({ id, label }) => ({ id, label, Icon: Puzzle })),
+    ],
+    [state.screen, contributed],
+  )
+
   return (
     <>
       <div className={styles.paneTitle}>{shown.title}</div>
 
       <div className={styles.body}>
         {pane === 'toc' && (
-          <Contents
-            toc={book.toc}
-            currentHref={book.position.chapterHref}
-            {...(onGoTo ? { onGoTo } : {})}
-          />
+          <Contents toc={book.toc} currentHref={book.position.chapterHref} {...goToProps} />
         )}
 
         {pane === 'companion' && (
           <Companion
+            /* ⚠️ **THE THREAD BELONGS TO A BOOK, AND NOTHING SAID SO.** The
+               pane stays mounted across an open, so switching books kept the
+               previous book's exchange and the half-typed question in the
+               composer — under the new book's heading, and grounded in the new
+               book the moment the reader pressed send. "grounded in this book
+               only" is the panel's own promise and this is where it was broken:
+               amber marks provenance, and provenance carried over is worse than
+               none. Keyed, so the session is rebuilt rather than reset by hand
+               — and the unmount aborts a generation still streaming, which is a
+               subscription turn spent on an answer nobody will read. */
+            key={book.bookId ?? 'no-book'}
             currentChapter={book.position.chapterLabel}
-            hasBook={book.source !== null}
+            /* A book that is OPEN and READ, not merely chosen: `source` is set
+               the instant a file is handed over, while it is still parsing and
+               after it has failed to open — and a companion accepting
+               questions about a book that did not open answers about nothing. */
+            hasBook={book.source !== null && book.meta !== null && book.error === null}
             provider={companion}
-            bookTitle={books.find((row) => row.bookId === book.bookId)?.title ?? ''}
-            passages={companionPassages ?? (() => [])}
+            /* The open book's own metadata first — it is known the moment the
+               parse lands, before the shelf row exists or when the book is not
+               shelved at all — and the shelf's title as the fallback. */
+            bookTitle={book.meta?.title ?? (book.bookId ? titleOf(book.bookId) : undefined) ?? ''}
+            selection={selection}
+            passages={companionPassages ?? NO_PASSAGES}
             /* A bare cfi IS a `JumpTarget` — the union's string arm — so a
                citation navigates through exactly the path a search hit does,
                jump stack included. */
-            {...(onGoTo ? { onGoTo } : {})}
+            {...goToProps}
           />
         )}
 
@@ -260,16 +320,17 @@ export function SidePane({
             platform={platform}
             /* The shelf is already here for the Library panel; Marginalia needs
                it only to name the book a cross-book row came from. */
-            titleOf={(id) => books.find((entry) => entry.bookId === id)?.title}
+            titleOf={titleOf}
             /* WHETHER THE BOOK CAN BE OPENED AT ALL, asked separately from
                what it is called. `titleOf` returning undefined nearly answers
                it, but a shelved book with an empty title answers the same way
                — and conflating "has no title" with "is not here" would
                silently disable rows that work. Same `books` list, two
                questions, both answered where the list already is. */
-            onShelf={(id) => books.some((entry) => entry.bookId === id)}
+            onShelf={onShelf}
             focus={markFocus}
-            {...(onGoTo ? { onGoTo } : {})}
+            onFocusDone={onMarkFocusDone}
+            {...goToProps}
           />
         )}
 
@@ -279,12 +340,15 @@ export function SidePane({
             bookId={book.bookId}
             /* THE SAME `books` LIST, THE SAME QUESTION as Marginalia asks two
                panels up. One source, so the two cannot answer differently. */
-            onShelf={(id) => books.some((entry) => entry.bookId === id)}
-            {...(onGoTo ? { onGoTo } : {})}
+            onShelf={onShelf}
+            {...goToProps}
           />
         )}
 
-        {pane === 'search' && <SearchPanel book={book} />}
+        {/* A hit is a jump like any other panel's — through `onGoTo`, so it
+            enters the stack and raises "← Back to". Mounted without it, the
+            panel navigated on its own and the ledger's promise was a row. */}
+        {pane === 'search' && <SearchPanel book={book} {...goToProps} />}
 
         {pane === 'settings' && (
           <Settings
@@ -345,12 +409,7 @@ export function SidePane({
             today's difference and leaves tomorrow's; one list cannot drift.
             The ICON is all that genuinely differs — a capability's pane has no
             icon of its own to give, so every one of them wears the same mark. */}
-        {[
-          ...railFor(state.screen).map(({ id, label, Icon }) => ({ id, label, Icon })),
-          ...contributed
-            .filter((entry) => paneFits(state.screen, entry.id, contributed))
-            .map(({ id, label }) => ({ id, label, Icon: Puzzle })),
-        ].map(({ id, label, Icon }) => (
+        {rail.map(({ id, label, Icon }) => (
           <button
             key={id}
             type="button"

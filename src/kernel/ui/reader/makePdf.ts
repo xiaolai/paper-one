@@ -314,6 +314,22 @@ html, body { margin: 0; padding: 0; }
   return URL.createObjectURL(new Blob([html], { type: 'text/html' }))
 }
 
+/**
+ * The outline as a table of contents, or none when it will not map — a
+ * malformed outline entry used to throw AFTER the worker was up, leaking it
+ * and the stylesheet URL with it (audit round 1, #492); `destIndex` already
+ * treats broken destinations as common, and a broken TREE gets the same
+ * treatment: the book opens, without a table of contents.
+ */
+function tocOf(outline: { title: string; dest: unknown; items?: unknown[] }[] | null): TocItem[] {
+  try {
+    return outline?.map(tocItem) ?? []
+  } catch (cause) {
+    console.warn('Paper: this PDF outline could not be read as a table of contents', cause)
+    return []
+  }
+}
+
 function tocItem(item: { title: string; dest: unknown; items?: unknown[] }): TocItem {
   const subitems = item.items?.length
     ? item.items.map((child) => tocItem(child as Parameters<typeof tocItem>[0]))
@@ -327,6 +343,23 @@ function tocItem(item: { title: string; dest: unknown; items?: unknown[] }): Toc
   return { label: item.title, href, subitems }
 }
 
+/**
+ * Why pdf.js is asking for a password: it has none, or the one it was given
+ * was wrong. pdf.js's own `PasswordResponses`, named for the reader.
+ */
+export type PasswordReason = 'needed' | 'wrong'
+
+/**
+ * What a protected PDF nobody unlocked is told it is.
+ *
+ * ONE SENTENCE FOR EVERY WAY OF NOT UNLOCKING IT — a cancelled prompt, no
+ * prompt at all (the enrichment pass parses with no reader present), a prompt
+ * that threw. pdf.js's own words for the first two are "No password given",
+ * which reached the reader verbatim and read as a verdict on something they
+ * had never been asked to do.
+ */
+export const PDF_LOCKED = 'This PDF is protected by a password and was not opened.'
+
 export interface PdfHooks {
   /**
    * A page has finished painting, text layer and all.
@@ -337,6 +370,15 @@ export interface PdfHooks {
    * re-attach the marks now that there is text to anchor them to.
    */
   onPagePainted?: () => void
+  /**
+   * The document needs a password: ask the reader for one. Resolve `null`
+   * for a cancel, which refuses the open by name — see `PDF_LOCKED`. Asked
+   * again, with `'wrong'`, after an answer pdf.js rejected.
+   *
+   * Optional, because the enrichment pass has no reader to ask; with nobody
+   * to ask the open is refused with the same sentence, never left hanging.
+   */
+  password?: (reason: PasswordReason) => Promise<string | null>
 }
 
 /**
@@ -356,10 +398,11 @@ export interface PdfHooks {
  *
  * ⚠️ It was exported and referenced nowhere: callers took the weaker
  * `RangedSource` and this sat beside them as a public shape that could drift
- * from the real contract without anything noticing. `transportOf` narrows to it
- * now, so the check and the type say the same thing by construction.
+ * from the real contract without anything noticing. `transportOf` narrows to
+ * it now, so the check and the type say the same thing by construction — and
+ * it is not exported, because nothing imports it (audit round 1, #832).
  */
-export interface RangedPdf extends RangedSource {
+interface RangedPdf extends RangedSource {
   readonly range: PDFDataRangeTransport
 }
 
@@ -387,12 +430,14 @@ function transportOf(source: RangedSource): PDFDataRangeTransport {
 }
 
 export async function makePdf(file: BookSource, hooks: PdfHooks = {}): Promise<PdfBook> {
-  /* ONE STYLESHEET FOR THE BOOK — see `styleSheetUrl`. Minted before anything
-   * can fail, so every exit below has one thing to revoke. */
-  const styleHref = styleSheetUrl()
-  const task = pdfjs.getDocument({
-    ...(isRanged(file)
-      ? {
+  /* THE SOURCE FIRST, THE URL SECOND (audit round 1, #492). `transportOf`
+   * throws on a wrong transport and `arrayBuffer()` can reject, and both used
+   * to be evaluated inside the `getDocument` arguments AFTER the stylesheet
+   * URL was minted — every such failure leaked the URL, one per attempt, for
+   * the life of the window. Read the source before there is anything to
+   * leak; from `getDocument` on, the catch on `task.promise` owns cleanup. */
+  const source = isRanged(file)
+    ? {
           /* `length` COMES OFF THE TRANSPORT — `getDocument` reads
            * `src.range.length` and never looks at a `length` beside it, so
            * passing one here would be a field nothing reads.
@@ -418,9 +463,15 @@ export async function makePdf(file: BookSource, hooks: PdfHooks = {}): Promise<P
           disableAutoFetch: true,
           disableStream: true,
         }
-      : typeof file === 'string'
-        ? { url: file }
-        : { data: await file.arrayBuffer() }),
+    : typeof file === 'string'
+      ? { url: file }
+      : { data: await file.arrayBuffer() }
+  /* ONE STYLESHEET FOR THE BOOK — see `styleSheetUrl`. Minted once nothing
+   * before the loading task can fail, so every exit below has one thing to
+   * revoke. */
+  const styleHref = styleSheetUrl()
+  const task = pdfjs.getDocument({
+    ...source,
     cMapUrl: `${ASSET_BASE}cmaps/`,
     cMapPacked: true,
     standardFontDataUrl: `${ASSET_BASE}standard_fonts/`,
@@ -430,6 +481,29 @@ export async function makePdf(file: BookSource, hooks: PdfHooks = {}): Promise<P
     wasmUrl: `${ASSET_BASE}wasm/`,
     iccUrl: `${ASSET_BASE}iccs/`,
   })
+  /* THE PASSWORD, AND THE ONE WAY OUT OF NOT HAVING ONE.
+   *
+   * pdf.js asks through this callback rather than rejecting, and rejects on
+   * its own — with "No password given" — only when nothing is set here. Set
+   * always, so every road that does not end in a password ends in the SAME
+   * named refusal: an `Error` handed to `update` rejects the loading task
+   * with that error, which the cleanup below tears down and rethrows. A prompt
+   * that never answered would leave the task, and the worker it started,
+   * waiting forever; a `null` from the prompt is the reader's cancel and gets
+   * the same sentence. */
+  task.onPassword = (update: (answer: string | Error) => void, code: number) => {
+    const reason: PasswordReason =
+      code === pdfjs.PasswordResponses.INCORRECT_PASSWORD ? 'wrong' : 'needed'
+    const ask = hooks.password
+    if (!ask) {
+      update(new Error(PDF_LOCKED))
+      return
+    }
+    ask(reason).then(
+      (answer) => update(answer === null ? new Error(PDF_LOCKED) : answer),
+      () => update(new Error(PDF_LOCKED)),
+    )
+  }
   /**
    * ⚠️ **A REJECTED LOAD LEFT THE WORKER RUNNING.**
    *
@@ -496,7 +570,7 @@ export async function makePdf(file: BookSource, hooks: PdfHooks = {}): Promise<P
        * two thousand strings does not belong in a file written that often. */
       pageCount: pdf.numPages,
     },
-    toc: outline?.map(tocItem) ?? [],
+    toc: tocOf(outline),
     sections: Array.from({ length: pdf.numPages }, (_, i) => ({
       id: i,
       load: async () => {
@@ -534,7 +608,10 @@ export async function makePdf(file: BookSource, hooks: PdfHooks = {}): Promise<P
       // foliate uses this to weight progress. Pages are equal enough.
       size: 1000,
     })),
-    isExternal: (uri) => /^\w+:/i.test(uri),
+    /* RFC 3986's scheme grammar, not `\w+`: `\w` rejects `+`, `-` and `.`
+       (so `web+paper:` was internal) and accepts a leading digit or `_`
+       (audit round 1, #833). */
+    isExternal: (uri) => /^[a-z][a-z0-9+.-]*:/i.test(uri),
     /* A destination that cannot be resolved REFUSES, rather than resolving to
      * page 0. Falling back sent the reader to the cover — from wherever they
      * were, with no way back but the history — and did it for exactly the

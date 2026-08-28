@@ -42,6 +42,16 @@ export interface FileStore extends MarkStorage {
   readonly healthy: boolean
   /** True when the contents were seeded from localStorage on this run. */
   readonly migrated: boolean
+  /**
+   * What this run found on disk that it could not read — or null.
+   *
+   * `aside` is where the damaged file went, or null when it could not be
+   * moved and the next write will replace it. Reported rather than only
+   * logged: a reader who lost their cards and settings to a truncated file
+   * learned it from an empty pane with nothing to say why, and a console
+   * line is not where a reader looks. Boot says it where they do.
+   */
+  readonly damaged: { readonly aside: string | null } | null
 }
 
 /** The filesystem operations this needs, injected so it can be tested. */
@@ -52,10 +62,20 @@ export interface FileSystem {
   /**
    * Move a damaged store aside, so the next write cannot destroy it.
    *
+   * ⚠️ **`to` IS A REQUEST, AND THE ANSWER IS WHERE IT WENT.** `rename`
+   * REPLACES its destination on every filesystem this ships to, so an
+   * implementation that honours `to` literally destroys the quarantine an
+   * earlier corruption left at that name — the one thing moving a damaged
+   * file aside exists to prevent. An implementation must therefore be free to
+   * choose a neighbouring name, and the caller must be told which: `aside` is
+   * reported to the reader as the file their work is in, and a path nothing
+   * wrote is the same lie as no quarantine at all. Answering `void` means the
+   * requested name was used.
+   *
    * Optional: a filesystem that cannot rename is still usable, and the store
    * then behaves as it did before this existed.
    */
-  quarantine?: (path: string, to: string) => Promise<void>
+  quarantine?: (path: string, to: string) => Promise<string | void>
 }
 
 export interface FileStoreOptions {
@@ -80,8 +100,12 @@ export async function openFileStore({
   legacy = null,
   schedule = (fn) => void Promise.resolve().then(fn),
 }: FileStoreOptions): Promise<FileStore> {
-  let contents: Contents = {}
+  /* Null-prototype, so a key like `toString` or `__proto__` is data rather
+   * than an inherited function or a prototype write. The keys are ours today;
+   * the object should not care. */
+  let contents: Contents = Object.create(null) as Contents
   let migrated = false
+  let damaged: FileStore['damaged'] = null
 
   const existing = await fs.read(path)
   if (existing !== null) {
@@ -92,12 +116,29 @@ export async function openFileStore({
        * their work, destroyed by the recovery path that claimed to preserve it.
        * The store then starts empty, which is what a reader sees either way;
        * the difference is whether the old bytes still exist afterwards. */
-      const aside = `${path}.corrupt`
-      try {
-        await fs.quarantine?.(path, aside)
-        console.error(`Paper: the store could not be read; moved it to ${aside}`)
-      } catch (cause) {
-        console.error('Paper: the store could not be read, and could not be moved aside', cause)
+      const asked = `${path}.corrupt`
+      if (fs.quarantine) {
+        try {
+          /* WHERE IT ACTUALLY WENT, not where it was asked to go — see the
+           * seam. An implementation that avoids destroying an earlier
+           * quarantine has to choose a different name, and reporting the
+           * requested one then sends the reader to a file nothing wrote. */
+          const landed = await fs.quarantine(path, asked)
+          const aside = typeof landed === 'string' && landed !== '' ? landed : asked
+          console.error(`Paper: the store could not be read; moved it to ${aside}`)
+          damaged = { aside }
+        } catch (cause) {
+          console.error('Paper: the store could not be read, and could not be moved aside', cause)
+          damaged = { aside: null }
+        }
+      } else {
+        /* NO SEAM IS NOT A MOVE. `fs.quarantine?.()` resolved undefined and
+         * the report claimed the bytes were preserved at a path nothing
+         * wrote — the next write then overwrote the reader's only copy,
+         * under a notice saying it was safe. An absent seam is the
+         * could-not-move case, told as such. */
+        console.error('Paper: the store could not be read, and this filesystem cannot move it aside')
+        damaged = { aside: null }
       }
     } else {
       contents = readable
@@ -108,8 +149,16 @@ export async function openFileStore({
      * migration — or a downgrade — still finds the reader's work where it was.
      * Nothing here deletes anything a reader made. */
     for (const key of MIGRATED_KEYS) {
-      const value = legacy.getItem(key)
-      if (value !== null) contents[key] = value
+      /* PER KEY, because browser storage can throw on a read even after the
+       * object itself was handed over (a revoked permission, a dying
+       * profile) — and one throwing key used to reject the whole open,
+       * which took the disk-backed store down over a LEGACY copy. */
+      try {
+        const value = legacy.getItem(key)
+        if (value !== null) contents[key] = value
+      } catch (cause) {
+        console.error(`Paper: could not migrate ${key} from the old storage`, cause)
+      }
     }
     migrated = Object.keys(contents).length > 0
   }
@@ -121,14 +170,21 @@ export async function openFileStore({
   let queued = false
   /** Writes run one after another, never overlapping. */
   let inFlight: Promise<void> = Promise.resolve()
+  /**
+   * Why the last write did not land, or null when it did — `healthy`'s cause,
+   * kept so `flush` can raise the real failure rather than a summary of it.
+   */
+  let lastFailure: unknown = null
 
   const writeNow = async () => {
     const snapshot = JSON.stringify(contents)
     try {
       await fs.write(path, snapshot)
       healthy = true
+      lastFailure = null
     } catch (cause) {
       healthy = false
+      lastFailure = cause
       console.error('Paper: could not save to disk', cause)
     }
   }
@@ -171,9 +227,25 @@ export async function openFileStore({
       if (!healthy) throw new Error('the previous save to disk failed')
     },
 
+    /**
+     * A FLUSH THAT RESOLVES MEANS THE BYTES ARE DOWN.
+     *
+     * `writeNow` swallows so the QUEUE survives a bad write — chaining onto a
+     * rejected promise would make every write after it reject too, and a
+     * store that failed once would never save again. But the swallow also
+     * made this resolve over a write that never happened, and its callers are
+     * precisely the ones that need the answer: the app's shutdown step, which
+     * reports a failed save, and the CLI's close, which turns one into a
+     * non-zero exit rather than printing success over bytes that are not on
+     * disk. Raised HERE, where there is an `await` to raise into, and nowhere
+     * in the chain.
+     */
     flush: async () => {
       if (dirty) chain()
       await inFlight
+      if (lastFailure !== null) {
+        throw lastFailure instanceof Error ? lastFailure : new Error(String(lastFailure))
+      }
     },
 
     get healthy() {
@@ -181,6 +253,9 @@ export async function openFileStore({
     },
     get migrated() {
       return migrated
+    },
+    get damaged() {
+      return damaged
     },
   }
 
@@ -191,7 +266,14 @@ export async function openFileStore({
    * nothing at all. */
   if (migrated) {
     dirty = true
-    await store.flush()
+    /* AND ITS FAILURE DOES NOT FAIL THE OPEN. `flush` raises a write that did
+     * not land, which is what its callers need — but the seeded values are in
+     * memory and still in the legacy store they were copied from, so a
+     * refused migration write costs this run's durability (`healthy` says so,
+     * and the next `setItem` throws) and not the reader's application.
+     * Thrown, it would send the caller down its "could not open the store at
+     * all" path and pin the whole session to window storage. */
+    await store.flush().catch(() => {})
   }
 
   return store
@@ -202,13 +284,16 @@ function parse(text: string): Contents | null {
   try {
     const value: unknown = JSON.parse(text)
     if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
-    // Only string entries: every store above this writes a JSON string, and a
-    // non-string here would reach `JSON.parse` in a parser expecting one.
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>).filter(
-        ([, v]) => typeof v === 'string',
-      ),
-    ) as Contents
+    /* ONE invalid entry damns the file, deliberately. Every store above this
+     * writes a JSON string, so a non-string entry means the file was not
+     * written by this code — and FILTERING it meant the remainder was
+     * accepted as healthy and the next write erased the dropped keys with no
+     * quarantine and no notice. Damage is damage: `null` sends the whole
+     * file down the move-aside path, where every byte survives and the boot
+     * notice says so. */
+    const entries = Object.entries(value as Record<string, unknown>)
+    if (!entries.every(([, v]) => typeof v === 'string')) return null
+    return Object.assign(Object.create(null), Object.fromEntries(entries)) as Contents
   } catch {
     /* Reported to the caller rather than thrown. Throwing here would happen
      * before React mounts and take the whole application down — a reader whose

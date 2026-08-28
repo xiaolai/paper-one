@@ -4,7 +4,7 @@ import { join, resolve, win32 } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { CONTENT_EXTENSIONS } from '../../kernel'
 import { BOOKS_ONLY_BYTES, LIBRARY_FIXTURE, LIBRARY_FIXTURE_BYTES } from '../../kernel/testkit'
-import { appPresence, makeDataDir, nodeIndexFs, nodeSizePort, nodeTextFs, under } from './fs'
+import { makeDataDir, nodeIndexFs, nodeSizePort, nodeTextFs, under } from './fs'
 
 /**
  * The Node seam, held to the behaviours the kernel actually depends on
@@ -28,18 +28,30 @@ import { appPresence, makeDataDir, nodeIndexFs, nodeSizePort, nodeTextFs, under 
  * were here, and one had no guard at all.
  *
  * The denial is verified by attempting the read. When it did not take, the
- * mode is put back and `false` is returned, and the caller SKIPS rather than
- * asserting — a test that cannot run should say so, not quietly succeed.
+ * mode is put back and the REASON is returned; `null` means denied. The
+ * caller hands that reason to the test context's `skip`, so the case is
+ * REPORTED as skipped — `↓ name [reason]` — rather than passing.
+ *
+ * THREE OF THESE WERE A BARE `return` (WI-20.38): the case ended early and
+ * was counted as a pass, on the only CI platform, forever. Not `it.skipIf`,
+ * and the reason is measured: `vitest list --json` — which `pnpm test:ledger`
+ * reads to know what exists — does NOT list a test skipped statically (probed
+ * against 3.2.7: `it.skipIf(true)` absent from the list, a `context.skip`
+ * case present). A name in the ledger that Windows or root cannot collect is
+ * read by that gate as a deletion, so the platform-conditional skip has to
+ * happen at RUN time, where the name is still collected everywhere.
  */
-async function denyAccess(path: string, kind: 'file' | 'directory' = 'file'): Promise<boolean> {
-  if (process.platform === 'win32' || process.getuid?.() === 0) return false
+async function denyAccess(path: string, kind: 'file' | 'directory' = 'file'): Promise<string | null> {
+  if (process.platform === 'win32') return 'Windows ignores the mode bits'
+  if (process.getuid?.() === 0) return 'root is exempt from the mode bits'
   await chmod(path, 0o000)
   const denied = await (kind === 'file' ? readFile(path) : readdir(path)).then(
     () => false,
     () => true,
   )
-  if (!denied) await chmod(path, kind === 'file' ? 0o644 : 0o755)
-  return denied
+  if (denied) return null
+  await chmod(path, kind === 'file' ? 0o644 : 0o755)
+  return `chmod 000 did not deny a ${kind} read on this filesystem`
 }
 
 const roots: string[] = []
@@ -168,6 +180,33 @@ describe('nodeIndexFs', () => {
    * Measured rather than asserted about: appending one line to an existing
    * megabyte must not read that megabyte back.
    */
+  /* THE SYNCED ATOMIC WRITE (phase 20, D3) — the CLI's half of what the
+     app's `write_atomic` command does: temp, `fsync`, rename, directory
+     synced, parent made. Node has no `F_FULLFSYNC`, so both levels are one
+     `fsync(2)` here and the adapter says so. */
+  it('writes atomically and synced, making the folder and leaving no temporary', async () => {
+    const root = await freshRoot()
+    const fs = nodeIndexFs(root)
+    await fs.writeAtomic!('books/b/book.json', new TextEncoder().encode('{"a":1}'), 'full')
+    await fs.writeAtomic!('books/b/book.json', new TextEncoder().encode('{"a":2}'), 'barrier')
+    expect(await readFile(join(root, 'books', 'b', 'book.json'), 'utf8')).toBe('{"a":2}')
+    expect((await readdir(join(root, 'books', 'b'))).filter((name) => name.includes('.writing'))).toEqual([])
+    /* And the file at the root of the data directory, which has no folder
+       of its own to make. */
+    await fs.writeAtomic!('index.json', new TextEncoder().encode('[]'), 'full')
+    expect(await readFile(join(root, 'index.json'), 'utf8')).toBe('[]')
+  })
+
+  it('syncs a file it wrote, and a directory, and refuses one that is not there', async () => {
+    const root = await freshRoot()
+    const fs = nodeIndexFs(root)
+    await fs.writeAtomic!('sync/journal.jsonl', new TextEncoder().encode('{}\n'), 'full')
+    await expect(fs.fsync!('sync/journal.jsonl', 'full')).resolves.toBeUndefined()
+    await expect(fs.fsync!('sync', 'barrier')).resolves.toBeUndefined()
+    await expect(fs.fsync!('sync/nope.jsonl', 'full')).rejects.toThrow()
+    await expect(fs.writeAtomic!('../outside.json', new Uint8Array(0), 'full')).rejects.toThrow(/leaves the data directory/)
+  })
+
   it('appends without rewriting', async () => {
     const root = await freshRoot()
     const fs = nodeIndexFs(root)
@@ -177,7 +216,7 @@ describe('nodeIndexFs', () => {
     expect(text(await fs.readFile('sync/journal.jsonl'))).toBe('one\ntwo\n')
   })
 
-  it('does not read the file back in order to append to it', async () => {
+  it('does not read the file back in order to append to it', async ({ skip }) => {
     const root = await freshRoot()
     const fs = nodeIndexFs(root)
     await fs.mkdir('sync')
@@ -191,8 +230,9 @@ describe('nodeIndexFs', () => {
      * the same speed, so the margin was noise. This is the property itself.
      *
      * Skipped for root, who is exempt from the mode bits and would make it
-     * pass by not applying. */
-    if (process.getuid?.() === 0) return
+     * pass by not applying — and REPORTED as skipped, through the context,
+     * for the reason `denyAccess` gives above. */
+    if (process.getuid?.() === 0) skip('root is exempt from the mode bits')
     await chmod(join(root, 'sync/journal.jsonl'), 0o222)
     try {
       await expect(fs.appendFile?.('sync/journal.jsonl', bytes('two\n'))).resolves.toBeUndefined()
@@ -258,14 +298,18 @@ describe('nodeTextFs', () => {
     /* A DIRECTORY where the file belongs — EISDIR. */
     await nodeIndexFs(root).mkdir('paper.store.v1.json')
     await expect(fs.read('paper.store.v1.json')).rejects.toThrow()
+  })
 
-    /* AND A FILE THAT WILL NOT OPEN — EACCES. Skipped for root, who is
-     * exempt from the mode bits and would make this pass by not applying. */
+  /* AND A FILE THAT WILL NOT OPEN — EACCES. Its own case, not the tail of
+   * the one above: it is skipped where the mode bits do not apply, and a
+   * skip has to mean "this did not run", not "half of this ran". */
+  it('throws rather than answering null when the store will not open', async ({ skip }) => {
     const other = await freshRoot()
     const guarded = nodeTextFs(other)
     await guarded.write('paper.store.v1.json', '{"kept":true}')
     const at = join(other, 'paper.store.v1.json')
-    if (!(await denyAccess(at))) return
+    const undeniable = await denyAccess(at)
+    if (undeniable !== null) skip(undeniable)
     try {
       await expect(guarded.read('paper.store.v1.json')).rejects.toThrow()
     } finally {
@@ -406,7 +450,7 @@ describe('nodeSizePort', () => {
    * port is "nobody can say", and a number that is quietly short is worse
    * than no number — a reader would believe their library is smaller than it
    * is. */
-  it('answers null when any part of the walk could not be read', async () => {
+  it('answers null when any part of the walk could not be read', async ({ skip }) => {
     const root = await freshRoot()
     const fs = nodeIndexFs(root)
     await fs.mkdir('books/aaa')
@@ -415,7 +459,8 @@ describe('nodeSizePort', () => {
     /* UNGUARDED BEFORE: as root, or on Windows, the chmod changed nothing and
      * `libraryBytes()` answered a perfectly good number — so the assertion
      * below passed while proving the opposite of what it says. */
-    if (!(await denyAccess(join(root, 'books/locked'), 'directory'))) return
+    const undeniable = await denyAccess(join(root, 'books/locked'), 'directory')
+    if (undeniable !== null) skip(undeniable)
     try {
       expect(await nodeSizePort(root).libraryBytes()).toBeNull()
     } finally {
@@ -459,41 +504,6 @@ describe('the containment rule, against Windows path semantics', () => {
   })
 })
 
-/**
- * `appPresence` decides whether `paper` may open the sync journal, so an
- * answer of `absent` when the app is live puts a second writer on
- * `journal.jsonl`. Three answers rather than two: everything it cannot decide
- * is `unknown`, and the caller treats that as `running`.
- */
-describe('appPresence', () => {
-  it('answers one of the three, and never throws, whatever the platform', async () => {
-    await expect(appPresence()).resolves.toMatch(/^(running|absent|unknown)$/)
-  })
-
-  /* THE DIRECTION THAT MATTERS. A platform it cannot probe must never answer
-   * `absent`, because `absent` is the only answer that unlocks journalling. */
-  it('never answers `absent` on a platform it cannot probe', async () => {
-    if (process.platform === 'darwin') return
-    await expect(appPresence()).resolves.toBe('unknown')
-  })
-
-  it('is false when no Paper bundle is running', async () => {
-    /* Nothing in a test environment runs `Paper.app/Contents/MacOS/`. If this
-     * ever fails on a developer's machine it is because their own Paper is
-     * open — which is exactly the state the CLI must detect, so the failure
-     * would be the function working. */
-    const running = (await appPresence()) === 'running'
-    if (running) {
-      const { execFile } = await import('node:child_process')
-      const { promisify } = await import('node:util')
-      const { stdout } = await promisify(execFile)('pgrep', ['-f', 'Paper.app/Contents/MacOS/'])
-      expect(stdout.trim()).not.toBe('')
-    } else {
-      expect(running).toBe(false)
-    }
-  })
-})
-
 /* `rename` REPLACES its destination, so quarantining twice to the same
  * `.corrupt` name destroyed the earlier copy — the one holding whatever the
  * reader might still have recovered. The point of moving a damaged file aside
@@ -512,6 +522,34 @@ describe('repeated quarantine', () => {
     expect(await readFile(join(root, 'paper.store.v1.json.corrupt'), 'utf8')).toBe('first damage')
     /* And the second is beside it rather than on top of it. */
     expect(await readFile(join(root, 'paper.store.v1.json.corrupt.1'), 'utf8')).toBe('second damage')
+  })
+
+  /**
+   * ⚠️ **AND THE FREE NAME WAS TAKEN BY LOOKING, NOT BY CLAIMING.**
+   *
+   * `access` then `rename` is a check followed by an overwrite: two writers
+   * over one library — a `paper` beside the running app, or two `paper` runs
+   * — both saw the same `.corrupt` free, and POSIX `rename` REPLACES its
+   * destination, so the second silently destroyed the first. `link` fails
+   * `EEXIST` instead, which is how one of these two ends up at `.1`.
+   *
+   * Both calls issue their probe before either answers — one event loop,
+   * two pending syscalls — so both genuinely believe the name is free. Which
+   * of them wins is not the point and is not asserted; that BOTH survive is.
+   */
+  it('does not let two writers racing for one name destroy each other’s copy', async () => {
+    const root = await freshRoot()
+    const fs = nodeTextFs(root)
+    await writeFile(join(root, 'one.json'), 'from one')
+    await writeFile(join(root, 'two.json'), 'from two')
+
+    await Promise.all([fs.quarantine?.('one.json', 'held.corrupt'), fs.quarantine?.('two.json', 'held.corrupt')])
+
+    const held = [
+      await readFile(join(root, 'held.corrupt'), 'utf8'),
+      await readFile(join(root, 'held.corrupt.1'), 'utf8'),
+    ].sort()
+    expect(held).toEqual(['from one', 'from two'])
   })
 })
 

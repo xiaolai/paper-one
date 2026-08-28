@@ -221,18 +221,41 @@ export function parseFrame(value: unknown): Frame {
  */
 export function encodeFrame(frame: Frame): Uint8Array {
   const checked = parseFrame(frame)
-  /* ⚠️ **`JSON.stringify` RUNS FIRST, AND THE ORDER IS LOAD-BEARING.** It is
-   * what detects a CYCLE — properly, which a walk of my own would not: a plain
-   * visited-set also rejects a shared subgraph, which is legitimate and which
-   * `stringify` serialises happily. So the graph is proven acyclic here, and
-   * only then is it walked. Written the other way round, a body holding a
-   * reference to itself hangs the sender forever instead of refusing. */
+  /* ⚠️ **THE BODY IS CHECKED THROUGH `JSON.stringify` ITSELF, NOT BY A
+   * SECOND WALK OF THE SAME OBJECT.**
+   *
+   * This used to serialise the frame and then traverse the LIVE graph again to
+   * judge it — so a body was encoded from one traversal and validated against
+   * another. Every getter fired twice and every `toJSON` was called twice, and
+   * nothing obliges the second answer to match the first: a lazily built row, a
+   * `toJSON` reading a cursor, an accessor with a side effect all pass a check
+   * performed on a graph the bytes were never taken from. The failure is
+   * silent, and it is the wrong way round — what goes on the wire is what the
+   * FIRST pass saw, and what was proven encodable is what the second one did.
+   *
+   * The replacer is called exactly once per value `stringify` serialises, after
+   * the getter has run and after `toJSON` has replaced the value, and what it
+   * receives is precisely what is encoded. One walk, and it is the encoder's.
+   *
+   * It RECORDS rather than throws, for two reasons. The refusals keep their
+   * order — a payload over the cap is still `FrameTooLarge` — and `stringify`
+   * still gets to be the thing that detects a CYCLE, which a walk of my own
+   * could not do properly: a plain visited-set also rejects a shared subgraph,
+   * which is legitimate and which `stringify` serialises happily. */
+  let unencodable: string | null = null
+  const witness = (_key: string, value: unknown): unknown => {
+    if (unencodable === null) unencodable = unencodableReason(value)
+    return value
+  }
   let json: string
   try {
-    json = JSON.stringify(checked)
+    json = JSON.stringify(checked, witness)
   } catch (cause) {
-    /* A cycle, a bigint, or a `toJSON` that threw. `TypeError` naming neither
-       the frame nor the field is not something a caller can act on. */
+    /* THE WITNESS ANSWERS FIRST WHEN IT HAS ONE. A bigint reaches the replacer
+       and only then makes `stringify` throw — a `TypeError` naming neither the
+       frame nor the field, which is not something a caller can act on. What is
+       left is a cycle, or a `toJSON` that threw. */
+    if (unencodable !== null) throw new MalformedFrame(unencodable)
     throw new MalformedFrame(
       `frame body cannot be serialised as JSON: ${cause instanceof Error ? cause.message : String(cause)}`,
     )
@@ -244,9 +267,7 @@ export function encodeFrame(frame: Frame): Uint8Array {
      makes "what encode accepts" and "what decode accepts" one rule rather than
      two that agree until they do not. */
   assertBoundedDepth(json, MAX_JSON_DEPTH + 1)
-  /* LAST, and bounded by both checks above: the graph is acyclic and its
-     serialised form is under the wire cap, so this walk terminates. */
-  assertEncodable(checked.body)
+  if (unencodable !== null) throw new MalformedFrame(unencodable)
   const out = new Uint8Array(HEADER_BYTES + payload.byteLength)
   new DataView(out.buffer).setUint32(0, payload.byteLength, false)
   out.set(payload, HEADER_BYTES)
@@ -300,7 +321,7 @@ function assertFiniteNumbers(root: unknown): void {
 }
 
 /**
- * Refuse a body JSON cannot carry unchanged.
+ * Why JSON cannot carry this value unchanged, or `null` when it can.
  *
  * `JSON.stringify` does not throw on any of these — it rewrites them, which is
  * the whole problem: a non-finite number becomes `null`, and `undefined`, a
@@ -309,49 +330,30 @@ function assertFiniteNumbers(root: unknown): void {
  * and what the peer receives, and none of them can be detected downstream:
  * `null` is a legitimate value and an absent key is a legitimate shape.
  *
- * `bigint` is included for consistency of message rather than of behaviour —
+ * `bigint` is here for the message rather than for the behaviour —
  * `JSON.stringify` does throw on it, with a `TypeError` naming neither the
- * frame nor the field.
+ * frame nor the field, so `encodeFrame` prefers this sentence to that one.
  *
- * Walked iteratively so a deep graph cannot overflow the stack, and it visits
- * exactly what `JSON.stringify` would: own enumerable properties and array
- * elements.
- *
- * ⚠️ **IT ASSUMES AN ACYCLIC GRAPH, AND ITS CALLER PROVES THAT** by running
- * `JSON.stringify` first. Detecting cycles here would need a visited set, which
- * also rejects a SHARED subgraph — legitimate, and something `stringify`
- * serialises without complaint. Called on a cyclic body directly, this does not
- * return.
+ * ONE VALUE, NOT A GRAPH, and deliberately so: it is `encodeFrame`'s replacer,
+ * called by `JSON.stringify` once per value it actually serialises. The
+ * traversal belongs to the encoder, so what is judged is what is encoded —
+ * getters and `toJSON` run exactly once, and there is no second pass to
+ * disagree with the first. See `encodeFrame` for the incident.
  */
-function assertEncodable(root: unknown): void {
-  const stack: unknown[] = [root]
-  while (stack.length > 0) {
-    const value = stack.pop()
-    switch (typeof value) {
-      case 'number':
-        if (!Number.isFinite(value)) throw new MalformedFrame('frame body has a non-finite number')
-        break
-      case 'undefined':
-        throw new MalformedFrame('frame body has an undefined value, which JSON drops silently')
-      case 'function':
-        throw new MalformedFrame('frame body has a function, which JSON drops silently')
-      case 'symbol':
-        throw new MalformedFrame('frame body has a symbol, which JSON drops silently')
-      case 'bigint':
-        throw new MalformedFrame('frame body has a bigint, which JSON cannot carry')
-      case 'object':
-        if (value === null) break
-        if (Array.isArray(value)) for (const element of value) stack.push(element)
-        /* `toJSON` REPLACES THE VALUE, and legitimately — a `Date` is the
-           common case. What it returns is what goes on the wire, so that is
-           what is checked. */
-        else if (typeof (value as { toJSON?: unknown }).toJSON === 'function') {
-          stack.push((value as { toJSON: () => unknown }).toJSON())
-        } else for (const nested of Object.values(value)) stack.push(nested)
-        break
-      default:
-        break
-    }
+function unencodableReason(value: unknown): string | null {
+  switch (typeof value) {
+    case 'number':
+      return Number.isFinite(value) ? null : 'frame body has a non-finite number'
+    case 'undefined':
+      return 'frame body has an undefined value, which JSON drops silently'
+    case 'function':
+      return 'frame body has a function, which JSON drops silently'
+    case 'symbol':
+      return 'frame body has a symbol, which JSON drops silently'
+    case 'bigint':
+      return 'frame body has a bigint, which JSON cannot carry'
+    default:
+      return null
   }
 }
 
@@ -397,17 +399,36 @@ function isServiceError(value: unknown): value is ServiceError {
   )
 }
 
+/** What a thrown value that says nothing usable crosses as. */
+const INTERNAL_ERROR: ServiceError = {
+  code: ENVELOPE_ERRORS.internal,
+  retryable: false,
+  message: 'the service failed',
+}
+
 /**
  * A NEW `ServiceError` built from allow-listed fields only, each capped. A
  * handler that throws `{code, retryable, message, stack, bookText}` must not
  * ship the extras — only the three public fields cross the wire, and a public
  * message cannot itself grow past the cap.
+ *
+ * READ ONCE, AND CANNOT THROW. The value is whatever a handler threw, so its
+ * properties may be getters or Proxy traps: this called `isServiceError`
+ * three more times, once per field, which is four reads of a value that is
+ * free to answer differently each time and to raise on any of them. A raise
+ * escaped the catch block that called it — after the request had been settled
+ * and its clock cleared, so the peer got no answer and no timeout either.
  */
 function toWireError(value: unknown): ServiceError {
-  return {
-    code: isServiceError(value) ? value.code.slice(0, MAX_ERROR_CODE) : ENVELOPE_ERRORS.internal,
-    retryable: isServiceError(value) ? value.retryable : false,
-    message: isServiceError(value) ? value.message.slice(0, MAX_ERROR_MESSAGE) : 'the service failed',
+  try {
+    if (!isPlainObject(value)) return INTERNAL_ERROR
+    const { code, retryable, message } = value
+    if (typeof code !== 'string' || typeof retryable !== 'boolean' || typeof message !== 'string') {
+      return INTERNAL_ERROR
+    }
+    return { code: code.slice(0, MAX_ERROR_CODE), retryable, message: message.slice(0, MAX_ERROR_MESSAGE) }
+  } catch {
+    return INTERNAL_ERROR
   }
 }
 
@@ -491,6 +512,16 @@ export interface RouterConnection {
   recheckGrants(): void
   /** The peer is gone: every in-flight handler is aborted and nothing more is written. */
   disconnect(): void
+  /**
+   * Hear the connection close — for ANY reason: the caller's own
+   * `disconnect`, a transport write that rejected, or the outbound budget
+   * overflowing. The router hangs up on its own for the last two, and until
+   * this existed nothing outside it could tell: the webhost pump went on
+   * holding a session whose router had already gone silent (the 2026-08-28
+   * audit, #61). Fires once; a listener added after the close is called at
+   * once, so there is no window to miss. Answers the unsubscribe.
+   */
+  onDisconnect(listener: () => void): () => void
   /** How many requests are in flight — for tests and diagnostics. */
   readonly inFlight: number
 }
@@ -638,7 +669,14 @@ interface InFlight {
 }
 
 function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
-  return typeof value === 'object' && value !== null && Symbol.asyncIterator in value
+  /* A function can be an iterable too, and presence is not enough: the
+   * property must BE a function, or `for await` fails later as an internal
+   * service error naming nothing. */
+  return (
+    (typeof value === 'object' || typeof value === 'function') &&
+    value !== null &&
+    typeof (value as { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator] === 'function'
+  )
 }
 
 /**
@@ -658,6 +696,19 @@ function positiveLimit(name: string, value: number): number {
 
 export function createRouter(options: RouterOptions): Router {
   const services = new Map<string, ServiceContribution>()
+  /* THE GRANT CHECK NEVER THROWS OUT OF `receive`. `hasGrant` is injected —
+   * a capability's binding, a pump's book-bound rule — and an exception from
+   * it escaped the receive loop that promises never to, and took the
+   * transport down over one frame. A check that fails is a check that said
+   * no, and the reason goes to the log. */
+  const granted = (peer: Parameters<typeof hasGrant>[0], grant: Parameters<typeof hasGrant>[1]): boolean => {
+    try {
+      return hasGrant(peer, grant)
+    } catch (cause) {
+      console.error(`Paper: the grant check threw for ${grant}; treating it as refused`, cause)
+      return false
+    }
+  }
   for (const service of options.services) {
     if (services.has(service.name)) throw new Error(`envelope router: service "${service.name}" registered twice`)
     services.set(service.name, service)
@@ -817,7 +868,7 @@ export function createRouter(options: RouterOptions): Router {
           refuse(frame.service, frame.id, serviceError(ENVELOPE_ERRORS.duplicateId, `request ${JSON.stringify(frame.id)} is already in flight`))
           return
         }
-        if (!hasGrant(peer, service.grant)) {
+        if (!granted(peer, service.grant)) {
           refuse(frame.service, frame.id, serviceError(ENVELOPE_ERRORS.forbidden, `peer lacks grant ${JSON.stringify(service.grant)}`))
           return
         }
@@ -897,22 +948,45 @@ export function createRouter(options: RouterOptions): Router {
              * from its public fields only, so a stack, a path or a book's text
              * hidden in extra properties never crosses. An answer over the cap
              * says so; anything else is a defect and crosses as `internal`. */
-            const error = isServiceError(thrown)
-              ? toWireError(thrown)
-              : thrown instanceof FrameTooLarge
-                ? serviceError(ENVELOPE_ERRORS.frameTooLarge, thrown.message)
-                : serviceError(ENVELOPE_ERRORS.internal, 'the service failed')
+            /* AND INSPECTING IT CANNOT THROW PAST HERE. The request is already
+             * settled at this point: an `instanceof` against a Proxy, or a
+             * getter that raises, became an unhandled rejection with the
+             * peer's clock stopped — no answer, and nothing left to end the
+             * wait. `toWireError` is total; this covers the two tests around
+             * it, which read the value in their own right. */
+            let error: ServiceError
+            try {
+              error = isServiceError(thrown)
+                ? toWireError(thrown)
+                : thrown instanceof FrameTooLarge
+                  ? serviceError(ENVELOPE_ERRORS.frameTooLarge, thrown.message)
+                  : INTERNAL_ERROR
+            } catch {
+              error = INTERNAL_ERROR
+            }
             refuse(frame.service, frame.id, error)
           }
         })()
       }
 
+      const closed = new Set<() => void>()
       const disconnect = () => {
         if (!open) return
         open = false
         for (const id of [...inFlight.keys()]) {
           settle(id)?.controller.abort(serviceError(ENVELOPE_ERRORS.disconnected, 'peer disconnected'))
         }
+        /* After the aborts, so a listener that tears the session down sees
+         * the handlers already gone; each on its own, so one that throws
+         * cannot keep the next from hearing. */
+        for (const listener of [...closed]) {
+          try {
+            listener()
+          } catch {
+            /* A listener's failure is its own; the close still happened. */
+          }
+        }
+        closed.clear()
       }
 
       return {
@@ -920,10 +994,20 @@ export function createRouter(options: RouterOptions): Router {
         get inFlight() {
           return inFlight.size
         },
+        onDisconnect(listener) {
+          if (!open) {
+            listener()
+            return () => {}
+          }
+          closed.add(listener)
+          return () => {
+            closed.delete(listener)
+          }
+        },
         recheckGrants() {
           if (!open) return
           for (const [id, entry] of [...inFlight]) {
-            if (!hasGrant(peer, entry.grant)) abortAndRefuse(id, serviceError(ENVELOPE_ERRORS.forbidden, 'grant revoked'))
+            if (!granted(peer, entry.grant)) abortAndRefuse(id, serviceError(ENVELOPE_ERRORS.forbidden, 'grant revoked'))
           }
         },
         receive(bytes) {
@@ -975,7 +1059,7 @@ export function createRouter(options: RouterOptions): Router {
                 refuse(frame.service, frame.id, serviceError(ENVELOPE_ERRORS.protocol, `stream after end`))
                 return
               }
-              if (!hasGrant(peer, entry.grant)) {
+              if (!granted(peer, entry.grant)) {
                 abortAndRefuse(frame.id, serviceError(ENVELOPE_ERRORS.forbidden, 'grant revoked'))
                 return
               }
@@ -1002,10 +1086,14 @@ export function createRouter(options: RouterOptions): Router {
                 refuse(frame.service, frame.id, serviceError(ENVELOPE_ERRORS.protocol, `end after end`))
                 return
               }
-              if (!hasGrant(peer, entry.grant)) {
+              if (!granted(peer, entry.grant)) {
                 abortAndRefuse(frame.id, serviceError(ENVELOPE_ERRORS.forbidden, 'grant revoked'))
                 return
               }
+              /* PROGRESS, like every accepted input frame: a handler still
+               * draining what it was sent must not time out at the very
+               * instant the sender finished. */
+              entry.refresh?.()
               entry.ended = true
               entry.input.end()
               return
@@ -1162,7 +1250,7 @@ export function createClient(options: ClientOptions): Client {
     const id = nextId()
     const promise = new Promise<Frame>((resolve, reject) => {
       if (!open) {
-        reject(new ServiceCallError(service, serviceError(ENVELOPE_ERRORS.disconnected, 'client is disconnected')))
+        reject(new ServiceCallError(service, serviceError(ENVELOPE_ERRORS.disconnected, 'client is disconnected', true)))
         return
       }
       const signal = call.signal
@@ -1192,8 +1280,8 @@ export function createClient(options: ClientOptions): Client {
       /* The per-call override must actually limit — `NaN` disarms the
        * timer's comparison and zero or a negative fires it before the
        * request leaves. Same rule the constructor applies to its default. */
-      if (call.timeoutMs !== undefined && (!Number.isFinite(call.timeoutMs) || call.timeoutMs <= 0)) {
-        reject(new ServiceCallError(service, serviceError(ENVELOPE_ERRORS.internal, `timeoutMs must be a positive finite number, not ${String(call.timeoutMs)}`)))
+      if (call.timeoutMs !== undefined && (!Number.isInteger(call.timeoutMs) || call.timeoutMs <= 0)) {
+        reject(new ServiceCallError(service, serviceError(ENVELOPE_ERRORS.internal, `timeoutMs must be a positive integer, not ${String(call.timeoutMs)}`)))
         return
       }
       const onAbort = () => fail(serviceError(ENVELOPE_ERRORS.cancelled, 'cancelled by the caller'))
@@ -1228,12 +1316,23 @@ export function createClient(options: ClientOptions): Client {
     return { id, promise }
   }
 
+  /**
+   * RETRYABLE, on both roads out of a disconnect.
+   *
+   * ⚠️ It was `false` here and `false` above, and the browser client's channel
+   * marked only the call made AFTER its socket closed as retryable
+   * (`channel.ts`). So the request that was in flight when the socket dropped
+   * — the one a replay exists for — rejected `retryable: false`, and a replay
+   * keyed on the flag never saw it (WI-20.30, Codex round 2). A disconnect is
+   * retryable by nature: it says nothing about the request, only that the
+   * answer, if there was one, went into a socket that is gone.
+   */
   const disconnect = () => {
     if (!open) return
     open = false
     for (const id of [...pending.keys()]) {
       const entry = finish(id)
-      entry?.reject(new ServiceCallError(entry.service, serviceError(ENVELOPE_ERRORS.disconnected, 'disconnected')))
+      entry?.reject(new ServiceCallError(entry.service, serviceError(ENVELOPE_ERRORS.disconnected, 'disconnected', true)))
     }
   }
 
@@ -1301,9 +1400,15 @@ export function createClient(options: ClientOptions): Client {
           wake()
         },
       )
+      /* ONE ITERATOR, however many times it is asked for. Each call minted a
+       * fresh iterator over the SAME buffer and cursor, so two consumers
+       * silently split the items between them — and the concurrent-read
+       * guard below only fires once both are waiting at the same time. */
+      let iterator: AsyncIterator<unknown> | null = null
       return {
         [Symbol.asyncIterator]() {
-          return {
+          if (iterator) return iterator
+          iterator = {
             async next(): Promise<IteratorResult<unknown>> {
               for (;;) {
                 if (head < items.length) {
@@ -1336,6 +1441,7 @@ export function createClient(options: ClientOptions): Client {
               return Promise.reject(reason)
             },
           }
+          return iterator
         },
       }
     },
@@ -1381,7 +1487,13 @@ export function createClient(options: ClientOptions): Client {
           return
         case 'req':
         case 'cancel':
-          /* Requests travel the other way; a client is not a router. */
+          /* Requests travel the other way; a client is not a router. One that
+           * arrives FOR A PENDING CALL — `entry` is that call — is a protocol
+           * violation, and it used to be ignored, leaving the call to fail on
+           * its timeout instead of at once, as a wrong-direction frame does
+           * on the router. */
+          finish(frame.id)
+          entry.reject(new ServiceCallError(entry.service, serviceError(ENVELOPE_ERRORS.protocol, `${frame.kind} frame on the client side`)))
           return
       }
     },

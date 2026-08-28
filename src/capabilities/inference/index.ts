@@ -1,3 +1,4 @@
+import { messageOf } from './lib/messageOf'
 import { createElement } from 'react'
 import { createRenderSlot, openSession, type Capability, type CapabilityContext, type Disposable } from '../../kernel'
 import { createController, type Controller } from './lib/controller'
@@ -52,7 +53,7 @@ const section = createRenderSlot<ModelsModel>()
 const endpointsSection = createRenderSlot<EndpointsModel>()
 
 /**
- * Which start is the current one.
+ * Every lifetime that still owns the one daemon.
  *
  * ⚠️ **AN OLD LIFETIME COULD STOP THE NEW ONE'S DAEMON.** `plugin.stop()` is
  * fire-and-forget and addresses the plugin-wide daemon, not this capability's
@@ -61,8 +62,18 @@ const endpointsSection = createRenderSlot<EndpointsModel>()
  * begun answering, cancelling its requests and killing its child process. The
  * ownership checks around `running` and the render slot do not cover it, because
  * the action they guard is scheduled and lands later.
+ *
+ * ⚠️ **AND A MONOTONIC "IS MINE THE NEWEST" TOKEN WAS THE WRONG SHAPE** — the
+ * same finding `createRenderSlot` records, in the field beside it. It answers
+ * about the LATEST start and says nothing about two LIVE ones: disposing the
+ * newer composition stopped a daemon the older one was still using, and the
+ * older one's own disposal then declined to stop it — its lifetime was no
+ * longer current — leaking the child process for the life of the app. A SET
+ * answers the question that actually decides this: is anybody left. The
+ * rapid-restart case is unchanged, because an outgoing lifetime that has
+ * already been replaced is not the last owner either.
  */
-let lifetime = 0
+const daemonOwners = new Set<object>()
 
 /**
  * The PORT — what `inference` offers the capabilities that `require` it.
@@ -81,7 +92,6 @@ export interface InferencePort {
     onChunk: (text: string) => void,
     signal: AbortSignal,
   ): Promise<string>
-  /** One tool-free turn from an agent CLI. */
   /**
    * One tool-free agent turn.
    *
@@ -114,7 +124,7 @@ export function inferencePort(): InferencePort | null {
    * plugin wrapper, so every consumer gets it without having to remember. */
   const withCancel = async <T,>(
     prefix: string,
-    signal: AbortSignal | null,
+    signal: AbortSignal,
     run: (requestId: string) => Promise<T>,
   ): Promise<T> => {
     /* ⚠️ CHECKED BEFORE THE LISTENER IS ADDED. `addEventListener('abort')` does
@@ -123,22 +133,25 @@ export function inferencePort(): InferencePort | null {
      * started anyway. `generate` below makes that a real window rather than a
      * theoretical one: it awaits `ensureReady()` first, which is a process
      * launch, and a reader pressing Stop during it was ignored. */
-    signal?.throwIfAborted()
+    signal.throwIfAborted()
     const requestId = mintRequestId(prefix)
     const abort = (): void => cancelRequest(plugin, requestId, held.report)
-    signal?.addEventListener('abort', abort, { once: true })
+    signal.addEventListener('abort', abort, { once: true })
     try {
       return await run(requestId)
     } finally {
-      signal?.removeEventListener('abort', abort)
+      signal.removeEventListener('abort', abort)
     }
   }
 
   return {
     generate: async (model, system, question, onChunk, signal) => {
-      /* Before the start as well as after it: a launch is seconds, and a
-         reader who gave up in that window must not have a daemon started on
-         their behalf. `withCancel` checks again on the far side. */
+      /* Before the start as well as after it. The check here refuses to
+         BEGIN a launch for a reader who has already given up; a launch in
+         flight is not cancelled by an abort during it — the daemon is shared
+         by every later question, and stopping it for one reader's Stop would
+         cost the next question the seconds it just paid. `withCancel` checks
+         again on the far side, so the request itself never starts. */
       signal.throwIfAborted()
       if (!(await controller.ensureReady())) throw new Error('The runtime is not running')
       return withCancel('ask', signal, (id) => plugin.generate(id, model, system, question, onChunk))
@@ -189,14 +202,15 @@ export const inference: Capability = {
 
   start(api: CapabilityContext, signal: AbortSignal): Disposable {
     const plugin = inferencePlugin
-    const controller = createController(plugin, (event, fields) => api.diagnostics.warn(event, fields))
-    const gloss = createGlossProvider({
-      plugin,
-      controller,
-      report: (event, fields) => api.diagnostics.warn(event, fields),
-    })
+    /* ONE reporter, handed to everything that reports — it was built four
+       times, once per consumer. */
+    const report = (event: string, fields: Record<string, unknown>): void => api.diagnostics.warn(event, fields)
+    const controller = createController(plugin, report)
+    const gloss = createGlossProvider({ plugin, controller, report })
 
-    const myLifetime = ++lifetime
+    /** This start's claim on the shared daemon — see `daemonOwners`. */
+    const myClaim = {}
+    daemonOwners.add(myClaim)
     /* EVERYTHING THIS ACQUIRES, OWNED BY ONE THING — see `openSession`. The
      * `stopped` flag, the listener removal, the guarded-step loop and a
      * nullable `let` per resource were written out here, and the one resource
@@ -220,11 +234,7 @@ export const inference: Capability = {
     })
     session.own('unbindWorkLine', () => unbindWorkLine.dispose())
 
-    const myRunning = {
-      plugin,
-      controller,
-      report: (event: string, fields: Record<string, unknown>) => api.diagnostics.warn(event, fields),
-    }
+    const myRunning = { plugin, controller, report }
     running = myRunning
     /* Ownership before clearing: an older stop firing after a restart must not
        strip the newer start's state — the rule sync's own stop follows. */
@@ -236,7 +246,7 @@ export const inference: Capability = {
       controller,
       plugin,
       settings: api.settings,
-      report: (event, fields) => api.diagnostics.warn(event, fields),
+      report,
     })
     /* ⚠️ THE MODEL IS DISPOSED TOO. Only the tests ever called this, so in the
        running app a settings subscription, an `Audio` element, a blob URL and
@@ -252,10 +262,7 @@ export const inference: Capability = {
        nothing under `src/` invoked them, so the keychain path, the
        provisioning and the per-start registration could never run in the app.
        An audit found it; the feature ledger had called it Shipped. */
-    const endpoints = createEndpointsModel({
-      plugin,
-      report: (event, fields) => api.diagnostics.warn(event, fields),
-    })
+    const endpoints = createEndpointsModel({ plugin, report })
     session.own('endpointsModel', () => endpoints.dispose())
     const showingEndpoints = endpointsSection.hold(endpoints)
     session.own('endpointsSection', () => showingEndpoints.dispose())
@@ -264,16 +271,28 @@ export const inference: Capability = {
      * that owns it. Best-effort and unawaited: `dispose` is synchronous and
      * Rust stops it again on app exit anyway.
      *
-     * ⚠️ ONLY IF NOTHING HAS STARTED SINCE. There is one daemon for the
+     * ⚠️ ONLY WHEN THE LAST OWNER LETS GO. There is one daemon for the
      * plugin, not one per lifetime, so an outgoing stop landing after an
      * incoming start killed the NEW capability's runtime and cancelled its
      * requests. An ownership check made where the stop is REGISTERED cannot
      * cover it: that check runs now and this action lands later.
      *
+     * ⚠️ WHAT THIS STILL DOES NOT COVER: the stop is asynchronous, and a
+     * lifetime that starts between this check and the moment the stop reaches
+     * the shared Rust state gets its daemon killed anyway. Closing that needs
+     * the stop to name the generation it means and the backend to refuse a
+     * mismatched one — one protocol across the language boundary, not a
+     * second check on this side.
+     *
      * OWNED LAST, so it is released FIRST — nothing else here depends on the
      * daemon, and the child process is the thing worth stopping soonest. */
     session.own('daemon', () => {
-      if (lifetime === myLifetime) void plugin.stop().catch(() => {})
+      daemonOwners.delete(myClaim)
+      /* Reported, not swallowed: a stop that fails is a daemon still running
+         after the capability that owned it is gone. */
+      if (daemonOwners.size === 0) {
+        void plugin.stop().catch((thrown: unknown) => report('inference.stop-failed', { message: messageOf(thrown) }))
+      }
     })
 
     /* Read what is on disk, unawaited: `start` must not block the composition
@@ -299,9 +318,15 @@ export const inference: Capability = {
  * them dead and documented as live, is how the live one comes to be changed
  * without the dead one and nobody notices which is which. See `start`. */
 
-export { DEPTHS, reasonOf } from './lib/plugin'
+export { DEPTHS, errorKind, reasonOf } from './lib/plugin'
+/* `detailFor` and `errorKind` are what `companion` translates a failed answer
+ * with (WI-20.18) — the same pair `glossProvider` uses, and for the same
+ * reason: the reader's sentence for a `kind` has one home, and the kernel's
+ * thread cannot reach it. */
+export { detailFor } from './lib/controller'
+export { messageOf } from './lib/messageOf'
 /* ⚠️ EXACTLY WHAT `companion` IMPORTS, AND NOTHING ELSE. This list carried
- * `InstallProgress`, `ModelRow` and `RouteKind` too, plus `KEEP_LOADED_SETTING`,
+ * `InstallProgress`, `ModelRow` and `RouteKind` too, plus the keep-loaded setting (since removed — see `ModelsPane`),
  * `useInference` and three controller types on their own lines — none of which
  * any module outside this directory imported. A capability barrel exists to
  * serve the capabilities that `require` this one, and `companion` is the only

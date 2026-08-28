@@ -3,7 +3,8 @@
 //! This module is pure: it turns a [`SpawnInputs`] into a [`SpawnPlan`] — a
 //! program, an argv, an environment and a `config.json` — and touches no
 //! filesystem and no process. That is what makes WI-15.0's acceptance
-//! ("each of the eight lines has a test that breaks when it is removed")
+//! ("each line of the configuration table has a test that breaks when it is
+//! removed" — the table has grown since it was eight)
 //! something a unit test can hold rather than something an integration run
 //! has to notice.
 //!
@@ -26,6 +27,18 @@
 //! | `auto_check_model_updates` | `true` | `false` | Paper owns the manifest, not upstream |
 //! | `llamacpp.prefer_system` | `true` | `false` | prefers a llama.cpp found on PATH over the vetted builtin |
 //! | `inhibit_suspend` | `true` | `false` | a reader must not hold the machine awake |
+//! | `no_fetch_executables` | `false` | `true` | the daemon fetched llama.cpp from GitHub inside the first gloss, unhashed (WI-20.24) |
+//! | `llamacpp.<backend>_bin` | `"builtin"` | the verified `llama-server` | "builtin" is whatever the fetch left in the cache; a path is never downloaded |
+//!
+//! The last two are the same decision from two sides. `<backend>_bin` takes
+//! the EXECUTABLE'S path — `lemond` execs it directly, with its directory as
+//! the working directory (`llamacpp_server.cpp`) — and is read from the
+//! environment before the config (`LEMONADE_LLAMACPP_<BACKEND>_BIN`,
+//! `backend_utils.cpp`'s `get_bin_config_value`), so it is set on both, the
+//! way `--no-broadcast` is: the config file is the one the daemon rewrites.
+//! `llamacpp.backend` is pinned to the staged backend's name rather than
+//! left `auto`, because `auto` on a machine with a GPU would pick a backend
+//! nothing staged and, with fetching forbidden, fail at the first model.
 //!
 //! # Three channels, and they are not interchangeable
 //!
@@ -88,9 +101,15 @@ pub const CONFIG_VERSION: u32 = 2;
 pub struct SpawnInputs {
     /// The `lemond` executable Paper ships and supervises. Absolute.
     pub program: PathBuf,
+    /// The backend the manifest verified — the only kind there is. A plan
+    /// for an unverified backend cannot be built; see `runtime.rs`.
+    pub backend: crate::runtime::VerifiedBackend,
     /// The Paper-owned cache directory. Need not exist — the daemon creates
     /// it, which WI-15.0's first acceptance line turns on.
     pub cache_dir: PathBuf,
+    /// Where the daemon's process-group record goes (`lineage.rs`), so a
+    /// Paper killed outright leaves the next launch something to collect.
+    pub record_path: PathBuf,
     /// The Paper-owned model directory. Kept OUT of the cache directory on
     /// purpose: models are the expensive, reader-visible artifact ("Models
     /// folder … [Reveal]" in the settings sketch) and the cache is scratch.
@@ -118,13 +137,20 @@ pub struct SpawnPlan {
     /// The `config.json` to write into `cache_dir` before launching.
     pub config: serde_json::Value,
     pub cache_dir: PathBuf,
-    pub models_dir: PathBuf,
+    /// See [`SpawnInputs::record_path`].
+    pub record_path: PathBuf,
     pub port: u16,
 }
 
 /// The prefix of a per-provider cloud key (F1).
 pub fn cloud_key_var(provider: &str) -> String {
     format!("LEMONADE_{}_API_KEY", provider.to_ascii_uppercase())
+}
+
+/// The environment variable naming a llama.cpp backend's executable — the
+/// channel `lemond` reads BEFORE the config key of the same name.
+pub fn backend_bin_var(backend: &str) -> String {
+    format!("LEMONADE_LLAMACPP_{}_BIN", backend.to_ascii_uppercase())
 }
 
 /// Environment variables the child must NOT inherit.
@@ -183,12 +209,22 @@ pub fn mint_token() -> String {
 
 /// Turn inputs into a launch. Pure.
 pub fn plan_spawn(inputs: &SpawnInputs) -> SpawnPlan {
+    /* The per-launch token invariant, ENFORCED rather than assumed:
+     * `mint_token` is 64 lowercase hex characters, and a plan built with an
+     * empty or hand-rolled key would authenticate nothing while looking
+     * configured. Loud here, where the plan is made, not at the question. */
+    assert!(
+        inputs.api_key.len() == 64 && inputs.api_key.chars().all(|c| c.is_ascii_hexdigit()),
+        "SpawnInputs.api_key is not a minted token — use mint_token()"
+    );
     let mut env = BTreeMap::new();
     env.insert(CACHE_DIR_ENV.to_owned(), path_string(&inputs.cache_dir));
     env.insert(API_KEY_ENV.to_owned(), inputs.api_key.clone());
     for (provider, key) in &inputs.cloud_keys {
         env.insert(cloud_key_var(provider), key.clone());
     }
+    let server = path_string(inputs.backend.server());
+    env.insert(backend_bin_var(inputs.backend.name()), server.clone());
 
     let args = vec![
         "--host".to_owned(),
@@ -241,12 +277,25 @@ pub fn plan_spawn(inputs: &SpawnInputs) -> SpawnPlan {
         // Telemetry is already off in the shipped defaults; stated anyway,
         // because "off by default upstream" is not a property Paper controls.
         "telemetry": { "enabled": false },
+        /* NOTHING IS FETCHED. Ships `false`: the daemon downloaded llama.cpp
+         * from GitHub inside the first gloss, with no hash Paper checked and
+         * no quarantine flag for Gatekeeper to act on, and this file called
+         * the result "the vetted builtin". The backend is the one the
+         * manifest verified before this plan was built (WI-20.24). */
+        "no_fetch_executables": true,
         "llamacpp": {
             // Ships `true`, which prefers a llama.cpp binary found on the
             // SYSTEM over the one inside the artifact Paper verified. That is
             // an unverified executable on the reader's PATH deciding how the
             // reader's book is read.
-            "prefer_system": false
+            "prefer_system": false,
+            // Pinned rather than `auto`: on a machine with a GPU, `auto`
+            // picks a backend nothing staged and fetching is forbidden.
+            "backend": inputs.backend.name(),
+            // The executable's path, which `lemond` execs directly and never
+            // downloads. Also in the environment above, which outranks this
+            // and survives the daemon rewriting the file.
+            format!("{}_bin", inputs.backend.name()): server,
         },
     });
 
@@ -256,7 +305,10 @@ pub fn plan_spawn(inputs: &SpawnInputs) -> SpawnPlan {
         env,
         config,
         cache_dir: inputs.cache_dir.clone(),
-        models_dir: inputs.models_dir.clone(),
+        // No `models_dir` on the PLAN: the path is already inside `config`,
+        // and the plan's copy was read by nothing — a second place for one
+        // fact to drift.
+        record_path: inputs.record_path.clone(),
         port: inputs.port,
     }
 }
@@ -275,15 +327,62 @@ fn path_string(path: &Path) -> String {
 mod tests {
     use super::*;
 
+    const SERVER: &str = "/opt/paper/runtime/backend/llamacpp/metal/llama-server";
+
     fn inputs() -> SpawnInputs {
         SpawnInputs {
-            program: PathBuf::from("/opt/paper/lemond"),
-            cache_dir: PathBuf::from("/data/Paper/runtime"),
-            models_dir: PathBuf::from("/data/Paper/models"),
+            program: PathBuf::from("/opt/paper/runtime/lemond"),
+            backend: crate::runtime::VerifiedBackend::for_test("metal", SERVER),
+            cache_dir: PathBuf::from("/data/Paper/inference/runtime"),
+            models_dir: PathBuf::from("/data/Paper/inference/models"),
+            record_path: PathBuf::from("/data/Paper/inference/daemon.json"),
             port: 13399,
-            api_key: "deadbeef".to_owned(),
+            // A real minted shape — `plan_spawn` asserts the invariant now.
+            api_key: "deadbeef".repeat(8),
             cloud_keys: BTreeMap::new(),
         }
+    }
+
+    /// WI-20.24. The shipped default lets the daemon fetch a backend from
+    /// GitHub — inside the first gloss, with no hash Paper controls — and
+    /// `spawn.rs` used to call that "the vetted builtin". Nothing is fetched:
+    /// the backend is the one the manifest verified, and the daemon is told
+    /// so on BOTH channels, because the env var outranks the config key and
+    /// the config file is the one the daemon rewrites.
+    #[test]
+    fn executables_are_never_fetched() {
+        let plan = plan_spawn(&inputs());
+        assert_eq!(
+            plan.config["no_fetch_executables"],
+            serde_json::Value::Bool(true),
+            "ships false — the daemon downloads llama.cpp from GitHub with no hash Paper checks"
+        );
+    }
+
+    #[test]
+    fn the_backend_is_the_verified_one_on_both_channels() {
+        let plan = plan_spawn(&inputs());
+        assert_eq!(plan.config["llamacpp"]["backend"], "metal");
+        assert_eq!(
+            plan.config["llamacpp"]["metal_bin"], SERVER,
+            "lemond's `<backend>_bin` takes the executable's path and never downloads"
+        );
+        assert_eq!(
+            plan.env
+                .get("LEMONADE_LLAMACPP_METAL_BIN")
+                .map(String::as_str),
+            Some(SERVER),
+            "the env var outranks the config key, and survives the daemon rewriting config.json"
+        );
+    }
+
+    #[test]
+    fn the_record_path_travels_with_the_plan() {
+        let plan = plan_spawn(&inputs());
+        assert_eq!(
+            plan.record_path,
+            PathBuf::from("/data/Paper/inference/daemon.json")
+        );
     }
 
     /* Each test below names one line of the table in the module header. They
@@ -297,7 +396,7 @@ mod tests {
         let plan = plan_spawn(&inputs());
         assert_eq!(
             plan.env.get(CACHE_DIR_ENV).map(String::as_str),
-            Some("/data/Paper/runtime"),
+            Some("/data/Paper/inference/runtime"),
             "the cache dir must be set, or the daemon writes to ~/.cache/lemonade"
         );
     }
@@ -323,7 +422,10 @@ mod tests {
     #[test]
     fn extra_models_dir_points_at_the_models_paper_downloaded() {
         let plan = plan_spawn(&inputs());
-        assert_eq!(plan.config["extra_models_dir"], "/data/Paper/models");
+        assert_eq!(
+            plan.config["extra_models_dir"],
+            "/data/Paper/inference/models"
+        );
         assert_ne!(
             plan.config["extra_models_dir"], "",
             "an empty extra_models_dir is the daemon scanning nowhere, which is a 404 per lookup"
@@ -333,7 +435,7 @@ mod tests {
     #[test]
     fn models_dir_is_paper_owned_and_not_auto() {
         let plan = plan_spawn(&inputs());
-        assert_eq!(plan.config["models_dir"], "/data/Paper/models");
+        assert_eq!(plan.config["models_dir"], "/data/Paper/inference/models");
         assert_ne!(
             plan.config["models_dir"], "auto",
             "`auto` resolves to ~/.cache/huggingface/hub even with the cache dir moved"
@@ -375,8 +477,19 @@ mod tests {
         let plan = plan_spawn(&inputs());
         assert_eq!(
             plan.env.get(API_KEY_ENV).map(String::as_str),
-            Some("deadbeef")
+            Some("deadbeef".repeat(8).as_str())
         );
+    }
+
+    /// The invariant `plan_spawn` now asserts: a plan cannot be built around
+    /// a key that is not a minted token — empty, short, or non-hex all die
+    /// at construction, where the stack names the builder.
+    #[test]
+    #[should_panic(expected = "not a minted token")]
+    fn a_plan_with_an_unminted_key_dies_at_construction() {
+        let mut bad = inputs();
+        bad.api_key = "hunter2".to_owned();
+        let _ = plan_spawn(&bad);
     }
 
     #[test]
@@ -421,7 +534,11 @@ mod tests {
         let a = mint_token();
         let b = mint_token();
         assert_eq!(a.len(), 64, "32 bytes, hex");
-        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        // LOWERCASE hex, as documented — `is_ascii_hexdigit` also took A–F,
+        // so the encoding contract was asserted by nothing.
+        assert!(a
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)));
         assert_ne!(a, b, "per launch, not per install");
     }
 
@@ -475,7 +592,7 @@ mod tests {
         let plan = plan_spawn(&inputs());
         assert_eq!(
             plan.config_path(),
-            PathBuf::from("/data/Paper/runtime/config.json")
+            PathBuf::from("/data/Paper/inference/runtime/config.json")
         );
     }
 
@@ -491,6 +608,6 @@ mod tests {
                 "unexpected argument {arg:?}"
             );
         }
-        assert_eq!(plan.program, PathBuf::from("/opt/paper/lemond"));
+        assert_eq!(plan.program, PathBuf::from("/opt/paper/runtime/lemond"));
     }
 }

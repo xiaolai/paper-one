@@ -1,3 +1,4 @@
+import { messageOf } from './messageOf'
 import { Channel, invoke } from '@tauri-apps/api/core'
 
 /**
@@ -73,13 +74,17 @@ export type RouteKind = 'local' | 'agent' | 'endpoint'
  *
  * `probe.rs` emits both halves from one place, so they cannot disagree.
  */
-export type UnusableReason =
-  | 'notInstalled'
-  | 'runtimeMissing'
-  | 'agentMissing'
-  | 'signedOut'
-  | 'versionUnsupported'
-  | 'noKey'
+export const UNUSABLE_REASONS = [
+  'notInstalled',
+  'runtimeMissing',
+  'agentMissing',
+  'signedOut',
+  'versionUnsupported',
+  'noKey',
+  'keyUnreadable',
+  'notRegistered',
+] as const
+export type UnusableReason = (typeof UNUSABLE_REASONS)[number]
 
 export interface Route {
   readonly id: string
@@ -111,9 +116,12 @@ export interface Route {
 export function reasonOf(route: Route): UnusableReason | null {
   const { reason } = route
   if (reason === undefined) return null
-  if (typeof reason === 'string') return reason
-  const [key] = Object.keys(reason)
-  return (key as UnusableReason | undefined) ?? null
+  /* CHECKED AGAINST THE SET, not cast: a code this build does not know —
+   * a newer crate, a malformed answer — used to be handed on as if it were
+   * one of ours and could pick the wrong action. Unknown reads as "unusable,
+   * reason unknown", which is what `unusable`'s sentence still says. */
+  const key = typeof reason === 'string' ? reason : Object.keys(reason)[0]
+  return key !== undefined && (UNUSABLE_REASONS as readonly string[]).includes(key) ? (key as UnusableReason) : null
 }
 
 export interface Probe {
@@ -121,11 +129,23 @@ export interface Probe {
   readonly runtimeVersion: string | null
 }
 
+/**
+ * Whether an endpoint's key is there — THREE answers, because the keychain
+ * gives three, as `endpoints.rs`'s `KeyState` says.
+ *
+ * `unreadable` is the one a boolean used to hide: the keychain refused to
+ * say (a denied prompt, a rebuilt binary the entry's ACL no longer trusts).
+ * The key is probably there, so "no key" — go and add one — was the wrong
+ * advice, and re-entering it would be refused again on the next read.
+ */
+export type KeyState = 'set' | 'missing' | 'unreadable'
+
 export interface Endpoint {
   readonly id: string
   readonly label: string
   readonly baseUrl: string
-  readonly hasKey: boolean
+  /** A STATE, never the key. */
+  readonly keyState: KeyState
 }
 
 export interface ResourceUsage {
@@ -316,7 +336,7 @@ export function cancelRequest(
     report?.('inference.cancel-failed', {
       requestId,
       kind: errorKind(cause),
-      message: cause instanceof Error ? cause.message : String(cause),
+      message: messageOf(cause),
     })
   })
 }
@@ -342,7 +362,14 @@ export function cancelRequest(
  * The counter still runs, because an ordered id is far easier to follow in a
  * log than a bare UUID; a per-load random component is what makes it unique.
  */
-const SESSION = Math.random().toString(36).slice(2, 10)
+const SESSION = (() => {
+  /* `Math.random().toString(36).slice(2, 10)` could be EMPTY (a random of
+   * exactly 0) and carried ~41 bits; the UUID is the platform's own source
+   * and never empty. The base-36 fallback is for a runtime with no
+   * `crypto` — none this app ships to, kept for the type. */
+  const uuid = globalThis.crypto?.randomUUID?.()
+  return uuid !== undefined ? uuid.replace(/-/g, '').slice(0, 12) : `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10) || '0'}`
+})()
 let counter = 0
 export function mintRequestId(prefix: string): string {
   counter += 1

@@ -1,12 +1,10 @@
 import { constants } from 'node:fs'
-import { access, appendFile, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
-import { isAbsolute, relative, resolve, sep } from 'node:path'
+import { access, appendFile, link, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import {
-  CONTENT_EXTENSIONS,
-  folderOf,
-  /* THE PURE WALK, not a second copy of it — see the barrel's note. The TAURI
-     binding is deliberately not exported there; this walk is, because both
-     hosts must run the same one. */
+  /* THE PURE WALKS, not second copies of them — see the barrel's note. The
+     TAURI binding is deliberately not exported there; these walks are,
+     because both hosts must run the same ones. */
   sizePortOver,
   type FileSystem,
   type IndexFs,
@@ -162,6 +160,50 @@ export function nodeIndexFs(root: string): IndexFs {
     appendFile: async (path, bytes) => {
       await appendFile(at(path), bytes)
     },
+    /* THE WHOLE ATOMIC WRITE, SYNCED — `VaultFs.writeAtomic`, over `node:fs`
+     * (phase 20, D3). Temp in the same directory and private to this write,
+     * `write`, `fsync`, `rename`, then the directory synced so the rename is
+     * on disk too. The level is honoured as far as Node can: `fs.fsync` is
+     * `fsync(2)`, which on macOS is the barrier and not `F_FULLFSYNC` — the
+     * app's Rust command has both; a `paper book add` survives a crash and
+     * not necessarily a power cut, and says so here rather than implying
+     * otherwise. */
+    writeAtomic: async (path, bytes, _level) => {
+      const target = at(path)
+      const dir = dirname(target)
+      await mkdir(dir, { recursive: true })
+      const writing = `${target}.${process.pid}.${nextTemp++}.writing`
+      try {
+        const handle = await open(writing, 'w')
+        try {
+          await handle.writeFile(bytes)
+          await handle.sync()
+        } finally {
+          await handle.close()
+        }
+        await rename(writing, target)
+      } catch (cause) {
+        await rm(writing, { force: true }).catch(() => {})
+        throw cause
+      }
+      await syncDir(dir)
+    },
+    /* The sync journal's barrier, over a real descriptor: `fsync(2)` on a
+     * read handle — enough to flush, and it needs no permission a barrier
+     * does not. A directory is synced the same way. */
+    fsync: async (path, _level) => {
+      const target = at(path)
+      if ((await stat(target)).isDirectory()) {
+        await syncDir(target)
+        return
+      }
+      const handle = await open(target, 'r')
+      try {
+        await handle.sync()
+      } finally {
+        await handle.close()
+      }
+    },
     /* A REAL SEEK, for the same reason the Tauri adapter has one: `content.read`
      * serves a book a slice at a time, and the interface's fallback is O(n) per
      * slice — quadratic over a book, with a 300 MB scanned PDF re-read once per
@@ -247,6 +289,10 @@ export function nodeTextFs(root: string): FileSystem {
        * collision takes a suffix, and the loop is bounded: if a hundred
        * quarantines of one file have accumulated, something is wrong that a
        * hundred-and-first copy will not clarify. */
+      /* THE SOURCE IS VALIDATED BEFORE ANY PROBE. `at` is the traversal
+       * check; run last, a hostile `path` had 101 destination existence
+       * probes to itself before anything refused it. */
+      const source = at(path)
       const target = at(to)
       let destination = target
       /* ⚠️ THE LAST CANDIDATE WAS NEVER TESTED. The loop assigned
@@ -259,109 +305,113 @@ export function nodeTextFs(root: string): FileSystem {
        * `found` is what turns "the search ran out" into a refusal. A
        * hundred-and-first copy clarifies nothing; overwriting the hundredth
        * clarifies less. */
-      let found = false
-      for (let n = 0; n <= 100; n += 1) {
+      /* ⚠️ **THE NAME IS CLAIMED BY `link`, NOT BY LOOKING FIRST.**
+       *
+       * This asked `access` whether a candidate was free and then `rename`d
+       * onto it — and POSIX `rename` REPLACES its destination, so two
+       * quarantines racing (the app beside a `paper`, or two `paper` runs)
+       * both saw the same name free and the second silently destroyed the
+       * first: the one outcome this whole function exists to prevent, in the
+       * situation that produces it. `link` is atomic and fails `EEXIST` when
+       * the name is taken — the same primitive the advisory lock publishes
+       * with, and for the same reason. The source is unlinked only after a
+       * link succeeded, so a crash between the two leaves the file under BOTH
+       * names rather than under neither.
+       *
+       * `access` still runs first, because a fresh `.corrupt` is the ordinary
+       * case and `link` on an occupied name would otherwise raise once per
+       * candidate; the claim, not the look, is what decides. */
+      let linked = false
+      let last: unknown = null
+      for (let n = 0; n <= 100 && !linked; n += 1) {
         if (n > 0) destination = `${target}.${n}`
         try {
           await access(destination, constants.F_OK)
-        } catch {
-          found = true
-          break
+          /* Taken. `ENOENT`/`ENOTDIR` below is the free one; anything else is
+           * a candidate this process cannot judge, and skipping it is the
+           * same safe direction. */
+          continue
+        } catch (cause) {
+          const code = (cause as { code?: string }).code
+          if (code !== 'ENOENT' && code !== 'ENOTDIR') continue
+        }
+        try {
+          await link(source, destination)
+          linked = true
+        } catch (cause) {
+          last = cause
+          const code = (cause as { code?: string }).code
+          /* SOMEBODY ELSE GOT THERE FIRST — try the next name. Any other
+           * failure is this filesystem refusing hard links at all (a FAT
+           * volume, some network mounts), and the rename is the honest
+           * fallback: it is what this did before, race and all, and losing
+           * the quarantine entirely would be worse than racing for it. */
+          if (code !== 'EEXIST') {
+            await rename(source, destination)
+            return
+          }
         }
       }
-      if (!found) {
+      if (!linked) {
         throw new Error(
           `cannot quarantine ${path}: ${target} and .1 through .100 all exist. ` +
             'Something is producing corrupt files faster than they can be looked at; ' +
-            'move the existing quarantines aside before this can continue.',
+            'move the existing quarantines aside before this can continue.' +
+            (last === null ? '' : ` (last: ${last instanceof Error ? last.message : String(last)})`),
         )
       }
-      await rename(at(path), destination)
+      /* The copy is safe under its own name; this one is the caller's to lose. */
+      await rm(source, { force: true })
     },
   }
 }
 
 /**
- * Is the reader's app holding this library open?
- *
- * THREE ANSWERS, NOT TWO, and the third is the important one. This began as a
- * boolean and every case it could not decide — an unsupported platform, a
- * probe that failed — collapsed into `false`, meaning "safe to journal". That
- * is failing OPEN on the one question protecting `journal.jsonl` from a second
- * writer, and a second writer corrupts `nextSeq` and the rev CAS in a way no
- * later pass detects.
- *
- * So an undecidable answer is `unknown`, and the caller treats `unknown`
- * exactly as it treats `running`. The cost is that on a platform this cannot
- * probe, `paper` declines to journal and says so — which is the behaviour the
- * CLI had before journalling existed at all, and strictly better than a
- * corrupt journal.
- *
- * WHAT IT CAN ACTUALLY DECIDE:
- *
- * - **macOS**: `pgrep -f` against the bundle's executable path. `-f` and never
- *   `-x`, because Tauri names the executable inside the bundle `app`, so
- *   `pgrep -x Paper` can never match — a mistake that once reported the app
- *   closed on a machine where it was plainly running.
- * - **Linux and Windows**: `unknown`. A Tauri app there is a bare executable
- *   with no `Paper.app` bundle path to match, so the macOS probe would answer
- *   `absent` for a running app — a false negative, which is the dangerous
- *   direction. Saying so is better than guessing.
- *
- * STILL A HEURISTIC where it answers at all: it matches any Paper process on
- * the machine, not one holding THIS data root, and it is read once before the
- * journal is opened rather than held for the duration. The real fix is a
- * per-data-root lock taken by both the app and the CLI, which needs a Rust
- * command with an ACL entry on the app side; until that exists this is the
- * honest approximation and is documented as one in `dev-docs/cli.md`.
+ * A directory's entries, on disk — the half that makes a rename durable
+ * (Pillai et al., OSDI 2014). Ignored where the filesystem refuses it
+ * (`EINVAL`, `ENOTSUP`) and where a directory cannot be opened as a file
+ * (Windows), as PostgreSQL and SQLite do: the rename is what it is there.
  */
-export type AppPresence = 'running' | 'absent' | 'unknown'
+/** The one platform whose refusals below are a shape rather than a fault. */
+const windows = process.platform === 'win32'
 
-export async function appPresence(): Promise<AppPresence> {
-  if (process.platform !== 'darwin') return 'unknown'
+async function syncDir(dir: string): Promise<void> {
+  let handle: Awaited<ReturnType<typeof open>>
   try {
-    const { execFile } = await import('node:child_process')
-    const { promisify } = await import('node:util')
-    const { stdout } = await promisify(execFile)('pgrep', ['-f', 'Paper.app/Contents/MacOS/'])
-    return stdout.trim().length > 0 ? 'running' : 'absent'
-  } catch (error) {
-    /* `pgrep` exits 1 with no output when nothing matches — that is a real
-     * ANSWER, not a failure, and the only error shape that may mean `absent`.
-     * Anything else (no `pgrep`, a permission problem) is undecided. */
-    const code = (error as { code?: unknown })?.code
-    const out = (error as { stdout?: unknown })?.stdout
-    if (code === 1 && typeof out === 'string' && out.trim() === '') return 'absent'
-    return 'unknown'
+    handle = await open(dir, 'r')
+  } catch (cause) {
+    /* ONLY THE PLATFORM'S OWN REFUSALS ARE TOLERATED. Windows cannot open a
+     * directory as a file (`EPERM`/`EACCES`/`EISDIR`/`UNKNOWN`,
+     * engine-dependent), and that is what the header's "the rename is what it
+     * is there" covers. A blanket return also swallowed `EMFILE`, `ENFILE` and
+     * real I/O errors — reporting "durable" with the directory never opened,
+     * which is the silent-skip shape `writeAtomic`'s contract exists to
+     * refuse.
+     *
+     * ⚠️ **AND THE WINDOWS CODES WERE SWALLOWED EVERYWHERE.** The comment
+     * justified them as one platform's limitation and the code applied them
+     * to all three: on POSIX, `open(dir, 'r')` does not fail with `EACCES`
+     * unless the process genuinely cannot read the directory it has just
+     * written into, which is a real fault and not a platform's shape. So the
+     * excuse is gated on the platform that needs it. `ENOTSUP` and `EINVAL`
+     * stay unconditional: those are a FILESYSTEM saying it does not do this,
+     * which any of the three can host. */
+    const code = (cause as { code?: string }).code
+    if (code === 'ENOTSUP' || code === 'EINVAL') return
+    if (windows && (code === 'EPERM' || code === 'EACCES' || code === 'EISDIR' || code === 'UNKNOWN')) return
+    throw cause
   }
-}
-
-/**
- * The journal's durability barrier, over a real file descriptor.
- *
- * `JournalOptions.fsync` defaults to a no-op, and a no-op is what the CLI had:
- * every journal line was a write the page cache could still be holding when
- * the process exited. The app binds the peer plugin's `fs_fsync` here; this is
- * the same barrier for a Node process.
- *
- * It opens for READING. `fsync(2)` flushes whatever the descriptor names, and
- * a read handle is enough — opening for write would truncate on the wrong flag
- * and needs a permission the barrier does not. The journal also fsyncs its
- * DIRECTORY after a rename (`fsyncDir`), which is a read handle of necessity.
- *
- * NOT a full `F_FULLFSYNC`: on macOS `fsync(2)` hands the data to the drive
- * without waiting for the drive's own cache to commit, so this survives a
- * process crash — the case the journal's dirty flag is paired with — and not
- * necessarily a power cut. Said plainly rather than implied, because a barrier
- * believed to be stronger than it is, is worse than a missing one.
- */
-export function nodeFsyncPort(root: string): (path: string) => Promise<void> {
-  return async (path: string) => {
-    const handle = await open(under(root, path), 'r')
-    try {
-      await handle.sync()
-    } finally {
-      await handle.close()
-    }
+  try {
+    await handle.sync()
+  } catch (cause) {
+    /* Same split: a filesystem that does not implement `fsync` on a directory
+     * answers `EINVAL`/`ENOTSUP` anywhere, and `FlushFileBuffers` on a
+     * directory handle is the Windows-only refusal. */
+    const code = (cause as { code?: string }).code
+    const excused = code === 'EINVAL' || code === 'ENOTSUP' || (windows && (code === 'EISDIR' || code === 'EPERM' || code === 'UNKNOWN'))
+    if (!excused) throw cause
+  } finally {
+    await handle.close()
   }
 }
 
@@ -380,8 +430,13 @@ export function nodeFsyncPort(root: string): (path: string) => Promise<void> {
  */
 export function nodeSizePort(root: string): SizePort {
   const bytesAt = async (path: string): Promise<number | null> => {
+    /* THE TRAVERSAL CHECK IS OUTSIDE THE CATCH. Inside it, a path that
+     * `under` refuses came back as `null` — "no bytes" — where every other
+     * host operation refuses out loud; a traversal is a caller defect, not a
+     * missing file. */
+    const full = under(root, path)
     try {
-      const info = await stat(under(root, path))
+      const info = await stat(full)
       return info.isFile() ? info.size : null
     } catch {
       return null
@@ -407,20 +462,12 @@ export function nodeSizePort(root: string): SizePort {
   })
   return {
     bytesAt,
-    contentBytes: async (bookId) => {
-      const folder = folderOf(bookId)
-      /* `CONTENT_EXTENSIONS` ORDER, and `content.locate` walks the same list
-       * to choose the `ext` it reports. A folder is not supposed to hold two
-       * content files, but it can — and when the two sides picked differently
-       * (this one by preference order, that one alphabetically) one answer
-       * named `azw3` and carried the epub's byte count. Two fields describing
-       * two files, in one answer about one book. */
-      for (const ext of CONTENT_EXTENSIONS) {
-        const size = await bytesAt(`${folder}/content.${ext}`)
-        if (size !== null) return size
-      }
-      return null
-    },
+    /* BOTH SHARED WALKS, not one. `contentBytes` was still a local copy of
+     * the `CONTENT_EXTENSIONS` loop `sizePortOver` already carries — the
+     * comment beside it claimed "a real difference" that no longer existed,
+     * which is exactly the drift the shared abstraction was bought to
+     * prevent (see the `libraryBytes` incident above). */
+    contentBytes: shared.contentBytes,
     libraryBytes: shared.libraryBytes,
   }
 }

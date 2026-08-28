@@ -15,11 +15,10 @@ becomes a second opinion.
 
 import html
 import pathlib
-import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-SOURCE = ROOT / 'docs' / 'feature-ledger.md'
+SOURCE = ROOT / 'dev-docs' / 'feature-ledger.md'
 OUTPUT = ROOT / 'dev-docs' / 'artifacts' / 'feature-ledger.html'
 
 # The states the ledger defines. A row carrying anything else is a typo that
@@ -35,7 +34,20 @@ MARKS = {
     '–': ('na', '&#8211;'),
     '-': ('na', '&#8211;'),
     'stub': ('stub', '&#9678;'),
+    # The glyph the ledger actually writes for a stub — the word above is the
+    # legacy spelling. It fell through the old na-fallback and rendered as
+    # "not applicable", which is a different claim.
+    '◍': ('stub', '&#9677;'),
 }
+
+# Tables the ledger keeps for the READER, not for this generator: drift logs,
+# not-done lists, the state legend. Named so a renamed inventory or matrix
+# header cannot be mistaken for one of them and silently dropped.
+INFORMATIONAL_HEADERS = (
+    ['row', 'was', 'is'],
+    ['row', 'what has not been done'],
+    ['state', 'meaning'],
+)
 
 
 def cells(row: str) -> list[str]:
@@ -47,9 +59,78 @@ def cells(row: str) -> list[str]:
     that cell in the generated page: no error, no missing row, just a sentence
     that stops halfway. Exactly the failure this parser was written to prevent,
     reintroduced by the parser itself.
+
+    THEN THE CURE DID IT AGAIN, TWICE, and this is the third version. The
+    second was `re.split(r'(?<!\\)\\|', row.strip().strip('|'))`, and a
+    lookbehind that only asks "is the previous character a backslash" cannot
+    answer the question, because a backslash may itself be escaped:
+
+      - `| a | ends with \\||`  — `strip('|')` eats trailing pipes by the
+        CHARACTER, so it removed the escaped pipe's own `|` and left the
+        backslash dangling: `['a', 'ends with \\\\']`. Same silent truncation
+        as the original, now hiding inside the fix for it.
+      - `| path C:\\\\| next |`  — the `\\\\` is an escaped BACKSLASH and the
+        pipe after it is a real delimiter, but the lookbehind saw a backslash
+        and refused to split: one cell where the row has two.
+
+    So it is scanned rather than pattern-matched. A backslash consumes the
+    character after it, whatever that is; only a pipe reached outside an
+    escape pair delimits. The optional leading and trailing pipes GFM allows
+    are then dropped by what the scan saw, not by stripping characters off
+    the ends.
     """
-    parts = re.split(r'(?<!\\)\|', row.strip().strip('|'))
-    return [c.strip().replace('\\|', '|') for c in parts]
+    text = row.strip()
+    parts: list[str] = []
+    buf: list[str] = []
+    ends_on_delimiter = False
+    i = 0
+    while i < len(text):
+        char = text[i]
+        if char == '\\' and i + 1 < len(text):
+            # The pair travels together; `_unescape` below decides what it means.
+            buf.append(char)
+            buf.append(text[i + 1])
+            i += 2
+            ends_on_delimiter = False
+        elif char == '|':
+            parts.append(''.join(buf))
+            buf = []
+            i += 1
+            ends_on_delimiter = True
+        else:
+            buf.append(char)
+            i += 1
+            ends_on_delimiter = False
+    parts.append(''.join(buf))
+
+    # GFM's optional outer pipes. Dropped only when the row really opened or
+    # closed with a DELIMITER — a row ending in an escaped pipe closes with a
+    # cell, and the empty string a blind `[1:-1]` would remove is that cell's.
+    if text.startswith('|'):
+        parts = parts[1:]
+    if ends_on_delimiter and parts:
+        parts = parts[:-1]
+    return [_unescape(c.strip()) for c in parts]
+
+
+def _unescape(cell: str) -> str:
+    """`\\|` → `|` and `\\\\` → `\\`, left to right, once each.
+
+    A chain of `.replace()` calls cannot do this: unescaping `\\|` first turns
+    `\\\\|` — a literal backslash then a delimiter that was already consumed —
+    into `\\|`, and the second pass then eats the backslash that was the
+    cell's own text.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(cell):
+        if cell[i] == '\\' and i + 1 < len(cell) and cell[i + 1] in '\\|':
+            out.append(cell[i + 1])
+            i += 2
+        else:
+            out.append(cell[i])
+            i += 1
+    return ''.join(out)
 
 
 def plain(text: str) -> str:
@@ -81,10 +162,22 @@ def parse(md: str):
             blurb = ''
         elif line.startswith('|') and '---' not in line:
             header = [c.lower() for c in cells(line)]
+            # The row after a header must be the delimiter. Skipped blind, a
+            # missing delimiter silently ate the first data row instead.
+            if i + 1 >= len(lines) or not (lines[i + 1].startswith('|') and '---' in lines[i + 1]):
+                raise SystemExit(f"{SOURCE}: table '{' | '.join(header)}' has no delimiter row under its header")
             body: list[list[str]] = []
-            j = i + 2  # skip the delimiter row
+            j = i + 2  # past the validated delimiter
             while j < len(lines) and lines[j].startswith('|'):
-                body.append(cells(lines[j]))
+                r = cells(lines[j])
+                # Exactly the header's width: zip() would silently drop a
+                # surplus cell, and a short row would blame the wrong column.
+                if len(r) != len(header):
+                    raise SystemExit(
+                        f"{SOURCE}: row '{plain(r[0]) if r else ''}' has {len(r)} cells against "
+                        f"{len(header)} columns in '{' | '.join(header)}'"
+                    )
+                body.append(r)
                 j += 1
 
             if header[:2] == ['code', 'reader']:
@@ -112,6 +205,16 @@ def parse(md: str):
                     for r in body
                 ]
                 matrices.append((section, blurb, rows))
+            elif [c for c in header] not in [list(h) for h in INFORMATIONAL_HEADERS] and not any(
+                header[: len(h)] == list(h) for h in INFORMATIONAL_HEADERS
+            ):
+                # A table this parser does not recognise is either a renamed
+                # target table — which used to be DROPPED, whole — or a new
+                # informational one, which belongs in the list above.
+                raise SystemExit(
+                    f"{SOURCE}: unrecognised table header '{' | '.join(header)}' — a renamed target table "
+                    "would be silently dropped; name it in INFORMATIONAL_HEADERS if it is prose"
+                )
             i = j
             continue
         elif line.strip() and not line.startswith('#') and section and not blurb:
@@ -126,7 +229,11 @@ def parse(md: str):
 
 def mark_cell(value: str, extra: str = '') -> str:
     key = value.lower() if value.lower() == 'stub' else value
-    cls, glyph = MARKS.get(key, ('na', html.escape(value)))
+    if key not in MARKS:
+        # The fallback used to render any typo — and the ◍ stub glyph, for a
+        # while — as "not applicable", which is a claim, not an absence.
+        raise SystemExit(f"{SOURCE}: unknown matrix mark '{value}'. Allowed: {', '.join(MARKS)}")
+    cls, glyph = MARKS[key]
     return f'<td class="{extra}"><span class="m {cls}">{glyph}</span></td>'
 
 
@@ -147,9 +254,9 @@ def render_matrix(title: str, blurb: str, rows, comparators) -> str:
             mark_cell(values[code.lower()]) for code, _ in comparators
         )
         body.append(f'<tr><th scope="row">{html.escape(capability)}</th>{cs}</tr>')
+    lede = f'\n<p class="lede">{html.escape(blurb)}</p>' if blurb else ''
     return f"""<section class="block">
-<h3>{html.escape(title)}</h3>
-<p class="lede">{html.escape(blurb)}</p>
+<h3>{html.escape(title)}</h3>{lede}
 <div class="scroller"><table class="matrix">
 <thead><tr><th scope="col">Capability</th><th class="paper">Paper</th>{head}</tr></thead>
 <tbody>{''.join(body)}</tbody></table></div></section>"""

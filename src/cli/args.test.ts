@@ -129,6 +129,12 @@ describe('positional and flag arguments', () => {
 })
 
 describe('what it refuses', () => {
+  it('refuses a list flag with nothing but separators in it, beside the usage', () => {
+    /* `--book ,` became `book: []`, which passed the required-field check
+     * and reached the handler — refused later, in the service's words. */
+    expect(error(['tag', 'add', 'sea', '--book', ','])).toContain('--book needs at least one value')
+  })
+
   it('refuses an unknown noun and names the closest', () => {
     expect(error(['bok', 'list'])).toContain('did you mean "book"')
   })
@@ -185,6 +191,26 @@ describe('what it refuses', () => {
 
   it('refuses a flag the service does not declare, and names the closest', () => {
     expect(error(['book', 'list', '--finshed'])).toContain('did you mean "finished"')
+  })
+
+  /**
+   * WI-20.7 — `paper book set <id> --title 'Renamed'` was the reference's own
+   * example, and the kernel could not keep the edit: the next parse put the
+   * file's title back. The flag is WITHDRAWN on the row, so the refusal names
+   * it and says a rename is not offered — where the caller is deciding what
+   * to type, and in the help beside the flags that are taken. "Did you mean"
+   * would send them to a field that does not exist for this reason.
+   */
+  it('refuses --title and --author on book set by name, and says a rename is not offered', () => {
+    for (const flag of ['--title', '--author']) {
+      const { message, text } = errorWithText(['book', 'set', 'b1', flag, 'x'])
+      expect(message).toContain(`does not take ${flag}`)
+      expect(message).toMatch(/rename/i)
+      expect(message).not.toContain('did you mean')
+      expect(text).toContain(flag)
+      expect(text).toMatch(/rename/i)
+    }
+    expect(usageOf(serviceDescriptor('book.set') as ServiceDescriptor)).not.toContain('--title')
   })
 
   it('refuses a flag with no value', () => {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { asHlc } from './hlc'
-import type { VaultFs } from './bookVault'
+import { asHlc, hlcOf } from './hlc'
+import { storedBookName, type VaultFs } from './bookVault'
 import {
   BOOKS_DIR,
   atomicWrite,
@@ -16,6 +16,7 @@ import {
   readMarks,
   recordFromMeta,
   recordPath,
+  setTag,
   trashOf,
   type BookRecord,
   updateBook,
@@ -617,7 +618,35 @@ describe('mergeStranded', () => {
 
   it('unions the tags rather than picking a list', () => {
     const merged = mergeStranded(stranded, book({ tags: ['Mine'] }))
-    expect(merged.tags).toEqual(['Sea', 'Mine'])
+    /* In the clock's order — by key, deterministic — not arrival order. */
+    expect(merged.tags).toEqual(['Mine', 'Sea'])
+  })
+
+  /**
+   * ⚠️ **THE UNION USED TO LAST UNTIL THE NEXT READ.** `mergeStranded`
+   * unioned the two `tags` lists and spread `live` — carrying `live.tagClock`
+   * through as it was. `parseRecord` re-derives `tags` from a clock it finds,
+   * so the rescued tag was there in memory and gone on the next launch, the
+   * next `updateBook`, and in sync's `tagRegisters`. Measured on the real
+   * modules on 2026-08-27: `["Sea", "Mine"]` in, `["Mine"]` after the round
+   * trip. The merge is over the registers now, and the round trip is the
+   * test.
+   */
+  it('carries the clock, so a rescued tag survives being written and read back', () => {
+    const live = setTag(book({ addedAt: 20 }), 'Mine', true, hlcOf(30))
+    const merged = mergeStranded(stranded, live)
+    expect(merged.tags).toEqual(['Mine', 'Sea'])
+    const back = parseRecord(JSON.stringify(merged))
+    expect(back?.tags).toEqual(['Mine', 'Sea'])
+    expect(Object.keys(back?.tagClock ?? {}).sort()).toEqual(['mine', 'sea'])
+  })
+
+  it('lets a clocked off beat a legacy on, whichever side holds it', () => {
+    const off = setTag(book({ addedAt: 20, tags: ['Sea'] }), 'Sea', false, hlcOf(30))
+    expect(mergeStranded(stranded, off).tags).toBeUndefined()
+    expect(mergeStranded(off, stranded).tags).toBeUndefined()
+    /* And the register that decided it travels, so a read agrees. */
+    expect(parseRecord(JSON.stringify(mergeStranded(stranded, off)))?.tags).toBeUndefined()
   })
 
   it('folds a tag that differs only in case', () => {
@@ -701,6 +730,80 @@ describe('mergeParsed and the origin', () => {
 
   it('leaves it unset when neither has one', () => {
     expect(mergeParsed(book(), book()).origin).toBeUndefined()
+  })
+})
+
+/**
+ * A comic archive has no metadata, so `comic-book.js` titles it after the file
+ * it was given — extension included. The vault hands the book back named
+ * `${title}.${ext}`, and `mergeParsed` lets the parse's title win, so every
+ * open and every enrichment pass grew the title by one extension:
+ * "Batman.cbz" → "Batman.cbz.cbz" → … This is the round trip, driven through
+ * the same three functions the app uses, with the parser's behaviour stood in
+ * for by a title equal to the file name.
+ */
+describe('recordFromMeta and a parser that names the file', () => {
+  /** What `comic-book.js` produces for a file: `metadata.title = file.name`. */
+  const comicParse = (file: File) => ({ title: file.name, author: '' })
+  const comic = (name: string): File => new File([new Uint8Array([0x50, 0x4b])], name)
+
+  it('strips the comic’s own extension from a title that is its file name', () => {
+    expect(recordFromMeta(comicParse(comic('Batman.cbz')), comic('Batman.cbz')).title).toBe('Batman')
+    expect(recordFromMeta(comicParse(comic('Batman.CBZ')), comic('Batman.CBZ')).title).toBe('Batman')
+  })
+
+  it('keeps the title stable across a reopen from the vault and an enrichment pass', () => {
+    const first = comic('Batman.cbz')
+    const opened = { ...recordFromMeta(comicParse(first), first), ext: 'cbz', format: 'cbz' as const }
+    expect(opened.title).toBe('Batman')
+
+    /* THE REOPEN: the vault names the file after the record, the parser names
+     * the book after the file, and the parse is folded into the record. */
+    const reopenedAs = comic(storedBookName(opened))
+    expect(reopenedAs.name).toBe('Batman.cbz')
+    const reopened = mergeParsed(opened, recordFromMeta(comicParse(reopenedAs), reopenedAs))
+    expect(reopened.title).toBe('Batman')
+
+    /* THE ENRICHMENT PASS reads the file back under the same name and folds
+     * the same projection in; a third time proves the point is fixed. */
+    const enrichedAs = comic(storedBookName(reopened))
+    const enriched = mergeParsed(reopened, recordFromMeta(comicParse(enrichedAs), enrichedAs))
+    expect(enriched.title).toBe('Batman')
+    expect(storedBookName(enriched)).toBe('Batman.cbz')
+  })
+
+  /* The control: without the file, the projection cannot tell a title from a
+   * name, and this is the growth the rule exists to stop. */
+  it('grows by one extension per open when the parse is not told which file it was', () => {
+    const opened = { ...recordFromMeta(comicParse(comic('Batman.cbz'))), ext: 'cbz' }
+    expect(opened.title).toBe('Batman.cbz')
+    const reopenedAs = comic(storedBookName(opened))
+    expect(reopenedAs.name).toBe('Batman.cbz.cbz')
+    expect(mergeParsed(opened, recordFromMeta(comicParse(reopenedAs))).title).toBe('Batman.cbz.cbz')
+  })
+
+  /* A record the defect already wrote reaches the parser one extension longer
+   * still. Stripping once would hand back the damaged title unchanged. */
+  it('heals a title the defect already wrote, however many extensions it grew', () => {
+    const damaged = comic('Batman.cbz.cbz.cbz')
+    expect(recordFromMeta(comicParse(damaged), damaged).title).toBe('Batman')
+  })
+
+  it('leaves a genuine title alone, even one that ends in the comic extension', () => {
+    /* An EPUB whose declared title is "Batman.cbz" was opened from a file the
+     * vault named `Batman.cbz.epub`; the title is not the file name. */
+    const epub = new File([], 'Batman.cbz.epub')
+    expect(recordFromMeta({ title: 'Batman.cbz', author: 'X' }, epub).title).toBe('Batman.cbz')
+    /* And an EPUB that declares its own file name as its title keeps it: its
+     * parser does not invent titles, so the equality is not evidence. */
+    const named = new File([], 'Batman.epub')
+    expect(recordFromMeta({ title: 'Batman.epub', author: 'X' }, named).title).toBe('Batman.epub')
+    /* A comic whose title the reader has corrected no longer equals the name. */
+    expect(recordFromMeta({ title: 'Batman', author: '' }, comic('Batman.cbz')).title).toBe('Batman')
+  })
+
+  it('keeps a name that is nothing but its extension', () => {
+    expect(recordFromMeta(comicParse(comic('.cbz')), comic('.cbz')).title).toBe('.cbz')
   })
 })
 

@@ -81,7 +81,6 @@ export interface BookRow {
   /** What the bytes ARE — the value that travels, unlike `ext`. */
   readonly format: BookRowFormat | null
   readonly contentHash: string | null
-  /** Whether this device holds the bytes. Derived from the folder. */
   /**
    * Whether the bytes are on this device — or `null` when nothing has looked.
    *
@@ -144,6 +143,24 @@ export interface BookDetail extends BookRow {
   readonly positionAt: string | null
   readonly finishedAt: string | null
   readonly tagClock: Readonly<Record<string, { readonly on: boolean; readonly at: string; readonly spelling: string }>> | null
+}
+
+/** What `book.position` answers: the register it just wrote. */
+export interface PositionSetRow {
+  readonly bookId: string
+  readonly position: string
+  readonly progress: number
+  /** The stamp the shelf gave the write — what another device compares against its own. */
+  readonly positionAt: string | null
+}
+
+export function positionSet(book: IndexedBook): PositionSetRow {
+  return {
+    bookId: book.bookId,
+    position: book.position ?? '',
+    progress: book.progress ?? 0,
+    positionAt: book.positionAt ?? null,
+  }
 }
 
 export function bookDetail(book: IndexedBook): BookDetail {
@@ -280,7 +297,6 @@ export function trashRow(one: TrashedBook): TrashRow {
   }
 }
 
-/** Where a book's bytes are, as `content.locate` / `content.evict` answer. */
 /**
  * A slice of a book's bytes (phase 18).
  *
@@ -302,13 +318,16 @@ export interface ContentChunk {
   readonly bytes: string
 }
 
+/** Where a book's bytes are, as `content.locate` / `content.evict` answer. */
 export interface ContentLocation {
   readonly bookId: string
   /** Whether THIS device holds the bytes. */
   readonly here: boolean
   /** How this copy is stored — device-local, and the one place it is told. */
   readonly ext: string | null
-  readonly format: string | null
+  /* The same closed set `BookRow.format` carries — a `string` here let an
+   * impossible value through and cost every consumer its exhaustive check. */
+  readonly format: BookRowFormat | null
   /** BLAKE3, hex, when a hasher has run over it. */
   readonly contentHash: string | null
   /** Bytes, when the host can measure. Null is "nobody can say", not zero. */

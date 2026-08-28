@@ -112,6 +112,27 @@ export interface MarkSnapshot {
    * stops persisting is indistinguishable from one that works.
    */
   readonly persistent: boolean
+  /**
+   * The open book's marks file is THERE and would not read.
+   *
+   * A different fact from `persistent`, and it used to be no fact at all:
+   * `open` caught the read's throw and installed an empty list with `ready`
+   * true — so the reader saw a book with no marks, the ribbon offered to
+   * place a bookmark on it, and only the write's own read throwing again
+   * stood between that bookmark and the damaged file. Now the book is not
+   * called ready, this says why, and the file is left exactly as it is.
+   * Cleared by the next `open`, which is the point at which the question
+   * is asked again.
+   */
+  readonly unreadable: boolean
+  /**
+   * The last `loadAll` scan FAILED, and `all` is empty because of that and
+   * not because the library holds no marks. Until this existed the catch
+   * installed `[]` and published, and the panel could not tell a damaged
+   * shelf from an empty one — "Nothing kept yet" stood over both (the
+   * 2026-08-28 audit, #101/#477). Cleared by the next scan that lands.
+   */
+  readonly scanFailed: boolean
 }
 
 export interface MarkStore {
@@ -254,6 +275,10 @@ export function createMarkStore({
   let persistent = true
   /** Whether a write has failed since the last successful load — see `applyElsewhere`. */
   let failed = false
+  /** The book whose marks file was there and would not read — see `MarkSnapshot.unreadable`. */
+  let unreadableId: string | null = null
+  /** See `MarkSnapshot.scanFailed`. */
+  let scanFailed = false
   /** Which `open` is the current one, so a read that lands late is discarded. */
   let generation = 0
   /**
@@ -283,6 +308,8 @@ export function createMarkStore({
     bookId: null,
     ready: false,
     persistent,
+    unreadable: false,
+    scanFailed: false,
   }
 
   /**
@@ -359,8 +386,20 @@ export function createMarkStore({
       bookId: openId,
       ready,
       persistent,
+      unreadable: openId !== null && unreadableId === openId,
+      scanFailed,
     }
-    for (const listener of [...listeners]) listener()
+    for (const listener of [...listeners]) {
+      /* EACH ON ITS OWN. One throwing subscriber used to stop every later
+       * one — and, called from the optimistic half of `applyTo`, stopped the
+       * disk write behind it; called after a successful write, its throw was
+       * then classified as a persistence failure by the catch around it. */
+      try {
+        listener()
+      } catch (cause) {
+        console.error('Paper: a marks subscriber threw', cause)
+      }
+    }
   }
 
   /**
@@ -373,7 +412,14 @@ export function createMarkStore({
    * `all` is updated so the row stays changed, and the open book's list when
    * this is that book.
    */
-  const applyElsewhere = (targetId: string, mutate: (prev: readonly Mark[]) => readonly Mark[]): Promise<void> => {
+  const applyElsewhere = (
+    targetId: string,
+    mutate: (prev: readonly Mark[]) => readonly Mark[],
+    /** A mark id the change is about — the file must hold it, or this rejects. */
+    requires?: string,
+    /** Work that must happen INSIDE the task, before the file is read. */
+    prepare?: () => Promise<void>,
+  ): Promise<void> => {
     if (!fs) {
       /* SAID OUT LOUD. With nowhere to write, a mark is drawn and gone at the
        * next redraw — and a store that silently stops persisting is
@@ -409,13 +455,26 @@ export function createMarkStore({
            * nowhere to land. The mark itself moved with the folder and is
            * safe; the EDIT is what is lost, and losing it silently made the
            * Notes row look updated until the next reload disagreed. */
-          console.warn(`Paper: could not change a mark for ${targetId} — no folder under that id`)
-          return
+          /* AND FAILED, not merely said. Resolving here left the caller
+           * believing an edit had landed that had nowhere to land; the catch
+           * below turns this into the store's own not-saving state, which is
+           * what the edit's loss is. */
+          throw new Error(`could not change a mark for ${targetId} — no folder under that id`)
         }
+        if (prepare) await prepare()
         const trashedBefore = await target.exists(trashOf(targetId))
         const before = validMarks(await readMarks(target, targetId))
         const next = mutate(before)
-        if (next === before) return
+        if (next === before) {
+          /* An unchanged answer for a mark the file does not hold is the
+           * rejection the interface promises — "a mark none of them know is
+           * a rejection, not a silent no-op" — which the hint-routed path
+           * used to resolve as success, since the routing never checked. */
+          if (requires !== undefined && !before.some((mark) => mark.id === requires)) {
+            throw new Error(`no mark ${requires} is known to the store under ${targetId}`)
+          }
+          return
+        }
         await recorded(recorder, targetId, 'marks', () => writeMarks(target, targetId, next))
         if (!trashedBefore && (await target.exists(trashOf(targetId)))) {
           /* The removal won. What was just written is a fragment of this
@@ -486,7 +545,12 @@ export function createMarkStore({
    * way. `all` is kept in step so a Notes row does not revert to the old value
    * the moment it is edited.
    */
-  const applyTo = (targetId: string, mutate: (prev: readonly Mark[]) => readonly Mark[]): Promise<void> => {
+  const applyTo = (
+    targetId: string,
+    mutate: (prev: readonly Mark[]) => readonly Mark[],
+    requires?: string,
+    prepare?: () => Promise<void>,
+  ): Promise<void> => {
     if (openId === targetId && loaded.bookId === targetId) {
       const next = mutate(loaded.marks)
       if (next !== loaded.marks) {
@@ -496,7 +560,7 @@ export function createMarkStore({
         publish()
       }
     }
-    return applyElsewhere(targetId, mutate)
+    return applyElsewhere(targetId, mutate, requires, prepare)
   }
 
   /**
@@ -518,11 +582,13 @@ export function createMarkStore({
   ): Promise<void> => {
     const owner = ownerOf(id, hint)
     if (!owner) return Promise.reject(new Error(`no mark ${id} is known to the store`))
-    return applyTo(owner, mutate)
+    return applyTo(owner, mutate, id)
   }
 
   const open: MarkStore['open'] = (bookId) => {
     openId = bookId
+    // A fact about ONE open; the next open asks the question again.
+    unreadableId = null
     generation += 1
     const mine = generation
     if (!bookId || !fs) {
@@ -539,17 +605,30 @@ export function createMarkStore({
        * one id (`book:abc` and its folder name `book_abc`) name one directory.
        * Keyed by the id as spelled, a marks write and the removal trashing the
        * same folder could run beside each other. */
-      .append(folderOf(bookId), async () => {
+      .append(lane(bookId), async () => {
         const raw = await readMarks(target, bookId)
         // Parsed through the same validator every read uses: this is a file on
         // disk, and a mark with no CFI cannot be drawn.
         if (mine !== generation) return
         loaded = { bookId, marks: validMarks(raw) }
+        /* A read that landed is the screen agreeing with the disk again —
+         * the point the failure note in `applyElsewhere` names as what
+         * clears the flag; it cleared `failed` and left `persistent` false
+         * until the next write happened to succeed. */
+        if (!failed) persistent = true
         publish()
       })
       .catch(() => {
         if (mine !== generation) return
-        loaded = { bookId, marks: [] }
+        /* NOT INSTALLED AS EMPTY. `readMarks` throws for a file that is there
+         * and will not read, precisely so that it is not mistaken for a book
+         * with no marks — and this catch used to undo that one line later,
+         * handing the projections an empty list under the open book's id so
+         * `ready` came out true. `loaded` is left as it was, which is not
+         * this book's, so the book is not ready and its lists are empty; the
+         * flag says why. A write will find the same throw and fail rather
+         * than replace the file. */
+        unreadableId = bookId
         publish()
       })
   }
@@ -590,43 +669,67 @@ export function createMarkStore({
                    write's own result for them, which the scan predates. */
                 ...all.filter((mark) => stale.has(mark.bookId)),
               ]
+        scanFailed = false
         publish()
       })
       .catch(() => {
         // A failed scan has not established that there is nothing; it has
-        // established nothing. Empty, and the next mount asks again.
+        // established nothing. Empty, SAID SO, and the next mount asks again.
         all = []
+        scanFailed = true
         publish()
       })
   }
 
-  const add: MarkStore['add'] = (mark) =>
+  /* THE STAMP IS MINTED ONCE, OUTSIDE THE MUTATION. `applyTo` runs the
+   * mutation twice — optimistically over the screen's list, then over the
+   * file — and a `clock()` inside it minted two different stamps for one
+   * edit: memory and disk disagreed until the confirmation republished,
+   * and the generation moved twice. One reading, both applications. */
+  const add: MarkStore['add'] = (mark) => {
+    const at = clock()
     /* Overlapping, not byte-identical. A mark is reached by any selection
      * that covers part of it, so the row a new mark replaces is the row that
      * selection resolved to — otherwise re-marking a passage the reader was
      * just told is marked writes a second, overlapping row. The superseded
      * row is TOMBSTONED under this clock, so the replacement travels. */
-    applyTo(mark.bookId, (prev) => upsertOverlapping(prev, mark, clock()))
+    return applyTo(mark.bookId, (prev) => upsertOverlapping(prev, mark, at))
+  }
 
   const addMany: MarkStore['addMany'] = (bookId, marks) => {
     if (marks.length === 0) return Promise.resolve()
+    /* EVERY MARK IS THIS BOOK'S, or the batch is refused whole — as
+     * `mergeRemote` refuses. A foreign row written into this file would be
+     * routed to the wrong folder by every later edit. */
+    const stray = marks.find((mark) => mark.bookId !== bookId)
+    if (stray) {
+      return Promise.reject(new Error(`addMany: mark ${stray.id} belongs to ${stray.bookId}, not ${bookId}`))
+    }
     /* ONE CLOCK READING PER MARK, as `add` takes — the stamps have to be
      * distinct or the tombstones a later mark writes over an earlier one in
-     * the same batch cannot be ordered. */
+     * the same batch cannot be ordered. Minted here, once per mark, so both
+     * applications of the mutation write the same stamps. */
+    const stamps = marks.map(() => clock())
     return applyTo(bookId, (prev) =>
-      marks.reduce<readonly Mark[]>((sofar, mark) => upsertOverlapping(sofar, mark, clock()), prev),
+      marks.reduce<readonly Mark[]>((sofar, mark, i) => upsertOverlapping(sofar, mark, stamps[i]!), prev),
     )
   }
 
-  const remove: MarkStore['remove'] = (id, bookId) =>
+  const remove: MarkStore['remove'] = (id, bookId) => {
+    const at = clock()
     // A tombstone, not a vanished row — see `removeMark`.
-    applyToMark(id, bookId, (prev) => removeMark(prev, id, clock()))
+    return applyToMark(id, bookId, (prev) => removeMark(prev, id, at))
+  }
 
-  const updateNote: MarkStore['updateNote'] = (id, note, bookId) =>
-    applyToMark(id, bookId, (prev) => updateNoteIn(prev, id, note, clock()))
+  const updateNote: MarkStore['updateNote'] = (id, note, bookId) => {
+    const at = clock()
+    return applyToMark(id, bookId, (prev) => updateNoteIn(prev, id, note, at))
+  }
 
-  const setTint: MarkStore['setTint'] = (id, tint, bookId) =>
-    applyToMark(id, bookId, (prev) => setTintIn(prev, id, tint, clock()))
+  const setTint: MarkStore['setTint'] = (id, tint, bookId) => {
+    const at = clock()
+    return applyToMark(id, bookId, (prev) => setTintIn(prev, id, tint, at))
+  }
 
   const rekey: MarkStore['rekey'] = async (from, to) => {
     if (!fs || from === to) return
@@ -642,13 +745,23 @@ export function createMarkStore({
      * So: rewrite what is already here, AND merge anything still sitting in
      * the old folder if the rename has not happened. Whichever order the two
      * ran in, the answer is the same. */
+    const target = fs
     let waiting: Mark[] = []
-    try {
-      waiting = validMarks(await readMarks(fs, from))
-    } catch (cause) {
-      // The old file is there and will not read. Left alone, and said out
-      // loud, rather than quietly treated as a book with no marks.
-      console.error('Paper: could not read the marks under the old book id', cause)
+    /* READ INSIDE THE TASK, on the lane the merge writes on. Read before it,
+     * outside any queue, a mutation already queued for the old book — or the
+     * folder move itself — could land between the read and the merge, and
+     * the marks it touched were stranded under the old identity. And a file
+     * that is there and will not read REJECTS the rekey: logged-and-continued
+     * resolved as if the migration had happened, with no retry signal and the
+     * old marks left behind. Nothing is deleted from the old folder either
+     * way, so a rejected rekey loses nothing. */
+    const prepare = async () => {
+      try {
+        waiting = validMarks(await readMarks(target, from))
+      } catch (cause) {
+        console.error('Paper: could not read the marks under the old book id', cause)
+        throw new Error(`could not read the marks under ${from}`, { cause })
+      }
     }
     await applyTo(to, (prev) => {
       let rewrote = false
@@ -673,7 +786,7 @@ export function createMarkStore({
       }
       if (!rewrote && fresh.length === 0) return prev
       return [...mine, ...fresh]
-    })
+    }, undefined, prepare)
   }
 
   const mergeRemote: MarkStore['mergeRemote'] = (bookId, incoming) => {

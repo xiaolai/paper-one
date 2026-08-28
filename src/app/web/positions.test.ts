@@ -257,3 +257,41 @@ describe('readingPositions', () => {
     })
   })
 })
+
+describe('held', () => {
+  it('answers the position with the clock it was written at, and null for a book it does not have', () => {
+    const { store } = fakeStore()
+    const positions = readingPositions(store, () => 1_700_000_000_000)
+    positions.set('one', 'epubcfi(/6/4)')
+    expect(positions.held('one')).toEqual({ cfi: 'epubcfi(/6/4)', at: 1_700_000_000_000 })
+    expect(positions.held('two')).toBeNull()
+  })
+
+  it('reads a row that recorded no clock as written at 0, so any shelf stamp beats it', () => {
+    const { store } = fakeStore(JSON.stringify({ one: { cfi: 'epubcfi(/6/4)' } }))
+    expect(readingPositions(store).held('one')).toEqual({ cfi: 'epubcfi(/6/4)', at: 0 })
+  })
+})
+
+describe('recency and the position stamp are two different questions', () => {
+  it('touch refreshes the eviction order and never the stamp the shelf is compared against', () => {
+    /* The live interleaving this pins: the desktop reads on at 12:30; the
+     * phone is opened OFFLINE at 13:00 with no page turned; reopened online,
+     * a touched `at` made the stale phone position "newer" than the shelf's
+     * and dragged the record back. Newest WRITE wins, not newest glance. */
+    let clock = 1_000
+    const positions = readingPositions(fakeStore().store, () => clock)
+    positions.set('book:a', 'epubcfi(/6/2!/4/2)')
+    clock = 5_000
+    positions.touch('book:a')
+    expect(positions.held('book:a')).toEqual({ cfi: 'epubcfi(/6/2!/4/2)', at: 1_000 })
+  })
+
+  it('a stored timestamp that is not a real moment is read as never recorded', () => {
+    /* `1e400` parses as `Infinity`, which would beat every genuine stamp
+     * forever — in eviction and against the shelf alike. */
+    const seed = JSON.stringify({ 'book:a': { cfi: 'epubcfi(/6/2!/4/2)', at: 1e400 } })
+    const positions = readingPositions(fakeStore(seed).store)
+    expect(positions.held('book:a')).toEqual({ cfi: 'epubcfi(/6/2!/4/2)', at: 0 })
+  })
+})

@@ -227,10 +227,10 @@ async fn a_signed_in_browser_appears_in_live_ids_while_its_socket_is_open() {
 
     let ids = shelf.state.pipe.live_ids();
     assert_eq!(ids.len(), 1);
-    /* AND IT KNOWS WHOSE IT IS. `close_credential` is how a sign-out reaches a
-     * live socket, and it can only do that if the record carries the
-     * credential. */
-    assert!(shelf.state.pipe.credential_of(ids[0]).is_some());
+    /* AND IT KNOWS WHOSE IT IS. `close_browser` is how a sign-out reaches a
+     * live socket, and it can only do that if the record carries the durable
+     * id of the browser that opened it. */
+    assert!(shelf.state.pipe.admitted(ids[0]).is_some());
 
     drop(socket);
 }
@@ -359,7 +359,7 @@ async fn a_frame_the_shelf_sends_reaches_the_browser() {
 #[tokio::test]
 async fn revoking_a_credential_closes_the_socket_the_browser_is_holding() {
     /* Adversarial suite 6, at the layer it actually happens. The in-process
-     * tests prove `close_credential` returns the ids; only a real socket can
+     * tests prove `close_browser` returns the ids; only a real socket can
      * show the client being disconnected. */
     let shelf = shelf().await;
     let code = live_code(&shelf);
@@ -367,13 +367,13 @@ async fn revoking_a_credential_closes_the_socket_the_browser_is_holding() {
     let mut socket = connect(&shelf, Some(&cookie)).await.expect("a socket");
     until("the session", || shelf.state.pipe.live_count() == 1).await;
 
-    let credential = shelf
+    let browser = shelf
         .state
         .pipe
-        .credential_of(shelf.state.pipe.live_ids()[0])
-        .expect("the credential behind the socket");
-    shelf.state.sessions.revoke(&credential);
-    shelf.state.pipe.close_credential(&credential, "signed out");
+        .admitted(shelf.state.pipe.live_ids()[0])
+        .expect("the browser behind the socket");
+    let _ = shelf.state.sessions.revoke_by_id(browser);
+    shelf.state.pipe.close_browser(browser, "signed out");
 
     /* THE CLIENT SEES IT END. Draining to `None` — or to a close or an error —
     is the socket going away; only the timeout can fail this, which is the
@@ -424,13 +424,13 @@ async fn a_revoked_browser_is_sent_nothing_that_was_already_queued() {
         shelf.state.pipe.send(id, SECRET.to_vec());
     }
 
-    let credential = shelf
+    let browser = shelf
         .state
         .pipe
-        .credential_of(id)
-        .expect("the credential behind the socket");
-    shelf.state.sessions.revoke(&credential);
-    shelf.state.pipe.close_credential(&credential, "signed out");
+        .admitted(id)
+        .expect("the browser behind the socket");
+    let _ = shelf.state.sessions.revoke_by_id(browser);
+    shelf.state.pipe.close_browser(browser, "signed out");
 
     /* Read everything the client is given until the socket ends. Any binary
      * frame arriving here arrived AFTER the revocation. */
@@ -481,18 +481,65 @@ async fn a_revoked_credential_cannot_open_a_second_socket() {
     let first = connect(&shelf, Some(&cookie)).await.expect("a socket");
     until("the session", || shelf.state.pipe.live_count() == 1).await;
 
-    let credential = shelf
+    let browser = shelf
         .state
         .pipe
-        .credential_of(shelf.state.pipe.live_ids()[0])
-        .expect("the credential");
-    shelf.state.sessions.revoke(&credential);
+        .admitted(shelf.state.pipe.live_ids()[0])
+        .expect("the browser");
+    let _ = shelf.state.sessions.revoke_by_id(browser);
 
     let refused = connect(&shelf, Some(&cookie))
         .await
         .expect_err("a revoked credential must not open another");
     assert!(refused.contains("401"), "expected unauthorized: {refused}");
     drop(first);
+}
+
+/// SIGNING OUT EVERY BROWSER ENDS EVERY SOCKET, over the real wire.
+///
+/// The in-process test proves the pipe records close and the code is retired;
+/// only real sockets can show two clients each LEARNING it, and each being
+/// refused on the way back with the cookie it still holds — which is what
+/// "the laptop was stolen" has to mean from the phone's side.
+#[tokio::test]
+async fn revoking_everything_ends_every_socket_and_refuses_every_cookie() {
+    let shelf = shelf().await;
+    let mut clients = Vec::new();
+    let mut cookies = Vec::new();
+    for _ in 0..2 {
+        let code = live_code(&shelf);
+        let cookie = sign_in(&shelf, &code).await;
+        clients.push(connect(&shelf, Some(&cookie)).await.expect("a socket"));
+        cookies.push(cookie);
+    }
+    until("both sessions", || shelf.state.pipe.live_count() == 2).await;
+
+    let out = shelf.state.revoke_all();
+    assert_eq!(out.applied.len(), 2, "both browsers are signed out");
+    out.saved.expect("in memory, nothing to save");
+
+    for mut socket in clients {
+        let ended = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(message) = socket.next().await {
+                if matches!(message, Ok(Message::Close(_)) | Err(_)) {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(ended.is_ok(), "every socket should have been closed");
+    }
+    until("every session to be released", || {
+        shelf.state.pipe.live_count() == 0
+    })
+    .await;
+
+    for cookie in cookies {
+        let refused = connect(&shelf, Some(&cookie))
+            .await
+            .expect_err("a signed-out cookie must not open a socket");
+        assert!(refused.contains("401"), "expected unauthorized: {refused}");
+    }
 }
 
 /// ⚠️ **A REVOCATION THAT LANDS BETWEEN ADMISSION AND `Pipe::open`.**
@@ -551,11 +598,13 @@ async fn a_revocation_inside_the_admission_window_leaves_no_socket() {
         "the seam should be before the pipe record exists"
     );
 
-    /* THE REVOCATION, in the window. `close_credential` finds nothing to close —
+    /* THE REVOCATION, in the window. `close_browser` finds nothing to close —
     that is the whole point — so only the re-check after registration can
     stop this socket. */
-    shelf.state.sessions.revoke(&credential);
-    shelf.state.pipe.close_credential(&credential, "revoked");
+    let revoked = shelf.state.sessions.revoke(&credential);
+    if let Some(browser) = revoked.applied {
+        shelf.state.pipe.close_browser(browser, "revoked");
+    }
 
     release
         .send(())
@@ -741,4 +790,138 @@ async fn a_frame_that_meets_a_full_inbox_is_delivered_after_the_drain() {
          not dropped while the pump waits for a retransmission that never comes"
     );
     drop(socket);
+}
+
+/// A raw upgrade request over a bare stream, abandoned after the shelf has
+/// admitted it and BEFORE it can answer — a browser giving up in the sliver
+/// between the handler opening a pipe record and hyper flushing the `101`.
+///
+/// # Why a bare stream, and why a reset rather than a close
+///
+/// tungstenite drives the whole handshake or none of it; there is no hook
+/// between "request sent" and "response read". And the abandonment has to be a
+/// RESET: after a plain close the shelf's first write still succeeds — the
+/// kernel buffers it and the peer answers with a reset afterwards — so the
+/// upgrade completes and `pump` finds the dead socket, which is the ordinary
+/// exit. Only a write that FAILS makes hyper drop the connection with the
+/// upgrade still pending, and that is the one path that reaches
+/// `on_failed_upgrade`. `SO_LINGER` of zero turns the close into a reset.
+///
+/// # Why the request carries a line it does not need
+///
+/// While a handler is in flight hyper probes the socket for EOF and, on one,
+/// DROPS the handler (`mid_message_detect_eof`: "found unexpected EOF on busy
+/// connection"). A reset landing while the handler waits at the seam would
+/// therefore never open a record at all — the wrong window. The probe skips the
+/// socket while hyper's own read buffer holds unparsed bytes, so the request is
+/// followed by the first line of a second one that never finishes: pipelined
+/// and stalled, which HTTP permits. Those bytes park in the buffer, hyper stops
+/// looking, and the reset is first met by the write of the `101`.
+async fn abandon_a_handshake(shelf: &Shelf, cookie: &str) {
+    let (reached, release) = shelf.state.pause_before_open();
+    let stream = TcpStream::connect(&shelf.origin)
+        .await
+        .expect("a connection");
+    let request = format!(
+        "GET /ws HTTP/1.1\r\n\
+         Host: {origin}\r\n\
+         Connection: Upgrade\r\n\
+         Upgrade: websocket\r\n\
+         Sec-WebSocket-Version: 13\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+         Sec-Fetch-Site: same-origin\r\n\
+         Cookie: {cookie}\r\n\
+         \r\n\
+         GET /ws HTTP/1.1\r\n",
+        origin = shelf.origin
+    );
+    /* `try_write` in a loop rather than `write_all`: the dev build takes tokio
+     * with `net` and not `io-util`, and a helper that leans on a feature a
+     * sibling dependency happens to switch on is a helper that breaks when
+     * that sibling changes. */
+    let mut bytes = request.as_bytes();
+    while !bytes.is_empty() {
+        stream.writable().await.expect("writable");
+        match stream.try_write(bytes) {
+            Ok(written) => bytes = &bytes[written..],
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(error) => panic!("writing the request: {error}"),
+        }
+    }
+
+    /* ADMITTED, AND PARKED BEFORE `Pipe::open`. */
+    reached.await.expect("the handshake should reach the seam");
+
+    /* THE RESET. Then a moment for it to cross the loopback: the shelf's write
+     * is what must meet it, and a write that wins the race succeeds, completes
+     * the upgrade and ends through `pump` instead — reaped either way, which is
+     * why the count below is asserted rather than assumed. */
+    /* tokio deprecates `set_linger` because a linger WAIT blocks the runtime
+     * thread on drop. A linger of zero is not a wait — it is the abort, the
+     * one portable way to make a close send a reset — and the only other
+     * routes to the option are an unstable std API or a crate this crate does
+     * not take. */
+    #[allow(deprecated)]
+    let reset = stream.set_linger(Some(Duration::ZERO));
+    reset.expect("SO_LINGER");
+    drop(stream);
+    tokio::time::sleep(Duration::from_millis(25)).await;
+
+    release
+        .send(())
+        .expect("the handshake should still be waiting");
+}
+
+/// A browser that gives up mid-handshake must not keep its seat at the table.
+///
+/// ⚠️ `on_failed_upgrade` CLOSED the record and did not REAP it, and the two
+/// are not the same thing: `Pipe::open` counts every record toward
+/// `MAX_SESSIONS`, closed or not — only `reap` removes one — and every other
+/// exit path reaps. Sixty-four abandoned handshakes, over any span of time,
+/// and the shelf answered 429 to every browser for the life of the process,
+/// with nothing logged and nothing in the Browsers pane to explain it.
+///
+/// One past the cap, so that under the defect the last abandonment is itself
+/// refused at `open` and the browser after it is what the defect turns away.
+#[tokio::test]
+async fn a_handshake_the_browser_abandons_does_not_keep_its_seat() {
+    let shelf = shelf().await;
+    let code = live_code(&shelf);
+    let cookie = sign_in(&shelf, &code).await;
+
+    const ABANDONED: usize = paper_webhost::pipe::MAX_SESSIONS + 1;
+    for _ in 0..ABANDONED {
+        abandon_a_handshake(&shelf, &cookie).await;
+    }
+    until("the abandoned handshakes to be noticed", || {
+        shelf.state.failed_upgrades() >= paper_webhost::pipe::MAX_SESSIONS
+    })
+    .await;
+
+    let socket = connect(&shelf, Some(&cookie))
+        .await
+        .expect("sixty-five abandoned handshakes must not turn the next browser away");
+    until("the session to be registered", || {
+        shelf.state.pipe.live_count() == 1
+    })
+    .await;
+    drop(socket);
+
+    /* THE CONTROL. A reset that lost its race with the `101` ended through
+     * `pump`, which reaps whether or not the callback does — so a shortfall
+     * here means the case above proved less than it claims, and says so
+     * rather than passing quietly. */
+    let mut noticed = 0;
+    for _ in 0..200 {
+        noticed = shelf.state.failed_upgrades();
+        if noticed == ABANDONED {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        noticed, ABANDONED,
+        "{noticed} of {ABANDONED} abandoned handshakes reached `on_failed_upgrade`; \
+         the rest were reaped by `pump`, and this test did not exercise the callback for them"
+    );
 }

@@ -1,6 +1,6 @@
 import type { ServiceContribution, ServiceHandler } from '../capability'
-import { SERVICE_TABLE, readingGrant, type ServiceDescriptor, type ServiceName } from '../serviceTable'
-import { bookAdd, bookGet, bookList, bookRemove, bookRestore, bookSearch, bookSet } from './book'
+import { SERVICE_TABLE, readServices, type ServiceDescriptor, type ServiceName } from '../serviceTable'
+import { bookAdd, bookGet, bookList, bookPosition, bookRemove, bookRestore, bookSearch, bookSet } from './book'
 import { cardAdd, cardList, cardRemove } from './card'
 import { contentEvict, contentLocate, contentRead, coverRead } from './content'
 import { deviceForget, deviceGrant, deviceList } from './device'
@@ -48,6 +48,7 @@ const HANDLERS: Readonly<Record<ServiceName, HandlerFactory>> = {
   'book.get': bookGet,
   'book.add': bookAdd,
   'book.set': bookSet,
+  'book.position': bookPosition,
   'book.remove': bookRemove,
   'book.restore': bookRestore,
   'book.search': bookSearch,
@@ -112,15 +113,40 @@ export function buildServices(
   env: ServiceEnvironment,
   only?: readonly ServiceDescriptor[],
 ): readonly ServiceContribution[] {
-  return (only ?? SERVICE_TABLE).map((descriptor) => ({
+  /* SNAPSHOT FIRST, THEN VALIDATE THE SNAPSHOT, THEN MAP THE SAME ONE.
+   *
+   * `only` is a caller's object. The check walked it with `for…of` and the
+   * build then walked it again through its own `.map()` — two reads of a
+   * value free to answer differently each time. A Proxy, or an array-like
+   * with its own `map`, could hand the table's own descriptors to the check
+   * and forged ones to the build, which is precisely the bypass the check
+   * exists to close: clone `trash.empty`, weaken its grant to `book:read`,
+   * and be handed a contribution that carries the table's authority under
+   * somebody else's permission. `Array.from` reads it once. */
+  const wanted = only === undefined ? SERVICE_TABLE : Array.from(only)
+  if (only !== undefined) {
+    /* A FILTER, HELD TO IT. `only` took any descriptors at all, so a caller
+     * could clone `trash.empty`, change its grant to `book:read`, and be
+     * handed a contribution that bypassed the table's authorization record.
+     * Every entry must be the table's own object, once. */
+    const table = new Set<ServiceDescriptor>(SERVICE_TABLE)
+    const seen = new Set<ServiceDescriptor>()
+    for (const descriptor of wanted) {
+      if (!table.has(descriptor)) throw new Error(`buildServices: ${String(descriptor?.name)} is not a descriptor from the service table`)
+      if (seen.has(descriptor)) throw new Error(`buildServices: ${descriptor.name} is listed twice`)
+      seen.add(descriptor)
+    }
+  }
+  return wanted.map((descriptor) => ({
     name: descriptor.name,
     grant: descriptor.grant,
     handler: handlerFor(descriptor, env),
   }))
 }
 
-/** Just the read half — the ten services WI-11.3 landed first, because they
- *  carry no concurrency question and are worth having before the rest. */
+/** Just the read half — the services WI-11.3 landed first, because they
+ *  carry no concurrency question and were worth having before the rest. The
+ *  set is `readServices()`'s, not a second spelling of its rule. */
 export function buildReadServices(env: ServiceEnvironment): readonly ServiceContribution[] {
-  return buildServices(env, SERVICE_TABLE.filter((one) => readingGrant(one.grant)))
+  return buildServices(env, readServices())
 }

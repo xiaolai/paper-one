@@ -139,6 +139,29 @@ describe('the shipped Content Security Policy', () => {
     for (const [name, policy] of BOUNDARY_POLICIES) {
       const d = directives(policy ?? '')
       expect(d['frame-src'], `${name}: book documents are blob URLs`).toContain('blob:')
+      /* AND NOTHING THE CLIENT ITSELF SERVES. Asserted as an exact set, like
+       * `script-src`, because `'self'` sat here for a phase and was a route a
+       * book had into the real client: a blob document inherits this policy,
+       * so a book framing the client loaded it — module running, cookie
+       * attached to its socket — under the book's own markup. Nothing Paper
+       * serves is legitimately framed by a book.
+       *
+       * ⚠️ **THE URL HAS TO BE ABSOLUTE, and this comment used to say
+       * `<iframe src="/">`.** It cannot: a `blob:` URL has an opaque path, and
+       * the WHATWG parser refuses every relative reference against one but a
+       * fragment — so that markup resolves to nothing and frames `about:blank`.
+       * The hostile fixture's static probe was written from this same wrong
+       * belief and tested nothing for a while (round 3, `make-hostile-epub.py`).
+       * The script half always used `location.origin + '/'`, which is why the
+       * vector is real and why the assertion below is right; only the example
+       * was wrong. A book that wants the client writes the origin out.
+       *
+       * AND ONLY `blob:`. `data:` sat beside it from the policy's first draft
+       * with no consumer — nothing under `src/` and nothing in the pinned
+       * fork frames a `data:` URL — and a frame source no document of ours
+       * needs is one a book's markup may use. The plan's acceptance for
+       * WI-20.39 is `["blob:"]`; this is that sentence, held. */
+      expect(d['frame-src'], `${name}: a book frames blob documents and nothing else`).toEqual(['blob:'])
       expect(d['img-src'], `${name}: book images are blobs`).toContain('blob:')
       expect(d['img-src'], `${name}: and sometimes data URLs`).toContain('data:')
       expect(d['worker-src'], `${name}: pdf.js runs in a worker`).toContain('blob:')

@@ -35,7 +35,10 @@ export function ModelsPane({ model }: { readonly model: ModelsModel }) {
   }, [model])
 
   const { runtime } = snapshot
-  const busy = snapshot.installing !== null
+  /* Any operation on the store — an install OR a removal — holds the
+     controls; `busy` tracked installs only, so a double-click on Remove
+     started a second removal the daemon refused. */
+  const busy = snapshot.installing !== null || snapshot.removing !== null
 
   return (
     <div className={ui.section}>
@@ -52,6 +55,15 @@ export function ModelsPane({ model }: { readonly model: ModelsModel }) {
           this the reader pressed Remove, nothing happened, and nothing said
           why. Same slot and same voice as `Test voice`'s failure line. */}
       {snapshot.failure === null ? null : <div className={ui.hint}>{snapshot.failure}</div>}
+      {/* WHY NOTHING BELOW OFFERS INSTALL (WI-20.21). Said once here rather
+          than once per row: the rows show the reason in their value slot, and
+          this is the sentence that says what would change it. */}
+      {runtime.kind === 'absent' ? (
+        <div className={ui.hint}>
+          The runtime is not installed, so no model could run — nothing is
+          offered until it is.
+        </div>
+      ) : null}
 
       {snapshot.models.map((entry) => {
         const action = modelAction(entry, runtime)
@@ -62,7 +74,10 @@ export function ModelsPane({ model }: { readonly model: ModelsModel }) {
               {entry.quantization ? ` ${entry.quantization}` : ''}
             </span>
             <span className={ui.value}>{modelValue(entry, runtime)}</span>
-            {action === 'cancel' ? (
+            {/* NO CONTROL for a model that cannot run — §07's disabled-and-
+                says-why, with the why already in the value slot. A disabled
+                Install would be a control that cannot act, dressed as one. */}
+            {action === 'runtime-missing' ? null : action === 'cancel' ? (
               <button type="button" className={ui.button} onClick={() => model.cancelInstall()}>
                 Cancel
               </button>
@@ -119,15 +134,11 @@ export function ModelsPane({ model }: { readonly model: ModelsModel }) {
         </div>
       ) : null}
 
-      <div className={ui.row}>
-        <span className={ui.grow}>Keep model loaded</span>
-        <input
-          type="checkbox"
-          className={ui.toggle}
-          checked={snapshot.keepLoaded}
-          onChange={(event) => model.setKeepLoaded(event.currentTarget.checked)}
-        />
-      </div>
+      {/* "KEEP MODEL LOADED" IS GONE, NOT HIDDEN. The checkbox persisted a
+          setting that nothing read — no spawn flag, no daemon config, no
+          unload policy consumed it — so it was a control that did nothing
+          and said otherwise. It comes back with its consumer, as a `<label>`
+          so the text toggles it and a screen reader can name it. */}
       <div className={ui.hint}>
         Off frees the memory a few minutes after you stop asking.
       </div>

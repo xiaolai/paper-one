@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useSyncExternalStore } from 'react'
+import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import type { MarkStore } from '../../core/markStore'
 import { createMark, type Annotation, type Bookmark, type Mark, type NewMark } from '../../core/marks'
 
@@ -34,6 +34,15 @@ export interface MarksView {
   /** Whether this book's marks have been READ — see `MarkSnapshot.ready`.
    *  Paired with the book asked for, like the two lists above. */
   readonly ready: boolean
+  /** This book's marks file is there and would not read — see
+   *  `MarkSnapshot.unreadable`. Paired with the book, like `ready`. */
+  readonly unreadable: boolean
+  /** Whether a `loadAll` scan is still in flight — `all` and `allBookmarks`
+   *  are not yet an answer while it is. */
+  readonly scanning: boolean
+  /** The last cross-book scan failed — `all` is empty for that reason, not
+   *  because nothing is kept. `MarkSnapshot.scanFailed`. */
+  readonly scanFailed: boolean
   /**
    * Add a mark and hand it back AT ONCE, because the reader draws it before
    * the write lands: foliate only offers marks to an overlay when it builds
@@ -91,8 +100,40 @@ export interface MarksView {
    * either: `all` is a value captured in the closure that called it, one React
    * commit behind the store. This asks the store and hands the rows straight
    * back, so there is no render in the path at all.
+   *
+   * ⚠️ **REJECTS WITH `MarksScanFailed` WHEN THE SCAN DID NOT LAND**, rather
+   * than resolving with the empty list a failed scan leaves behind. That is
+   * the second half of the same backup, and without it the first half only
+   * moved the empty archive one cause further along.
    */
   loadAllNow: () => Promise<readonly Mark[]>
+}
+
+/**
+ * The cross-book scan FAILED — what `loadAllNow` throws instead of answering
+ * with an empty library.
+ *
+ * `MarkStore.loadAll` catches the scan's failure, installs `[]` and resolves,
+ * because the Marginalia panel that calls it has to draw something either way;
+ * the difference between "nothing is kept" and "nothing could be read" lives
+ * in `MarkSnapshot.scanFailed`. The panel reads that flag and says which it
+ * was. Every OTHER caller read the empty list as an answer — and the export
+ * turned that answer into a file: `{"version":1,"books":[]}` written over the
+ * reader's only backup and reported as a success (the 2026-08-28 audit, #101).
+ *
+ * A REJECTION RATHER THAN A FLAG BESIDE THE ROWS, because a caller that
+ * forgets to read a flag writes the empty archive, and a caller that forgets
+ * to catch does not write anything at all. The failure mode of the omission
+ * is what decides the shape.
+ */
+export class MarksScanFailed extends Error {
+  constructor() {
+    /* NO `cause` TO CARRY, and no parameter pretending there might be:
+       `MarkStore.loadAll` catches the scan's failure and does not keep it.
+       This says which failure it is, which is what the callers branch on. */
+    super("the library's marks could not be read")
+    this.name = 'MarksScanFailed'
+  }
 }
 
 const SAVE_FAILED = "Paper: could not save that book's marks"
@@ -105,6 +146,12 @@ function letGo(written: Promise<unknown>): void {
 
 export function useMarks(store: MarkStore, bookId: string | null): MarksView {
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
+  /* WHETHER THE CROSS-BOOK SCAN IS STILL RUNNING. `loadAll` costs a read per
+   * book and the store publishes nothing until it lands, so the panel that
+   * asked drew "Nothing kept yet" over a library it had not finished reading.
+   * Counted rather than flagged: two overlapping scans must not let the first
+   * to finish declare the second done. */
+  const [scans, setScans] = useState(0)
 
   /* Which book is open is the component's to say and the service's to act
    * on: the read goes on that book's queue, and a read that lands after the
@@ -132,15 +179,39 @@ export function useMarks(store: MarkStore, bookId: string | null): MarksView {
         letGo(store.add(mark))
         return mark
       },
-      addMany: (bookId: string, drafts: readonly NewMark[]): Promise<void> =>
-        store.addMany(bookId, drafts.map((draft) => createMark(draft))),
+      addMany: (bookId: string, drafts: readonly NewMark[]): Promise<void> => {
+        /* FAIL FAST on a draft naming another book. The store writes the batch
+         * under the FIRST argument's file, so a mismatched draft would land in
+         * one book's file while carrying another book's id — ownership
+         * corrupted quietly, surfacing only when a later mutation routes by
+         * the id inside the row. Today's one caller builds both from the same
+         * plan entry; this guard is for the caller that will not. */
+        const foreign = drafts.find((draft) => draft.bookId !== bookId)
+        if (foreign) {
+          return Promise.reject(
+            new Error(`addMany for ${bookId} was handed a draft belonging to ${foreign.bookId}`),
+          )
+        }
+        return store.addMany(bookId, drafts.map((draft) => createMark(draft)))
+      },
       remove: (mark: MarkRef) => letGo(store.remove(mark.id, mark.bookId)),
       setNote: (mark: MarkRef, note: string) => letGo(store.updateNote(mark.id, note, mark.bookId)),
       rekey: (from: string, to: string) => letGo(store.rekey(from, to)),
-      loadAll: () => letGo(store.loadAll()),
+      loadAll: () => {
+        setScans((n) => n + 1)
+        letGo(store.loadAll().finally(() => setScans((n) => n - 1)))
+      },
       loadAllNow: async () => {
         await store.loadAll()
         const fresh = store.getSnapshot()
+        /* ⚠️ A FAILED SCAN STILL RESOLVES, so the flag is the only thing that
+         * tells it from an empty library — see `MarksScanFailed`. `loadAll`
+         * catches the scan's failure and installs `[]` on purpose, for the
+         * panel that has to draw something; this caller has to WRITE something,
+         * and an empty answer becoming a file on disk is the one outcome worth
+         * refusing. Read from the snapshot the scan just published rather than
+         * from the hook's `all`, which is a commit behind. */
+        if (fresh.scanFailed) throw new MarksScanFailed()
         /* BOTH CLASSES. They share a file and a store and are split at the
            snapshot; anything that wants the whole of what a reader left in
            their books has to put them back together. */
@@ -158,8 +229,24 @@ export function useMarks(store: MarkStore, bookId: string | null): MarksView {
       bookmarks,
       persistent: snapshot.persistent,
       ready: snapshot.ready && snapshot.bookId === bookId,
+      unreadable: snapshot.unreadable && snapshot.bookId === bookId,
+      scanning: scans > 0,
+      scanFailed: snapshot.scanFailed,
       ...verbs,
     }),
-    [snapshot.all, snapshot.allBookmarks, current, bookmarks, snapshot.persistent, snapshot.ready, snapshot.bookId, bookId, verbs],
+    [
+      snapshot.all,
+      snapshot.scanFailed,
+      snapshot.allBookmarks,
+      current,
+      bookmarks,
+      snapshot.persistent,
+      snapshot.ready,
+      snapshot.unreadable,
+      snapshot.bookId,
+      bookId,
+      scans,
+      verbs,
+    ],
   )
 }

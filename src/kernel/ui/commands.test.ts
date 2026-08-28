@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest'
 import { buildCommands, filterCommands, score, type Command } from './commands'
 import { DEFAULT_STEP_IDX, READING_STEPS } from '../core/metrics'
 import { PANE_SHORTCUTS, panesFor } from './panes'
-import { resolveAccel } from './accel'
+import { resolveAccel, resolvePageKey } from './accel'
 import { initialState, paneFits, type AppState } from './state'
 
 function context(over: Partial<AppState> = {}) {
@@ -210,6 +210,7 @@ describe('advertised combos are bound', () => {
    * pass for the wrong reason: absent, rather than declined.
    */
   const anything = {
+    platform: 'macos',
     screen: 'reader',
     pane: null,
     hasSelection: true,
@@ -219,6 +220,51 @@ describe('advertised combos are bound', () => {
     canJumpBack: true,
     canJumpForward: true,
   } as const
+
+  /**
+   * Ctrl+Q is a quit only where nothing else owns the key. macOS has an
+   * application menu whose Quit item takes ⌘Q before the webview sees it;
+   * Windows and Linux have no menu bar, so with decorations off the close
+   * button was the only quit — and a held key must not fire a close per
+   * repeat, on the rule every other toggle follows.
+   */
+  it('binds Ctrl+Q to quit off macOS, and leaves ⌘Q to the platform on it', () => {
+    expect(resolveAccel({ key: 'q', repeat: false }, { ...anything, platform: 'windows' })).toEqual({ kind: 'quit' })
+    expect(resolveAccel({ key: 'q', repeat: false }, { ...anything, platform: 'linux' })).toEqual({ kind: 'quit' })
+    expect(resolveAccel({ key: 'q', repeat: false }, anything)).toBeNull()
+    expect(resolveAccel({ key: 'q', repeat: true }, { ...anything, platform: 'windows' })).toBeNull()
+  })
+
+  /**
+   * Repeat suppression comes from the ACTION'S KIND, not a second key list.
+   * The hand-kept set this replaced had drifted: `l` was bound and unlisted,
+   * so a held ⌘L flickered between reader and library, and a held ⌘D wrote a
+   * mark and a tombstone per repeat — ⌘B's defect on another key. The walks
+   * (⌘+, ⌘[) stay repeatable on purpose; everything else is one press.
+   */
+  it('suppresses a repeat for every binding that is not a walk — including the two the old list missed', () => {
+    expect(resolveAccel({ key: 'l', repeat: false }, anything)).toEqual({ kind: 'toggleScreen' })
+    expect(resolveAccel({ key: 'l', repeat: true }, anything)).toBeNull()
+    const selecting = { ...anything, hasSelection: true }
+    expect(resolveAccel({ key: 'd', repeat: false }, selecting)).toEqual({ kind: 'markSelection' })
+    expect(resolveAccel({ key: 'd', repeat: true }, selecting)).toBeNull()
+    /* The walks still repeat. */
+    expect(resolveAccel({ key: '=', repeat: true }, anything)).toEqual({ kind: 'stepBy', delta: 1 })
+    expect(
+      resolveAccel({ key: '[', repeat: true }, { ...anything, canJumpBack: true }),
+    ).toEqual({ kind: 'jumpBack' })
+  })
+
+  /**
+   * Caps Lock is not Shift. With it latched every letter arrives uppercase,
+   * and the letter shortcuts all went dead; with Shift genuinely down the
+   * combo is a different one and stays unbound.
+   */
+  it('reads a Caps-Locked letter as the letter, and a shifted one as a different combo', () => {
+    const bookmarkable = { ...anything, onReader: true, canBookmark: true }
+    expect(resolveAccel({ key: 'B', repeat: false }, bookmarkable)).toEqual({ kind: 'toggleBookmark' })
+    expect(resolveAccel({ key: 'B', repeat: false, shiftKey: true }, bookmarkable)).toBeNull()
+  })
 
   /**
    * What a printed combo requires the handler to bind.
@@ -611,5 +657,71 @@ describe('the way into the removed books', () => {
     for (const word of ['deleted', 'restore', 'undo', 'recover', 'trash']) {
       expect(filterCommands(commands, word).map((c) => c.id), word).toContain('library:trash')
     }
+  })
+})
+
+/**
+ * ⚠️ **→ AND THE RIGHT CHEVRON MOVED OPPOSITE WAYS IN A RIGHT-TO-LEFT BOOK.**
+ * The arrows were bound to `next`/`prev` — an ORDER — while the chevrons and
+ * the trackpad go through `goLeft`/`goRight` — a SIDE — which the fork resolves
+ * from the book's own `dir`. So in an RTL book the → key turned to the next
+ * page, which is on the left, and the → chevron beside it turned to the
+ * previous one. An arrow key is a side, exactly as a chevron is; PageUp,
+ * PageDown and Space are an order and stay one.
+ */
+describe('resolvePageKey', () => {
+  const press = (key: string, over: { code?: string; shiftKey?: boolean } = {}) => ({
+    key,
+    code: over.code ?? key,
+    shiftKey: over.shiftKey ?? false,
+  })
+
+  it('sends the arrows to a side and the paging keys to an order', () => {
+    expect(resolvePageKey(press('ArrowRight'))).toBe('goRight')
+    expect(resolvePageKey(press('ArrowLeft'))).toBe('goLeft')
+    expect(resolvePageKey(press('PageDown'))).toBe('next')
+    expect(resolvePageKey(press('PageUp'))).toBe('prev')
+  })
+
+  it('reads Space by key or by code, and ⇧Space as the previous page', () => {
+    expect(resolvePageKey(press(' '))).toBe('next')
+    expect(resolvePageKey(press('Spacebar', { code: 'Space' }))).toBe('next')
+    expect(resolvePageKey(press(' ', { shiftKey: true }))).toBe('prev')
+  })
+
+  /* ⇧arrow is a SELECTION in every text surface there is, and ⇧PageDown is
+     nothing this app binds — both left to the platform, not swallowed. */
+  it('leaves a shifted arrow to the selection and an unbound key to the platform', () => {
+    expect(resolvePageKey(press('ArrowRight', { shiftKey: true }))).toBeNull()
+    expect(resolvePageKey(press('ArrowLeft', { shiftKey: true }))).toBeNull()
+    expect(resolvePageKey(press('PageDown', { shiftKey: true }))).toBeNull()
+    expect(resolvePageKey(press('ArrowUp'))).toBeNull()
+    expect(resolvePageKey(press('Home'))).toBeNull()
+    expect(resolvePageKey(press('a'))).toBeNull()
+    /* A SYSTEM-MODIFIED KEY IS NOT A READING KEY. The caller strips only the
+       platform's primary accelerator, so Ctrl-, Meta- and Alt-arrows — window
+       management, word movement, history — arrived looking plain and turned
+       the page out from under the gesture they belong to. */
+    expect(resolvePageKey({ ...press('ArrowRight'), altKey: true })).toBeNull()
+    expect(resolvePageKey({ ...press('ArrowLeft'), ctrlKey: true })).toBeNull()
+    expect(resolvePageKey({ ...press('PageDown'), metaKey: true })).toBeNull()
+    expect(resolvePageKey({ ...press(' '), metaKey: true })).toBeNull()
+  })
+
+  /**
+   * THE SIDE IS RESOLVED BY THE BOOK, and this pins where. `goRight` is `prev`
+   * in an RTL book because the fork reads `book.dir` — the same fact the
+   * chevrons and the wheel already rely on. Read from the shipped source, the
+   * way `pageTurn.test.ts` pins the paginator: a rebase that dropped it would
+   * put the arrows back to disagreeing with the chevrons, silently, and only
+   * in books written right to left.
+   */
+  it('and the fork resolves that side from the book’s direction', () => {
+    const view = readFileSync(
+      fileURLToPath(new URL('../../../node_modules/foliate-js/view.js', import.meta.url)),
+      'utf8',
+    )
+    expect(view).toMatch(/goRight\(\)\s*\{\s*return this\.book\.dir === 'rtl' \? this\.prev\(\) : this\.next\(\)/)
+    expect(view).toMatch(/goLeft\(\)\s*\{\s*return this\.book\.dir === 'rtl' \? this\.next\(\) : this\.prev\(\)/)
   })
 })

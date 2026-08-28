@@ -3,8 +3,9 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use paper_webauth::sessions::SessionId;
 use paper_webhost::pipe::{Send, WebSessionId};
 use paper_webhost::WebHost;
 
@@ -74,14 +75,34 @@ impl WebHostState {
         }
     }
 
+    /// The listener bound: `Pending` → `Bound(port)`, and ONLY that.
+    ///
+    /// `compare_exchange` from `Pending`, so a second report — or one landing
+    /// after a failure was already recorded — cannot resurrect a dead status.
+    /// A port of 0 would ENCODE `Pending` (the sentinel), and a listener never
+    /// reports 0 — `local_addr` answers with the port the kernel chose — so a
+    /// 0 here is a caller bug, recorded as a failure rather than stored as a
+    /// silent "still waiting".
     pub fn set_port(&self, port: u16) {
-        self.bind.store(u32::from(port), Ordering::SeqCst);
+        if port == 0 {
+            log::error!("webhost: a bound listener reported port 0; treating the bind as failed");
+            self.set_bind_failed();
+            return;
+        }
+        let _ = self.bind.compare_exchange(
+            BIND_PENDING,
+            u32::from(port),
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
     }
 
-    /// The bind was refused. **CALL THIS ON EVERY FAILING PATH** — a bind that
-    /// neither succeeds nor is reported leaves the pane saying "looking for an
-    /// address" for the life of the run, which is the failure this type exists
-    /// to make impossible to ship silently.
+    /// No browser client this run. **CALL THIS ON EVERY FAILING PATH** — a bind
+    /// that neither succeeds nor is reported leaves the pane saying "looking
+    /// for an address" for the life of the run, which is the failure this type
+    /// exists to make impossible to ship silently. Legitimate from `Pending`
+    /// (the bind failed) AND from `Bound` (the server stopped later); `Failed`
+    /// is the one terminal state.
     pub fn set_bind_failed(&self) {
         self.bind.store(BIND_FAILED, Ordering::SeqCst);
     }
@@ -154,7 +175,7 @@ impl WebHostState {
     /// now" is a question about the pipe and not a second piece of state to keep
     /// in step.
     pub fn browsers(&self) -> Vec<Browser> {
-        let open: Vec<_> = self
+        let open: Vec<SessionId> = self
             .host
             .pipe
             .live_ids()
@@ -163,11 +184,15 @@ impl WebHostState {
             .collect();
         self.host
             .sessions
-            .live_sessions()
+            .records(SystemTime::now())
             .into_iter()
-            .map(|id| Browser {
-                id: id.as_u64(),
-                connected: open.contains(&id),
+            .map(|record| Browser {
+                id: record.id.as_u64(),
+                connected: open.contains(&record.id),
+                label: record.label,
+                created_ms: epoch_ms(record.created),
+                last_seen_ms: epoch_ms(record.last_seen),
+                expires_at_ms: epoch_ms(record.expires_at),
             })
             .collect()
     }
@@ -176,25 +201,79 @@ impl WebHostState {
     ///
     /// Takes the DURABLE authorization id, not a socket id. Revoking by socket
     /// could only ever reach a browser that happened to be connected.
-    pub fn revoke(&self, id: u64) {
+    ///
+    /// `Err(Unsaved)` means the browser IS cut off and the disk did not take
+    /// it: after a restart it may be back. Both facts reach the pane.
+    pub fn revoke(&self, id: u64) -> Result<(), Error> {
         /* Forget the credential FIRST so a reconnect cannot slip through the
          * gap, then close whatever sockets it holds. `Sessions::revoke` alone
          * leaves an open socket answering requests, which its own doc comment
          * warns about — and a browser with no socket at all is exactly the case
          * this ordering has to cover, because there is nothing to close. */
-        if let Some(credential) = self
-            .host
-            .sessions
-            .revoke_by_id(paper_webauth::sessions::SessionId::from_u64(id))
-        {
-            self.host.pipe.close_credential(&credential, "revoked");
+        let revoked = self.host.sessions.revoke_by_id(SessionId::from_u64(id));
+        if let Some(browser) = revoked.applied {
+            self.host.pipe.close_browser(browser, "revoked");
         }
+        revoked.saved.map_err(|error| {
+            /* THE DISK'S REASON GOES TO THE LOG AND STAYS THERE. The wire
+             * carries the stable code alone (`Serialize` on `Error`), so this
+             * line is the one place the io error is ever seen — which is why
+             * the variant carries no copy of it. */
+            log::error!("webhost: a revocation was applied but could not be saved: {error}");
+            Error::Unsaved
+        })
     }
 
-    pub fn send(&self, session: u64, frame: Vec<u8>) -> Result<(), Error> {
-        match self.host.pipe.send(WebSessionId(session), frame) {
+    /// Sign out every browser. Returns how many. See `WebHost::revoke_all`
+    /// for the four things it touches; the `Err` is the same "applied, not
+    /// saved" answer `revoke` gives.
+    pub fn revoke_all(&self) -> Result<usize, Error> {
+        let revoked = self.host.revoke_all();
+        let count = revoked.applied.len();
+        revoked.saved.map(|()| count).map_err(|error| {
+            /* As in `revoke`: the wire gets the code, the log gets the cause,
+             * and the variant carries neither twice. */
+            log::error!(
+                "webhost: every browser was signed out but the change could not be saved: {error}"
+            );
+            Error::Unsaved
+        })
+    }
+
+    /// How long a send waits for the browser to make room before the browser
+    /// is judged to have stopped.
+    ///
+    /// The wait ends the moment ANY room appears — one 512 KiB chunk written to
+    /// the socket frees that much — so this is not "drain 8 MiB in a minute",
+    /// it is "drain one chunk in a minute". A phone on a poor link manages
+    /// that; a phone whose page the OS has suspended, or a tab that closed
+    /// without the socket noticing, does not, and holding a router connection
+    /// open for it any longer only delays the reconnect the client will make.
+    const SEND_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+    /// A frame to one browser, WAITING for room rather than refusing.
+    ///
+    /// ⚠️ **THIS MAPPED `Backpressure` TO AN ERROR**, under a doc comment on
+    /// the variant saying "NOT an error… retry" — and the webview's pump does
+    /// not retry a rejected send; it closes the session as dead. Twelve 512 KiB
+    /// chunks of a book filled the session's budget, and every larger book
+    /// aborted mid-stream on the phone. `Pipe::send_wait` is the retry, done
+    /// where the room appears.
+    ///
+    /// A wait that runs out CLOSES THE SOCKET. The peer envelope makes the same
+    /// call for the same reason: a browser that has drained nothing for
+    /// `SEND_WAIT` is not reading, closing is what frees its budget, and the
+    /// browser learning it was cut off is what lets it reconnect. The error
+    /// keeps its name on the wire — the webview drops the router connection,
+    /// as it should for a session that is now gone.
+    pub async fn send(&self, session: u64, frame: Vec<u8>) -> Result<(), Error> {
+        let id = WebSessionId(session);
+        match self.host.pipe.send_wait(id, frame, Self::SEND_WAIT).await {
             Send::Sent => Ok(()),
-            Send::Backpressure => Err(Error::Backpressure),
+            Send::Backpressure(_) => {
+                self.host.pipe.close(id, "not keeping up");
+                Err(Error::Backpressure)
+            }
             Send::TooLarge => Err(Error::FrameTooLarge),
             Send::Gone => Err(Error::NoSuchSession),
         }
@@ -224,23 +303,23 @@ impl WebHostState {
     }
 }
 
+/// Epoch milliseconds for the wire, saturating at zero for a clock before 1970.
+fn epoch_ms(at: SystemTime) -> u64 {
+    at.duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The three-state, on its own — no `WebHostState`, which needs a running
-    /// `WebHost`. The encoding is what could go wrong: one atomic carrying a
-    /// port and two sentinels.
-    fn cell() -> AtomicU32 {
-        AtomicU32::new(BIND_PENDING)
-    }
-
-    fn read(cell: &AtomicU32) -> Bind {
-        match cell.load(Ordering::SeqCst) {
-            BIND_PENDING => Bind::Pending,
-            BIND_FAILED => Bind::Failed,
-            port => Bind::Bound(port as u16),
-        }
+    /// The REAL type, not a re-implementation of its decoding. These tests
+    /// carried their own copy of the atomic's encode/decode and their own
+    /// `port()` fold, so a regression in `WebHostState::bind()` itself would
+    /// have left them green. `WebHost::new()` is an in-memory host; nothing
+    /// here binds anything.
+    fn state() -> WebHostState {
+        WebHostState::new(Arc::new(paper_webhost::WebHost::new()))
     }
 
     /// ⚠️ **PENDING IS NOT FAILED, AND THEY USED TO BE ONE VALUE.** The port
@@ -250,40 +329,22 @@ mod tests {
     /// reopen Paper", permanently, over a client that was about to work.
     #[test]
     fn a_bind_that_has_not_answered_is_not_a_bind_that_failed() {
-        let cell = cell();
-        assert_eq!(read(&cell), Bind::Pending);
-        assert_ne!(read(&cell), Bind::Failed);
+        let state = state();
+        assert_eq!(state.bind(), Bind::Pending);
+        assert_ne!(state.bind(), Bind::Failed);
     }
 
+    /// Ports a listener can actually report all read back as themselves —
+    /// the sentinels (`Pending` = 0, `Failed` above `u16`) cannot collide,
+    /// because a listener never reports 0: binding to 0 asks the kernel to
+    /// choose, and `local_addr` answers with the choice.
     #[test]
     fn a_bound_port_reads_back_as_itself() {
-        let cell = cell();
-        cell.store(u32::from(27182u16), Ordering::SeqCst);
-        assert_eq!(read(&cell), Bind::Bound(27182));
-    }
-
-    /// The sentinels cannot collide with a port a listener can report.
-    ///
-    /// `Failed` is above the whole `u16` range. `Pending` is 0, which is a
-    /// `u16` — and is safe for the reason the constant's own note gives: a
-    /// listener never REPORTS 0. Binding to port 0 asks the kernel to choose
-    /// one, and `local_addr` answers with the port it chose. So the range that
-    /// has to be clear is 1..=65535, and that is what this walks.
-    #[test]
-    fn the_sentinels_are_outside_the_range_of_a_port() {
-        assert!(BIND_FAILED > u32::from(u16::MAX));
         for port in [1u16, 80, 27182, u16::MAX] {
-            let raw = u32::from(port);
-            assert_ne!(raw, BIND_PENDING);
-            assert_ne!(raw, BIND_FAILED);
-            assert_eq!(
-                match raw {
-                    BIND_PENDING => Bind::Pending,
-                    BIND_FAILED => Bind::Failed,
-                    got => Bind::Bound(got as u16),
-                },
-                Bind::Bound(port)
-            );
+            let state = state();
+            state.set_port(port);
+            assert_eq!(state.bind(), Bind::Bound(port));
+            assert_eq!(state.port(), Some(port));
         }
     }
 
@@ -292,12 +353,42 @@ mod tests {
     /// answers are asserted here so the folding stays deliberate.
     #[test]
     fn port_is_none_for_both_ways_of_having_no_port() {
-        let port_of = |bind| match bind {
-            Bind::Bound(port) => Some(port),
-            Bind::Pending | Bind::Failed => None,
-        };
-        assert_eq!(port_of(Bind::Pending), None);
-        assert_eq!(port_of(Bind::Failed), None);
-        assert_eq!(port_of(Bind::Bound(27182)), Some(27182));
+        let pending = state();
+        assert_eq!(pending.port(), None);
+        let failed = state();
+        failed.set_bind_failed();
+        assert_eq!(failed.port(), None);
+        assert_eq!(failed.bind(), Bind::Failed);
+    }
+
+    /// `Failed` is terminal: a port report landing after a failure was
+    /// recorded must not resurrect the status — the one writer that follows a
+    /// failure is a bug, and believing it would advertise a dead client.
+    #[test]
+    fn a_failure_is_not_overwritten_by_a_late_port() {
+        let state = state();
+        state.set_bind_failed();
+        state.set_port(27182);
+        assert_eq!(state.bind(), Bind::Failed);
+    }
+
+    /// A reported port of 0 would ENCODE `Pending` — the pane would say
+    /// "looking for an address" forever. It is recorded as the failure it is.
+    #[test]
+    fn a_reported_port_of_zero_is_a_failure_not_a_silent_pending() {
+        let state = state();
+        state.set_port(0);
+        assert_eq!(state.bind(), Bind::Failed);
+    }
+
+    /// The server stopping AFTER a successful bind moves `Bound` → `Failed`;
+    /// a status left at `Bound` advertised a dead port for the life of the
+    /// run.
+    #[test]
+    fn a_server_that_stopped_moves_bound_to_failed() {
+        let state = state();
+        state.set_port(27182);
+        state.set_bind_failed();
+        assert_eq!(state.bind(), Bind::Failed);
     }
 }

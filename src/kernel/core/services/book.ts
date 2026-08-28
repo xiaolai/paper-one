@@ -1,9 +1,8 @@
 import { folderOf, type BookRecord } from '../bookFolder'
-import { CONTENT_EXTENSIONS, isContentExtension } from '../bookVault'
 import { BLOB_FOLDER } from '../ports'
 import { listTrash } from '../bookTrash'
 import type { IndexedBook } from '../bookIndex'
-import { allTags, byRecency, displayAuthor, inScope, matchesQuery } from '../library'
+import { allTags, byRecency, inScope, matchesQuery } from '../library'
 import { parseQuery } from '../searchQuery'
 import { fold, tagKey } from '../tags'
 import type { ServiceContext } from '../capability'
@@ -12,7 +11,7 @@ import { bool, descriptorOf, num, readInput, reqStr, str, type ServiceInput } fr
 import { pages } from './paging'
 import { trashFs } from './trash'
 import { SERVICE_ERRORS, refuse } from './refusals'
-import { bookDetail, bookRow, type BookDetail, type BookRow, type RemovedRow, type RestoredRow } from './rows'
+import { bookDetail, bookRow, positionSet, type BookDetail, type BookRow, type PositionSetRow, type RemovedRow, type RestoredRow } from './rows'
 
 /**
  * `book.*` — the noun the whole library hangs off (phase 11, WI-11.3/11.5).
@@ -51,9 +50,16 @@ function filtered(books: readonly IndexedBook[], input: ServiceInput): readonly 
   const wantedAuthor = author === undefined ? null : fold(author)
   return books.filter((book) => {
     if (wantedTag !== null && !allTags(book).some((one) => tagKey(one) === wantedTag)) return false
-    if (wantedAuthor !== null && !fold(displayAuthor(book)).includes(wantedAuthor)) return false
+    /* THE STORED FIELD, not the display fallback: `displayAuthor` answers
+     * "Unknown author" for an empty one, so that phrase as a filter matched
+     * every authorless book against a filter the doc says is over the field. */
+    if (wantedAuthor !== null && !fold(book.author ?? '').includes(wantedAuthor)) return false
     if (finished !== undefined && (book.finished === true) !== finished) return false
-    if (downloaded !== undefined && (book.hasContent === true) !== downloaded) return false
+    /* THREE STATES, and the filter names two of them exactly: `true` is a
+     * measured yes, `false` a measured no, and an unmeasured row answers
+     * NEITHER — collapsing unknown into "not downloaded" was a definite
+     * answer the model never gave. */
+    if (downloaded !== undefined && book.hasContent !== downloaded) return false
     if (since !== undefined && !touchedSince(book, since)) return false
     return true
   })
@@ -168,18 +174,10 @@ export function bookAdd(env: ServiceEnvironment) {
           : `book ${bookId} would share a folder with ${trashed.bookId}, which is in the trash`,
       )
     }
+    /* Against the blob layer's own set — declared as the row's `choices`,
+     * so `readInput` refuses it, `--help` prints the vocabulary and this
+     * handler holds no second copy of the rule. */
     const ext = str(input, 'ext')
-    /* AGAINST THE SAME SET THE BLOB LAYER USES. `ext` was any string: the
-     * record truncates it to eight characters and content operations accept
-     * only `CONTENT_EXTENSIONS`, so anything else produced a book whose
-     * declared format named a blob nothing would ever store or fetch —
-     * `hasContent` derived from a file that cannot exist. */
-    if (ext !== undefined && !isContentExtension(ext)) {
-      throw refuse(
-        SERVICE_ERRORS.malformed,
-        `ext ${JSON.stringify(ext)} is not a format this shelf stores — one of ${CONTENT_EXTENSIONS.join(', ')}`,
-      )
-    }
     const record: BookRecord = {
       bookId,
       title: reqStr(input, 'title'),
@@ -187,7 +185,26 @@ export function bookAdd(env: ServiceEnvironment) {
       addedAt: Date.now(),
       ...(ext === undefined ? {} : { ext }),
     }
-    await env.services.library.add(bookId, record)
+    /* AND THE DECISION ITSELF IS MADE IN THE BOOK'S LANE — `AddGuard.fresh`.
+     *
+     * Everything above is a check-then-act across a lane boundary: the
+     * snapshot and the trash are read here, and the folder is written there.
+     * Between the two an aliasing `book.add` can publish its own optimistic
+     * row for this folder, or a removal can put the folder in the trash for
+     * `library.add` to silently restore and relabel — and `add` FOLDS rather
+     * than refusing, so both callers were told their book was added and two
+     * logical books ended up sharing one directory.
+     *
+     * The scans stay because they are the better MESSAGE: they name the
+     * occupant, and they fold case, which a path derived from the id cannot on
+     * a case-sensitive filesystem. They are the diagnosis; the lane is the
+     * decision. */
+    if ((await env.services.library.add(bookId, record, false, { fresh: true })) === 'folder-taken') {
+      throw refuse(
+        SERVICE_ERRORS.conflict,
+        `book ${bookId} was not added: its folder was taken while the add waited its turn`,
+      )
+    }
     return bookDetail(find(env, bookId))
   }
 }
@@ -197,8 +214,9 @@ export function bookSet(env: ServiceEnvironment) {
     const input = readInput(descriptorOf('book.set'), req)
     const bookId = reqStr(input, 'book')
     find(env, bookId)
-    const title = str(input, 'title')
-    const author = str(input, 'author')
+    /* NO TITLE, NO AUTHOR — withdrawn on the row (WI-20.7), so `readInput`
+     * has already refused either by name before this runs. The edit went
+     * through `patch` with no stamp and lost to the next parse. */
     const finished = bool(input, 'finished')
     const position = str(input, 'position')
     const progress = num(input, 'progress')
@@ -242,12 +260,30 @@ export function bookSet(env: ServiceEnvironment) {
      * inside the patch rather than read off a snapshot out here — omitted
      * means "leave it alone", and the record is what actually holds it. */
     await env.services.library.patch(bookId, {
-      ...(title === undefined ? {} : { title }),
-      ...(author === undefined ? {} : { author }),
       ...(finished === undefined ? {} : { finished }),
       ...(position === undefined ? {} : { position: { position, ...(progress === undefined ? {} : { progress }) } }),
     })
     return bookDetail(find(env, bookId))
+  }
+}
+
+/**
+ * `book.position` — one register, under its own grant. See the row.
+ *
+ * The same store verb `book.set` reaches for a position, so the two cannot
+ * disagree about what a position write does; what differs is the door. A
+ * progress not given keeps the record's — a device that knows where it is
+ * but not how far through (a fixed-layout page) must not zero the bar.
+ */
+export function bookPosition(env: ServiceEnvironment) {
+  return async (req: unknown): Promise<PositionSetRow> => {
+    const input = readInput(descriptorOf('book.position'), req)
+    const bookId = reqStr(input, 'book')
+    const book = find(env, bookId)
+    const position = reqStr(input, 'position')
+    const progress = num(input, 'progress') ?? book.progress ?? 0
+    await env.services.library.rememberPosition(bookId, position, progress)
+    return positionSet(find(env, bookId))
   }
 }
 
@@ -289,7 +325,32 @@ export function bookRestore(env: ServiceEnvironment) {
      * was told their book was back while its record sat in the trash ageing
      * towards the sweep. An unreadable trash now REFUSES rather than
      * answering "there was nothing to restore". */
-    const outcome = await env.services.library.restore(bookId)
+    /* AND THE IDENTITY IS READ AGAIN IN THE BOOK'S LANE — `RestoreGuard`.
+     *
+     * The scan above is a check-then-act across a lane boundary: the trash is
+     * read here and the folder is emptied there, and a removal of an aliasing
+     * id lands in exactly the folder this restore is about to empty. The scan
+     * stays because it names the occupant and folds case; the lane is what
+     * cannot be raced. Both refuse with the same sentence, because a caller
+     * branching on the message must not be able to tell which one answered. */
+    const outcome = await env.services.library.restore(bookId, { onlyThisBook: true })
+    if (outcome.state === 'mismatch') {
+      throw refuse(
+        SERVICE_ERRORS.conflict,
+        `that folder holds ${outcome.bookId}, not ${bookId}; nothing was restored`,
+      )
+    }
+    /* AND A FOLDER WHOSE OWNER CANNOT BE ESTABLISHED IS REFUSED TOO, with its
+     * own sentence because the reader's move is different: a mismatch names
+     * the book in the way, and this one names the file to look at. Answering
+     * "nothing to restore" over a record that would not read is the shape of
+     * lie the outcome type was widened to stop. */
+    if (outcome.state === 'unreadable') {
+      throw refuse(
+        SERVICE_ERRORS.conflict,
+        `the record in the ${outcome.at} folder for ${bookId} could not be read, so it cannot be told whose book it is; nothing was restored`,
+      )
+    }
     return {
       bookId,
       restored: outcome.state !== 'absent',

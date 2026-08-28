@@ -209,8 +209,6 @@ class FakeWireImpl implements FakeWire {
     return `/fake/${this.id}`
   }
 
-  async fsync(): Promise<void> {}
-
   async listPeers(): Promise<readonly WirePeer[]> {
     return [...this.peers.values()]
   }

@@ -10,7 +10,9 @@
 //! `.part` from disk (never the stream incrementally, so an out-of-band change
 //! cannot slip through) and re-validates containment, then renames `.part`
 //! into place. On a size, hash, or containment mismatch the `.part` is
-//! deleted. One transfer per target at a time.
+//! deleted. One transfer per target at a time. A `.part` an interruption
+//! leaves behind is kept for the resume; one nobody comes back for in a day
+//! is collected at the next launch ([`sweep_abandoned_parts`]).
 //!
 //! Symmetric: a shelf serves its books to a satchel; a satchel serves a book
 //! it imported to the shelf. Neither side writes anything but the blob.
@@ -19,7 +21,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use iroh::endpoint::{RecvStream, SendStream};
 use serde::{Deserialize, Serialize};
@@ -31,11 +33,186 @@ use crate::error::{Error, Result};
 use crate::events::{PeerEvent, TransferProgress, TransferState};
 use crate::frame::{read_json, write_json};
 use crate::node::{parse_peer_id, Node};
-use crate::paths::{Access, BlobTarget};
+use crate::paths::{validate_folder, Access, BlobTarget, BOOKS_DIR};
 use crate::session::Session;
 
 /// The grant a peer needs for the server to serve it anything.
 pub const GRANT_READ: &str = "blob:read";
+
+/// How long an abandoned `.part` is kept for a resume before the launch sweep
+/// collects it. Measured from the file's mtime — the last byte a fetch
+/// appended — so a transfer that is merely slow is never collected while it
+/// is still landing bytes.
+pub const PART_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// What one launch sweep did. The plugin's setup logs it; nothing else reads
+/// it.
+#[derive(Debug, Default)]
+pub struct PartSweep {
+    /// Collected, in the order found.
+    pub removed: Vec<PathBuf>,
+    /// `.part` files seen and left: younger than [`PART_MAX_AGE`], dated in
+    /// the future, not a regular file, or the `.part` of a name the fetch
+    /// path never writes.
+    pub kept: usize,
+    /// Could not be examined or removed. Each is logged; none stops the
+    /// sweep.
+    pub failed: Vec<(PathBuf, Error)>,
+}
+
+impl PartSweep {
+    /// One warning per failure, one line for a sweep that removed something,
+    /// silence for the common launch that found nothing to do.
+    pub fn log(&self) {
+        for (path, err) in &self.failed {
+            log::warn!(
+                "peer: the .part sweep could not handle {}: {err}",
+                path.display()
+            );
+        }
+        if !self.removed.is_empty() {
+            log::info!(
+                "peer: swept {} abandoned .part file(s) older than a day",
+                self.removed.len()
+            );
+        }
+    }
+}
+
+/// Collect the `.part` files no transfer is coming back for.
+///
+/// A fetch appends into `<target>.part` and keeps it on an interruption so
+/// the next attempt resumes from its length — correct, and unbounded: a
+/// satchel that never returns, a book removed from the shelf, a folder whose
+/// record moved on, each leaves a `.part` beside it for ever, and `paths.rs`
+/// refuses the name so no command can address one. This walks
+/// `<root>/books/<folder>/` and removes each `.part` older than
+/// [`PART_MAX_AGE`]. It runs at launch, on a blocking thread, and the node
+/// waits for it (`PeerState::node`): the node is the only route to a
+/// transfer, so no fetch can resume from a file the sweep is about to
+/// unlink.
+///
+/// Only what a fetch could have written, from where it could have written
+/// it: a candidate must be a regular file whose name
+/// [`BlobTarget::of_part`] accepts, in a folder [`validate_folder`] accepts,
+/// and it is unlinked through the same [`checked_part`](BlobTarget::checked_part)
+/// the fetch runs before its rename — so a planted symlink, a folder linked
+/// out of the root, and a `notes.txt.part` somebody else left are all outside
+/// the sweep's reach, and stay where they are for a human. Synchronous
+/// `std::fs` on purpose: nothing here needs the async runtime, and the
+/// `file_type` the directory listing already carries decides most entries
+/// without a second syscall.
+pub fn sweep_abandoned_parts(root: &Path, now: SystemTime) -> PartSweep {
+    let mut report = PartSweep::default();
+    let books = root.join(BOOKS_DIR);
+    let folders = match std::fs::read_dir(&books) {
+        Ok(folders) => folders,
+        // A fresh root has no `books/` yet. Not a failure, and not created.
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return report,
+        Err(err) => {
+            report.failed.push((books, err.into()));
+            return report;
+        }
+    };
+    for entry in folders {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                report.failed.push((books.clone(), err.into()));
+                continue;
+            }
+        };
+        // From the listing itself: a folder that is a symlink reads as a
+        // symlink, not a directory, and is not walked — the sweep never
+        // follows a link out of the root.
+        match entry.file_type() {
+            Ok(file_type) if file_type.is_dir() => {}
+            Ok(_) => continue,
+            Err(err) => {
+                report.failed.push((entry.path(), err.into()));
+                continue;
+            }
+        }
+        let name = entry.file_name();
+        let Some(folder) = name.to_str() else {
+            continue;
+        };
+        if validate_folder(folder).is_err() {
+            continue;
+        }
+        sweep_folder(root, folder, &entry.path(), now, &mut report);
+    }
+    report
+}
+
+fn sweep_folder(root: &Path, folder: &str, dir: &Path, now: SystemTime, report: &mut PartSweep) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) => {
+            report.failed.push((dir.to_path_buf(), err.into()));
+            return;
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                report.failed.push((dir.to_path_buf(), err.into()));
+                continue;
+            }
+        };
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.ends_with(".part") {
+            continue;
+        }
+        // The `.part` of a name the fetch never writes is somebody else's.
+        let Ok(target) = BlobTarget::of_part(root, folder, name) else {
+            report.kept += 1;
+            continue;
+        };
+        let part = target.part_path();
+        match entry.file_type() {
+            Ok(file_type) if file_type.is_file() => {}
+            // A symlink, or anything else that is not a file a fetch wrote.
+            Ok(_) => {
+                report.kept += 1;
+                continue;
+            }
+            Err(err) => {
+                report.failed.push((part, err.into()));
+                continue;
+            }
+        }
+        let age = match entry.metadata().and_then(|meta| meta.modified()) {
+            // `Err` here is an mtime AFTER `now`: a clock that went backwards
+            // must not make every resume look a day old.
+            Ok(modified) => now.duration_since(modified).ok(),
+            Err(err) => {
+                report.failed.push((part, err.into()));
+                continue;
+            }
+        };
+        if !age.is_some_and(|age| age > PART_MAX_AGE) {
+            report.kept += 1;
+            continue;
+        }
+        // The fetch's containment check, run before its rename; run here
+        // before the unlink for the same reasons.
+        if let Err(err) = target.checked_part(root) {
+            report.failed.push((part, err));
+            continue;
+        }
+        match std::fs::remove_file(&part) {
+            Ok(()) => report.removed.push(part),
+            // Gone between the listing and the unlink: the outcome wanted.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => report.failed.push((part, err.into())),
+        }
+    }
+}
 const CHUNK: usize = 64 * 1024;
 const PROGRESS_EVERY: u64 = 1024 * 1024;
 const HEADER_TIMEOUT: Duration = Duration::from_secs(30);
@@ -302,7 +479,16 @@ async fn serve_inner(
         let want = CHUNK.min((hash.size - sent) as usize);
         let n = file.read(&mut buf[..want]).await?;
         if n == 0 {
-            break;
+            /* The loop only runs while `sent < hash.size`, so EOF here is
+             * always PREMATURE — a file truncated mid-serve. The receiver's
+             * hash check would catch the short body anyway; this makes the
+             * server say so too, instead of reporting a serve it did not
+             * finish as done. */
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("the blob ended at {sent} of {} bytes", hash.size),
+            )
+            .into());
         }
         // Idle deadline on the write: a requester that stops reading stalls
         // this on flow control; drop it rather than hold the task forever.
@@ -478,7 +664,13 @@ async fn run(
         offset = 0;
     }
 
-    let (mut send, mut recv) = session.conn().open_bi().await?;
+    /* Deadlined like every other step of the transfer: a peer that grants no
+     * bidirectional-stream capacity would otherwise hold this — and the
+     * per-target claim behind it — pending forever, answering `TransferBusy`
+     * to every retry of the same book. */
+    let (mut send, mut recv) = timeout(HEADER_TIMEOUT, session.conn().open_bi())
+        .await
+        .map_err(|_| Error::Timeout("blob stream open"))??;
     write_json(
         &mut send,
         &BlobRequest {
@@ -1361,5 +1553,155 @@ mod tests {
                 .kind(),
             "io"
         );
+    }
+
+    /// Give a file an mtime `age` before `now`, so the sweep sees it as
+    /// abandoned then and not before.
+    fn age_file(path: &Path, now: std::time::SystemTime, age: Duration) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(now - age)
+            .unwrap();
+    }
+
+    const TWO_DAYS: Duration = Duration::from_secs(2 * 24 * 60 * 60);
+
+    #[test]
+    fn the_launch_sweep_collects_day_old_parts_and_leaves_the_rest() {
+        let dir = crate::testutil::ScratchDir::new("blob-sweep");
+        let root = dir.path();
+        let now = std::time::SystemTime::now();
+        let books = root.join("books");
+        for folder in ["bk1", "bk2", "bad name"] {
+            std::fs::create_dir_all(books.join(folder)).unwrap();
+        }
+        std::fs::create_dir_all(root.join("peer")).unwrap();
+
+        // Two the sweep owns: day-old `.part`s of names a fetch writes.
+        let old_epub = books.join("bk1").join("content.epub.part");
+        let old_cover = books.join("bk2").join("cover.jpg.part");
+        // Everything else stays: a fresh `.part` (a resume in waiting), the
+        // content file itself however old, a `.part` of a name outside the
+        // grammar, an old `.part` in a folder outside the grammar, and an old
+        // `.part` that is not under `books/` at all.
+        let fresh = books.join("bk1").join("content.pdf.part");
+        let content = books.join("bk1").join("content.epub");
+        let stray = books.join("bk1").join("notes.txt.part");
+        let bad_folder = books.join("bad name").join("content.epub.part");
+        let elsewhere = root.join("peer").join("content.epub.part");
+        for path in [
+            &old_epub,
+            &old_cover,
+            &fresh,
+            &content,
+            &stray,
+            &bad_folder,
+            &elsewhere,
+        ] {
+            std::fs::write(path, b"bytes").unwrap();
+        }
+        for path in [
+            &old_epub,
+            &old_cover,
+            &content,
+            &stray,
+            &bad_folder,
+            &elsewhere,
+        ] {
+            age_file(path, now, TWO_DAYS);
+        }
+
+        let report = sweep_abandoned_parts(root, now);
+
+        assert!(!old_epub.exists(), "day-old content .part collected");
+        assert!(!old_cover.exists(), "day-old cover .part collected");
+        assert!(fresh.exists(), "a fresh .part is a resume in waiting");
+        assert!(content.exists(), "the content file is never the sweep's");
+        assert!(stray.exists(), "a .part of a name the fetch never writes");
+        assert!(
+            bad_folder.exists(),
+            "a folder outside the grammar is not walked"
+        );
+        assert!(elsewhere.exists(), "only books/ is swept");
+        let mut removed = report.removed.clone();
+        removed.sort();
+        let mut expected = vec![old_epub, old_cover];
+        expected.sort();
+        assert_eq!(removed, expected);
+        // Kept: the fresh one and the stray one — `.part`s the sweep saw and
+        // declined. The content file and the bad folder are not `.part`
+        // candidates and are not counted at all.
+        assert_eq!(report.kept, 2);
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+    }
+
+    #[test]
+    fn the_launch_sweep_on_a_fresh_root_does_nothing_and_fails_nothing() {
+        let dir = crate::testutil::ScratchDir::new("blob-sweep-empty");
+        let report = sweep_abandoned_parts(dir.path(), std::time::SystemTime::now());
+        assert!(report.removed.is_empty());
+        assert_eq!(report.kept, 0);
+        assert!(report.failed.is_empty());
+        assert!(
+            !dir.path().join("books").exists(),
+            "the sweep creates nothing"
+        );
+    }
+
+    #[test]
+    fn the_launch_sweep_treats_a_future_mtime_as_fresh() {
+        // A clock that went backwards must not make every resume look a day
+        // old; a `.part` from the future is kept, not collected.
+        let dir = crate::testutil::ScratchDir::new("blob-sweep-future");
+        let folder = dir.path().join("books").join("bk1");
+        std::fs::create_dir_all(&folder).unwrap();
+        let part = folder.join("content.epub.part");
+        std::fs::write(&part, b"bytes").unwrap();
+        let now = std::time::SystemTime::now();
+        std::fs::File::options()
+            .write(true)
+            .open(&part)
+            .unwrap()
+            .set_modified(now + TWO_DAYS)
+            .unwrap();
+        let report = sweep_abandoned_parts(dir.path(), now);
+        assert!(part.exists());
+        assert_eq!(report.kept, 1);
+        assert!(report.removed.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_launch_sweep_does_not_follow_symlinks() {
+        // Finding H4's shape, on the sweep: a `.part` that is a symlink out of
+        // the root, and a book folder that is a symlink to a directory outside
+        // it. Neither the link nor anything behind it is removed.
+        let dir = crate::testutil::ScratchDir::new("blob-sweep-symlink");
+        let root = dir.path().join("root");
+        let outside = dir.path().join("outside");
+        let now = std::time::SystemTime::now();
+        std::fs::create_dir_all(root.join("books").join("bk1")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let victim = outside.join("content.epub.part");
+        std::fs::write(&victim, b"victim").unwrap();
+        age_file(&victim, now, TWO_DAYS);
+        let linked_part = root.join("books").join("bk1").join("content.epub.part");
+        std::os::unix::fs::symlink(&victim, &linked_part).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("books").join("escape")).unwrap();
+
+        let report = sweep_abandoned_parts(&root, now);
+
+        assert!(victim.exists(), "the file behind the link is untouched");
+        assert!(
+            std::fs::symlink_metadata(&linked_part)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the planted link itself is left for a human"
+        );
+        assert!(report.removed.is_empty());
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
     }
 }

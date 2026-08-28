@@ -22,7 +22,8 @@ pub enum Error {
     #[error("the iroh endpoint failed to bind: {0}")]
     Bind(#[from] iroh::endpoint::BindError),
 
-    /// `fs_fsync` was handed a relative path. Paths are resolved against no
+    /// A path arrived relative (the incident was `fs_fsync`, since moved to the
+    /// app crate as `write_atomic`). Paths are resolved against no
     /// working directory here — the caller states the whole path.
     #[error("path is not absolute: {}", .0.display())]
     PathNotAbsolute(PathBuf),
@@ -269,6 +270,18 @@ impl Serialize for Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// The shared root resolver's failures, as this plugin's kinds — so the wire
+/// sees `dataRootNotAbsolute` and `io` exactly as it always did.
+impl From<paper_data_root::Error> for Error {
+    fn from(err: paper_data_root::Error) -> Self {
+        match err {
+            paper_data_root::Error::NotAbsolute(path) => Error::DataRootNotAbsolute(path),
+            paper_data_root::Error::Io(io) => Error::Io(io),
+            paper_data_root::Error::Tauri(tauri) => Error::Tauri(tauri),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

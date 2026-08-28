@@ -1,11 +1,11 @@
 import { writeFileSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { MUTATION_KINDS, SERVICE_TABLE, readingGrant, type MutationKind, type MutationToken } from '../kernel'
 import { FIXTURE_FILES } from '../hosts/node/fixture.testkit'
-import { LOCK_FILE, LockHeld, acquireDataLock } from '../hosts/node/lock'
+import { IDENTITY_TOLERANCE_MS, LOCK_FILE, LockHeld, acquireDataLock, hostBootedAt, ownStartedAt } from '../hosts/node/lock'
 import { openNodeServices, type NodeHost } from '../hosts/node/services'
 import { localCaller } from './caller'
 import { paper } from './paper'
@@ -178,9 +178,9 @@ describe('every write service, through the CLI', () => {
   it('sets fields on a record, and the change is on disk', async () => {
     const dataDir = await library()
     const { host } = await watched(dataDir)
-    expect((await through(host, ['book', 'set', 'bbb', '--title', 'Moby-Dick or, The Whale'])).code).toBe(EXIT.ok)
-    const written = JSON.parse(await readFile(join(dataDir, 'books/bbb/book.json'), 'utf8')) as { title: string }
-    expect(written.title).toBe('Moby-Dick or, The Whale')
+    expect((await through(host, ['book', 'set', 'bbb', '--finished'])).code).toBe(EXIT.ok)
+    const written = JSON.parse(await readFile(join(dataDir, 'books/bbb/book.json'), 'utf8')) as { finished?: boolean }
+    expect(written.finished).toBe(true)
   })
 
   it('adds and removes a book, and a removal is recoverable', async () => {
@@ -276,7 +276,7 @@ describe('the journal bracket a CLI write leaves', () => {
   it('is one begin/commit pair per mutation, with nothing dangling', async () => {
     const dataDir = await library()
     const { host, seen } = await watched(dataDir)
-    await through(host, ['book', 'set', 'bbb', '--title', 'Renamed'])
+    await through(host, ['book', 'set', 'bbb', '--finished'])
     const { pairs, dangling } = bracketsAreWholeAndPaired(seen)
     expect(pairs).toBe(1)
     expect(dangling).toBe(0)
@@ -309,7 +309,7 @@ describe('the journal bracket a CLI write leaves', () => {
 
   it('leaves no bracket at all for a write the service refused', async () => {
     const { host, seen } = await watched(await library())
-    expect((await through(host, ['book', 'set', 'nope', '--title', 'x'])).code).toBe(EXIT.refused)
+    expect((await through(host, ['book', 'set', 'nope', '--finished'])).code).toBe(EXIT.refused)
     expect(seen).toEqual([])
   })
 })
@@ -321,7 +321,7 @@ describe('two writers cannot interleave', () => {
     try {
       const err: string[] = []
       const code = await paper({
-        argv: ['book', 'set', 'bbb', '--title', 'Second'],
+        argv: ['book', 'set', 'bbb', '--finished'],
         dataDir,
         lockWaitMs: 0,
         sinks: { out: () => {}, err: (line) => err.push(line) },
@@ -331,8 +331,8 @@ describe('two writers cannot interleave', () => {
       expect(err.join('\n')).toContain(String(held.owner.pid))
       /* AND NOTHING WAS WRITTEN. A refusal that had already changed the file
        * would be the worst of both. */
-      const record = JSON.parse(await readFile(join(dataDir, 'books/bbb/book.json'), 'utf8')) as { title: string }
-      expect(record.title).toBe('Moby-Dick')
+      const record = JSON.parse(await readFile(join(dataDir, 'books/bbb/book.json'), 'utf8')) as { finished?: boolean }
+      expect(record.finished).toBeUndefined()
     } finally {
       await held.release()
     }
@@ -359,13 +359,13 @@ describe('two writers cannot interleave', () => {
   it('takes the lock, does the write, and gives it back', async () => {
     const dataDir = await library()
     const code = await paper({
-      argv: ['book', 'set', 'bbb', '--title', 'Locked and written'],
+      argv: ['book', 'set', 'bbb', '--finished'],
       dataDir,
       sinks: { out: () => {}, err: () => {} },
     })
     expect(code).toBe(EXIT.ok)
-    const record = JSON.parse(await readFile(join(dataDir, 'books/bbb/book.json'), 'utf8')) as { title: string }
-    expect(record.title).toBe('Locked and written')
+    const record = JSON.parse(await readFile(join(dataDir, 'books/bbb/book.json'), 'utf8')) as { finished?: boolean }
+    expect(record.finished).toBe(true)
     /* Released, so the next writer is not refused by a ghost. */
     await expect(readFile(join(dataDir, LOCK_FILE))).rejects.toThrow()
   })
@@ -391,7 +391,7 @@ describe('two writers cannot interleave', () => {
      * either way, which is what this test was really for. */
     await expect(
       paper({
-        argv: ['book', 'set', 'bbb', '--title', 'x'],
+        argv: ['book', 'set', 'bbb', '--finished'],
         dataDir: root,
         sinks: { out: () => {}, err: (line) => err.push(line) },
       }),
@@ -404,7 +404,7 @@ describe('two writers cannot interleave', () => {
     const dataDir = await library()
     expect(
       await paper({
-        argv: ['book', 'set', 'nope', '--title', 'x'],
+        argv: ['book', 'set', 'nope', '--finished'],
         dataDir,
         sinks: { out: () => {}, err: () => {} },
       }),
@@ -434,6 +434,56 @@ describe('two writers cannot interleave', () => {
     } finally {
       await held.release()
     }
+  })
+
+  it('treats a record whose pid could never have been written as held by somebody unnameable', async () => {
+    /* Corruption wearing a record's shape. A fractional or negative pid
+     * used to flow to `kill()`, which throws on it, and "the holder is gone"
+     * RECLAIMED the file — the permissive reading of junk. Junk lands on
+     * the held side, like every other unreadable lock. */
+    const dataDir = await library()
+    await writeFile(
+      join(dataDir, LOCK_FILE),
+      JSON.stringify({ pid: -1.5, host: (await import('node:os')).hostname(), at: 1, command: 'garbage', token: 't' }),
+    )
+    await expect(acquireDataLock(dataDir, { waitMs: 0, alive: () => false })).rejects.toBeInstanceOf(LockHeld)
+  })
+
+  /**
+   * AND NEITHER IS A TIMESTAMP THAT COULD NOT HAVE BEEN WRITTEN. The pid was
+   * validated and the three stamps beside it were not, which left two halves
+   * of one defect:
+   *
+   *   - `at` went straight into `new Date(at).toISOString()` in `LockHeld`'s
+   *     message, so a record holding `1e400` — legal JSON, `Infinity` once
+   *     parsed — made the refusal throw `RangeError: Invalid time value`.
+   *     The writer trying to explain who held the library crashed instead.
+   *   - `startedAt` went into `Math.abs(startedAt − now) > TOLERANCE`, which
+   *     for an infinity is TRUE: the identity check declared a perfectly
+   *     live holder stale and RECLAIMED its lock. The permissive direction,
+   *     which is how two writers happen.
+   *
+   * Written as raw text rather than through `JSON.stringify`, because that
+   * turns a non-finite number into `null` and the file being described is
+   * one nothing in this repository wrote.
+   */
+  it('names the holder through an unrenderable stamp, and does not reclaim a live lock over one', async () => {
+    const dataDir = await library()
+    const host = (await import('node:os')).hostname()
+    const record = (fields: string) => `{"pid":${process.pid},"host":${JSON.stringify(host)},${fields}}`
+
+    await writeFile(join(dataDir, LOCK_FILE), record('"at":1e400,"command":"a crashed paper","token":"t"'))
+    const refused = await acquireDataLock(dataDir, { waitMs: 0, alive: () => true }).catch((error: unknown) => error)
+    expect(refused).toBeInstanceOf(LockHeld)
+    expect((refused as LockHeld).message).toContain(`pid ${process.pid} on ${host}`)
+    /* Read as a record that never carried a stamp, which is what one written
+     * before the field existed looks like — not as a reason to say nothing. */
+    expect((refused as LockHeld).message).toContain('1970-01-01T00:00:00.000Z')
+
+    await writeFile(join(dataDir, LOCK_FILE), record('"at":1,"command":"a live paper","token":"t","startedAt":1e400'))
+    await expect(
+      acquireDataLock(dataDir, { waitMs: 0, alive: () => true, startedAt: () => 2_000_000_000_000, bootedAt: () => null }),
+    ).rejects.toBeInstanceOf(LockHeld)
   })
 
   it('reclaims a lock whose holder is gone, on this host', async () => {
@@ -475,6 +525,91 @@ describe('two writers cannot interleave', () => {
     /* The live lock is still where its owner left it. */
     const after = JSON.parse(await readFile(join(dataDir, LOCK_FILE), 'utf8')) as { token: string }
     expect(after.token).toBe('live-token')
+  })
+
+  /**
+   * PUBLISHED BY `link`, NOT BY WRITE-AFTER-CREATE (WI-20.34). `open(path,
+   * 'wx')` then `writeFile` had a window a SIGKILL could land in, leaving an
+   * empty file every later writer read as "held by somebody unnameable" —
+   * forever, with no reclamation path. The record is written whole under a
+   * private name and linked into place, so the lock file never exists
+   * without a readable owner. Same protocol as `lock.rs`.
+   */
+  it('publishes the record by link, so the lock never exists without a readable owner', async () => {
+    const dataDir = await library()
+    const taken = await acquireDataLock(dataDir, { command: 'paper book add' })
+    const owner = JSON.parse(await readFile(join(dataDir, LOCK_FILE), 'utf8')) as Record<string, unknown>
+    expect(owner['token']).toBe(taken.owner.token)
+    /* The two identities the app's record carries too, camel-cased as
+     * `lock.rs` spells them. */
+    expect(typeof owner['startedAt']).toBe('number')
+    expect(typeof owner['bootedAt']).toBe('number')
+    /* And no private name left beside it. */
+    const left = (await readdir(dataDir)).filter((name) => name.startsWith(`.${LOCK_FILE}.`))
+    expect(left).toEqual([])
+    await taken.release()
+  })
+
+  /* The old protocol's crash window, and a helper's leftovers: neither may
+   * lock the library until a human deletes a file. */
+  it('reclaims an empty lock file, and a dangling temp name blocks nobody', async () => {
+    const dataDir = await library()
+    await writeFile(join(dataDir, LOCK_FILE), '')
+    await writeFile(join(dataDir, `.${LOCK_FILE}.a-killed-helper`), '{"pid":1}')
+    const taken = await acquireDataLock(dataDir, { waitMs: 0, alive: () => true })
+    expect(taken.owner.pid).toBe(process.pid)
+    const owner = JSON.parse(await readFile(join(dataDir, LOCK_FILE), 'utf8')) as { token: string }
+    expect(owner.token).toBe(taken.owner.token)
+    await taken.release()
+  })
+
+  /**
+   * A PID IS NOT AN IDENTITY. The kernel reuses a dead process's number,
+   * and every number is reused after a reboot. So a running pid whose start
+   * time disagrees with the record, or whose record predates this boot, is
+   * not the holder; and an OS that cannot say refutes nothing.
+   */
+  it('does not call a running pid the holder when its start time or boot disagrees with the record', async () => {
+    const dataDir = await library()
+    const host = (await import('node:os')).hostname()
+    const reused = { pid: process.pid, host, at: 1, command: 'a crashed paper', token: 'old', startedAt: 1_000 }
+    await writeFile(join(dataDir, LOCK_FILE), JSON.stringify(reused))
+    /* The pid runs (it is ours), but the OS says it started long after the
+     * record claims: a different process wearing the number. */
+    const taken = await acquireDataLock(dataDir, { waitMs: 0, startedAt: () => 2_000_000_000_000, bootedAt: () => null })
+    expect(taken.owner.pid).toBe(process.pid)
+    await taken.release()
+
+    const rebooted = { ...reused, startedAt: undefined, bootedAt: 1_000 }
+    await writeFile(join(dataDir, LOCK_FILE), JSON.stringify(rebooted))
+    const again = await acquireDataLock(dataDir, { waitMs: 0, startedAt: () => null, bootedAt: () => 2_000_000_000_000 })
+    expect(again.owner.pid).toBe(process.pid)
+    await again.release()
+
+    /* Within the tolerance is the same process: held. */
+    const same = { ...reused, startedAt: 2_000_000_000_000 + IDENTITY_TOLERANCE_MS - 1 }
+    await writeFile(join(dataDir, LOCK_FILE), JSON.stringify(same))
+    await expect(
+      acquireDataLock(dataDir, { waitMs: 0, startedAt: () => 2_000_000_000_000, bootedAt: () => null }),
+    ).rejects.toBeInstanceOf(LockHeld)
+
+    /* An OS with no answer cannot refute a record that has one: held. */
+    await writeFile(join(dataDir, LOCK_FILE), JSON.stringify(reused))
+    await expect(acquireDataLock(dataDir, { waitMs: 0, startedAt: () => null, bootedAt: () => null })).rejects.toBeInstanceOf(
+      LockHeld,
+    )
+  })
+
+  /* The real identity lookups agree with this process about itself: a
+   * second take by the same process is refused, by pid, by start and by
+   * boot, with nothing injected. */
+  it('recognises its own live record through the operating system', async () => {
+    const dataDir = await library()
+    const mine = await acquireDataLock(dataDir, { command: 'the first' })
+    await expect(acquireDataLock(dataDir, { waitMs: 0 })).rejects.toBeInstanceOf(LockHeld)
+    expect(Math.abs(ownStartedAt() - (mine.owner.startedAt ?? 0))).toBeLessThan(IDENTITY_TOLERANCE_MS)
+    expect(Math.abs(hostBootedAt() - (mine.owner.bootedAt ?? 0))).toBeLessThan(IDENTITY_TOLERANCE_MS)
+    await mine.release()
   })
 
   it('never reclaims a lock from another host, however old', async () => {

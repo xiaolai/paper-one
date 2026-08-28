@@ -168,3 +168,139 @@ describe('the port over two linked fake wires', () => {
     expect(peer).not.toBeNull()
   })
 })
+
+describe('audit-fix round 1 — the port and the wire’s listeners', () => {
+  it('does not dial until every listener has attached, and a registration that failed refuses the dial', async () => {
+    /* `listen` registers asynchronously while the wire's subscriptions are
+       synchronous; a session that opened into an unattached listener was a
+       peer that looked silent. */
+    const { shelf, satchel } = linkedWires()
+    const shelfPort = createPeerPort(shelf)
+    await shelfPort.serve([])
+    const order: string[] = []
+    let attach!: () => void
+    const attached = new Promise<void>((resolve) => {
+      attach = resolve
+    })
+    const slow: typeof satchel = Object.assign(Object.create(Object.getPrototypeOf(satchel)), satchel, {
+      whenListening: async () => {
+        order.push('whenListening')
+        await attached
+      },
+      connect: async (peerId: string, hello?: unknown) => {
+        order.push('connect')
+        return satchel.connect(peerId, hello)
+      },
+    })
+    const dialing = createPeerPort(slow).connect(shelf.id)
+    await new Promise<void>((resolve) => setTimeout(resolve, 5))
+    expect(order).toEqual(['whenListening'])
+    attach()
+    const channel = await dialing
+    expect(order).toEqual(['whenListening', 'connect'])
+    await channel.close()
+
+    const broken: typeof satchel = Object.assign(Object.create(Object.getPrototypeOf(satchel)), satchel, {
+      whenListening: async () => {
+        throw new Error('listen refused: event system gone')
+      },
+    })
+    await expect(createPeerPort(broken).connect(shelf.id)).rejects.toThrow(/listen refused/)
+  })
+
+  it('replays a close that happened during the dial to a listener registered afterwards', async () => {
+    const { shelf, satchel } = linkedWires()
+    await createPeerPort(shelf).serve([])
+    /* The peer closes the session the moment it is dialed — before the
+       caller has the channel, and before it could have subscribed. */
+    const flighty: typeof satchel = Object.assign(Object.create(Object.getPrototypeOf(satchel)), satchel, {
+      connect: async (peerId: string, hello?: unknown) => {
+        const id = await satchel.connect(peerId, hello)
+        await satchel.close(id)
+        return id
+      },
+    })
+    const channel = await createPeerPort(flighty).connect(shelf.id)
+    const reasons: string[] = []
+    channel.onClosed((reason) => reasons.push(reason))
+    expect(reasons).toHaveLength(1)
+  })
+})
+
+describe('a router that hung up on its own', () => {
+  /**
+   * ⚠️ **THE PORT COULD NOT HEAR THE ROUTER HANG UP.**
+   *
+   * The envelope disconnects a connection by itself in two cases the port
+   * does not raise: the outbound byte budget overflowing, and a `send` that
+   * fails in a way the port's own `.catch` never sees — a SYNCHRONOUS throw
+   * returns no promise for that `.catch` to attach to. The native session
+   * then stayed open with the router behind it dead: every later frame was
+   * drained into a connection answered by nobody, and the peer waited on a
+   * request that could never be refused. The webhost pump was caught by the
+   * same defect (the 2026-08-28 audit, #61); `onDisconnect` is what both
+   * sides now listen to.
+   */
+  it('closes the native session, so the peer is refused rather than left waiting', async () => {
+    const { shelf, satchel } = linkedWires()
+    await createPeerPort(shelf).serve([echo])
+    const channel = await createPeerPort(satchel).connect(shelf.id)
+    /* Shadowed on the instance rather than copied onto a stand-in: the wire's
+       readiness, sessions and listeners all have to stay the ones the ports
+       are already holding. */
+    ;(shelf as unknown as { send: () => never }).send = () => {
+      throw new Error('the session went away under the answer')
+    }
+
+    const closedOnShelf: number[] = []
+    shelf.onSessionClosed((event) => void closedOnShelf.push(event.sessionId))
+
+    const outcome = await Promise.race([
+      channel.call('sync.echo', { n: 1 }).then(
+        () => 'answered',
+        () => 'refused',
+      ),
+      new Promise<string>((resolve) => setTimeout(() => resolve('hung'), 50)),
+    ])
+    expect(outcome, 'the peer was left waiting on a router that had already hung up').toBe('refused')
+    expect(closedOnShelf, 'the native session outlived the router it belonged to').toHaveLength(1)
+  })
+})
+
+describe('a serve() that fails part-way through its subscriptions', () => {
+  it('rolls back the subscriptions it had already taken', async () => {
+    /* THE LEAK THAT SURVIVED INSIDE ITS OWN FIX. The three registrations were
+       ARGUMENTS to one `offs.push(...)`, and arguments evaluate before the
+       call: a throw from the second discarded the first's unsubscribe along
+       with the argument list, so the rollback iterated an EMPTY array and the
+       listener stayed on the wire for the life of the process. */
+    const { shelf } = linkedWires()
+    let taken = 0
+    let released = 0
+    const brittle: typeof shelf = Object.assign(Object.create(Object.getPrototypeOf(shelf)), shelf, {
+      onSessionOpen: (fn: Parameters<typeof shelf.onSessionOpen>[0]) => {
+        taken += 1
+        const off = shelf.onSessionOpen(fn)
+        return () => {
+          released += 1
+          off()
+        }
+      },
+      /* The SECOND registration — the one whose throw skips the push. */
+      onSessionFrames: () => {
+        throw new Error('listen refused: event system gone')
+      },
+    })
+    const port = createPeerPort(brittle)
+    await expect(port.serve([])).rejects.toThrow(/listen refused/)
+    expect(taken, 'the first subscription was taken').toBe(1)
+    expect(released, 'and rolled back when the second threw').toBe(1)
+
+    /* The port-wide flag went with it: a `serve()` that rejected is not a
+       server, so the next attempt must reach the wire rather than be refused
+       as "already active" — and it must roll back the same way. */
+    await expect(port.serve([])).rejects.toThrow(/listen refused/)
+    expect(taken).toBe(2)
+    expect(released).toBe(2)
+  })
+})

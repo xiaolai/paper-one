@@ -3,7 +3,7 @@ name = "tauri-plugin-webhost"
 version = "0.1.0"
 description = "Paper's browser client host: an HTTP surface on loopback, and the frame pipe between it and the webview"
 authors = ["Paper"]
-license = ""
+license = "MIT"
 edition = "2021"
 rust-version = "1.91"
 publish = false
@@ -14,9 +14,16 @@ links = "tauri-plugin-webhost"
 tauri-plugin = { version = "2", features = ["build"] }
 
 [dependencies]
-tauri = { version = "2.11.3" }
+# `default-features = false`, matching the peer and inference plugins: the
+# defaults pull wry, compression and the platform shells, none of which a
+# plugin that only registers commands and spawns a listener touches.
+tauri = { version = "2.11.3", default-features = false }
 paper-webhost = { path = "../paper-webhost" }
 paper-webauth = { path = "../paper-webauth" }
+# Where `webhost/sessions.json` lives: ONE resolution of the data root, shared
+# with the app and the other plugins (see that crate's header for why it is
+# not a copy of forty lines).
+paper-data-root = { path = "../paper-data-root" }
 serde = { version = "1", features = ["derive"] }
 # `tailscale status --json` is a large document and the two facts wanted from it
 # sit inside a NAMED object. Read by hand, the search for `"DNSName"` ran from
@@ -34,5 +41,4 @@ axum = { version = "0.8.9", default-features = false, features = ["http1", "toki
 [dev-dependencies]
 # Drives the real router over the real embedded table, in-process.
 tower = { version = "0.5", features = ["util"] }
-http-body-util = "0.1"
 tokio-test = "0.4"

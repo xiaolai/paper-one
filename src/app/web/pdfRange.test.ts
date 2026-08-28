@@ -6,7 +6,7 @@
  */
 import { describe, expect, it, vi } from 'vitest'
 import type { RemoteContent } from './content'
-import { pdfRangeTransport } from './pdfRange'
+import { MAX_RANGE_ATTEMPTS, pdfRangeTransport } from './pdfRange'
 
 /**
  * The range transport, against a fake shelf.
@@ -31,13 +31,13 @@ globals.DOMMatrix ??= class {}
 
 /** A `RemoteContent` that answers slices of `text`, or refuses. */
 function shelf(text: string, options: { readonly fail?: boolean; readonly hold?: boolean } = {}) {
-  const asked: { offset: number; length: number }[] = []
+  const asked: { offset: number; length: number; expect: string | null }[] = []
   let release: (() => void) | null = null
   const content = {
     locate: async () => ({ here: true, ext: 'pdf', size: text.length }),
     fileOf: async () => new File([], 'x.pdf'),
-    readRange: async (_book: string, offset: number, length: number) => {
-      asked.push({ offset, length })
+    readRange: async (_book: string, offset: number, length: number, expect: string | null) => {
+      asked.push({ offset, length, expect })
       if (options.hold) await new Promise<void>((resolve) => (release = resolve))
       if (options.fail) throw new Error('the shelf went away')
       return new TextEncoder().encode(text.slice(offset, offset + length))
@@ -74,7 +74,7 @@ const noteFailure = () => vi.fn()
 describe('pdfRangeTransport', () => {
   it('carries the length pdf.js needs before it reads a byte', async () => {
     const { content } = shelf('%PDF-1.7 and so on')
-    expect((await pdfRangeTransport(content, 'one', 18, { onFailure: noteFailure() })).length).toBe(18)
+    expect((await pdfRangeTransport(content, 'one', 18, { onFailure: noteFailure(), contentHash: null })).length).toBe(18)
   })
 
   /**
@@ -85,17 +85,17 @@ describe('pdfRangeTransport', () => {
    */
   it('converts pdf.js’s exclusive end into a length', async () => {
     const { content, asked } = shelf('0123456789')
-    const transport = await pdfRangeTransport(content, 'one', 10, { onFailure: noteFailure() })
+    const transport = await pdfRangeTransport(content, 'one', 10, { onFailure: noteFailure(), contentHash: null })
     const got = listen(transport)
     transport.requestDataRange(2, 6)
     await settle()
-    expect(asked).toEqual([{ offset: 2, length: 4 }])
+    expect(asked).toEqual([{ offset: 2, length: 4, expect: null }])
     expect(got).toEqual([{ begin: 2, chunk: '2345' }])
   })
 
   it('serves several ranges at once, each labelled with its own start', async () => {
     const { content } = shelf('0123456789')
-    const transport = await pdfRangeTransport(content, 'one', 10, { onFailure: noteFailure() })
+    const transport = await pdfRangeTransport(content, 'one', 10, { onFailure: noteFailure(), contentHash: null })
     const got = listen(transport)
     transport.requestDataRange(0, 2)
     transport.requestDataRange(8, 10)
@@ -115,7 +115,7 @@ describe('pdfRangeTransport', () => {
    */
   it('starts no new read once it has been aborted', async () => {
     const { content, asked } = shelf('0123456789')
-    const transport = await pdfRangeTransport(content, 'one', 10, { onFailure: noteFailure() })
+    const transport = await pdfRangeTransport(content, 'one', 10, { onFailure: noteFailure(), contentHash: null })
     const got = listen(transport)
     transport.abort()
 
@@ -129,7 +129,7 @@ describe('pdfRangeTransport', () => {
      bytes into a document pdf.js has already torn down. */
   it('delivers nothing after abort, even for a read already in flight', async () => {
     const { content, release } = shelf('0123456789', { hold: true })
-    const transport = await pdfRangeTransport(content, 'one', 10, { onFailure: noteFailure() })
+    const transport = await pdfRangeTransport(content, 'one', 10, { onFailure: noteFailure(), contentHash: null })
     const got = listen(transport)
     transport.requestDataRange(0, 4)
     transport.abort()
@@ -147,7 +147,7 @@ describe('pdfRangeTransport', () => {
   it('reports a failed read rather than leaving pdf.js waiting', async () => {
     const { content } = shelf('0123456789', { fail: true })
     const onFailure = vi.fn()
-    const transport = await pdfRangeTransport(content, 'one', 10, { onFailure })
+    const transport = await pdfRangeTransport(content, 'one', 10, { onFailure, contentHash: null })
     const got = listen(transport)
     transport.requestDataRange(0, 4)
     await settle()
@@ -161,9 +161,123 @@ describe('pdfRangeTransport', () => {
        one dropped socket. */
     const { content } = shelf('0123456789', { fail: true })
     const onFailure = vi.fn()
-    const transport = await pdfRangeTransport(content, 'one', 10, { onFailure })
+    const transport = await pdfRangeTransport(content, 'one', 10, { onFailure, contentHash: null })
     listen(transport)
     transport.requestDataRange(0, 4)
+    transport.requestDataRange(4, 8)
+    await settle()
+    expect(onFailure).toHaveBeenCalledOnce()
+  })
+})
+
+/**
+ * A RETRYABLE FAILURE DOES NOT END THE TRANSPORT (WI-20.30).
+ *
+ * `stopped` was latched on ANY rejection, so a dropped socket — which the
+ * content layer restarts, and which the envelope now marks retryable — ended
+ * the document for good: every later range pdf.js asked for was silently
+ * ignored, on a book whose shelf was back a second later.
+ */
+import { ENVELOPE_ERRORS, ServiceCallError, serviceError } from '../../kernel/core/envelope'
+
+describe('a retryable failure', () => {
+  function flaky(text: string, failures: number) {
+    const asked: { offset: number; length: number; expect: string | null }[] = []
+    let left = failures
+    const content = {
+      locate: async () => ({ here: true, ext: 'pdf', size: text.length }),
+      fileOf: async () => new File([], 'x.pdf'),
+      readRange: async (_book: string, offset: number, length: number, expect: string | null) => {
+        asked.push({ offset, length, expect })
+        if (left > 0) {
+          left -= 1
+          throw new ServiceCallError('content.read', serviceError(ENVELOPE_ERRORS.disconnected, 'disconnected', true))
+        }
+        return new TextEncoder().encode(text.slice(offset, offset + length))
+      },
+    } as unknown as RemoteContent
+    return { content, asked }
+  }
+
+  it('is reported, and the next range is still read', async () => {
+    const { content, asked } = flaky('0123456789', 1)
+    const onFailure = vi.fn()
+    const transport = await pdfRangeTransport(content, 'one', 10, { onFailure, contentHash: null })
+    const got = listen(transport)
+    transport.requestDataRange(0, 4)
+    await settle()
+    expect(onFailure).toHaveBeenCalledOnce()
+    transport.requestDataRange(4, 8)
+    await settle()
+    expect(asked.map((one) => one.offset)).toEqual([0, 0, 4])
+    expect(got).toEqual([
+      { begin: 0, chunk: '0123' },
+      { begin: 4, chunk: '4567' },
+    ])
+  })
+
+  /**
+   * ⚠️ **THE RANGE THAT FAILED USED TO BE ABANDONED.**
+   *
+   * pdf.js makes ONE reader per `requestDataRange` and never asks again; its
+   * chunk manager also remembers that the chunk was requested, so every later
+   * page needing those bytes waits on the same promise. Keeping the transport
+   * alive for FUTURE ranges therefore left the page the reader was actually
+   * on blank for the life of the document — the shelf came back, and that one
+   * page never did.
+   */
+  it('asks again for the range that failed, and delivers it when the shelf is back', async () => {
+    const { content, asked } = flaky('0123456789', 1)
+    const onFailure = vi.fn()
+    const transport = await pdfRangeTransport(content, 'one', 10, { onFailure, contentHash: null })
+    const got = listen(transport)
+    transport.requestDataRange(0, 4)
+    await settle()
+    await settle()
+    expect(asked.map((one) => one.offset)).toEqual([0, 0])
+    expect(got).toEqual([{ begin: 0, chunk: '0123' }])
+  })
+
+  /* AND IT IS BOUNDED. A shelf that never comes back ends the range with the
+     failure that ended it, rather than asking for ever. */
+  it('gives up after a bounded number of attempts', async () => {
+    const { content, asked } = flaky('0123456789', 99)
+    const onFailure = vi.fn()
+    const transport = await pdfRangeTransport(content, 'one', 10, { onFailure, contentHash: null })
+    listen(transport)
+    transport.requestDataRange(0, 4)
+    for (let n = 0; n < MAX_RANGE_ATTEMPTS + 2; n += 1) await settle()
+    expect(asked).toHaveLength(MAX_RANGE_ATTEMPTS)
+    expect(onFailure).toHaveBeenCalledTimes(MAX_RANGE_ATTEMPTS)
+  })
+
+  /**
+   * THE VERSION THE DOCUMENT WAS OPENED AGAINST, on every range it asks for.
+   *
+   * The hash used to live in a map inside `content.ts`, keyed on the book and
+   * rewritten by every `locate` — so a second locate for the same book (a
+   * re-open, a re-import, another component) re-pointed a LIVE document at
+   * the new bytes, and the shelf served them into a PDF parsed from the old
+   * ones. Nothing in the chunks or the offsets can catch that.
+   */
+  it('carries the hash it was opened with on every range', async () => {
+    const HASH = 'b'.repeat(64)
+    const { content, asked } = shelf('0123456789')
+    const transport = await pdfRangeTransport(content, 'one', 10, { onFailure: noteFailure(), contentHash: HASH })
+    listen(transport)
+    transport.requestDataRange(0, 4)
+    transport.requestDataRange(4, 8)
+    await settle()
+    expect(asked.map((one) => one.expect)).toEqual([HASH, HASH])
+  })
+
+  it('still ends the transport on a failure that is not retryable', async () => {
+    const { content } = shelf('0123456789', { fail: true })
+    const onFailure = vi.fn()
+    const transport = await pdfRangeTransport(content, 'one', 10, { onFailure, contentHash: null })
+    listen(transport)
+    transport.requestDataRange(0, 4)
+    await settle()
     transport.requestDataRange(4, 8)
     await settle()
     expect(onFailure).toHaveBeenCalledOnce()

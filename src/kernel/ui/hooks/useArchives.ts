@@ -5,7 +5,7 @@ import { planImport } from '../../core/tagArchive'
 import { planImport as planMarksImport } from '../../core/marksArchive'
 import type { CardsView } from './useCards'
 import type { LibraryView } from './useLibrary'
-import type { MarksView } from './useMarks'
+import { MarksScanFailed, type MarksView } from './useMarks'
 
 /**
  * The reader's filing and their marginalia, out to a file and back.
@@ -50,17 +50,10 @@ export interface ArchivesOptions {
 }
 
 export function useArchives({ library, marks, cards, notice }: ArchivesOptions): Archives {
-/**
- * The reader's filing, out to a file and back.
- *
- * BOTH REPORT THROUGH `importNotice`, which is the shelf's own line for
- * "something just happened to your library" — an archive written silently is
- * indistinguishable from a dialog the reader dismissed, and an import that
- * merged nothing looks exactly like one that failed.
- *
- * A dismissed dialog says nothing at all, deliberately: the reader closed it,
- * they know, and a message about it is the app narrating their own action.
- */
+/* The reader's filing, out to a file and back — reporting through `notice`,
+ * per the module header. A dismissed dialog says nothing at all, deliberately:
+ * the reader closed it, they know, and a message about it is the app
+ * narrating their own action. */
 const exportTagsNow = useCallback(() => {
   void exportTagsToFile(library.books, new Date())
     .then((path) => {
@@ -76,33 +69,65 @@ const exportTagsNow = useCallback(() => {
       console.error('Paper: could not export your tags', cause)
       notice('Those tags could not be written.')
     })
-}, [library.books])
+}, [library.books, notice])
 
 const importTagsNow = useCallback(() => {
-  void importTagsFromFile()
-    .then((picked) => {
-      if (!picked) return
-      if (!picked.archive) {
-        notice('That file is not a Paper tag export.')
-        return
-      }
-      const plan = planImport(picked.archive, library.books)
-      for (const one of plan.additions) library.tagBooks([one.bookId], one.tags)
-      /* THE NUMBER THAT DID NOTHING IS WORTH SAYING TOO. An archive from
-         another library matches nothing here, and an import that reports only
-         its successes leaves the reader believing it worked. */
-      const missed = plan.unmatched > 0 ? ` ${plan.unmatched} not on this shelf.` : ''
-      notice(
-        plan.booksTouched === 0
-          ? `Nothing to add — those tags are already here.${missed}`
-          : `Added ${plan.tagsAdded} ${plan.tagsAdded === 1 ? 'tag' : 'tags'} across ${plan.booksTouched} ${plan.booksTouched === 1 ? 'book' : 'books'}.${missed}`,
-      )
-    })
-    .catch((cause: unknown) => {
-      console.error('Paper: could not import those tags', cause)
-      notice('That file could not be read.')
-    })
-}, [library])
+  /* WHICH STAGE FAILED decides the sentence. One catch used to answer every
+   * rejection with "That file could not be read" — including a rejected
+   * store write, for which that message is factually wrong and sends the
+   * reader chasing the wrong problem (their file, not their disk). */
+  let reading = true
+  void (async () => {
+    const picked = await importTagsFromFile()
+    if (!picked) return
+    if (!picked.archive) {
+      notice('That file is not a Paper tag export.')
+      return
+    }
+    const plan = planImport(picked.archive, library.books)
+    reading = false
+    /* THE NUMBER THAT DID NOTHING IS WORTH SAYING TOO. An archive from
+       another library matches nothing here, and an import that reports only
+       its successes leaves the reader believing it worked. */
+    const missed = plan.unmatched > 0 ? ` ${plan.unmatched} not on this shelf.` : ''
+    if (plan.additions.length === 0) {
+      notice(`Nothing to add — those tags are already here.${missed}`)
+      return
+    }
+    /* ONE BATCHED CALL, AWAITED, exactly as the marks import below. This
+     * looped `tagBooks` once per archived book in one synchronous pass —
+     * two thousand write chains in flight in a single tick, the flood the
+     * library's `addMany` documents — and said "Added N" before a single
+     * write had landed, so a full disk produced a cheerful notice and no
+     * tags. The books figure is the STORE's answer, what actually changed on
+     * disk, and what could not be saved is said in the same breath. */
+    const { changed, failed } = await library.tagMany(plan.additions)
+    const books = (n: number) => `${n.toLocaleString()} ${n === 1 ? 'book' : 'books'}`
+    const lost = failed > 0 ? ` ${books(failed)} could not be saved.` : ''
+    /* ⚠️ THE TAG COUNT IS THE PLAN'S, AND THE PLAN IS ONLY TRUE IF EVERY WRITE
+     * LANDED. `tagMany` answers in BOOKS — how many changed, how many failed —
+     * so a partial write leaves no tag figure anybody can stand behind, and
+     * this said "Added 412 tags across 3 books. 97 books could not be saved",
+     * claiming all 412 for the three that landed. With every write refused it
+     * read "Added 412 tags across 0 books", which is the cheerful notice over
+     * an empty disk that the batching above exists to prevent.
+     *
+     * So the number is spent only on a whole import; a partial one counts the
+     * books it actually changed, which is the thing that was measured. */
+    notice(
+      changed === 0 && failed === 0
+        ? `Nothing to add — those tags are already here.${missed}`
+        : changed === 0
+          ? `Nothing was added.${lost}${missed}`
+          : failed === 0
+            ? `Added ${plan.tagsAdded.toLocaleString()} ${plan.tagsAdded === 1 ? 'tag' : 'tags'} across ${books(changed)}.${missed}`
+            : `Added tags to ${books(changed)}.${lost}${missed}`,
+    )
+  })().catch((cause: unknown) => {
+    console.error('Paper: could not import those tags', cause)
+    notice(reading ? 'That file could not be read.' : 'The file was read, but those tags could not be saved.')
+  })
+}, [library, notice])
 /**
  * The reader's marginalia, out to a file and back.
  *
@@ -119,6 +144,14 @@ const importTagsNow = useCallback(() => {
  *
  * `loadAllNow()` resolves with the rows rather than setting state and hoping
  * a re-render arrives first — see `MarksView.loadAllNow`.
+ *
+ * AND A FAILED SCAN IS THE SAME TRAP WEARING A DIFFERENT CAUSE. A scan that
+ * could not read the shelf leaves the same empty list behind as a shelf with
+ * nothing on it, so the fixed export would still have written the empty
+ * archive — over the reader's backup, reported as a success — for a disk that
+ * would not answer. `loadAllNow` rejects with `MarksScanFailed` for that case,
+ * and both handlers below refuse rather than write. The dialog is never even
+ * opened, because the scan is awaited first.
  */
 const exportMarksNow = useCallback(() => {
   void (async () => {
@@ -142,10 +175,20 @@ const exportMarksNow = useCallback(() => {
     const note = written.format === 'md' ? ' as Markdown, which cannot be imported back' : ''
     notice(`Exported ${parts.join(' and ')} from ${written.books} ${written.books === 1 ? 'book' : 'books'}${note}.`)
   })().catch((cause: unknown) => {
+    /* WHICH END FAILED decides the sentence, exactly as the tag import above.
+       "could not be written" over a scan failure sends the reader to look at
+       the disk they were about to write to, when the one that would not
+       answer is the one their books are on — and nothing was written at all,
+       which is the fact they most need. */
+    if (cause instanceof MarksScanFailed) {
+      console.error('Paper: could not read your marginalia to export it', cause)
+      notice('Your marks could not be read — nothing was exported.')
+      return
+    }
     console.error('Paper: could not export your marginalia', cause)
     notice('Those marks could not be written.')
   })
-}, [marks, cards, library.books])
+}, [marks, cards, library.books, notice])
 
 const importMarksNow = useCallback(() => {
   void (async () => {
@@ -167,7 +210,12 @@ const importMarksNow = useCallback(() => {
      * entire global list per card; and "Added N marks" appeared whether or
      * not a single write had landed, so a full disk produced a cheerful
      * notice and no marginalia. */
-    await Promise.all([
+    /* SETTLED, NOT RACED TO THE FIRST FAILURE. `Promise.all` rejected on one
+     * book's write and reported "could not be read" for an import that had
+     * read fine and LANDED most of its books — the reader retries the whole
+     * file or gives up, both wrong. Each book's write settles on its own;
+     * what failed is counted and said beside what landed. */
+    const settled = await Promise.allSettled([
       ...plan.additions.map((one) =>
         marks.addMany(
           one.bookId,
@@ -199,6 +247,35 @@ const importMarksNow = useCallback(() => {
         ),
       ),
     ])
+    for (const outcome of settled) {
+      if (outcome.status === 'rejected') console.error('Paper: an import write failed', outcome.reason)
+    }
+    const bookOutcomes = settled.slice(0, plan.additions.length)
+    const failedBooks = bookOutcomes.filter((outcome) => outcome.status === 'rejected').length
+    const cardsFailed = settled[plan.additions.length]?.status === 'rejected'
+    /* ⚠️ WHAT LANDED, NOT WHAT WAS PLANNED. The sentence took its three
+     * numbers from the plan and appended the failures as a qualifier, so an
+     * import whose every write was refused still read "Added 812 marks and 40
+     * cards across 96 books" with "96 books could not be saved" behind it —
+     * the reader is told the thing happened and then told it did not. Each
+     * book is one write and each settles on its own, so the counts are exactly
+     * derivable: a fulfilled book contributed its marks, a rejected one
+     * contributed none, and the cards are one write for the lot. */
+    const marksAdded = plan.additions.reduce(
+      (sum, one, at) => (bookOutcomes[at]?.status === 'fulfilled' ? sum + one.marks.length : sum),
+      0,
+    )
+    const cardsAdded = cardsFailed ? 0 : plan.cardsAdded
+    const booksTouched = bookOutcomes.filter((outcome) => outcome.status === 'fulfilled').length
+    const lostWrites =
+      failedBooks > 0 || cardsFailed
+        ? ` ${[
+            failedBooks > 0 ? `${failedBooks} ${failedBooks === 1 ? 'book' : 'books'}` : '',
+            cardsFailed ? 'the cards' : '',
+          ]
+            .filter(Boolean)
+            .join(' and ')} could not be saved.`
+        : ''
     /* THE BOOKS THAT MATCHED NOTHING ARE NAMED, not counted. An archive from
        another library matches nothing here, and an import that reports only
        its successes leaves the reader believing it worked. Three titles fit
@@ -208,16 +285,37 @@ const importMarksNow = useCallback(() => {
     const rest = missing.length > 3 ? ` and ${missing.length - 3} more` : ''
     const missed = missing.length > 0 ? ` Not on this shelf: ${named}${rest}.` : ''
     const already = plan.duplicates > 0 ? ` ${plan.duplicates} already here.` : ''
+    /* SAID, NOT SWALLOWED: two archived marks that overlapped each other were
+       kept as one, and the reader who exported both deserves to hear it. */
+    const folded = plan.folded > 0 ? ` ${plan.folded} overlapping ${plan.folded === 1 ? 'mark' : 'marks'} kept as one.` : ''
     notice(
       plan.marksAdded === 0 && plan.cardsAdded === 0
-        ? `Nothing to add.${already}${missed}`
-        : `Added ${plan.marksAdded} ${plan.marksAdded === 1 ? 'mark' : 'marks'} and ${plan.cardsAdded} ${plan.cardsAdded === 1 ? 'card' : 'cards'} across ${plan.booksTouched} ${plan.booksTouched === 1 ? 'book' : 'books'}.${already}${missed}`,
+        ? `Nothing to add.${already}${folded}${missed}`
+        : marksAdded === 0 && cardsAdded === 0
+          ? /* Everything the plan had was refused. Saying so first is the
+               whole point: the qualifier used to trail a claim that
+               contradicted it. */
+            `Nothing was saved.${lostWrites}${already}${folded}${missed}`
+          : `Added ${marksAdded} ${marksAdded === 1 ? 'mark' : 'marks'} and ${cardsAdded} ${cardsAdded === 1 ? 'card' : 'cards'} across ${booksTouched} ${booksTouched === 1 ? 'book' : 'books'}.${lostWrites}${already}${folded}${missed}`,
     )
   })().catch((cause: unknown) => {
+    /* Everything after the parse settles individually above, so a rejection
+     * REACHING here is the read/parse/scan half — the sentence is finally
+     * true. A failed `loadAllNow` is caught here too, deliberately: importing
+     * against an unknown baseline would re-add every mark in the archive.
+     *
+     * AND SAID AS ITS OWN CAUSE. It is the reader's own shelf that would not
+     * read, not the file they just chose, and "that file could not be read"
+     * sends them to replace an archive that is perfectly good. */
+    if (cause instanceof MarksScanFailed) {
+      console.error('Paper: could not read your marginalia to import against it', cause)
+      notice('Your marks could not be read — nothing was imported.')
+      return
+    }
     console.error('Paper: could not import that marginalia', cause)
     notice('That file could not be read.')
   })
-}, [marks, cards, library.books])
+}, [marks, cards, library.books, notice])
 
   /* NULL WHERE THE BUILD CANNOT DO IT, so the palette omits the row rather
      than offering one that would refuse — the same rule every other

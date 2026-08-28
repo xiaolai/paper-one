@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useState, type CSSProperties } from 'react'
+import { useCallback, useLayoutEffect, useMemo, useState, type CSSProperties } from 'react'
 import { Bookmark, ChevronLeft, ChevronRight, Library, Plus } from 'lucide-react'
 import type { ExternalLinkDetail, LinkDetail } from 'foliate-js/view.js'
 import { comboFor } from '../panes'
@@ -27,12 +27,14 @@ import { NOOP_DIAGNOSTICS, type Diagnostics } from '../../core/ports'
 import { askGloss, useGloss } from '../hooks/useGloss'
 import { marginMarks, type MarkAppearance } from '../../core/marks'
 import type { MarksView } from '../hooks/useMarks'
+import type { SaveFailureView } from '../hooks/useLibrary'
 import type { Marking } from '../hooks/useMarking'
 import type { Bookmarking } from '../hooks/useBookmarking'
 import { hasOpenLayer } from '../state'
 import type { AppDispatch, AppState } from '../state'
 import type { Book } from '../hooks/useBook'
 import { useAvailableWidth, useElementWidth } from '../hooks/useAvailableWidth'
+import { useFadingHint } from '../hooks/useFadingHint'
 import { FoliateView } from '../reader/FoliateView'
 import type { PageIntent } from '../reader/wheelPaging'
 import { MarginMarks } from '../reader/MarginMarks'
@@ -52,6 +54,26 @@ import { pageFilter } from '../reader/fixedLayout'
  * has faded.
  */
 const RETURN_HINT_MS = 6000
+
+/**
+ * A jump the reader can undo — the chapter they left, and which leaving it
+ * this is.
+ *
+ * THE NONCE IS NOT DECORATION. The label is a chapter name, so two jumps out
+ * of one chapter carry the same string: React bails out of a `setState` to an
+ * identical value, so the prop never changes, so the fade timer never
+ * restarts and the second hint inherits the first one's deadline. Following
+ * two footnote links in one chapter is enough to see it — the second line can
+ * vanish the moment it appears. A counter the host bumps per jump makes every
+ * showing its own occasion, which is what the timer is about; the label is
+ * what the reader reads. See `useFadingHint`.
+ */
+export interface ReturnHint {
+  /** The chapter the reader just left, as they would name it themselves. */
+  readonly label: string
+  /** Which jump this is. Bumped by the host per hint, never reused. */
+  readonly nonce: number
+}
 
 export interface ReaderProps {
   state: AppState
@@ -83,6 +105,14 @@ export interface ReaderProps {
    * a capability — so what crosses is a callback, not an id.
    */
   onInstallGloss?: (() => void) | undefined
+  /**
+   * A save that did not land — a position, a tag, a mark's record — with
+   * the way to try it again. Drawn in the notice slot over the footer, where
+   * the clipboard's failures already are: the reader is here, not on the
+   * shelf, when a page turn's write is refused. See `LibraryView.saveFailure`.
+   */
+  saveFailure?: SaveFailureView | null
+  onDismissSaveFailure?: () => void
   /**
    * Where a lookup says whether it found a real sentence (WI-16.4, §F4).
    *
@@ -124,8 +154,11 @@ export interface ReaderProps {
    * A jump is the only movement in this app that can be invisible: everything
    * else is something the reader did to the page in front of them, and a jump
    * replaces it. Without a word, nothing suggests the move is undoable.
+   *
+   * A `ReturnHint` rather than the bare label, so a second jump out of the
+   * same chapter is a second hint — see that type.
    */
-  returnTo?: string | null
+  returnTo?: ReturnHint | null
   /** Go back there. The same thing ⌘[ does. */
   onReturn?: () => void
   /** The line has faded on its own; forget it. */
@@ -193,6 +226,8 @@ export function Reader({
   book,
   gloss: glossProvider = NO_GLOSS,
   onInstallGloss,
+  saveFailure = null,
+  onDismissSaveFailure,
   diagnostics = NOOP_DIAGNOSTICS,
   marks,
   marking,
@@ -240,15 +275,14 @@ export function Reader({
    * worked, offering to be undone. Sharing it would have made every successful
    * jump look like a failure and demanded a click to clear.
    *
-   * Restarts on each new jump, so jumping twice quickly leaves one line
-   * showing the most recent departure rather than two racing timers where the
-   * first clears the second's message.
+   * Restarts on each new jump — INCLUDING A SECOND JUMP OUT OF THE SAME
+   * CHAPTER, which is what the nonce is for — so jumping twice quickly leaves
+   * one line showing the most recent departure rather than two racing timers
+   * where the first clears the second's message. Both traps under the timing
+   * here are written up in `useFadingHint`, which owns them so they can be
+   * tested without mounting this screen.
    */
-  useEffect(() => {
-    if (!returnTo || !onReturnDone) return
-    const timer = setTimeout(onReturnDone, RETURN_HINT_MS)
-    return () => clearTimeout(timer)
-  }, [returnTo, onReturnDone])
+  useFadingHint({ nonce: returnTo?.nonce ?? null, after: RETURN_HINT_MS, done: onReturnDone })
 
   const { selection, setSelection, ranges, onMarkDrawn, selected, mark, unmark } = marking
 
@@ -330,6 +364,14 @@ export function Reader({
   /* Derived from the book, not drawn at random — see `bookAccent`. Null with no
    * book open, which is also what stops the rule rendering. */
   const accent = bookAccent(book.bookId, state.theme === 'night')
+  /* ONE clamp for the progress track and the percentage under it. Each had
+   * its own, and they had diverged: `Math.min(1, Math.max(0, NaN))` is `NaN`,
+   * so a relocation with a malformed fraction drew the track at `NaN%` while
+   * the footer, with its `|| 0`, said 0%. Non-finite is 0 — the footer's
+   * reading, now both. */
+  const progress = Number.isFinite(book.position.fraction)
+    ? Math.min(1, Math.max(0, book.position.fraction))
+    : 0
 
   /* WHERE THE WORDS ARE. The selection bar has always needed it so the popup
    * cannot hang across the margin and cover the notes drawn there; the ribbon
@@ -549,7 +591,9 @@ export function Reader({
       else if (intent === 'next') book.next()
       else book.prev()
     },
-    [state, book, selection, paneVisible, setSelection],
+    /* `clearSelection` is what the body calls; `selection` and `setSelection`
+       were what an earlier body read, and had outlived it in this list. */
+    [state, book, paneVisible, clearSelection],
   )
 
   /**
@@ -625,7 +669,7 @@ export function Reader({
                       <div
                         className={styles.progressFill}
                         style={{
-                          height: `${Math.min(1, Math.max(0, book.position.fraction)) * 100}%`,
+                          height: `${progress * 100}%`,
                           background: accent,
                         }}
                       />
@@ -927,9 +971,29 @@ export function Reader({
                 {returnTo && onReturn && (
                   <div className={styles.returnHint} role="status">
                     <button type="button" className={styles.returnHintGo} onClick={onReturn}>
-                      ← Back to {returnTo}
+                      ← Back to {returnTo.label}
                     </button>
                     <span className={styles.returnHintKey}>{comboFor('⌘[', platform)}</span>
+                  </div>
+                )}
+
+                {/* A save that did not land (WI-20.36): the position this page
+                    turn wrote, or the mark's record. Amber, like the clipboard's
+                    failure below, and beside its retry — the reader is here
+                    when the disk refuses a write, not on the shelf. */}
+                {saveFailure && (
+                  <div className={styles.notice} role="status">
+                    <span>{saveFailure.message}</span>
+                    {saveFailure.retry !== null && (
+                      <button type="button" className={styles.noticeDismiss} onClick={saveFailure.retry}>
+                        Retry
+                      </button>
+                    )}
+                    {onDismissSaveFailure && (
+                      <button type="button" className={styles.noticeDismiss} onClick={onDismissSaveFailure}>
+                        Dismiss
+                      </button>
+                    )}
                   </div>
                 )}
 
@@ -997,10 +1061,12 @@ export function Reader({
                   <span>{book.position.chapterLabel}</span>
                   {book.position.chapterLabel && <span>·</span>}
                   <span style={{ fontVariantNumeric: 'tabular-nums' }}>
-                    {/* CLAMPED, like the track beside it. A relocation event
-                        with a malformed fraction drew "-3%" or "NaN%" under a
-                        bar that had already pinned itself to the end. */}
-                    {Math.round(Math.min(1, Math.max(0, book.position.fraction || 0)) * 100)}%
+                    {/* CLAMPED, like the track beside it — by the SAME clamp.
+                        A relocation event with a malformed fraction drew "-3%"
+                        or "NaN%" under a bar that had already pinned itself to
+                        the end; and the two copies had diverged, the track
+                        letting `NaN` through where this one caught it. */}
+                    {Math.round(progress * 100)}%
                   </span>
                 </div>
               </>

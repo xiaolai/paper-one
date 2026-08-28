@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { NATIVE_PLATFORMS, PLATFORMS } from './architecture.mjs'
+import { NATIVE_PLATFORMS, PLATFORMS, namespaceOf } from './architecture.mjs'
 import { dependenciesOfFeature, dependencyForCrate, readCargoManifest, rustName } from './cargo.mjs'
 
 /**
@@ -68,15 +68,34 @@ const CAPABILITY_MODULE = /^src\/capabilities\/([^/]+)(?:\/|$)/
  * a finding, not a style.
  *
  * Comments are stripped first, so a specifier quoted in prose (this file's
- * own comments say `../capabilities/<id>`) is not an import.
+ * own comments say `../capabilities/<id>`) is not an import. Template
+ * literals are blanked for the same reason — see `maskTemplates` — and
+ * type-only imports do not count: `import type` puts nothing in the bundle,
+ * so a composition wired only in types is a composition wired to nothing.
  */
+/**
+ * Blank a template literal's contents, keeping the backticks and every
+ * newline. The scanners below read code with REGEXES, and a template is the
+ * one string that spans lines — so an `export const capabilities = […]` or a
+ * whole fake composition QUOTED in one read as the real thing. The ordinary
+ * quoted strings stay: import specifiers live in them, and being
+ * line-bounded they cannot host the multi-line shapes the anchored regexes
+ * match. (An `${…}` holding a nested backtick would end the blanking early —
+ * none of the composition files has one, and the failure direction is a
+ * loud false finding, not a silent pass.)
+ */
+export function maskTemplates(code) {
+  return code.replace(/`(?:[^`\\]|\\[\s\S])*`/g, (tpl) => tpl.replace(/[^\n`]/g, ' '))
+}
+
 export function parseCompositionImports(source) {
-  const code = stripComments(source)
+  const code = maskTemplates(stripComments(source))
   const imports = []
   const dynamic = []
   const seen = new Set()
   const STATIC = /(?:^|\n)\s*(?:import|export)\b[^'"`;]*?\bfrom\s*['"]([^'"]+)['"]|(?:^|\n)\s*import\s*['"]([^'"]+)['"]/g
   for (const m of code.matchAll(STATIC)) {
+    if (/^\s*(?:import|export)\s+type\b/.test(m[0].replace(/^\n/, ''))) continue
     const specifier = m[1] ?? m[2]
     const cap = capabilityDirOf(specifier)
     if (cap === null) continue
@@ -101,17 +120,20 @@ export function parseCompositionImports(source) {
  * array must list, so a name renamed at import is still matched by its binding.
  */
 export function capabilityBindings(source) {
-  const code = stripComments(source)
+  const code = maskTemplates(stripComments(source))
   const byDir = new Map()
-  const RE = /\bimport\s+(?:type\s+)?\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]/g
+  const RE = /\bimport\s+(type\s+)?\{([^}]*)\}\s*from\s*['"]([^'"]+)['"]/g
   for (const m of code.matchAll(RE)) {
-    const cap = capabilityDirOf(m[2])
+    /* `import type { sync }` binds a TYPE: nothing reaches the bundle, so it
+     * must not satisfy the wiring check a runtime import exists for. */
+    if (m[1] !== undefined) continue
+    const cap = capabilityDirOf(m[3])
     if (cap === null || cap.deep) continue
     /* EVERY binding, not the last: `import { capability, helper }` bound the
      * directory to `helper`, and the order check then demanded the wrong
      * identifier in the array. */
     const names = byDir.get(cap.dir) ?? new Set()
-    for (const raw of m[1].split(',')) {
+    for (const raw of m[2].split(',')) {
       const name = raw.trim()
       if (name === '') continue
       const as = /^[A-Za-z_$][\w$]*\s+as\s+([A-Za-z_$][\w$]*)$/.exec(name)
@@ -133,7 +155,7 @@ export function capabilityBindings(source) {
  * carries no `=`, so anchoring on `= [` skips it.
  */
 export function parseCompositionExport(source) {
-  const code = stripComments(source)
+  const code = maskTemplates(stripComments(source))
   const m = /export\s+const\s+capabilities\b[^=]*=\s*\[([^\]]*)\]/.exec(code)
   if (!m) {
     return { literal: false, ids: [], reason: '`export const capabilities` is not an array literal — a composition is a static list, not a computed one' }
@@ -257,6 +279,7 @@ export const FINDING_CODES = Object.freeze([
   'PLUGIN_UNREGISTERED',
   'ACL_UNREADABLE',
   'PERMISSION_UNGRANTED',
+  'GRANT_UNCOMPILED',
   ...BUNDLE_CODES,
 ])
 
@@ -364,22 +387,28 @@ export function checkRustSurfaces(manifest, files) {
 
   /* The ACL half runs for EVERY entry that lists permissions — a capability
    * whose plugin comes from a registry (no local `crate`) still needs its
-   * grants, and the old crate-only loop skipped it entirely. */
-  if (withPermissions.length > 0) {
-    const acl = readAcl(files.acl, findings)
-    for (const entry of withPermissions) {
-      const where = `capabilities/${entry.id}`
-      for (const permission of entry.permissions ?? []) {
-        for (const platform of entry.platforms) {
-          if (!acl.grants(permission, platform)) {
-            findings.push(
-              finding('PERMISSION_UNGRANTED', where, `permission ${JSON.stringify(permission)} is not granted for ${platform} by any src-tauri/capabilities/*.json`),
-            )
-          }
+   * grants, and the old crate-only loop skipped it entirely.
+   *
+   * AND THE FILES ARE READ WHETHER OR NOT ANY ENTRY LISTS PERMISSIONS. The
+   * inverse rule below is about grants the ACL makes, not grants the manifest
+   * asks for: an entry with `permissions: []` and a stray `inf:allow-x` in a
+   * platform-less file is still a build tauri-build refuses on the phones.
+   * Gating the read on `withPermissions` skipped that case entirely — the
+   * test that spells the grant differently found it. */
+  const acl = readAcl(files.acl, findings)
+  for (const entry of withPermissions) {
+    const where = `capabilities/${entry.id}`
+    for (const permission of entry.permissions ?? []) {
+      for (const platform of entry.platforms) {
+        if (!acl.grants(permission, platform)) {
+          findings.push(
+            finding('PERMISSION_UNGRANTED', where, `permission ${JSON.stringify(permission)} is not granted for ${platform} by any src-tauri/capabilities/*.json`),
+          )
         }
       }
     }
   }
+  findings.push(...uncompiledGrants(manifest, acl.grantList))
   if (withCrate.length === 0) return { findings, crates: 0 }
 
   let cargo = null
@@ -435,22 +464,166 @@ export function checkRustSurfaces(manifest, files) {
   return { findings, crates: withCrate.length }
 }
 
+/** Whether `c` can appear inside a Rust identifier. */
+const isIdentChar = (c) => c !== undefined && /[A-Za-z0-9_]/.test(c)
+
+/**
+ * A raw string starting at `i`, or null. `r"…"`, `r#"…"#`, `br#"…"#`, `cr"…"`.
+ *
+ * ⚠️ **The `r` must STAND ALONE** (a `b` or `c` prefix aside). Without the
+ * boundary, ANY identifier ending in `r` before a quote opened a phantom raw
+ * string — `"Quit Paper"` in the tray menu matched at `…r"`, and the mask
+ * blanked everything to the next quote, 250 lines of real registrations
+ * included. A masker that eats the code it was meant to protect is the defect
+ * this whole function exists against, one layer down.
+ */
+function rawStringAt(source, i) {
+  if (source[i] !== 'r') return null
+  const before = source[i - 1]
+  if (isIdentChar(before) && !((before === 'b' || before === 'c') && !isIdentChar(source[i - 2]))) return null
+  let j = i + 1
+  let hashes = 0
+  while (source[j] === '#') {
+    hashes++
+    j++
+  }
+  /* `r#type` is a RAW IDENTIFIER, not a string, and there are several in any
+   * Tauri codebase. No quote, no raw string. */
+  if (source[j] !== '"') return null
+  const close = `"${'#'.repeat(hashes)}`
+  const at = source.indexOf(close, j + 1)
+  return at === -1
+    ? { contentFrom: j + 1, contentTo: source.length, end: source.length }
+    : { contentFrom: j + 1, contentTo: at, end: at + close.length }
+}
+
+/**
+ * Rust with its COMMENTS and its STRING CONTENTS blanked to spaces.
+ *
+ * ⚠️ **`stripComments` IS A JAVASCRIPT LEXER AND RUST IS NOT JAVASCRIPT.** It
+ * treats `'` as a quote, so the first LIFETIME in a file — `'a`, `'static`,
+ * `'outer:` — opened a string that never closed, and from there to the next
+ * apostrophe nothing was recognised as a comment. A commented-out
+ * `.plugin(x::init())` in that span read as a live registration, and a plugin
+ * the app never registers passed the gate below. That is the third masker in
+ * this file to eat what it was written to protect, so this one is a lexer for
+ * the language it is pointed at rather than a stack of regular expressions:
+ *
+ *   - `//` to end of line, and `/* *\/` NESTED, which Rust's are and C's are not.
+ *   - `"…"` with backslash escapes, and `r"…"` / `r#"…"#` / `br#"…"#` without.
+ *   - `'x'`, `'\n'`, `'\''` and `b'x'` are CHAR LITERALS; anything else after
+ *     an apostrophe is a lifetime or a loop label, and changes no state at all.
+ *
+ * LENGTH-PRESERVING — every blanked character becomes a space and every
+ * newline stays — so a caller may match against the mask and edit the raw
+ * text by the match's own indexes, and so line numbers still mean what they
+ * meant.
+ *
+ * The one thing it gets wrong is a char literal holding a NON-BMP character
+ * (`'😀'`): two UTF-16 code units, so the closing quote is not where a char
+ * literal's would be and both quotes read as lifetimes. That leaves the
+ * character visible rather than blanked, which is the harmless direction —
+ * unlike the old behaviour, an unpaired apostrophe can no longer swallow the
+ * rest of the file.
+ */
+export function maskRustCode(source) {
+  const out = [...source]
+  const blank = (from, to) => {
+    for (let k = from; k < to && k < out.length; k++) if (out[k] !== '\n') out[k] = ' '
+  }
+  /* The terminator of a `"…"` or a `'…'`, honouring backslash escapes. */
+  const closingAt = (from, quote) => {
+    let j = from
+    while (j < source.length) {
+      if (source[j] === '\\') {
+        j += 2
+        continue
+      }
+      if (source[j] === quote) return j
+      j++
+    }
+    return source.length
+  }
+  let i = 0
+  while (i < source.length) {
+    const c = source[i]
+    if (c === '/' && source[i + 1] === '/') {
+      const end = source.indexOf('\n', i)
+      const to = end === -1 ? source.length : end
+      blank(i, to)
+      i = to
+      continue
+    }
+    if (c === '/' && source[i + 1] === '*') {
+      /* NESTED, because Rust's block comments nest and C's do not: an inner
+       * opener needs an inner closer, so a scanner that stopped at the first
+       * close would read the rest of the outer comment as code. An
+       * unterminated one runs to the end of the file. */
+      let depth = 1
+      let j = i + 2
+      while (j < source.length && depth > 0) {
+        if (source[j] === '/' && source[j + 1] === '*') {
+          depth++
+          j += 2
+        } else if (source[j] === '*' && source[j + 1] === '/') {
+          depth--
+          j += 2
+        } else j++
+      }
+      blank(i, j)
+      i = j
+      continue
+    }
+    const raw = rawStringAt(source, i)
+    if (raw !== null) {
+      blank(raw.contentFrom, raw.contentTo)
+      i = raw.end
+      continue
+    }
+    if (c === '"') {
+      const at = closingAt(i + 1, '"')
+      blank(i + 1, at)
+      i = at + 1
+      continue
+    }
+    if (c === "'") {
+      /* `'\n'` and `'\''` — an escape can only be a char literal. */
+      if (source[i + 1] === '\\') {
+        const at = closingAt(i + 1, "'")
+        blank(i + 1, at)
+        i = at + 1
+        continue
+      }
+      /* `'x'` — one character then the closing quote. Anything else is a
+       * LIFETIME or a loop label, which is not a literal and opens nothing. */
+      if (source[i + 2] === "'") {
+        blank(i + 1, i + 2)
+        i += 3
+        continue
+      }
+      i++
+      continue
+    }
+    i++
+  }
+  return out.join('')
+}
+
 /** `.plugin(<name>::init())`, whitespace-tolerant, outside comments AND
- *  outside single-line string literals — a log line quoting the call is not
- *  the call. The mask is LINE-BOUNDED on purpose: an unpaired quote (in a
- *  char literal, or prose) must not swallow the lines after it. */
+ *  outside string literals of every shape — a log line quoting the call is
+ *  not the call. See `maskRustCode` for what a JavaScript lexer got wrong
+ *  here. */
 export function registersPlugin(libRs, name) {
-  const code = stripComments(libRs)
-    /* ⚠️ RAW STRINGS FIRST, and they were not masked at all. Rust's
-     * `r#"…"#` spans lines and contains no escapes, so the line-bounded
-     * ordinary-string mask below cannot see inside one: a `.plugin(x::init())`
-     * quoted in a raw string — an error message, a doc example, a test
-     * fixture — read as a real registration, and a plugin that was never
-     * registered passed this gate. Blanked rather than removed so nothing
-     * downstream depends on offsets. */
-    .replace(/r(#*)"[\s\S]*?"\1/g, (raw) => raw.replace(/[^\n]/g, ' '))
-    .replace(/"(?:[^"\\\n]|\\.)*"/g, '""')
-  return new RegExp(`\\.plugin\\(\\s*${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}::init\\(\\)\\s*\\)`).test(code)
+  const code = maskRustCode(libRs)
+  /* Two registration shapes, both real. `NAME::init()` is what a generated
+   * plugin exports and what every crate in this workspace uses;
+   * `NAME::Builder::…` is the OFFICIAL plugins' documented form —
+   * `single_instance::Builder::new(cb)` and `window_state::Builder::default()`
+   * (WI-20.32) register that way, and matching only `init()` read both as
+   * unregistered. The builder chain spans lines and takes arguments, so the
+   * match is the OPENING of the call, not its close. */
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`\\.plugin\\(\\s*${escaped}::(?:init\\(\\)\\s*\\)|Builder\\b)`).test(code)
 }
 
 /**
@@ -495,10 +668,12 @@ function readAcl(files, findings) {
     const platforms = Array.isArray(json.platforms) ? new Set(json.platforms.map(String)) : null
     for (const item of Array.isArray(json.permissions) ? json.permissions : []) {
       const identifier = typeof item === 'string' ? item : item && typeof item.identifier === 'string' ? item.identifier : null
-      if (identifier !== null) grants.push({ identifier, platforms })
+      if (identifier !== null) grants.push({ identifier, platforms, file })
     }
   }
   return {
+    /** Every grant read, with the file it came from — what the inverse rule walks. */
+    grantList: grants,
     /**
      * Whether `identifier` is granted on every OS `platform` stands for.
      *
@@ -522,6 +697,67 @@ function readAcl(files, findings) {
       )
     },
   }
+}
+
+/** Every Tauri platform name a capability file can be scoped to. */
+const TAURI_PLATFORM_NAMES = Object.freeze(Object.values(TAURI_PLATFORMS).flat())
+
+/**
+ * THE INVERSE OF `PERMISSION_UNGRANTED`, and the half that was missing.
+ *
+ * The forward rule asks "is every permission the manifest lists granted on
+ * every platform the entry composes?" — and is satisfied by a grant in a file
+ * with no `platforms`, which applies EVERYWHERE. Nothing asked the other
+ * question: "does every grant of a manifest plugin sit on a platform that
+ * COMPILES that plugin?" tauri-build asks it at build time, per target, and
+ * refuses the whole capability — `Permission inference:default not found` —
+ * because a plugin that is not compiled for the target contributes no
+ * permission manifest to check against. `inference:default` and
+ * `webhost:default` sat in the platform-less `default.json` for a phase, both
+ * plugins are desktop-only, and the iOS and Android compositions did not
+ * compile. `pnpm verify` runs only default-feature cargo, and the weekly
+ * mobile workflow had never fired, so the first thing to notice was a hand
+ * run of the iOS `cargo check`.
+ *
+ * SCOPED TO MANIFEST PLUGINS, deliberately. A grant's namespace is the text
+ * before its first `:`; only namespaces that belong to a manifest entry are
+ * this rule's business. `core:*`, `dialog:*`, `fs:*`, `log:*` are Tauri's own
+ * and its first-party plugins, compiled on every target that has one, and a
+ * rule that named them would report every capability file in the tree. The
+ * exemption cannot hide the regression above: `inference` IS a manifest
+ * entry, so its grants are checked wherever they are spelled —
+ * `inference:default` and `inference:allow-x` alike.
+ *
+ * One finding per (file, grant), naming the platforms the file applies to
+ * that the entry does not compose — so a reader knows which file to scope
+ * and with what.
+ */
+function uncompiledGrants(manifest, grantList) {
+  const findings = []
+  const composed = new Map() // namespace -> { entry, names: Set<TauriPlatformName> }
+  for (const entry of manifest.capabilities) {
+    const ns = namespaceOf(entry)
+    if (ns === null) continue
+    const names = new Set(entry.platforms.flatMap((p) => TAURI_PLATFORMS[p] ?? []))
+    composed.set(ns, { entry, names })
+  }
+  for (const grant of grantList) {
+    const colon = grant.identifier.indexOf(':')
+    if (colon <= 0) continue
+    const target = composed.get(grant.identifier.slice(0, colon))
+    if (target === undefined) continue
+    const applies = grant.platforms === null ? TAURI_PLATFORM_NAMES : TAURI_PLATFORM_NAMES.filter((n) => grant.platforms.has(n))
+    const missing = applies.filter((n) => !target.names.has(n))
+    if (missing.length === 0) continue
+    findings.push(
+      finding(
+        'GRANT_UNCOMPILED',
+        grant.file,
+        `${grant.file} grants ${JSON.stringify(grant.identifier)} on ${missing.join(', ')}, where the manifest does not compose ${target.entry.id} (platforms: [${target.entry.platforms.join(', ')}]); tauri-build refuses a permission whose plugin is not compiled for the target — scope the file with "platforms", or move the grant to one that is`,
+      ),
+    )
+  }
+  return findings
 }
 
 /* ----------------------------------------------------------------- bundle */

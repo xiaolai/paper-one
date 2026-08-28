@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
-import { cancelRequest } from './plugin'
+import { cancelRequest, mintRequestId, reasonOf } from './plugin'
 
 /**
  * FOUR SURFACES NAME THE SAME COMMANDS, THE SAME WAY.
@@ -231,5 +231,22 @@ describe('cancelRequest', () => {
     const cancel = vi.fn().mockRejectedValue(new Error('boom'))
     expect(() => cancelRequest({ cancel } as never, 'x-1')).not.toThrow()
     await new Promise((resolve) => setTimeout(resolve, 0))
+  })
+})
+
+describe('audit-fix round 1 — reasons and request ids', () => {
+  it('reads only a reason this build knows, whichever serde shape carries it', () => {
+    const route = (reason: unknown) => ({ id: 'x', kind: 'local', unusable: 'no', reason, installed: false, modality: 'text' }) as never
+    expect(reasonOf(route('notInstalled'))).toBe('notInstalled')
+    expect(reasonOf(route({ versionUnsupported: { found: '1.0' } }))).toBe('versionUnsupported')
+    expect(reasonOf(route('somethingNewer'))).toBeNull()
+    expect(reasonOf(route({ somethingNewer: {} }))).toBeNull()
+    expect(reasonOf(route(undefined))).toBeNull()
+  })
+  it('mints request ids with a non-empty session component', () => {
+    const [prefix, session, counter] = mintRequestId('ask').split('-')
+    expect(prefix).toBe('ask')
+    expect(session!.length).toBeGreaterThan(0)
+    expect(Number(counter)).toBeGreaterThan(0)
   })
 })

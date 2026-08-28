@@ -1,3 +1,4 @@
+import { messageOf } from './messageOf'
 import type { GlossContext, GlossProvider } from '../../../kernel'
 import { detailFor, type Controller, type ReportFailure } from './controller'
 import { cancelRequest, errorKind, mintRequestId, type InferencePlugin } from './plugin'
@@ -67,25 +68,11 @@ export function glossQuestion(term: string, context: GlossContext): string {
  */
 export function glossKey(term: string, context: GlossContext): string {
   const flatten = (text: string): string => text.trim().replace(/\s+/g, ' ').toLowerCase()
-  return `${flatten(term)}\u0000${flatten(context.sentence)}`
-}
-
-/**
- * Whatever text a rejection carries, from either shape it arrives in.
- *
- * ⚠️ `String(cause)` IS NOT ENOUGH, and it is the trap this exists to avoid: a
- * plugin rejection is `{ kind, message }`, a plain object, so `String` gives
- * `[object Object]` — throwing away the exact sentence the log is being written
- * to preserve. The `Error` branch alone has the mirror problem, since that
- * object is not an `Error` either.
- */
-function messageOf(cause: unknown): string {
-  if (cause instanceof Error) return cause.message
-  if (typeof cause === 'object' && cause !== null) {
-    const { message } = cause as { message?: unknown }
-    if (typeof message === 'string') return message
-  }
-  return String(cause)
+  /* THE TITLE IS PART OF THE QUESTION (`glossQuestion` sends it, and the
+     model reads the sense from it), so it is part of the key — one term in
+     two books used to share one cached definition. An encoded tuple rather
+     than a NUL-joined string: a NUL inside either text collided. */
+  return JSON.stringify([flatten(term), flatten(context.sentence), context.bookTitle ?? ''])
 }
 
 export interface GlossProviderOptions {
@@ -116,21 +103,28 @@ export function createGlossProvider({ plugin, controller, report }: GlossProvide
     },
 
     /**
-     * ALWAYS TRUE, and it is a constant rather than an oversight.
+     * TRUE WHILE THERE IS A RUNTIME TO INSTALL A MODEL INTO.
      *
-     * This object exists only because `inference` composed, and `inference`
+     * ⚠️ **THIS WAS THE CONSTANT `true`**, on the argument that `inference`
      * composing is exactly what puts the Local models section in Settings —
-     * `start()` never fails on absence (F2), so there is no state in which
-     * this provider is bound and the reader has nowhere to install a model.
-     * A build that did not compose it keeps the port's `NO_GLOSS` default,
-     * where the same field is `false`.
+     * `start()` never fails on absence (F2) — so there was "no state in which
+     * this provider is bound and the reader has nowhere to install a model".
+     * There is one, and WI-20.21 measured what it cost: with the runtime
+     * absent, Look up offered "Install one", the pane took the download, 2.5 GB
+     * landed, and every lookup then failed with "The runtime is not
+     * installed". Somewhere to send the reader is only worth sending them if
+     * something can be done there.
      *
-     * So the two objects that implement `GlossProvider` answer this with two
-     * constants, and between them they say the thing the reader UI actually
-     * needs to know: whether Look up should offer a download or not be drawn
-     * at all. See `GlossProvider.installable`.
+     * So this follows the runtime, read per call like `available` — and with
+     * it false the reader UI draws no Look up control at all, which is the
+     * same answer a browser or a phone gets (`decideLookUp` → `none`), and the
+     * honest one: nothing the reader can do from here changes it. A build that
+     * did not compose `inference` keeps the port's `NO_GLOSS` default, where
+     * the field is `false` for the other reason. See `GlossProvider.installable`.
      */
-    installable: true,
+    get installable(): boolean {
+      return controller.getSnapshot().runtime.kind !== 'absent'
+    },
 
     async gloss(term: string, context: GlossContext, signal: AbortSignal): Promise<string> {
       const model = controller.textModel()
@@ -144,6 +138,10 @@ export function createGlossProvider({ plugin, controller, report }: GlossProvide
         cachedFor = model
       }
 
+      /* Cancelled is cancelled, cached or not: a lookup the reader abandoned
+         used to succeed from the cache and reject from the model, so what
+         `useGloss` saw depended on whether the word had been asked before. */
+      signal.throwIfAborted()
       const key = glossKey(term, context)
       const hit = cache.get(key)
       if (hit !== undefined) return hit
@@ -250,10 +248,13 @@ export function createGlossProvider({ plugin, controller, report }: GlossProvide
                * would have ended the search in a minute" — and the gloss path
                * simply had no such hook until now.
                *
-               * Reported for EVERY failure including cancellation, because a
-               * cancellation the reader did not ask for is one of the things
-               * worth seeing in a log. */
-              report?.('inference.gloss-failed', { kind, model, message: messageOf(cause) })
+               * Reported for every failure but the reader's OWN abort — a
+               * cancellation nobody asked for is worth seeing in a log; one the
+               * reader made by moving on is every selection change, and a
+               * log full of those buries the failures. */
+              if (!(kind === 'cancelled' && signal.aborted)) {
+                report?.('inference.gloss-failed', { kind, model, message: messageOf(cause) })
+              }
 
               /* THE READER'S OWN ABORT, and only when it really was one.
                * `cancelled` also arrives when the DAEMON cancels — it does so
@@ -272,7 +273,7 @@ export function createGlossProvider({ plugin, controller, report }: GlossProvide
                * made READABLE, which is a different thing and the half that
                * was missing. */
               if (cause instanceof Error) throw cause
-              throw new Error(String(cause), { cause })
+              throw new Error(messageOf(cause), { cause })
             })
         ).trim()
         /* An empty answer is NOT cached and NOT returned as a definition: an

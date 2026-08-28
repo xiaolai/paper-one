@@ -4,15 +4,18 @@ import { coverIn } from '../core/coverArt'
 import { tauriVaultFs } from '../core/vaultFsTauri'
 import { offeredFaces } from '../core/typefaces'
 import { presentFaces } from './fontProbe'
-import { canKeepPlace, resolveAccel } from './accel'
+import { canKeepPlace, resolveAccel, resolvePageKey } from './accel'
 import { DEFAULT_STEP_IDX, applyMetrics } from '../core/metrics'
 import { importFs as tauriImportFs, pickBooks, pickFolder, readBookAt } from '../core/bookFiles'
 import { positionRecorder, type PositionRecorder } from '../core/positionRecorder'
 import { createGenerations } from '../core/generations'
+import { createOpenRollback } from './openRollback'
 import { usePlatform, usePrefersDark, usePrefersReducedMotion } from './platform'
 import { useImportRun } from './hooks/useImportRun'
 import { useArchives } from './hooks/useArchives'
-import { useWindowClose } from './hooks/useWindowClose'
+import { requestWindowClose, useWindowClose } from './hooks/useWindowClose'
+import { takeOpened, type OpenRequests } from './openedFiles'
+import { closePrepare } from './closeWindow'
 import { openExternal } from './openExternal'
 import { hasOpenLayer, useAppState } from './state'
 import { useTagPrefs } from './hooks/useTagPrefs'
@@ -21,7 +24,7 @@ import type { Composition } from '../core/registry'
 import { useBook } from './hooks/useBook'
 import { useBookIntake } from './hooks/useBookIntake'
 import { useEnrichment } from './hooks/useEnrichment'
-import { onBeforeClose } from '../core/beforeClose'
+import { flushBeforeClose, onBeforeClose } from '../core/beforeClose'
 import { useFileDrop, type DropHaul } from './hooks/useFileDrop'
 import { useLibrary } from './hooks/useLibrary'
 import { useCards } from './hooks/useCards'
@@ -52,7 +55,7 @@ import { TrashSheet } from './overlays/TrashSheet'
 import { TitleBar } from './shell/TitleBar'
 import { WindowShell } from './shell/WindowShell'
 import { Library } from './screens/Library'
-import { Reader } from './screens/Reader'
+import { Reader, type ReturnHint } from './screens/Reader'
 import { TagEditor } from './screens/TagEditor'
 import { tagCounts } from '../core/library'
 import { SidePane } from './pane/SidePane'
@@ -96,12 +99,35 @@ export interface AppProps {
    */
   shelfUnread?: boolean
   /**
+   * What boot found wrong with the store, in one sentence — a damaged file
+   * moved aside, a disk it could not open — or null. Shown in the shelf's
+   * foot until dismissed, because the console it used to go to is not where
+   * a reader looks for their cards and settings (WI-20.36).
+   */
+  bootNotice?: string | null
+  /**
    * What the composed capabilities contributed — panes for the side pane,
    * commands for the palette — as `composeCapabilities` returned it. Built
    * by the composition root, like `services`, and read here; the kernel
    * itself puts nothing in it.
    */
   composition: Composition
+  /**
+   * What must happen before the window closes, when the composition root has
+   * more to tear down than the kernel knows about — the same teardown the
+   * quit handshake runs: hand over, drain, end the capabilities, close the
+   * sync journal, tell the shell. Absent, the kernel flushes and drains its
+   * own queue and no more, which is right for a host with nothing composed.
+   */
+  beforeWindowClose?: () => Promise<unknown>
+  /**
+   * Books the launch carried — a double-click in the Finder, a path on the
+   * command line, a second launch the first absorbed — as the shell hands
+   * them over. Absent for a host with no shell (a browser tab). See
+   * `openedFiles.ts` for the queue and why the root, not this component,
+   * tells the shell when it may release it.
+   */
+  openRequests?: OpenRequests
 }
 
 /**
@@ -112,7 +138,15 @@ export interface AppProps {
  */
 const NOTICE_MS = 12_000
 
-export function App({ services, fs, shelfUnread = false, composition }: AppProps) {
+export function App({
+  services,
+  fs,
+  shelfUnread = false,
+  bootNotice: bootSaid = null,
+  composition,
+  beforeWindowClose,
+  openRequests,
+}: AppProps) {
   const platform = usePlatform()
   /* Probed once for the app's lifetime: which fonts this machine has cannot
      change while it is running. Shared by the settings panel and the palette so
@@ -183,9 +217,9 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
     [fs],
   )
   const library = useLibrary(services.library)
-  /* Reading aloud follows the spine document: an utterance outlives a section,
-   * and would otherwise go on reading words that are no longer on screen. */
-  const speech = useSpeech(book.doc)
+  /* Reading aloud follows the spine document and turns its pages: the session
+   * is the paging — `next`, in reading order — and `doc` is what is read. */
+  const speech = useSpeech(book.doc, book)
 
   /* One file picker for the window. The reader's empty state, the palette and
    * the switcher all ask for books, and one input serves all three rather than
@@ -207,9 +241,26 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
    * dropped afterwards, and landed on top of the one they had chosen. */
   const openGenerations = useRef(createGenerations())
 
+  /**
+   * What to undo if the open now starting never lands — see the arming site
+   * in `goToJump`, the fuller note above `openFailed`, and `openRollback.ts`,
+   * which holds the three transitions and the reasons each has been wrong.
+   *
+   * DECLARED HERE, above `openBook`, because every open OWNS this slot for its
+   * own duration: an open that starts arms it, and doing so retires whatever
+   * the last one left.
+   */
+  const undoOpen = useRef(createOpenRollback())
+
   const openBook = useCallback(
-    (source: File | string, path: string | null = null) => {
+    (source: File | string, path: string | null = null, undo: (() => void) | null = null) => {
       openGenerations.current.claim()
+      /* A direct open RETIRES the rollback a pending open armed — runs it,
+       * rather than dropping it: the state a superseded jump committed is
+       * still committed. `undo` is how `openStored` carries its own rollback
+       * through the origin fallback, which is the one re-entry that is the
+       * same open continuing. See `openRollback.ts`. */
+      undoOpen.current.arm(undo)
       dispatch({ type: 'goScreen', screen: 'reader' })
       /* Handed over WITH its source rather than set directly, so the effect that
        * notices the new source is the single place the path is decided. Set here
@@ -316,27 +367,31 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
    * a failed jump moved a later, unrelated open to the wrong place.
    *
    * A ref rather than a dependency because `openStored` is declared eight
-   * hundred lines above the state it has to undo. It is set immediately before
-   * the read and consumed by whichever settles first.
+   * hundred lines above the state it has to undo. It is armed by the open
+   * that starts (`openStored`'s `undo` argument) and consumed by whichever
+   * settles first; the slot itself is declared above `openBook`, which see.
    */
-  const undoOpen = useRef<(() => void) | null>(null)
-  const openFailed = useCallback(() => {
-    const undo = undoOpen.current
-    undoOpen.current = null
-    undo?.()
-  }, [])
+  const openFailed = useCallback(() => undoOpen.current.fire(), [])
 
   const openStored = useCallback(
-    (entry: IndexedBook) => {
+    (entry: IndexedBook, undo?: () => void) => {
       if (!fs) return
       const fresh = openGenerations.current.claim()
+      /* THIS open owns the rollback slot now, and taking it RETIRES whatever
+       * the last one left rather than dropping it — see `openRollback.ts`. */
+      undoOpen.current.arm(undo ?? null)
       const name = storedBookName(entry)
       void readOwnedBook(fs, contentPathIn(entry.bookId, name), name)
         .then((file) => {
           if (!fresh()) return
-          /* Landed, so there is nothing left to undo. */
-          undoOpen.current = null
-          openBook(file, entry.origin ?? null)
+          /* ⚠️ NOT RELEASED HERE. The bytes arriving is not the book landing:
+           * it still has to parse and render, and a corrupt or unsupported one
+           * fails after this line. Released this early, a jump into a book the
+           * reader was then shown an error for kept its override and its "←
+           * Back to …" line. The rollback travels with the open — see the
+           * `book.error` effect, which fires it, and the override's own
+           * spending effect, which releases it once a section has rendered. */
+          openBook(file, entry.origin ?? null, undo ?? null)
         })
         .catch((cause: unknown) => {
           if (!fresh()) return
@@ -365,16 +420,21 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
              * The reader takes a string source directly, and a genuinely bad
              * origin still fails — one step later, through the reader's own
              * error path, which is where an unopenable book belongs. */
+            /* THE ROLLBACK TRAVELS WITH THE FALLBACK. This is the same open
+             * continuing by another route, not a new one replacing it — so it
+             * carries `undo` rather than retiring it, which would clear the
+             * jump's own override and land the book at its saved place instead
+             * of the mark that was clicked. */
             if (/^https?:\/\//i.test(original)) {
-              openBook(original)
+              openBook(original, null, undo ?? null)
               return
             }
             void readBookAt(original)
               .then((file) => {
-                if (fresh()) openBook(file, original)
+                if (fresh()) openBook(file, original, undo ?? null)
               })
               .catch(() => {
-                if (fresh()) openBook(original)
+                if (fresh()) openBook(original, null, undo ?? null)
               })
             return
           }
@@ -423,6 +483,10 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
    * DECLARED ABOVE THE IMPORT COORDINATOR, which writes every import's notice
    * through it. */
   const [importNotice, setImportNotice] = useState<string | null>(null)
+  /* Standing, not transient: a quarantined store is not something the app
+     did, it is something the reader has lost, and it stays until they say
+     they have read it. */
+  const [bootNotice, setBootNotice] = useState<string | null>(bootSaid)
 
   /* THE IMPORT LIFECYCLE, ONCE — see `useImportRun`. The progress bar, the
    * generation token, the abort handle, the handover and the settle were
@@ -483,6 +547,9 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
     bookId,
     meta,
     source,
+    /* WHICH OPEN, not which source — see `BookIntakeInput.generation`. The
+       same URL opened twice is two opens and one `source`. */
+    generation: book.generation,
     fs,
     add,
     keepContent,
@@ -632,7 +699,16 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
 
   const addBooks = useCallback(() => {
     void pickBooks()
-      .then((picked) => addAndOpen(picked))
+      .then((picked) =>
+        /* ITS OWN CATCH, so the sentence matches the stage. One catch over
+         * both used to answer a rejected ADD with "The file picker failed" —
+         * files had been selected and partly copied, and the reader was sent
+         * to re-pick them. */
+        addAndOpen(picked).catch((cause: unknown) => {
+          console.error('Paper: could not add the picked books', cause)
+          setImportNotice('Those books could not be added.')
+        }),
+      )
       .catch((cause: unknown) => {
         /* SAID, not only logged. A cancelled picker resolves empty, so
          * reaching here is a real failure — and a reader whose "Add books"
@@ -685,7 +761,11 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
         books.map((file) => ({ file, path: null })),
         notes.length ? notes.join(' ') : undefined,
       ).catch((cause: unknown) => {
+        /* SAID, like every other route in. The drop was the one intake whose
+         * failure went to the console alone — the silent-failure shape this
+         * callback's own header says it exists to remove. */
         console.error('Paper: could not add what was dropped', cause)
+        setImportNotice('Those books could not be added.')
       })
     },
     [addAndOpen],
@@ -695,6 +775,27 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
    * app does not intercept NAVIGATES the webview to it — the interface is
    * replaced by WebKit's PDF viewer with no error and no way back. */
   const { dragging } = useFileDrop(dropBooks)
+
+  /* Books the LAUNCH carried, through the picker's route with the path kept —
+   * a double-clicked book is one the shelf should be able to reopen. The
+   * subscription is the root's: it registers the shell listener and only then
+   * tells the shell it may release what it held (`openedFiles.ts`). */
+  useEffect(() => {
+    if (!openRequests) return
+    /* IN ORDER, one launch at a time. Two deliveries close together — the
+     * reader double-clicks A, then B — used to run concurrently, and a slow
+     * A (a big PDF off a network volume) could finish its `addAndOpen` AFTER
+     * B's, leaving A open when B was the later ask. The chain survives a
+     * failure: one launch that cannot be read must not dam the next. */
+    let chain: Promise<void> = Promise.resolve()
+    return openRequests.subscribe((paths) => {
+      chain = chain
+        .then(() => takeOpened(paths, { addAndOpen, notice: setImportNotice }))
+        .catch((cause: unknown) => {
+          console.error('Paper: could not open what the launch carried', cause)
+        })
+    })
+  }, [openRequests, addAndOpen])
 
   /**
    * Add a whole folder.
@@ -786,7 +887,20 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
           },
         },
       )
-    })()
+    })().catch((cause: unknown) => {
+      /* THE TERMINAL CATCH. `run` reports its own failures through
+       * `onFailure`, but its settle — the shelving handover — used to reject
+       * past that, and a detached IIFE turned it into an unhandled rejection
+       * with no notice anywhere.
+       *
+       * THE SETTLE IS HANDLED INSIDE `run` NOW, which is where it belonged:
+       * catching it here said the right sentence but left the progress bar up
+       * and `imports.busy` true forever, so this route refused every later
+       * import. This stays as the backstop it should always have been — a
+       * detached IIFE with no catch is a rejection nobody hears. */
+      console.error('Paper: the folder import failed to settle', cause)
+      setImportNotice('That folder could not be imported.')
+    })
   }, [importFs, imports])
 
 
@@ -992,15 +1106,44 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
    * the jump would open the right book at the wrong place, which is the failure
    * this whole item is about. A published CFI means a section has rendered,
    * which means the read has happened.
+   *
+   * AND IT IS ALSO WHERE THE OPEN LANDS. A section rendered in the book the
+   * jump asked for is the whole of what "it worked" means, so the rollback is
+   * released in the same breath the override is spent — see `openRollback.ts`
+   * for why releasing it any earlier was wrong.
    */
   useEffect(() => {
-    if (overrideSpent(bookId, openAt, book.position.cfi)) setOpenAt(null)
+    if (!overrideSpent(bookId, openAt, book.position.cfi)) return
+    setOpenAt(null)
+    undoOpen.current.release()
   }, [openAt, bookId, book.position.cfi])
 
-  /* HOLD THE WINDOW SHUT UNTIL EVERY WRITE HAS LANDED — see
-   * `useWindowClose`. A whole errand with its own lifetime failure modes, and
-   * both defects it has had were lifetime defects. */
-  useWindowClose(useCallback(() => services.drain(), [services]))
+  /**
+   * A book whose bytes arrived and which would not open is a failed open.
+   *
+   * ⚠️ THE ROLLBACK USED TO BE RELEASED WHEN THE BYTES LANDED, which is before
+   * anything has parsed. So a jump into a corrupt, DRM-locked or unsupported
+   * book cleared its own undo, showed the reader an error, and left the place
+   * override armed and the "← Back to …" line offering a jump that never
+   * happened. `book.error` is the reader's terminal open failure — `fail` is
+   * generation-guarded, so this is about the book on screen — and it is the
+   * signal this half was missing.
+   */
+  useEffect(() => {
+    if (book.error !== null) openFailed()
+  }, [book.error, openFailed])
+
+  /* HOLD THE WINDOW SHUT UNTIL EVERYTHING HAS LANDED — see `useWindowClose`.
+   * A whole errand with its own lifetime failure modes, and both defects it
+   * has had were lifetime defects. The composition's teardown when there is
+   * one; the kernel's own flush-and-drain when there is not. */
+  const reportClose = useCallback((message: string, cause: unknown) => console.error(message, cause), [])
+  useWindowClose(
+    useMemo(
+      () => beforeWindowClose ?? closePrepare(flushBeforeClose, () => services.drain(), reportClose),
+      [beforeWindowClose, services, reportClose],
+    ),
+  )
 
   /* The book intake — bytes first, then record, one effect — lives in
    * `useBookIntake`, where its ordering rationale is documented. */
@@ -1150,8 +1293,21 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
    * Set only when a jump ACTUALLY happened: `jumpTo` returns false for a
    * refused one, and offering a way back from a jump that did not occur is a
    * worse lie than saying nothing.
+   *
+   * A LABEL AND A NONCE, not a label. Two jumps out of one chapter carry the
+   * same chapter name, React bails out of a `setState` to an identical value,
+   * and the reader's fade timer therefore never restarted — the second hint
+   * ran out on the first one's clock. See `ReturnHint`.
    */
-  const [returnTo, setReturnTo] = useState<string | null>(null)
+  const [returnTo, setReturnTo] = useState<ReturnHint | null>(null)
+  /* MINTED IN ONE PLACE, so the nonce cannot be forgotten by the third call
+     site. A ref rather than `n + 1` off the current hint: the hint is cleared
+     to null between jumps, so its own count is not there to read. */
+  const returnHints = useRef(0)
+  const raiseReturnHint = useCallback((label: string) => {
+    returnHints.current += 1
+    setReturnTo({ label, nonce: returnHints.current })
+  }, [])
   /* DECLARED ABOVE `goToJump`, which clears it when a cross-book open fails.
      A refused jump and a jump whose book would not open are the same lie to
      the reader, and only the first was being caught. */
@@ -1180,18 +1336,25 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
         setImportNotice('That book is no longer on your shelf.')
         return false
       }
-      /* ARMED BEFORE THE READ, consumed if it fails. The override and the
+      /* ARMED WITH THE READ, consumed if it fails. The override and the
          "← Back to …" line are both committed here on the assumption that the
          open lands, and it can fail seconds later — missing content, an origin
          that has moved. Without this the override stayed armed and was spent
          by the NEXT book the reader opened, sending it to a place from a book
-         they never reached. */
-      undoOpen.current = () => {
+         they never reached. Handed to `openStored` rather than written to the
+         ref here, so the open that carries it is the only one that can be
+         rolled back by it. */
+      /* ⚠️ THE OPEN STARTS FIRST, AND THE ORDER IS THE POINT. Taking the
+         rollback slot RETIRES the previous open's — it runs it — and that
+         rollback's whole job is `setOpenAt(null)`. Written the other way round
+         React batches the pair and the null wins, so a jump made while an
+         earlier jump was still in flight lost its own override and opened the
+         right book at the wrong place. */
+      openStored(row, () => {
         setOpenAt(null)
         setReturnTo(null)
-      }
+      })
       setOpenAt(target)
-      openStored(row)
       return true
     },
     [book, library.books, openStored, setReturnTo],
@@ -1213,9 +1376,9 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
     (target: JumpTarget) => {
       /* Read BEFORE the jump — this is where the reader is leaving from. */
       const leaving = book.position.chapterLabel
-      if (jumps.jumpTo(target) && leaving) setReturnTo(leaving)
+      if (jumps.jumpTo(target) && leaving) raiseReturnHint(leaving)
     },
-    [jumps, book.position.chapterLabel],
+    [jumps, book.position.chapterLabel, raiseReturnHint],
   )
 
   /* Spent by using it, so the line does not linger over a place the reader has
@@ -1253,8 +1416,8 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
   const onBookLink = useCallback(() => {
     const leaving = book.position.chapterLabel
     jumps.record()
-    if (leaving) setReturnTo(leaving)
-  }, [jumps, book.position.chapterLabel])
+    if (leaving) raiseReturnHint(leaving)
+  }, [jumps, book.position.chapterLabel, raiseReturnHint])
 
   /**
    * A link whose scheme leaves the book.
@@ -1411,31 +1574,26 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
        * a toolbar control reached by Tab — turned the page instead of pressing
        * the button, and an arrow key a custom control had already consumed
        * (`defaultPrevented`) turned it again. Both are the platform's meaning
-       * of those keys being taken from under the reader's focus. */
+       * of those keys being taken from under the reader's focus.
+       *
+       * THE HOST'S CONTROLS ONLY. A key pressed inside the book arrives here
+       * re-dispatched with the WINDOW as its target, so this can never see a
+       * `<select>` in an interactive EPUB; `ReaderSession.#watchKeys` decides
+       * that half where the real target is visible, and does not forward. */
       const onControl =
         target instanceof HTMLElement &&
         target.closest('button, a[href], select, [role="menu"], [role="listbox"], [role="dialog"]') !== null
       if (!accel && !typing && !onControl && !event.defaultPrevented && reading) {
-        /* Shift+arrow is a SELECTION, not a page turn — the platform meaning of
-         * the combo in every text surface there is. Without this guard the page
-         * turned instead, which also made the paginator's keyboard-selection
-         * branch unreachable: it extends the selection on the same keydown this
-         * handler was consuming first. Space handles its own shift below, where
-         * ⇧Space is the published binding for the previous page. */
-        const selecting = event.shiftKey
-
-        if (!selecting && (event.key === 'ArrowRight' || event.key === 'PageDown')) {
-          event.preventDefault()
-          book.next()
-          return
-        }
-        if (!selecting && (event.key === 'ArrowLeft' || event.key === 'PageUp')) {
-          event.preventDefault()
-          book.prev()
-          return
-        }
-
-        /* §11: Space moves on by one screen, ⇧Space back by one.
+        /* THE MAP IS A PURE FUNCTION — `resolvePageKey`, beside `resolveAccel`
+         * and for the same reason. What it returns is the navigator's VERB:
+         * the arrows ask for a side (`goLeft`/`goRight`, which the book
+         * resolves from its own direction, exactly as the chevrons do), the
+         * paging keys and Space ask for an order (`next`/`prev`). The arrows
+         * were `next`/`prev` here, and in a right-to-left book the → key and
+         * the → chevron beside it moved opposite ways. Shift+arrow is left to
+         * the selection there too; ⇧Space is the one shifted key it owns.
+         *
+         * §11: Space moves on by one screen, ⇧Space back by one.
          *
          * In BOTH flows, which this used to refuse. It returned early unless
          * the book was paginated, on the stated grounds that "with the ruler
@@ -1458,10 +1616,10 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
          * listener, which React registers before this one because a child's
          * effects run before its parent's. That is what `defaultPrevented`
          * below is reading, and it is the whole reason this can be flow-blind. */
-        if ((event.key === ' ' || event.code === 'Space') && !event.defaultPrevented) {
+        const verb = resolvePageKey(event)
+        if (verb) {
           event.preventDefault()
-          if (event.shiftKey) book.prev()
-          else book.next()
+          book[verb]()
           return
         }
       }
@@ -1473,6 +1631,7 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
          every repeat rule and every toggle lives there, where a test can put
          real keys through it instead of searching this file for a literal. */
       const action = resolveAccel(event, {
+        platform,
         screen: state.screen,
         pane: state.pane,
         hasSelection: marking.selection !== null,
@@ -1525,6 +1684,12 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
           return
         case 'jumpForward':
           jumps.forward()
+          return
+        /* THE WINDOW'S CLOSE, not an exit: `useWindowClose` intercepts it and
+           runs the teardown the quit handshake runs, so Ctrl+Q closes the
+           journal as ⌘Q and the red button do. */
+        case 'quit':
+          requestWindowClose()
           return
       }
     }
@@ -1673,6 +1838,8 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
             onGoTo={jumpTo}
             onDeleteMark={marking.unmark}
             markFocus={marking.focus}
+            onMarkFocusDone={marking.clearFocus}
+            selection={marking.selection?.text ?? null}
             /* The one place the app decides what the companion is — and this
                IS the line the old comment said would change when a provider
                arrived. It reads the kernel's port rather than a constant, so
@@ -1725,6 +1892,8 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
              port keeps its `NO_GLOSS` default, the button is still absent. */
           onInstallGloss={() => dispatch({ type: 'openPane', pane: 'settings' })}
           libraryCount={library.books.length}
+          saveFailure={library.saveFailure}
+          onDismissSaveFailure={library.dismissSaveFailure}
           shelfUnread={shelfUnread}
           onOpenLibrary={() => dispatch({ type: 'goScreen', screen: 'library' })}
           state={state}
@@ -1780,6 +1949,10 @@ export function App({ services, fs, shelfUnread = false, composition }: AppProps
             onAddFolder={addFolder}
             importing={importing}
             importNotice={importNotice}
+            saveFailure={library.saveFailure}
+            onDismissSaveFailure={library.dismissSaveFailure}
+            bootNotice={bootNotice}
+            onDismissBootNotice={() => setBootNotice(null)}
             shelfUnread={shelfUnread}
             enriching={enrichment.pending}
             download={download}

@@ -604,7 +604,7 @@ describe('the storage model', () => {
 
   it('mirrors the status store', async () => {
     const w = await world()
-    w.status.set({ state: 'degraded', detail: "Paper on your Mac isn't reachable" })
+    w.status.set({ state: 'degraded', detail: "Paper on Study iMac isn't reachable" })
     expect(w.model.getSnapshot().status.state).toBe('degraded')
     expect(w.model.getSnapshot().status.detail).toMatch(/isn't reachable/)
   })

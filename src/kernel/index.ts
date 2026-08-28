@@ -1,7 +1,11 @@
 /**
  * The kernel's public entry — the ONLY kernel module anything outside
  * `src/kernel/` may import (`.dependency-cruiser.cjs`, rule
- * `kernel-public-entry-only`).
+ * `kernel-public-entry-only`), with the exemptions that rule names: the
+ * browser client under `src/app/web/` reaches `ui/browser` and `core/metrics`
+ * directly, because this barrel re-exports modules that import `@tauri-apps`
+ * and a web bundle may carry none of them. Those exemptions are written
+ * beside the rule, with the reason; they are not a licence for anyone else.
  *
  * NOTHING REACT. What is here is the non-React kernel: the services a
  * composition root builds and a capability's `start` receives, the ports a
@@ -66,8 +70,11 @@ export {
 export type { CapabilityErrorCode, Composition, CompositionOptions, Contributions } from './core/registry'
 
 /* THE SERVICE TABLE — the one declaration the router registration, the client
- * stubs, the CLI's commands and `dev-docs/service-table.md` are all derived from
- * (phase 11). Public because all four consumers sit outside the kernel. */
+ * stubs and the CLI's commands are all derived from (phase 11). Public because
+ * the consumers sit outside the kernel. `dev-docs/service-table.md` is NOT
+ * derived from it: that document is hand-kept and drifts (WI-20.37 found it
+ * two services and a grant behind); `serviceTable.test.ts` holds the CODE to
+ * one declaration, and nothing holds the document. */
 export {
   GRANT_FAMILIES,
   SERVICE_GRANTS,
@@ -96,6 +103,7 @@ export type {
   ServiceNoun,
   ServiceOutput,
   ServiceVerb,
+  WithdrawnField,
 } from './core/serviceTable'
 
 /* The table's HANDLERS, and the ports the three nouns the kernel cannot
@@ -294,17 +302,26 @@ export type { Presence, PresenceEntry, PresenceState } from './core/presence'
 export { FORMATS, formatOf, isFormat, sniffFormat } from './core/formats'
 export type { Format } from './core/formats'
 export type { TrashFs } from './core/bookTrash'
-export type { ContentExtension, KnownExtension, VaultFs } from './core/bookVault'
+export type { ContentExtension, KnownExtension, SyncLevel, VaultFs } from './core/bookVault'
 
 /* The vocabulary. */
 /* THE CLOSED DOMAINS, exported so a client can VALIDATE a wire row against
  * them rather than casting. Reading somebody else's JSON and trusting `kind`
  * to be one of three strings is how an unknown value reaches a switch with no
  * case for it — see `app/web/wireRow.ts`. */
-export { MARK_KINDS, MARK_STYLES, MARK_TINTS } from './core/marks'
-export type { MarkStyle } from './core/marks'
-export { createMark, isAnnotation, isBookmark, liveMarks, markStamp, mergeMarks, validMarks } from './core/marks'
-export type { Annotation, Bookmark, Mark, MarkKind, MarkStorage, MarkTint, NewMark } from './core/marks'
+export {
+  MARK_KINDS,
+  MARK_STYLES,
+  MARK_TINTS,
+  createMark,
+  isAnnotation,
+  isBookmark,
+  liveMarks,
+  markStamp,
+  mergeMarks,
+  validMarks,
+} from './core/marks'
+export type { Annotation, Bookmark, Mark, MarkKind, MarkStorage, MarkStyle, MarkTint, NewMark } from './core/marks'
 export { CARD_KINDS, CARDS_STORAGE_KEY, cardStamp, liveCards, mergeCards, parseCards } from './core/cards'
 export type { Card, CardKind, NewCard } from './core/cards'
 export { KERNEL_PANE_IDS, isContributedPaneId, isKernelPaneId } from './core/uiTypes'

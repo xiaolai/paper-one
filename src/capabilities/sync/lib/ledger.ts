@@ -1,17 +1,16 @@
 import {
   BOOKS_DIR,
-  PRESENCE_KEY,
+  ENVELOPE_ERRORS,
+  ServiceCallError,
   defineSetting,
   folderOf,
   mergeCards,
-  notePresence,
   readBook,
   readMarks,
   readPresence,
   recordPath,
   isContentExtension,
   validMarks,
-  writePresence,
   type BookRecord,
   type ContentBlobName,
   type KernelServices,
@@ -23,6 +22,8 @@ import {
 import { isHlc, type Clock, type Hlc } from './clock'
 import type { Journal, JournalKeyRef } from './journal'
 import { canonicalJson, cardsDigest, marksDigest, mergeRecord, toWire } from './merge'
+import { SYNC_QUARANTINE_SETTING, quarantineFor, release, setAside, type Quarantine } from './quarantine'
+import { refusalKind, type QuarantineReport, type SessionRefusal } from './status'
 import {
   PUSHABLE,
   SYNC_JOURNAL_FORMAT,
@@ -135,6 +136,31 @@ export interface SyncSummary {
   readonly pulledRemovals: number
   readonly pulledMarks: number
   readonly pulledCards: boolean
+  /**
+   * Groups the shelf refused ABOUT THE GROUP — a conflict, a malformed
+   * group — and the session went on past (WI-20.25). Their revs stay in the
+   * outbox and are offered again next session; the reader is told which
+   * book, by the status line. Empty when everything was acked.
+   */
+  readonly refused: readonly SessionRefusal[]
+  /** The pull side's quarantine after this session — see `quarantine.ts`. */
+  readonly quarantine: QuarantineReport
+}
+
+/**
+ * What one session accumulates as it goes: the push side's refusals, and the
+ * pull side's quarantine as it stood when the session began, moved by what
+ * the session found. One object, threaded through the steps, so a step never
+ * has to reach for a module-level slot.
+ */
+interface SessionOutcome {
+  readonly refused: SessionRefusal[]
+  quarantine: Quarantine
+  /** `dropped` as the session found it, so the report says what THIS session
+   *  dropped: the list's count is lifetime, and reporting it whole made every
+   *  session after one overflow read as a degradation forever. */
+  readonly droppedBefore: number
+  repaired: number
 }
 
 export interface Ledger {
@@ -179,6 +205,47 @@ export const KEEP_NOTES_SETTING: Setting<boolean> = defineSetting('sync.keepNote
 )
 
 const DEFAULT_PAGE_LIMIT = 200
+
+/**
+ * A refusal that is about the SESSION rather than about the group it
+ * answered: continuing to the next group would fail the same way and tell
+ * the reader nothing new. Everything else the shelf refuses is about the one
+ * group — a conflict on this book's bytes, a group it could not parse — and
+ * the next book is not implicated, because every rev is CAS-acked on its
+ * own (WI-20.25).
+ */
+const SESSION_LEVEL_CODES: ReadonlySet<string> = new Set([
+  ENVELOPE_ERRORS.disconnected,
+  ENVELOPE_ERRORS.timeout,
+  ENVELOPE_ERRORS.overloaded,
+  ENVELOPE_ERRORS.cancelled,
+  ENVELOPE_ERRORS.forbidden,
+  ENVELOPE_ERRORS.unsupported,
+  ENVELOPE_ERRORS.unknownService,
+  ENVELOPE_ERRORS.duplicateId,
+  ENVELOPE_ERRORS.protocol,
+  /* The handler threw something it did not classify — "the service failed"
+   * — and whether the fault is this group's or the shelf's is unknown. The
+   * session ends, as it always did, and the reader sees a failure. */
+  ENVELOPE_ERRORS.internal,
+  'not-ready',
+])
+
+/** The shelf's answer about THIS group, crossed the wire; null for anything
+ *  that ends the session — a transport failure, a session-level refusal, a
+ *  local throw. */
+const aboutTheGroup = (thrown: unknown): ServiceCallError | null =>
+  thrown instanceof ServiceCallError && !SESSION_LEVEL_CODES.has(thrown.error.code) ? thrown : null
+
+/** A refusal of this group that will not change by asking again. A RETRYABLE
+ *  one — bytes the shelf cannot verify yet, a file mid-repair — still ends
+ *  the session, so the reader sees a failure rather than a finished sync
+ *  with a book quietly left behind; `a phone import is acked only after the
+ *  bytes land` holds that. */
+const groupRefusal = (thrown: unknown): ServiceCallError | null => {
+  const refused = aboutTheGroup(thrown)
+  return refused !== null && !refused.error.retryable ? refused : null
+}
 
 /** A `ServiceError`-shaped refusal — structurally what the envelope router
  *  forwards as a typed `err` frame. */
@@ -322,8 +389,11 @@ export function createLedger({
     try {
       await fetchBlob(peer, folder, cover)
     } catch {
-      /* This session loses the jacket, not the content; the next push of
-       * the book offers it again. */
+      /* This session loses the jacket, not the content. NOTHING RE-ASKS:
+       * the group is acked and the cover is offered again only when the
+       * book's next push happens — an edit, a mark — which may be never. A
+       * persisted retry for a jacket is more machinery than a jacket is
+       * worth; the trade is recorded here rather than implied away. */
     }
   }
 
@@ -347,19 +417,14 @@ export function createLedger({
    */
   const applyRemoteRemoval = async (book: string, at: Hlc): Promise<void> => {
     if (!fs) return
-    const target = fs
-    let won = false
-    await services.writes.append(PRESENCE_KEY, async () => {
-      won = await notePresence(target, book, 'removed', at)
-    })
-    if (!won || rowOf(book) === undefined) return
-    await journal.markRemote([{ book, what: 'removed' }], () => library.remove(book))
-    await services.writes.append(PRESENCE_KEY, async () => {
-      const presence = await readPresence(target)
-      if (presence[book]?.state === 'removed') {
-        await writePresence(target, { ...presence, [book]: { state: 'removed', at } })
-      }
-    })
+    /* ON THE BOOK'S LANE, both halves in one task — the register write and
+     * the folder move — so a guarded `add` for the same book cannot read
+     * `live` between them and materialise the folder beside a `removed`
+     * register. This used to write `PRESENCE_KEY` directly and call
+     * `library.remove` after, outside every book lane; Codex found the race.
+     * `markRemote` still arms the provenance so the resulting `removed`
+     * commit journals as remote, not as a local removal echoed back. */
+    await journal.markRemote([{ book, what: 'removed' }], () => library.noteRemoteRemoval(book, at))
   }
 
   /**
@@ -430,53 +495,66 @@ export function createLedger({
    * still-armed expectation.
    */
   const applyRemote = async (applies: readonly RemoteApply[]): Promise<void> => {
-    const armed: { book: string; what: JournalKeyRef['what']; ticket: number | null }[] = []
-    const fences: Promise<void>[] = []
-    const pending: Promise<unknown>[] = []
-    for (const apply of applies) {
-      for (const key of apply.keys) {
-        const slot = { book: key.book, what: key.what, ticket: null as number | null }
-        armed.push(slot)
-        fences.push(
-          services.writes.append(key.book, async () => {
-            slot.ticket = journal.expectRemote(key.book, key.what)
-          }),
-        )
+    /* THROUGH `journal.markRemote`, WHICH ARMS ON THE SURFACE'S OWN LANE.
+     * This helper used to carry its own fence — `services.writes.append(
+     * key.book, …)` — and the raw book id is a lane NOTHING ELSE USES: the
+     * kernel's writers queue on `library.lane(book)` (`books/<safeId>`,
+     * rename-following), so the fence armed on an empty lane while the local
+     * edit it was meant to order sat queued on another. The local begin then
+     * consumed the remote expectation — journaled `remote`, dropped from the
+     * outbox, never pushed — and the remote apply journaled `local`, an
+     * echo. The journal fixed this exact defect once (`JournalOptions.lane`'s
+     * note); this duplicate had kept the pre-fix key. The cards surface never
+     * showed it because its lane IS the raw `''`. */
+    const keys = applies.flatMap((one) => one.keys)
+    await journal.markRemote(keys, async () => {
+      const pending: Promise<unknown>[] = []
+      for (const apply of applies) {
+        /* `run` must ENQUEUE synchronously (see the module note) — but a
+         * synchronous THROW from it would escape before the settle below and
+         * leave the batch half-launched. */
+        try {
+          pending.push(apply.run())
+        } catch (thrown) {
+          pending.push(Promise.reject(thrown))
+        }
       }
-      /* `run` must ENQUEUE synchronously (see the module note) — but a
-       * synchronous THROW from it would escape before the try below and
-       * leave every armed fence loaded for the next local edit. */
-      try {
-        pending.push(apply.run())
-      } catch (thrown) {
-        pending.push(Promise.reject(thrown))
-      }
-    }
-    try {
       const outcomes = await Promise.allSettled(pending)
       const failed = outcomes.filter((one): one is PromiseRejectedResult => one.status === 'rejected')
       if (failed.length === 1) throw failed[0]!.reason
       if (failed.length > 1) throw new AggregateError(failed.map((one) => one.reason), `${failed.length} remote applies failed`)
-    } finally {
-      /* Every fence has RUN before its expectation is taken back — clearing
-       * a not-yet-armed one would leave the later arming loaded for the
-       * next local edit, which is the exact defect this helper closes. */
-      await Promise.allSettled(fences)
-      for (const slot of armed) {
-        if (slot.ticket !== null) journal.clearRemote(slot.book, slot.what, slot.ticket)
-      }
-    }
+    })
   }
 
-  const applyIncomingRecord = async (book: string, incoming: BookRecord): Promise<void> => {
+  const applyIncomingRecord = async (
+    book: string,
+    incoming: BookRecord,
+    restoreAt: Hlc | undefined,
+    /** Whether the presence register says this device removed the book —
+     *  READ BEFORE THE FENCE, by the caller. See `handlePush`. */
+    removedLocally: boolean,
+  ): Promise<void> => {
     if (rowOf(book)) {
+      /* On the shelf: an ordinary edit, merged. */
       await library.update(book, foldRecord(incoming))
-    } else {
-      /* A book this device has never seen: `add` — which also restores a
-       * trashed copy rather than writing over it, exactly what a re-add
-       * arriving from elsewhere needs. */
-      await library.add(book, incoming)
+      return
     }
+    if (restoreAt !== undefined) {
+      /* A RESTORE, and it carries its own presence stamp. `add`'s guard wins
+       * the re-add only if `restoreAt` is newer than a removal the register
+       * holds — so a restore at t2 loses to this shelf's own removal at
+       * t3 > t2, and beats a removal at t1 < t2. */
+      await library.add(book, incoming, false, { asOf: restoreAt })
+      return
+    }
+    /* NO RESTORE INTENT, and not on the shelf. If the register removed this
+     * book, the record is a STALE EDIT — a page turn on a book this device
+     * removed after the satchel last heard — and the removal stands whatever
+     * the record's own stamp says (a page turn at t3 is newer than a removal
+     * at t2 and is still not a re-add). Dropped. Otherwise it is a book this
+     * device has genuinely never seen: added. */
+    if (removedLocally) return
+    await library.add(book, incoming)
   }
 
   /**
@@ -560,6 +638,14 @@ export function createLedger({
     const held = group.book === '' ? null : await ownRecord(group.book)
     const row = group.book === '' ? undefined : rowOf(group.book)
     const ownHasContent = row?.hasContent === true
+    /* BOTH SIDES HOLD BYTES AND THE SENDER SENT NO HASH: identity cannot be
+     * established, which the contract above says is a retryable refusal —
+     * and the guard used to fall straight through it, merging blind and
+     * acking a record for bytes that may differ. A record we cannot read
+     * is the same case from this side. */
+    if (group.hasContent && ownHasContent && (group.contentHash === undefined || held === null)) {
+      throw refuse('unverifiable', `content for ${group.book} is on both devices and the push carries no hash to compare`, true)
+    }
     if (group.hasContent && ownHasContent && group.contentHash !== undefined && held !== null) {
       let heldHash = held.contentHash
       if (heldHash === undefined) {
@@ -589,14 +675,58 @@ export function createLedger({
      * its own provenance (see `applyRemoteRemoval`). */
     if (group.removed) await applyRemoteRemoval(group.book, group.removed.at)
 
+    /* A restore carries `live` (its presence stamp); a stale record does not.
+     * Both the record and the marks are judged against it: `marks.mergeRemote`
+     * on a book the register removed writes a ghost `marks.json` beside the
+     * trash, so it is skipped for a removed book with no restore intent, the
+     * same rule the record follows. */
+    const restoreAt = group.live?.at
+    /**
+     * ⚠️ **READ BEFORE THE FENCE, NOT INSIDE IT.**
+     *
+     * Both applies below used to `await readPresence(fs)` as their first act
+     * — inside `run`, which `applyRemote` requires to ENQUEUE SYNCHRONOUSLY.
+     * That await is a hole in the lock scope §2.4 describes: the fence task
+     * had armed the journal's one-shot remote expectation and the apply had
+     * not yet queued behind it, so a local edit enqueued in the gap began
+     * first, CONSUMED the expectation, and was journaled `remote` — dropped
+     * from the outbox, never pushed, gone with no error anywhere. That is
+     * the exact defect `applyRemote`'s own note says the fence was written
+     * to remove, reintroduced by the presence check added beside it.
+     *
+     * Read once, here, and handed to both applies as a value. This is a
+     * check, not a lock: a removal that lands between this read and the
+     * apply is still possible, and closing THAT needs a kernel verb that
+     * tests presence and adds inside the book's own write lane. The
+     * ordering defect is the one that loses a reader's edit silently;
+     * the residual race re-adds a book a pull would have re-added anyway.
+     */
+    /* NOT GATED ON `rowOf`, which is the one part of the old condition that
+       can CHANGE between here and the apply: a row that goes away in the gap
+       would leave the decision reading a `removedLocally` that was never
+       computed. `restoreAt` is a value off the wire and cannot move, so it
+       still spares the read on a restore. */
+    const asksAboutPresence = restoreAt === undefined && (group.record !== undefined || (group.marks !== undefined && group.marks.length > 0))
+    const removedLocally = fs !== null && asksAboutPresence && (await readPresence(fs))[group.book]?.state === 'removed'
     const applies: RemoteApply[] = []
     if (group.record) {
       const incoming = group.record
-      applies.push({ keys: [{ book: group.book, what: 'record' }], run: () => applyIncomingRecord(group.book, incoming) })
+      applies.push({
+        keys: [{ book: group.book, what: 'record' }],
+        run: () => applyIncomingRecord(group.book, incoming, restoreAt, removedLocally),
+      })
     }
     if (group.marks && group.marks.length > 0) {
       const incoming = group.marks
-      applies.push({ keys: [{ book: group.book, what: 'marks' }], run: () => marks.mergeRemote(group.book, incoming) })
+      applies.push({
+        keys: [{ book: group.book, what: 'marks' }],
+        run: () => {
+          /* `rowOf` is re-read here because it is FREE and synchronous — the
+             row may have arrived from the record apply queued just above. */
+          if (restoreAt === undefined && rowOf(group.book) === undefined && removedLocally) return Promise.resolve()
+          return marks.mergeRemote(group.book, incoming)
+        },
+      })
     }
     if (group.cards) {
       const incoming = group.cards
@@ -626,8 +756,11 @@ export function createLedger({
       }
     }
     /* The cover moves whenever it is offered and this device lacks it —
-     * INDEPENDENT of the content fetch (#21), and tracked for retry rather
-     * than dropped on failure. */
+     * INDEPENDENT of the content fetch (#21). A failure loses the jacket for
+     * this session and NOTHING RE-ASKS: the only retry is structural, the
+     * book's NEXT push offering the cover again, which may never come. This
+     * used to say "tracked for retry", which was true of a `coverRetry` set
+     * nothing ever read — see `ensureCover`, which carries the trade. */
     if (group.cover && group.book !== '') {
       await ensureCover(peer, folder, group.cover)
     }
@@ -744,7 +877,7 @@ export function createLedger({
     }
     const contentName = contentBlobName(record)
     const content = await facts(contentName)
-    const cover = (await facts('cover.jpg')) ?? (await facts('cover.webp'))
+    const cover = await coverFacts(folder)
     return {
       folder,
       name: content?.name ?? contentName,
@@ -782,6 +915,7 @@ export function createLedger({
       record?: BookRecord
       marks?: readonly Mark[]
       removed?: { at: Hlc }
+      live?: { at: Hlc }
       contentHash?: string
       format?: string
       size?: number
@@ -793,9 +927,15 @@ export function createLedger({
       const state = (await readPresence(fs))[book]
       if (state?.state === 'removed') {
         group.removed = { at: state.at }
-      } else if (record && group.record === undefined) {
-        // A restore with no record edit: the record IS the news.
-        group.record = toWire(record)
+      } else if (state?.state === 'live') {
+        /* A RESTORE: the register flipped back to `live`, so the removed rev
+         * in the outbox is a re-add. The record is the news, and `live`
+         * carries the flip's stamp so the shelf can order it against a
+         * removal of its own — without it the shelf would fall back to the
+         * record's stamp, which may predate the removal even for a genuine
+         * restore. */
+        if (group.record === undefined && record) group.record = toWire(record)
+        group.live = { at: state.at }
       }
     }
     if (hasContent && record) {
@@ -809,16 +949,38 @@ export function createLedger({
         group.contentHash = facts.hash
         if (facts.size > 0) group.size = facts.size
       }
-      if (hashFile) {
-        try {
-          const cover = await hashFile(blobFolderOf(book), 'cover.jpg')
-          group.cover = { name: 'cover.jpg', size: cover.size, hash: cover.blake3 }
-        } catch {
-          /* No cover; nothing to offer. */
-        }
+      /* THE SAME PROBE `handleContent` USES — both names, jpg then webp. This
+       * asked for `cover.jpg` alone, so a legacy WebP jacket was never
+       * offered on a push while the content service happily served it. */
+      const cover = await coverFacts(blobFolderOf(book))
+      if (cover) group.cover = cover
+    }
+    /* A REVISION WITH NOTHING BEHIND IT IS NOT OFFERED. The shelf acks what
+     * is advertised and the ack clears the rev — so a record rev whose file
+     * could not be read, or a removed rev whose register says nothing,
+     * would have been cleared as "pushed" with its state never sent. Left
+     * in the outbox instead, visible, for a session that can carry it. A
+     * record or marks rev rides a removal or a restore without its payload:
+     * there the removal is the news. */
+    const intent = group.removed !== undefined || group.live !== undefined
+    if (revs.record !== undefined && group.record === undefined && !intent) delete revs.record
+    if (revs.removed !== undefined && !intent) delete revs.removed
+    return group
+  }
+
+  /** A jacket beside the bytes, whichever of the two names it carries — the
+   *  one probe for the push offer and the content answer (#329). */
+  const coverFacts = async (folder: string): Promise<{ name: string; size: number; hash: string } | null> => {
+    if (!hashFile) return null
+    for (const name of ['cover.jpg', 'cover.webp'] as const) {
+      try {
+        const hashed = await hashFile(folder, name)
+        return { name, size: hashed.size, hash: hashed.blake3 }
+      } catch {
+        /* Not this name; try the other. */
       }
     }
-    return group
+    return null
   }
 
   const applyAck = async (group: PushGroup, ack: PushAck): Promise<void> => {
@@ -852,11 +1014,31 @@ export function createLedger({
     }
   }
 
-  const pushAll = async (channel: SyncChannel): Promise<number> => {
+  const pushAll = async (channel: SyncChannel, outcome: SessionOutcome): Promise<number> => {
     let pushed = 0
     for (const [book, revs] of outboxGroups()) {
       const group = await buildGroup(book, revs)
-      const answer = await channel.call(SYNC_SERVICES.push.name, group)
+      /* Every rev this group had was one it could not back (see
+       * `buildGroup`); nothing to offer this session. */
+      if (Object.keys(group.revs).length === 0) continue
+      let answer: unknown
+      try {
+        answer = await channel.call(SYNC_SERVICES.push.name, group)
+      } catch (thrown) {
+        /* ONE REFUSED GROUP DOES NOT END THE SESSION (WI-20.25). It used to:
+         * a `conflict` on one book was offered first every session, refused
+         * every session, and every later push and the whole pull sat behind
+         * it. The revs stay in the outbox — nothing was acked — and the
+         * next group is offered, because each rev is acked on its own and
+         * the shelf's answer about this book says nothing about the next.
+         * The refusal is recorded so the reader is told WHICH book. A
+         * refusal about the session, or anything that did not come from the
+         * shelf's handler, still ends it. */
+        const refused = groupRefusal(thrown)
+        if (refused === null) throw thrown
+        outcome.refused.push({ kind: refusalKind(refused), book, message: refused.error.message })
+        continue
+      }
       const ack = parsePushAck(answer)
       if (ack === null) throw new Error('sync.push answered something that is not an ack')
       await applyAck(group, ack)
@@ -870,7 +1052,50 @@ export function createLedger({
     return held && held.peerId === peerId ? held : null
   }
 
-  const applyPage = async (channel: SyncChannel, page: PullPage): Promise<{ rows: number; removals: number; marksPulled: number; cardsApplied: boolean }> => {
+  /**
+   * One book's marks off the shelf — CORRELATED, and strictly valid. An
+   * answer for a different book, a non-list, or a list validation would thin
+   * is `invalid`, never a partial merge: a dropped row would otherwise be
+   * skipped forever, because the digest comparison that schedules this fetch
+   * never re-fires for an already-advanced page. Invalid answers go to the
+   * quarantine (below), which is what re-asks.
+   */
+  const fetchMarks = async (
+    channel: SyncChannel,
+    book: string,
+  ): Promise<{ readonly rows: readonly Mark[] } | { readonly invalid: string }> => {
+    const answer = await channel.call(SYNC_SERVICES.marks.name, { book })
+    const parsed = answer && typeof answer === 'object' ? (answer as { book?: unknown; marks?: unknown }) : null
+    if (parsed?.book !== book) return { invalid: `sync.marks answered book ${JSON.stringify(parsed?.book)} for ${book}` }
+    const answered = parsed.marks
+    if (!Array.isArray(answered)) return { invalid: 'sync.marks answered something that is not a marks list' }
+    const rows = validMarks(answered)
+    if (rows.length !== answered.length) {
+      return { invalid: `sync.marks answered ${answered.length} rows of which only ${rows.length} are valid marks` }
+    }
+    return { rows }
+  }
+
+  const mergeFetched = async (book: string, rows: readonly Mark[]): Promise<void> => {
+    if (rows.length === 0) return
+    witnessStamps(rows)
+    await applyRemote([{ keys: [{ book, what: 'marks' }], run: () => marks.mergeRemote(book, rows) }])
+  }
+
+  /* The quarantine is PERSISTED as it changes, before the page's cursor
+   * moves: a kill between the two re-pulls the page (free, every apply is a
+   * merge) rather than leaving a book neither fetched nor held. */
+  const hold = (outcome: SessionOutcome, next: Quarantine): void => {
+    if (next === outcome.quarantine) return
+    outcome.quarantine = next
+    settings.set(SYNC_QUARANTINE_SETTING, next)
+  }
+
+  const applyPage = async (
+    channel: SyncChannel,
+    page: PullPage,
+    outcome: SessionOutcome,
+  ): Promise<{ rows: number; removals: number; marksPulled: number; cardsApplied: boolean }> => {
     witnessStamps(page)
     const known = new Set(library.getSnapshot().map((one) => one.bookId))
     const adds: PullRow[] = []
@@ -882,8 +1107,35 @@ export function createLedger({
     }
     let marksPulled = 0
     let cardsApplied = false
+    /* A PULLED RECORD FOR A BOOK THIS DEVICE REMOVED does not re-add it.
+     * The push door judges a stale record against the register (WI-20.1);
+     * this door handed the row straight to `library.add`, which treats a
+     * bare add on a removed book as a deliberate re-open — restore, plus a
+     * `removed` rev of intent that would then push the resurrection back.
+     * The local removal is newer news than the shelf's row, and the outbox
+     * already carries it. */
+    /* ⚠️ **READ BEFORE THE FENCE, NOT INSIDE THE APPLY** — the same defect as
+     * the push door's, in the same shape, and `applyRemote` states the
+     * contract this broke: `run` must ENQUEUE SYNCHRONOUSLY. An `await` as
+     * its first act left the fence armed with nothing queued behind it, so a
+     * local edit enqueued in that gap began first and CONSUMED the remote
+     * expectation — journaled `remote`, dropped from the outbox, never
+     * pushed. One read for the whole page rather than one per row, which is
+     * also what it should always have been. */
+    const presence = fs !== null && adds.length > 0 ? await readPresence(fs) : {}
     const applies: RemoteApply[] = [
-      ...adds.map((row): RemoteApply => ({ keys: [{ book: row.book, what: 'record' }], run: () => library.add(row.book, row.record) })),
+      ...adds
+        /* A PULLED RECORD FOR A BOOK THIS DEVICE REMOVED is not applied at
+           all now, rather than applied into a `run` that decided to do
+           nothing — a fence armed for a key nothing writes is an expectation
+           `applyRemote` has to take back at the end. */
+        .filter((row) => presence[row.book]?.state !== 'removed')
+        .map(
+          (row): RemoteApply => ({
+            keys: [{ book: row.book, what: 'record' }],
+            run: () => library.add(row.book, row.record),
+          }),
+        ),
       ...(updates.length > 0
         ? [
             {
@@ -918,28 +1170,53 @@ export function createLedger({
       if (!keepNotes && rowOf(row.book)?.hasContent !== true) continue
       const current = await marksDigest(await ownMarks(row.book))
       if (current === row.marksDigest) continue
-      const answer = await channel.call(SYNC_SERVICES.marks.name, { book: row.book })
-      const parsed = answer && typeof answer === 'object' ? (answer as { book?: unknown; marks?: unknown }) : null
-      /* CORRELATED, and strictly valid. An answer for a different book —
-       * or one whose rows validation would thin — must not be merged with
-       * the cursor then advancing past it: a dropped row would be skipped
-       * forever, because the digest comparison above is what schedules
-       * this fetch and it never re-fires for an already-advanced page. */
-      if (parsed?.book !== row.book) {
-        throw new Error(`sync.marks answered book ${JSON.stringify(parsed?.book)} for ${row.book}`)
+      const fetched = await fetchMarks(channel, row.book)
+      if ('invalid' in fetched) {
+        /* SET ASIDE, NOT THROWN (WI-20.25). Throwing failed this page every
+         * session, forever, for one bad row — and every row behind it. The
+         * page advances; the book is held and re-asked every session until
+         * it answers validly, which is the only way a repair the shelf makes
+         * WITHOUT a new seq can ever be seen. */
+        hold(outcome, setAside(outcome.quarantine, row.book))
+        continue
       }
-      const answered = parsed.marks
-      if (!Array.isArray(answered)) throw new Error('sync.marks answered something that is not a marks list')
-      const rows = validMarks(answered)
-      if (rows.length !== answered.length) {
-        throw new Error(`sync.marks answered ${answered.length} rows of which only ${rows.length} are valid marks`)
-      }
-      if (rows.length === 0) continue
-      witnessStamps(rows)
-      await applyRemote([{ keys: [{ book: row.book, what: 'marks' }], run: () => marks.mergeRemote(row.book, rows) }])
+      /* A valid answer for a book that was held releases it: the shelf's
+       * repair, seen on the digest path first. */
+      hold(outcome, release(outcome.quarantine, row.book))
+      if (fetched.rows.length === 0) continue
+      await mergeFetched(row.book, fetched.rows)
       marksPulled += 1
     }
     return { rows: page.rows.length, removals: page.removals.length, marksPulled, cardsApplied }
+  }
+
+  /**
+   * Re-ask for every held book, REGARDLESS OF DIGEST — the whole reason the
+   * quarantine exists. Bounded by the list's cap, so a shelf that answers
+   * badly for ten thousand books costs sixty-four calls a session, not ten
+   * thousand. A book the shelf no longer has is released: there is nothing
+   * left to repair. A refusal about the session ends it, as anywhere.
+   */
+  const refetchQuarantine = async (channel: SyncChannel, outcome: SessionOutcome): Promise<number> => {
+    let repaired = 0
+    for (const book of [...outcome.quarantine.books]) {
+      let fetched: Awaited<ReturnType<typeof fetchMarks>>
+      try {
+        fetched = await fetchMarks(channel, book)
+      } catch (thrown) {
+        /* Refused about this book — retryable or not, it stays held and is
+         * asked again next session; that is what the list is for. */
+        const refused = aboutTheGroup(thrown)
+        if (refused === null) throw thrown
+        if (refused.error.code === 'not-found') hold(outcome, release(outcome.quarantine, book))
+        continue
+      }
+      if ('invalid' in fetched) continue
+      await mergeFetched(book, fetched.rows)
+      hold(outcome, release(outcome.quarantine, book))
+      repaired += 1
+    }
+    return repaired
   }
 
   const pullAll = async (
@@ -947,6 +1224,7 @@ export function createLedger({
     from: number,
     until: number,
     epoch: string,
+    outcome: SessionOutcome,
   ): Promise<{ rows: number; removals: number; marksPulled: number; cardsApplied: boolean }> => {
     let since = from
     const totals = { rows: 0, removals: 0, marksPulled: 0, cardsApplied: false }
@@ -981,7 +1259,7 @@ export function createLedger({
           prev = one.seq
         }
       }
-      const applied = await applyPage(channel, page)
+      const applied = await applyPage(channel, page, outcome)
       totals.rows += applied.rows
       totals.removals += applied.removals
       totals.marksPulled += applied.marksPulled
@@ -1007,11 +1285,14 @@ export function createLedger({
     })
     const welcome = parseSyncWelcome(welcomeRaw)
     if (welcome === null) throw new Error('sync.hello answered something that is not a welcome')
+    /* TYPED, like the shelf's own refusal of a skewed hello — the status
+     * line reads the code, and a version skew must not be worded as "not
+     * reachable" (WI-20.25). */
     if (welcome.journalFormat !== SYNC_JOURNAL_FORMAT) {
-      throw new Error(`the shelf journals format ${welcome.journalFormat}; this build speaks ${SYNC_JOURNAL_FORMAT}`)
+      throw refuse('unsupported', `the shelf journals format ${welcome.journalFormat}; this build speaks ${SYNC_JOURNAL_FORMAT}`)
     }
     if (!versionsOverlap(welcome.services.sync as [number, number], SYNC_VERSION as [number, number])) {
-      throw new Error(`the shelf speaks sync [${welcome.services.sync.join(', ')}]; this build [${SYNC_VERSION.join(', ')}]`)
+      throw refuse('unsupported', `the shelf speaks sync [${welcome.services.sync.join(', ')}]; this build [${SYNC_VERSION.join(', ')}]`)
     }
     clock.witness(welcome.clock)
 
@@ -1021,14 +1302,30 @@ export function createLedger({
     const cursor = readCursor(channel.peerId)
     const since = cursor !== null && cursor.epoch === welcome.epoch ? cursor.since : 0
 
-    const pushed = await pushAll(channel)
-    const pulled = await pullAll(channel, since, welcome.hubSeq, welcome.epoch)
+    const startedWith = quarantineFor(settings.get(SYNC_QUARANTINE_SETTING), channel.peerId)
+    const outcome: SessionOutcome = {
+      refused: [],
+      quarantine: startedWith,
+      droppedBefore: startedWith.dropped,
+      repaired: 0,
+    }
+    const pushed = await pushAll(channel, outcome)
+    /* The held books first, then the pull: what THIS session sets aside is
+     * not re-asked in the same breath. */
+    outcome.repaired = await refetchQuarantine(channel, outcome)
+    const pulled = await pullAll(channel, since, welcome.hubSeq, welcome.epoch, outcome)
     return {
       pushed,
       pulledRows: pulled.rows,
       pulledRemovals: pulled.removals,
       pulledMarks: pulled.marksPulled,
       pulledCards: pulled.cardsApplied,
+      refused: outcome.refused,
+      quarantine: {
+        held: outcome.quarantine.books.length,
+        dropped: outcome.quarantine.dropped - outcome.droppedBefore,
+        repaired: outcome.repaired,
+      },
     }
   }
 

@@ -100,3 +100,9 @@ coverage/
 # The bundled `paper` CLI — `pnpm build:cli` writes it; the source is
 # `src/cli/`.
 /bin/
+
+# Python bytecode. `scripts/gen-feature-ledger.py` and `make-hostile-epub.py`
+# are run directly; a `.pyc` is a build artifact of running them and was
+# committed once by a directory-scoped `git add` before this rule existed.
+__pycache__/
+*.pyc

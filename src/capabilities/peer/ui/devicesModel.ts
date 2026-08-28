@@ -80,13 +80,19 @@ export function grantsForWrite(held: readonly string[], canWrite: boolean): stri
   const mine = (grant: string) => grant.startsWith('sync:') || grant.startsWith('blob:')
   const kept = held.filter((grant) => !mine(grant))
   if (canWrite) return [...kept, ...OWN_DEVICE_GRANTS]
-  /* TURNING IT OFF NEVER GRANTS ANYTHING. A peer holding no sync or blob
-     grant at all is not a read-write device being demoted — it is a device
-     with no access — and handing it `sync:pull` and `blob:read` from a
-     control whose entire stated effect is to take access away is the wrong
-     direction for a permission to move on its own. */
-  if (held.length === kept.length) return kept
-  return [...kept, ...READ_ONLY_GRANTS]
+  /* TURNING IT OFF NEVER GRANTS ANYTHING — EACH GRANT DEMOTED ON ITS OWN. The
+     first rule was "a peer holding any sync or blob grant gets the read-only
+     pair", and that GRANTED: a peer holding `sync:push` alone was handed
+     `blob:read` it never had, and one holding `blob:read` alone was handed
+     `sync:pull`. So: a wildcard becomes its family's read grant, a read
+     grant stays, `sync:push` goes, and no family the peer did not hold
+     appears. A peer with no sync or blob grant at all keeps having none. */
+  const reads = new Set<string>()
+  for (const grant of held) {
+    if (grant === 'sync:*' || grant === 'sync:pull') reads.add('sync:pull')
+    if (grant === 'blob:*' || grant === 'blob:read') reads.add('blob:read')
+  }
+  return [...kept, ...READ_ONLY_GRANTS.filter((grant) => reads.has(grant))]
 }
 
 /**
@@ -179,7 +185,9 @@ export function describeRole(role: PeerRole | null): string {
 export const ROLE_CHOICES: readonly { readonly role: PeerRole; readonly label: string; readonly detail: string }[] = [
   {
     role: 'shelf',
-    label: 'On this Mac',
+    /* "This device", not "this Mac": the pane runs on whatever the reader
+       paired, and the row above it already says "This device" (WI-20.25). */
+    label: 'On this device',
     detail: 'It keeps the whole library and other devices read from it.',
   },
   {
@@ -188,6 +196,31 @@ export const ROLE_CHOICES: readonly { readonly role: PeerRole; readonly label: s
     detail: 'This one reads from it and keeps the books you download.',
   },
 ]
+
+/**
+ * The shelf's pairing name, as this device's peer list records it — the name
+ * the other side gave when pairing, which the plugin defaults to its machine
+ * name. Null while unpaired, or on the shelf itself.
+ */
+export function shelfNameOf(peers: readonly WirePeer[]): string | null {
+  return peers.find((peer) => peer.role === 'shelf')?.name ?? null
+}
+
+/**
+ * Where Paper has to be running for a sync to happen, said for THIS device's
+ * role. The pane said "on your Mac" to everyone — to the phone whose library
+ * lives on a Linux desktop, and to the desktop itself, where "your Mac" meant
+ * "here". A satchel is told the shelf by its pairing name; a shelf is told
+ * it is itself (WI-20.25). The plugin does not expose this machine's own
+ * name to the webview, so the shelf's sentence says "this device", which is
+ * also what the row above it calls it.
+ */
+export function describeReach(role: PeerRole | null, shelfName: string | null): string {
+  if (role === 'satchel') {
+    return `Syncing needs Paper running on ${shelfName ?? 'the device that holds your library'}; its tray keeps it alive with the window closed.`
+  }
+  return 'Syncing needs Paper running on this device; the tray keeps it alive with the window closed.'
+}
 
 /**
  * May the reader still answer it?
@@ -244,16 +277,21 @@ export function describeGrants(grants: readonly string[]): string {
   const parts: string[] = []
   if (has('sync:pull')) parts.push('Books, highlights, reading position')
   if (has('blob:read')) parts.push('book files')
+  /* EVERYTHING ELSE IS NAMED, NOT HIDDEN. A peer holding `sync:pull` and
+     `shelf:admin` read as "receive only" — the one grant that can empty a
+     trash, concealed by the phrase for the others. */
+  const known = new Set(['sync:*', 'sync:pull', 'sync:push', 'blob:*', 'blob:read'])
+  const other = grants.filter((held) => !known.has(held))
   if (!parts.length) return grants.length ? grants.join(', ') : 'Nothing yet'
   const sentence = parts.join(' and ')
-  return has('sync:push') ? `${sentence} — both ways` : `${sentence} — receive only`
+  const way = has('sync:push') ? `${sentence} — both ways` : `${sentence} — receive only`
+  return other.length ? `${way}, plus ${other.join(', ')}` : way
 }
 
 export interface DevicesSnapshot {
   /** False outside the app (no plugin) — the pane says so instead of lying. */
   readonly available: boolean
   readonly role: PeerRole | null
-  readonly endpointId: string | null
   readonly peers: readonly WirePeer[]
   /**
    * Whether `peers` has been read from the plugin yet.
@@ -324,7 +362,6 @@ export function createDevicesModel({
   let snapshot: DevicesSnapshot = {
     available: port !== null,
     role: null,
-    endpointId: null,
     peers: [],
     offer: null,
     pending: null,
@@ -344,12 +381,33 @@ export function createDevicesModel({
 
   const offs: Unsubscribe[] = []
   if (port) {
-    offs.push(
-      port.onPairingPending((pending) => publish({ pending })),
-      port.onPairingResult((lastResult) => {
-        publish({ lastResult, pending: null, sas: null, offer: lastResult.ok ? null : snapshot.offer })
-        void refresh()
-      }),
+    /* ONE PUSH PER SUBSCRIPTION, AND ROLLED BACK. The two used to be
+       ARGUMENTS to a single `offs.push(...)` — the same shape `serve()` in
+       `port.ts` was caught with. Arguments evaluate before the call, so a
+       throw from the second discarded the first's unsubscribe along with the
+       argument list, and here the throw escapes the factory: the caller never
+       receives a model, so nothing can ever dispose the listener that
+       survived. Each handle is registered the moment it exists, and a throw
+       part-way unsubscribes what was taken before re-throwing. */
+    try {
+      offs.push(port.onPairingPending((pending) => publish({ pending })))
+      offs.push(
+        port.onPairingResult((lastResult) => {
+          /* ⚠️ **THE PEER LIST IS UNKNOWN AGAIN UNTIL THE REFRESH LANDS.**
+             This cleared `pending` and `sas` — the two flags `setRole` reads
+             to mean "a pairing could still land a peer" — and then started an
+             asynchronous refresh. In between, `peersLoaded` was still true
+             over the OLD, empty list, so `roleIsSettable` said yes and the
+             role control was both drawn and answerable: a click there wrote
+             the durable role change the guard exists to refuse, and the pair
+             that had just formed had two of one side. `peersLoaded: false` is
+             the answer that already means "nothing has been read", which is
+             exactly the truth in this window — and it fails CLOSED if the
+             refresh itself fails. */
+          publish({ lastResult, pending: null, sas: null, offer: lastResult.ok ? null : snapshot.offer, peersLoaded: false })
+          void refresh()
+        }),
+      )
       /* NO TRANSFER SUBSCRIPTION. This kept the twenty most recent transfer
          events so the pane could list them — "Transfer 1 — done", the surface
          that per-book download progress replaced. The list went; the
@@ -357,7 +415,10 @@ export function createDevicesModel({
          pane held a rolling buffer of events nothing rendered. Progress now
          reaches the book's own row through sync's `BookStatus`, which is the
          only place a reader looks for it. */
-    )
+    } catch (thrown) {
+      for (const off of offs.splice(0)) off()
+      throw thrown
+    }
   }
 
   /* Refreshes overlap — a listener fires one while a command's own refresh
@@ -380,7 +441,13 @@ export function createDevicesModel({
     offerTimer = null
     if (offer === null) return
     const left = offer.expiresAt - Date.now()
-    if (left <= 0) return
+    if (left <= 0) {
+      /* Expired IN FLIGHT — the backend answered an offer already past its
+         time. Cleared now, or the QR stood on screen with no timer to end
+         it. */
+      if (snapshot.offer === offer) publish({ offer: null })
+      return
+    }
     offerTimer = setTimeout(() => {
       offerTimer = null
       if (disposed) return
@@ -398,13 +465,15 @@ export function createDevicesModel({
   /* Attempts whose confirmation is already in flight — a second click on
    * the same attempt must not race the first and overwrite its outcome. */
   const confirming = new Set<string>()
+  /** Per peer, the grant edit in flight — see `setPeerCanWrite`. */
+  const grantEdits = new Map<string, Promise<void>>()
   const refresh = async (): Promise<void> => {
-    if (!port) return
+    if (!port || disposed) return
     const mine = ++refreshGeneration
     try {
       const [status, peers] = await Promise.all([port.status(), port.listPeers()])
-      if (mine !== refreshGeneration) return
-      publish({ role: status.role, endpointId: status.endpointId, peers, peersLoaded: true, error: null })
+      if (disposed || mine !== refreshGeneration) return
+      publish({ role: status.role, peers, peersLoaded: true, error: null })
     } catch (thrown) {
       if (mine !== refreshGeneration) return
       publish({ error: said(thrown) })
@@ -420,6 +489,13 @@ export function createDevicesModel({
     refresh,
     beginPairing: async (name) => {
       if (!port || disposed) return
+      /* NOT ACROSS A ROLE CHANGE THAT HAS NOT RESTARTED. The node still runs
+         the OLD role, so a pairing made now is made as that role — and the
+         restart then turns it into a pair with two of one side, durably. */
+      if (snapshot.roleNeedsRestart) {
+        publish({ error: 'Restart Paper to apply the role change before pairing' })
+        return
+      }
       /* Generation-tokened like refresh: two overlapping begins resolve in
        * either order, and only the NEWEST may publish its offer — the older
        * one's QR is already replaced on the backend. Beginning a NEW attempt
@@ -463,7 +539,7 @@ export function createDevicesModel({
       }
     },
     confirmPairing: async (accept) => {
-      if (!port) return
+      if (!port || disposed) return
       /* Bind the confirmation to the attempt the human is looking at, so a
        * pre-played QR that started a different attempt cannot be confirmed
        * by this click. CAPTURED FIRST and REQUIRED: with no pending attempt
@@ -484,7 +560,11 @@ export function createDevicesModel({
         /* Clear only what this click confirmed — a NEWER attempt that arrived
          * while the confirmation was in flight stays pending. */
         if (snapshot.pending === null || snapshot.pending.attemptId === pending.attemptId) {
-          publish({ pending: null, offer: null, error: null })
+          /* AND THE PEER LIST IS UNKNOWN UNTIL THE REFRESH BELOW — the same
+             window as `onPairingResult`, for the same reason: the flags that
+             say "a peer may still land" are being cleared here, and the list
+             that would show the one that just did has not been read yet. */
+          publish({ pending: null, offer: null, error: null, peersLoaded: false })
         }
         await refresh()
       } catch (thrown) {
@@ -495,6 +575,13 @@ export function createDevicesModel({
     },
     pairWithCode: async (uri) => {
       if (!port || disposed) return
+      /* NOT ACROSS A ROLE CHANGE THAT HAS NOT RESTARTED. The node still runs
+         the OLD role, so a pairing made now is made as that role — and the
+         restart then turns it into a pair with two of one side, durably. */
+      if (snapshot.roleNeedsRestart) {
+        publish({ error: 'Restart Paper to apply the role change before pairing' })
+        return
+      }
       /* Same ordering rule as beginPairing: only the newest attempt's SAS
        * may land. */
       const mine = ++beginGeneration
@@ -519,22 +606,33 @@ export function createDevicesModel({
     },
     setPeerCanWrite: async (id, canWrite) => {
       if (!port || disposed) return
-      try {
-        /* Read what the peer holds first: the toggle owns `sync:` and `blob:`
-           and must not be able to add or drop anything else — see
-           `grantsForWrite`. */
-        const held = (await port.listPeers()).find((one) => one.id === id)?.grants ?? []
-        /* Re-checked across the await: a disposal between the read and the
-           write must not start further IPC on a dead model. */
+      /* ONE EDIT AT A TIME PER PEER. The read-modify-write below, run twice
+         in overlap from two quick toggles, read the same old list twice and
+         the later write carried the earlier intent — write access left on
+         after the reader turned it off. Chained on the peer's own promise. */
+      const previous = grantEdits.get(id) ?? Promise.resolve()
+      const mine = previous.then(async () => {
         if (disposed) return
-        await port.setGrants(id, grantsForWrite(held, canWrite))
-        /* Re-read rather than assume: the plugin is the owner of the record,
-           and a grant list echoed back from here would be this pane's idea of
-           what it wrote rather than what the store holds. */
-        await refresh()
-      } catch (thrown) {
-        if (!disposed) publish({ error: said(thrown) })
-      }
+        try {
+          /* Read what the peer holds first: the toggle owns `sync:` and `blob:`
+             and must not be able to add or drop anything else — see
+             `grantsForWrite`. */
+          const held = (await port.listPeers()).find((one) => one.id === id)?.grants ?? []
+          /* Re-checked across the await: a disposal between the read and the
+             write must not start further IPC on a dead model. */
+          if (disposed) return
+          await port.setGrants(id, grantsForWrite(held, canWrite))
+          /* Re-read rather than assume: the plugin is the owner of the record,
+             and a grant list echoed back from here would be this pane's idea of
+             what it wrote rather than what the store holds. */
+          await refresh()
+        } catch (thrown) {
+          if (!disposed) publish({ error: said(thrown) })
+        }
+      })
+      grantEdits.set(id, mine)
+      await mine
+      if (grantEdits.get(id) === mine) grantEdits.delete(id)
     },
     setRole: async (role) => {
       if (!port || disposed) return
@@ -545,6 +643,34 @@ export function createDevicesModel({
          emptiness is trustworthy: before the first refresh the list is empty
          because nothing has been read, which is not the same answer. */
       if (!snapshot.peersLoaded || !roleIsSettable(snapshot.peers)) return
+      /* NOT WHILE A PAIRING IS IN FLIGHT: an offer on screen, a code being
+         joined or a SAS being read means a peer record can land after this
+         check, and the pair that results has two of one side.
+
+         ALL THREE, NOT TWO. This named the joiner's window and then tested
+         only `offer` and `pending` — the shelf's two halves. A satchel that
+         has pasted a code holds neither: `pairWithCode` publishes `sas` and
+         nothing else, its peer list is still empty until the far shelf
+         confirms, so `roleIsSettable` says yes and the control is on screen.
+         Changing sides there is exactly the durable two-shelf pair this guard
+         exists to refuse. The window closes on its own — `from_uri` emits a
+         `pairing-result` either way, bounded by the ack timeout, and that
+         clears `sas` — so refusing here cannot wedge the control. */
+      if (snapshot.offer !== null || snapshot.pending !== null || snapshot.sas !== null) {
+        /* AND IT NAMES ONLY WHAT IS ON SCREEN. Cancel belongs to the invite —
+           the pane draws it inside the offer — so a joiner reading its SAS
+           told to "cancel" would go looking for a button that is not there.
+           Waiting is what that side actually does, and the wait is bounded:
+           the shelf answers or the attempt times out, and either way a
+           `pairing-result` clears the SAS. */
+        const canCancelHere = snapshot.offer !== null || snapshot.pending !== null
+        publish({
+          error: canCancelHere
+            ? 'Finish or cancel the pairing in progress before changing sides'
+            : 'Wait for the other device to answer this pairing before changing sides',
+        })
+        return
+      }
       /* CHOOSING WHAT IS ALREADY RUNNING IS NOT A CHANGE. Every successful
          write used to raise "restart to apply", including the one that put
          the device back where it started. */

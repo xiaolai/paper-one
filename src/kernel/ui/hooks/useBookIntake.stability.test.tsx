@@ -49,6 +49,7 @@ function harness(): {
          the input CHANGES, and the id and source below carry that. */
       meta: null,
       source: `source_${n}`,
+      generation: n,
       fs: null,
       add: async () => {},
       keepContent: async () => true,

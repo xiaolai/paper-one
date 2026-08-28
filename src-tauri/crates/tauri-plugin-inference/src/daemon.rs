@@ -34,6 +34,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
 use crate::error::{unreachable, Error, Result};
+use crate::lineage::{GroupHold, GroupRecord, OsProcesses, Processes};
 use crate::spawn::SpawnPlan;
 
 /// How long to wait for the daemon to answer its health route before giving
@@ -108,7 +109,10 @@ const MODEL_CEILING: Duration = Duration::from_secs(600);
 /// (`Unload all models` → `Evict all completed` → `Cleanup complete` in the
 /// smoke test's log), and a loaded 2.4 GB model takes a moment to let go of.
 /// Past this, the reader closing the app matters more than a clean unload.
-const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+///
+/// `pub(crate)`: the launch-time recovery of a group a previous Paper left
+/// running (`lineage.rs`) gives it the same grace, for the same reason.
+pub(crate) const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 /// How many lines of the child's output to keep.
 ///
@@ -120,14 +124,22 @@ const LOG_TAIL_LINES: usize = 40;
 /// A running daemon.
 pub struct Daemon {
     child: Child,
-    /// The process group, captured at spawn — see `procgroup::group_of`.
-    /// `Child::id()` is `None` after a reap, and the grace loop reaps.
-    group: Option<u32>,
+    /// The process group, captured at spawn — see `procgroup::group_of`;
+    /// `Child::id()` is `None` after a reap, and the grace loop reaps — and
+    /// the record on disk that names it. Both go when this does, by ANY
+    /// route: `stop` is the ordered teardown, and the hold's `Drop` is what
+    /// still runs when a future is cancelled mid-await or a panic unwinds
+    /// through here (WI-20.23).
+    hold: GroupHold,
     plan: SpawnPlan,
     client: reqwest::Client,
     /// The client for requests a MODEL answers — see `MODEL_SILENCE`.
     model_client: reqwest::Client,
     log: LogTail,
+    /// The pipe readers, kept so an error tail can WAIT for the last lines
+    /// — see [`Daemon::drain_readers`]. Dropping a handle detaches the task,
+    /// which is exactly what the drain does after its bounded wait.
+    readers: Vec<tokio::task::JoinHandle<()>>,
     /// The port its WebSocket chose for itself, once health has reported it.
     websocket_port: Option<u16>,
     #[cfg(windows)]
@@ -166,6 +178,17 @@ impl Daemon {
     /// and the daemon makes its own — creating it first would turn that test
     /// into one that proves nothing.
     pub async fn start(plan: SpawnPlan) -> Result<Daemon> {
+        /* THE PLAN CARRIES THE KEY, checked at the door. `request` and
+         * `model_request` index `env[API_KEY_ENV]`, and a plan without it
+         * would panic THERE — mid-question, far from whoever built the plan.
+         * Plans are built by `spawn.rs`, which always sets it; this turns a
+         * future construction bug into a loud failure at start, where the
+         * stack still names the culprit. */
+        assert!(
+            plan.env.contains_key(crate::spawn::API_KEY_ENV),
+            "SpawnPlan carries no {} — spawn.rs always sets it",
+            crate::spawn::API_KEY_ENV
+        );
         // The config file has to exist before the launch, and it lives inside
         // the cache directory — so this one directory is created, and only
         // this one. The daemon still populates everything under it.
@@ -191,13 +214,15 @@ impl Daemon {
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            // A Paper that is killed outright must not leave a daemon holding
-            // the port. This is the backstop under the ordered shutdown, not
-            // a replacement for it.
+            // A Paper that EXITS must not leave a daemon holding the port.
+            // This is the backstop under the ordered shutdown, not a
+            // replacement for it — and it does nothing for a Paper that is
+            // killed, which `lineage.rs` and the death signal below are for.
             .kill_on_drop(true);
         crate::procgroup::configure(&mut cmd);
+        arm_death_signal(&mut cmd);
 
-        let mut child = cmd.spawn().map_err(|e| {
+        let mut child = spawn_child(cmd).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 Error::RuntimeMissing(plan.program.clone())
             } else {
@@ -205,18 +230,51 @@ impl Daemon {
             }
         })?;
 
+        /* ⚠️ The child RUNS before this assignment lands — a Windows process
+         * cannot be spawned pre-assigned to a Job Object without the
+         * suspended-thread dance (CREATE_SUSPENDED, assign, ResumeThread),
+         * which this crate does not attempt. In the microseconds between
+         * spawn and hold, a descendant could be spawned outside the job.
+         * Accepted: `lemond` loads its config before it forks anything, and
+         * the recovery record below covers the group by identity anyway. */
         #[cfg(windows)]
         let job = crate::procgroup::JobHandle::hold(&child)?;
+
+        /* WRITTEN BEFORE ANYTHING IS AWAITED. A Paper killed between here
+         * and readiness has still spawned a group, and the record is the
+         * only thing the next launch can find it by. Best-effort: a record
+         * that could not be written is logged, and the daemon still runs —
+         * the reader asked for an answer, not for bookkeeping. */
+        let group = crate::procgroup::group_of(&child);
+        let leader = child.id().unwrap_or(0);
+        let record = GroupRecord {
+            pgid: group.unwrap_or(leader),
+            leader_pid: leader,
+            leader_started_at: OsProcesses.started_at(leader).unwrap_or(0),
+            exe: plan.program.clone(),
+            port: plan.port,
+        };
+        if let Err(err) = crate::lineage::write_record(&plan.record_path, &record) {
+            log::warn!(
+                "inference: could not record the runtime's process group at {}: {err}",
+                plan.record_path.display()
+            );
+        }
+        let hold = GroupHold::new(group, plan.record_path.clone());
 
         let log = LogTail::default();
         // Both pipes are drained. Not for the log alone: a child whose stdout
         // pipe fills up BLOCKS, and a daemon that stops making progress
         // because nobody is reading its chatter is a hang with no symptom.
+        // The handles are KEPT so an error path can wait for the tail —
+        // `try_wait` can observe the exit while the readers still hold the
+        // final, usually most useful, lines.
+        let mut readers = Vec::new();
         if let Some(out) = child.stdout.take() {
-            spawn_reader(out, log.clone());
+            readers.push(spawn_reader(out, log.clone()));
         }
         if let Some(err) = child.stderr.take() {
-            spawn_reader(err, log.clone());
+            readers.push(spawn_reader(err, log.clone()));
         }
 
         // No proxy, ever, on either client. A reader's `HTTP_PROXY` pointing
@@ -245,14 +303,14 @@ impl Daemon {
             .build()
             .map_err(|e| unreachable("model client", e))?;
 
-        let group = crate::procgroup::group_of(&child);
         let mut daemon = Daemon {
             child,
-            group,
+            hold,
             plan,
             client,
             model_client,
             log,
+            readers,
             websocket_port: None,
             #[cfg(windows)]
             _job: job,
@@ -278,6 +336,7 @@ impl Daemon {
             // out the full deadline to say so wastes thirty seconds of the
             // reader's time on a question already settled.
             if let Some(status) = self.child.try_wait()? {
+                self.drain_readers().await;
                 return Err(Error::RuntimeExited {
                     status: status.to_string(),
                     tail: self.log.text(),
@@ -289,19 +348,42 @@ impl Daemon {
              * happily, so "the route answered with valid JSON" was being read
              * as "the daemon is ready". A proxy, a captive portal or a
              * half-initialised server can all produce that. */
-            if let Ok(health) = self.health().await {
+            /* BOUNDED BY THE DEADLINE, not just checked against it. The
+             * health client's own timeout is ten seconds, so a request
+             * STARTED just before the deadline used to overshoot it by up to
+             * that much — `READY_TIMEOUT` read as a suggestion. `timeout_at`
+             * cuts the in-flight request at the line. */
+            if let Ok(Ok(health)) = tokio::time::timeout_at(deadline, self.health()).await {
                 if health.status == "ok" {
                     self.websocket_port = health.websocket_port;
                     return Ok(());
                 }
             }
             if tokio::time::Instant::now() >= deadline {
+                self.drain_readers().await;
                 return Err(Error::NotReady {
                     secs: READY_TIMEOUT.as_secs(),
                     tail: self.log.text(),
                 });
             }
-            tokio::time::sleep(POLL_EVERY).await;
+            tokio::time::sleep_until(std::cmp::min(
+                deadline,
+                tokio::time::Instant::now() + POLL_EVERY,
+            ))
+            .await;
+        }
+    }
+
+    /// Wait, briefly, for the pipe readers before quoting the tail.
+    ///
+    /// `try_wait` can observe the exit while the readers still hold the
+    /// child's LAST buffered lines — usually the diagnostic that says why.
+    /// Bounded, because a pipe inherited by a grandchild never reaches EOF;
+    /// a reader that is still going after the wait is detached by the drop,
+    /// exactly as it was when nothing held the handles at all.
+    async fn drain_readers(&mut self) {
+        for mut reader in self.readers.drain(..) {
+            let _ = tokio::time::timeout(Duration::from_millis(250), &mut reader).await;
         }
     }
 
@@ -488,10 +570,170 @@ impl Daemon {
          * a backend that ignored SIGTERM outlives its parent. Returning early
          * meant the group never received SIGKILL and the model stayed
          * resident. SIGKILL to an empty group is a harmless ESRCH. */
-        if let Err(err) = crate::procgroup::kill(&mut self.child, self.group).await {
+        if let Err(err) = crate::procgroup::kill(&mut self.child, self.hold.group()).await {
             log::warn!("inference: could not kill the runtime group: {err}");
         }
+        /* THE RECORD IS THE HOLD'S TO REMOVE, and only after a kill that was
+         * delivered. This used to unlink it here, unconditionally, one line
+         * after logging that the kill had failed — so an EPERM or a member
+         * wedged in the kernel ended with a live group and its only key
+         * thrown away, and the `GroupHold::drop` that runs as `self` falls
+         * out of scope here could no longer preserve what was already gone.
+         * `recover` learned this rule first (`lineage.rs`); the ordered path
+         * saying it differently was the whole defect. */
     }
+}
+
+/// Arm a death signal on the child where the platform has one.
+///
+/// Linux: `PR_SET_PDEATHSIG(SIGKILL)`, the mechanism Lemonade itself uses on
+/// `llama-server`. Two things about it are easy to get wrong and are handled
+/// here. First, the signal fires when the THREAD that forked the child dies,
+/// not the process — so the child is spawned from a keeper thread that lives
+/// for the process ([`spawn_child`]), never from a blocking-pool thread that
+/// tokio retires after ten idle seconds. Second, it arms only from the
+/// `prctl` on, so a parent that died between `fork` and `prctl` has already
+/// reparented the child; `getppid` is re-checked against the pid captured
+/// before the fork, and a child that finds a stranger there exits instead of
+/// becoming the orphan this exists to prevent.
+///
+/// macOS has no such signal (verified: no `prctl.h` in the SDK); Windows has
+/// the Job Object. Both are covered by the record and the hold instead.
+#[cfg(target_os = "linux")]
+fn arm_death_signal(cmd: &mut Command) {
+    let parent = std::process::id() as libc::pid_t;
+    // SAFETY: the closure runs between fork and exec and calls only
+    // async-signal-safe syscalls; it allocates nothing and touches no lock.
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::getppid() != parent {
+                return Err(std::io::Error::other(
+                    "the parent exited before the death signal was armed",
+                ));
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn arm_death_signal(_cmd: &mut Command) {}
+
+/// A spawned child NOBODY HAS TAKEN RESPONSIBILITY FOR YET: dropping one
+/// takes its whole process group down, and only the caller that actually
+/// receives it disarms that.
+///
+/// ⚠️ **`send` RETURNING `Ok` IS NOT DELIVERY.** The keeper below used to
+/// clean up on `Err` alone — the caller cancelled between asking and the
+/// answer — but tokio's `oneshot::Sender::send` returns `Ok` the moment the
+/// value is QUEUED and documents the receiver as free to drop immediately
+/// afterwards. The queued `Child` is then dropped by the channel with
+/// `kill_on_drop` and nothing else, which reaches the LEADER only: a
+/// `lemond` that had already forked a backend leaves it holding the GPU, the
+/// model's several gigabytes and the port, with nothing left that knows its
+/// pid. That is the same failure the whole `procgroup` module exists to
+/// prevent, arriving through the one path that had no owner. So the group
+/// travels ARMED and the handover is what disarms it — the state "spawned,
+/// unowned, unkillable" is no longer a value this code can hold.
+#[cfg(unix)]
+struct ArmedChild {
+    child: Option<Child>,
+    /// Captured at spawn, for the reason `procgroup::group_of` gives.
+    group: Option<u32>,
+}
+
+#[cfg(unix)]
+impl ArmedChild {
+    fn new(child: Child) -> ArmedChild {
+        ArmedChild {
+            group: crate::procgroup::group_of(&child),
+            child: Some(child),
+        }
+    }
+
+    /// The receiver owns the child now; there is nothing left to kill.
+    fn disarm(mut self) -> Child {
+        self.child.take().expect("an armed child is disarmed once")
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ArmedChild {
+    fn drop(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        if let Some(pgid) = self.group {
+            // SAFETY: a plain syscall on two integers. ESRCH — the group is
+            // already gone — is the outcome asked for and needs no branch.
+            unsafe { libc::killpg(pgid as libc::pid_t, libc::SIGKILL) };
+        }
+        let _ = child.start_kill();
+    }
+}
+
+/// Spawn the child from a thread that lives as long as the process.
+///
+/// On Unix every spawn goes through ONE keeper thread, started on first use
+/// and never retired. The death signal above is the reason it exists — a
+/// child whose forking thread has gone is a child whose death signal has
+/// already fired, or never will — and it runs on macOS too, so the thread
+/// and the channel are exercised on the platform the tests run on rather
+/// than only on the one that needs them. `tokio::process::Command::spawn`
+/// needs a runtime context for its reaper; the keeper enters the caller's.
+///
+/// The child crosses the channel as an [`ArmedChild`], which is what covers
+/// a caller that goes away — by either half of that race; see the type.
+#[cfg(unix)]
+async fn spawn_child(cmd: Command) -> std::io::Result<Child> {
+    use std::sync::OnceLock;
+    use tokio::sync::oneshot;
+
+    struct Job {
+        cmd: Command,
+        runtime: tokio::runtime::Handle,
+        reply: oneshot::Sender<std::io::Result<ArmedChild>>,
+    }
+
+    static KEEPER: OnceLock<std::sync::mpsc::Sender<Job>> = OnceLock::new();
+
+    let keeper = KEEPER.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<Job>();
+        std::thread::Builder::new()
+            .name("inference-keeper".to_owned())
+            .spawn(move || {
+                for mut job in rx {
+                    let _entered = job.runtime.enter();
+                    /* Whatever comes back from `send` — the `Err` that hands
+                     * the value straight back, or an `Ok` whose receiver
+                     * never reads it — is a drop of an armed child, and the
+                     * group goes with it. */
+                    let _ = job.reply.send(job.cmd.spawn().map(ArmedChild::new));
+                }
+            })
+            .expect("the inference keeper thread could not be started");
+        tx
+    });
+    let (reply, answer) = oneshot::channel();
+    keeper
+        .send(Job {
+            cmd,
+            runtime: tokio::runtime::Handle::current(),
+            reply,
+        })
+        .map_err(|_| std::io::Error::other("the inference keeper thread is gone"))?;
+    answer
+        .await
+        .map_err(|_| std::io::Error::other("the inference keeper thread dropped the spawn"))?
+        .map(ArmedChild::disarm)
+}
+
+#[cfg(windows)]
+async fn spawn_child(mut cmd: Command) -> std::io::Result<Child> {
+    cmd.spawn()
 }
 
 /// What `/api/v1/health` answers. Only the fields Paper acts on.
@@ -513,34 +755,68 @@ pub struct Health {
 }
 
 /// Drain one of the child's pipes into the tail, line by line.
-fn spawn_reader<R>(pipe: R, log: LogTail)
+/// One retained line is capped here; the bytes past it are still CONSUMED —
+/// the pipe must drain whatever the tail keeps — but dropped, with the line
+/// marked. `read_until` had no cap at all, so one unterminated line (a
+/// progress bar that never prints its newline, a looping backend) grew a
+/// buffer without bound inside Paper's own process.
+const LINE_CAP: usize = 64 * 1024;
+
+fn spawn_reader<R>(pipe: R, log: LogTail) -> tokio::task::JoinHandle<()>
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
     tokio::spawn(async move {
-        /* `read_until` OVER BYTES, not `lines()`. `lines()` yields
-         * `Err(InvalidData)` on a byte sequence that is not UTF-8 and the
-         * `while let Ok(..)` above ENDED THE LOOP there — leaving the pipe
-         * undrained, so the child blocked on its next write once the buffer
-         * filled and the daemon simply stopped. A backend that prints a raw
-         * byte in a progress bar is enough. The tail is diagnostics, so a
-         * lossy conversion is exactly right here. */
-        let mut reader = BufReader::new(pipe);
-        let mut buffer = Vec::new();
-        loop {
+        /* BYTES, not `lines()`. `lines()` yields `Err(InvalidData)` on a
+         * byte sequence that is not UTF-8 and the old loop ENDED there —
+         * leaving the pipe undrained, so the child blocked on its next write
+         * once the buffer filled and the daemon simply stopped. A backend
+         * that prints a raw byte in a progress bar is enough. The tail is
+         * diagnostics, so a lossy conversion is exactly right here. */
+        fn take_line(log: &LogTail, buffer: &mut Vec<u8>, truncated: &mut bool) {
+            while matches!(buffer.last(), Some(b'\n' | b'\r')) {
+                buffer.pop();
+            }
+            let mut line = String::from_utf8_lossy(buffer).into_owned();
+            if *truncated {
+                line.push_str(" …[line truncated]");
+            }
+            log.push(line);
             buffer.clear();
-            match reader.read_until(b'\n', &mut buffer).await {
-                Ok(0) => break,
-                Ok(_) => {
-                    while matches!(buffer.last(), Some(b'\n' | b'\r')) {
-                        buffer.pop();
-                    }
-                    log.push(String::from_utf8_lossy(&buffer).into_owned());
+            *truncated = false;
+        }
+        let mut reader = BufReader::new(pipe);
+        let mut buffer: Vec<u8> = Vec::new();
+        let mut truncated = false;
+        loop {
+            let (ended_line, consumed) = {
+                let chunk = match reader.fill_buf().await {
+                    Ok([]) => break,
+                    Ok(chunk) => chunk,
+                    Err(_) => break,
+                };
+                let (piece, ended, used) = match chunk.iter().position(|&b| b == b'\n') {
+                    Some(at) => (&chunk[..at], true, at + 1),
+                    None => (chunk, false, chunk.len()),
+                };
+                let room = LINE_CAP.saturating_sub(buffer.len());
+                let keep = piece.len().min(room);
+                buffer.extend_from_slice(&piece[..keep]);
+                if keep < piece.len() {
+                    truncated = true;
                 }
-                Err(_) => break,
+                (ended, used)
+            };
+            reader.consume(consumed);
+            if ended_line {
+                take_line(&log, &mut buffer, &mut truncated);
             }
         }
-    });
+        // The pipe closed mid-line: what it held is still the tail's business.
+        if !buffer.is_empty() || truncated {
+            take_line(&log, &mut buffer, &mut truncated);
+        }
+    })
 }
 
 /// A request the MODEL client built, and the only thing a model answer can be
@@ -663,6 +939,84 @@ mod tests {
         }
     }
 
+    /// The keeper thread spawns for a runtime it is not on, and the child it
+    /// hands back is one this runtime can wait on. A current-thread test
+    /// runtime is the harder case: the reaper it registers with is driven by
+    /// the very task that is awaiting the exit.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_keeper_thread_spawns_a_child_this_runtime_can_reap() {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg("exit 3");
+        let mut child = spawn_child(cmd).await.expect("spawn through the keeper");
+        let status = child.wait().await.expect("wait");
+        assert_eq!(status.code(), Some(3));
+
+        let mut again = Command::new("/bin/sh");
+        again.arg("-c").arg("exit 4");
+        let mut child = spawn_child(again).await.expect("the keeper is still there");
+        assert_eq!(child.wait().await.unwrap().code(), Some(4));
+    }
+
+    /// AN ARMED CHILD NOBODY TOOK TAKES ITS GROUP WITH IT — the half of the
+    /// keeper's race that `send` returning `Ok` hides. `kill_on_drop` alone
+    /// would leave the grandchild running, which is exactly what this asserts
+    /// against: a `sleep` in the leader's group stands in for the backend
+    /// `lemond` forks. Disarming is the other half: the caller that receives
+    /// the child gets one nothing has signalled.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_armed_child_nobody_disarms_takes_its_group_down() {
+        let dir = crate::testutil::ScratchDir::new("armed");
+        let pidfile = dir.path().join("grandchild.pid");
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg(format!("sleep 30 & echo $! > {}; wait", pidfile.display()));
+        crate::procgroup::configure(&mut cmd);
+        cmd.kill_on_drop(true);
+        let armed = ArmedChild::new(cmd.spawn().expect("spawn"));
+
+        let mut grandchild = 0;
+        for _ in 0..250 {
+            if let Ok(text) = tokio::fs::read_to_string(&pidfile).await {
+                if let Ok(pid) = text.trim().parse::<i32>() {
+                    grandchild = pid;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(grandchild > 0, "the helper shell never wrote its pidfile");
+        // SAFETY: signal 0 delivers nothing; it only asks.
+        assert_eq!(
+            unsafe { libc::kill(grandchild, 0) },
+            0,
+            "the grandchild should be running before the drop"
+        );
+
+        drop(armed);
+
+        let mut gone = false;
+        for _ in 0..250 {
+            if unsafe { libc::kill(grandchild, 0) } != 0 {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            gone,
+            "the grandchild survived: the drop signalled the leader, not the group"
+        );
+
+        // And a child that WAS handed over is untouched by the guard.
+        let mut plain = Command::new("/bin/sh");
+        plain.arg("-c").arg("exit 7");
+        crate::procgroup::configure(&mut plain);
+        let mut child = ArmedChild::new(plain.spawn().expect("spawn")).disarm();
+        assert_eq!(child.wait().await.unwrap().code(), Some(7));
+    }
+
     #[test]
     fn the_log_tail_is_bounded_and_keeps_the_end() {
         let log = LogTail::default();
@@ -731,18 +1085,68 @@ mod tests {
         assert_eq!(good.status, "ok");
     }
 
-    /// The log tail must survive a byte sequence that is not UTF-8: `lines()`
+    /// The READER must survive a byte sequence that is not UTF-8: `lines()`
     /// ended the loop there, leaving the pipe undrained so the child blocked
-    /// on its next write and the daemon simply stopped.
-    #[test]
-    fn the_log_tail_takes_text_that_is_not_valid_utf8() {
+    /// on its next write and the daemon simply stopped. Driven through
+    /// `spawn_reader` itself over a real async pipe — the earlier version of
+    /// this test did the lossy conversion by hand and would have stayed green
+    /// had the reader gone back to `lines()`.
+    #[tokio::test]
+    async fn the_reader_takes_text_that_is_not_valid_utf8_and_reads_on() {
         let log = LogTail::default();
-        log.push(String::from_utf8_lossy(&[b'a', 0xFF, 0xFE, b'b']).into_owned());
+        let (mut writer, reader) = tokio::io::duplex(64);
+        let handle = spawn_reader(reader, log.clone());
+        use tokio::io::AsyncWriteExt;
+        writer
+            .write_all(&[b'a', 0xFF, 0xFE, b'b', b'\n'])
+            .await
+            .unwrap();
+        writer.write_all(b"after\n").await.unwrap();
+        drop(writer);
+        handle.await.unwrap();
         let text = log.text();
         assert!(text.contains('a') && text.contains('b'));
         assert!(
             text.contains('\u{FFFD}'),
             "the bad bytes are replaced, not dropped"
+        );
+        assert!(text.contains("after"), "the loop went on past them");
+    }
+
+    /// One unterminated line cannot grow without bound: past the cap the
+    /// bytes are consumed — the pipe still drains — but dropped, and the
+    /// retained line says it was cut. A line closed by EOF instead of a
+    /// newline still reaches the tail.
+    #[tokio::test]
+    async fn an_endless_line_is_capped_and_marked_not_kept_whole() {
+        let log = LogTail::default();
+        let (mut writer, reader) = tokio::io::duplex(8 * 1024);
+        let handle = spawn_reader(reader, log.clone());
+        use tokio::io::AsyncWriteExt;
+        let flood = vec![b'x'; LINE_CAP + 100_000];
+        writer.write_all(&flood).await.unwrap();
+        writer.write_all(b"\ntail-line\n").await.unwrap();
+        writer.write_all(b"no-newline-at-eof").await.unwrap();
+        drop(writer);
+        handle.await.unwrap();
+        let text = log.text();
+        assert!(
+            text.contains("…[line truncated]"),
+            "{}",
+            &text[..200.min(text.len())]
+        );
+        assert!(
+            text.contains("tail-line"),
+            "the reader kept going past the flood"
+        );
+        assert!(
+            text.contains("no-newline-at-eof"),
+            "an EOF-closed line still lands"
+        );
+        let longest = log.text().lines().map(str::len).max().unwrap_or(0);
+        assert!(
+            longest <= LINE_CAP + 32,
+            "retained lines are bounded, got {longest}"
         );
     }
 

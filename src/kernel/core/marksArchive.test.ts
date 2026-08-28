@@ -10,6 +10,7 @@ import {
 import type { IndexedBook } from './bookIndex'
 import type { Card } from './cards'
 import type { Mark } from './marks'
+import { ARCHIVE_MAX_ROWS } from './importLimits'
 import { hlcOf } from './hlc'
 
 /**
@@ -52,7 +53,7 @@ const CARD = (over: Partial<Card> = {}): Card =>
   ({
     id: 'c1',
     bookId: 'moby',
-    kind: 'recall',
+    kind: 'Recall',
     body: 'Who narrates?',
     answer: 'Ishmael',
     source: 'Loomings',
@@ -248,6 +249,80 @@ describe('planImport', () => {
     expect(planImport(doc, shelf, mine, []).marksAdded).toBe(1)
   })
 
+  /**
+   * ⚠️ **ONE BOOKMARK USED TO EAT EVERY ARCHIVED HIGHLIGHT ON ITS PAGE.** A
+   * bookmark's CFI is the visible page, so it overlaps each highlight there;
+   * the duplicate test compared CFIs and never asked what class the two were.
+   * `upsertOverlapping` was fixed for this with `sameClass`; the import was
+   * not. Measured 2026-08-27: `marksAdded: 0, duplicates: 1`.
+   */
+  it('does not count a bookmark as a duplicate of a highlight on its page, nor the reverse', () => {
+    const shelf = [BOOK()]
+    const highlight = MARK({ id: 'h', cfi: 'epubcfi(/6/4!/4/2,/1:10,/1:30)' })
+    const bookmark = MARK({ id: 'b', kind: 'bookmark', cfi: 'epubcfi(/6/4!/4/2,/1:0,/1:400)', text: '', note: '' })
+    const highlightIn = planImport(exportMarks(shelf, [highlight], []), shelf, [bookmark], [])
+    expect(highlightIn.marksAdded).toBe(1)
+    expect(highlightIn.duplicates).toBe(0)
+    const bookmarkIn = planImport(exportMarks(shelf, [bookmark], []), shelf, [highlight], [])
+    expect(bookmarkIn.marksAdded).toBe(1)
+    expect(bookmarkIn.duplicates).toBe(0)
+    /* A bookmark on the shelf still makes an archived bookmark of the same
+       page a duplicate — the class rule narrows the test, it does not drop it. */
+    expect(planImport(exportMarks(shelf, [bookmark], []), shelf, [bookmark], []).duplicates).toBe(1)
+  })
+
+  it('folds two archived marks of one class that overlap each other into the later one, and counts it', () => {
+    const shelf = [BOOK()]
+    const early = MARK({ id: 'e', cfi: 'epubcfi(/6/4!/4/2,/1:0,/1:15)', note: 'lost', createdAt: Date.UTC(2026, 0, 1) })
+    const late = MARK({ id: 'l', cfi: 'epubcfi(/6/4!/4/2,/1:5,/1:20)', note: 'kept', createdAt: Date.UTC(2026, 0, 2) })
+    const plan = planImport(exportMarks(shelf, [early, late], []), shelf, [], [])
+    expect(plan.marksAdded).toBe(1)
+    expect(plan.folded).toBe(1)
+    expect(plan.duplicates).toBe(0)
+    expect(plan.additions[0]?.marks.map((m) => m.note)).toEqual(['kept'])
+    /* Order in the file does not decide it; the stamp does. */
+    const reversed = planImport(exportMarks(shelf, [late, early], []), shelf, [], [])
+    expect(reversed.additions[0]?.marks.map((m) => m.note)).toEqual(['kept'])
+  })
+
+  /* ⚠️ **AN ARCHIVE AT ITS OWN LIMIT USED TO THROW BEFORE IT WAS PLANNED.**
+     The rows were gathered with `push(...row.marks)`, which passes every row
+     as an ARGUMENT — and `ARCHIVE_MAX_ROWS` permits 200 000, well past what
+     the engine accepts: `RangeError: Maximum call stack size exceeded`, from
+     an import of a file the parser had just accepted. The marks here are all
+     one passage so the fold is a constant-time match and this measures the
+     gather, not the matcher. */
+  it('plans an archive holding as many rows as the parser permits', () => {
+    const shelf = [BOOK()]
+    const one = {
+      text: 'Call me Ishmael',
+      prefix: '',
+      suffix: '',
+      note: '',
+      kind: 'highlight' as const,
+      tint: 'yellow' as const,
+      style: 'fill' as const,
+      chapter: '',
+      createdAt: '2026-01-02T03:04:05.000Z',
+      localAnchor: { cfi: '', sectionIndex: 0 },
+    }
+    const archive: MarksArchive = {
+      version: 1,
+      books: [
+        {
+          bookId: 'moby',
+          title: 'Moby-Dick',
+          author: 'Herman Melville',
+          marks: Array.from({ length: ARCHIVE_MAX_ROWS }, () => one),
+          cards: [],
+        },
+      ],
+    }
+    const plan = planImport(archive, shelf, [], [])
+    expect(plan.marksAdded).toBe(1)
+    expect(plan.folded).toBe(ARCHIVE_MAX_ROWS - 1)
+  })
+
   it('never removes: a shelf mark absent from the file survives', () => {
     /* Restoring a month-old backup cannot silently delete a month of reading.
        The plan is a list of ADDITIONS and has no other verb. */
@@ -286,5 +361,67 @@ describe('archiveName', () => {
     const day = new Date(2026, 7, 21)
     expect(archiveName(day)).toBe('paper-marginalia-2026-08-21.json')
     expect(archiveName(day, 'md')).toBe('paper-marginalia-2026-08-21.md')
+  })
+})
+
+describe('what the audit found in the archive (round 1)', () => {
+  it('keeps a bookmark whose page had no text — a place, not a quote', () => {
+    /* `parseMark` refused any row with neither text nor note before it had
+       looked at `kind`, and `exportMarks` writes exactly that row for a
+       bookmark on a page with nothing to quote — so a reader's own export
+       silently dropped every such bookmark on the way back in. */
+    const bookmark = MARK({ id: 'b', kind: 'bookmark', cfi: 'epubcfi(/6/4!/4/2,/1:0,/1:400)', text: '', note: '' })
+    const doc = exportMarks([BOOK()], [bookmark], [])
+    const parsed = parseArchive(JSON.stringify(doc))!
+    expect(parsed.books[0]?.marks.map((one) => one.kind)).toEqual(['bookmark'])
+    expect(planImport(doc, [BOOK()], [], []).marksAdded).toBe(1)
+  })
+
+  it('refuses a card whose kind the card store would refuse on the next load', () => {
+    /* Cast, not checked: the import reported the card added, stored it, and
+       `parseCards` threw it away the next time the file was read. */
+    const doc = exportMarks([BOOK()], [], [CARD()])
+    const text = JSON.stringify(doc).replace('"kind":"Recall"', '"kind":"question"')
+    expect(parseArchive(text)?.books[0]?.cards ?? []).toEqual([])
+  })
+
+  it('does not call two marks the same passage when they sit in different sections', () => {
+    /* `findMark` requires the section to match; neither duplicate detection
+       nor in-archive folding did, so a CFI that happens to overlap another
+       section's was discarded as its duplicate. */
+    const cfi = 'epubcfi(/6/4!/4/2,/1:0,/1:9)'
+    const inSectionOne = MARK({ id: 'm-s1', cfi, sectionIndex: 1, text: 'later' })
+    const doc = exportMarks([BOOK()], [inSectionOne], [])
+    const shelfHasSectionZero = MARK({ id: 'm-s0', cfi, sectionIndex: 0, text: 'earlier' })
+    const plan = planImport(doc, [BOOK()], [shelfHasSectionZero], [])
+    expect(plan.duplicates).toBe(0)
+    expect(plan.marksAdded).toBe(1)
+
+    /* And within one file: two sections, one CFI, two marks kept. */
+    const both = exportMarks([BOOK()], [inSectionOne, MARK({ id: 'm-s0b', cfi, sectionIndex: 0, text: 'earlier' })], [])
+    expect(planImport(both, [BOOK()], [], []).folded).toBe(0)
+    expect(planImport(both, [BOOK()], [], []).marksAdded).toBe(2)
+  })
+
+  it('plans two archive rows for one shelf book as one addition, and counts a body repeated across them once', () => {
+    /* One row matched by id, another by name — two devices' exports merged
+       into one file. Planned independently, the pair kept its cross-row
+       duplicates and the book took two concurrent `addMany` calls. */
+    const byId = BOOK()
+    const byName = BOOK({ bookId: 'elsewhere' })
+    const doc = exportMarks(
+      [byId, byName],
+      [MARK({ id: 'm1', bookId: 'moby' }), MARK({ id: 'm2', bookId: 'elsewhere' })],
+      [CARD({ id: 'c1', bookId: 'moby' }), CARD({ id: 'c2', bookId: 'elsewhere' })],
+    )
+    const plan = planImport(doc, [BOOK()], [], [])
+    expect(plan.additions).toHaveLength(1)
+    expect(plan.additions[0]?.bookId).toBe('moby')
+    /* Same passage on both rows → folded to one; same card body → one added,
+       the repeat counted as a duplicate rather than let through. */
+    expect(plan.folded).toBe(1)
+    expect(plan.marksAdded).toBe(1)
+    expect(plan.cardsAdded).toBe(1)
+    expect(plan.duplicates).toBe(1)
   })
 })

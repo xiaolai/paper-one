@@ -2,7 +2,7 @@
   "name": "paper",
   "private": true,
   "version": "0.1.1",
-  "license": "ISC",
+  "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@10.33.0",
   "engines": {
@@ -40,6 +40,7 @@
     "browser:check": "node scripts/check-browser-safe.mjs",
     "directives:check": "node scripts/check-inert-directives.mjs",
     "docs:notices": "node scripts/write-third-party-notices.mjs",
+  "docs:rust-notices": "node scripts/refresh-rust-notices.mjs",
     "capability:remove": "node scripts/capability-remove.mjs",
     "verify": "node scripts/verify.mjs",
     "verify:without": "node scripts/verify-without.mjs",

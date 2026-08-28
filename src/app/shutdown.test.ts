@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { SHUTDOWN_DONE_EVENT, SHUTDOWN_EVENT, armShutdown, armShutdownInBackground, type ShutdownDeps } from './shutdown'
+import { SHUTDOWN_DONE_EVENT, SHUTDOWN_EVENT, armShutdown, armShutdownInBackground, createTeardown, type ShutdownDeps } from './shutdown'
 
 /**
  * THE QUIT HANDSHAKE — the cross-language path nothing could reach.
@@ -109,7 +109,15 @@ describe('the teardown order', () => {
     vi.useFakeTimers()
     try {
       /* A drain that never settles is the wedged queue this bound exists for. */
-      const world = shell({ drain: () => new Promise<void>(() => {}) })
+      const warned: string[] = []
+      const world = shell({
+        drain: () => new Promise<void>(() => {}),
+        diagnostics: {
+          warn: (_event: string, fields: { message?: string }) => void warned.push(fields.message ?? ''),
+          info: () => {},
+          error: () => {},
+        } as unknown as ShutdownDeps['diagnostics'],
+      })
       await armShutdown(world.deps)
       const answered = world.quit()
       /* Nothing has happened past the flush while the grace period runs. */
@@ -120,6 +128,10 @@ describe('the teardown order', () => {
       expect(world.order).toEqual(['flush', 'abort', 'quiesce'])
       expect(world.emitted).toEqual([SHUTDOWN_DONE_EVENT])
       expect(world.deps.signal.aborted).toBe(true)
+      /* AND IT IS SAID. The journal is closed under a queue still running and
+       * the shell is told the app finished cleanly — the one exit that cannot
+       * have written everything must not be the one that leaves no trace. */
+      expect(warned).toEqual([`drain: the write queue did not finish within ${world.deps.graceMs}ms — writes may have been lost`])
     } finally {
       vi.useRealTimers()
     }
@@ -173,6 +185,48 @@ describe('the teardown order', () => {
     world.quit()
     await vi.waitFor(() => expect(attempted).toBe(1))
     expect(world.order).toEqual(['flush', 'drain', 'abort', 'quiesce'])
+  })
+})
+
+/**
+ * THE WINDOW CLOSE AND THE QUIT ARE ONE TEARDOWN.
+ *
+ * The red button ran flush → drain → destroy and never the abort and the
+ * journal close, so the sync journal's flag stayed up on every close — and on
+ * Windows and Linux, which have no quit menu, that was every quit. Now the
+ * close runs the same teardown the shell's ask runs, through one memoised
+ * function: a quit that lands while a close is already tearing down joins it
+ * instead of starting a second abort.
+ */
+describe('one teardown for the close and the quit', () => {
+  it('runs once however many ask, and answers the shell once', async () => {
+    const world = shell()
+    const teardown = createTeardown(world.deps)
+    await armShutdown(world.deps, teardown)
+    /* The window close starts it; the shell's ask joins it. */
+    const closing = teardown()
+    await world.quit()
+    await closing
+    expect(world.order).toEqual(['flush', 'drain', 'abort', 'quiesce'])
+    expect(world.emitted).toEqual([SHUTDOWN_DONE_EVENT])
+  })
+
+  it('is what arming in the background hands back, so the composition root can give it to the window', async () => {
+    const world = shell()
+    const teardown = armShutdownInBackground(world.deps)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(world.listening()).toBe(true)
+    await teardown()
+    expect(world.order).toEqual(['flush', 'drain', 'abort', 'quiesce'])
+    expect(world.emitted).toEqual([SHUTDOWN_DONE_EVENT])
+    /* AND THE SHELL ASKING AFTERWARDS GETS THE FINISHED ONE, not a second —
+       and hears nothing new: the one answer already went, and the shell's
+       persistent listener (`shutdown::watch`) has it. `quit()` awaits an
+       answer, so it is fired and not awaited; a tick is enough to know. */
+    void world.quit()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(world.order).toEqual(['flush', 'drain', 'abort', 'quiesce'])
+    expect(world.emitted).toEqual([SHUTDOWN_DONE_EVENT])
   })
 })
 
@@ -243,3 +297,31 @@ describe('arming in the background', () => {
   })
 })
 
+
+describe('a failing step does not take the rest with it', () => {
+  /**
+   * ONE SHARED `try` USED TO COVER ALL FOUR STEPS, so a flush that threw
+   * skipped drain, abort AND quiesce: the journal stayed open and the quit
+   * was released anyway — the flag-up exit this file exists to prevent,
+   * caused by a failure in the one step that has nothing to do with the
+   * journal. Each step now runs regardless, and the failure is still said.
+   */
+  it('closes the journal even when the flush throws, and names the step that failed', async () => {
+    const warned: string[] = []
+    const world = shell({
+      flush: () => {
+        throw new Error('a note refused to leave its editor')
+      },
+      diagnostics: {
+        warn: (_event: string, fields: { message?: string }) => void warned.push(fields.message ?? ''),
+        info: () => {},
+        error: () => {},
+      } as unknown as ShutdownDeps['diagnostics'],
+    })
+    await armShutdown(world.deps)
+    await world.quit()
+    expect(world.order).toEqual(['drain', 'abort', 'quiesce'])
+    expect(world.emitted).toEqual([SHUTDOWN_DONE_EVENT])
+    expect(warned).toEqual(['flush: a note refused to leave its editor'])
+  })
+})

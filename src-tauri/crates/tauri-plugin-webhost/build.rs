@@ -17,6 +17,7 @@ const COMMANDS: &[&str] = &[
     "webhost_sessions",
     "webhost_browsers",
     "webhost_revoke",
+    "webhost_revoke_all",
     "webhost_ready",
     "webhost_send",
     "webhost_session_recv",
@@ -63,7 +64,12 @@ fn embed_client() {
     let has_entry = entries
         .iter()
         .any(|(request, _)| request == "/index.web.html");
-    let release = std::env::var("PROFILE").as_deref() == Ok("release");
+    /* EVERY PROFILE THAT IS NOT `debug`, not `== "release"`: a custom
+     * distribution profile (`[profile.dist]`, say) inherits from release,
+     * reports its own name, and would have shipped an empty client past a
+     * guard that only knew one spelling. Dev builds are the one case the
+     * absent client is legitimate, and they are the one profile named. */
+    let release = std::env::var("PROFILE").as_deref() != Ok("debug");
     if release && !has_entry {
         panic!(
             "dist-web/ has no index.web.html, so this release would ship a browser client that \
@@ -109,6 +115,10 @@ fn embed_client() {
 ///
 /// Distinguishing them costs one `match` and is the difference between "no
 /// client was asked for" and "the client is broken and nobody said so".
+///
+/// ⚠️ **NOTHING IS FOLLOWED AND NOTHING IRREGULAR IS EMBEDDED**, which is what
+/// keeps the walk inside `dist-web/` and what keeps it terminating. See the
+/// note at the type check below.
 fn collect(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(String, String)>) -> bool {
     let read = match std::fs::read_dir(dir) {
         Ok(read) => read,
@@ -131,20 +141,81 @@ fn collect(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(String,
             )
         });
         let path = entry.path();
-        if path.is_dir() {
+        /* ⚠️ `symlink_metadata`, NOT `path.is_dir()` — and this used to be
+         * `is_dir()`, which FOLLOWS the link.
+         *
+         * A symlinked directory anywhere under `dist-web/` was therefore
+         * walked as though it were part of the tree. Whatever it pointed at
+         * came out embedded in the binary under request paths that claim to
+         * be inside the bundle, and a link at an ancestor — `..`, or `/` —
+         * took the walk out of `dist-web/` altogether while every
+         * `strip_prefix` below still succeeded, because the paths were built
+         * by descending from the root rather than resolved against it. A
+         * link back INTO the tree was worse: there is no visited set here, so
+         * it recursed until the build ran out of stack.
+         *
+         * Refusing links outright answers both without a canonicalisation or
+         * a visited set: nothing is followed, so nothing can leave the tree
+         * and nothing can cycle. It is the same rule `tauri-plugin-inference`
+         * holds over the staged runtime, for the same reason — the build that
+         * writes this directory (Vite) emits regular files, so anything else
+         * in it is a tree somebody else arranged. */
+        let kind = std::fs::symlink_metadata(&path)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "cannot read the type of {} for the browser client: {error}",
+                    path.display()
+                )
+            })
+            .file_type();
+        if kind.is_dir() {
             /* The return is discarded ON PURPOSE here and only here: a
              * subdirectory that vanished mid-walk now panics above rather than
              * reporting `false`, so the only value this can return is `true`. */
             let _ = collect(root, &path, out);
             continue;
         }
-        let Ok(relative) = path.strip_prefix(root) else {
-            continue;
-        };
+        if !kind.is_file() {
+            /* Loud, not skipped: a client silently missing a chunk is the
+             * exact failure this function's note above is about, arrived at
+             * from a different direction. */
+            panic!(
+                "{} is {} and not a regular file, so the browser client bundle will not embed \
+                 it.\n\
+                 \n\
+                 dist-web/ holds what `pnpm build:web` wrote and nothing else. Delete it and \
+                 rebuild.",
+                path.display(),
+                if kind.is_symlink() {
+                    "a symbolic link"
+                } else {
+                    "a special file"
+                },
+            );
+        }
+        /* `expect`, not a silent `continue`: every path here was produced by
+         * walking `root`, so a prefix miss is an invariant violation — and a
+         * recovery branch for one hides the day a traversal change breaks it. */
+        let relative = path
+            .strip_prefix(root)
+            .expect("walked path must remain under dist-web");
         /* The REQUEST path, always with a forward slash — a Windows build
-         * would otherwise emit keys no browser can ever send. */
-        let request = format!("/{}", relative.to_string_lossy().replace('\\', "/"));
-        out.push((request, path.to_string_lossy().into_owned()));
+         * would otherwise emit keys no browser can ever send. And `to_str`,
+         * not `to_string_lossy`: a lossy name would generate an
+         * `include_bytes!` path that names a DIFFERENT file, or none. Vite
+         * writes UTF-8 names; anything else in the tree is a build to stop. */
+        let utf8 = |p: &std::path::Path| -> String {
+            p.to_str()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{} is not valid UTF-8; the browser client cannot serve it",
+                        p.display()
+                    )
+                })
+                .to_owned()
+        };
+        let request = format!("/{}", utf8(relative).replace('\\', "/"));
+        out.push((request, utf8(&path)));
     }
     true
 }

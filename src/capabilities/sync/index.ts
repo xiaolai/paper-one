@@ -27,7 +27,7 @@ import { bindRole, bindScheduler, currentRole, syncNow, syncStatus, unbindRole, 
 import { createDownloads, describeDownload } from './lib/downloads'
 import { describeArrival, dropArrival, readArrivals, recordArrival, type Arrival } from './lib/arrivals'
 import { createSyncScheduler, type SyncScheduler } from './lib/scheduler'
-import { DEGRADED_DETAIL } from './lib/status'
+import { describeRefusal, describeSession, refusalKind, type RefusalNames } from './lib/status'
 import { createStorageModel, dropDownloadSize, recordDownloadSize, type StorageModel } from './ui/storageModel'
 import { StoragePane } from './ui/StoragePane'
 
@@ -50,28 +50,12 @@ import { StoragePane } from './ui/StoragePane'
  * and the journal exists only after `start()`.
  */
 
-/** The clock floor, persisted before any stamp escapes (`clock.ts`). */
-/**
- * An app-relative path, resolved against the data root — the rule behind
- * `absoluteInDataRoot`, kept pure so it can be tested without a peer.
- *
- * Exported for that test and for no other caller: everything inside the
- * capability goes through the memoised wrapper, which is what makes the root
- * one question asked once.
- */
-export function absoluteIn(root: string, path: string): string {
-  /* The root must already be absolute — it is Rust's answer for the data
-   * directory, and a relative or blank one would silently anchor the journal
-   * to whatever the working directory happens to be. Same check, and the same
-   * reason, as `contentBlobPort`. */
-  if (typeof root !== 'string' || (!root.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(root))) {
-    throw new Error('sync: the data root must be an absolute path')
-  }
-  const base = root.replace(/[\\/]+$/, '')
-  if (base === '') throw new Error('sync: the data root must name a directory, not the filesystem root')
-  return `${base}/${path.replace(/^[\\/]+/, '')}`
-}
+/* `absoluteIn` LIVED HERE and is gone with WI-20.35: the journal's fsync goes
+ * through the kernel's own filesystem seam with its app-relative path, so
+ * nothing in this capability resolves a path against the data root any more.
+ * `journalFsync.test.ts` pins the wiring that replaced it. */
 
+/** The clock floor, persisted before any stamp escapes (`clock.ts`). */
 export const CLOCK_FLOOR_SETTING: Setting<string> = defineSetting('sync.clockFloor', '', (raw) =>
   typeof raw === 'string' ? raw : undefined,
 )
@@ -83,10 +67,18 @@ let running: {
   readonly port: PeerPort
   readonly ledger: Ledger
   readonly shelfPeer: () => Promise<string | null>
+  /** The shelf's pairing name — what the status line calls it (WI-20.25). */
+  readonly shelfName: () => Promise<string | null>
+  /** A book's title, for a refusal that is about one book. */
+  readonly titleOf: (book: string) => string | null
   readonly coverCache: CoverCache | null
   /** The composition's (scoped) filesystem — carried here so an action that
    *  outlives a teardown cannot write through a NEWER runtime's handle. */
   readonly fs: KernelApi['services']['fs']
+  /** The kernel's queue and the book's lane on it — download-size bookkeeping
+   *  is ordered against eviction there (audit-fix #319). */
+  readonly writes: KernelApi['services']['writes']
+  readonly lane: (bookId: string) => string
 } | null = null
 let storageModel: StorageModel | null = null
 
@@ -185,8 +177,50 @@ async function withShelf<T>(task: (channel: SyncChannel) => Promise<T>): Promise
   try {
     return await task(channel)
   } finally {
-    await channel.close().catch(() => {})
+    /* Reported, not swallowed: a channel that would not close is a leaked
+     * session, and nothing else says so. The task's own result or error is
+     * what the caller sees either way. */
+    await channel.close().catch((thrown: unknown) => {
+      warn?.('sync.channel-close-failed', { message: thrown instanceof Error ? thrown.message : String(thrown) })
+    })
   }
+}
+
+/**
+ * The names a refusal sentence needs, from the runtime that is up: the
+ * shelf's pairing name (IPC, so best-effort — a status line that could not
+ * ask is worded without the name rather than not set), and a book's title.
+ */
+async function refusalNames(): Promise<RefusalNames> {
+  const held = running
+  return {
+    shelf: held ? await held.shelfName().catch(() => null) : null,
+    title: (book) => held?.titleOf(book) ?? null,
+  }
+}
+
+/**
+ * A failure, worded for the reader and set as the status (WI-20.25). Every
+ * failure — a download refused, a session that did not finish — used to
+ * become "Paper on your Mac isn't reachable", which was the wrong sentence
+ * for a revoked device, a version skew and a full disk alike, and named
+ * hardware the reader may not own. The kind decides the sentence; the
+ * shelf's own name and the book's title go where they belong.
+ */
+async function degrade(thrown: unknown, book?: string): Promise<void> {
+  /* OWNED BY THE RUNTIME THAT WAS UP WHEN THIS FAILED. `refusalNames` asks
+   * the plugin for the shelf's name, which is IPC — and a teardown or a
+   * restart lands inside that await freely. The status is a module slot, so
+   * an old download's refusal used to arrive after the runtime it belonged
+   * to was gone and paint "your shelf isn't reachable" over a session that
+   * had just started successfully. The callers that capture their own owner
+   * check it before calling this; this is the check for the await INSIDE. */
+  const owner = running
+  const message = thrown instanceof Error ? thrown.message : String((thrown as { message?: unknown })?.message ?? thrown)
+  const refusal = { kind: refusalKind(thrown), message, ...(book === undefined ? {} : { book }) }
+  const names = await refusalNames()
+  if (running !== owner) return
+  syncStatus.set({ state: 'degraded', detail: describeRefusal(refusal, names) })
 }
 
 /* IN FLIGHT, BY BOOK. The corner mark on the card and the Download item in
@@ -221,7 +255,10 @@ async function runDownload(bookId: string): Promise<void> {
         downloads.progress(bookId, received, total),
       )
       const fs = held.fs
-      if (fs) await recordDownloadSize(fs, bookId, size).catch(() => {})
+      /* ON THE BOOK'S LANE, so an eviction queued right behind the download
+       * cannot lose the race to this write and leave a size entry for bytes
+       * that are gone. `dropDownloadSize` queues on the same lane. */
+      if (fs) await held.writes.append(held.lane(bookId), () => recordDownloadSize(fs, bookId, size)).catch(() => {})
       /* The jacket, best-effort — a cover that will not come costs nothing. */
       await held.coverCache?.ensure(bookId).catch(() => {})
     })
@@ -239,10 +276,9 @@ async function removeDownloadAction(bookId: string): Promise<void> {
   if (!held) return
   await held.ledger.removeDownload(bookId)
   const fs = held.fs
-  if (fs) await dropDownloadSize(fs, bookId).catch(() => {})
+  if (fs) await held.writes.append(held.lane(bookId), () => dropDownloadSize(fs, bookId)).catch(() => {})
 }
 
-let servicesFs: KernelApi['services']['fs'] = null
 /* The journal HANDOFF: one journal's close must settle before the next
  * opens, or an overlapping restart's older close could delete the dirty
  * flag out from under the newer, live journal. */
@@ -491,10 +527,7 @@ export const sync: Capability = {
        * a book with no bytes (`canOpen`); tap-to-open-fetches is C.6 polish
        * — this action is the honest seam today. */
       when: (book) => runningRole() === 'satchel' && book.hasContent !== true,
-      run: (bookId) =>
-        downloadAction(bookId).catch(() => {
-          syncStatus.set({ state: 'degraded', detail: DEGRADED_DETAIL })
-        }),
+      run: (bookId) => downloadAction(bookId).catch((thrown: unknown) => degrade(thrown, bookId)),
     },
     {
       /* EVICT, not "Remove download" (phase 11).
@@ -518,11 +551,11 @@ export const sync: Capability = {
       icon: 'circle-minus',
       when: (book) => runningRole() === 'satchel' && book.hasContent === true,
       run: (bookId) =>
-        removeDownloadAction(bookId).catch(() => {
+        removeDownloadAction(bookId).catch((thrown: unknown) =>
           /* Content that stayed put must not look removed — same signal as a
            * failed download. */
-          syncStatus.set({ state: 'degraded', detail: DEGRADED_DETAIL })
-        }),
+          degrade(thrown, bookId),
+        ),
     },
   ],
 
@@ -534,7 +567,6 @@ export const sync: Capability = {
   async start(api: CapabilityContext, signal: AbortSignal): Promise<Disposable> {
     const services = api.services
     const settings = api.settings
-    servicesFs = services.fs
 
     /* Every torn-down resource has a slot below; `stop` reads them, so it can
      * run at ANY point — including a `start` that throws half-way — and undo
@@ -612,7 +644,6 @@ export const sync: Capability = {
        * a newer start's live runtime — the same rule peer's stop follows. */
       if (handlers === myHandlers) handlers = null
       if (running === myRunning) running = null
-      if (servicesFs === services.fs) servicesFs = null
       /* Restore the kernel's recorder and clock BEFORE the journal closes, so
        * no store write is ever delegated into a journal that is shutting down
        * — the whole point of an unbind-able bind. */
@@ -641,30 +672,6 @@ export const sync: Capability = {
     unbindClock = services.bindClock(() => clock.now())
 
     const port = peerPort()
-    /**
-     * The journal's paths, made absolute for the ONE call that is not an fs
-     * call.
-     *
-     * Every path the journal hands its filesystem is app-relative — the
-     * kernel's fs resolves them against `BaseDirectory.AppData`, which is what
-     * `sync/journal.jsonl` means everywhere else in this file. `fsync` is not
-     * an fs-plugin call: it is the peer plugin's own command, it takes a real
-     * path, and it refuses one that is not absolute and inside the data root.
-     * Handed the relative path it answered `pathNotAbsolute`, `journal.open()`
-     * threw, and the composition rolled the whole set back — so a build with
-     * `sync` composed showed the fatal screen instead of the library, with the
-     * cause two `cause` links down.
-     *
-     * The root is Rust's answer (`paper_data_root`), asked for ONCE and reused:
-     * a debug build may be pointed at `PAPER_TEST_DATA_DIR`, so TypeScript
-     * resolving `appDataDir()` on its own would disagree with the process that
-     * owns the files — the same reasoning `contentBlobPort` is built on.
-     */
-    let dataRoot: Promise<string> | null = null
-    const absoluteInDataRoot = async (path: string): Promise<string> => {
-      dataRoot ??= port!.dataRoot()
-      return absoluteIn(await dataRoot, path)
-    }
     const fs = services.fs
     let journal: Journal | null = null
     if (fs) {
@@ -687,8 +694,20 @@ export const sync: Capability = {
         clock: () => clock.now(),
         /* NOT swallowed: the fsync hook is the journal's durability
          * barrier, and a barrier that reports success on failure is no
-         * barrier — the append must fail loudly and stay retryable. */
-        ...(port ? { fsync: async (path: string) => port.fsync(await absoluteInDataRoot(path)) } : {}),
+         * barrier — the append must fail loudly and stay retryable.
+         *
+         * THE KERNEL'S OWN SEAM, with the journal's own app-relative path
+         * (WI-20.35). It used to be the peer plugin's `fs_fsync`, which took
+         * an ABSOLUTE path resolved against Rust's data root — handed the
+         * relative one it answered `pathNotAbsolute`, `journal.open()` threw,
+         * and the composition rolled the whole set back, with the cause two
+         * `cause` links down; and a kernel flushing through a removable
+         * capability's command stopped flushing when the capability went.
+         * `fs.fsync` takes the same path every other call on `fs` takes and
+         * is confined by the app crate; `full`, because a journal line is
+         * the commit. Absent on a filesystem without it (a fake), and the
+         * journal's own default is then the no-op it documents. */
+        ...(fs.fsync ? { fsync: (path: string) => fs.fsync!(path, 'full') } : {}),
         /* The canonical rows, tombstones included, off the kernel's card
          * store — sync holds no raw flat-store handle (WI-10.4). */
         cards: () => services.cards.stored(),
@@ -793,6 +812,10 @@ export const sync: Capability = {
       handlers = myHandlers
       const shelfPeer = async (): Promise<string | null> =>
         (await port.listPeers()).find((peer) => peer.role === 'shelf')?.id ?? null
+      const shelfName = async (): Promise<string | null> =>
+        (await port.listPeers()).find((peer) => peer.role === 'shelf')?.name ?? null
+      const titleOf = (book: string): string | null =>
+        services.library.getSnapshot().find((one) => one.bookId === book)?.title ?? null
 
       const coverCache = createCoverCache({
         fs,
@@ -823,7 +846,7 @@ export const sync: Capability = {
          * (WI-10.2/10.5); the scoped fs cannot reach a book's folder. */
         removeBlob: (book, name) => services.removeBlob(book, name),
       })
-      myRunning = { port, ledger, shelfPeer, coverCache, fs }
+      myRunning = { port, ledger, shelfPeer, shelfName, titleOf, coverCache, fs, writes: services.writes, lane: services.library.lane }
       running = myRunning
       myStorageModel = createStorageModel({
         services,
@@ -899,23 +922,53 @@ export const sync: Capability = {
               })
             })
         }
-        unserve = port.onSessionOpen(() => syncStatus.set({ state: 'ok', lastSyncAt: Date.now() }))
+        /* `detail: null` with the state: a degraded sentence left from before
+         * would otherwise stand under a green `ok`. */
+        unserve = port.onSessionOpen(() => syncStatus.set({ state: 'ok', detail: null, lastSyncAt: Date.now() }))
       } else {
         const run = async (): Promise<void> => {
+          /* OWNED BY THIS RUNTIME: a session in flight through a teardown —
+           * or across a restart — used to go on writing `syncStatus`, a
+           * module slot, over the runtime that replaced it. The capture is
+           * the same rule `withShelf` follows; after the await, a run whose
+           * runtime is gone says nothing. */
+          const owner = running
           syncStatus.set({ state: 'syncing', detail: null })
           try {
             const summary = await withShelf((channel) => ledger.runSession(channel))
+            if (running !== owner) return
+            /* A session that FINISHED with something refused is `ok` — the
+               rest of the library moved — with the refusal in the detail, so
+               the reader is told which book rather than shown a green line
+               over a book that never arrives (WI-20.25). Each refusal is a
+               diagnostic too, with the raw message the sentence leaves out. */
+            for (const refusal of summary.refused) {
+              api.diagnostics.warn('sync.push-refused', { book: refusal.book ?? '', kind: refusal.kind, message: refusal.message })
+            }
+            if (summary.quarantine.held > 0 || summary.quarantine.repaired > 0) {
+              api.diagnostics.warn('sync.marks-quarantined', { ...summary.quarantine })
+            }
+            /* THE NAMES FIRST, THEN THE OWNERSHIP CHECK. `refusalNames` is
+             * IPC and the check above ran before it — so a teardown or a
+             * restart landing inside that await let this session write its
+             * green line over the runtime that had replaced it. The rule is
+             * the same one `degrade` follows: whoever writes the module slot
+             * re-reads ownership on the near side of the last await. */
+            const names = await refusalNames()
+            if (running !== owner) return
             syncStatus.set({
               state: 'ok',
-              detail: null,
+              detail: describeSession(summary, names),
               lastSyncAt: Date.now(),
               lastSummary: { pushed: summary.pushed, pulledRows: summary.pulledRows },
             })
           } catch (thrown) {
             api.diagnostics.warn('sync.session-failed', {
+              kind: refusalKind(thrown),
               message: thrown instanceof Error ? thrown.message : String(thrown),
             })
-            syncStatus.set({ state: 'degraded', detail: DEGRADED_DETAIL })
+            if (running !== owner) return
+            await degrade(thrown)
           }
         }
         scheduler = createSyncScheduler({
@@ -971,7 +1024,14 @@ export const sync: Capability = {
       const backfillTick = async (): Promise<void> => {
         await restThenBreathe(BACKFILL_REST_MS, BACKFILL_IDLE_CEILING_MS)
         if (stopped) return
-        const stamped = await backfill.runOnce().catch(() => 0)
+        /* A failure is NOT "nothing left to stamp": it used to read as zero —
+         * the completion signal — and one unexpected throw ended the backfill
+         * for the rest of the process with nothing anywhere saying so. Ended
+         * still (a retry policy is its own decision), but loudly. */
+        const stamped = await backfill.runOnce().catch((thrown: unknown) => {
+          api.diagnostics.warn('sync.backfill-failed', { message: thrown instanceof Error ? thrown.message : String(thrown) })
+          return 0
+        })
         if (!stopped && stamped > 0) void backfillTick()
       }
       backfillTimer = setTimeout(() => void backfillTick(), 0)
@@ -1020,65 +1080,36 @@ export type { SyncStatus } from './lib/status'
  * and it is a property of `compact`, which deliberately keeps the last local
  * commit even when a remote one landed after it.
  *
- * WHY THE DIRTY FLAG IS THE GATE, AND WHICH DIRECTION OF IT IS LOAD-BEARING.
- * Two processes appending to one `journal.jsonl` would corrupt it — not
- * merely the bytes, which `O_APPEND` would keep whole, but `nextSeq` and the
- * rev CAS, which each process holds in memory and neither would see the other
- * move. The advisory lock cannot prevent it: the app cannot take that lock (a
- * webview's filesystem has no exclusive create, see `dev-docs/cli.md`).
+ * WHO MAY OPEN THIS, AND WHAT THE DIRTY FLAG IS NOT. Two processes appending
+ * to one `journal.jsonl` would corrupt it — not merely the bytes, which
+ * `O_APPEND` would keep whole, but `nextSeq` and the rev CAS, which each
+ * process holds in memory and neither would see the other move. THE LOCK IS
+ * THE ARBITER: the app takes the data-root lock in Rust before its webview
+ * boots (WI-20.40), the CLI takes the same lock before it opens a host
+ * (`src/hosts/node/lock.ts`), and a writer that holds it is the only writer.
+ * This function is reached with the lock held, and asks nothing about
+ * liveness — a capability has no business asking the operating system what
+ * is running, and it no longer needs to.
  *
- * The flag is what can. `open()` writes it before it returns, so a live
- * journal ALWAYS has it up — and the useful direction is the contrapositive:
- * **flag down means no journal opened these files and left them open.** That
- * is the only guarantee needed here, and it holds without asking the
- * operating system what is running.
+ * IT USED TO GATE ON THE FLAG, then on a `pgrep` for the app, and both are
+ * gone with WI-20.34: the flag is NOT a liveness signal — measured on a real
+ * library, `close()` did not clear it across an ordinary `quit app "Paper"`,
+ * and both machines carried it for days with the app shut, because a Tauri
+ * app quits by tearing down the webview and an async close that drains a
+ * queue is not guaranteed to finish first. So "flag up" means "up for SOME
+ * reason" — running, crashed, or simply quit. And the `pgrep` could not see
+ * `pnpm app`, the only way this project is run, and answered `unknown` off
+ * macOS, where every CLI write was therefore refused.
  *
- * IT IS NOT A LIVENESS SIGNAL, and reading it as one is a mistake this
- * comment exists to stop somebody repeating. Measured on a real library:
- * `close()` did not clear it across an ordinary `quit app "Paper"`, and both
- * machines carried the flag for days with the app shut. A Tauri app quits by
- * tearing down the webview, and an async close that drains a queue and does
- * file I/O is not guaranteed to finish first. So "flag up" means "up for SOME
- * reason" — running, crashed, or simply quit — and the CLI may not conclude
- * from it that anyone is there.
- *
- * Hence the asymmetry: a journal is opened only when the flag is DOWN, which
- * is both safe and, on a library that has ever run the app, uncommon. The
- * caller decides what to do about the refusal; this only refuses.
- *
- * A second reason the same gate is right: a dirty open owes
+ * WHAT THE FLAG STILL DECIDES: how to open. A dirty open owes
  * `verifyAfterUncleanShutdown()`, a pass over every book that RAISES REVS.
- * That is the app's job on its own schedule, not something a `paper book add`
- * should do to sixteen gigabytes on its way past.
- *
- * WHAT IS STILL UNCOVERED, and is not pretended away: the app STARTING while
- * a CLI command holds the journal. The flag is checked once, before opening.
- * That window is the same one the CLI has always had against the stores, it
- * is not made wider here, and closing it needs the app to take a real lock —
- * a Rust command with an ACL entry, which is a phase of its own.
+ * That is the app's job on its own schedule, not something a `paper book
+ * add` should do to sixteen gigabytes on its way past — so with the flag up
+ * the journal is opened WITHOUT the recovery pass and without clearing it,
+ * and the app still owes it.
  */
-export class JournalInUse extends Error {
-  constructor(message: string) {
-    super(message)
-    this.name = 'JournalInUse'
-  }
-}
-
 export interface LocalJournalOptions {
   readonly services: KernelServices
-  /** Durability barrier. App-relative paths, as everywhere in this file. */
-  readonly fsync?: (path: string) => Promise<void>
-  /**
-   * Open even when the dirty flag is up, WITHOUT running the recovery pass
-   * the flag asks for and without clearing it.
-   *
-   * The caller states this, because the caller is the only one that can know
-   * it: the flag means "not closed cleanly", which in the field is permanent
-   * (the app's teardown cannot finish before its process dies), so the real
-   * question — is another writer live — is answered by asking the operating
-   * system, and a capability has no business doing that.
-   */
-  readonly allowDirty?: boolean
 }
 
 export interface LocalJournal {
@@ -1086,31 +1117,12 @@ export interface LocalJournal {
   readonly close: () => Promise<void>
 }
 
-export async function openLocalJournal({
-  services,
-  fsync,
-  allowDirty = false,
-}: LocalJournalOptions): Promise<LocalJournal> {
+export async function openLocalJournal({ services }: LocalJournalOptions): Promise<LocalJournal> {
   const fs = services.fs
   /* Not a soft no: a caller that asked for a journal and silently got none
    * would write exactly the unreplicated mutations this exists to stop. */
   if (!fs) throw new Error('openLocalJournal: these services have no filesystem')
   const dirty = await fs.exists(JOURNAL_DIRTY_PATH)
-  /* THE CALLER'S ANSWER OUTRANKS THE FLAG, IN BOTH DIRECTIONS.
-   *
-   * `allowDirty` used to be read only when the flag was up, so a caller that
-   * KNEW another process held the library was still allowed to open a journal
-   * whose flag happened to be down — which is precisely the app-starting
-   * window: the app is live, has not yet written the flag, and a CLI opening
-   * then makes two writers. The caller is the only side that can see a live
-   * process, so its refusal has to bind whatever the flag says. */
-  if (!allowDirty) {
-    throw new JournalInUse(
-      dirty
-        ? 'the sync journal is marked dirty — Paper is running on this machine, or last exited without closing it'
-        : 'Paper is running on this machine, or its presence could not be determined',
-    )
-  }
 
   /* THE SAME DEVICE AND THE SAME FLOOR THE APP USES, read from the settings
    * store they share. A private device id would make this machine's own CLI
@@ -1134,7 +1146,9 @@ export async function openLocalJournal({
      * lane the kernel's writers use, and `paper` shares that queue too. */
     lane: (book, what) => (what === 'cards' ? '' : services.library.lane(book)),
     clock: () => clock.now(),
-    ...(fsync ? { fsync } : {}),
+    /* The kernel's own barrier, as the app's composition wires it (above):
+     * the CLI's `nodeIndexFs` has `fsync` over a real descriptor. */
+    ...(fs.fsync ? { fsync: (path: string) => fs.fsync!(path, 'full') } : {}),
     /* Appending is ours; RECOVERING IS THE APP'S. Declining the pass keeps
      * the flag up, so the app still owes it and still performs it. */
     ...(dirty ? { recover: false } : {}),
@@ -1148,13 +1162,25 @@ export async function openLocalJournal({
     unbindClock.dispose()
     throw error
   }
-  const unbindRecorder = services.bindRecorder(journal)
+  let unbindRecorder: { dispose: () => void }
+  try {
+    unbindRecorder = services.bindRecorder(journal)
+  } catch (error) {
+    /* A bind that throws — the recorder is already bound — must not leave an
+     * open journal and a held clock behind it. */
+    await journal.close().catch(() => {})
+    unbindClock.dispose()
+    throw error
+  }
   return {
     close: async () => {
+      /* THE APP'S ORDER (`start`'s teardown): restore the kernel's recorder
+       * BEFORE the journal closes, so no store write is delegated into a
+       * journal that is draining. This did the opposite. */
+      unbindRecorder.dispose()
       try {
         await journal.close()
       } finally {
-        unbindRecorder.dispose()
         unbindClock.dispose()
       }
     },

@@ -31,7 +31,7 @@ use tauri::{AppHandle, Runtime, State};
 
 use crate::agent::{self, Agent};
 use crate::agentask;
-use crate::endpoints::{Endpoint, EndpointStore};
+use crate::endpoints::Endpoint;
 use crate::error::{Error, Result};
 use crate::generate::{self, ChatRequest, Message};
 use crate::install::{self, Progress};
@@ -143,6 +143,7 @@ pub async fn inference_install_model<R: Runtime>(
     progress: Channel<Progress>,
 ) -> Result<()> {
     limits::within("request id", &request_id, limits::MAX_REQUEST_ID)?;
+    limits::within("model id", &model, limits::MAX_MODEL_ID)?;
     let guard = state.requests().begin(&request_id)?;
     let cancel = guard.cancel();
     /* Held for the whole download, so a second install of this model — or a
@@ -167,6 +168,13 @@ pub async fn inference_remove_model<R: Runtime>(
     state: State<'_, InferenceState>,
     model: String,
 ) -> Result<()> {
+    /* BOUNDED BEFORE THE LOCK KEY IS BUILT FROM IT. `lock_model` formats the
+     * id into `model:{model}` and a refusal copies it again into
+     * `RequestBusy` — both happen before `manifest.model(&model)` gets to say
+     * it is not a model at all. Missed when the other model commands were
+     * bounded, because this one reads as a delete rather than as a command
+     * that takes a string. */
+    limits::within("model id", &model, limits::MAX_MODEL_ID)?;
     /* THE SAME LOCK THE INSTALL TAKES. Removing a model's artifacts while
      * they are being fetched is the same collision from the other side, and
      * this command carries no request id to have been serialised by. */
@@ -230,11 +238,16 @@ fn manifest_id_for(state: &InferenceState, loaded: &str) -> Option<String> {
         .models
         .iter()
         .find(|model| {
+            /* By FILE NAME, not by suffix: `ends_with` on the raw string let
+             * `/tmp/not-model.gguf` claim the manifest entry for
+             * `model.gguf`. The daemon reports a path; the path's last
+             * component either IS the artifact's file or it is not ours. */
             loaded == model.id
-                || model
-                    .artifacts
-                    .iter()
-                    .any(|artifact| loaded.ends_with(&artifact.file))
+                || model.artifacts.iter().any(|artifact| {
+                    std::path::Path::new(&loaded)
+                        .file_name()
+                        .is_some_and(|name| name.to_string_lossy() == artifact.file)
+                })
         })
         .map(|model| model.id.clone())
 }
@@ -285,9 +298,11 @@ pub async fn inference_probe<R: Runtime>(
     routes.push(probe::agent_route(&claude));
 
     /* Whether the DAEMON took each one, which is a separate fact from whether
-    Paper has it stored — see `UnusableReason::NotRegistered`. */
+    Paper has it stored — see `UnusableReason::NotRegistered`. The list reads
+    the keychain once per endpoint, so it goes through the blocking seam like
+    every other store call (WI-20.20). */
     let unregistered = state.unregistered().await;
-    for endpoint in state.endpoints(&app)?.list()? {
+    for endpoint in state.on_store(&app, |store| store.list()).await? {
         let registered = !unregistered.contains(&endpoint.id);
         routes.push(probe::endpoint_route(&endpoint, registered));
     }
@@ -395,9 +410,8 @@ async fn route_for<R: Runtime>(
     /* The daemon's own verdict, so a route it refused is refused here too
     rather than reaching it a second time to be refused again. */
     let unregistered = state.unregistered().await;
-    state
-        .endpoints(app)?
-        .list()?
+    let endpoints = state.on_store(app, |store| store.list()).await?;
+    endpoints
         .iter()
         .find(|endpoint| endpoint.id == model)
         .map(|endpoint| probe::endpoint_route(endpoint, !unregistered.contains(&endpoint.id)))
@@ -414,7 +428,11 @@ fn parse_agent_route(route: &str) -> Result<Agent> {
     match route {
         "agent:codex" => Ok(Agent::Codex),
         "agent:claude" => Ok(Agent::Claude),
-        // A route id the probe did not mint. Never a path, never an argv.
+        /* A route id the probe did not mint. Never a path, never an argv —
+         * but `to_owned` here COPIES whatever arrived into an error that
+         * crosses IPC, which is why both callers bound the route first.
+         * `every_string_parameter_of_every_command_is_bounded` in `limits.rs`
+         * is what holds that, rather than this sentence. */
         other => Err(Error::ModelUnknown(other.to_owned())),
     }
 }
@@ -455,11 +473,18 @@ pub async fn inference_generate<R: Runtime>(
      * command surface bounds which verbs a webview can reach; it says nothing
      * about how much can be pushed through one. See `limits.rs`. */
     limits::within("request id", &request_id, limits::MAX_REQUEST_ID)?;
+    limits::within("model id", &model, limits::MAX_MODEL_ID)?;
     limits::within("system prompt", &system, limits::MAX_SYSTEM)?;
     limits::within("question", &question, limits::MAX_QUESTION)?;
-    let model = resolve_model(&app, &state, &model, probe::Modality::Text).await?;
+    /* REGISTERED BEFORE THE RESOLVE — the same rule the agent turn records.
+     * `resolve_model` does filesystem and keychain work; a Stop pressed in
+     * that window used to answer `RequestUnknown` and the generation then
+     * started anyway. The token exists first, and the resolve's outcome is
+     * checked against it. */
     let guard = state.requests().begin(&request_id)?;
     let cancel = guard.cancel();
+    let model = resolve_model(&app, &state, &model, probe::Modality::Text).await?;
+    cancel.check()?;
     /* ⚠️ THE DAEMON LOCK IS DROPPED BEFORE THE NETWORK WAIT. `state.daemon()`
      * hands back a mapped mutex guard, and holding it across a streamed
      * generation serialised every other daemon command behind this one — the
@@ -504,13 +529,16 @@ pub async fn inference_gloss<R: Runtime>(
     limits::within("request id", &request_id, limits::MAX_REQUEST_ID)?;
     limits::within("system prompt", &system, limits::MAX_SYSTEM)?;
     limits::within("question", &question, limits::MAX_QUESTION)?;
+    limits::within("model id", &model, limits::MAX_MODEL_ID)?;
     /* RESOLVED, like `inference_generate`. The first version of the closed
      * argument set covered only the generate path, which left two commands
      * forwarding a caller-supplied model straight to the daemon — the exact
-     * hole the header claims does not exist. An audit caught the omission. */
-    let model = resolve_model(&app, &state, &model, probe::Modality::Text).await?;
+     * hole the header claims does not exist. An audit caught the omission.
+     * And registered BEFORE the resolve, for generate's reason. */
     let guard = state.requests().begin(&request_id)?;
     let cancel = guard.cancel();
+    let model = resolve_model(&app, &state, &model, probe::Modality::Text).await?;
+    cancel.check()?;
     /* Dropped before the wait, as in `inference_generate` — see there. */
     let request = {
         let daemon = state.daemon().await?;
@@ -542,6 +570,7 @@ pub async fn agent_ask<R: Runtime>(
 ) -> Result<String> {
     limits::within("request id", &request_id, limits::MAX_REQUEST_ID)?;
     limits::within("prompt", &prompt, limits::MAX_AGENT_PROMPT)?;
+    limits::within("route id", &route, limits::MAX_MODEL_ID)?;
     let which = parse_agent_route(&route)?;
     /* REGISTERED BEFORE THE PROBE, and the probe races cancellation.
      *
@@ -609,6 +638,7 @@ pub async fn agent_ask<R: Runtime>(
 /// stays theirs.
 #[tauri::command]
 pub async fn agent_sign_in(route: String) -> Result<()> {
+    limits::within("route id", &route, limits::MAX_MODEL_ID)?;
     let which = parse_agent_route(&route)?;
     let path = agent::which(which.exe()).ok_or_else(|| Error::AgentMissing(which.name()))?;
     let args: &[&str] = match which {
@@ -616,49 +646,34 @@ pub async fn agent_sign_in(route: String) -> Result<()> {
         Agent::Claude => &["auth", "login"],
     };
     // Spawned and released: a login flow opens a browser and takes as long as
-    // the reader takes. Awaiting it would block the command for minutes.
-    tokio::process::Command::new(path)
+    // the reader takes. Awaiting it would block the command for minutes —
+    // but SOMETHING must wait, or the exited child sits as a zombie until
+    // Paper quits. A detached task is that something.
+    let mut child = tokio::process::Command::new(path)
         .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()?;
+    tokio::spawn(async move {
+        if let Err(err) = child.wait().await {
+            log::warn!("inference: the sign-in process could not be reaped: {err}");
+        }
+    });
     Ok(())
 }
 
 /* ────────────────────────────── cloud endpoints ─────────────────────────── */
 
-/// Run one endpoint-store operation off the async runtime.
-///
-/// ⚠️ **THE STORE IS BLOCKING, AND SO IS THE KEYCHAIN.** `read`/`write` are
-/// `std::fs`, and every key operation goes through the OS keychain, which on
-/// macOS can put a modal prompt in front of the reader — an unbounded wait on
-/// a tokio worker thread. Calling either straight from an `async` command
-/// stalls the runtime, and with it every other command, the daemon's health
-/// poll and any streaming answer.
-async fn on_store<R, T>(
-    app: &AppHandle<R>,
-    state: &InferenceState,
-    work: impl FnOnce(&EndpointStore) -> Result<T> + Send + 'static,
-) -> Result<T>
-where
-    R: Runtime,
-    T: Send + 'static,
-{
-    // Cloned rather than borrowed: `spawn_blocking` needs `'static`, and the
-    // store is a path.
-    let store = state.endpoints(app)?.clone();
-    tokio::task::spawn_blocking(move || work(&store))
-        .await
-        .map_err(|join| Error::Io(std::io::Error::other(join.to_string())))?
-}
+/* Every store call below goes through `state.on_store` — the store is
+ * blocking and so is the keychain, and the seam is where that is explained. */
 
 #[tauri::command]
 pub async fn inference_endpoints<R: Runtime>(
     app: AppHandle<R>,
     state: State<'_, InferenceState>,
 ) -> Result<Vec<Endpoint>> {
-    on_store(&app, &state, |store| store.list()).await
+    state.on_store(&app, |store| store.list()).await
 }
 
 #[tauri::command]
@@ -669,12 +684,22 @@ pub async fn inference_add_endpoint<R: Runtime>(
     label: String,
     base_url: String,
 ) -> Result<()> {
+    /* THE ID IS BOUNDED HERE AND NOT ONLY IN THE STORE. `EndpointStore::add`
+     * refuses an invalid id by copying it into `ModelUnknown`, and that error
+     * crosses IPC — so the store's grammar check is a length check that
+     * ALLOCATES AND ECHOES whatever it refuses. Bounded before the blocking
+     * hop, like the label beside it and the key in `set_endpoint_key`. */
+    limits::within("endpoint id", &id, limits::MAX_ENDPOINT_ID)?;
+    limits::within("endpoint label", &label, limits::MAX_ENDPOINT_LABEL)?;
+    limits::within("endpoint url", &base_url, limits::MAX_ENDPOINT_URL)?;
     /* ⚠️ ONE WRITER AT A TIME. `add` and `remove` read the list, edit it and
      * write it back through the same temporary path; nothing serialised them
      * and `#[tauri::command]`s run concurrently, so two at once lose an edit
      * or rename a half-written file over the reader's only copy. */
     let _writing = state.endpoint_writes().lock().await;
-    on_store(&app, &state, move |store| store.add(&id, &label, &base_url)).await?;
+    state
+        .on_store(&app, move |store| store.add(&id, &label, &base_url))
+        .await?;
     /* The daemon takes its keys and its provider registrations at spawn, so a
      * running one knows nothing about this until it is restarted. */
     state.reconfigure().await;
@@ -687,13 +712,20 @@ pub async fn inference_remove_endpoint<R: Runtime>(
     state: State<'_, InferenceState>,
     id: String,
 ) -> Result<()> {
+    /* ⚠️ THIS IS THE ONE THAT NEVER REACHED A GRAMMAR CHECK. `add` and
+     * `set_key` call `valid_id`; `EndpointStore::remove` does not — it filters
+     * the list by the id and then hands it straight to the keychain as an
+     * account name. So nothing at all bounded this field, and the bound has to
+     * be here rather than borrowed from a sibling command. */
+    limits::within("endpoint id", &id, limits::MAX_ENDPOINT_ID)?;
     let _writing = state.endpoint_writes().lock().await;
-    on_store(&app, &state, move |store| store.remove(&id)).await?;
-    /* ⚠️ AND THIS IS THE HALF THAT MATTERS. Without it a key the reader
-     * deleted stayed live in the running child's environment, with its
-     * provider still registered, until the app was next launched. */
-    state.reconfigure().await;
-    Ok(())
+    /* ⚠️ THE RECONFIGURE IS THE HALF THAT MATTERS, and it is unconditional.
+     * Without it a key the reader deleted stayed live in the running child's
+     * environment, with its provider still registered, until the app was next
+     * launched — and a `?` between the removal and the reconfigure put it
+     * back for exactly the case where the keychain refused to give the key
+     * up. `remove_endpoint` holds the order; see it for why. */
+    state.remove_endpoint(&app, id).await
 }
 
 /// Store an endpoint's key. WRITE-ONLY — there is deliberately no command
@@ -706,8 +738,14 @@ pub async fn inference_set_endpoint_key<R: Runtime>(
     id: String,
     key: String,
 ) -> Result<()> {
+    // Bounded BEFORE the blocking keychain write gets to allocate for it.
+    // Both fields: the id is the keychain ACCOUNT the key is written under.
+    limits::within("endpoint id", &id, limits::MAX_ENDPOINT_ID)?;
+    limits::within("endpoint key", &key, limits::MAX_ENDPOINT_KEY)?;
     let _writing = state.endpoint_writes().lock().await;
-    on_store(&app, &state, move |store| store.set_key(&id, &key)).await?;
+    state
+        .on_store(&app, move |store| store.set_key(&id, &key))
+        .await?;
     // A changed key is a changed spawn environment; an empty one is a clear.
     state.reconfigure().await;
     Ok(())
@@ -730,13 +768,24 @@ pub async fn inference_speak<R: Runtime>(
     voice: Option<String>,
 ) -> Result<Vec<u8>> {
     limits::within("request id", &request_id, limits::MAX_REQUEST_ID)?;
+    limits::within("model id", &model, limits::MAX_MODEL_ID)?;
     limits::within("speech text", &text, limits::MAX_SPEECH_TEXT)?;
+    /* THE VOICE IS A CALLER STRING TOO, and it was the one field on this
+     * command left unbounded — `speech::body` copies it into the JSON body
+     * that goes to the daemon, so an unbounded voice is an unbounded request
+     * whatever `MAX_SPEECH_TEXT` says about the text beside it. An
+     * `Option<String>` reads as "optional, therefore small"; it is neither. */
+    if let Some(voice) = voice.as_deref() {
+        limits::within("voice", voice, limits::MAX_MODEL_ID)?;
+    }
     /* SPEECH, and this is where the modality check earns itself: without it a
      * caller could name the text model here and the answering model in
-     * `inference_generate` could be a voice. */
-    let model = resolve_model(&app, &state, &model, probe::Modality::Speech).await?;
+     * `inference_generate` could be a voice. Registered BEFORE the resolve,
+     * for generate's reason. */
     let guard = state.requests().begin(&request_id)?;
     let cancel = guard.cancel();
+    let model = resolve_model(&app, &state, &model, probe::Modality::Speech).await?;
+    cancel.check()?;
     let body = speech::body(&model, &text, voice.as_deref());
     /* Dropped before the wait, as in `inference_generate` — see there. */
     let request = {

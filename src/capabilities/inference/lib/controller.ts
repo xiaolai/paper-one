@@ -1,4 +1,5 @@
 import { createGenerations } from '../../../kernel'
+import { messageOf } from './messageOf'
 import type { InferencePlugin, InstallProgress, ModelRow, RuntimeStatus } from './plugin'
 import { errorKind, isCancelled, mintRequestId } from './plugin'
 
@@ -40,6 +41,8 @@ export interface InferenceSnapshot {
   readonly models: readonly ModelRow[]
   /** The model id currently downloading, or null. At most one at a time. */
   readonly installing: string | null
+  /** The model a removal is in flight for — one at a time, see `uninstall`. */
+  readonly removing: string | null
   /**
    * What went wrong with the last download or removal, in the reader's words.
    *
@@ -97,6 +100,7 @@ const INITIAL: InferenceSnapshot = {
   runtime: { kind: 'absent', reason: 'Not installed' },
   models: [],
   installing: null,
+  removing: null,
   failure: null,
 }
 
@@ -112,6 +116,11 @@ export function detailFor(error: unknown): string {
   switch (kind) {
     case 'runtimeMissing':
       return 'The runtime is not installed'
+    /* WI-20.24: the staged runtime is checked file by file against its
+     * manifest before every spawn, and a byte that differs refuses the
+     * launch. The plugin's message names the file; this is the sentence. */
+    case 'runtimeUnverified':
+      return 'The runtime did not verify — nothing was started'
     case 'notReady':
       return 'The runtime did not start'
     case 'runtimeExited':
@@ -154,6 +163,25 @@ export function detailFor(error: unknown): string {
       return 'The runtime’s answer could not be read'
     case 'cancelled':
       return 'The runtime stopped before it answered'
+    /* ── REACHABLE FROM THE COMPANION, and added because they were not ──
+     *
+     * WI-20.18. An agent route rejects with the four `agent*` kinds and a
+     * cloud endpoint's key read with `keychain`, and every one of them landed
+     * on the default — so a reader signed out of Codex was told "Something
+     * went wrong" by a thread that knew exactly what was wrong. "That agent"
+     * rather than its name, for the reason the two above say "That request":
+     * this is worded for every caller, and the crate's own message names the
+     * agent in the maintainer's half. */
+    case 'agentSignedOut':
+      return 'That agent is not signed in'
+    case 'agentMissing':
+      return 'That agent is not installed'
+    case 'agentUnsupportedVersion':
+      return 'That agent’s version is not supported'
+    case 'agentMalformed':
+      return 'That agent’s answer could not be read'
+    case 'keychain':
+      return 'The keychain refused'
     default:
       return 'Something went wrong'
   }
@@ -194,8 +222,6 @@ interface Install {
   readonly before: RuntimeState
 }
 
-/** The maintainer's half of a failure — see `detailFor` for the reader's. */
-const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
 /**
  * The six commands this controller actually uses, of the plugin's nineteen.
@@ -212,7 +238,7 @@ export type ControllerPlugin = Pick<
   'status' | 'models' | 'start' | 'installModel' | 'removeModel' | 'cancel'
 >
 
-export function createController(plugin: ControllerPlugin, report?: ReportFailure): Controller {
+export function createController(plugin: ControllerPlugin, reportTo?: ReportFailure): Controller {
   let snapshot: InferenceSnapshot = INITIAL
   const listeners = new Set<() => void>()
   let disposed = false
@@ -222,6 +248,17 @@ export function createController(plugin: ControllerPlugin, report?: ReportFailur
      trips that need not return in the order they were asked. Without this the
      older one lands last and puts back the catalogue it read. */
   const generations = createGenerations()
+  /* A REPORTER THAT CANNOT TURN A RECOVERY INTO A REJECTION. `refresh`,
+     `install` and `uninstall` promise to absorb their failures; a reporter
+     that threw inside their catch blocks broke that promise and, in
+     `install`, left the slot owned with the state stuck on "installing". */
+  const report = (event: string, fields: Record<string, unknown>): void => {
+    try {
+      reportTo?.(event, fields)
+    } catch (thrown) {
+      console.error('inference controller: the failure reporter itself threw', thrown, 'while reporting', event)
+    }
+  }
 
   const set = (next: Partial<InferenceSnapshot>): void => {
     if (disposed) return
@@ -294,7 +331,7 @@ export function createController(plugin: ControllerPlugin, report?: ReportFailur
          maintainer's, and they are deliberately different sentences — see
          `detailFor`. Reporting only the first would have said "Something went
          wrong" to the log as well. */
-      report?.('inference.refresh-failed', { detail, message: messageOf(error) })
+      report('inference.refresh-failed', { detail, message: messageOf(error) })
       if (mine() && !owned()) set({ runtime: { kind: 'degraded', detail } })
     }
   }
@@ -329,7 +366,13 @@ export function createController(plugin: ControllerPlugin, report?: ReportFailur
       })
       if (!mine()) return false
       install_ = null
-      set({ installing: null, runtime: { kind: 'installed' }, models: withInstalled(model, true) })
+      /* WHAT WAS RUNNING IS STILL RUNNING. Stamping `installed` here over a
+         `ready` runtime meant that if the refresh below then failed, a live
+         daemon was reported stopped until the next successful read. The
+         model row is corrected locally; the runtime keeps `before` — a
+         download changes what is on disk, not whether the daemon is up —
+         and the refresh is the authority when it answers. */
+      set({ installing: null, runtime: session.before, models: withInstalled(model, true) })
       await refresh()
       return true
     } catch (error) {
@@ -344,8 +387,12 @@ export function createController(plugin: ControllerPlugin, report?: ReportFailur
         return false
       }
       const detail = detailFor(error)
-      report?.('inference.install-failed', { model, detail, message: messageOf(error) })
-      set({ installing: null, failure: detail, runtime: { kind: 'degraded', detail } })
+      report('inference.install-failed', { model, detail, message: messageOf(error) })
+      /* THE OPERATION FAILED; THE RUNTIME DID NOT. A digest mismatch or a
+         refused download said nothing about the daemon, yet marked it
+         degraded — `failure` is the operation's field, and the runtime goes
+         back to what it was. */
+      set({ installing: null, failure: detail, runtime: session.before })
       return false
     }
   }
@@ -372,7 +419,7 @@ export function createController(plugin: ControllerPlugin, report?: ReportFailur
      * reported rather than swallowed. */
     void plugin.cancel(requestId).catch((cause: unknown) => {
       if (errorKind(cause) === 'requestUnknown') return
-      report?.('inference.cancel-failed', { message: messageOf(cause) })
+      report('inference.cancel-failed', { message: messageOf(cause) })
     })
   }
 
@@ -386,7 +433,11 @@ export function createController(plugin: ControllerPlugin, report?: ReportFailur
     install,
     cancelInstall,
     uninstall: async (model) => {
-      set({ failure: null })
+      /* ONE REMOVAL AT A TIME. A double-click started two; the second was
+         refused `requestBusy` by the daemon and its failure was shown over a
+         first that had succeeded. The pane disables Remove on `removing`. */
+      if (snapshot.removing !== null) return false
+      set({ failure: null, removing: model })
       try {
         await plugin.removeModel(model)
       } catch (error) {
@@ -394,11 +445,11 @@ export function createController(plugin: ControllerPlugin, report?: ReportFailur
            model.uninstall(id)`, so a rejection here is an unhandled promise
            and a Remove button that appears to have done nothing. */
         const detail = detailFor(error)
-        report?.('inference.remove-failed', { model, detail, message: messageOf(error) })
-        set({ failure: detail })
+        report('inference.remove-failed', { model, detail, message: messageOf(error) })
+        set({ failure: detail, removing: null })
         return false
       }
-      set({ models: withInstalled(model, false) })
+      set({ models: withInstalled(model, false), removing: null })
       /* The re-read is still the authority when it works: the daemon knows what
          is on disk. The local correction above is what stops a swallowed
          refresh failure leaving a deleted model reading Installed. */
@@ -413,16 +464,22 @@ export function createController(plugin: ControllerPlugin, report?: ReportFailur
        * it health-checks and returns the same port — so asking every time
        * costs one loopback round trip and buys a runtime that recovers.
        * Found by audit. */
+      /* THE SAME GENERATION `refresh` CLAIMS. Two `ensureReady`s, or one and
+         a refresh, used to settle in either order with the older one writing
+         last; whichever asked LAST now owns the next state write, as every
+         refresh already did among refreshes. The answer is still returned
+         either way — a caller waiting to generate needs it. */
+      const mine = generations.claim()
       if (!owned() && snapshot.runtime.kind !== 'ready') set({ runtime: { kind: 'starting' } })
       try {
         await plugin.start()
         const status = await plugin.status()
         /* Asked and answered either way; only the STATE write waits for the
            download to finish owning the slot. */
-        if (!owned()) set({ runtime: runtimeFrom(status) })
+        if (mine() && !owned()) set({ runtime: runtimeFrom(status) })
         return status.state === 'ready'
       } catch (error) {
-        if (!owned()) set({ runtime: { kind: 'degraded', detail: detailFor(error) } })
+        if (mine() && !owned()) set({ runtime: { kind: 'degraded', detail: detailFor(error) } })
         return false
       }
     },

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatOf, isFormat, isPdf, sniffFormat, titleFromSource } from './formats'
+import { formatOf, isEmptySource, isFormat, isPdf, sniffFormat, titleFromSource } from './formats'
 
 /**
  * The routing decision, which lives in `core/formats.ts` rather than in
@@ -117,7 +117,7 @@ function mobiOf(version: number): Uint8Array {
   const view = new DataView(bytes.buffer)
   view.setUint32(78, record0, false)
   bytes.set(utf8('MOBI'), record0 + 16)
-  view.setUint32(record0 + 16 + 36, version, false)
+  view.setUint32(record0 + 36, version, false)
   return bytes
 }
 
@@ -170,7 +170,9 @@ describe('sniffFormat', () => {
 
   it('does not throw on a truncated or lying archive', () => {
     const epub = zipOf([{ name: 'mimetype', data: utf8('application/epub+zip') }])
-    expect(sniffFormat(epub.subarray(0, 8))).toBe('cbz') // a ZIP of some kind, unreadably short
+    /* A ZIP of some kind, unreadably short: no entries, so no verdict — the
+       name decides. It used to be called a comic, as was every DOCX. */
+    expect(sniffFormat(epub.subarray(0, 8))).toBeNull()
     const lying = zipOf([{ name: 'mimetype' }])
     // Compressed size pointing past the end just stops the walk.
     new DataView(lying.buffer).setUint32(18, 99999, true)
@@ -202,5 +204,23 @@ describe('isFormat', () => {
     expect(isFormat('txt')).toBe(false)
     expect(isFormat('EPUB')).toBe(false)
     expect(isFormat(7)).toBe(false)
+  })
+})
+
+/**
+ * WI-20.13 — a zero-length file used to reach the fork, whose words for
+ * `!file.size` are "File not found": true of nothing, since the file was
+ * right there. The reader asks this before the fork sees the file.
+ */
+describe('isEmptySource', () => {
+  it('is true for a file with no bytes, whatever it is called', () => {
+    expect(isEmptySource(new File([], 'empty.epub'))).toBe(true)
+    expect(isEmptySource(new File([], 'empty.pdf', { type: 'application/pdf' }))).toBe(true)
+  })
+
+  it('is false for a file with bytes, a URL, and a ranged source whose bytes are elsewhere', () => {
+    expect(isEmptySource(new File(['PK'], 'book.epub'))).toBe(false)
+    expect(isEmptySource('/books/moby.epub')).toBe(false)
+    expect(isEmptySource({ name: 'scanned.pdf', range: {} })).toBe(false)
   })
 })

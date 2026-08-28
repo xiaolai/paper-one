@@ -55,6 +55,13 @@ const byId = (books: readonly IndexedBook[]): IndexedBook[] =>
   [...books].sort((a, b) => a.bookId.localeCompare(b.bookId))
 
 describe('defaultDataDir', () => {
+  it('treats an empty HOME as no home, never as the current directory', () => {
+    /* `HOME=` used to pass `??` as the empty string, and every platform path
+     * then resolved relative to wherever the shell was. */
+    expect(defaultDataDir({ HOME: '' }, 'darwin')).not.toMatch(/^Library/)
+    expect(defaultDataDir({ HOME: '' }, 'darwin')).toBe(defaultDataDir({}, 'darwin'))
+  })
+
   it('resolves the app data directory per platform, under the bundle identifier', () => {
     expect(defaultDataDir({ HOME: '/Users/x' }, 'darwin')).toBe(`/Users/x/Library/Application Support/${APP_IDENTIFIER}`)
     expect(defaultDataDir({ HOME: '/home/x' }, 'linux')).toBe(`/home/x/.local/share/${APP_IDENTIFIER}`)

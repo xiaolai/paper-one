@@ -1,7 +1,7 @@
 ## Default Permission
 
 The commands a Paper webview needs from the peer plugin: the endpoint's status,
-the device's role, the storage root, fsync of a file inside that root; the
+the device's role, the storage root; the
 paired-peer list with grants; pairing (offer, cancel, confirm, dial-from-URI);
 sessions (ready, connect, send, recv, close) and blob transfers (fetch, hash).
 Every path the plugin touches is validated to lie inside the data root, and
@@ -13,7 +13,6 @@ every session is accepted only from a persisted peer.
 - `allow-peer-local-role`
 - `allow-peer-set-local-role`
 - `allow-paper-data-root`
-- `allow-fs-fsync`
 - `allow-peer-list-peers`
 - `allow-peer-forget-peer`
 - `allow-peer-set-grants`
@@ -38,32 +37,6 @@ every session is accepted only from a persisted peer.
 <th>Description</th>
 </tr>
 
-
-<tr>
-<td>
-
-`peer:allow-fs-fsync`
-
-</td>
-<td>
-
-Enables the fs_fsync command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`peer:deny-fs-fsync`
-
-</td>
-<td>
-
-Denies the fs_fsync command without any pre-configured scope.
-
-</td>
-</tr>
 
 <tr>
 <td>

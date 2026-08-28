@@ -51,11 +51,9 @@ function sinks(): { sinks: CliSinks; out: string[]; err: string[] } {
   return { sinks: { out: (line) => out.push(line), err: (line) => err.push(line) }, out, err }
 }
 
-const absent = async () => 'absent' as const
-
 async function run(root: string, argv: string[]): Promise<{ code: number; out: string; err: string }> {
   const { sinks: s, out, err } = sinks()
-  const code = await paper({ argv, sinks: s, dataDir: root, appPresence: absent })
+  const code = await paper({ argv, sinks: s, dataDir: root })
   return { code, out: out.join('\n'), err: err.join('\n') }
 }
 

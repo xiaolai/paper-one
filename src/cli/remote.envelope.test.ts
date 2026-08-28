@@ -112,8 +112,17 @@ async function serveOverTheWire(
      * case worth testing is a trash that HOLDS something. */
     fs: fakeFs({
       'books/b0000/content.epub': 'PK\u0003\u0004 pretend epub bytes',
-      'books/b0001/record.json': JSON.stringify({ title: 'Title 1', addedAt: 1 }),
-      'books/b0002/record.json': JSON.stringify({ title: 'Title 2', addedAt: 2 }),
+      /* ⚠️ **AND `book.json` IS THE RECORD'S NAME.** These were `record.json`,
+       * which is a file nothing in the tree reads — so `b0001` and `b0002` had
+       * folders and no records, and a `book.set` on one applied its change to
+       * nothing. It reported success because `commit` discarded what the write
+       * answered; `updateBook` returns `null` for a folder with no record, and
+       * the row is now taken off the shelf rather than left claiming the change
+       * landed (round 2, #77). `b0004` is here for the `--shelf` write, which
+       * needs a book a write can actually reach. */
+      'books/b0001/book.json': JSON.stringify({ title: 'Title 1', addedAt: 1 }),
+      'books/b0002/book.json': JSON.stringify({ title: 'Title 2', addedAt: 2 }),
+      'books/b0004/book.json': JSON.stringify({ title: 'Title 4', addedAt: 4 }),
       /* ⚠️ **A JACKET, BECAUSE `cover.read` WAS ONLY EVER ASKED ABOUT A BOOK
        * THAT HAS NONE.** An empty stream is a legitimate answer — most books
        * have no artwork — and it is also what a `cover.read` that is completely
@@ -307,8 +316,9 @@ describe('every command, over the envelope', () => {
 
   it('writes through the wire, and the shelf holds the change', async () => {
     const shelf = await serveOverTheWire()
-    expect((await overTheWire(shelf, ['book', 'set', 'b0001', '--title', 'Renamed remotely'])).code).toBe(EXIT.ok)
-    expect(shelf.services.library.getSnapshot().find((one) => one.bookId === 'b0001')?.title).toBe('Renamed remotely')
+    /* `--finished`, since WI-20.7 withdrew `--title`: a rename is not offered. */
+    expect((await overTheWire(shelf, ['book', 'set', 'b0001', '--finished'])).code).toBe(EXIT.ok)
+    expect(shelf.services.library.getSnapshot().find((one) => one.bookId === 'b0001')?.finished).toBe(true)
   })
 
   it('carries a service refusal across unchanged, code and all', async () => {
@@ -671,7 +681,7 @@ describe('paper --shelf', () => {
     const err: string[] = []
     const out: string[] = []
     const code = await paper({
-      argv: ['--shelf', 'k', 'book', 'set', 'b0005', '--title', 'x'],
+      argv: ['--shelf', 'k', 'book', 'set', 'b0005', '--finished'],
       sinks: { out: (line) => out.push(line), err: (line) => err.push(line) },
       remote: async () =>
         remoteCaller({
@@ -730,13 +740,13 @@ describe('paper --shelf', () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'paper-remote-'))
     try {
       const code = await paper({
-        argv: ['--shelf', 'the-shelf', 'book', 'set', 'b0004', '--title', 'Remote write'],
+        argv: ['--shelf', 'the-shelf', 'book', 'set', 'b0004', '--finished'],
         dataDir,
         sinks: { out: () => {}, err: () => {} },
         remote: async () => remoteCaller({ channel: shelf.channel, close: async () => {} }),
       })
       expect(code).toBe(EXIT.ok)
-      expect(shelf.services.library.getSnapshot().find((one) => one.bookId === 'b0004')?.title).toBe('Remote write')
+      expect(shelf.services.library.getSnapshot().find((one) => one.bookId === 'b0004')?.finished).toBe(true)
 
       /* NOTHING WAS CREATED. Not a lock, not an index, not a `books/` — the
        * local host was never opened. An empty directory is the whole

@@ -148,6 +148,22 @@ describe('readRangeOf', () => {
     expect(await readRangeOf(sliceOnly, 'x', 50, 10)).toEqual(new Uint8Array(0))
   })
 
+  it('refuses NaN, infinities, fractions and unsafe integers, not only negatives', async () => {
+    /* `NaN < 0` is false, so NaN sailed past the old check — and what each
+       adapter did with it next was its own private answer. */
+    for (const [offset, length] of [
+      [NaN, 4],
+      [0, NaN],
+      [Infinity, 4],
+      [0, Infinity],
+      [1.5, 4],
+      [0, 2.5],
+      [2 ** 53, 1],
+    ] as const) {
+      await expect(readRangeOf(sliceOnly, 'x', offset, length)).rejects.toThrow(/safe integers/)
+    }
+  })
+
   it('answers nothing for a zero length, without touching the file', async () => {
     const never = {
       readFile: async () => {
@@ -160,8 +176,8 @@ describe('readRangeOf', () => {
   it('refuses a negative offset or length rather than guessing', async () => {
     /* `slice` treats a negative index as counting from the END, so a negative
        offset would quietly answer bytes from the wrong part of the book. */
-    await expect(readRangeOf(sliceOnly, 'x', -1, 4)).rejects.toThrow(/must not be negative/)
-    await expect(readRangeOf(sliceOnly, 'x', 0, -4)).rejects.toThrow(/must not be negative/)
+    await expect(readRangeOf(sliceOnly, 'x', -1, 4)).rejects.toThrow(/non-negative safe integers/)
+    await expect(readRangeOf(sliceOnly, 'x', 0, -4)).rejects.toThrow(/non-negative safe integers/)
   })
 
   it('does not keep the whole file alive behind one slice', async () => {
@@ -228,11 +244,18 @@ describe('storedBookName', () => {
     }
   })
 
-  /* `bin` IS THE VAULT'S INERT FALLBACK, and no parser routes on it — so a
-     record stored as `bin` lands on the same guess the reader would make. */
+  /* `bin` NAMES THE FILE AS STORED. The old rule mapped it to `epub` "so the
+     parser at least opens something" — but the name also locates the file,
+     and `content.epub` is not where the vault put `content.bin`: every
+     unrecognised import was reported MISSING with its bytes right there. */
   it('does not name a file after the inert fallback', () => {
-    expect(storedBookName({ title: 'Book', ext: 'bin' })).toBe('Book.epub')
-    expect(storedBookName({ title: 'Book', format: 'bin' })).toBe('Book.epub')
+    expect(storedBookName({ title: 'Book', ext: 'bin' })).toBe('Book.bin')
+    expect(storedBookName({ title: 'Book', format: 'bin' })).toBe('Book.bin')
+    /* The round trip that was broken: the stored name must locate the file
+       the vault actually wrote. */
+    expect(contentPathIn('book:abc', storedBookName({ title: 'Book', ext: 'bin' }))).toBe(
+      `${BOOKS_DIR}/book_abc/content.bin`,
+    )
   })
 
   it('falls back to a title when a record has none', () => {

@@ -29,6 +29,22 @@ export interface SearchableBook {
 
 export interface SearchPanelProps {
   book: SearchableBook
+  /**
+   * Navigate to a hit THROUGH THE HOST, so the departure is recorded.
+   *
+   * A hit is a jump — non-linear, and the reader wants ⌘[ to bring them back
+   * from it — and the ledger names search hits among the panels that push
+   * onto the jump stack. This panel called `book.goTo` on its own, which
+   * moved the reader and recorded nothing: no way back, no "← Back to" line,
+   * and it looked exactly like a jump, which is why nothing noticed. The
+   * other panels reach the host's `jumpTo` through a prop of this shape; now
+   * this one does too. A bare CFI is a `JumpTarget`'s string arm.
+   *
+   * OPTIONAL, because the browser client mounts this over a navigator and
+   * nothing else — it has no stack to push onto, and a hit there still has to
+   * move the reader. Absent, the book's own `goTo` is used.
+   */
+  onGoTo?: (cfi: string) => void
 }
 
 /** Long enough that typing does not start a full-book scan per keystroke. */
@@ -69,7 +85,7 @@ interface SearchResult {
  * index the handoff describes, and the pane's "instant results" assume that
  * index exists before the user types.
  */
-export function SearchPanel({ book }: SearchPanelProps) {
+export function SearchPanel({ book, onGoTo }: SearchPanelProps) {
   const [query, setQuery] = useState('')
   const [result, setResult] = useState<SearchResult>({
     needle: '',
@@ -226,7 +242,10 @@ export function SearchPanel({ book }: SearchPanelProps) {
               key={`${hit.cfi}:${index}`}
               type="button"
               className={styles.result}
-              onClick={() => goTo(hit.cfi)}
+              /* The host's jump when there is one, the book's own `goTo` when
+                 there is not — never both, which would move the reader twice
+                 and stack the origin against a page that had already turned. */
+              onClick={() => (onGoTo ?? goTo)(hit.cfi)}
             >
               {hit.label && <span className={styles.resultAt}>{hit.label}</span>}
               <div className={styles.resultSnippet}>

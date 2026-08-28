@@ -1,7 +1,7 @@
 import { MAX_RECORD_FIELD, MAX_RECORD_POSITION } from './bookFolder'
-import { MAX_CARD_TEXT } from './cards'
-import { CARD_KINDS } from './cards'
-import { MARK_KINDS, MARK_TINTS } from './marks'
+import { CONTENT_EXTENSIONS } from './bookVault'
+import { CARD_KINDS, MAX_CARD_TEXT } from './cards'
+import { MARK_KINDS, MARK_TINTS, MAX_MARK_NOTE, MAX_MARK_TEXT } from './marks'
 import { TAG_MAX } from './tags'
 import type { DeviceRow } from './ports'
 import type {
@@ -18,8 +18,8 @@ import type {
   TagChange,
   TagCountRow,
   TrashRow,
+  PositionSetRow,
 } from './services/rows'
-import { MAX_MARK_NOTE, MAX_MARK_TEXT } from './marks'
 import type { ClientContribution } from './capability'
 
 /**
@@ -86,7 +86,10 @@ import type { ClientContribution } from './capability'
  * `blob:*`", which was true while nothing here carried bytes and stopped being
  * true when `content.read` did. See that row.
  */
-export const GRANT_FAMILIES = ['book', 'blob', 'mark', 'card', 'device', 'shelf'] as const
+/* FROZEN, every registry here: `readonly` is a compile-time claim, and a
+ * consumer could mutate grant derivation or command discovery at runtime in a
+ * module whose whole point is that the table cannot be. */
+export const GRANT_FAMILIES = Object.freeze(['book', 'blob', 'mark', 'card', 'device', 'shelf', 'position'] as const)
 export type GrantFamily = (typeof GRANT_FAMILIES)[number]
 
 /**
@@ -96,7 +99,7 @@ export type GrantFamily = (typeof GRANT_FAMILIES)[number]
  * `book:*`, `mark:*`, `card:*`, `shelf:read`; a shared device gets
  * `book:read` and nothing else.
  */
-export const SERVICE_GRANTS = [
+export const SERVICE_GRANTS = Object.freeze([
   'book:read',
   'book:write',
   /* THE BYTES OF A BOOK, and the one grant a reader is shown by name.
@@ -111,7 +114,12 @@ export const SERVICE_GRANTS = [
   'device:manage',
   'shelf:read',
   'shelf:admin',
-] as const
+  /* WHERE THE READER IS, and nothing else (WI-20.30, D7). Its own family so
+   * that `book:*` does not include it and it does not include `book.set` —
+   * the one write a browser session is admitted to, and the browser shares
+   * its origin with the book it is reading. */
+  'position:write',
+] as const)
 export type ServiceGrant = (typeof SERVICE_GRANTS)[number]
 
 /**
@@ -162,7 +170,7 @@ export function grantCovers(grants: readonly string[], grant: string): boolean {
  * the book cannot be opened. "Cover" is also not a verb, and `content.cover`
  * would have been the first row in this table whose second word was not one.
  */
-export const SERVICE_NOUNS = ['book', 'mark', 'card', 'tag', 'content', 'cover', 'device', 'shelf', 'trash'] as const
+export const SERVICE_NOUNS = Object.freeze(['book', 'mark', 'card', 'tag', 'content', 'cover', 'device', 'shelf', 'trash'] as const)
 export type ServiceNoun = (typeof SERVICE_NOUNS)[number]
 
 /**
@@ -179,7 +187,7 @@ export type ServiceNoun = (typeof SERVICE_NOUNS)[number]
  * One concept, one word,
  * in the service, the CLI and the UI alike.
  */
-export const SERVICE_VERBS = [
+export const SERVICE_VERBS = Object.freeze([
   'list',
   'get',
   'add',
@@ -190,6 +198,10 @@ export const SERVICE_VERBS = [
   'rename',
   'locate',
   'evict',
+  /* `position` is `book.position` (phase 20) — the reader's place, as its own
+     verb under its own grant. `set` carries it too, under `book:write`; this
+     is the narrow door. */
+  'position',
   /* `read` is `content.read` (phase 18) — a slice of a book's bytes. The one
      verb in this table that carries CONTENT rather than a description of it;
      the note at the head of the file says why that exception is safe. */
@@ -200,7 +212,7 @@ export const SERVICE_VERBS = [
   'sync',
   'verify',
   'empty',
-] as const
+] as const)
 export type ServiceVerb = (typeof SERVICE_VERBS)[number]
 
 /** The response shape: one answer, or many sent as `stream` frames then `end`. */
@@ -301,6 +313,20 @@ export interface ServiceField {
    * and a sentence in a doc string that nothing holds to it.
    */
   readonly choices?: readonly string[]
+  /**
+   * A `string` that must match this pattern, when a vocabulary is open but
+   * a SHAPE is not — a hex digest, say. Declared here so the refusal is the
+   * table's and the reference can print it; a handler that checked the
+   * shape itself left `--help` promising `<string>` for a field that took
+   * exactly sixty-four hex digits.
+   */
+  readonly pattern?: RegExp
+  /**
+   * The fewest entries a `string[]` may carry. `required` says the field
+   * must be present; it says nothing about an empty list, which `tag.add`
+   * refused in its handler while the schema and the reference said nothing.
+   */
+  readonly minItems?: number
 }
 
 /**
@@ -322,6 +348,7 @@ export interface WireShapes {
   TagChange: TagChange
   ContentChunk: ContentChunk
   ContentLocation: ContentLocation
+  PositionSet: PositionSetRow
   ShelfStatus: ShelfStatus
   DeviceRow: DeviceRow
   Removed: RemovedRow
@@ -411,11 +438,38 @@ export interface ServiceDescriptor {
    * the reference says so.
    */
   readonly atLeastOne?: readonly string[]
+  /**
+   * Fields this service once took and now REFUSES BY NAME, each with the
+   * reason.
+   *
+   * Dropping a field from `input` alone turns a caller's `--title` into
+   * "book.set has no field title — did you mean …?", which is the answer to
+   * a misspelling, not to an edit that was withdrawn on purpose. Declared
+   * here, `readInput` and the CLI refuse it with the reason in the message,
+   * and `--help` and the reference print it beside the fields that are
+   * taken — one statement, enforced and published, like `atLeastOne`.
+   *
+   * The first entry is `book.set`'s `title` and `author` (WI-20.7): the
+   * edit went through `patch` with no stamp, the next parse or enrichment
+   * let the file's metadata win in `mergeParsed`, and sync's metadata group
+   * is taken whole by `parsedAt`, which `patch` never moved. Nothing in the
+   * app called it. An edit the kernel cannot keep is not offered.
+   */
+  readonly withdrawn?: readonly WithdrawnField[]
+}
+
+/** A field a service refuses by name, and the sentence it refuses it with. */
+export interface WithdrawnField {
+  readonly name: string
+  readonly why: string
 }
 
 /* -------------------------------------------------------------- the table */
 
 const BOOK_ID: ServiceField = { name: 'book', type: 'string', required: true, nonEmpty: true, maxLength: MAX_RECORD_FIELD, doc: 'The book id.', positional: 0 }
+
+/** A BLAKE3 digest, hex, as `contentHash` carries it — 32 bytes, 64 characters. */
+const MAX_CONTENT_HASH = 64
 
 /**
  * The table. Ordered by noun as the phase document lists them, and within a
@@ -462,7 +516,7 @@ const TABLE = [
       BOOK_ID,
       { name: 'title', type: 'string', required: true, nonEmpty: true, maxLength: MAX_RECORD_FIELD, doc: 'The title.', positional: 1 },
       { name: 'author', type: 'string', maxLength: MAX_RECORD_FIELD, doc: 'The author.', positional: 2 },
-      { name: 'ext', type: 'string', maxLength: 16, doc: "The content file's extension, when this device holds bytes." },
+      { name: 'ext', type: 'string', choices: CONTENT_EXTENSIONS, doc: "The content file's extension, when this device holds bytes — one the blob layer stores." },
     ],
     output: { many: false, of: 'BookDetail', columns: ['bookId', 'title', 'author', 'tags', 'progress', 'finished', 'hasContent'] },
   },
@@ -472,17 +526,44 @@ const TABLE = [
     verb: 'set',
     grant: 'book:write',
     kind: 'req',
-    summary: 'Change fields on one record: title, author, finished, position.',
+    summary: 'Change fields on one record: finished, position.',
     input: [
       BOOK_ID,
-      { name: 'title', type: 'string', maxLength: MAX_RECORD_FIELD, doc: 'A new title.' },
-      { name: 'author', type: 'string', maxLength: MAX_RECORD_FIELD, doc: 'A new author.' },
       { name: 'finished', type: 'boolean', doc: 'Whether the reader is done with it.' },
       { name: 'position', type: 'string', maxLength: MAX_RECORD_POSITION, doc: 'Where the reader is, as a CFI.' },
       { name: 'progress', type: 'number', min: 0, max: 1, doc: 'How far through, in [0, 1]. Needs `position`.' },
     ],
-    atLeastOne: ['title', 'author', 'finished', 'position', 'progress'],
+    atLeastOne: ['finished', 'position', 'progress'],
+    /* Refused by name, not dropped — see `withdrawn` on the descriptor. */
+    withdrawn: [
+      { name: 'title', why: 'a rename is not offered — an edit with no stamp loses to the next parse of the file' },
+      { name: 'author', why: 'a rename is not offered — an edit with no stamp loses to the next parse of the file' },
+    ],
     output: { many: false, of: 'BookDetail', columns: ['bookId', 'title', 'author', 'tags', 'progress', 'finished', 'hasContent'] },
+  },
+  {
+    name: 'book.position',
+    noun: 'book',
+    verb: 'position',
+    /**
+     * THE NARROW DOOR (WI-20.30, D7). A phone's position never reached the
+     * shelf: the browser client holds `readingGrant`, every write is refused,
+     * and the position lived in `localStorage`. `book.set` carries a position
+     * — under `book:write`, beside `finished` and every other field, which
+     * is everything a hostile book's script could reach through the cookie
+     * the browser attaches to any socket the page opens. So the position has
+     * its own row under its own family, which covers nothing else; the
+     * webhost pump binds it further, to the book the client opened.
+     */
+    grant: 'position:write',
+    kind: 'req',
+    summary: 'Where the reader is in one book — the one write a reading device is granted.',
+    input: [
+      BOOK_ID,
+      { name: 'position', type: 'string', required: true, nonEmpty: true, maxLength: MAX_RECORD_POSITION, doc: 'Where the reader is, as a CFI.', positional: 1 },
+      { name: 'progress', type: 'number', min: 0, max: 1, doc: 'How far through, in [0, 1]. Absent keeps what the record has.' },
+    ],
+    output: { many: false, of: 'PositionSet' },
   },
   {
     name: 'book.remove',
@@ -663,7 +744,7 @@ const TABLE = [
     summary: 'Apply one or many tags to one or many books.',
     input: [
       { name: 'tag', type: 'string', required: true, nonEmpty: true, maxLength: TAG_MAX, doc: 'The tag to apply.', positional: 0 },
-      { name: 'book', type: 'string[]', required: true, maxLength: MAX_RECORD_FIELD, maxItems: MAX_BATCH, doc: 'The books to apply it to.' },
+      { name: 'book', type: 'string[]', required: true, minItems: 1, maxLength: MAX_RECORD_FIELD, maxItems: MAX_BATCH, doc: 'The books to apply it to.' },
     ],
     output: { many: false, of: 'TagChange' },
   },
@@ -736,13 +817,34 @@ const TABLE = [
     summary: "A slice of a book's bytes, base64, in chunks — what a browser reads a book through.",
     input: [
       BOOK_ID,
-      { name: 'offset', type: 'number', integer: true, min: 0, doc: 'Where to start, in bytes. Default 0.' },
+      { name: 'offset', type: 'number', integer: true, min: 0, max: Number.MAX_SAFE_INTEGER, doc: 'Where to start, in bytes. Default 0.' },
       {
         name: 'length',
         type: 'number',
         integer: true,
         min: 0,
+        /* SAFE INTEGERS, refused as malformed here rather than as an internal
+         * failure at the filesystem: a JSON number past 2^53 loses precision
+         * on the way in and reads a different range than it named. */
+        max: Number.MAX_SAFE_INTEGER,
         doc: 'How many bytes at most. Absent means to the end of the file.',
+      },
+      /* THE HASH THE CALLER WAS TOLD (WI-20.30). A browser that lost its
+         socket mid-read asks for the whole read again on a fresh one, and
+         nothing else can tell it the book changed in between — a re-import,
+         an enrichment that rewrote the file. `content.locate` answers
+         `contentHash`; this hands it back, and the read is REFUSED rather
+         than served when the bytes are no longer the ones described. */
+      {
+        name: 'expect',
+        type: 'string',
+        nonEmpty: true,
+        maxLength: MAX_CONTENT_HASH,
+        /* A BLAKE3 digest is sixty-four hex digits; anything else reached
+         * the handler and was reported as a content CONFLICT, which is the
+         * wrong word for a caller who sent a typo. */
+        pattern: /^[0-9a-f]{64}$/,
+        doc: "The `contentHash` `content.locate` answered. Refused with `conflict` when this shelf's bytes are no longer the ones that hash describes, or when it cannot say.",
       },
     ],
     output: { many: true, of: 'ContentChunk', columns: ['bookId', 'offset', 'bytes'] },
@@ -797,7 +899,7 @@ const TABLE = [
     summary: "Set a peer's grants, replacing the list it had.",
     input: [
       { name: 'device', type: 'string', required: true, nonEmpty: true, maxLength: MAX_RECORD_FIELD, doc: 'The peer id.', positional: 0 },
-      { name: 'grants', type: 'string[]', maxLength: MAX_WORD, maxItems: MAX_GRANTS, doc: 'The grants it should hold from now on.' },
+      { name: 'grants', type: 'string[]', required: true, maxLength: MAX_WORD, maxItems: MAX_GRANTS, doc: 'The grants it should hold from now on.' },
     ],
     output: { many: false, of: 'DeviceRow', columns: ['id', 'name', 'platform', 'role', 'grants'] },
   },
@@ -929,7 +1031,7 @@ function deepFreeze<T>(value: T): T {
 export const SERVICE_TABLE: readonly ServiceDescriptor[] = deepFreeze(TABLE)
 
 /** Names, in table order. */
-export const SERVICE_NAMES: readonly ServiceName[] = TABLE.map((one) => one.name)
+export const SERVICE_NAMES: readonly ServiceName[] = Object.freeze(TABLE.map((one) => one.name))
 
 const BY_NAME: ReadonlyMap<string, ServiceDescriptor> = new Map(SERVICE_TABLE.map((one) => [one.name, one]))
 

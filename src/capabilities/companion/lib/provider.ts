@@ -1,5 +1,5 @@
 import type { AnswerEnd, AskContext, CompanionProvider } from '../../../kernel'
-import type { Depth, InferencePort } from '../../inference'
+import { detailFor, errorKind, messageOf, type Depth, type InferencePort } from '../../inference'
 import {
   COMPANION_SYSTEM_PROMPT,
   buildAgentTurn,
@@ -77,7 +77,9 @@ export function parseRoute(route: string): ParsedRoute | null {
   const id = route.slice(at + 1)
   /* An empty identifier is not a route. `agent:` names no agent and
      `endpoint:` asks the daemon for a model called the empty string. */
-  if (id === '' || !ROUTE_KINDS.has(kind)) return null
+  /* Trimmed before the emptiness test: `local:   ` is no more a route than
+     `local:`, and it used to dispatch a model id of spaces. */
+  if (id.trim() === '' || !ROUTE_KINDS.has(kind)) return null
   return { kind: kind as RouteKindName, id }
 }
 
@@ -97,20 +99,17 @@ export interface CompanionProviderOptions {
    * the next question, not on the next restart.
    */
   readonly depth: () => Depth
+  /**
+   * Told when an answer fails, with the maintainer's half.
+   *
+   * WI-20.18. A failed answer left NOTHING anywhere: the reader saw "The
+   * companion could not answer" and the log saw nothing at all, because the
+   * plugin's `{ kind, message }` was thrown straight through to a thread that
+   * could neither translate it nor record it. This is the same hook
+   * `glossProvider` has, for the same reason.
+   */
+  readonly report?: ((event: string, fields: Record<string, unknown>) => void) | undefined
 }
-
-/**
- * The provider this capability binds.
- *
- * ⚠️ IT HAD A `lastPassages()` ACCESSOR AND NOTHING CALLED IT. Its contract
- * was "the most recent answer's table", which is provider-wide mutable state
- * shared by every concurrent ask — the exact shape of the defect that made two
- * overlapping questions resolve each other's citations, and the reason the
- * table each answer is numbered against is now held locally. Keeping a public
- * reader for the floating value would have invited the same bug back through
- * the front door, and no caller wanted it.
- */
-export type BoundCompanionProvider = CompanionProvider
 
 /** Whether a route id names an agent rather than the local runtime. */
 export function isAgentRoute(route: string): boolean {
@@ -132,18 +131,18 @@ export function isAgentRoute(route: string): boolean {
  * asserted: the getter that got this wrong was an inline closure nothing could
  * reach.
  */
-export function effectiveRoute(stored: string, fallback: string | null): RouteId | null {
-  /* PARSED, NOT MERELY NON-EMPTY. A stored value is whatever a previous build
-     — or a hand-edited settings file — left there, and a shape this does not
-     recognise must fall back rather than be dispatched on. */
+export function effectiveRoute(stored: string, probed: string | null): RouteId | null {
+  /* THE PROBE'S ANSWER, ONCE THERE IS ONE. `probed` is the routes model's
+     `inUse`, which already honours the stored choice when it is usable and
+     names the fallback when it is not — so preferring the raw stored value
+     over it re-selected exactly the route the probe had found unusable, and
+     the Settings row said one thing while the provider dispatched another.
+     Before the probe answers, the stored choice stands. PARSED, NOT MERELY
+     NON-EMPTY: a stored value is whatever a previous build — or a hand-edited
+     settings file — left there. */
+  if (probed !== null && parseRoute(probed) !== null) return probed as RouteId
   if (stored !== '' && parseRoute(stored) !== null) return stored as RouteId
-  return fallback !== null && parseRoute(fallback) !== null ? (fallback as RouteId) : null
-}
-
-/** The model id inside a `local:` route. */
-export function localModelOf(route: string): string | null {
-  const parsed = parseRoute(route)
-  return parsed?.kind === 'local' ? parsed.id : null
+  return null
 }
 
 /**
@@ -183,7 +182,50 @@ export function createCompanionProvider({
   port,
   route,
   depth,
-}: CompanionProviderOptions): BoundCompanionProvider {
+  report,
+}: CompanionProviderOptions): CompanionProvider {
+  /**
+   * What a failed answer raises — WI-20.18, and the mirror of `glossProvider`'s
+   * catch, branch for branch.
+   *
+   * ⚠️ **THE READER READS THIS, AND THEY USED TO READ NOTHING.** A rejection
+   * from the plugin is `{ kind, message }` — a plain object, not an `Error` —
+   * and `useCompanionThread` built its failure line with `error instanceof
+   * Error ? error.message : 'The companion could not answer'`, so a signed-out
+   * agent, a missing CLI and a stopped runtime all reached the reader as the
+   * one sentence that names nothing. `detailFor` has had the sentence for each
+   * `kind` since WI-15.4; the thread could not use it, because the thread is
+   * the kernel's and `detailFor` is `inference`'s. So the translation belongs
+   * HERE, on the far side of the port.
+   *
+   * Reported for EVERY failure, cancellation included, because a cancellation
+   * the reader did not ask for is one of the things worth seeing in a log —
+   * and with the maintainer's half only: the kind, the route and the crate's
+   * own sentence. Never the question, never a passage; those are the reader's
+   * and the book's, and a log line is not where either belongs.
+   */
+  const failure = (cause: unknown, chosen: string, signal: AbortSignal): unknown => {
+    const kind = errorKind(cause)
+    /* The reporter is a courtesy to the log; one that throws must not replace
+       the failure the reader is about to be shown. */
+    try {
+      report?.('companion.answer-failed', { kind, route: chosen, message: messageOf(cause) })
+    } catch (again) {
+      console.error('companion: the failure reporter itself threw', again)
+    }
+    /* THE READER'S OWN ABORT, and only when it really was one. `cancelled`
+       also arrives when the DAEMON cancels — it does so on stop — with a
+       signal nobody aborted, and passing that through would show the reader
+       nothing while the answer silently ends. */
+    if (kind === 'cancelled' && signal.aborted) return cause
+    if (kind !== null) return new Error(detailFor(cause), { cause })
+    /* NOT THE PLUGIN'S. A rejection with no `kind` is a Tauri or webview
+       failure — `Command agent_ask not found` is a bare string — and
+       `detailFor` would map it to its default, destroying the one sentence
+       that ends the search. Not translated, but made readable. */
+    if (cause instanceof Error) return cause
+    return new Error(String(cause), { cause })
+  }
 
   return {
     get name(): string {
@@ -234,14 +276,21 @@ export function createCompanionProvider({
          cancellation contract held for a local model and silently did not for
          a subscription route — the one where abandoning an answer actually
          costs the reader something. */
+      /* Parsed ONCE: the agent test and the model-id read each reparsed the
+         route, and validation sat apart from dispatch. */
+      const parsed = parseRoute(chosen)
       const deltas = streamed<string>((push) =>
-        isAgentRoute(chosen)
+        parsed?.kind === 'agent'
           ? port.agentAsk(chosen, buildAgentTurn(prompt), depth(), push, signal)
           : port.generate(requireModelId(chosen), COMPANION_SYSTEM_PROMPT, prompt, push, signal),
       )
-      for await (const text of deltas) {
-        answer += text
-        yield text
+      try {
+        for await (const text of deltas) {
+          answer += text
+          yield text
+        }
+      } catch (cause) {
+        throw failure(cause, chosen, signal)
       }
 
       /* THE MAP BACK, and the drop. An index the table does not contain is

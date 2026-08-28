@@ -21,7 +21,7 @@ const EMPTY: EndpointsSnapshot = { rows: [], loading: false, busy: false, failur
 const row = (over: Partial<EndpointsSnapshot['rows'][number]> & { id: string }) => ({
   label: over.id,
   value: 'api.example.com · key set',
-  hasKey: true,
+  keyState: 'set' as const,
   action: 'remove' as const,
   ...over,
 })
@@ -88,7 +88,7 @@ describe('the Cloud endpoints pane', () => {
 
   it('draws a row per endpoint, saying the host and whether a key is stored', () => {
     const world = fakeModel({
-      rows: [row({ id: 'a', label: 'My proxy' }), row({ id: 'b', value: 'other.example.com · no key', hasKey: false })],
+      rows: [row({ id: 'a', label: 'My proxy' }), row({ id: 'b', value: 'other.example.com · no key', keyState: 'missing' })],
     })
     render(<EndpointsPane model={world.model} />)
     expect(screen.getByText('My proxy')).toBeTruthy()

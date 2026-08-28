@@ -58,8 +58,23 @@ export const SHUTDOWN_DONE_EVENT = 'paper://shutdown-done'
  * journal dirty — the exact state this exists to prevent, during the window
  * most likely to be slow.
  */
-export async function armShutdown(deps: ShutdownDeps): Promise<void> {
-  const stop = await deps.listen(SHUTDOWN_EVENT, () => void runTeardown(deps))
+export async function armShutdown(deps: ShutdownDeps, teardown: () => Promise<void> = createTeardown(deps)): Promise<void> {
+  /* THE TEARDOWN'S REJECTION IS CAUGHT HERE, because the listener cannot await
+   * it. The default teardown settles its own failures, but the parameter is
+   * injectable and a custom one that rejects would otherwise leave the app
+   * with an unhandled rejection as its very last act — and no report at the
+   * one moment a report matters. */
+  const stop = await deps.listen(SHUTDOWN_EVENT, () => {
+    void teardown().catch((error: unknown) => {
+      try {
+        deps.diagnostics.warn('shutdown.teardown-failed', {
+          message: error instanceof Error ? error.message : String(error),
+        })
+      } catch {
+        /* The reporter of last resort must not be allowed to re-raise. */
+      }
+    })
+  })
   /* THE UNLISTEN IS KEPT AND TIED TO THE LIFETIME. Discarding it left a native
    * registration behind on every reload — StrictMode alone mounts twice in
    * development — so a quit reached several handlers, each aborting a lifetime
@@ -80,12 +95,33 @@ export async function armShutdown(deps: ShutdownDeps): Promise<void> {
  * Failing to arm means every quit leaves the journal dirty, so it is said out
  * loud.
  */
-export function armShutdownInBackground(deps: ShutdownDeps): void {
-  void armShutdown(deps).catch((error: unknown) => {
+export function armShutdownInBackground(deps: ShutdownDeps): () => Promise<void> {
+  const teardown = createTeardown(deps)
+  void armShutdown(deps, teardown).catch((error: unknown) => {
     deps.diagnostics.warn('shutdown.handshake-unavailable', {
       message: error instanceof Error ? error.message : String(error),
     })
   })
+  return teardown
+}
+
+/**
+ * ONE TEARDOWN, HOWEVER MANY ASK.
+ *
+ * Two things end the app: the shell's `paper://shutdown` (⌘Q, the menu, an
+ * AppleScript quit) and the window's own close button — which, on Windows and
+ * Linux, where the quit menu is macOS-only, is the only quit there is. The
+ * close used to run its own flush-and-drain and skip the two steps that close
+ * the journal, so its flag stayed up on every close. Both paths now run THIS,
+ * and a second caller — a quit arriving while the close is already tearing
+ * down — gets the same promise rather than a second abort racing the first.
+ */
+export function createTeardown(deps: ShutdownDeps): () => Promise<void> {
+  let running: Promise<void> | null = null
+  return () => {
+    running ??= runTeardown(deps)
+    return running
+  }
 }
 
 /**
@@ -109,30 +145,67 @@ export function armShutdownInBackground(deps: ShutdownDeps): void {
  * one, so the quit path silently skipped both halves of the UI's own flush.
  */
 async function runTeardown(deps: ShutdownDeps): Promise<void> {
+  /* EVERY STEP RUNS, whatever the one before it did.
+   *
+   * One shared `try` used to cover all four, so a `flush` that threw skipped
+   * `drain`, `abort` AND `quiesce`: the queue kept what it had been given, the
+   * journal stayed open, and the quit was released anyway — the app exited
+   * with the journal flag up because of a failure in the one step that has
+   * nothing to do with the journal. The steps are not a transaction; each is
+   * worth attempting on its own, and the ORDER note above is about sequence,
+   * not about atomicity.
+   *
+   * CAUGHT AND SAID, not left to escape — this runs as `void teardown()` from
+   * an event listener, so anything thrown here would be an unhandled rejection
+   * on the way out of the app, losing the only report that a shutdown did not
+   * finish at the one moment it matters. Found by testing the four failure
+   * paths, each of which raised one. */
+  const failures: string[] = []
+  const step = async (name: string, run: () => void | Promise<void>): Promise<void> => {
+    try {
+      await run()
+    } catch (error) {
+      failures.push(`${name}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
   try {
-    deps.flush()
-    await Promise.race([deps.drain(), wait(deps.graceMs)])
-    deps.abort()
-    await deps.quiesce()
-  } catch (error) {
-    /* CAUGHT AND SAID, not left to escape.
+    await step('flush', () => deps.flush())
+    /* A DRAIN THAT RAN OUT OF TIME IS AN OUTCOME, NOT A SILENCE.
      *
-     * This ran as `void runTeardown(…)` from an event listener, so a teardown
-     * that threw — a capability's dispose, a journal that would not close —
-     * produced an UNHANDLED REJECTION on the way out of the app. The `finally`
-     * below still released the quit, so nothing looked wrong; what was lost is
-     * the only report that a shutdown did not finish, at the one moment it
-     * matters, on the path where the reader's last edit lives.
-     *
-     * Found by testing the four failure paths, each of which raised one. */
-    deps.diagnostics.warn('shutdown.teardown-failed', {
-      message: error instanceof Error ? error.message : String(error),
+     * The bound stays — a wedged queue delays a quit and must not prevent one
+     * — but the race used to resolve identically whichever side won, so the
+     * one shutdown that CANNOT have written everything looked exactly like
+     * the one that did: `abort` closes the journal underneath a queue still
+     * running, and the shell is then told the app finished cleanly. Nothing
+     * anywhere recorded that it had not. The queue cannot be cancelled from
+     * here and the journal's flag cannot be held up per capability, so what
+     * this can do is SAY so, in the same line the other failed steps use. */
+    await step('drain', async () => {
+      const finished = await Promise.race([deps.drain().then(() => true), wait(deps.graceMs).then(() => false)])
+      if (!finished) {
+        failures.push(`drain: the write queue did not finish within ${deps.graceMs}ms — writes may have been lost`)
+      }
     })
+    await step('abort', () => deps.abort())
+    await step('quiesce', () => deps.quiesce())
+    if (failures.length > 0) {
+      deps.diagnostics.warn('shutdown.teardown-failed', { message: failures.join('; ') })
+    }
   } finally {
     /* ALWAYS ANSWERED. A teardown that threw must still release the quit —
      * otherwise a bug in one capability makes the app take the shell's whole
-     * grace period to close, every time, for everybody. */
-    await deps.emit(SHUTDOWN_DONE_EVENT).catch(() => {})
+     * grace period to close, every time, for everybody. The failed answer is
+     * still SAID: the shell discovers it through its timeout either way, but
+     * without the line there is no evidence afterwards of which side failed. */
+    await deps.emit(SHUTDOWN_DONE_EVENT).catch((error: unknown) => {
+      try {
+        deps.diagnostics.warn('shutdown.ack-failed', {
+          message: error instanceof Error ? error.message : String(error),
+        })
+      } catch {
+        /* The reporter of last resort must not be allowed to break the exit. */
+      }
+    })
   }
 }
 

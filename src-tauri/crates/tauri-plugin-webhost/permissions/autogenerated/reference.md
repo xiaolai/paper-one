@@ -2,8 +2,8 @@
 
 The commands a Paper webview needs from the webhost plugin: the server's
 status and bound port; showing and cancelling the six-digit code a human types
-into a browser; listing and revoking paired browsers; and the frame pipe
-(ready, send, recv) between a browser's socket and the service router.
+into a browser; listing and revoking paired browsers, one or all; and the frame
+pipe (ready, send, recv) between a browser's socket and the service router.
 
 The server binds loopback only and answers no service call itself — it carries
 frames to the webview, which holds the router.
@@ -17,6 +17,7 @@ frames to the webview, which holds the router.
 - `allow-webhost-sessions`
 - `allow-webhost-browsers`
 - `allow-webhost-revoke`
+- `allow-webhost-revoke-all`
 - `allow-webhost-ready`
 - `allow-webhost-send`
 - `allow-webhost-session-recv`
@@ -182,6 +183,32 @@ Enables the webhost_revoke command without any pre-configured scope.
 <td>
 
 Denies the webhost_revoke command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`webhost:allow-webhost-revoke-all`
+
+</td>
+<td>
+
+Enables the webhost_revoke_all command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`webhost:deny-webhost-revoke-all`
+
+</td>
+<td>
+
+Denies the webhost_revoke_all command without any pre-configured scope.
 
 </td>
 </tr>

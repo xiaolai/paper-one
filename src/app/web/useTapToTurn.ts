@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, type RefObject } from 'react'
-import { stagePoint, tapIntent } from './tapToTurn'
+import { stagePoint, TAP_SLOP, tapIntent } from './tapToTurn'
 
 /**
  * TURNING A PAGE BY TAPPING — the wiring, in one place.
@@ -35,13 +35,61 @@ import { stagePoint, tapIntent } from './tapToTurn'
  * form advanced the reader out of it.
  *
  * `closest` walks up, so a tap on a `<span>` inside a `<button>` is caught by
- * the button. `[role]` covers the widget roles as a class rather than by
- * enumeration; a role is only ever put on something meant to be interacted
- * with, and treating one as inert is the direction that turns pages by
- * accident.
+ * the button.
+ *
+ * ⚠️ **AND THEN THE LIST HELD A BARE `[role]`**, on the reasoning that a role
+ * is only ever put on something meant to be interacted with. It is not. EPUB 3
+ * puts one on every chapter — `<section role="doc-chapter">` is the structural
+ * semantics inflection the spec recommends, and every current authoring tool
+ * maps `epub:type="chapter"` to it — so `closest` walked up from any paragraph
+ * to the section that held it, found a role, and refused. A book that followed
+ * the spec could be opened and never advanced by tapping, and the gesture
+ * this whole module exists for was dead on exactly the well-formed books.
+ *
+ * So the roles are enumerated after all: the WAI-ARIA widget roles a press
+ * already belongs to. `menuitemcheckbox`, `menuitemradio`, `searchbox` and
+ * `spinbutton` are the subclasses of roles on that list and take a press the
+ * same way. A document role (`doc-*`), a landmark, a live region name what
+ * the text IS; a tap on the prose inside one is a tap on prose.
  */
-const INTERACTIVE =
-  'a[href], button, input, select, textarea, summary, label, [contenteditable]:not([contenteditable="false"]), audio[controls], video[controls], [role]'
+const WIDGET_ROLES = [
+  'button',
+  'link',
+  'menuitem',
+  'menuitemcheckbox',
+  'menuitemradio',
+  'tab',
+  'checkbox',
+  'radio',
+  'switch',
+  'textbox',
+  'searchbox',
+  'combobox',
+  'slider',
+  'spinbutton',
+  'option',
+  /* The remaining widget roles of ARIA 1.2 that take a press: a tree's items,
+   * and an interactive grid's cells and headers. The first cut stopped at the
+   * form-control shapes and left a tap on these turning the page. */
+  'treeitem',
+  'gridcell',
+  'rowheader',
+  'columnheader',
+]
+
+const INTERACTIVE = [
+  'a[href]',
+  'button',
+  'input',
+  'select',
+  'textarea',
+  'summary',
+  'label',
+  '[contenteditable]:not([contenteditable="false"])',
+  'audio[controls]',
+  'video[controls]',
+  ...WIDGET_ROLES.map((role) => `[role="${role}"]`),
+].join(', ')
 
 function onInteractive(target: EventTarget | null): boolean {
   return (target as Element | null)?.closest?.(INTERACTIVE) != null
@@ -105,7 +153,7 @@ const watchTaps = useCallback(
     target: Document | HTMLElement,
     /** Where the release landed and how wide the page is, both in the
      *  stage's coordinates — see `stagePoint` for why not the document's. */
-    placeOf: (clientX: number) => { x: number; width: number },
+    placeOf: (clientX: number) => TapPlace,
     selectionOf: () => string,
   ): (() => void) => {
     /**
@@ -129,42 +177,67 @@ const watchTaps = useCallback(
      * unmatched release is ignored rather than believed.
      */
     let downAt: { id: number; x: number; y: number } | null = null
+    /**
+     * EVERY POINTER CURRENTLY DOWN ON THIS TARGET.
+     *
+     * ⚠️ **A SECOND FINGER WAS MERELY IGNORED, AND IGNORING IS NOT
+     * REFUSING.** The first pointer went on being tracked, so a pinch whose
+     * first finger happened to land near an edge turned the page the moment
+     * that finger came up — no `pointercancel` is guaranteed, and one never
+     * arrives when the second finger is the one the browser hands back. The
+     * gesture is MULTI-POINTER from the instant the second press lands, and a
+     * multi-pointer gesture is not a tap however it ends.
+     *
+     * A press is tracked only when it is the ONLY pointer down, which is also
+     * what keeps a third finger from starting a fresh gesture while two are
+     * still on the glass. Every removal path the single origin had —
+     * `pointerup`, `pointercancel`, `pointerleave` — clears this too, so a
+     * pointer whose end is never reported leaks here exactly as far as it
+     * leaked there and no further.
+     */
+    const down = new Set<number>()
     const onDown = (event: Event) => {
       const pointer = event as PointerEvent
-      /* THE FIRST POINTER WINS, until it is released or cancelled. A second
-         finger is a gesture the browser or foliate owns — a pinch, a
-         two-finger scroll — and letting its press OVERWRITE the first is how
-         the release of the first came to be measured from the second's
-         origin, which reads as a tap wherever the fingers happened to be.
-         `isPrimary` would say the same thing, and is `false` on every
-         synthesized event, so this asks the question the tracking can
-         actually answer. */
-      if (downAt !== null) return
+      down.add(pointer.pointerId)
+      /* A SECOND PRESS POISONS THE GESTURE rather than being dropped on the
+         floor. Overwriting the origin was the first version of this bug — the
+         first finger's release measured from the second's position — and
+         keeping the first was the second: the pinch turned the page.
+         `isPrimary` would answer a similar question, and is `false` on every
+         synthesized event, so this asks the one the tracking can answer. */
+      if (down.size > 1) {
+        downAt = null
+        return
+      }
       downAt = { id: pointer.pointerId, x: pointer.clientX, y: pointer.clientY }
     }
     const onCancel = (event: Event) => {
       const pointer = event as PointerEvent
+      down.delete(pointer.pointerId)
       if (downAt?.id === pointer.pointerId) downAt = null
     }
     const onUp = (event: Event) => {
       const pointer = event as PointerEvent
-      const from = downAt
-      downAt = null
       /* NO MATCHING PRESS, NO TAP. See the note on `downAt`: this used to
-         fall through with `moved = 0`, which is a page turn. */
+         fall through with `moved = 0`, which is a page turn. And ONLY the
+         matching pointer's release ends the tracking — an unrelated
+         pointer's `pointerup` used to clear it first, discarding the first
+         pointer the note above says wins. */
+      const from = downAt
+      down.delete(pointer.pointerId)
       if (from === null || from.id !== pointer.pointerId) return
+      downAt = null
       const place = placeOf(pointer.clientX)
-      const intent = tapIntent({
-        x: place.x,
-        /* HOW FAR IT TRAVELLED, not where it ended. A drag that begins in the
-         * middle and ends at the edge is a selection, not a page turn. */
-        moved: Math.hypot(pointer.clientX - from.x, pointer.clientY - from.y),
-        width: place.width,
-        selected: selectionOf() !== '',
-        /* A LINK WINS. foliate is already handling it, and turning the page
-         * as well would leave the reader somewhere they did not choose. */
-        onControl: onInteractive(pointer.target),
-      })
+      /* MEASURED ONCE, so the turn and the centre-toggle below judge the
+       * same release by the same facts. */
+      /* HOW FAR IT TRAVELLED, not where it ended. A drag that begins in the
+       * middle and ends at the edge is a selection, not a page turn. */
+      const moved = Math.hypot(pointer.clientX - from.x, pointer.clientY - from.y)
+      /* A LINK WINS. foliate is already handling it, and turning the page
+       * as well would leave the reader somewhere they did not choose. */
+      const onControl = onInteractive(pointer.target)
+      const selected = selectionOf() !== ''
+      const intent = tapIntent({ x: place.x, moved, width: place.width, selected, onControl })
       if (intent !== null) {
         /* A TURN HIDES THE CHROME — "hides on scroll", and a tap-turn is
          * this client's scroll. The bar and footer come back on the next
@@ -175,28 +248,40 @@ const watchTaps = useCallback(
       }
       /* THE MIDDLE THIRD, which `tapIntent` refuses on purpose, is where the
        * chrome is summoned — §06: "tap centre to show". Only a clean tap:
-       * a drag, a selection or a tap on a link all still do nothing here. */
-      if (
-        place.width > 0 &&
-        !onInteractive(pointer.target) &&
-        selectionOf() === '' &&
-        Math.hypot(pointer.clientX - from.x, pointer.clientY - from.y) <= 10
-      ) {
+       * a drag, a selection or a tap on a link all still do nothing here.
+       * `TAP_SLOP` is the one definition of "clean" — a second literal here
+       * let the turn and the toggle disagree about what a tap was. */
+      if (place.width > 0 && !onControl && !selected && moved <= TAP_SLOP) {
         toggleChrome()
       }
+    }
+    /* A POINTER THAT LEAVES IS DONE. A press that is dragged out of the
+       target and released elsewhere sends this target no `pointerup`, so the
+       tracked origin outlived the gesture — and `onDown` refuses a new press
+       while one is tracked, which left tap-to-turn DEAD until something sent
+       a `pointercancel`. A release outside cannot be a tap here anyway. */
+    const onLeave = (event: Event) => {
+      const pointer = event as PointerEvent
+      down.delete(pointer.pointerId)
+      if (downAt?.id === pointer.pointerId) downAt = null
     }
     target.addEventListener('pointerdown', onDown, { passive: true })
     target.addEventListener('pointerup', onUp, { passive: true })
     /* THE BROWSER TAKING THE GESTURE OVER. Without this the origin outlives
        the gesture and waits to be paired with an unrelated release. */
     target.addEventListener('pointercancel', onCancel, { passive: true })
+    target.addEventListener('pointerleave', onLeave, { passive: true })
     return () => {
       target.removeEventListener('pointerdown', onDown)
       target.removeEventListener('pointerup', onUp)
       target.removeEventListener('pointercancel', onCancel)
+      target.removeEventListener('pointerleave', onLeave)
     }
   },
-  [turn],
+  /* EVERYTHING THE CLOSURE CALLS. `[turn]` alone let a re-supplied
+     `hideChrome` or `toggleChrome` go on being the OLD one for as long as
+     `turn` stayed stable. */
+  [turn, hideChrome, toggleChrome],
 )
 
 /* THE MARGINS. A tap that misses the book still asked to turn a page. */
@@ -231,10 +316,13 @@ const watchDocument = useCallback(
         const stage = stageEl.current
         const frame = doc.defaultView?.frameElement
         if (stage === null || frame == null) {
-          /* No stage or a document that is not framed: fall back to the
-           * document's own box. Wrong for a multi-column section, but this
-           * is the case that should not arise, and a tap that does nothing
-           * is better than one that goes the wrong way. */
+          /* No stage, or a document that is NOT framed. An unframed document
+           * has no paginator and therefore no side-by-side columns: its own
+           * box IS the page in front of the reader, so measuring against it is
+           * right, not a fallback that "does nothing" — the earlier wording
+           * here said the latter and described a tap this branch never
+           * produced. The multi-column trap `stagePoint` exists for belongs
+           * to a FRAMED document only. */
           return { x: clientX, width: doc.documentElement.clientWidth }
         }
         const stageBox = stage.getBoundingClientRect()

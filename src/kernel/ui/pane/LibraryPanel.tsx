@@ -126,7 +126,7 @@ export interface LibraryPanelProps {
   readonly onTagBooks: (bookIds: readonly string[], tags: readonly string[]) => void
 }
 
-/** What the last collection-wide remove took off, so it can be put back. */
+/** The Library panel: the shelf's tags, subjects and saved views, as filters. */
 export function LibraryPanel({
   books,
   query,
@@ -155,12 +155,20 @@ export function LibraryPanel({
   /** Naming a view, in place — the same shape the tag rename uses. */
   const [naming, setNaming] = useState(false)
   const [viewName, setViewName] = useState('')
+  /* One exit from naming a view, for submit, blur and Escape alike — three
+     copies of the same two lines is how one of them gains a third. */
+  const stopNaming = () => {
+    setNaming(false)
+    setViewName('')
+  }
 
   /* PARSED ONCE. This ran twice — once bare for the scope sets, once inside
    * the shelf memo — two derivations of one string, diverging the day one
    * gains an argument the other lacks. */
   const parsed = useMemo(() => parseQuery(query, tagKey), [query])
-  const counts = statusCounts(books)
+  /* Memoised on the list, not recounted per keystroke in the name filter —
+     both scans are over the whole shelf, and every local render ran them. */
+  const counts = useMemo(() => statusCounts(books), [books])
   /* The shelf as the reader sees it — see the header. */
   const shown = useMemo(
     () =>
@@ -196,7 +204,7 @@ export function LibraryPanel({
     return map
   }, [books])
   const counted = useMemo(() => tagCounts(shown), [shown])
-  const untagged = untaggedCount(shown)
+  const untagged = useMemo(() => untaggedCount(shown), [shown])
 
   const activeTags = new Set(parsed.tags.map(tagKey))
   const excludedTags = new Set(parsed.excluded.map(tagKey))
@@ -236,13 +244,21 @@ export function LibraryPanel({
   )
   /* A hidden subject is gone from here and nowhere else: it stays on the book,
      it still scopes if typed, and the editor still offers to adopt it. What the
-     reader asked for is not to be shown BISAC codes in this list. */
-  const subjects = shownSubjects(
-    inTagOrder(
-      narrowed.filter((row) => !row.mine),
-      order,
-    ),
-    tagPrefs.prefs,
+     reader asked for is not to be shown BISAC codes in this list.
+     AN ACTIVE ONE STAYS, hidden or not — the same rule that pins active rows
+     into `rows` and keeps them through the name filter above: what is
+     narrowing the shelf must stay clearable where the narrowing is done. A
+     hidden subject the reader had typed into the query scoped the shelf with
+     no chip to clear it from. */
+  const ordered = inTagOrder(
+    narrowed.filter((row) => !row.mine),
+    order,
+  )
+  const subjects = ordered.filter(
+    (row) =>
+      activeTags.has(tagKey(row.tag)) ||
+      excludedTags.has(tagKey(row.tag)) ||
+      shownSubjects([row], tagPrefs.prefs).length > 0,
   )
   const hiddenCount = tagPrefs.prefs.hiddenSubjects.length
   const views = tagPrefs.prefs.views
@@ -351,6 +367,18 @@ export function LibraryPanel({
 
   return (
     <div className={styles.libraryPanel}>
+      {/* §11: say what happened. A pin, a colour, a hidden subject or a saved
+          view the storage refused stayed on screen as though kept and was gone
+          at the next launch, with nothing having said so (WI-20.36). Said
+          here, where the decisions are made. */}
+      {!tagPrefs.persistent && (
+        <div className={styles.panelMeta}>
+          <span>
+            Your tag pins, colours, hidden subjects and saved views are not being saved — this
+            device's storage is unavailable.
+          </span>
+        </div>
+      )}
       <button
         type="button"
         className={styles.scopeRow}
@@ -438,8 +466,7 @@ export function LibraryPanel({
                   event.preventDefault()
                   const name = viewName.trim()
                   if (name) tagPrefs.saveView(name, query)
-                  setNaming(false)
-                  setViewName('')
+                  stopNaming()
                 }}
               >
                 <Bookmark size={ICON.control} strokeWidth={ICON.stroke} />
@@ -451,15 +478,11 @@ export function LibraryPanel({
                   placeholder="Name this view"
                   aria-label="Name for this view"
                   onChange={(event) => setViewName(event.target.value)}
-                  onBlur={() => {
-                    setNaming(false)
-                    setViewName('')
-                  }}
+                  onBlur={stopNaming}
                   onKeyDown={(event) => {
                     if (event.key === 'Escape') {
                       event.stopPropagation()
-                      setNaming(false)
-                      setViewName('')
+                      stopNaming()
                     }
                   }}
                 />

@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { STEPS, parseArgs, runSteps, spawnStep } from './verify.mjs'
+import { STEPS, needsShell, parseArgs, plainToken, runSteps, spawnStep } from './verify.mjs'
 
 /**
  * `pnpm verify` — the runner, not the gates it runs (each has its own
@@ -14,7 +14,7 @@ import { STEPS, parseArgs, runSteps, spawnStep } from './verify.mjs'
 const SCRIPT = fileURLToPath(new URL('./verify.mjs', import.meta.url))
 
 describe('the steps', () => {
-  it('are the plan\'s, in order: manifest, compositions, dead CSS, undefined CSS tokens, browser safety, inert directives, boundaries (and the test-project check and the test ledger), types, coverage, the desktop build, the browser build, the CLI bundle, then Cargo', () => {
+  it('are the plan\'s, in order: manifest, compositions, dead CSS, undefined CSS tokens, browser safety, inert directives, boundaries (and the test-project check and the test ledger), types, coverage, the desktop build, the browser build, the CLI bundle, Cargo, then the notice\'s Rust half', () => {
     /* THE CHEAP STATIC CHECKS COME FIRST, before the ones that spend a minute
        compiling — `css:check`, `css:tokens` and `directives:check` are a walk of
        `src` and answer in milliseconds, so failing there costs the reader
@@ -54,6 +54,7 @@ describe('the steps', () => {
       'cargo fmt --check',
       'cargo clippy -D warnings',
       'cargo test --workspace',
+      'docs:rust-notices --check',
     ])
     /* THE SELFTEST STEP IS GONE ON PURPOSE, and this pins it so putting it
        back is a deliberate act rather than a reflex. Its cases run under
@@ -80,6 +81,20 @@ describe('the steps', () => {
     /* The CLI's bundle is gitignored, so no other step here would notice it
      * stop compiling — and `bin/paper.mjs` is what `sync-scenario.sh` runs. */
     expect(STEPS.find((s) => s.name === 'build:cli').args).toEqual(['build:cli'])
+    /* THE NOTICE'S RUST HALF IS LAST, AFTER CARGO, and that position is the
+     * fix rather than an accident of ordering. Enumerating the crates the
+     * binary links needs `cargo metadata` over four targets and a populated
+     * registry; the notices test used to ask for it itself, with `--offline`,
+     * from inside `test:coverage` — eight steps before cargo runs at all.
+     * `--offline` exits 101 on a fresh clone and on a CI runner with a
+     * rust-cache keyed on an older lockfile, so a pull request touching
+     * `Cargo.lock` could redden the gate for a reason unrelated to it.
+     * Anything moving this step above `cargo test --workspace` reintroduces
+     * exactly that. */
+    expect(STEPS.map((s) => s.name).indexOf('docs:rust-notices --check')).toBeGreaterThan(
+      STEPS.map((s) => s.name).indexOf('cargo test --workspace'),
+    )
+    expect(STEPS.find((s) => s.name === 'docs:rust-notices --check').args).toEqual(['docs:rust-notices', '--check'])
   })
 })
 
@@ -117,20 +132,88 @@ describe('spawnStep', () => {
     expect(spawnStep({ name: 'seven', cmd: process.execPath, args: ['-e', 'process.exit(7)'] })).toBe(7)
     expect(spawnStep({ name: 'quiet', cmd: process.execPath, args: ['-e', 'console.log("hidden"); process.exit(0)'], quiet: true })).toBe(0)
     expect(spawnStep({ name: 'missing', cmd: '/nonexistent/binary-for-verify-test', args: [] })).toBe(127)
-    expect(spawnStep({ name: 'killed', cmd: process.execPath, args: ['-e', 'process.kill(process.pid, "SIGKILL")'] })).toBe(128)
+    /* WINDOWS HAS NO SIGNALS. `process.kill(pid, 'SIGKILL')` there is
+       `TerminateProcess`, which sets an exit CODE — `status` is never null, so
+       the 128 arm cannot be reached and asserting it would redden the Windows
+       leg for a reason that has nothing to do with this runner. */
+    if (process.platform !== 'win32') {
+      expect(spawnStep({ name: 'killed', cmd: process.execPath, args: ['-e', 'process.kill(process.pid, "SIGKILL")'] })).toBe(128)
+    }
+  })
+
+  /**
+   * THE WINDOWS-ONLY HALF, ASSERTED FROM ANYWHERE.
+   *
+   * `needsShell` decides both the shell and the plain-token refusal, and the
+   * refusal keyed on the platform alone made the whole block above return 126
+   * on the Windows leg — which runs `test:coverage` through
+   * `pnpm verify --until build:cli`. Nothing on a Mac could see that, so the
+   * predicate takes the platform as an argument and both answers are checked
+   * here rather than discovered by CI.
+   */
+  it('takes cmd.exe only for the shims that cannot start without it', () => {
+    /* The `.cmd` shims — this is why a shell is used at all. */
+    expect(needsShell('pnpm', 'win32')).toBe(true)
+    expect(needsShell('cargo', 'win32')).toBe(true)
+    /* A full path is an executable Node starts itself; the tests spawn one. */
+    expect(needsShell('C:\\Program Files\\nodejs\\node.exe', 'win32')).toBe(false)
+    expect(needsShell('/nonexistent/binary-for-verify-test', 'win32')).toBe(false)
+    /* Nowhere else, whatever the command. */
+    expect(needsShell('pnpm', 'darwin')).toBe(false)
+    expect(needsShell('pnpm', 'linux')).toBe(false)
+    /* And the refusal follows it: the arguments the suite above spawns are
+       legitimate precisely because no shell reads them. */
+    for (const step of STEPS) expect(needsShell(step.cmd, 'win32'), step.name).toBe(true)
+    expect(needsShell(process.execPath, process.platform)).toBe(false)
   })
 })
 
 describe('parseArgs', () => {
   it('selects steps with --from and --only, lists with --list, refuses the rest', () => {
     expect(parseArgs([]).steps.map((s) => s.name)).toEqual(STEPS.map((s) => s.name))
-    expect(parseArgs(['--from', 'build']).steps.map((s) => s.name)).toEqual(['build', 'build:web', 'build:cli', 'cargo metadata --locked', 'cargo fmt --check', 'cargo clippy -D warnings', 'cargo test --workspace'])
+    expect(parseArgs(['--from', 'build']).steps.map((s) => s.name)).toEqual(['build', 'build:web', 'build:cli', 'cargo metadata --locked', 'cargo fmt --check', 'cargo clippy -D warnings', 'cargo test --workspace', 'docs:rust-notices --check'])
     expect(parseArgs(['--only', 'boundaries']).steps.map((s) => s.name)).toEqual(['boundaries'])
     expect(parseArgs(['--from', 'build', '--only', 'cargo fmt --check']).steps.map((s) => s.name)).toEqual(['cargo fmt --check'])
     expect(parseArgs(['--list'])).toEqual({ list: true })
     expect(parseArgs(['--from'])).toEqual({ error: '--from needs a step name' })
     expect(parseArgs(['--only', 'nope'])).toEqual({ error: 'no step named "nope"; see --list' })
     expect(parseArgs(['--wat'])).toEqual({ error: 'unknown argument "--wat"' })
+    /* A repeated selector used to win silently — the second `--only` replaced
+       the first with no word about it. */
+    expect(parseArgs(['--only', 'build', '--only', 'typecheck'])).toEqual({ error: '--only was given twice' })
+    expect(parseArgs(['--from', 'build', '--from', 'typecheck'])).toEqual({ error: '--from was given twice' })
+  })
+
+  it('holds the step table frozen all the way down, and its arguments plain tokens', () => {
+    for (const step of STEPS) {
+      expect(Object.isFrozen(step), `${step.name} is frozen`).toBe(true)
+      expect(Object.isFrozen(step.args), `${step.name}'s args are frozen`).toBe(true)
+      /* Every real argument must be what the Windows shell cannot misread —
+         the refusal in `spawnStep` only fires there, so this is the half a
+         macOS run can hold. */
+      for (const arg of step.args) expect(plainToken(arg), `${step.name}: ${arg}`).toBe(true)
+    }
+    expect(plainToken('capability-id')).toBe(true)
+    expect(plainToken('a;rm -rf /')).toBe(false)
+    expect(plainToken('x&y')).toBe(false)
+    expect(plainToken('$(boom)')).toBe(false)
+  })
+
+  /* `--until` IS THE JS HALF OF THE GATE ON A PLATFORM WHOSE CARGO HALF IS A
+     SEPARATE JOB — the Windows leg runs `pnpm verify --until build:cli` and
+     then `cargo check` (WI-20.38, D10). Inclusive, and narrowed after
+     `--from`, so a window that names two real steps in the wrong order is the
+     same refused-empty selection the other two flags already give. */
+  it('stops after a step with --until, inclusive, and refuses an empty window', () => {
+    expect(parseArgs(['--until', 'compositions:check']).steps.map((s) => s.name)).toEqual(['architecture:check', 'compositions:check'])
+    expect(parseArgs(['--until', 'build:cli']).steps.map((s) => s.name).at(-1)).toBe('build:cli')
+    expect(parseArgs(['--until', 'build:cli']).steps.map((s) => s.name)).not.toContain('cargo metadata --locked')
+    expect(parseArgs(['--from', 'build', '--until', 'build:web']).steps.map((s) => s.name)).toEqual(['build', 'build:web'])
+    expect(parseArgs(['--from', 'build:web', '--until', 'build'])).toEqual({
+      error: '--from "build:web" and --until "build" select no steps; --until and --only must name a step at or after --from',
+    })
+    expect(parseArgs(['--until'])).toEqual({ error: '--until needs a step name' })
+    expect(parseArgs(['--list', '--until', 'build'])).toEqual({ error: '--list cannot be combined with --from, --until or --only' })
   })
 
   /* A GATE THAT VERIFIES NOTHING MUST NOT EXIT 0. Both selectors name real
@@ -146,8 +229,8 @@ describe('parseArgs', () => {
   /* `--list` used to win silently, so `--list --only build` printed the whole
      list and ran nothing while looking like a plan for the one step asked for. */
   it('refuses --list combined with a selector rather than ignoring it', () => {
-    expect(parseArgs(['--list', '--only', 'build'])).toEqual({ error: '--list cannot be combined with --from or --only' })
-    expect(parseArgs(['--from', 'build', '--list'])).toEqual({ error: '--list cannot be combined with --from or --only' })
+    expect(parseArgs(['--list', '--only', 'build'])).toEqual({ error: '--list cannot be combined with --from, --until or --only' })
+    expect(parseArgs(['--from', 'build', '--list'])).toEqual({ error: '--list cannot be combined with --from, --until or --only' })
   })
 })
 

@@ -60,8 +60,6 @@ export interface PeerPort {
    */
   setLocalRole(role: PeerRole): Promise<void>
   dataRoot(): Promise<string>
-  /** The plugin's durability primitive — the sync journal's fsync hook. */
-  fsync(path: string): Promise<void>
 
   listPeers(): Promise<readonly WirePeer[]>
   forgetPeer(id: string): Promise<void>
@@ -159,7 +157,6 @@ export function createPeerPort(wire: PeerWire): PeerPort {
     localRole: () => wire.localRole(),
     setLocalRole: (role) => wire.setLocalRole(role),
     dataRoot: () => wire.dataRoot(),
-    fsync: (path) => wire.fsync(path),
 
     listPeers: () => wire.listPeers(),
     forgetPeer: (id) => wire.forgetPeer(id),
@@ -243,47 +240,88 @@ export function createPeerPort(wire: PeerWire): PeerPort {
       }
       grantWatchers.add(onGrantsChanged)
 
-      const offs: Unsubscribe[] = [
-        wire.onSessionOpen((event) => {
-          if (event.initiator) return
-          void (async () => {
-            try {
-              await refresh()
-              /* Torn down while the refresh was in flight: registering now
-               * would hand a connection to a server that no longer exists,
-               * and it would serve forever. */
-              if (!serving) return
-              const conn = router.connect(event.peerId, (bytes) =>
-                /* Return the send promise so the envelope serialises and awaits
-                 * it; a failure tears the connection AND the session down
-                 * rather than being swallowed, then re-throws so the envelope's
-                 * own chain also disconnects. */
-                wire.send(event.sessionId, bytes).catch((thrown) => {
-                  dropConnection(event.sessionId, true)
-                  throw thrown
-                }),
-              )
-              connections.set(event.sessionId, conn)
-              /* Frames that landed before the connection existed are in the
-               * inbox and raised their one edge event already — drain now. */
-              await drainInto(
-                event.sessionId,
-                (bytes) => conn.receive(bytes),
-                () => dropConnection(event.sessionId, false),
-              )
-            } catch {
-              dropConnection(event.sessionId, true)
-            }
-          })()
-        }),
-        wire.onSessionFrames((event) => {
-          const conn = connections.get(event.sessionId)
-          if (conn) void drainInto(event.sessionId, (bytes) => conn.receive(bytes), () => dropConnection(event.sessionId, false))
-        }),
-        wire.onSessionClosed((event) => {
-          dropConnection(event.sessionId, false)
-        }),
-      ]
+      /* FROM HERE, EVERYTHING ROLLS BACK. The watcher above and every
+         subscription below are registered before the `try` that used to
+         start at `refresh()` — so a subscription that threw synchronously
+         left the earlier ones and the watcher installed, with `servingActive`
+         stuck true and nothing serving. The registrations are now inside the
+         same rollback the refresh and readiness have.
+
+         ONE PUSH PER SUBSCRIPTION, and that is the load-bearing part: the
+         three used to be ARGUMENTS to a single `offs.push(...)`, and
+         arguments evaluate before the call. A throw from the second left the
+         first's unsubscribe in an argument list that was never delivered, so
+         the catch below rolled back an EMPTY array — the leak survived
+         inside its own fix. Each handle is registered for rollback the
+         moment it exists. */
+      const offs: Unsubscribe[] = []
+      try {
+        offs.push(
+          wire.onSessionOpen((event) => {
+            if (event.initiator) return
+            void (async () => {
+              try {
+                await refresh()
+                /* Torn down while the refresh was in flight: registering now
+                 * would hand a connection to a server that no longer exists,
+                 * and it would serve forever. */
+                if (!serving) return
+                const conn = router.connect(event.peerId, (bytes) =>
+                  /* Return the send promise so the envelope serialises and
+                   * awaits it; a failure tears the connection AND the session
+                   * down rather than being swallowed, then re-throws so the
+                   * envelope's own chain also disconnects. */
+                  wire.send(event.sessionId, bytes).catch((thrown) => {
+                    dropConnection(event.sessionId, true)
+                    throw thrown
+                  }),
+                )
+                connections.set(event.sessionId, conn)
+                /* THE ROUTER HANGS UP ON ITS OWN, and nothing here could see
+                 * it. A rejected write is handled above; the OUTBOUND BUDGET
+                 * overflowing is not — a peer that stopped reading fills it,
+                 * the router disconnects, and the native session stayed open
+                 * with every later frame drained into a connection answered
+                 * by nobody, so the peer's requests hung for ever and its
+                 * inbox went on being served. The webhost pump was caught by
+                 * the same defect in the 2026-08-28 audit (#61) and this is
+                 * the same remedy: the session goes the way the drain path
+                 * takes it. Identity-checked, so a session id the plugin has
+                 * since reused is left alone; `dropConnection` deletes before
+                 * it disconnects, so the teardown road does not re-enter. */
+                conn.onDisconnect(() => {
+                  if (connections.get(event.sessionId) === conn) dropConnection(event.sessionId, true)
+                })
+                /* Frames that landed before the connection existed are in the
+                 * inbox and raised their one edge event already — drain now. */
+                await drainInto(
+                  event.sessionId,
+                  (bytes) => conn.receive(bytes),
+                  () => dropConnection(event.sessionId, false),
+                )
+              } catch {
+                dropConnection(event.sessionId, true)
+              }
+            })()
+          }),
+        )
+        offs.push(
+          wire.onSessionFrames((event) => {
+            const conn = connections.get(event.sessionId)
+            if (conn) void drainInto(event.sessionId, (bytes) => conn.receive(bytes), () => dropConnection(event.sessionId, false))
+          }),
+        )
+        offs.push(
+          wire.onSessionClosed((event) => {
+            dropConnection(event.sessionId, false)
+          }),
+        )
+      } catch (thrown) {
+        grantWatchers.delete(onGrantsChanged)
+        for (const off of offs) off()
+        servingActive = false
+        throw thrown
+      }
       const teardown = () => {
         /* Idempotent AND ownership-scoped: a stale second call must not
          * release the port-wide flag a NEWER server now holds. */
@@ -296,6 +334,10 @@ export function createPeerPort(wire: PeerWire): PeerPort {
       }
       try {
         await refresh()
+        /* Every listener above must be ATTACHED before the plugin starts
+           emitting — `listen` registers asynchronously, and a session that
+           opened into an unattached listener was a peer that looked silent. */
+        await wire.whenListening?.()
         await wire.ready()
       } catch (thrown) {
         /* A serve that fails must not leave its listeners and grant watcher
@@ -308,6 +350,8 @@ export function createPeerPort(wire: PeerWire): PeerPort {
 
     async connect(peerId) {
       const closedFns = new Set<(reason: string) => void>()
+      /** Why this channel closed, once it has — replayed to a late `onClosed`. */
+      let closedReason: string | null = null
       let sessionId: number | null = null
       let client: Client | null = null
       let torn = false
@@ -318,6 +362,7 @@ export function createPeerPort(wire: PeerWire): PeerPort {
       const tearDown = (reason: string): void => {
         if (torn) return
         torn = true
+        closedReason = reason
         if (sessionId !== null) abortDrain(sessionId)
         offFrames()
         offClosed()
@@ -351,23 +396,35 @@ export function createPeerPort(wire: PeerWire): PeerPort {
        * exists (which would leave later sends failing silently and callers
        * waiting out their 30 s timeout). Until the id is known, a close is
        * buffered; matched or discarded once it is. */
-      const offClosed = wire.onSessionClosed((event) => {
-        if (sessionId === null) {
-          buffered.push(event)
-          return
-        }
-        if (event.sessionId !== sessionId) return
-        tearDown(event.reason)
-      })
-      const offFrames = wire.onSessionFrames((event) => {
-        if (sessionId !== null && event.sessionId === sessionId) {
-          void drainInto(sessionId, deliver, () => tearDown('lost'))
-        }
-      })
-
+      /* ONE ROAD OUT, for the transport breaking under us: close the native
+         session (best-effort) and tear the channel down as `lost`. Three
+         sites spelled this pair out and could drift apart. */
+      const lose = (): void => {
+        if (sessionId !== null) void wire.close(sessionId).catch(() => {})
+        tearDown('lost')
+      }
+      let offClosed: Unsubscribe = () => {}
+      let offFrames: Unsubscribe = () => {}
       try {
+        offClosed = wire.onSessionClosed((event) => {
+          if (sessionId === null) {
+            buffered.push(event)
+            return
+          }
+          if (event.sessionId !== sessionId) return
+          tearDown(event.reason)
+        })
+        offFrames = wire.onSessionFrames((event) => {
+          if (sessionId !== null && event.sessionId === sessionId) {
+            void drainInto(sessionId, deliver, lose)
+          }
+        })
+        /* Attached before the dial — see `serve`; the buffer above covers the
+           id-unknown window, this covers the not-yet-attached one. */
+        await wire.whenListening?.()
         sessionId = await wire.connect(peerId, null)
       } catch (thrown) {
+        /* A registration or the dial threw: nothing registered survives. */
         offFrames()
         offClosed()
         throw thrown
@@ -375,8 +432,7 @@ export function createPeerPort(wire: PeerWire): PeerPort {
       client = createClient({
         send: (bytes) =>
           wire.send(sessionId as number, bytes).catch((thrown) => {
-            if (sessionId !== null) void wire.close(sessionId).catch(() => {})
-            tearDown('lost')
+            lose()
             throw thrown
           }),
       })
@@ -385,7 +441,7 @@ export function createPeerPort(wire: PeerWire): PeerPort {
       // subscription.
       for (const event of buffered) if (event.sessionId === sessionId) tearDown(event.reason)
       const id = sessionId
-      void drainInto(id, deliver, () => tearDown('lost'))
+      void drainInto(id, deliver, lose)
       return {
         sessionId: id,
         peerId,
@@ -393,6 +449,14 @@ export function createPeerPort(wire: PeerWire): PeerPort {
         stream: (service, body, options) => (client as Client).stream(service, body, options),
         close: () => wire.close(id),
         onClosed: (fn) => {
+          /* A CLOSE THAT ALREADY HAPPENED IS REPLAYED. The peer can close
+             during the dial — the buffer above tears this channel down before
+             the caller has it — and a listener registered afterwards used to
+             wait for a notification that had already gone by. */
+          if (closedReason !== null) {
+            fn(closedReason)
+            return () => {}
+          }
           closedFns.add(fn)
           return () => void closedFns.delete(fn)
         },

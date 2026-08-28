@@ -38,7 +38,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::agent::{self, Agent, AgentProbe, AuthState};
-use crate::endpoints::Endpoint;
+use crate::endpoints::{Endpoint, KeyState};
 use crate::manifest::{Manifest, ModelEntry};
 
 /// What kind of thing answers.
@@ -85,6 +85,13 @@ pub enum UnusableReason {
     VersionUnsupported { needs: Option<String> },
     /// A registered endpoint with no API key. The fix is to add one.
     NoKey,
+    /// An endpoint whose key the keychain would not read (WI-20.20).
+    ///
+    /// Distinct from `NoKey` because the advice is different: the key is
+    /// probably there, and the fix is with the keychain — a denied prompt, a
+    /// rebuilt binary the entry's ACL no longer trusts — not with re-entering
+    /// a credential that would be refused again on the next read.
+    KeyUnreadable,
     /// An endpoint the daemon refused to register.
     ///
     /// ⚠️ A row's usability was decided ENTIRELY from what Paper had persisted
@@ -117,6 +124,7 @@ impl UnusableReason {
                 agent::VERSION_NOT_SUPPORTED.to_owned()
             }
             UnusableReason::NoKey => "No key".to_owned(),
+            UnusableReason::KeyUnreadable => "The keychain would not read its key".to_owned(),
             UnusableReason::NotRegistered => "The runtime would not accept it".to_owned(),
         }
     }
@@ -405,20 +413,20 @@ pub fn agent_route(probe: &AgentProbe) -> Route {
 /// `registered` is whether the DAEMON accepted it, which is a separate fact
 /// from whether Paper has it stored — see [`UnusableReason::NotRegistered`].
 pub fn endpoint_route(endpoint: &Endpoint, registered: bool) -> Route {
-    // No key first: it is the one the reader can act on, and an endpoint with
-    // no key was never offered to the daemon to be refused.
-    let reason = if !endpoint.has_key {
-        Some(UnusableReason::NoKey)
-    } else if !registered {
-        Some(UnusableReason::NotRegistered)
-    } else {
-        None
+    // The key first: it is the one the reader can act on, and an endpoint
+    // whose key is missing or could not be read was never offered to the
+    // daemon to be refused.
+    let reason = match endpoint.key_state {
+        KeyState::Missing => Some(UnusableReason::NoKey),
+        KeyState::Unreadable => Some(UnusableReason::KeyUnreadable),
+        KeyState::Set if !registered => Some(UnusableReason::NotRegistered),
+        KeyState::Set => None,
     };
     Route {
         id: endpoint_route_id(&endpoint.id),
         kind: RouteKind::Endpoint,
         label: endpoint.label.clone(),
-        detail: endpoint.has_key.then(|| "endpoint".to_owned()),
+        detail: (endpoint.key_state == KeyState::Set).then(|| "endpoint".to_owned()),
         // An endpoint that cannot answer says why, with the action that fixes
         // it where there is one, rather than failing when pressed.
         unusable: reason.as_ref().map(UnusableReason::text),
@@ -507,14 +515,14 @@ mod tests {
                 unusable: Some(agent::VERSION_NOT_SUPPORTED),
             }));
         }
-        for has_key in [false, true] {
+        for key_state in [KeyState::Missing, KeyState::Set, KeyState::Unreadable] {
             for registered in [false, true] {
                 routes.push(endpoint_route(
                     &Endpoint {
                         id: "e".to_owned(),
                         label: "E".to_owned(),
                         base_url: "https://example.invalid".to_owned(),
-                        has_key,
+                        key_state,
                     },
                     registered,
                 ));
@@ -556,7 +564,7 @@ mod tests {
             id: "proxy".to_owned(),
             label: "P".to_owned(),
             base_url: "https://e.example.com".to_owned(),
-            has_key: true,
+            key_state: KeyState::Set,
         };
         assert!(endpoint_route(&endpoint, true).usable());
 
@@ -567,13 +575,38 @@ mod tests {
         /* A missing key outranks it: that is the one the reader can act on,
         and an endpoint with no key was never offered to be refused. */
         let keyless = Endpoint {
-            has_key: false,
+            key_state: KeyState::Missing,
             ..endpoint
         };
         assert_eq!(
             endpoint_route(&keyless, false).reason,
             Some(UnusableReason::NoKey)
         );
+    }
+
+    /// WI-20.20 (b). "No key" is advice — go and add one — and it is wrong
+    /// advice when the key is in the keychain and the keychain will not hand
+    /// it over. That is a different fact with a different fix, and it outranks
+    /// registration for the same reason a missing key does: an endpoint whose
+    /// key could not be read was never offered to the daemon to be refused.
+    #[test]
+    fn an_endpoint_whose_key_cannot_be_read_is_not_told_it_has_none() {
+        let endpoint = Endpoint {
+            id: "proxy".to_owned(),
+            label: "P".to_owned(),
+            base_url: "https://e.example.com".to_owned(),
+            key_state: KeyState::Unreadable,
+        };
+        for registered in [false, true] {
+            let route = endpoint_route(&endpoint, registered);
+            assert!(!route.usable());
+            assert_eq!(route.reason, Some(UnusableReason::KeyUnreadable));
+            assert_ne!(
+                route.unusable,
+                Some(UnusableReason::NoKey.text()),
+                "the reader must not be told to add a key they already have"
+            );
+        }
     }
 
     /// The three actionable codes are distinguishable without reading English.
@@ -689,7 +722,7 @@ mod tests {
             id: "proxy".to_owned(),
             label: "My proxy".to_owned(),
             base_url: "https://api.example.com/v1".to_owned(),
-            has_key: false,
+            key_state: KeyState::Missing,
         };
         let route = endpoint_route(&endpoint, true);
         assert!(!route.usable());
@@ -702,7 +735,7 @@ mod tests {
             id: "proxy".to_owned(),
             label: "My proxy".to_owned(),
             base_url: "https://api.example.com/v1".to_owned(),
-            has_key: true,
+            key_state: KeyState::Set,
         };
         assert!(endpoint_route(&endpoint, true).usable());
     }
@@ -719,7 +752,7 @@ mod tests {
                 id: "proxy".to_owned(),
                 label: "P".to_owned(),
                 base_url: "https://e.example.com".to_owned(),
-                has_key: true,
+                key_state: KeyState::Set,
             },
             true,
         ));
