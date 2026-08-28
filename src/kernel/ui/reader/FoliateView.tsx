@@ -8,6 +8,9 @@ import { isPdf, isRanged, type BookSource } from '../../core/formats'
 import { applyBookVars, bookSheets, markPalette, noteSheets } from './bookCss'
 import { balanceRects } from './markGeometry'
 import { ReaderSession, type FootnoteRender, type MarkAnchor, type SelectionSnapshot } from './session'
+import type { PasswordReason } from './makePdf'
+import { protectionOf } from './protection'
+import { PasswordSheet } from '../overlays/PasswordSheet'
 import type { PageIntent } from './wheelPaging'
 
 export interface FoliateViewProps {
@@ -452,6 +455,19 @@ export function FoliateView({
 
   /** Bumped once the book is open and its renderer exists. */
   const [ready, setReady] = useState(0)
+
+  /**
+   * A password pdf.js is waiting for — see `PasswordSheet`.
+   *
+   * State, so the sheet renders; and a ref beside it, so the effect's cleanup
+   * can answer a prompt the reader walked away from. A prompt left pending
+   * would leave pdf.js's loading task, and the worker it started, waiting for
+   * an answer nobody can give any more — closing the book, or opening the
+   * next one, answers `null`, which `makePdf` turns into its named refusal.
+   */
+  const [asking, setAsking] = useState<PasswordAsk | null>(null)
+  const askingRef = useRef<PasswordAsk | null>(null)
+  const askSeq = useRef(0)
   const fontsReady = useFontsReady()
 
   /* Callbacks and settings live in refs so changing one does not tear the book
@@ -618,8 +634,35 @@ export function FoliateView({
              * already ignores a disposed session, so capturing it directly is
              * both narrower and self-cancelling. */
             onPagePainted: () => session.redrawMarks(),
+            /* Each asking is its OWN request — a wrong password gets a fresh
+             * sheet saying so, keyed apart from the first — and answers the
+             * promise exactly once, from the sheet or from the cleanup below,
+             * whichever comes first. */
+            password: (reason: PasswordReason) =>
+              new Promise<string | null>((resolve) => {
+                if (session.disposed) {
+                  resolve(null)
+                  return
+                }
+                const request: PasswordAsk = {
+                  id: askSeq.current++,
+                  name: typeof input === 'string' ? input : input.name,
+                  reason,
+                  answer: (password) => {
+                    if (askingRef.current !== request) return
+                    askingRef.current = null
+                    setAsking(null)
+                    resolve(password)
+                  },
+                }
+                askingRef.current = request
+                setAsking(request)
+              }),
           })
         },
+        /* Asked after the fork has parsed the archive and before any section
+         * loads — a DRM'd book is refused by name, not rendered as noise. */
+        protection: protectionOf,
         applySettings: (view: View) => applySettings(view.renderer, settings.current),
         applyVars: (doc: Document) => applyBookVars(doc, readingVars(settings.current)),
         styleNote: (view: View) => styleNoteView(view.renderer),
@@ -641,6 +684,10 @@ export function FoliateView({
       })
 
     return () => {
+      /* A prompt still open belongs to THIS book, which is going. Answered
+         before the dispose so `makePdf` tears its task down on a refusal,
+         not on a dangling promise. */
+      askingRef.current?.answer(null)
       session.dispose()
       sessionRef.current = null
     }
@@ -737,5 +784,26 @@ export function FoliateView({
     }
   }, [marks, ready])
 
-  return <div ref={hostRef} style={{ position: 'absolute', inset: 0 }} />
+  return (
+    <>
+      <div ref={hostRef} style={{ position: 'absolute', inset: 0 }} />
+      {asking && (
+        <PasswordSheet
+          key={asking.id}
+          name={asking.name}
+          reason={asking.reason}
+          onSubmit={(password) => asking.answer(password)}
+          onCancel={() => asking.answer(null)}
+        />
+      )}
+    </>
+  )
+}
+
+/** One asking for a password: which file, why, and the way to answer it. */
+interface PasswordAsk {
+  readonly id: number
+  readonly name: string
+  readonly reason: PasswordReason
+  readonly answer: (password: string | null) => void
 }

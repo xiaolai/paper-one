@@ -327,6 +327,23 @@ function tocItem(item: { title: string; dest: unknown; items?: unknown[] }): Toc
   return { label: item.title, href, subitems }
 }
 
+/**
+ * Why pdf.js is asking for a password: it has none, or the one it was given
+ * was wrong. pdf.js's own `PasswordResponses`, named for the reader.
+ */
+export type PasswordReason = 'needed' | 'wrong'
+
+/**
+ * What a protected PDF nobody unlocked is told it is.
+ *
+ * ONE SENTENCE FOR EVERY WAY OF NOT UNLOCKING IT — a cancelled prompt, no
+ * prompt at all (the enrichment pass parses with no reader present), a prompt
+ * that threw. pdf.js's own words for the first two are "No password given",
+ * which reached the reader verbatim and read as a verdict on something they
+ * had never been asked to do.
+ */
+export const PDF_LOCKED = 'This PDF is protected by a password and was not opened.'
+
 export interface PdfHooks {
   /**
    * A page has finished painting, text layer and all.
@@ -337,6 +354,15 @@ export interface PdfHooks {
    * re-attach the marks now that there is text to anchor them to.
    */
   onPagePainted?: () => void
+  /**
+   * The document needs a password: ask the reader for one. Resolve `null`
+   * for a cancel, which refuses the open by name — see `PDF_LOCKED`. Asked
+   * again, with `'wrong'`, after an answer pdf.js rejected.
+   *
+   * Optional, because the enrichment pass has no reader to ask; with nobody
+   * to ask the open is refused with the same sentence, never left hanging.
+   */
+  password?: (reason: PasswordReason) => Promise<string | null>
 }
 
 /**
@@ -430,6 +456,29 @@ export async function makePdf(file: BookSource, hooks: PdfHooks = {}): Promise<P
     wasmUrl: `${ASSET_BASE}wasm/`,
     iccUrl: `${ASSET_BASE}iccs/`,
   })
+  /* THE PASSWORD, AND THE ONE WAY OUT OF NOT HAVING ONE.
+   *
+   * pdf.js asks through this callback rather than rejecting, and rejects on
+   * its own — with "No password given" — only when nothing is set here. Set
+   * always, so every road that does not end in a password ends in the SAME
+   * named refusal: an `Error` handed to `update` rejects the loading task
+   * with that error, which the cleanup below tears down and rethrows. A prompt
+   * that never answered would leave the task, and the worker it started,
+   * waiting forever; a `null` from the prompt is the reader's cancel and gets
+   * the same sentence. */
+  task.onPassword = (update: (answer: string | Error) => void, code: number) => {
+    const reason: PasswordReason =
+      code === pdfjs.PasswordResponses.INCORRECT_PASSWORD ? 'wrong' : 'needed'
+    const ask = hooks.password
+    if (!ask) {
+      update(new Error(PDF_LOCKED))
+      return
+    }
+    ask(reason).then(
+      (answer) => update(answer === null ? new Error(PDF_LOCKED) : answer),
+      () => update(new Error(PDF_LOCKED)),
+    )
+  }
   /**
    * ⚠️ **A REJECTED LOAD LEFT THE WORKER RUNNING.**
    *

@@ -26,6 +26,14 @@ const pdfjs = vi.hoisted(() => {
     outcome: 'resolve' as 'resolve' | 'reject',
     destroys: 0,
     FakeTransport,
+    /**
+     * When not null, the fake document is PASSWORD-PROTECTED: the loading task
+     * calls `onPassword` with this reason code before it can settle, exactly
+     * as pdf.js does — 1 for "needs one", 2 for "that one was wrong".
+     */
+    askPassword: null as number | null,
+    /** Every password the task was handed back. */
+    passwords: [] as string[],
   }
 })
 
@@ -44,20 +52,46 @@ vi.mock('pdfjs-dist', () => {
     getDestination: async () => null,
     getPageIndex: async () => 0,
   }
+  type Update = (answer: string | Error) => void
   return {
     GlobalWorkerOptions: { workerSrc: '' },
     PDFDataRangeTransport: pdfjs.FakeTransport,
+    PasswordResponses: { NEED_PASSWORD: 1, INCORRECT_PASSWORD: 2 },
     getDocument: (src: Record<string, unknown>) => {
       pdfjs.lastSrc = src
-      return {
-        promise:
-          pdfjs.outcome === 'resolve'
-            ? Promise.resolve(document_)
-            : Promise.reject(new Error('this book is truncated')),
+      const task = {
+        /* Settable AFTER `getDocument` returns, which is when a caller can
+           set it and when the real task reads it: the worker's request comes
+           back asynchronously. */
+        onPassword: null as ((update: Update, reason: number) => void) | null,
+        promise: new Promise<unknown>((resolve, reject) => {
+          queueMicrotask(() => {
+            const ask = pdfjs.askPassword
+            if (ask !== null) {
+              if (!task.onPassword) {
+                /* pdf.js's own words when nobody is there to ask. */
+                reject(new Error('No password given'))
+                return
+              }
+              task.onPassword((answer) => {
+                if (answer instanceof Error) {
+                  reject(answer)
+                  return
+                }
+                pdfjs.passwords.push(answer)
+                resolve(document_)
+              }, ask)
+              return
+            }
+            if (pdfjs.outcome === 'resolve') resolve(document_)
+            else reject(new Error('this book is truncated'))
+          })
+        }),
         destroy: async () => {
           pdfjs.destroys += 1
         },
       }
+      return task
     },
   }
 })
@@ -68,7 +102,7 @@ vi.mock('pdfjs-dist/build/pdf.worker.min.mjs?url', () => ({ default: 'worker.js'
    make "the page is smaller than the sheet" true either way. */
 vi.mock('pdfjs-dist/web/pdf_viewer.css?raw', () => ({ default: '.textLayer{}'.repeat(14_000) }))
 
-const { makePdf } = await import('./makePdf')
+const { makePdf, PDF_LOCKED } = await import('./makePdf')
 
 /** Every object URL minted, and whether it has been revoked. */
 const minted: { url: string; revoked: boolean; type: string; size: number }[] = []
@@ -93,6 +127,8 @@ afterEach(() => {
   pdfjs.lastSrc = null
   pdfjs.destroys = 0
   pdfjs.outcome = 'resolve'
+  pdfjs.askPassword = null
+  pdfjs.passwords.length = 0
 })
 
 const ranged = () => ({ range: new pdfjs.FakeTransport(), name: 'scanned.pdf' })
@@ -196,5 +232,58 @@ describe('the page documents', () => {
     const again = await book.sections[0]?.load()
     expect(again?.src).toBe(first?.src)
     await book.destroy()
+  })
+})
+
+/**
+ * WI-20.13 — a password-protected PDF used to show pdf.js's own "No password
+ * given": `getDocument` was called with no `onPassword`, so the library's
+ * answer to "this needs a password" was to reject with the sentence it uses
+ * for exactly that, and nothing under `src/` had ever named
+ * `PasswordException`. The reader was told, in effect, that it had failed to
+ * do something it was never asked to do.
+ */
+describe('a password-protected document', () => {
+  it('asks the caller, and opens with the answer', async () => {
+    pdfjs.askPassword = 1
+    const password = vi.fn(async () => 'secret')
+    const book = await makePdf(ranged() as never, { password })
+    expect(password).toHaveBeenCalledWith('needed')
+    expect(pdfjs.passwords).toEqual(['secret'])
+    await book.destroy()
+  })
+
+  it('says the last answer was wrong when pdf.js asks again', async () => {
+    pdfjs.askPassword = 2
+    const password = vi.fn(async () => 'second try')
+    const book = await makePdf(ranged() as never, { password })
+    expect(password).toHaveBeenCalledWith('wrong')
+    await book.destroy()
+  })
+
+  it('a cancelled prompt refuses by name and releases the task — it does not hang', async () => {
+    pdfjs.askPassword = 1
+    const password = vi.fn(async () => null)
+    await expect(makePdf(ranged() as never, { password })).rejects.toThrow(PDF_LOCKED)
+    expect(pdfjs.passwords).toEqual([])
+    expect(pdfjs.destroys, 'the pdf.js worker was left running after a cancel').toBe(1)
+    expect(minted.every((one) => one.revoked), 'an object URL outlived a cancelled open').toBe(true)
+  })
+
+  it('with nobody to ask, refuses by name rather than in pdf.js’s words', async () => {
+    /* The enrichment pass parses without a reader present. It must see the
+       same named refusal, not "No password given". */
+    pdfjs.askPassword = 1
+    await expect(makePdf(ranged() as never)).rejects.toThrow(PDF_LOCKED)
+    expect(pdfjs.destroys).toBe(1)
+  })
+
+  it('a prompt that throws is a refusal too, not a hang', async () => {
+    pdfjs.askPassword = 1
+    const password = vi.fn(async () => {
+      throw new Error('the sheet went away')
+    })
+    await expect(makePdf(ranged() as never, { password })).rejects.toThrow(PDF_LOCKED)
+    expect(pdfjs.destroys).toBe(1)
   })
 })

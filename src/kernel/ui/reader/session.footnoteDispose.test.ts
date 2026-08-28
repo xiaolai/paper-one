@@ -174,6 +174,7 @@ async function started(order: string[] = []) {
     prepare: (source: unknown) => Promise.resolve(source),
     applySettings: () => {},
     applyVars: () => {},
+    protection: () => Promise.resolve(null),
   })
   const handler = foliate.handlers[0]
   expect(handler, 'the session should have built a footnote handler').toBeDefined()

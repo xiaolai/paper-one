@@ -1,7 +1,29 @@
 // @vitest-environment jsdom
-import { cleanup, render } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { FoliateView } from './FoliateView'
+
+/**
+ * A PDF that asks for a password, and never finishes opening — the honest
+ * shape for this file (see the header): what is proven is the WIRING from
+ * `makePdf`'s prompt to the sheet and back, not reading.
+ */
+const locked = vi.hoisted(() => ({
+  /** Every answer the prompt resolved with, in order. `null` is a cancel. */
+  answers: [] as (string | null)[],
+}))
+vi.mock('./makePdf', () => ({
+  PDF_LOCKED: 'This PDF is protected by a password and was not opened.',
+  makePdf: (
+    _input: unknown,
+    hooks: { password?: (reason: 'needed' | 'wrong') => Promise<string | null> },
+  ) =>
+    new Promise(() => {
+      void hooks.password?.('needed').then((answer) => {
+        locked.answers.push(answer)
+      })
+    }),
+}))
 import { DEFAULT_READING_STYLE, DEFAULT_SPACING } from '../../core/metrics'
 
 /**
@@ -146,5 +168,47 @@ describe('FoliateView', () => {
     )
     rerender(<FoliateView {...props({ ...spies, file: second, generation: 2 })} />)
     expect(() => unmount()).not.toThrow()
+  })
+})
+
+describe('a PDF that asks for a password', () => {
+  afterEach(() => {
+    locked.answers.length = 0
+  })
+
+  const lockedPdf = () => new File(['%PDF-1.7'], 'Locked.pdf', { type: 'application/pdf' })
+
+  it('raises the sheet, names the file, and hands the answer back to pdf.js', async () => {
+    const spies = callbacks()
+    render(<FoliateView {...props({ ...spies, file: lockedPdf() })} />)
+
+    const dialog = await screen.findByRole('dialog', { name: /password/i })
+    expect(dialog.textContent).toContain('Locked.pdf')
+
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'secret' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Unlock' }))
+
+    await waitFor(() => expect(locked.answers).toEqual(['secret']))
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(spies.onError).not.toHaveBeenCalled()
+  })
+
+  it('answers nothing — not never — when the reader leaves while it is asking', async () => {
+    /* A prompt left pending would leave pdf.js's loading task, and the worker
+       it started, waiting for an answer nobody can give any more. */
+    const spies = callbacks()
+    const { unmount } = render(<FoliateView {...props({ ...spies, file: lockedPdf() })} />)
+    await screen.findByRole('dialog', { name: /password/i })
+    unmount()
+    await waitFor(() => expect(locked.answers).toEqual([null]))
+  })
+
+  it('cancelling answers nothing, and the sheet goes', async () => {
+    const spies = callbacks()
+    render(<FoliateView {...props({ ...spies, file: lockedPdf() })} />)
+    await screen.findByRole('dialog', { name: /password/i })
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(locked.answers).toEqual([null]))
+    expect(screen.queryByRole('dialog')).toBeNull()
   })
 })

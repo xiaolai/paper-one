@@ -288,6 +288,9 @@ const deps = (view: View) => ({
   prepare: (source: BookSource) => Promise.resolve(source),
   applySettings: () => {},
   applyVars: () => {},
+  /* Nothing these fixtures open is protected. Required — see
+     `SessionDeps.protection` — so a caller cannot forget the check. */
+  protection: () => Promise.resolve(null),
 })
 
 describe('ReaderSession disposal', () => {
@@ -342,6 +345,7 @@ describe('ReaderSession disposal', () => {
       prepare: (source: BookSource) => Promise.resolve(source),
       applySettings: () => {},
       applyVars: () => {},
+      protection: () => Promise.resolve(null),
     })
 
     session.dispose()
@@ -510,6 +514,7 @@ describe('ReaderSession disposal', () => {
       prepare: (source: BookSource) => Promise.resolve(source),
       applySettings: () => {},
       applyVars: () => {},
+      protection: () => Promise.resolve(null),
     })
     expect(cb.calls['onError']?.[0]?.[0]).toBe('module missing')
   })
@@ -524,6 +529,7 @@ describe('ReaderSession disposal', () => {
       prepare: (source: BookSource) => Promise.resolve(source),
       applySettings: () => {},
       applyVars: () => {},
+      protection: () => Promise.resolve(null),
     })
     expect(cb.calls['onError'] ?? []).toHaveLength(0)
   })
@@ -1725,6 +1731,7 @@ describe('ReaderSession marks', () => {
       prepare: (source: BookSource) => Promise.resolve(source),
       applySettings: () => {},
       applyVars: () => {},
+      protection: () => Promise.resolve(null),
     })
 
     expect(cb.calls['onError']?.[0]?.[0]).toBe('overlayer missing')
@@ -3600,5 +3607,67 @@ describe('directionOf', () => {
   it('answers ltr for a document that says nothing, and for one with no root', () => {
     expect(directionOf(asDoc({}))).toBe('ltr')
     expect(directionOf(asDoc({ root: false }))).toBe('ltr')
+  })
+})
+
+/**
+ * WI-20.13 — the book that cannot open says why.
+ *
+ * Three outcomes were silent: a zero-length file said "File not found" (the
+ * fork's words for `!file.size`), a DRM'd EPUB opened and rendered as noise,
+ * and a password-protected PDF showed pdf.js's own "No password given". The
+ * PDF half is `makePdf.test.ts`'s and the parsing half `protection.test.ts`'s;
+ * what is proven here is the session's part — the refusal is named, and a
+ * refused book is never displayed.
+ */
+describe('ReaderSession — a book that cannot open says why', () => {
+  it('says a zero-length file is empty, before anything tries to open it', async () => {
+    let opened = 0
+    const view = fakeView({
+      open: () => {
+        opened += 1
+        return Promise.reject(new Error('File not found'))
+      },
+    })
+    const cb = callbacks()
+    const session = new ReaderSession(fakeHost(), cb)
+    await session.start(new File([], 'empty.epub'), deps(view))
+
+    expect(cb.calls['onError']?.[0]?.[0]).toBe('This file is empty.')
+    expect(opened, 'an empty file reached the fork, which calls it "not found"').toBe(0)
+    expect(view.initCalls).toEqual([])
+  })
+
+  it('refuses a protected book by name, and never displays it', async () => {
+    const view = fakeView()
+    const cb = callbacks()
+    const session = new ReaderSession(fakeHost(), cb)
+    const refusal = 'This book is protected by ADEPT and cannot be opened here.'
+    await session.start('locked.epub', { ...deps(view), protection: () => Promise.resolve(refusal) })
+
+    expect(cb.calls['onError']?.[0]?.[0]).toBe(refusal)
+    /* Refused means NOT SHOWN: no first page, no contents, no navigator — a
+       page of ciphertext behind a notice is still a page of ciphertext. */
+    expect(view.initCalls).toEqual([])
+    expect(cb.calls['onToc'] ?? []).toHaveLength(0)
+    expect(cb.calls['onNavigator'] ?? []).toHaveLength(0)
+    /* And the book stays closable, exactly as a failed open does. */
+    session.dispose()
+    expect(view.closed).toBe(1)
+  })
+
+  it('asks the check about the OPENED book, so it can read the archive the fork already parsed', async () => {
+    const view = fakeView()
+    const seen: unknown[] = []
+    const session = new ReaderSession(fakeHost(), callbacks())
+    await session.start('book.epub', {
+      ...deps(view),
+      protection: (book) => {
+        seen.push(book)
+        return Promise.resolve(null)
+      },
+    })
+    expect(seen).toEqual([view.book])
+    expect(view.initCalls).toHaveLength(1)
   })
 })

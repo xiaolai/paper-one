@@ -31,7 +31,8 @@ import {
   type MarkTint,
 } from '../../core/marks'
 import type { BookMeta, ReaderPosition } from '../../core/bookMeta'
-import type { BookSource } from '../../core/formats'
+import { isEmptySource, type BookSource } from '../../core/formats'
+import type { OpenedBook } from './protection'
 import { coverFrom } from '../../core/coverArt'
 import { deferSnap } from './wordSnap/deferredSnap'
 import { watchGestureProvenance } from './wordSnap/gestureProvenance'
@@ -598,6 +599,20 @@ export interface SessionDeps {
    * `applyVars` just below, which is required for the same reason.
    */
   prepare: (source: BookSource) => Promise<unknown>
+  /**
+   * Why the OPENED book must not be shown, or null.
+   *
+   * Asked after `view.open` and before `init` — the fork has parsed the
+   * archive by then and loaded no section yet, so the answer costs one small
+   * read and a refused book never puts a page of ciphertext on screen. See
+   * `protection.ts` for what it decides and why the rule is narrow.
+   *
+   * Injected rather than imported so the session's lifecycle tests, which
+   * run with no DOM, can hand it a verdict; REQUIRED, on the same reasoning as
+   * `prepare` above — a caller that left it out would reopen exactly the
+   * failure it exists to prevent, a DRM'd book rendered as noise.
+   */
+  protection: (book: OpenedBook) => Promise<string | null>
   applySettings: (view: View) => void
   /**
    * The reader's settings, as custom properties on ONE document's root.
@@ -1222,8 +1237,24 @@ export class ReaderSession {
     })
   }
 
-  /** Parse the source and open it. False means stop — failed or disposed. */
+  /**
+   * Parse the source and open it. False means stop — failed, refused or
+   * disposed.
+   *
+   * THREE OUTCOMES USED TO BE SILENT, or worse than silent (WI-20.13). A
+   * zero-length file reached the fork, whose words for it are "File not
+   * found". A DRM'd EPUB opened and rendered its chapters as noise, because
+   * the fork passes an algorithm it cannot decode through as ciphertext and
+   * nothing here asked. And a password-protected PDF showed pdf.js's own "No
+   * password given" — `makePdf` owns that one; its refusal arrives through
+   * the catch below with a sentence of its own.
+   */
   async #openBook(view: View, source: BookSource, deps: SessionDeps): Promise<boolean> {
+    /* Before the fork sees it — see `isEmptySource`. */
+    if (isEmptySource(source)) {
+      this.#cb.onError(EMPTY_FILE)
+      return false
+    }
     try {
       /* REQUIRED — see `SessionDeps.prepare`. The cast at `view.open` below is
          only sound because something has converted whatever this was into
@@ -1248,7 +1279,22 @@ export class ReaderSession {
       this.#cb.onError(message(cause, 'This file could not be opened.'))
       return false
     }
-    return this.#settle(view)
+    if (!this.#settle(view)) return false
+
+    /* OPENED IS NOT THE SAME AS READABLE. The container, the package and the
+     * navigation of a DRM'd EPUB are in the clear — that is why `open`
+     * succeeds and why nothing said anything — and the first section loaded
+     * is where the ciphertext would appear. Asked here, after the parse and
+     * before any section, so a refused book is never displayed at all: not a
+     * first page, not its contents, not a navigator. `dispose` closes it like
+     * any other open that stopped. */
+    const refused = await deps.protection(view.book)
+    if (!this.#settle(view)) return false
+    if (refused !== null) {
+      this.#cb.onError(refused)
+      return false
+    }
+    return true
   }
 
   /** Hand the book's contents and its navigation to the host. */
@@ -2794,6 +2840,9 @@ function toHit(
 function message(cause: unknown, fallback: string): string {
   return cause instanceof Error ? cause.message : fallback
 }
+
+/** What a zero-length file is told it is — see `isEmptySource`. */
+const EMPTY_FILE = 'This file is empty.'
 
 /** foliate's metadata is loosely typed: title may be a language map, author a
  *  string, an object, or an array of either. */

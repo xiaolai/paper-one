@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatOf, isFormat, isPdf, sniffFormat, titleFromSource } from './formats'
+import { formatOf, isEmptySource, isFormat, isPdf, sniffFormat, titleFromSource } from './formats'
 
 /**
  * The routing decision, which lives in `core/formats.ts` rather than in
@@ -202,5 +202,23 @@ describe('isFormat', () => {
     expect(isFormat('txt')).toBe(false)
     expect(isFormat('EPUB')).toBe(false)
     expect(isFormat(7)).toBe(false)
+  })
+})
+
+/**
+ * WI-20.13 — a zero-length file used to reach the fork, whose words for
+ * `!file.size` are "File not found": true of nothing, since the file was
+ * right there. The reader asks this before the fork sees the file.
+ */
+describe('isEmptySource', () => {
+  it('is true for a file with no bytes, whatever it is called', () => {
+    expect(isEmptySource(new File([], 'empty.epub'))).toBe(true)
+    expect(isEmptySource(new File([], 'empty.pdf', { type: 'application/pdf' }))).toBe(true)
+  })
+
+  it('is false for a file with bytes, a URL, and a ranged source whose bytes are elsewhere', () => {
+    expect(isEmptySource(new File(['PK'], 'book.epub'))).toBe(false)
+    expect(isEmptySource('/books/moby.epub')).toBe(false)
+    expect(isEmptySource({ name: 'scanned.pdf', range: {} })).toBe(false)
   })
 })

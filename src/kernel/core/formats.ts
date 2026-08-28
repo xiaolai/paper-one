@@ -53,6 +53,19 @@ export const isRanged = (source: BookSource): source is RangedSource =>
   typeof source !== 'string' && 'range' in source
 
 /**
+ * A source with NO BYTES — a zero-length file.
+ *
+ * Asked BEFORE the fork sees the file, because the fork's words for
+ * `!file.size` are "File not found" (`view.js`), which reached the reader
+ * verbatim through the open path's catch: true of nothing, since the file was
+ * right there, and a message that sends the reader looking for a file they
+ * just picked. A URL and a ranged source carry no size here — their bytes are
+ * somewhere else — and are never empty by this measure.
+ */
+export const isEmptySource = (source: BookSource): boolean =>
+  typeof source !== 'string' && !isRanged(source) && source.size === 0
+
+/**
  * Which of the two readers a source belongs to.
  *
  * Here rather than in `reader/pdf.ts` because that module imports pdf.js, which
