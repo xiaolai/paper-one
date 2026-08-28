@@ -22,14 +22,38 @@ export function fakeFs(files: Record<string, string> = {}) {
   /* Per path, because the assertion worth making is "this file was
      rewritten once", not "the disk was touched once". */
   const written = new Map<string, number>()
+  /* WHAT WAS SYNCED, AND HOW HARD — phase 20's D3 and D4 are about exactly
+     this: which write went through the synced path and at which level, and
+     that a position tick costs a barrier on `book.json` and a full sync on
+     nothing. A fake that only stored bytes could not refute either. */
+  const synced: { path: string; level: 'full' | 'barrier'; kind: 'write' | 'fsync' }[] = []
   const fs: IndexFs & {
     store: Map<string, Uint8Array>
     reads: () => number
     writes: (path: string) => number
+    synced: () => readonly { path: string; level: 'full' | 'barrier'; kind: 'write' | 'fsync' }[]
   } = {
     store,
     reads: () => reads,
     writes: (path) => written.get(path) ?? 0,
+    synced: () => synced,
+    /* The synced write, as the real filesystems do it in one call — but
+       THROUGH `this.writeFile` AND `this.rename`, not straight into the
+       store. Suites inject a failing disk by spreading this fake and
+       overriding `writeFile` (`{ ...fs, writeFile: refuse }`), and a
+       `writeAtomic` that wrote to the store directly would have skipped
+       every one of those refusals: fourteen failure-path tests went green
+       against a disk that was supposed to be full. A method, so `this` is
+       whichever object the kernel actually called. */
+    async writeAtomic(path, bytes, level) {
+      const writing = `${path}.writing`
+      await this.writeFile(writing, bytes)
+      await this.rename(writing, path)
+      synced.push({ path, level, kind: 'write' })
+    },
+    async fsync(path, level) {
+      synced.push({ path, level, kind: 'fsync' })
+    },
     readDir: async (path) => {
       const names = new Set<string>()
       for (const key of store.keys()) {

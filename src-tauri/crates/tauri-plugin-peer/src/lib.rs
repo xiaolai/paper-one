@@ -53,7 +53,6 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::peer_local_role,
             commands::peer_set_local_role,
             commands::paper_data_root,
-            commands::fs_fsync,
             commands::peer_list_peers,
             commands::peer_forget_peer,
             commands::peer_set_grants,

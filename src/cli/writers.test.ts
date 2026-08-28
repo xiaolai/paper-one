@@ -1,11 +1,11 @@
 import { writeFileSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { MUTATION_KINDS, SERVICE_TABLE, readingGrant, type MutationKind, type MutationToken } from '../kernel'
 import { FIXTURE_FILES } from '../hosts/node/fixture.testkit'
-import { LOCK_FILE, LockHeld, acquireDataLock } from '../hosts/node/lock'
+import { IDENTITY_TOLERANCE_MS, LOCK_FILE, LockHeld, acquireDataLock, hostBootedAt, ownStartedAt } from '../hosts/node/lock'
 import { openNodeServices, type NodeHost } from '../hosts/node/services'
 import { localCaller } from './caller'
 import { paper } from './paper'
@@ -475,6 +475,91 @@ describe('two writers cannot interleave', () => {
     /* The live lock is still where its owner left it. */
     const after = JSON.parse(await readFile(join(dataDir, LOCK_FILE), 'utf8')) as { token: string }
     expect(after.token).toBe('live-token')
+  })
+
+  /**
+   * PUBLISHED BY `link`, NOT BY WRITE-AFTER-CREATE (WI-20.34). `open(path,
+   * 'wx')` then `writeFile` had a window a SIGKILL could land in, leaving an
+   * empty file every later writer read as "held by somebody unnameable" —
+   * forever, with no reclamation path. The record is written whole under a
+   * private name and linked into place, so the lock file never exists
+   * without a readable owner. Same protocol as `lock.rs`.
+   */
+  it('publishes the record by link, so the lock never exists without a readable owner', async () => {
+    const dataDir = await library()
+    const taken = await acquireDataLock(dataDir, { command: 'paper book add' })
+    const owner = JSON.parse(await readFile(join(dataDir, LOCK_FILE), 'utf8')) as Record<string, unknown>
+    expect(owner['token']).toBe(taken.owner.token)
+    /* The two identities the app's record carries too, camel-cased as
+     * `lock.rs` spells them. */
+    expect(typeof owner['startedAt']).toBe('number')
+    expect(typeof owner['bootedAt']).toBe('number')
+    /* And no private name left beside it. */
+    const left = (await readdir(dataDir)).filter((name) => name.startsWith(`.${LOCK_FILE}.`))
+    expect(left).toEqual([])
+    await taken.release()
+  })
+
+  /* The old protocol's crash window, and a helper's leftovers: neither may
+   * lock the library until a human deletes a file. */
+  it('reclaims an empty lock file, and a dangling temp name blocks nobody', async () => {
+    const dataDir = await library()
+    await writeFile(join(dataDir, LOCK_FILE), '')
+    await writeFile(join(dataDir, `.${LOCK_FILE}.a-killed-helper`), '{"pid":1}')
+    const taken = await acquireDataLock(dataDir, { waitMs: 0, alive: () => true })
+    expect(taken.owner.pid).toBe(process.pid)
+    const owner = JSON.parse(await readFile(join(dataDir, LOCK_FILE), 'utf8')) as { token: string }
+    expect(owner.token).toBe(taken.owner.token)
+    await taken.release()
+  })
+
+  /**
+   * A PID IS NOT AN IDENTITY. The kernel reuses a dead process's number,
+   * and every number is reused after a reboot. So a running pid whose start
+   * time disagrees with the record, or whose record predates this boot, is
+   * not the holder; and an OS that cannot say refutes nothing.
+   */
+  it('does not call a running pid the holder when its start time or boot disagrees with the record', async () => {
+    const dataDir = await library()
+    const host = (await import('node:os')).hostname()
+    const reused = { pid: process.pid, host, at: 1, command: 'a crashed paper', token: 'old', startedAt: 1_000 }
+    await writeFile(join(dataDir, LOCK_FILE), JSON.stringify(reused))
+    /* The pid runs (it is ours), but the OS says it started long after the
+     * record claims: a different process wearing the number. */
+    const taken = await acquireDataLock(dataDir, { waitMs: 0, startedAt: () => 2_000_000_000_000, bootedAt: () => null })
+    expect(taken.owner.pid).toBe(process.pid)
+    await taken.release()
+
+    const rebooted = { ...reused, startedAt: undefined, bootedAt: 1_000 }
+    await writeFile(join(dataDir, LOCK_FILE), JSON.stringify(rebooted))
+    const again = await acquireDataLock(dataDir, { waitMs: 0, startedAt: () => null, bootedAt: () => 2_000_000_000_000 })
+    expect(again.owner.pid).toBe(process.pid)
+    await again.release()
+
+    /* Within the tolerance is the same process: held. */
+    const same = { ...reused, startedAt: 2_000_000_000_000 + IDENTITY_TOLERANCE_MS - 1 }
+    await writeFile(join(dataDir, LOCK_FILE), JSON.stringify(same))
+    await expect(
+      acquireDataLock(dataDir, { waitMs: 0, startedAt: () => 2_000_000_000_000, bootedAt: () => null }),
+    ).rejects.toBeInstanceOf(LockHeld)
+
+    /* An OS with no answer cannot refute a record that has one: held. */
+    await writeFile(join(dataDir, LOCK_FILE), JSON.stringify(reused))
+    await expect(acquireDataLock(dataDir, { waitMs: 0, startedAt: () => null, bootedAt: () => null })).rejects.toBeInstanceOf(
+      LockHeld,
+    )
+  })
+
+  /* The real identity lookups agree with this process about itself: a
+   * second take by the same process is refused, by pid, by start and by
+   * boot, with nothing injected. */
+  it('recognises its own live record through the operating system', async () => {
+    const dataDir = await library()
+    const mine = await acquireDataLock(dataDir, { command: 'the first' })
+    await expect(acquireDataLock(dataDir, { waitMs: 0 })).rejects.toBeInstanceOf(LockHeld)
+    expect(Math.abs(ownStartedAt() - (mine.owner.startedAt ?? 0))).toBeLessThan(IDENTITY_TOLERANCE_MS)
+    expect(Math.abs(hostBootedAt() - (mine.owner.bootedAt ?? 0))).toBeLessThan(IDENTITY_TOLERANCE_MS)
+    await mine.release()
   })
 
   it('never reclaims a lock from another host, however old', async () => {

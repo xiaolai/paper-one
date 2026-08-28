@@ -130,6 +130,8 @@ dependencies = [
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "paper-data-root",
+ "paper-process",
+ "percent-encoding",
  "serde",
  "serde_json",
  "tauri",
@@ -3943,6 +3945,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "paper-process"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "paper-webauth"
 version = "0.1.0"
 dependencies = [
@@ -5759,6 +5768,7 @@ dependencies = [
  "libc",
  "log",
  "paper-data-root",
+ "paper-process",
  "rand 0.9.5",
  "reqwest",
  "serde",

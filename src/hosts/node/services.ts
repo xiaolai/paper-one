@@ -73,6 +73,16 @@ export interface NodeHostOptions {
   /** The library's data directory. Made if it is not there. */
   readonly dataDir: string
   readonly diagnostics?: Diagnostics
+  /**
+   * Whether this host may WRITE the shelf cache it loads. Default true.
+   *
+   * A read-only command holds no lock — reads never do — but `loadShelf`
+   * rescans a stale index and, until WI-20.34, wrote the result back through
+   * the same `index.json.writing` temp the app uses. So `paper book list`
+   * beside a running app was a writer after all, racing the app's own index
+   * write for one filename. `false` rescans in memory and writes nothing.
+   */
+  readonly persist?: boolean
 }
 
 export interface NodeHost {
@@ -104,13 +114,13 @@ export interface NodeHost {
  * the application); a CLI can, and must — `paper book list` printing nothing
  * because a read failed is the single most misleading thing it could do.
  */
-export async function openNodeServices({ dataDir, diagnostics }: NodeHostOptions): Promise<NodeHost> {
+export async function openNodeServices({ dataDir, diagnostics, persist = true }: NodeHostOptions): Promise<NodeHost> {
   const root = await makeDataDir(dataDir)
   const fs = nodeIndexFs(root)
   /* No `legacy`: there is no `localStorage` in a Node process to carry
    * across, and passing one would be inventing a migration source. */
   const storage: FileStore = await openFileStore({ fs: nodeTextFs(root), legacy: null })
-  const shelf = await loadShelf(fs)
+  const shelf = await loadShelf(fs, { persist })
   const services = createKernelServices({
     fs,
     storage,

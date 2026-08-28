@@ -14,7 +14,6 @@ const COMMANDS: &[&str] = &[
     // clean regeneration, leaving `default.toml` pointing at nothing.
     "peer_set_local_role",
     "paper_data_root",
-    "fs_fsync",
     // WI-B.1 — peers and grants
     "peer_list_peers",
     "peer_forget_peer",

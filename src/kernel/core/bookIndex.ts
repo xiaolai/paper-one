@@ -19,9 +19,71 @@
  */
 
 import { CONTENT_EXTENSIONS, type VaultFs } from './bookVault'
-import { BOOKS_DIR, atomicWrite, folderOf, parseRecord, type BookRecord } from './bookFolder'
+import { BOOKS_DIR, atomicWrite, folderOf, parseRecord, readBook, type BookRecord } from './bookFolder'
 
 export const INDEX_FILE = 'index.json'
+
+/**
+ * THE DIRTY MARKER — which books `book.json` may be ahead of the index on
+ * (phase 20, D4).
+ *
+ * Every position save used to rewrite `index.json` whole: ~1 MB every two
+ * seconds at 2 000 books, against a header that promised "a few hundred
+ * bytes". Readest hit the same defect — one `fs.writeFile` of the WHOLE
+ * library on every invocation, "directly responsible for the swipe jank" —
+ * and fixed it the same way: eager per-book writes, the index throttled.
+ * Calibre's `metadata_dirtied` table with its `dirtied_sequence` and a
+ * compare-and-clear is the named precedent for the generation.
+ *
+ * So a position tick writes `book.json` and puts the book's id here, once
+ * per dirty PERIOD — not per tick — with the generation the store was at.
+ * The index flush captures the generation before it serialises and clears
+ * the marker only if nothing was dirtied meanwhile; `loadShelf` seeing the
+ * marker re-reads `book.json` for the listed books before trusting the
+ * cache. A crash between a tick and the next flush therefore costs the
+ * re-read of a few records, never a lost position.
+ */
+export const INDEX_DIRTY_FILE = 'index.dirty'
+
+export interface DirtyMarker {
+  readonly version: 1
+  /** Monotonic within a session; the compare-and-clear key. */
+  readonly generation: number
+  readonly books: readonly string[]
+}
+
+export async function readDirtyMarker(fs: IndexFs): Promise<DirtyMarker | null> {
+  let raw: string
+  try {
+    raw = new TextDecoder().decode(await fs.readFile(INDEX_DIRTY_FILE))
+  } catch {
+    return null
+  }
+  /* A marker that will not parse is treated as "every listed book unknown",
+   * which the caller cannot act on — so it is the same as a full rescan's
+   * worth of distrust: `null` here, and the caller's cache is refused by the
+   * folder check or trusted on its own terms. Never a throw: the marker is a
+   * hint about what to re-read, not a store. */
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (typeof parsed !== 'object' || parsed === null) return null
+    const one = parsed as Record<string, unknown>
+    if (one['version'] !== 1 || typeof one['generation'] !== 'number' || !Array.isArray(one['books'])) return null
+    const books = one['books'].filter((id): id is string => typeof id === 'string')
+    return { version: 1, generation: one['generation'], books }
+  } catch {
+    return null
+  }
+}
+
+/** One small write, at the full level: the marker is what survives the crash. */
+export async function writeDirtyMarker(fs: IndexFs, marker: DirtyMarker): Promise<void> {
+  await atomicWrite(fs, INDEX_DIRTY_FILE, new TextEncoder().encode(JSON.stringify(marker)), 'full')
+}
+
+export async function clearDirtyMarker(fs: IndexFs): Promise<void> {
+  await fs.remove(INDEX_DIRTY_FILE).catch(() => {})
+}
 
 /** A book as the shelf needs it: its record, plus the id naming its folder. */
 export interface IndexedBook extends BookRecord {
@@ -441,8 +503,22 @@ export async function scanBooks(fs: IndexFs): Promise<IndexedBook[]> {
  */
 export type ShelfSource = 'cache' | 'no cache' | 'folders disagree' | 'rows incomplete'
 
+export interface LoadShelfOptions {
+  /**
+   * Whether a rescan may WRITE the cache it rebuilt. Default true.
+   *
+   * A reader of the shelf that holds no lock — `paper book list` beside a
+   * running app — must not be a writer on the way past: the index it would
+   * write goes through the same temp name the app's own index writes use,
+   * and two processes on one `index.json.writing` is a race with a loser.
+   * With `false` the rescan is served from memory and nothing is written.
+   */
+  readonly persist?: boolean
+}
+
 export async function loadShelf(
   fs: IndexFs,
+  { persist = true }: LoadShelfOptions = {},
 ): Promise<{ books: IndexedBook[]; rescanned: boolean; why: ShelfSource }> {
   let why: ShelfSource = 'no cache'
   const cached = await readIndex(fs)
@@ -464,7 +540,22 @@ export async function loadShelf(
      * open back on the shelf looking fine. Distrusting such a cache costs one
      * rescan, once, and the index it writes has the flag. */
     const complete = cached.books.every((one) => typeof one.hasContent === 'boolean')
-    if (agrees && complete) return { books: [...cached.books], rescanned: false, why: 'cache' }
+    if (agrees && complete) {
+      /* THE MARKER'S BOOKS ARE RE-READ BEFORE THE CACHE IS TRUSTED. A tick
+       * writes `book.json` and defers the index; a crash before the flush
+       * leaves the cache one position behind for exactly the books listed
+       * here, with the folder set unchanged — the case the folder check
+       * cannot see, and the one this marker exists for. `hasContent` is the
+       * cache's derived flag and is carried; the record is the folder's. */
+      const marker = await readDirtyMarker(fs)
+      if (!marker || marker.books.length === 0) return { books: [...cached.books], rescanned: false, why: 'cache' }
+      const books = await refreshed(fs, cached.books, marker.books)
+      if (persist) {
+        await writeIndex(fs, books, cached.folders).catch(() => {})
+        await clearDirtyMarker(fs)
+      }
+      return { books, rescanned: false, why: 'cache' }
+    }
     /* Named in the order they are checked, so the answer is the FIRST thing
      * wrong rather than the last — an index that both disagrees and predates
      * `hasContent` is a version mismatch, and saying so is more use than
@@ -477,8 +568,35 @@ export async function loadShelf(
    * whose books disagreed about the same instant, and the next launch trusted
    * the disagreement. */
   const { books, folders } = await scanShelf(fs)
-  await writeIndex(fs, books, folders).catch(() => {})
+  if (persist) {
+    await writeIndex(fs, books, folders).catch(() => {})
+    /* A scan read every record, so nothing is behind the index it wrote. */
+    await clearDirtyMarker(fs)
+  }
   return { books, rescanned: true, why }
+}
+
+/**
+ * The cached rows with the marker's books re-read from their folders. A
+ * book the marker names and the folder no longer holds (removed after the
+ * tick) keeps its cached row: the folder check above already agreed, so the
+ * folder is there and `readBook` answering null is a record that will not
+ * read — the row stays until a scan decides.
+ */
+async function refreshed(
+  fs: IndexFs,
+  cached: readonly IndexedBook[],
+  ids: readonly string[],
+): Promise<IndexedBook[]> {
+  const wanted = new Set(ids)
+  return Promise.all(
+    cached.map(async (row) => {
+      if (!wanted.has(row.bookId)) return row
+      const record = await readBook(fs, row.bookId).catch(() => null)
+      if (!record) return row
+      return { ...record, bookId: row.bookId, ...(row.hasContent === undefined ? {} : { hasContent: row.hasContent }) }
+    }),
+  )
 }
 
 async function readIndex(

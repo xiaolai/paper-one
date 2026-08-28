@@ -14,17 +14,29 @@
 //!
 //! SAME FILE, SAME RECORD, SAME PROTOCOL as the CLI's, deliberately — one
 //! lock, not two that agree until somebody edits one. The record is the JSON
-//! `lock.ts` reads (`pid`, `host`, `at`, `command`, `token`), so `paper book
-//! add` beside a running app is refused by name: "pid N holds paper.cli.lock
-//! (Paper, since …)". The stale-claim dance is the CLI's too, and its
-//! comments are the reasoning; they are not repeated here.
+//! `lock.ts` reads (`pid`, `host`, `at`, `command`, `token`, and since
+//! WI-20.34 `startedAt` and `bootedAt`), so `paper book add` beside a running
+//! app is refused by name: "pid N holds paper.cli.lock (Paper, since …)". The
+//! stale-claim dance is the CLI's too, and its comments are the reasoning;
+//! they are not repeated here.
 //!
-//! PUBLISHED BY `link`, NOT BY WRITE-AFTER-CREATE. The CLI opens with `wx`
-//! and then writes the record, and a kill between the two leaves a lock file
-//! nobody can read — which every later writer treats as held by somebody
-//! unnameable, forever. The record is written whole to a private temp name
-//! and `hard_link`ed into place: atomic, exclusive on POSIX and NTFS, and the
-//! lock file never exists without a readable owner.
+//! PUBLISHED BY `link`, NOT BY WRITE-AFTER-CREATE. The CLI used to open with
+//! `wx` and then write the record, and a kill between the two left a lock
+//! file nobody could read — which every later writer treated as held by
+//! somebody unnameable, forever. Both sides now write the record whole to a
+//! private temp name and `hard_link` it into place: atomic, exclusive on
+//! POSIX and NTFS, and the lock file never exists without a readable owner.
+//! Which is also why an EMPTY lock file is reclaimable by construction: the
+//! protocol cannot produce one, so it is the old protocol's crash window,
+//! and refusing it would lock the library until a human deleted a file.
+//!
+//! A PID IS NOT AN IDENTITY. The kernel hands a dead process's number to
+//! the next one, and a machine that rebooted since the record was written
+//! has handed out every number again. So the record carries the holder's
+//! start time and the host's boot time, and a holder is live only when the
+//! pid runs AND both agree with what the OS says now (`paper-process` is the
+//! one lookup, shared with the daemon's lineage record). `None` from the OS
+//! cannot refute — the check falls back to the pid alone.
 //!
 //! WINDOWS IS FAIL-CLOSED ON A CRASH. Liveness is `kill(pid, 0)`, which is
 //! Unix; without it a lock left by a crashed app is treated as held, and the
@@ -35,12 +47,16 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
 /// The CLI's name for it — `LOCK_FILE` in `lock.ts`. One lock.
 pub const LOCK_FILE: &str = "paper.cli.lock";
+
+/// How far a recorded start or boot may sit from the OS's answer and still
+/// be the same process. The CLI's record is `Date.now() − uptime`, rounded
+/// through seconds; a reused pid is minutes or days away, not seconds.
+const IDENTITY_TOLERANCE_MS: u64 = 5_000;
 
 /// Who holds it, as the file records. The CLI's `LockOwner`, field for field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +69,59 @@ pub struct Owner {
     pub command: String,
     /// Per acquisition; the only thing `release` compares on.
     pub token: String,
+    /// When the holder's process started, epoch milliseconds. Absent in a
+    /// record written before WI-20.34, or on a platform that cannot say.
+    #[serde(default, rename = "startedAt", skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<u64>,
+    /// When the holder's host booted, epoch milliseconds. Same terms.
+    #[serde(default, rename = "bootedAt", skip_serializing_if = "Option::is_none")]
+    pub booted_at: Option<u64>,
+}
+
+/// How the OS is asked whether a recorded holder is still that process.
+/// Injected whole so a test can hand in a pid it is sure of and a clock it
+/// controls; `Liveness::os()` is what the app uses.
+#[derive(Clone, Copy)]
+pub struct Liveness {
+    /// Does `pid` run at all? Signal 0 on Unix; always `true` elsewhere.
+    pub alive: fn(u32) -> bool,
+    /// When `pid` started, or `None` when the OS cannot say.
+    pub started_at: fn(u32) -> Option<u64>,
+    /// When this host booted, or `None` when the OS cannot say.
+    pub booted_at: fn() -> Option<u64>,
+}
+
+impl Liveness {
+    pub fn os() -> Self {
+        Liveness {
+            alive,
+            started_at: paper_process::started_at_ms,
+            booted_at: paper_process::booted_at_ms,
+        }
+    }
+
+    /// Is the recorded holder still the process that wrote the record?
+    ///
+    /// Pid first; then each identity the record carries is compared with
+    /// the OS's answer when there is one. A disagreement is a different
+    /// process (or a different boot) wearing the same number; an absent
+    /// answer on either side cannot refute and is not read as one.
+    fn holds(&self, held: &Owner) -> bool {
+        if !(self.alive)(held.pid) {
+            return false;
+        }
+        if let (Some(recorded), Some(now)) = (held.booted_at, (self.booted_at)()) {
+            if recorded.abs_diff(now) > IDENTITY_TOLERANCE_MS {
+                return false;
+            }
+        }
+        if let (Some(recorded), Some(now)) = (held.started_at, (self.started_at)(held.pid)) {
+            if recorded.abs_diff(now) > IDENTITY_TOLERANCE_MS {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 /// Why the lock could not be taken.
@@ -139,25 +208,20 @@ impl DataLock {
 }
 
 /// Take the lock on `dir`, or say who has it.
-///
-/// `alive` answers whether a pid on THIS host still runs; injected so a test
-/// can hand in a pid it is sure of. The default asks the kernel.
 pub fn acquire(dir: &Path, command: &str) -> Result<DataLock, Refused> {
-    acquire_with(dir, command, alive)
+    acquire_with(dir, command, &Liveness::os())
 }
 
-pub fn acquire_with(
-    dir: &Path,
-    command: &str,
-    alive: fn(u32) -> bool,
-) -> Result<DataLock, Refused> {
+pub fn acquire_with(dir: &Path, command: &str, liveness: &Liveness) -> Result<DataLock, Refused> {
     let path = dir.join(LOCK_FILE);
     let mine = Owner {
         pid: std::process::id(),
         host: hostname(),
-        at: now_ms(),
+        at: paper_process::now_ms(),
         command: command.to_string(),
         token: fresh_token(),
+        started_at: paper_process::own_started_at_ms(),
+        booted_at: paper_process::booted_at_ms(),
     };
     // Bounded: every branch below either returns or makes progress on the
     // file, and a loser of the rename race retries once more. A dozen is far
@@ -168,10 +232,29 @@ pub fn acquire_with(
             Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e.into()),
             Err(_) => {}
         }
-        let Some(held) = read_owner(&path) else {
-            return Err(Refused::Unreadable(path));
+        let held = match read_owner(&path) {
+            Some(held) => held,
+            None if is_empty(&path) => {
+                // The old protocol's crash window: created with `wx`, killed
+                // before the record was written. `link` cannot leave this
+                // shape, so it is provably nobody's. Moved aside and read
+                // back, like a stale record, so a lock that appeared under
+                // the name between the two looks is put back.
+                let aside = dir.join(format!("{LOCK_FILE}.stale-{}", mine.token));
+                if fs::rename(&path, &aside).is_err() {
+                    continue;
+                }
+                // Still empty: nobody's, gone. Not empty: a live lock landed
+                // under the name in the gap — put it back by `link`, and the
+                // aside goes only once the name is taken again.
+                if is_empty(&aside) || fs::hard_link(&aside, &path).is_ok() {
+                    let _ = fs::remove_file(&aside);
+                }
+                continue;
+            }
+            None => return Err(Refused::Unreadable(path)),
         };
-        if !(held.host == mine.host && !alive(held.pid)) {
+        if !(held.host == mine.host && !liveness.holds(&held)) {
             return Err(Refused::Held(held));
         }
         // Stale, and provably ours to clear. CLAIMED BY RENAME, as the CLI
@@ -220,11 +303,9 @@ pub fn read_owner(path: &Path) -> Option<Owner> {
     serde_json::from_str::<Owner>(&text).ok()
 }
 
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+/// A file that exists and holds nothing — see the module note.
+fn is_empty(path: &Path) -> bool {
+    fs::metadata(path).map(|m| m.len() == 0).unwrap_or(false)
 }
 
 /// Unique per acquisition within this process, and across processes by the
@@ -232,6 +313,7 @@ fn now_ms() -> u64 {
 /// token, which pid + time alone could not promise.
 fn fresh_token() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
     let nanos = SystemTime::now()
@@ -292,11 +374,33 @@ mod tests {
         dir
     }
 
-    fn live(_: u32) -> bool {
-        true
+    /// A pid that runs and an OS with no opinion on identity — the check
+    /// the record had before WI-20.34.
+    fn live() -> Liveness {
+        Liveness {
+            alive: |_| true,
+            started_at: |_| None,
+            booted_at: || None,
+        }
     }
-    fn dead(_: u32) -> bool {
-        false
+    fn dead() -> Liveness {
+        Liveness {
+            alive: |_| false,
+            started_at: |_| None,
+            booted_at: || None,
+        }
+    }
+
+    fn record(pid: u32, host: &str, token: &str) -> Owner {
+        Owner {
+            pid,
+            host: host.into(),
+            at: 1,
+            command: "a crashed paper".into(),
+            token: token.into(),
+            started_at: None,
+            booted_at: None,
+        }
     }
 
     #[test]
@@ -311,17 +415,43 @@ mod tests {
         assert_eq!(json["pid"], std::process::id());
         assert_eq!(json["command"], "Paper");
         assert_eq!(json["token"], lock.owner().token);
-        // Published whole: the file never exists without a readable owner.
+        // The two identities, where the OS can say — and as the CLI spells
+        // them, camel-cased, so its `readOwner` picks them up.
+        if paper_process::own_started_at_ms().is_some() {
+            assert!(json["startedAt"].is_u64(), "{text}");
+            assert!(json["bootedAt"].is_u64(), "{text}");
+        }
+        // Published whole: the file never exists without a readable owner,
+        // and the private temp name is gone.
         assert!(read_owner(&dir.join(LOCK_FILE)).is_some());
+        assert!(!dir
+            .join(format!(".{LOCK_FILE}.{}", lock.owner().token))
+            .exists());
         lock.release();
         assert!(!dir.join(LOCK_FILE).exists());
+    }
+
+    /// The CLI's record from before WI-20.34 — five keys, no identity — still
+    /// parses, and is judged on its pid alone.
+    #[test]
+    fn a_five_key_record_is_still_read() {
+        let dir = scratch("five");
+        fs::write(
+            dir.join(LOCK_FILE),
+            br#"{"pid":4000000,"host":"h","at":1,"command":"paper","token":"t"}"#,
+        )
+        .unwrap();
+        let held = read_owner(&dir.join(LOCK_FILE)).unwrap();
+        assert_eq!(held.pid, 4_000_000);
+        assert_eq!(held.started_at, None);
+        assert_eq!(held.booted_at, None);
     }
 
     #[test]
     fn a_second_holder_is_refused_by_name_while_the_first_lives() {
         let dir = scratch("twice");
-        let first = acquire_with(&dir, "Paper", live).unwrap();
-        match acquire_with(&dir, "paper book add", live) {
+        let first = acquire_with(&dir, "Paper", &live()).unwrap();
+        match acquire_with(&dir, "paper book add", &live()) {
             Err(Refused::Held(owner)) => {
                 assert_eq!(owner.pid, std::process::id());
                 assert_eq!(owner.command, "Paper");
@@ -330,27 +460,21 @@ mod tests {
         }
         first.release();
         // And free once it lets go.
-        assert!(acquire_with(&dir, "paper book add", live).is_ok());
+        assert!(acquire_with(&dir, "paper book add", &live()).is_ok());
     }
 
     #[test]
     fn a_stale_lock_on_this_host_is_reclaimed_and_a_live_one_is_not() {
         let dir = scratch("stale");
-        let stale = Owner {
-            pid: 4_000_000,
-            host: hostname(),
-            at: 1,
-            command: "a crashed paper".into(),
-            token: "old".into(),
-        };
+        let stale = record(4_000_000, &hostname(), "old");
         fs::write(dir.join(LOCK_FILE), serde_json::to_vec(&stale).unwrap()).unwrap();
         // Judged live: refused, whatever the pid.
         assert!(matches!(
-            acquire_with(&dir, "Paper", live),
+            acquire_with(&dir, "Paper", &live()),
             Err(Refused::Held(_))
         ));
         // Judged dead: reclaimed, and the new record is ours.
-        let lock = acquire_with(&dir, "Paper", dead).unwrap();
+        let lock = acquire_with(&dir, "Paper", &dead()).unwrap();
         assert_eq!(
             read_owner(&dir.join(LOCK_FILE)).unwrap().token,
             lock.owner().token
@@ -360,19 +484,72 @@ mod tests {
             .exists());
     }
 
+    /// A pid that runs is not a holder when the record says it started at
+    /// another time — the number was reused. And the same when the host has
+    /// booted since. The OS having no answer refutes nothing.
+    #[test]
+    fn a_running_pid_with_another_start_or_boot_is_not_the_holder() {
+        let dir = scratch("identity");
+        let mut reused = record(std::process::id(), &hostname(), "old");
+        reused.started_at = Some(1_000);
+        fs::write(dir.join(LOCK_FILE), serde_json::to_vec(&reused).unwrap()).unwrap();
+        let knows: Liveness = Liveness {
+            alive: |_| true,
+            started_at: |_| Some(2_000_000_000_000),
+            booted_at: || Some(1_900_000_000_000),
+        };
+        let lock = acquire_with(&dir, "Paper", &knows).expect("a reused pid is not a holder");
+        lock.release();
+
+        let mut rebooted = record(std::process::id(), &hostname(), "old");
+        rebooted.booted_at = Some(1_000);
+        fs::write(dir.join(LOCK_FILE), serde_json::to_vec(&rebooted).unwrap()).unwrap();
+        let lock =
+            acquire_with(&dir, "Paper", &knows).expect("a record from an earlier boot is stale");
+        lock.release();
+
+        // Same identity, within the tolerance: held.
+        let mut same = record(std::process::id(), &hostname(), "old");
+        same.started_at = Some(2_000_000_000_000 + 1_500);
+        same.booted_at = Some(1_900_000_000_000 - 1_500);
+        fs::write(dir.join(LOCK_FILE), serde_json::to_vec(&same).unwrap()).unwrap();
+        assert!(matches!(
+            acquire_with(&dir, "Paper", &knows),
+            Err(Refused::Held(_))
+        ));
+
+        // An OS with no answer cannot refute a record that has one.
+        fs::write(dir.join(LOCK_FILE), serde_json::to_vec(&reused).unwrap()).unwrap();
+        assert!(matches!(
+            acquire_with(&dir, "Paper", &live()),
+            Err(Refused::Held(_))
+        ));
+    }
+
+    /// Created with `wx` and killed before the record was written: the old
+    /// protocol's shape, which `link` cannot produce. Reclaimed, not held
+    /// forever by nobody.
+    #[test]
+    fn an_empty_lock_file_is_the_old_crash_window_and_is_reclaimed() {
+        let dir = scratch("empty");
+        fs::write(dir.join(LOCK_FILE), b"").unwrap();
+        // A helper's temp name left behind blocks nobody either.
+        fs::write(dir.join(format!(".{LOCK_FILE}.dangling")), b"{}").unwrap();
+        let lock = acquire_with(&dir, "Paper", &live()).expect("an empty lock is nobody's");
+        assert_eq!(
+            read_owner(&dir.join(LOCK_FILE)).unwrap().token,
+            lock.owner().token
+        );
+        lock.release();
+    }
+
     #[test]
     fn a_lock_from_another_host_is_never_reclaimed() {
         let dir = scratch("elsewhere");
-        let theirs = Owner {
-            pid: 1,
-            host: "some-other-machine.local".into(),
-            at: 1,
-            command: "paper".into(),
-            token: "t".into(),
-        };
+        let theirs = record(1, "some-other-machine.local", "t");
         fs::write(dir.join(LOCK_FILE), serde_json::to_vec(&theirs).unwrap()).unwrap();
         assert!(matches!(
-            acquire_with(&dir, "Paper", dead),
+            acquire_with(&dir, "Paper", &dead()),
             Err(Refused::Held(_))
         ));
     }
@@ -382,7 +559,7 @@ mod tests {
         let dir = scratch("junk");
         fs::write(dir.join(LOCK_FILE), b"{").unwrap();
         assert!(matches!(
-            acquire_with(&dir, "Paper", dead),
+            acquire_with(&dir, "Paper", &dead()),
             Err(Refused::Unreadable(_))
         ));
     }
@@ -390,7 +567,7 @@ mod tests {
     #[test]
     fn release_leaves_a_lock_that_is_no_longer_ours() {
         let dir = scratch("release");
-        let mine = acquire_with(&dir, "Paper", live).unwrap();
+        let mine = acquire_with(&dir, "Paper", &live()).unwrap();
         let theirs = Owner {
             token: "not-mine".into(),
             ..mine.owner().clone()
@@ -406,13 +583,9 @@ mod tests {
     #[test]
     fn the_refusal_names_the_holder_or_the_file() {
         let root = Path::new("/tmp/paper");
-        let held = Refused::Held(Owner {
-            pid: 42,
-            host: "mac.local".into(),
-            at: 1,
-            command: "paper book add".into(),
-            token: "t".into(),
-        });
+        let mut who = record(42, "mac.local", "t");
+        who.command = "paper book add".into();
+        let held = Refused::Held(who);
         let (title, body) = refusal_text(&held, root);
         assert_eq!(title, "Paper is already open");
         assert!(
@@ -431,5 +604,17 @@ mod tests {
         let pid = child.id();
         child.wait().unwrap();
         assert!(!alive(pid), "a reaped child is not alive");
+    }
+
+    /// The real `Liveness::os()` agrees with this process about itself.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn the_os_liveness_recognises_this_process() {
+        let dir = scratch("self");
+        let mine = acquire(&dir, "Paper").unwrap();
+        // A second take by the same process is refused: the record is live
+        // by pid, by start and by boot.
+        assert!(matches!(acquire(&dir, "Paper"), Err(Refused::Held(_))));
+        mine.release();
     }
 }

@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { BookRecord } from '../../core/bookFolder'
 import type { IndexedBook } from '../../core/bookIndex'
 import type {
@@ -95,6 +95,25 @@ export function useLibrary(library: Library): LibraryView {
    * the part it cares about. */
   const lastRemoval = useSyncExternalStore(library.subscribe, library.lastRemoval, library.lastRemoval)
   const failure = useSyncExternalStore(library.subscribe, library.lastFailure, library.lastFailure)
+  /* THE INDEX FLUSH ON BLUR AND ON HIDE (phase 20, D4). A page turn writes
+   * `book.json` and marks the index dirty; the index itself is rewritten on
+   * a 15 s throttle, at quit through the teardown's drain — and here, when
+   * the window loses focus or the tab is hidden, which is the moment a
+   * reader is about to sleep the machine or switch away. Chromium's prefs
+   * and Firefox's session store commit on the same signals. The store is
+   * DOM-free, so the two listeners live in the one hook that adapts it. */
+  useEffect(() => {
+    const flush = () => void library.flushIndex().catch((cause: unknown) => console.error(SAVE_FAILED, cause))
+    const hidden = () => {
+      if (document.visibilityState === 'hidden') flush()
+    }
+    window.addEventListener('blur', flush)
+    document.addEventListener('visibilitychange', hidden)
+    return () => {
+      window.removeEventListener('blur', flush)
+      document.removeEventListener('visibilitychange', hidden)
+    }
+  }, [library])
   /* THE VERB BEHIND EACH FAILURE THIS HOOK RAN, keyed by the failure object
    * the store published for it. Paired in the rejection handler, which runs
    * after the store has already notified — so `paired` is bumped to bring

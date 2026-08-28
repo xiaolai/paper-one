@@ -255,26 +255,12 @@ pub struct OsProcesses;
 #[cfg(target_os = "macos")]
 impl Processes for OsProcesses {
     fn started_at(&self, pid: u32) -> Option<u64> {
-        // `proc_pidinfo(PROC_PIDTBSDINFO)` is what `ps` reads; its start
-        // time is the same `p_starttime` that `sysctl kern.proc.pid` carries,
-        // and it costs one call rather than a sized buffer dance.
-        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
-        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
-        // SAFETY: `info` is a zeroed instance of the struct the flavor fills,
-        // and its size is passed alongside; the return is checked below.
-        let written = unsafe {
-            libc::proc_pidinfo(
-                pid as libc::c_int,
-                libc::PROC_PIDTBSDINFO,
-                0,
-                (&mut info as *mut libc::proc_bsdinfo).cast(),
-                size,
-            )
-        };
-        if written != size {
-            return None;
-        }
-        Some(info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
+        // ONE LOOKUP FOR THE WHOLE APP. The library lock asks the same
+        // question of the same kernel (`src-tauri/src/lock.rs`), and the app
+        // crate may not reach into this plugin for it — so the `proc_pidinfo`
+        // call that was here lives in `paper-process`, in epoch milliseconds
+        // on every platform, and both records compare against it.
+        paper_process::started_at_ms(pid)
     }
 
     fn exe_of(&self, pid: u32) -> Option<PathBuf> {
@@ -335,12 +321,11 @@ impl Processes for OsProcesses {
 #[cfg(target_os = "linux")]
 impl Processes for OsProcesses {
     fn started_at(&self, pid: u32) -> Option<u64> {
-        // `/proc/<pid>/stat` field 22, in clock ticks since boot — psutil's
-        // `create_time` source, and the one thing about a pid the kernel
-        // will not reuse.
-        stat_fields(pid)?
-            .get(19)
-            .and_then(|field| field.parse().ok())
+        // `/proc/<pid>/stat` field 22 — psutil's `create_time` source, and
+        // the one thing about a pid the kernel will not reuse — read by
+        // `paper-process` for the same reason as on macOS: the library lock
+        // asks it too, and the answer is in epoch milliseconds for both.
+        paper_process::started_at_ms(pid)
     }
 
     fn exe_of(&self, pid: u32) -> Option<PathBuf> {

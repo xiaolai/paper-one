@@ -39,6 +39,7 @@ tauri-plugin = { version = "2.6", features = ["build"] }
 tauri = { version = "2.11.3", default-features = false }
 # The one resolution of the data root, shared with the app and the other plugin.
 paper-data-root = { path = "../paper-data-root" }
+paper-process = { path = "../paper-process" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

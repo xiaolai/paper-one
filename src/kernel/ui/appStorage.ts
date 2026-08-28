@@ -1,12 +1,6 @@
-import {
-  BaseDirectory,
-  exists,
-  mkdir,
-  readTextFile,
-  rename,
-  writeTextFile,
-} from '@tauri-apps/plugin-fs'
-import { STORE_FILE, openFileStore, type FileStore, type FileSystem } from '../core/fileStore'
+import { invoke } from '@tauri-apps/api/core'
+import { BaseDirectory, exists, mkdir, readTextFile, rename } from '@tauri-apps/plugin-fs'
+import { openFileStore, type FileStore, type FileSystem } from '../core/fileStore'
 import type { MarkStorage } from '../core/marks'
 import { inTauri } from './inTauri'
 
@@ -20,26 +14,27 @@ import { inTauri } from './inTauri'
 
 const DIR = { baseDir: BaseDirectory.AppData } as const
 
-/** The temporary name an atomic write goes through. */
-const TEMP_FILE = `${STORE_FILE}.writing`
-
 /**
- * Write through a temporary file and a rename.
+ * Write through a temporary file and a rename, synced.
  *
  * A truncated store loses EVERY mark rather than one, and `writeTextFile` on a
  * path that already exists truncates before it writes — so a crash or a full
  * disk in the middle leaves nothing recoverable. A rename over a complete file
- * is atomic on every filesystem this ships to.
+ * is atomic on every filesystem this ships to — and, since phase 20's D3,
+ * durable across a power cut too: `write_atomic` is the app's own command,
+ * the same one the vault writes `book.json` through (`vaultFsTauri.ts`), and
+ * the store is written at the full level because it is the cards and the
+ * settings, whole.
  */
 const tauriFs: FileSystem = {
   read: async (path) => {
     if (!(await exists(path, DIR))) return null
     return readTextFile(path, DIR)
   },
-  write: async (path, text) => {
-    await writeTextFile(TEMP_FILE, text, DIR)
-    await rename(TEMP_FILE, path, { oldPathBaseDir: DIR.baseDir, newPathBaseDir: DIR.baseDir })
-  },
+  write: (path, text) =>
+    invoke('write_atomic', new TextEncoder().encode(text), {
+      headers: { path: encodeURIComponent(path), level: 'full' },
+    }),
   quarantine: (path, to) =>
     rename(path, to, { oldPathBaseDir: DIR.baseDir, newPathBaseDir: DIR.baseDir }),
 }

@@ -295,7 +295,7 @@ export type { Presence, PresenceEntry, PresenceState } from './core/presence'
 export { FORMATS, formatOf, isFormat, sniffFormat } from './core/formats'
 export type { Format } from './core/formats'
 export type { TrashFs } from './core/bookTrash'
-export type { ContentExtension, KnownExtension, VaultFs } from './core/bookVault'
+export type { ContentExtension, KnownExtension, SyncLevel, VaultFs } from './core/bookVault'
 
 /* The vocabulary. */
 /* THE CLOSED DOMAINS, exported so a client can VALIDATE a wire row against

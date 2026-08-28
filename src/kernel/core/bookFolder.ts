@@ -28,7 +28,7 @@
  * the truth.
  */
 
-import type { VaultFs } from './bookVault'
+import type { SyncLevel, VaultFs } from './bookVault'
 import { extensionFor } from './bookVault'
 import { isFormat, type Format, type NamedSource } from './formats'
 import { compareHlc, hlcOf, isHlc, type Hlc } from './hlc'
@@ -525,6 +525,7 @@ export async function writeBook(
   fs: VaultFs,
   bookId: string,
   record: BookRecord,
+  level: SyncLevel = 'full',
 ): Promise<void> {
   // Stamped on every write, so the record always knows its own id even if the
   // caller passed one that was not in it.
@@ -533,11 +534,13 @@ export async function writeBook(
     fs,
     recordPath(bookId),
     new TextEncoder().encode(JSON.stringify(stamped, null, 2)),
+    level,
   )
 }
 
 /**
- * Write a file so that a crash cannot leave half of one.
+ * Write a file so that a crash cannot leave half of one — and, where the
+ * filesystem can, so that a power cut cannot either.
  *
  * A temporary neighbour, then a rename — atomic within a filesystem, so readers
  * see the old bytes or the new bytes and never a truncated file. That matters
@@ -548,11 +551,27 @@ export async function writeBook(
  * folder import, and the reader's own copy on open — and four copies of an
  * invariant is three chances for one of them to drift out of it.
  *
- * The temporary path is derived from the destination, so two writers racing for
- * ONE file still collide. That is deliberate and is why both stores serialise
- * their writes per book; see `writeQueue`.
+ * SYNCED WHERE IT CAN BE (phase 20, D3). A filesystem with `writeAtomic` does
+ * the whole thing itself — write, sync the file at `level`, rename, sync the
+ * directory — in one call; the app's is one Rust command, the CLI's is
+ * `node:fs`. Without it, the temp-and-rename below: what the vault had for
+ * its whole life, which survives a crash and not a power loss, and is what a
+ * fake filesystem offers.
+ *
+ * The fallback's temporary path is derived from the destination, so two
+ * writers racing for ONE file still collide. That is deliberate and is why
+ * both stores serialise their writes per book; see `writeQueue`.
  */
-export async function atomicWrite(fs: VaultFs, path: string, bytes: Uint8Array): Promise<void> {
+export async function atomicWrite(
+  fs: VaultFs,
+  path: string,
+  bytes: Uint8Array,
+  level: SyncLevel = 'full',
+): Promise<void> {
+  if (fs.writeAtomic) {
+    await fs.writeAtomic(path, bytes, level)
+    return
+  }
   const writing = `${path}.writing`
   /* ONLY WHEN THERE IS ONE. `index.json` sits at the root of the data directory
    * and has no slash in it, so `slice(0, lastIndexOf('/'))` returns `index.jso`
@@ -593,6 +612,7 @@ export async function updateBook(
   fs: VaultFs,
   bookId: string,
   change: (record: BookRecord) => BookRecord,
+  level: SyncLevel = 'full',
 ): Promise<BookRecord | null> {
   /* THE CHANGE IS APPLIED TO WHAT IS ON DISK, which is the point of taking a
    * function rather than a value. A caller holding an in-memory copy may be
@@ -616,7 +636,7 @@ export async function updateBook(
   }
   const next = change(current)
   if (next === current) return current
-  await writeBook(fs, bookId, next)
+  await writeBook(fs, bookId, next, level)
   /* CHECKED AFTER THE WRITE, because a removal can rename the folder between
    * the read above and the write — and `writeBook` calls `mkdir`, so it happily
    * recreates the folder containing nothing but this record. That is a book

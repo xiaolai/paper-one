@@ -1,6 +1,6 @@
 import { constants } from 'node:fs'
 import { access, appendFile, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
-import { isAbsolute, relative, resolve, sep } from 'node:path'
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import {
   CONTENT_EXTENSIONS,
   folderOf,
@@ -162,6 +162,50 @@ export function nodeIndexFs(root: string): IndexFs {
     appendFile: async (path, bytes) => {
       await appendFile(at(path), bytes)
     },
+    /* THE WHOLE ATOMIC WRITE, SYNCED — `VaultFs.writeAtomic`, over `node:fs`
+     * (phase 20, D3). Temp in the same directory and private to this write,
+     * `write`, `fsync`, `rename`, then the directory synced so the rename is
+     * on disk too. The level is honoured as far as Node can: `fs.fsync` is
+     * `fsync(2)`, which on macOS is the barrier and not `F_FULLFSYNC` — the
+     * app's Rust command has both; a `paper book add` survives a crash and
+     * not necessarily a power cut, and says so here rather than implying
+     * otherwise. */
+    writeAtomic: async (path, bytes, _level) => {
+      const target = at(path)
+      const dir = dirname(target)
+      await mkdir(dir, { recursive: true })
+      const writing = `${target}.${process.pid}.${nextTemp++}.writing`
+      try {
+        const handle = await open(writing, 'w')
+        try {
+          await handle.writeFile(bytes)
+          await handle.sync()
+        } finally {
+          await handle.close()
+        }
+        await rename(writing, target)
+      } catch (cause) {
+        await rm(writing, { force: true }).catch(() => {})
+        throw cause
+      }
+      await syncDir(dir)
+    },
+    /* The sync journal's barrier, over a real descriptor: `fsync(2)` on a
+     * read handle — enough to flush, and it needs no permission a barrier
+     * does not. A directory is synced the same way. */
+    fsync: async (path, _level) => {
+      const target = at(path)
+      if ((await stat(target)).isDirectory()) {
+        await syncDir(target)
+        return
+      }
+      const handle = await open(target, 'r')
+      try {
+        await handle.sync()
+      } finally {
+        await handle.close()
+      }
+    },
     /* A REAL SEEK, for the same reason the Tauri adapter has one: `content.read`
      * serves a book a slice at a time, and the interface's fallback is O(n) per
      * slice — quadratic over a book, with a 300 MB scanned PDF re-read once per
@@ -282,86 +326,25 @@ export function nodeTextFs(root: string): FileSystem {
 }
 
 /**
- * Is the reader's app holding this library open?
- *
- * THREE ANSWERS, NOT TWO, and the third is the important one. This began as a
- * boolean and every case it could not decide — an unsupported platform, a
- * probe that failed — collapsed into `false`, meaning "safe to journal". That
- * is failing OPEN on the one question protecting `journal.jsonl` from a second
- * writer, and a second writer corrupts `nextSeq` and the rev CAS in a way no
- * later pass detects.
- *
- * So an undecidable answer is `unknown`, and the caller treats `unknown`
- * exactly as it treats `running`. The cost is that on a platform this cannot
- * probe, `paper` declines to journal and says so — which is the behaviour the
- * CLI had before journalling existed at all, and strictly better than a
- * corrupt journal.
- *
- * WHAT IT CAN ACTUALLY DECIDE:
- *
- * - **macOS**: `pgrep -f` against the bundle's executable path. `-f` and never
- *   `-x`, because Tauri names the executable inside the bundle `app`, so
- *   `pgrep -x Paper` can never match — a mistake that once reported the app
- *   closed on a machine where it was plainly running.
- * - **Linux and Windows**: `unknown`. A Tauri app there is a bare executable
- *   with no `Paper.app` bundle path to match, so the macOS probe would answer
- *   `absent` for a running app — a false negative, which is the dangerous
- *   direction. Saying so is better than guessing.
- *
- * STILL A HEURISTIC where it answers at all: it matches any Paper process on
- * the machine, not one holding THIS data root, and it is read once before the
- * journal is opened rather than held for the duration. The real fix is a
- * per-data-root lock taken by both the app and the CLI, which needs a Rust
- * command with an ACL entry on the app side; until that exists this is the
- * honest approximation and is documented as one in `dev-docs/cli.md`.
+ * A directory's entries, on disk — the half that makes a rename durable
+ * (Pillai et al., OSDI 2014). Ignored where the filesystem refuses it
+ * (`EINVAL`, `ENOTSUP`) and where a directory cannot be opened as a file
+ * (Windows), as PostgreSQL and SQLite do: the rename is what it is there.
  */
-export type AppPresence = 'running' | 'absent' | 'unknown'
-
-export async function appPresence(): Promise<AppPresence> {
-  if (process.platform !== 'darwin') return 'unknown'
+async function syncDir(dir: string): Promise<void> {
+  let handle: Awaited<ReturnType<typeof open>>
   try {
-    const { execFile } = await import('node:child_process')
-    const { promisify } = await import('node:util')
-    const { stdout } = await promisify(execFile)('pgrep', ['-f', 'Paper.app/Contents/MacOS/'])
-    return stdout.trim().length > 0 ? 'running' : 'absent'
-  } catch (error) {
-    /* `pgrep` exits 1 with no output when nothing matches — that is a real
-     * ANSWER, not a failure, and the only error shape that may mean `absent`.
-     * Anything else (no `pgrep`, a permission problem) is undecided. */
-    const code = (error as { code?: unknown })?.code
-    const out = (error as { stdout?: unknown })?.stdout
-    if (code === 1 && typeof out === 'string' && out.trim() === '') return 'absent'
-    return 'unknown'
+    handle = await open(dir, 'r')
+  } catch {
+    return
   }
-}
-
-/**
- * The journal's durability barrier, over a real file descriptor.
- *
- * `JournalOptions.fsync` defaults to a no-op, and a no-op is what the CLI had:
- * every journal line was a write the page cache could still be holding when
- * the process exited. The app binds the peer plugin's `fs_fsync` here; this is
- * the same barrier for a Node process.
- *
- * It opens for READING. `fsync(2)` flushes whatever the descriptor names, and
- * a read handle is enough — opening for write would truncate on the wrong flag
- * and needs a permission the barrier does not. The journal also fsyncs its
- * DIRECTORY after a rename (`fsyncDir`), which is a read handle of necessity.
- *
- * NOT a full `F_FULLFSYNC`: on macOS `fsync(2)` hands the data to the drive
- * without waiting for the drive's own cache to commit, so this survives a
- * process crash — the case the journal's dirty flag is paired with — and not
- * necessarily a power cut. Said plainly rather than implied, because a barrier
- * believed to be stronger than it is, is worse than a missing one.
- */
-export function nodeFsyncPort(root: string): (path: string) => Promise<void> {
-  return async (path: string) => {
-    const handle = await open(under(root, path), 'r')
-    try {
-      await handle.sync()
-    } finally {
-      await handle.close()
-    }
+  try {
+    await handle.sync()
+  } catch (cause) {
+    const code = (cause as { code?: string }).code
+    if (code !== 'EINVAL' && code !== 'ENOTSUP' && code !== 'EISDIR' && code !== 'EPERM') throw cause
+  } finally {
+    await handle.close()
   }
 }
 

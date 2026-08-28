@@ -11,13 +11,11 @@
 //! `tauri::ipc::Response` carries raw bytes without changing the contract
 //! below it.
 
-use std::path::PathBuf;
-
 use serde::Serialize;
 use tauri::{AppHandle, Runtime, State};
 
 use crate::blobs::{self, FetchHooks, FetchRequest, HashResult};
-use crate::data_root::{checked_target, data_root};
+use crate::data_root::data_root;
 use crate::error::{Error, Result};
 use crate::pairing::{self, PairOffer, PairStart};
 use crate::peers::PeerRecord;
@@ -39,7 +37,12 @@ pub struct Status {
     pub ready: bool,
 }
 
-// ── status, role, root, fsync (WI-5.8) ────────────────────────────────────
+// ── status, role, root (WI-5.8) ───────────────────────────────────────────
+//
+// `fs_fsync` LIVED HERE and moved to the app crate (`src-tauri/src/atomic.rs`,
+// WI-20.35). The sync journal's durability barrier is the kernel's business,
+// and a kernel that reached a removable capability's command for it by
+// string stopped flushing the moment the capability was removed.
 
 /// The endpoint's identity and this device's role. Starts the node on the
 /// first call.
@@ -86,23 +89,6 @@ pub fn paper_data_root<R: Runtime>(app: AppHandle<R>) -> Result<String> {
     root.to_str()
         .map(str::to_owned)
         .ok_or(Error::PathNotUnicode(root))
-}
-
-/// Flush a file (or directory) inside the data root to stable storage.
-///
-/// The fs plugin's `writeTextFile` returns when the bytes are handed to the
-/// OS, not when they are on disk; a rename is durable only once its parent
-/// directory is synced. This is the missing half. Anything outside the data
-/// root is refused with a typed error before the file is opened.
-#[tauri::command]
-pub async fn fs_fsync<R: Runtime>(app: AppHandle<R>, path: String) -> Result<()> {
-    let root = data_root(&app)?;
-    let target = checked_target(&root, &PathBuf::from(path))?;
-    // Read-only open: fsync does not need a writable descriptor, and this way
-    // a directory can be synced too (a write open of a directory fails).
-    let file = tokio::fs::File::open(&target).await?;
-    file.sync_all().await?;
-    Ok(())
 }
 
 // ── peers and grants (WI-B.1) ─────────────────────────────────────────────

@@ -13,7 +13,16 @@ import {
   writeBook,
   type BookRecord,
 } from './bookFolder'
-import { hasContentFile, invalidateIndex, writeIndex, type IndexFs, type IndexedBook } from './bookIndex'
+import type { SyncLevel } from './bookVault'
+import {
+  clearDirtyMarker,
+  hasContentFile,
+  invalidateIndex,
+  writeDirtyMarker,
+  writeIndex,
+  type IndexFs,
+  type IndexedBook,
+} from './bookIndex'
 import { keepCover } from './coverArt'
 import { TRASH_WINDOW_MS, expiredTrash, readStamp, rescueStrandedMarks, restoreBook, trashBook, type RestoreOutcome } from './bookTrash'
 import { hlcOf, type Hlc } from './hlc'
@@ -179,6 +188,15 @@ export interface Library {
    * wider than its track.
    */
   rememberPosition(bookId: string, position: string, progress: number): Promise<void>
+  /**
+   * Rewrite the index now, if a position tick left it behind (phase 20, D4).
+   *
+   * A page turn writes the book's own record and marks the index dirty; the
+   * index is rewritten on a throttle, and by this — from the drain at quit,
+   * and from the window losing focus or being hidden. Resolves when the
+   * rewrite has landed. A no-op when nothing is dirty.
+   */
+  flushIndex(): Promise<void>
   /** Whether the reader is done with a book. */
   setFinished(bookId: string, finished: boolean): Promise<void>
   /**
@@ -498,6 +516,15 @@ const sameRow = (a: IndexedBook, b: IndexedBook): boolean => canonical(a) === ca
 export const WRITE_WIDTH = 8
 
 /**
+ * How long the index may sit behind a position tick before it is rewritten
+ * (phase 20, D4). Fifteen seconds: Chromium commits its prefs every ten,
+ * Firefox its session store every fifteen, and Readest throttles its
+ * library file at thirty — and a drain, a blur or a hidden tab flushes at
+ * once, so the timer is the ceiling and not the usual case.
+ */
+export const INDEX_FLUSH_MS = 15_000
+
+/**
  * Run `work` over every item, at most `width` in flight, gathering failures
  * rather than stopping at the first.
  *
@@ -711,15 +738,94 @@ export function createLibrary({
     publish(next)
   }
 
-  /** The index, rewritten whole from the newest state, on its own key. */
+  /* THE DIRTY LIST (phase 20, D4) — which books `book.json` is ahead of the
+   * index on, and a generation that says whether a flush saw all of it.
+   *
+   * Every position save used to rewrite `index.json` whole: ~1 MB every two
+   * seconds at 2 000 books. A tick now writes the record at the barrier
+   * level and puts the book here; the index is rewritten on a throttle, at
+   * quit, and when the window blurs or hides. The marker on disk is written
+   * once per dirty PERIOD — when a book joins the set — not per tick, and
+   * `loadShelf` re-reads the listed records before trusting the cache.
+   *
+   * THE GENERATION IS THE COMPARE-AND-CLEAR KEY, Calibre's `dirtied_sequence`.
+   * A flush captures it before serialising; a tick that lands while the
+   * flush is writing bumps it; the flush then finds it moved and leaves the
+   * marker standing — so a crash before the next flush still re-reads the
+   * book the index missed. A one-bit marker was refuted on exactly that
+   * interleaving (round 2, #4). */
+  const dirty = new Set<string>()
+  let generation = 0
+  let flushTimer: ReturnType<typeof setTimeout> | null = null
+  let flushing: Promise<void> | null = null
+
+  /**
+   * The index, rewritten whole from the newest state, on its own key —
+   * and the dirty marker cleared, if and only if nothing was dirtied while
+   * the rewrite was in flight.
+   */
   const writeIndexNow = (target: IndexFs) =>
     /* The index LAST, and on its own key so a book's write is never held up
      * by it. Rewritten whole from `books`, which is the newest state by the
      * time this runs — a cache should describe where things ended up, not
      * where one write thought they were going. */
     queue.push('index', async () => {
+      const captured = generation
       await writeIndex(target, books)
+      if (captured === generation) {
+        if (dirty.size === 0) return
+        dirty.clear()
+        await clearDirtyMarker(target)
+      } else {
+        /* A tick landed mid-write. The index just installed is behind it;
+         * the marker must be on disk for it — re-stated whole, because the
+         * one the period began with may name fewer books than are dirty. */
+        await writeDirtyMarker(target, { version: 1, generation, books: [...dirty] })
+      }
     })
+
+  /**
+   * A position tick's half of the index: the book joins the dirty set, the
+   * marker is written when it does (APPENDED on the index key, so a
+   * structural rewrite queued behind it cannot coalesce it away — the queue
+   * keeps appended tasks and replaces only pushed ones), and the throttled
+   * flush is armed.
+   */
+  const markDirty = (target: IndexFs, bookId: string): Promise<void> => {
+    generation += 1
+    const joined = !dirty.has(bookId)
+    dirty.add(bookId)
+    armFlush(target)
+    if (!joined) return Promise.resolve()
+    const marker = { version: 1 as const, generation, books: [...dirty] }
+    return queue.append('index', () => writeDirtyMarker(target, marker))
+  }
+
+  const armFlush = (target: IndexFs) => {
+    if (flushTimer !== null) return
+    flushTimer = setTimeout(() => {
+      flushTimer = null
+      void flushIndex().catch((cause: unknown) => console.error('Paper: could not save the shelf index', cause))
+    }, INDEX_FLUSH_MS)
+    /* A timer must not keep a Node process — `paper` — alive for a flush
+     * its drain will run anyway; a browser's timer has no such handle. */
+    ;(flushTimer as { unref?: () => void }).unref?.()
+    void target
+  }
+
+  const flushIndex: Library['flushIndex'] = () => {
+    if (flushTimer !== null) {
+      clearTimeout(flushTimer)
+      flushTimer = null
+    }
+    if (!fs || dirty.size === 0) return Promise.resolve()
+    /* ONE IN FLIGHT: a blur and a drain a moment apart share the rewrite
+     * rather than queueing two. */
+    flushing ??= writeIndexNow(fs).finally(() => {
+      flushing = null
+    })
+    return flushing
+  }
 
   /**
    * What a commit may do BEFORE the recorder's `begin`, inside the lane.
@@ -735,6 +841,17 @@ export function createLibrary({
     readonly retract: () => void
   }
 
+  /**
+   * How a commit treats the index once its folder write has landed.
+   *
+   * `now` rewrites it whole — every structural change: a row added or
+   * removed, a tag, a rekey. `defer` marks the book dirty and leaves the
+   * rewrite to the throttle: the position tick, which is the one write that
+   * happens every two seconds and changes nothing the folder listing can
+   * see.
+   */
+  type IndexPolicy = 'now' | 'defer'
+
   /** State first, then the folder, then the index. */
   const commit = (
     key: string,
@@ -742,6 +859,7 @@ export function createLibrary({
     what: 'record' | 'removed',
     write: (target: IndexFs, live: string) => Promise<unknown>,
     hooks?: CommitHooks,
+    index: IndexPolicy = 'now',
   ): Promise<void> => {
     publish(next)
     if (!fs) return Promise.resolve()
@@ -770,9 +888,12 @@ export function createLibrary({
           await recorded(recorder, live, what, () => write(target, live))
         })
         .then(() => {
-          if (refused) hooks!.retract()
-          else noteLanded(resolveId(key))
-          return writeIndexNow(target)
+          if (refused) {
+            hooks!.retract()
+            return writeIndexNow(target)
+          }
+          noteLanded(resolveId(key))
+          return index === 'defer' ? markDirty(target, resolveId(key)) : writeIndexNow(target)
         })
         .catch(async (cause: unknown) => {
           /* SAID FIRST, before the repair — which is a further write that may
@@ -835,7 +956,22 @@ export function createLibrary({
     )
   }
 
-  const update: Library['update'] = (bookId, change) => {
+  /**
+   * How a record change is written: how hard the record is synced, and
+   * what happens to the index. Every caller but the position tick takes the
+   * defaults — full sync, index now.
+   */
+  interface WriteWith {
+    readonly level: SyncLevel
+    readonly index: IndexPolicy
+  }
+  const STRUCTURAL: WriteWith = { level: 'full', index: 'now' }
+  /* The position tick (phase 20, D3/D4): the record at the barrier level —
+   * ordered, not waited for; a position lost to a power cut is a page, not
+   * a book — and the index deferred behind the dirty list. */
+  const TICK: WriteWith = { level: 'barrier', index: 'defer' }
+
+  const updateWith = (bookId: string, change: (record: BookRecord) => BookRecord, how: WriteWith): Promise<void> => {
     const at = books.findIndex((one) => one.bookId === bookId)
     const current = at === -1 ? null : books[at]
     if (!current) return Promise.resolve()
@@ -851,17 +987,25 @@ export function createLibrary({
      * the row on the way through — the same defect `add` had, wearing the
      * other mutator. */
     list[at] = asRow(next, bookId, current.hasContent)
-    return commit(bookId, list, 'record', (target, live) =>
-      /* THE CHANGE, not the result. Passing `() => next` wrote the in-memory
-       * record back — and that copy can be stale, because it came from an
-       * index that may be one write behind after a crash. Handing the function
-       * over means it is applied to whatever is actually on disk.
-       *
-       * `live` rather than `bookId`: the book may have been carried onto a new
-       * id while this write waited its turn — see `rekeyed`. */
-      updateBook(target, live, change),
+    return commit(
+      bookId,
+      list,
+      'record',
+      (target, live) =>
+        /* THE CHANGE, not the result. Passing `() => next` wrote the in-memory
+         * record back — and that copy can be stale, because it came from an
+         * index that may be one write behind after a crash. Handing the function
+         * over means it is applied to whatever is actually on disk.
+         *
+         * `live` rather than `bookId`: the book may have been carried onto a new
+         * id while this write waited its turn — see `rekeyed`. */
+        updateBook(target, live, change, how.level),
+      undefined,
+      how.index,
     )
   }
+
+  const update: Library['update'] = (bookId, change) => updateWith(bookId, change, STRUCTURAL)
 
   /**
    * Whether a row's bytes are back, checked and recorded. Runs INSIDE a
@@ -1348,9 +1492,9 @@ export function createLibrary({
    * the ledger's registers now; with no sync composed the stamp is the legacy
    * wall clock under the zero device, which merges exactly like a legacy
    * record's synthesised stamp — nothing changes until a real clock arrives.) */
-  const patch: Library['patch'] = (bookId, fields) => {
+  const patchWith = (bookId: string, fields: BookPatch, how: WriteWith): Promise<void> => {
     const at = clock()
-    return update(bookId, (record) => {
+    return updateWith(bookId, (record) => {
       let next = record
       /* Identity-guarded field by field, so a patch naming three fields of
        * which two already hold writes only what moved — and a patch that
@@ -1371,14 +1515,21 @@ export function createLibrary({
         }
       }
       return next
-    })
+    }, how)
   }
+
+  const patch: Library['patch'] = (bookId, fields) => patchWith(bookId, fields, STRUCTURAL)
 
   /* Both of these are `patch` with one field named. Kept as their own verbs
    * because that is how the reader's app says what it means, and because a
-   * caller that only turns pages should not have to build a patch object. */
+   * caller that only turns pages should not have to build a patch object.
+   *
+   * THE POSITION TICK IS THE ONE WRITE THAT IS NOT STRUCTURAL (phase 20, D3
+   * and D4): the record at the barrier level, the index deferred. `book.set
+   * --position` from the CLI goes through `patch` and stays structural — it
+   * is one write, not one every two seconds. */
   const rememberPosition: Library['rememberPosition'] = (bookId, position, progress) =>
-    patch(bookId, { position: { position, progress } })
+    patchWith(bookId, { position: { position, progress } }, TICK)
 
   const setFinished: Library['setFinished'] = (bookId, finished) => patch(bookId, { finished })
 
@@ -1840,6 +1991,7 @@ export function createLibrary({
     restore,
     patch,
     rememberPosition,
+    flushIndex,
     setFinished,
     tag,
     untag,

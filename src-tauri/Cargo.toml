@@ -19,6 +19,10 @@ tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
 serde_json = "1.0"
+# For the `path` header of `write_atomic`, encoded the way the fs plugin's
+# client encodes its own (`atomic.rs`). Already in the tree through the peer
+# plugin's pairing URI.
+percent-encoding = "2"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 # `macos-private-api` is required for `titleBarStyle: "Overlay"` to honour
@@ -60,6 +64,7 @@ tauri-plugin-peer = { path = "crates/tauri-plugin-peer" }
 # Where the data lives — for the library lock (`src/lock.rs`). A plain
 # library, not a capability, so no capability's removal takes it away.
 paper-data-root = { path = "crates/paper-data-root" }
+paper-process = { path = "crates/paper-process" }
 # The local inference runtime (crates/tauri-plugin-inference). DESKTOP ONLY and
 # therefore optional: `lemond` ships for macOS, Windows and Linux and there is
 # no mobile build of it, so a phone has nothing for this plugin to supervise.

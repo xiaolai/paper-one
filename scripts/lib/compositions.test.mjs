@@ -476,9 +476,14 @@ describe('checkRustSurfaces', () => {
     }
     expect(plugins.length, 'the app depends on no plugin crate by path?').toBeGreaterThan(0)
     for (const name of plugins) expect(registersPlugin(libRs, rustName(name)), `${name} is a plugin the app depends on`).toBe(true)
-    /* The library is depended on, not registered — and is named here so the
-       shape this case now allows is a named one, not a silent widening. */
-    expect(libraries).toEqual(['paper-data-root'])
+    /* The libraries are depended on, not registered — and are named here so
+       the shape this case allows is a named one, not a silent widening.
+       `paper-process` (WI-20.34) is the second: the process-identity lookup
+       the lock's liveness check and the inference plugin's lineage record
+       share, a plain crate for the same reason `paper-data-root` is — the app
+       must not reach into a removable capability for a rule that is not the
+       capability's. */
+    expect(libraries).toEqual(['paper-data-root', 'paper-process'])
     for (const name of libraries) expect(registersPlugin(libRs, rustName(name))).toBe(false)
     expect(registersPlugin(libRs, 'tauri_plugin_fs')).toBe(true)
   })

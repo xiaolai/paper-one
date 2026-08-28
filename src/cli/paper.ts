@@ -1,8 +1,8 @@
 import { LockHeld, acquireDataLock, type DataLock } from '../hosts/node/lock'
-import { appPresence, makeDataDir, nodeFsyncPort, type AppPresence } from '../hosts/node/fs'
+import { makeDataDir } from '../hosts/node/fs'
 import { defaultDataDir, openNodeServices } from '../hosts/node/services'
 import { readingGrant } from '../kernel'
-import { JournalInUse, openLocalJournal, type LocalJournal } from '../capabilities/sync'
+import { openLocalJournal, type LocalJournal } from '../capabilities/sync'
 import { localCaller, type ServiceCaller } from './caller'
 import { plain } from './format'
 import { EXIT, runCommand, type CliSinks, type OpenCaller } from './run'
@@ -53,15 +53,6 @@ export interface PaperOptions {
    * without it says so by name instead of pretending the shelf is local.
    */
   readonly remote?: (shelf: string) => Promise<ServiceCaller>
-  /**
-   * Whether the reader's app is holding this library open.
-   *
-   * INJECTED SO A TEST DOES NOT DEPEND ON THE DEVELOPER'S DOCK. The default
-   * asks the operating system, so a suite run with Paper open answered
-   * differently from the same suite run with it closed — a test that passes
-   * or fails on what else is running is not a test.
-   */
-  readonly appPresence?: () => Promise<AppPresence>
   /** How long a write waits for the lock before refusing. See `lock.ts`. */
   readonly lockWaitMs?: number
 }
@@ -75,21 +66,13 @@ export interface PaperOptions {
  * throws still drains the write queue — a CLI that exited with a write in
  * flight would be the one way this can lose a reader's work.
  */
-export async function paper({
-  argv,
-  sinks,
-  dataDir,
-  remote,
-  lockWaitMs,
-  appPresence: presence = appPresence,
-}: PaperOptions): Promise<number> {
+export async function paper({ argv, sinks, dataDir, remote, lockWaitMs }: PaperOptions): Promise<number> {
   let lock: DataLock | null = null
   /** Raised by `open` when no remote is wired; caught below, like the lock's. */
   let noRemote: Error | null = null
   /** Thrown by `open` when the lock is held; caught below so the message is
    *  one line rather than a stack. */
   let refusedBy: LockHeld | null = null
-  let journalBusy: JournalInUse | null = null
 
   const open: OpenCaller = async (descriptor, shelf) => {
     if (shelf !== null) {
@@ -114,11 +97,19 @@ export async function paper({
      * because `paper book list` beside a running import is a perfectly safe
      * thing to want and a read that queued behind one would make the CLI feel
      * broken for no gain. */
-    if (!readingGrant(descriptor.grant)) {
-      /* THE DIRECTORY FIRST. `wx` on a path whose parent does not exist is
-       * ENOENT, not EEXIST — so on a machine that has never run Paper, the
-       * first write failed before it could take a lock on the library it was
-       * about to create. */
+    const writes = !readingGrant(descriptor.grant)
+    if (writes) {
+      /* THE DIRECTORY FIRST. A lock published into a directory that does not
+       * exist is ENOENT, not "held" — so on a machine that has never run
+       * Paper, the first write failed before it could take a lock on the
+       * library it was about to create.
+       *
+       * AND THE LOCK IS THE WHOLE ANSWER TO "IS THE APP RUNNING". The app
+       * takes this same lock in Rust at setup (WI-20.40), so a writing
+       * `paper` beside a running Paper is refused here, by name, with the
+       * app's pid — and off macOS too. The `pgrep` that used to guess
+       * answered `unknown` there and refused every write, and could not see
+       * `pnpm app` here. */
       await makeDataDir(root)
       try {
         lock = await acquireDataLock(root, lockWaitMs === undefined ? {} : { waitMs: lockWaitMs })
@@ -128,7 +119,12 @@ export async function paper({
         throw error
       }
     }
-    const host = await openNodeServices({ dataDir: root })
+    /* A READ HOLDS NO LOCK, SO IT MAY NOT WRITE — not even the shelf cache.
+     * `loadShelf` rescans a stale index and used to write the result back
+     * through the same `index.json.writing` temp the app's own index writes
+     * use, so `paper book list` beside a running app was a second writer on
+     * one filename. The rescan is served from memory instead. */
+    const host = await openNodeServices({ dataDir: root, persist: writes })
     /* THE JOURNAL, FOR A WRITE, ON THE SAME CONDITION AS THE LOCK — read from
      * the service's grant, so there is no second derivation of "this command
      * writes" to keep in step with the first.
@@ -139,45 +135,18 @@ export async function paper({
      * read stays out of this entirely; `paper book list` should not pay to
      * open a journal it cannot dirty.
      *
-     * `openLocalJournal` REFUSES when the app holds the journal, which is the
-     * safety this write path never had. It is caught rather than thrown
-     * through so the host is closed — an open host behind a refusal leaks the
-     * file store and, on a directory this process just locked, leaves the
-     * shelf loaded for nobody. */
+     * With the lock held there is no second writer to ask about: the dirty
+     * flag, if up, was left by a crash, and the journal opens without the
+     * recovery pass the flag asks for (that pass is the app's). A failure to
+     * open is thrown through after the host is closed — an open host behind
+     * a failure leaks the file store and, on a directory this process just
+     * locked, leaves the shelf loaded for nobody. */
     let journal: LocalJournal | null = null
-    if (!readingGrant(descriptor.grant)) {
-      /* THE DIRTY FLAG IS NOT THE QUESTION; A LIVE SECOND WRITER IS.
-       *
-       * The flag says "not closed cleanly", which in the field is close to
-       * permanent — an app killed mid-teardown leaves it up. So the flag
-       * decides how to OPEN a journal, and a live process decides WHETHER to.
-       * `absent` is the only answer that permits it: `unknown` is treated as
-       * `running`, because a guess in the permissive direction puts a second
-       * writer on `journal.jsonl` and corrupts `nextSeq` and the rev CAS. */
-      const openable = (await presence()) === 'absent'
+    if (writes) {
       try {
-        journal = await openLocalJournal({
-          services: host.services,
-          fsync: nodeFsyncPort(host.dataDir),
-          allowDirty: openable,
-        })
+        journal = await openLocalJournal({ services: host.services })
       } catch (error) {
         await host.close()
-        if (!(error instanceof JournalInUse)) throw error
-        /* REFUSED, NOT WARNED, and this is a deliberate change of behaviour.
-         *
-         * The write would land on disk and never enter the journal, so it
-         * could never replicate and the app — which believes it owns the
-         * library — may overwrite it. `paper` used to do it anyway and print
-         * a warning, which meant a script reading the exit code could not
-         * tell a durable, replicating write from a doomed one. Exit codes are
-         * what automation reads, and this one was lying.
-         *
-         * It costs the reader nothing they cannot undo in a second: quit
-         * Paper and run it again. `dev-docs/cli.md` has always said not to write
-         * while the app is open; this enforces it instead of advising it.
-         * Reads are untouched. */
-        journalBusy = error
         throw error
       }
     }
@@ -199,14 +168,6 @@ export async function paper({
     if (noRemote !== null && error === noRemote) {
       sinks.err('paper: this build cannot reach a remote shelf')
       return EXIT.usage
-    }
-    if (journalBusy !== null && error === journalBusy) {
-      /* Cast for the same reason `refusedBy` below is cast: the assignment
-       * happens inside the `open` closure, which control-flow analysis cannot
-       * see, so it narrows this to `null` and then to `never`. */
-      sinks.err(`paper: ${(journalBusy as JournalInUse).message}`)
-      sinks.err('paper: quit Paper on this machine and run this again — a write made now could not replicate')
-      return EXIT.refused
     }
     if (refusedBy === null || error !== refusedBy) {
       /* EVERY OTHER FAILURE STILL GETS A NAME AND AN EXIT CODE.

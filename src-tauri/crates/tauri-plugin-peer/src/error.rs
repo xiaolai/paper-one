@@ -22,7 +22,8 @@ pub enum Error {
     #[error("the iroh endpoint failed to bind: {0}")]
     Bind(#[from] iroh::endpoint::BindError),
 
-    /// `fs_fsync` was handed a relative path. Paths are resolved against no
+    /// A path arrived relative (the incident was `fs_fsync`, since moved to the
+    /// app crate as `write_atomic`). Paths are resolved against no
     /// working directory here — the caller states the whole path.
     #[error("path is not absolute: {}", .0.display())]
     PathNotAbsolute(PathBuf),

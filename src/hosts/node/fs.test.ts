@@ -4,7 +4,7 @@ import { join, resolve, win32 } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { CONTENT_EXTENSIONS } from '../../kernel'
 import { BOOKS_ONLY_BYTES, LIBRARY_FIXTURE, LIBRARY_FIXTURE_BYTES } from '../../kernel/testkit'
-import { appPresence, makeDataDir, nodeIndexFs, nodeSizePort, nodeTextFs, under } from './fs'
+import { makeDataDir, nodeIndexFs, nodeSizePort, nodeTextFs, under } from './fs'
 
 /**
  * The Node seam, held to the behaviours the kernel actually depends on
@@ -168,6 +168,33 @@ describe('nodeIndexFs', () => {
    * Measured rather than asserted about: appending one line to an existing
    * megabyte must not read that megabyte back.
    */
+  /* THE SYNCED ATOMIC WRITE (phase 20, D3) — the CLI's half of what the
+     app's `write_atomic` command does: temp, `fsync`, rename, directory
+     synced, parent made. Node has no `F_FULLFSYNC`, so both levels are one
+     `fsync(2)` here and the adapter says so. */
+  it('writes atomically and synced, making the folder and leaving no temporary', async () => {
+    const root = await freshRoot()
+    const fs = nodeIndexFs(root)
+    await fs.writeAtomic!('books/b/book.json', new TextEncoder().encode('{"a":1}'), 'full')
+    await fs.writeAtomic!('books/b/book.json', new TextEncoder().encode('{"a":2}'), 'barrier')
+    expect(await readFile(join(root, 'books', 'b', 'book.json'), 'utf8')).toBe('{"a":2}')
+    expect((await readdir(join(root, 'books', 'b'))).filter((name) => name.includes('.writing'))).toEqual([])
+    /* And the file at the root of the data directory, which has no folder
+       of its own to make. */
+    await fs.writeAtomic!('index.json', new TextEncoder().encode('[]'), 'full')
+    expect(await readFile(join(root, 'index.json'), 'utf8')).toBe('[]')
+  })
+
+  it('syncs a file it wrote, and a directory, and refuses one that is not there', async () => {
+    const root = await freshRoot()
+    const fs = nodeIndexFs(root)
+    await fs.writeAtomic!('sync/journal.jsonl', new TextEncoder().encode('{}\n'), 'full')
+    await expect(fs.fsync!('sync/journal.jsonl', 'full')).resolves.toBeUndefined()
+    await expect(fs.fsync!('sync', 'barrier')).resolves.toBeUndefined()
+    await expect(fs.fsync!('sync/nope.jsonl', 'full')).rejects.toThrow()
+    await expect(fs.writeAtomic!('../outside.json', new Uint8Array(0), 'full')).rejects.toThrow(/leaves the data directory/)
+  })
+
   it('appends without rewriting', async () => {
     const root = await freshRoot()
     const fs = nodeIndexFs(root)
@@ -456,41 +483,6 @@ describe('the containment rule, against Windows path semantics', () => {
     expect(rel === '..' || rel.startsWith(`..${win32.sep}`)).toBe(false)
     /* The rule `under()` uses now catches it. */
     expect(win32.isAbsolute(rel)).toBe(true)
-  })
-})
-
-/**
- * `appPresence` decides whether `paper` may open the sync journal, so an
- * answer of `absent` when the app is live puts a second writer on
- * `journal.jsonl`. Three answers rather than two: everything it cannot decide
- * is `unknown`, and the caller treats that as `running`.
- */
-describe('appPresence', () => {
-  it('answers one of the three, and never throws, whatever the platform', async () => {
-    await expect(appPresence()).resolves.toMatch(/^(running|absent|unknown)$/)
-  })
-
-  /* THE DIRECTION THAT MATTERS. A platform it cannot probe must never answer
-   * `absent`, because `absent` is the only answer that unlocks journalling. */
-  it('never answers `absent` on a platform it cannot probe', async () => {
-    if (process.platform === 'darwin') return
-    await expect(appPresence()).resolves.toBe('unknown')
-  })
-
-  it('is false when no Paper bundle is running', async () => {
-    /* Nothing in a test environment runs `Paper.app/Contents/MacOS/`. If this
-     * ever fails on a developer's machine it is because their own Paper is
-     * open — which is exactly the state the CLI must detect, so the failure
-     * would be the function working. */
-    const running = (await appPresence()) === 'running'
-    if (running) {
-      const { execFile } = await import('node:child_process')
-      const { promisify } = await import('node:util')
-      const { stdout } = await promisify(execFile)('pgrep', ['-f', 'Paper.app/Contents/MacOS/'])
-      expect(stdout.trim()).not.toBe('')
-    } else {
-      expect(running).toBe(false)
-    }
   })
 })
 

@@ -1,85 +1,56 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { absoluteIn } from './index'
 
 /**
  * The journal's fsync path.
  *
- * THE BUG THIS EXISTS FOR, because nothing else could see it. Every path the
+ * THE BUG THIS EXISTED FOR, because nothing else could see it. Every path the
  * journal hands its filesystem is app-relative — the kernel's fs resolves them
  * against `BaseDirectory.AppData`, so `sync/journal.jsonl` is what the file is
- * called everywhere in this capability. `fsync` is the one call that is NOT an
- * fs-plugin call: it is the peer plugin's own command, it takes a real path,
- * and Rust's `guard_inside_root` refuses one that is not absolute.
+ * called everywhere in this capability. `fsync` used to be the one call that
+ * was NOT an fs call: the peer plugin's own command, which took a real path
+ * and refused one that was not absolute. Handed the relative path it answered
+ * `pathNotAbsolute`, `journal.open()` threw, `sync` failed to start, and
+ * `composeCapabilities` rolled the whole set back — so a desktop build showed
+ * the fatal screen instead of the library, with the cause two `cause` links
+ * down from the message on screen.
  *
- * Handed the relative path it answered `pathNotAbsolute`, `journal.open()`
- * threw, `sync` failed to start, and `composeCapabilities` rolled the whole
- * set back — so a desktop build showed the fatal screen instead of the
- * library, with the cause two `cause` links down from the message on screen.
+ * WHAT CLOSED IT FOR GOOD (WI-20.35): the barrier is the kernel's own seam
+ * now — `VaultFs.fsync`, the app crate's `fsync_in_data_dir` behind it — and
+ * it takes the same app-relative path every other call on `fs` takes. There
+ * is no second path convention left to hand the wrong one to. The peer
+ * plugin's `fs_fsync` is gone, and with it the kernel flushing through a
+ * removable capability's command by string.
  *
- * The entire test suite was green throughout: every journal test injects its
- * own `fsync`, so the one seam where a relative path meets a native command
- * was exercised by nothing. Hence a source pin as well as a unit test — the
- * pin is what fails if the wiring is ever handed the raw path again.
+ * The entire test suite was green throughout the original incident: every
+ * journal test injects its own `fsync`, so the one seam where the journal
+ * meets a native command was exercised by nothing. Hence a source pin as well
+ * as the unit tests elsewhere — the pin is what fails if the wiring is ever
+ * handed a path that is not the journal's own, or a barrier weaker than the
+ * commit it protects.
  */
 
-describe('absoluteIn', () => {
-  it('resolves an app-relative path against the data root', () => {
-    expect(absoluteIn('/Users/x/Library/Application Support/paper', 'sync/journal.jsonl')).toBe(
-      '/Users/x/Library/Application Support/paper/sync/journal.jsonl',
-    )
-  })
-
-  it('does not double the separator, whichever side carries it', () => {
-    expect(absoluteIn('/data/', 'sync/journal.jsonl')).toBe('/data/sync/journal.jsonl')
-    expect(absoluteIn('/data//', 'sync/journal.jsonl')).toBe('/data/sync/journal.jsonl')
-    expect(absoluteIn('/data', '/sync/journal.jsonl')).toBe('/data/sync/journal.jsonl')
-  })
-
-  it('takes a Windows root', () => {
-    expect(absoluteIn('C:\\Users\\x\\paper', 'sync/journal.jsonl')).toBe(
-      'C:\\Users\\x\\paper/sync/journal.jsonl',
-    )
-  })
-
-  /* A relative or blank root would silently anchor the journal to whatever the
-     working directory happens to be — the failure `contentBlobPort` refuses for
-     the same reason, and the one this whole file is about, wearing the other
-     hat. */
-  it('refuses a root that is not absolute, and one that is the filesystem root', () => {
-    for (const bad of ['', 'paper', './paper', '../paper']) {
-      expect(() => absoluteIn(bad, 'sync/journal.jsonl'), bad).toThrow(/absolute path/)
-    }
-    expect(() => absoluteIn('/', 'sync/journal.jsonl')).toThrow(/not the filesystem root/)
-  })
-})
-
-describe('the journal is wired to it', () => {
+describe('the journal is wired to the kernel’s own barrier', () => {
   const source = readFileSync(fileURLToPath(new URL('./index.ts', import.meta.url)), 'utf8')
+  /* Asserted on the CODE, not on the file: a `not.toMatch` over the whole
+     source would be satisfied by the prose above it, which is how a negative
+     pin comes to test its own comment. */
+  const code = source.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '')
 
-  /* A PIN, not a proof: it reads the wiring rather than running it, because a
-     capability's tests may not import the kernel's fs double (see
-     `journalFs.testkit`) and there is no other way to stand this seam up here.
-     It fails on exactly the line that shipped broken. */
-  it('hands the fsync hook an absolute path, never the journal’s relative one', () => {
-    const hook = source.slice(source.indexOf('...(port ? { fsync'))
-    expect(hook.slice(0, 200)).toMatch(/fsync:\s*async\s*\(path: string\)\s*=>\s*port\.fsync\(await absoluteInDataRoot\(path\)\)/)
-    // And the raw pass-through, which is what was there, must not come back.
-    expect(source).not.toMatch(/fsync:\s*\(path: string\)\s*=>\s*port\.fsync\(path\)/)
+  it('hands the fsync hook the journal’s own path, through the filesystem it writes with, at full', () => {
+    /* Both journals — the app's composition and the CLI's `openLocalJournal`
+       — wire the same hook the same way. */
+    const hooks = code.match(/\.\.\.\(fs\.fsync \? \{ fsync: \(path: string\) => fs\.fsync!\(path, 'full'\) \} : \{\}\)/g) ?? []
+    expect(hooks).toHaveLength(2)
   })
 
-  it('asks Rust for the root, once', () => {
-    /* Rust's answer, not TypeScript's: a debug build may be pointed at
-       `PAPER_TEST_DATA_DIR`, which only the process owning the files knows
-       about — so resolving the directory on this side would disagree with it.
-       Memoised, so the root is one question however many lines are appended.
-
-       Asserted on the CODE, not on the file: a `not.toMatch` over the whole
-       source would have been satisfied by the prose above it, which is how a
-       negative pin comes to test its own comment. */
-    const code = source.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '')
-    expect(code).toMatch(/dataRoot \?\?= port!\.dataRoot\(\)/)
+  it('never reaches a peer port or resolves a data root for it', () => {
+    /* The raw pass-through to the plugin's command, which is what shipped
+       broken, and the root lookup it needed, must not come back. */
+    expect(code).not.toMatch(/port\.fsync/)
+    expect(code).not.toMatch(/absoluteIn/)
+    expect(code).not.toMatch(/dataRoot\(\)/)
     expect(code).not.toMatch(/appDataDir/)
   })
 })

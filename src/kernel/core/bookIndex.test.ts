@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { BOOKS_DIR, folderOf } from './bookFolder'
 import {
+  INDEX_DIRTY_FILE,
   INDEX_FILE,
   hasContentFile,
   invalidateIndex,
@@ -8,6 +9,7 @@ import {
   parseIndex,
   scanAllMarks,
   scanBooks,
+  writeDirtyMarker,
   writeIndex,
   type IndexFs,
 } from './bookIndex'
@@ -129,8 +131,61 @@ describe('loadShelf', () => {
     const { books, rescanned } = await loadShelf(fs)
     expect(rescanned).toBe(false)
     expect(books).toHaveLength(2)
-    // One read for the index, not one per book — the whole reason it exists.
-    expect(fs.reads() - before).toBe(1)
+    // One read for the index and one for the dirty marker (absent here), not
+    // one per book — the whole reason it exists. The marker read is the price
+    // of never trusting a cache a position tick left behind (phase 20, D4).
+    expect(fs.reads() - before).toBe(2)
+  })
+
+  /* THE DIRTY MARKER (phase 20, D4): a position tick writes `book.json` and
+     defers the index, so a crash before the flush leaves the cache one
+     position behind for the books the marker names — with the folder set
+     unchanged, which the check above cannot see. */
+  it('re-reads the books the marker names before trusting the cache, and clears it', async () => {
+    const fs = fakeFs(twoBooks)
+    await writeIndex(fs, await scanBooks(fs))
+    fs.store.set(`${BOOKS_DIR}/book_a/book.json`, new TextEncoder().encode(JSON.stringify({ title: 'Alpha', author: '', position: 'p2' })))
+    await writeDirtyMarker(fs, { version: 1, generation: 1, books: ['book_a'] })
+
+    const { books, rescanned } = await loadShelf(fs)
+    expect(rescanned).toBe(false)
+    expect(books.find((one) => one.bookId === 'book_a')?.position).toBe('p2')
+    expect(books.find((one) => one.bookId === 'book_a')?.hasContent).toBe(false)
+    /* Written down, and the marker gone: the next launch reads two files. */
+    expect(parseIndex(new TextDecoder().decode(fs.store.get(INDEX_FILE)!))?.find((one) => one.bookId === 'book_a')?.position).toBe('p2')
+    expect(fs.store.has(INDEX_DIRTY_FILE)).toBe(false)
+  })
+
+  it('serves the re-read from memory and writes nothing when persisting is off', async () => {
+    const fs = fakeFs(twoBooks)
+    await writeIndex(fs, await scanBooks(fs))
+    const indexBefore = fs.store.get(INDEX_FILE)
+    fs.store.set(`${BOOKS_DIR}/book_a/book.json`, new TextEncoder().encode(JSON.stringify({ title: 'Alpha', author: '', position: 'p2' })))
+    await writeDirtyMarker(fs, { version: 1, generation: 1, books: ['book_a'] })
+    const written = fs.writes(INDEX_FILE)
+
+    const { books } = await loadShelf(fs, { persist: false })
+    expect(books.find((one) => one.bookId === 'book_a')?.position).toBe('p2')
+    expect(fs.store.get(INDEX_FILE)).toBe(indexBefore)
+    expect(fs.writes(INDEX_FILE)).toBe(written)
+    expect(fs.store.has(INDEX_DIRTY_FILE)).toBe(true)
+  })
+
+  it('rescans in memory and writes no cache when persisting is off', async () => {
+    const fs = fakeFs(twoBooks)
+    const { books, rescanned } = await loadShelf(fs, { persist: false })
+    expect(rescanned).toBe(true)
+    expect(books).toHaveLength(2)
+    expect(fs.store.has(INDEX_FILE)).toBe(false)
+  })
+
+  it('ignores a marker it cannot read', async () => {
+    const fs = fakeFs(twoBooks)
+    await writeIndex(fs, await scanBooks(fs))
+    fs.store.set(INDEX_DIRTY_FILE, new TextEncoder().encode('not json'))
+    const { books, rescanned } = await loadShelf(fs)
+    expect(rescanned).toBe(false)
+    expect(books).toHaveLength(2)
   })
 
   /* Losing the cache is a rescan, not data loss. */

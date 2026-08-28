@@ -50,28 +50,12 @@ import { StoragePane } from './ui/StoragePane'
  * and the journal exists only after `start()`.
  */
 
-/** The clock floor, persisted before any stamp escapes (`clock.ts`). */
-/**
- * An app-relative path, resolved against the data root — the rule behind
- * `absoluteInDataRoot`, kept pure so it can be tested without a peer.
- *
- * Exported for that test and for no other caller: everything inside the
- * capability goes through the memoised wrapper, which is what makes the root
- * one question asked once.
- */
-export function absoluteIn(root: string, path: string): string {
-  /* The root must already be absolute — it is Rust's answer for the data
-   * directory, and a relative or blank one would silently anchor the journal
-   * to whatever the working directory happens to be. Same check, and the same
-   * reason, as `contentBlobPort`. */
-  if (typeof root !== 'string' || (!root.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(root))) {
-    throw new Error('sync: the data root must be an absolute path')
-  }
-  const base = root.replace(/[\\/]+$/, '')
-  if (base === '') throw new Error('sync: the data root must name a directory, not the filesystem root')
-  return `${base}/${path.replace(/^[\\/]+/, '')}`
-}
+/* `absoluteIn` LIVED HERE and is gone with WI-20.35: the journal's fsync goes
+ * through the kernel's own filesystem seam with its app-relative path, so
+ * nothing in this capability resolves a path against the data root any more.
+ * `journalFsync.test.ts` pins the wiring that replaced it. */
 
+/** The clock floor, persisted before any stamp escapes (`clock.ts`). */
 export const CLOCK_FLOOR_SETTING: Setting<string> = defineSetting('sync.clockFloor', '', (raw) =>
   typeof raw === 'string' ? raw : undefined,
 )
@@ -669,30 +653,6 @@ export const sync: Capability = {
     unbindClock = services.bindClock(() => clock.now())
 
     const port = peerPort()
-    /**
-     * The journal's paths, made absolute for the ONE call that is not an fs
-     * call.
-     *
-     * Every path the journal hands its filesystem is app-relative — the
-     * kernel's fs resolves them against `BaseDirectory.AppData`, which is what
-     * `sync/journal.jsonl` means everywhere else in this file. `fsync` is not
-     * an fs-plugin call: it is the peer plugin's own command, it takes a real
-     * path, and it refuses one that is not absolute and inside the data root.
-     * Handed the relative path it answered `pathNotAbsolute`, `journal.open()`
-     * threw, and the composition rolled the whole set back — so a build with
-     * `sync` composed showed the fatal screen instead of the library, with the
-     * cause two `cause` links down.
-     *
-     * The root is Rust's answer (`paper_data_root`), asked for ONCE and reused:
-     * a debug build may be pointed at `PAPER_TEST_DATA_DIR`, so TypeScript
-     * resolving `appDataDir()` on its own would disagree with the process that
-     * owns the files — the same reasoning `contentBlobPort` is built on.
-     */
-    let dataRoot: Promise<string> | null = null
-    const absoluteInDataRoot = async (path: string): Promise<string> => {
-      dataRoot ??= port!.dataRoot()
-      return absoluteIn(await dataRoot, path)
-    }
     const fs = services.fs
     let journal: Journal | null = null
     if (fs) {
@@ -715,8 +675,20 @@ export const sync: Capability = {
         clock: () => clock.now(),
         /* NOT swallowed: the fsync hook is the journal's durability
          * barrier, and a barrier that reports success on failure is no
-         * barrier — the append must fail loudly and stay retryable. */
-        ...(port ? { fsync: async (path: string) => port.fsync(await absoluteInDataRoot(path)) } : {}),
+         * barrier — the append must fail loudly and stay retryable.
+         *
+         * THE KERNEL'S OWN SEAM, with the journal's own app-relative path
+         * (WI-20.35). It used to be the peer plugin's `fs_fsync`, which took
+         * an ABSOLUTE path resolved against Rust's data root — handed the
+         * relative one it answered `pathNotAbsolute`, `journal.open()` threw,
+         * and the composition rolled the whole set back, with the cause two
+         * `cause` links down; and a kernel flushing through a removable
+         * capability's command stopped flushing when the capability went.
+         * `fs.fsync` takes the same path every other call on `fs` takes and
+         * is confined by the app crate; `full`, because a journal line is
+         * the commit. Absent on a filesystem without it (a fake), and the
+         * journal's own default is then the no-op it documents. */
+        ...(fs.fsync ? { fsync: (path: string) => fs.fsync!(path, 'full') } : {}),
         /* The canonical rows, tombstones included, off the kernel's card
          * store — sync holds no raw flat-store handle (WI-10.4). */
         cards: () => services.cards.stored(),
@@ -1064,65 +1036,36 @@ export type { SyncStatus } from './lib/status'
  * and it is a property of `compact`, which deliberately keeps the last local
  * commit even when a remote one landed after it.
  *
- * WHY THE DIRTY FLAG IS THE GATE, AND WHICH DIRECTION OF IT IS LOAD-BEARING.
- * Two processes appending to one `journal.jsonl` would corrupt it — not
- * merely the bytes, which `O_APPEND` would keep whole, but `nextSeq` and the
- * rev CAS, which each process holds in memory and neither would see the other
- * move. The advisory lock cannot prevent it: the app cannot take that lock (a
- * webview's filesystem has no exclusive create, see `dev-docs/cli.md`).
+ * WHO MAY OPEN THIS, AND WHAT THE DIRTY FLAG IS NOT. Two processes appending
+ * to one `journal.jsonl` would corrupt it — not merely the bytes, which
+ * `O_APPEND` would keep whole, but `nextSeq` and the rev CAS, which each
+ * process holds in memory and neither would see the other move. THE LOCK IS
+ * THE ARBITER: the app takes the data-root lock in Rust before its webview
+ * boots (WI-20.40), the CLI takes the same lock before it opens a host
+ * (`src/hosts/node/lock.ts`), and a writer that holds it is the only writer.
+ * This function is reached with the lock held, and asks nothing about
+ * liveness — a capability has no business asking the operating system what
+ * is running, and it no longer needs to.
  *
- * The flag is what can. `open()` writes it before it returns, so a live
- * journal ALWAYS has it up — and the useful direction is the contrapositive:
- * **flag down means no journal opened these files and left them open.** That
- * is the only guarantee needed here, and it holds without asking the
- * operating system what is running.
+ * IT USED TO GATE ON THE FLAG, then on a `pgrep` for the app, and both are
+ * gone with WI-20.34: the flag is NOT a liveness signal — measured on a real
+ * library, `close()` did not clear it across an ordinary `quit app "Paper"`,
+ * and both machines carried it for days with the app shut, because a Tauri
+ * app quits by tearing down the webview and an async close that drains a
+ * queue is not guaranteed to finish first. So "flag up" means "up for SOME
+ * reason" — running, crashed, or simply quit. And the `pgrep` could not see
+ * `pnpm app`, the only way this project is run, and answered `unknown` off
+ * macOS, where every CLI write was therefore refused.
  *
- * IT IS NOT A LIVENESS SIGNAL, and reading it as one is a mistake this
- * comment exists to stop somebody repeating. Measured on a real library:
- * `close()` did not clear it across an ordinary `quit app "Paper"`, and both
- * machines carried the flag for days with the app shut. A Tauri app quits by
- * tearing down the webview, and an async close that drains a queue and does
- * file I/O is not guaranteed to finish first. So "flag up" means "up for SOME
- * reason" — running, crashed, or simply quit — and the CLI may not conclude
- * from it that anyone is there.
- *
- * Hence the asymmetry: a journal is opened only when the flag is DOWN, which
- * is both safe and, on a library that has ever run the app, uncommon. The
- * caller decides what to do about the refusal; this only refuses.
- *
- * A second reason the same gate is right: a dirty open owes
+ * WHAT THE FLAG STILL DECIDES: how to open. A dirty open owes
  * `verifyAfterUncleanShutdown()`, a pass over every book that RAISES REVS.
- * That is the app's job on its own schedule, not something a `paper book add`
- * should do to sixteen gigabytes on its way past.
- *
- * WHAT IS STILL UNCOVERED, and is not pretended away: the app STARTING while
- * a CLI command holds the journal. The flag is checked once, before opening.
- * That window is the same one the CLI has always had against the stores, it
- * is not made wider here, and closing it needs the app to take a real lock —
- * a Rust command with an ACL entry, which is a phase of its own.
+ * That is the app's job on its own schedule, not something a `paper book
+ * add` should do to sixteen gigabytes on its way past — so with the flag up
+ * the journal is opened WITHOUT the recovery pass and without clearing it,
+ * and the app still owes it.
  */
-export class JournalInUse extends Error {
-  constructor(message: string) {
-    super(message)
-    this.name = 'JournalInUse'
-  }
-}
-
 export interface LocalJournalOptions {
   readonly services: KernelServices
-  /** Durability barrier. App-relative paths, as everywhere in this file. */
-  readonly fsync?: (path: string) => Promise<void>
-  /**
-   * Open even when the dirty flag is up, WITHOUT running the recovery pass
-   * the flag asks for and without clearing it.
-   *
-   * The caller states this, because the caller is the only one that can know
-   * it: the flag means "not closed cleanly", which in the field is permanent
-   * (the app's teardown cannot finish before its process dies), so the real
-   * question — is another writer live — is answered by asking the operating
-   * system, and a capability has no business doing that.
-   */
-  readonly allowDirty?: boolean
 }
 
 export interface LocalJournal {
@@ -1130,31 +1073,12 @@ export interface LocalJournal {
   readonly close: () => Promise<void>
 }
 
-export async function openLocalJournal({
-  services,
-  fsync,
-  allowDirty = false,
-}: LocalJournalOptions): Promise<LocalJournal> {
+export async function openLocalJournal({ services }: LocalJournalOptions): Promise<LocalJournal> {
   const fs = services.fs
   /* Not a soft no: a caller that asked for a journal and silently got none
    * would write exactly the unreplicated mutations this exists to stop. */
   if (!fs) throw new Error('openLocalJournal: these services have no filesystem')
   const dirty = await fs.exists(JOURNAL_DIRTY_PATH)
-  /* THE CALLER'S ANSWER OUTRANKS THE FLAG, IN BOTH DIRECTIONS.
-   *
-   * `allowDirty` used to be read only when the flag was up, so a caller that
-   * KNEW another process held the library was still allowed to open a journal
-   * whose flag happened to be down — which is precisely the app-starting
-   * window: the app is live, has not yet written the flag, and a CLI opening
-   * then makes two writers. The caller is the only side that can see a live
-   * process, so its refusal has to bind whatever the flag says. */
-  if (!allowDirty) {
-    throw new JournalInUse(
-      dirty
-        ? 'the sync journal is marked dirty — Paper is running on this machine, or last exited without closing it'
-        : 'Paper is running on this machine, or its presence could not be determined',
-    )
-  }
 
   /* THE SAME DEVICE AND THE SAME FLOOR THE APP USES, read from the settings
    * store they share. A private device id would make this machine's own CLI
@@ -1178,7 +1102,9 @@ export async function openLocalJournal({
      * lane the kernel's writers use, and `paper` shares that queue too. */
     lane: (book, what) => (what === 'cards' ? '' : services.library.lane(book)),
     clock: () => clock.now(),
-    ...(fsync ? { fsync } : {}),
+    /* The kernel's own barrier, as the app's composition wires it (above):
+     * the CLI's `nodeIndexFs` has `fsync` over a real descriptor. */
+    ...(fs.fsync ? { fsync: (path: string) => fs.fsync!(path, 'full') } : {}),
     /* Appending is ours; RECOVERING IS THE APP'S. Declining the pass keeps
      * the flag up, so the app still owes it and still performs it. */
     ...(dirty ? { recover: false } : {}),

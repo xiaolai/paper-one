@@ -60,8 +60,6 @@ export interface PeerPort {
    */
   setLocalRole(role: PeerRole): Promise<void>
   dataRoot(): Promise<string>
-  /** The plugin's durability primitive — the sync journal's fsync hook. */
-  fsync(path: string): Promise<void>
 
   listPeers(): Promise<readonly WirePeer[]>
   forgetPeer(id: string): Promise<void>
@@ -159,7 +157,6 @@ export function createPeerPort(wire: PeerWire): PeerPort {
     localRole: () => wire.localRole(),
     setLocalRole: (role) => wire.setLocalRole(role),
     dataRoot: () => wire.dataRoot(),
-    fsync: (path) => wire.fsync(path),
 
     listPeers: () => wire.listPeers(),
     forgetPeer: (id) => wire.forgetPeer(id),

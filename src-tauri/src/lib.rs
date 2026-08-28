@@ -271,7 +271,11 @@ pub fn run() {
         gated by the capability file — an app command is reachable from the
         webview the moment it is registered here, which is why `open_external`
         validates its own argument rather than trusting the caller. */
-        .invoke_handler(tauri::generate_handler![open_external])
+        .invoke_handler(tauri::generate_handler![
+            open_external,
+            atomic::write_atomic,
+            atomic::fsync_in_data_dir
+        ])
         // Scoped by `capabilities/default.json`, not by these registrations —
         // registering a plugin grants nothing on its own.
         .plugin(tauri_plugin_fs::init())
@@ -508,6 +512,9 @@ pub fn run() {
             }
         });
 }
+
+/// The kernel's durable writes — see the module.
+mod atomic;
 
 /// The library lock — see the module.
 #[cfg(feature = "desktop")]

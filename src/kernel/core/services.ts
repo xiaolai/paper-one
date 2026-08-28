@@ -675,6 +675,11 @@ export function createKernelServices({
       }
     },
     drain: async () => {
+      /* THE INDEX FIRST (phase 20, D4): a page turn writes `book.json` and
+       * leaves the index dirty behind a throttle, and a drain is the one
+       * moment — quit, window close — that must not wait for the timer. The
+       * flush queues the rewrite; the idle below is what waits for it. */
+      await library.flushIndex()
       await writes.idle()
       await storage?.flush?.()
     },

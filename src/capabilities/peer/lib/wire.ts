@@ -148,7 +148,6 @@ export interface PeerWire {
    */
   setLocalRole(role: PeerRole): Promise<void>
   dataRoot(): Promise<string>
-  fsync(path: string): Promise<void>
 
   listPeers(): Promise<readonly WirePeer[]>
   forgetPeer(id: string): Promise<void>
@@ -221,7 +220,6 @@ export function tauriWire(): PeerWire {
     localRole: () => invoke(command('peer_local_role')),
     setLocalRole: (role) => invoke(command('peer_set_local_role'), { role }),
     dataRoot: () => invoke(command('paper_data_root')),
-    fsync: (path) => invoke(command('fs_fsync'), { path }),
 
     listPeers: () => invoke(command('peer_list_peers')),
     forgetPeer: (id) => invoke(command('peer_forget_peer'), { id }),

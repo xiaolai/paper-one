@@ -74,7 +74,37 @@ export interface VaultFs {
    * assembling a stream already has to handle.
    */
   readRange?: (path: string, offset: number, length: number) => Promise<Uint8Array>
+  /**
+   * The whole atomic write, synced (phase 20, D3): temp in the same
+   * directory, write, sync at `level`, rename, parent directory synced.
+   *
+   * OPTIONAL, on the same terms as `appendFile`: a filesystem without it
+   * gets `atomicWrite`'s temp-and-rename with no sync, which is what the
+   * vault had for its whole life and is correct for a fake. Every real
+   * filesystem implements it — the app through one Rust command, the CLI
+   * over `node:fs` — because the difference is a power cut: a rename the
+   * page cache still held leaves an empty `book.json`, which `scanFolder`
+   * skips, and the book is gone from the shelf.
+   */
+  writeAtomic?: (path: string, bytes: Uint8Array, level: SyncLevel) => Promise<void>
+  /**
+   * Sync a file this filesystem already wrote — the sync journal's appends,
+   * which are not atomic writes and must not be. Optional as above.
+   */
+  fsync?: (path: string, level: SyncLevel) => Promise<void>
 }
+
+/**
+ * How hard a write is synced.
+ *
+ * `full` waits for the drive's own cache — `F_FULLFSYNC` on macOS, where a
+ * plain `fsync(2)` does not, the one that survives a power cut and the one
+ * SQLite calls "profoundly slow". `barrier` is `F_BARRIERFSYNC`: ordered, not
+ * waited for — Chromium's and libuv's choice for the frequent write, and the
+ * position tick's here, since a position lost to a power cut is a page and
+ * not a book. Off macOS they are the same `fsync`.
+ */
+export type SyncLevel = 'full' | 'barrier'
 
 /**
  * A slice of a file, however this filesystem can manage it.
