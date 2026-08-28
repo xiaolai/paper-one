@@ -152,6 +152,17 @@ describe('enrichOne', () => {
     expect(seen[0]?.name).toBe('moby.pdf')
   })
 
+  /* `comic-book.js` titles a comic after the file it is given, and the vault
+   * hands the file back named `${title}.${ext}` — so a pass that took the
+   * parser at its word renamed "Batman" to "Batman.cbz" on every launch. */
+  it('keeps a comic’s name, which its parser only ever reads off the file', async () => {
+    const row = shelved({ title: 'Batman', ext: 'cbz', format: 'cbz' })
+    const readBook = async () => new File([new Uint8Array([0x50, 0x4b])], `${row.title}.${row.ext}`)
+    const parse = async (file: File) => ({ meta: { title: file.name, author: '' }, cover: null })
+    const out = await enrichOne(deps({ readBook, parse }), row)
+    expect(out.record.title).toBe('Batman')
+  })
+
   it('is content with a book that simply has no jacket', async () => {
     const out = await enrichOne(deps({ parse: async () => ({ meta, cover: null }) }), shelved())
     expect(out.cover).toBeNull()

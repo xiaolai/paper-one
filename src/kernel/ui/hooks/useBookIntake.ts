@@ -266,7 +266,7 @@ export function useBookIntake({
         /* The parse's own fields — see `recordFromMeta`, which the enrichment
          * pass shares, so a book parsed in the background and a book opened
          * agree about what a parse knows. */
-        ...recordFromMeta(meta),
+        ...recordFromMeta(meta, source instanceof File ? source : undefined),
         openedAt: Date.now(),
         addedAt: Date.now(),
         /* THIS IS A PARSE, so it stamps the parse marker — the enrichment pass

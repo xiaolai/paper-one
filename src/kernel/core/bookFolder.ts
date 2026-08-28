@@ -30,7 +30,7 @@
 
 import type { VaultFs } from './bookVault'
 import { extensionFor } from './bookVault'
-import { isFormat, type Format } from './formats'
+import { isFormat, type Format, type NamedSource } from './formats'
 import { compareHlc, hlcOf, isHlc, type Hlc } from './hlc'
 import { TAG_MAX, normalizeTag, tagKey } from './tags'
 
@@ -719,20 +719,29 @@ function mergeTagClocks(a: TagClock | undefined, b: TagClock | undefined): TagCl
  * It deliberately does NOT carry `title` and `author` conditionally — those two
  * are `BookRecord`'s only required fields and a parse always has an answer for
  * them, even if the answer is empty.
+ *
+ * `source` is the file the parser was handed, when there was one. It is the
+ * evidence `titleAsParsed` needs to tell a title from a file name, and every
+ * caller that has the file should pass it — the reader opening a book and the
+ * enrichment pass both do — so that the two routes keep agreeing about what a
+ * comic is called.
  */
-export function recordFromMeta(meta: {
-  readonly title: string
-  readonly author: string
-  readonly sortAs?: string
-  readonly series?: string
-  readonly seriesIndex?: number | null
-  readonly subjects?: readonly string[]
-  readonly publisher?: string
-  readonly published?: string
-  readonly languages?: readonly string[]
-}): BookRecord {
+export function recordFromMeta(
+  meta: {
+    readonly title: string
+    readonly author: string
+    readonly sortAs?: string
+    readonly series?: string
+    readonly seriesIndex?: number | null
+    readonly subjects?: readonly string[]
+    readonly publisher?: string
+    readonly published?: string
+    readonly languages?: readonly string[]
+  },
+  source?: NamedSource,
+): BookRecord {
   return {
-    title: meta.title,
+    title: titleAsParsed(meta.title, source),
     author: meta.author,
     ...(meta.sortAs ? { sortAs: meta.sortAs } : {}),
     ...(meta.series ? { series: meta.series } : {}),
@@ -744,6 +753,56 @@ export function recordFromMeta(meta: {
     ...(meta.published ? { published: meta.published } : {}),
     ...(meta.languages?.length ? { languages: meta.languages } : {}),
   }
+}
+
+/**
+ * The formats whose parser NAMES THE BOOK AFTER ITS FILE.
+ *
+ * A comic archive carries no metadata, so foliate's `comic-book.js` sets
+ * `metadata.title = file.name` — extension included — and that is the whole
+ * of what a parse knows about its title. Typed over `Format` so that a second
+ * comic format (`cbr`, which Paper does not yet accept — see `FORMATS` and
+ * `ACCEPT_FORMATS`, and foliate routes only `.cbz` to that parser) has to be
+ * admitted there before it can be listed here.
+ */
+const FILE_NAMED_FORMATS: readonly Format[] = ['cbz']
+
+/**
+ * A parsed title, with a file-naming parser's extension taken back off.
+ *
+ * "Batman.cbz" → "Batman.cbz.cbz" → "Batman.cbz.cbz.cbz", one step per open
+ * and per enrichment pass. `comic-book.js` titles a comic after the file it is
+ * given; the vault hands it back named `storedBookName(entry)`, which is
+ * `${title}.${ext}`; and `mergeParsed` lets the parse's title replace the
+ * record's. So each open handed the parser a name one extension longer than
+ * the last, and wrote it back as the title.
+ *
+ * The rule is as narrow as the defect. It fires only when the file's own
+ * extension belongs to a parser that names the file, AND the title IS that
+ * file name — the evidence that it was never a title at all. An EPUB whose
+ * declared title happens to be "Batman.cbz" was opened from `Batman.cbz.epub`
+ * and is left alone; so is an EPUB whose title equals its own file name,
+ * because its parser does not invent titles; so is a comic whose title has
+ * since been corrected, since a corrected title no longer equals the name.
+ *
+ * EVERY trailing repeat of the extension comes off, not just one. A record
+ * this defect already wrote as "Batman.cbz.cbz" reaches the parser as
+ * "Batman.cbz.cbz.cbz", and stripping once would hand back exactly the damaged
+ * title it started with — stable, and still wrong. A name that is nothing but
+ * its extension is kept, which is what the parser said.
+ */
+function titleAsParsed(title: string, source: NamedSource | undefined): string {
+  if (!source || title !== source.name) return title
+  const dot = source.name.lastIndexOf('.')
+  if (dot <= 0) return title
+  const ext = source.name.slice(dot + 1).toLowerCase()
+  if (!isFormat(ext) || !FILE_NAMED_FORMATS.includes(ext)) return title
+  const suffix = `.${ext}`
+  let stem = title
+  while (stem.length > suffix.length && stem.slice(-suffix.length).toLowerCase() === suffix) {
+    stem = stem.slice(0, -suffix.length)
+  }
+  return stem
 }
 
 /**

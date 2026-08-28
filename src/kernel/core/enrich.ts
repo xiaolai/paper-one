@@ -216,7 +216,11 @@ export async function enrichOne(deps: EnrichDeps, book: IndexedBook): Promise<En
     const { meta, cover } = await deps.parse(file)
     return {
       bookId: book.bookId,
-      record: { ...recordFromMeta(meta), parsedAt },
+      /* WITH THE FILE, so a comic is not re-titled after the name the vault
+       * gave it — see `titleAsParsed`. The reader's open passes its source the
+       * same way; the two routes have to agree about what a comic is called or
+       * every pass renames it. */
+      record: { ...recordFromMeta(meta, file), parsedAt },
       cover,
     }
   } catch (cause) {
