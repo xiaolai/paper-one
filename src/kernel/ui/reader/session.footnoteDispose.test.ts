@@ -27,9 +27,21 @@ import type { View } from 'foliate-js/view.js'
  *
  * Its own file because the mock is module-wide, and `session.test.ts` drives
  * the real handler's heuristics.
+ *
+ * ⚠️ **THE NOTE IS OPENED THROUGH A CLICK, not by dispatching on a handler the
+ * session happens to hold.** There is a handler per request now — see
+ * `NoteRequest` — so its two listeners close over the request that built it,
+ * and a test that reaches for "the session's handler" is testing a session
+ * that no longer exists. Going in through the `link` event is also closer to
+ * what the reader does, and it is what makes the cancellation cases below
+ * expressible at all.
  */
 
-const foliate = vi.hoisted(() => ({ handlers: [] as EventTarget[] }))
+const foliate = vi.hoisted(() => ({
+  handlers: [] as EventTarget[],
+  /** What the next `handle` calls answer, in order — a resolved note by default. */
+  answers: [] as Promise<void>[],
+}))
 
 vi.mock('foliate-js/footnotes.js', () => ({
   FootnoteHandler: class extends EventTarget {
@@ -38,7 +50,7 @@ vi.mock('foliate-js/footnotes.js', () => ({
       foliate.handlers.push(this)
     }
     handle() {
-      return Promise.resolve()
+      return foliate.answers.shift() ?? Promise.resolve()
     }
   },
 }))
@@ -139,7 +151,7 @@ function callbacks() {
  */
 const view = (order: string[] = []) => {
   const listeners: Record<string, ((e: unknown) => void)[]> = {}
-  return {
+  const self = {
     style: {} as CSSStyleDeclaration,
     book: {
       toc: [],
@@ -151,6 +163,10 @@ const view = (order: string[] = []) => {
     addEventListener: (type: string, fn: (e: unknown) => void) => {
       ;(listeners[type] ??= []).push(fn)
     },
+    /** Fire one of the view's own events, the way foliate does. */
+    emit: (type: string, detail: unknown) => {
+      for (const fn of listeners[type] ?? []) fn(new CustomEvent(type, { detail, cancelable: true }))
+    },
     open: async () => {},
     init: async () => {
       for (const fn of listeners['relocate'] ?? []) fn(new CustomEvent('relocate', { detail: { fraction: 0 } }))
@@ -158,17 +174,47 @@ const view = (order: string[] = []) => {
     close: () => order.push('view.close'),
     remove: () => order.push('view.remove'),
     renderer: { setAttribute: () => {}, addEventListener: () => {} },
-  } as unknown as View
+    /* `#noteFailed` navigates the book to the note's href when a note cannot
+       be shown in place, so a fake without this throws inside a promise
+       chain — which passes and reports an unhandled error beside it. */
+    went: [] as string[],
+    goTo: async (href: string) => {
+      self.went.push(href)
+    },
+  }
+  return self
 }
 
-/** A started session, plus the handler its listeners are on. */
+type FakeView = ReturnType<typeof view>
+
+/**
+ * A reference anchor complete enough for the backlink test to inspect.
+ *
+ * `isBacklink` reads both spellings of `epub:type`, the ARIA role, and walks
+ * the parent chain; `anchorRectInHost` reads `ownerDocument`, and a null one
+ * is the honest answer for a fake — the popover then has no anchor rect,
+ * which is a case the session already handles.
+ */
+const anchorEl = () =>
+  ({
+    getAttribute: (name: string) => (name === 'href' ? 'notes.xhtml#n1' : null),
+    getAttributeNS: () => null,
+    matches: () => false,
+    children: [] as unknown as HTMLCollection,
+    parentElement: null,
+    ownerDocument: null,
+  }) as unknown as HTMLAnchorElement
+
+/** A started session, and the book view its link events go through. */
 async function started(order: string[] = []) {
   foliate.handlers.length = 0
+  foliate.answers.length = 0
   const host = fakeHost()
   const { cb, calls } = callbacks()
   const session = new ReaderSession(host, cb)
+  const book = view(order)
   await session.start('book.epub', {
-    createView: async () => view(order),
+    createView: async () => book as unknown as View,
     loadPainters: () => Promise.resolve({ fill: 'FILL', underline: 'UNDERLINE', wave: 'WAVE' }) as never,
     /* THE PASS-THROUGH — `prepare` is required; see `SessionDeps.prepare`. */
     prepare: (source: unknown) => Promise.resolve(source),
@@ -176,31 +222,49 @@ async function started(order: string[] = []) {
     applyVars: () => {},
     protection: () => Promise.resolve(null),
   })
-  const handler = foliate.handlers[0]
-  expect(handler, 'the session should have built a footnote handler').toBeDefined()
-  return { session, host, calls, handler: handler! }
+  return { session, host, calls, book }
 }
 
 /**
- * Put a note on screen, exactly as `FootnoteHandler` does.
+ * Follow a note reference, and hand back the handler that click created.
+ *
+ * The `link` event is the reader's click. The session offers it to a fresh
+ * `FootnoteHandler`, whose `handle` here always takes it — so the request is
+ * live and its two listeners are on the handler this returns.
+ */
+function clickNote(book: FakeView): EventTarget {
+  const before = foliate.handlers.length
+  book.emit('link', { a: anchorEl(), href: 'notes.xhtml#n1' })
+  const handler = foliate.handlers[before]
+  expect(handler, 'the click did not reach the footnote handler').toBeDefined()
+  return handler!
+}
+
+/**
+ * Render into a note's view, exactly as `FootnoteHandler` does.
  *
  * ⚠️ **`before-render` CARRIES `{ view }`**, and a fake that sent something else
  * left `view` undefined — which threw inside the dispatch rather than failing an
  * assertion. Both events, in order, because `before-render` is what attaches the
  * view and `render` is what publishes it.
  */
-function showNote(handler: EventTarget, note: { view: View }) {
+function renderInto(handler: EventTarget, note: { view: View }) {
   handler.dispatchEvent(new CustomEvent('before-render', { detail: { view: note.view } }))
   handler.dispatchEvent(
     new CustomEvent('render', { detail: { view: note.view, href: 'notes.xhtml#n1', type: 'footnote' } }),
   )
 }
 
+/** The whole flow: a click, and the note that click asked for. */
+function showNote(book: FakeView, note: { view: View }) {
+  renderInto(clickNote(book), note)
+}
+
 describe('closing a book with a note open', () => {
   it('closes and detaches the note’s view', async () => {
-    const { session, handler } = await started()
+    const { session, book } = await started()
     const note = noteView()
-    showNote(handler, note)
+    showNote(book, note)
     expect(note.calls, 'the note should be up, not released').toEqual([])
 
     session.dispose()
@@ -214,11 +278,11 @@ describe('closing a book with a note open', () => {
    * child of the host at all.
    */
   it('releases it even when it was mounted outside the host', async () => {
-    const { session, handler } = await started()
+    const { session, book } = await started()
     const elsewhere = fakeHost()
     session.setFootnoteMount(elsewhere)
     const note = noteView()
-    showNote(handler, note)
+    showNote(book, note)
 
     session.dispose()
     expect(note.calls, 'a note mounted outside the host was never released').toEqual(['close', 'remove'])
@@ -228,8 +292,8 @@ describe('closing a book with a note open', () => {
      so without it a host holds a note for a session that no longer exists and
      draws something nothing can close. */
   it('tells the host the note is gone', async () => {
-    const { session, handler, calls } = await started()
-    showNote(handler, noteView())
+    const { session, book, calls } = await started()
+    showNote(book, noteView())
     session.dispose()
     expect(calls['onFootnote']?.at(-1), 'the host was left holding a note').toEqual([null])
   })
@@ -237,9 +301,9 @@ describe('closing a book with a note open', () => {
   /* IDEMPOTENT, like the rest of dispose. Releasing a view twice is a close on
      a closed view, which is the thing `releaseNoteView` exists to order. */
   it('releases the note once, however many times dispose is called', async () => {
-    const { session, handler } = await started()
+    const { session, book } = await started()
     const note = noteView()
-    showNote(handler, note)
+    showNote(book, note)
     session.dispose()
     session.dispose()
     session.dispose()
@@ -273,12 +337,153 @@ describe('closing a book with a note open', () => {
 describe('closing a book releases the book', () => {
   it('destroys the book exactly once, after the note view is released and the view closed', async () => {
     const order: string[] = []
-    const { session, handler } = await started(order)
+    const { session, book } = await started(order)
     const note = noteView(order)
-    showNote(handler, note)
+    showNote(book, note)
 
     session.dispose()
     session.dispose()
     expect(order).toEqual(['note.close', 'note.remove', 'view.close', 'view.remove', 'book.destroy'])
+  })
+})
+
+/**
+ * WHICH NOTE A VIEW BELONGS TO — see `NoteRequest`.
+ *
+ * The session used to queue each click's anchor and shift one off at
+ * `before-render`, which pairs by ARRIVAL rather than by identity. Neither
+ * `resolveHref` nor a note's own render settles in click order, and the queue
+ * could also come up empty. Every case below is a real reader action that the
+ * pairing answered wrongly.
+ */
+describe('two notes in flight, and one the reader closed', () => {
+  const noteFrom = (calls: Record<string, unknown[][]>) =>
+    (calls['onFootnote'] ?? []).map(([one]) => one as { href: string } | null)
+
+  /**
+   * ⚠️ **THE VIEWS CROSSED.** Two clicks, and the SECOND note's view arrives
+   * first — a shorter section, a warm cache. Under the queue it took the first
+   * click's anchor and sequence, so it was released as superseded; the first
+   * note then took the second's sequence, passed the check, and was shown at
+   * the anchor of a reference the reader had moved on from.
+   */
+  it('shows the note that was clicked last, not the one that rendered first', async () => {
+    const { book, calls } = await started()
+    const first = clickNote(book)
+    const second = clickNote(book)
+    const late = noteView()
+    const early = noteView()
+
+    /* Out of order: the second click's note renders before the first's. */
+    renderInto(second, early)
+    renderInto(first, late)
+
+    expect(
+      noteFrom(calls).filter((one) => one !== null),
+      'a superseded note was shown, and the one the reader asked for released',
+    ).toHaveLength(1)
+    expect(late.calls, 'the superseded note’s view was left alive').toEqual(['close', 'remove'])
+    expect(early.calls, 'the note the reader asked for was released').toEqual([])
+  })
+
+  /**
+   * ⚠️ **A CLOSED NOTE CAME BACK.** The reader dismisses the popover while the
+   * note is still resolving; `closeFootnote` emptied the queue, so
+   * `before-render` fell back to `{ at: null, seq: <current> }` — the CURRENT
+   * sequence — which then passed `render`'s supersession check and put the
+   * note they had just closed back on screen, at no anchor.
+   */
+  it('does not reopen a note the reader closed while it was resolving', async () => {
+    const { session, book, calls } = await started()
+    const handler = clickNote(book)
+    session.closeFootnote()
+    const before = (calls['onFootnote'] ?? []).length
+
+    const note = noteView()
+    renderInto(handler, note)
+
+    expect(
+      (calls['onFootnote'] ?? []).slice(before).map(([one]) => one),
+      'the note the reader dismissed was shown again',
+    ).toEqual([])
+    /* And its view goes, rather than sitting detached with a live renderer. */
+    expect(note.calls, 'the cancelled note’s view was never released').toEqual(['close', 'remove'])
+  })
+
+  /* The same for a note superseded by a newer click: released at
+     `before-render`, so it is never mounted on the way to being discarded. */
+  it('releases a superseded note’s view without mounting it', async () => {
+    const { book, host } = await started()
+    const stale = clickNote(book)
+    clickNote(book)
+    const note = noteView()
+    renderInto(stale, note)
+    expect(note.calls).toEqual(['close', 'remove'])
+    expect(
+      (host as unknown as { appended: unknown[] }).appended,
+      'a superseded note was mounted before being thrown away',
+    ).toEqual([])
+  })
+})
+
+/**
+ * ⚠️ **A STALE REJECTION USED TO CLOSE THE NOTE THAT REPLACED IT.**
+ *
+ * `#noteFailed` is the honest fallback for a note that will not render in
+ * place: dismiss the popover, tell the host, and navigate to the note's href so
+ * the reader still gets there. Applied to an OLD request it is none of those
+ * things — it tears down the note the reader is currently looking at and sends
+ * them to a place they moved on from. The render path had a supersession check
+ * from the start; this road did not.
+ */
+describe('a note that fails after a newer one has opened', () => {
+  it('leaves the newer note alone and does not navigate', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { book, calls } = await started()
+
+    let refuse: (cause: unknown) => void = () => {}
+    foliate.answers.push(
+      new Promise<void>((_resolve, reject) => {
+        refuse = reject
+      }),
+    )
+    clickNote(book)
+    const second = clickNote(book)
+    const note = noteView()
+    renderInto(second, note)
+    expect(calls['onFootnote']?.at(-1)?.[0], 'the newer note never opened').not.toBeNull()
+
+    refuse(new Error('the note would not render'))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(
+      calls['onFootnote']?.at(-1)?.[0],
+      'a superseded request closed the note the reader was reading',
+    ).not.toBeNull()
+    expect(book.went, 'a superseded request navigated the reader away').toEqual([])
+    expect(note.calls, 'the open note’s view was released by an older failure').toEqual([])
+    warn.mockRestore()
+  })
+
+  /* AND THE CURRENT ONE STILL FALLS BACK. Superseding must not turn the honest
+     failure road off — a note that cannot be shown in place is still a place in
+     the book, and the reader asked to go there. */
+  it('still navigates when the request that failed is the current one', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { book, calls } = await started()
+
+    let refuse: (cause: unknown) => void = () => {}
+    foliate.answers.push(
+      new Promise<void>((_resolve, reject) => {
+        refuse = reject
+      }),
+    )
+    clickNote(book)
+    refuse(new Error('the note would not render'))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(book.went).toEqual(['notes.xhtml#n1'])
+    expect(calls['onFootnote']?.at(-1)).toEqual([null])
+    warn.mockRestore()
   })
 })

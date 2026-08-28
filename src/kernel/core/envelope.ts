@@ -399,17 +399,36 @@ function isServiceError(value: unknown): value is ServiceError {
   )
 }
 
+/** What a thrown value that says nothing usable crosses as. */
+const INTERNAL_ERROR: ServiceError = {
+  code: ENVELOPE_ERRORS.internal,
+  retryable: false,
+  message: 'the service failed',
+}
+
 /**
  * A NEW `ServiceError` built from allow-listed fields only, each capped. A
  * handler that throws `{code, retryable, message, stack, bookText}` must not
  * ship the extras — only the three public fields cross the wire, and a public
  * message cannot itself grow past the cap.
+ *
+ * READ ONCE, AND CANNOT THROW. The value is whatever a handler threw, so its
+ * properties may be getters or Proxy traps: this called `isServiceError`
+ * three more times, once per field, which is four reads of a value that is
+ * free to answer differently each time and to raise on any of them. A raise
+ * escaped the catch block that called it — after the request had been settled
+ * and its clock cleared, so the peer got no answer and no timeout either.
  */
 function toWireError(value: unknown): ServiceError {
-  return {
-    code: isServiceError(value) ? value.code.slice(0, MAX_ERROR_CODE) : ENVELOPE_ERRORS.internal,
-    retryable: isServiceError(value) ? value.retryable : false,
-    message: isServiceError(value) ? value.message.slice(0, MAX_ERROR_MESSAGE) : 'the service failed',
+  try {
+    if (!isPlainObject(value)) return INTERNAL_ERROR
+    const { code, retryable, message } = value
+    if (typeof code !== 'string' || typeof retryable !== 'boolean' || typeof message !== 'string') {
+      return INTERNAL_ERROR
+    }
+    return { code: code.slice(0, MAX_ERROR_CODE), retryable, message: message.slice(0, MAX_ERROR_MESSAGE) }
+  } catch {
+    return INTERNAL_ERROR
   }
 }
 
@@ -929,11 +948,22 @@ export function createRouter(options: RouterOptions): Router {
              * from its public fields only, so a stack, a path or a book's text
              * hidden in extra properties never crosses. An answer over the cap
              * says so; anything else is a defect and crosses as `internal`. */
-            const error = isServiceError(thrown)
-              ? toWireError(thrown)
-              : thrown instanceof FrameTooLarge
-                ? serviceError(ENVELOPE_ERRORS.frameTooLarge, thrown.message)
-                : serviceError(ENVELOPE_ERRORS.internal, 'the service failed')
+            /* AND INSPECTING IT CANNOT THROW PAST HERE. The request is already
+             * settled at this point: an `instanceof` against a Proxy, or a
+             * getter that raises, became an unhandled rejection with the
+             * peer's clock stopped — no answer, and nothing left to end the
+             * wait. `toWireError` is total; this covers the two tests around
+             * it, which read the value in their own right. */
+            let error: ServiceError
+            try {
+              error = isServiceError(thrown)
+                ? toWireError(thrown)
+                : thrown instanceof FrameTooLarge
+                  ? serviceError(ENVELOPE_ERRORS.frameTooLarge, thrown.message)
+                  : INTERNAL_ERROR
+            } catch {
+              error = INTERNAL_ERROR
+            }
             refuse(frame.service, frame.id, error)
           }
         })()

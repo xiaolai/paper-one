@@ -261,22 +261,23 @@ impl EndpointStore {
         // endpoint list they can no longer edit.
         let tmp = self.path.with_extension("json.part");
         std::fs::write(&tmp, text)?;
-        /* Windows cannot `rename` over an existing file, so every update
-         * AFTER the first would fail there and strand the `.part`. The
-         * remove-then-rename fallback is not atomic — a crash between the
-         * two loses the old list — but the store's writes are serialised by
-         * the command layer's mutex and a second Paper by the data-root
-         * lock, and a lost list is re-creatable; a store that can never be
-         * updated is not. Unix stays on the atomic rename. */
-        match std::fs::rename(&tmp, &self.path) {
-            Ok(()) => Ok(()),
-            Err(_) if cfg!(windows) && self.path.exists() => {
-                std::fs::remove_file(&self.path)?;
-                std::fs::rename(&tmp, &self.path)?;
-                Ok(())
-            }
-            Err(err) => Err(err.into()),
+        /* ONE RENAME, ON EVERY PLATFORM. This used to fall back to
+         * remove-then-rename on Windows, on the belief that `rename` there
+         * cannot replace an existing file — so every update after the first
+         * would strand the `.part`. THE BELIEF IS WRONG about the call this
+         * makes: `std::fs::rename` maps to `MoveFileEx` with
+         * `MOVEFILE_REPLACE_EXISTING` (std's `sys/fs/windows.rs`), which is
+         * exactly the atomic replace, and `role.rs` had already written that
+         * down. What the fallback bought was nothing; what it cost was a
+         * window with the old list unlinked and the new one not yet in
+         * place, entered after ANY rename failure — a crash there loses
+         * every endpoint the reader configured and orphans their keys in
+         * the keychain. */
+        if let Err(err) = std::fs::rename(&tmp, &self.path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(err.into());
         }
+        Ok(())
     }
 
     /// Every endpoint, each saying whether a key is stored for it — or that
@@ -470,6 +471,25 @@ pub const CLOUD_BACKEND: &str = "cloud";
 
 #[cfg(test)]
 mod tests {
+    /// A store over a keychain that is NOT THE DEVELOPER'S.
+    ///
+    /// ⚠️ Ten tests here called [`EndpointStore::new`], which is the OS
+    /// keychain under Paper's own service name — and every one of them uses
+    /// the account `proxy`, the obvious id for a reader to give a real
+    /// endpoint. So the suite read whatever was configured on the machine it
+    /// ran on (`an_endpoint_without_a_key_is_not_provisioned` fails outright
+    /// where a `proxy` key exists), raised access prompts on macOS after
+    /// every rebuild, and — through `remove` — DELETED a live credential.
+    /// A test may not depend on the machine's secrets, and it certainly may
+    /// not destroy them. `FakeKeychain` is the store's own seam for this;
+    /// `OsKeychain` belongs to the shipped build alone.
+    fn fake_store(dir: &crate::testutil::ScratchDir) -> EndpointStore {
+        EndpointStore::with_keychain(
+            dir.path(),
+            std::sync::Arc::new(crate::testutil::FakeKeychain::default()),
+        )
+    }
+
     /// ⚠️ **ONE CORPUS, TWO VALIDATORS.** `endpointsModel.ts` refuses the same
     /// things in the reader's own words, beside the field, so a bad address is
     /// not a round trip and an error naming nothing they can act on. Two
@@ -591,7 +611,7 @@ mod tests {
     #[test]
     fn a_registration_carries_the_base_url_and_never_the_key() {
         let dir = crate::testutil::ScratchDir::new("endpoints");
-        let store = EndpointStore::new(dir.path());
+        let store = fake_store(&dir);
         store.add("proxy", "P", "https://a.example.com/v1").unwrap();
         /* No key stored, so nothing to register: a provider that cannot
          * authenticate would be offered by the router and fail. */
@@ -619,7 +639,7 @@ mod tests {
     #[test]
     fn an_absent_file_is_an_empty_list_not_an_error() {
         let dir = crate::testutil::ScratchDir::new("endpoints");
-        let store = EndpointStore::new(dir.path());
+        let store = fake_store(&dir);
         assert_eq!(store.list().unwrap(), Vec::new());
     }
 
@@ -627,7 +647,7 @@ mod tests {
     fn a_malformed_file_is_refused_rather_than_read_as_empty() {
         let dir = crate::testutil::ScratchDir::new("endpoints");
         std::fs::write(dir.path().join(ENDPOINTS_FILE), "{ not json").unwrap();
-        let store = EndpointStore::new(dir.path());
+        let store = fake_store(&dir);
         let err = store.list().unwrap_err();
         assert_eq!(err.kind(), "manifestMalformed");
     }
@@ -635,7 +655,7 @@ mod tests {
     #[test]
     fn endpoints_round_trip_without_carrying_a_key_field() {
         let dir = crate::testutil::ScratchDir::new("endpoints");
-        let store = EndpointStore::new(dir.path());
+        let store = fake_store(&dir);
         store
             .add("proxy", "My proxy", "https://api.example.com/v1")
             .unwrap();
@@ -656,7 +676,7 @@ mod tests {
     #[test]
     fn adding_the_same_id_twice_replaces_rather_than_duplicates() {
         let dir = crate::testutil::ScratchDir::new("endpoints");
-        let store = EndpointStore::new(dir.path());
+        let store = fake_store(&dir);
         store
             .add("proxy", "First", "https://a.example.com/v1")
             .unwrap();
@@ -672,7 +692,7 @@ mod tests {
     #[test]
     fn a_bad_id_or_url_is_refused_at_add() {
         let dir = crate::testutil::ScratchDir::new("endpoints");
-        let store = EndpointStore::new(dir.path());
+        let store = fake_store(&dir);
         assert!(store.add("Bad Id", "x", "https://a.example.com").is_err());
         assert!(store.add("ok", "x", "http://a.example.com").is_err());
         assert_eq!(store.list().unwrap().len(), 0, "nothing was written");
@@ -716,7 +736,7 @@ mod tests {
     #[test]
     fn an_endpoint_without_a_key_is_not_provisioned() {
         let dir = crate::testutil::ScratchDir::new("endpoints");
-        let store = EndpointStore::new(dir.path());
+        let store = fake_store(&dir);
         store
             .add("proxy", "My proxy", "https://a.example.com/v1")
             .unwrap();
@@ -750,7 +770,7 @@ mod tests {
     #[test]
     fn removing_an_unkeyed_endpoint_is_not_an_error() {
         let dir = crate::testutil::ScratchDir::new("endpoints");
-        let store = EndpointStore::new(dir.path());
+        let store = fake_store(&dir);
         store
             .add("proxy", "My proxy", "https://a.example.com/v1")
             .unwrap();
@@ -849,7 +869,7 @@ mod tests {
     fn provisioning_still_refuses_a_malformed_list() {
         let dir = crate::testutil::ScratchDir::new("endpoints");
         std::fs::write(dir.path().join(ENDPOINTS_FILE), "{ not json").unwrap();
-        let store = EndpointStore::new(dir.path());
+        let store = fake_store(&dir);
         assert_eq!(
             store.provisioning().unwrap_err().kind(),
             "manifestMalformed"
@@ -876,7 +896,7 @@ mod tests {
     #[test]
     fn a_write_leaves_no_partial_file_behind() {
         let dir = crate::testutil::ScratchDir::new("endpoints");
-        let store = EndpointStore::new(dir.path());
+        let store = fake_store(&dir);
         store
             .add("proxy", "My proxy", "https://a.example.com/v1")
             .unwrap();

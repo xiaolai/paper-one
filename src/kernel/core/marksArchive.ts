@@ -461,8 +461,14 @@ export function planImport(
       continue
     }
     const into = grouped.get(match.bookId) ?? { marks: [], cards: [] }
-    into.marks.push(...row.marks)
-    into.cards.push(...row.cards)
+    /* APPENDED IN A LOOP, NOT SPREAD. `push(...rows)` passes every row as an
+     * ARGUMENT, and `ARCHIVE_MAX_ROWS` permits 200 000 of them — far past the
+     * engine's argument limit, where the spread throws `RangeError: Maximum
+     * call stack size exceeded` before the plan is built. Measured on this
+     * runtime at exactly that count. The same trap `base64Of` names in
+     * `services/content.ts`, on a bound this file sets itself. */
+    for (const one of row.marks) into.marks.push(one)
+    for (const one of row.cards) into.cards.push(one)
     grouped.set(match.bookId, into)
   }
 

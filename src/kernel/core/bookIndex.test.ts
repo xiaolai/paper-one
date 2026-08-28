@@ -207,6 +207,38 @@ describe('loadShelf', () => {
     expect(why).toBe('marker unreadable')
   })
 
+  it('rescans when a book the marker named will not read, rather than saving its stale row', async () => {
+    /* The marker says this book's record is AHEAD of the index. A record that
+     * then will not read leaves the row known-stale — and writing it back and
+     * clearing the marker threw away the only evidence, with the folder set
+     * still agreeing so that no later launch would look again. */
+    const fs = fakeFs(twoBooks)
+    await writeIndex(fs, await scanBooks(fs))
+    fs.store.set(`${BOOKS_DIR}/book_a/book.json`, new TextEncoder().encode('not json'))
+    await writeDirtyMarker(fs, { version: 1, generation: 1, books: ['book_a'] })
+
+    const { rescanned, why, books } = await loadShelf(fs)
+    expect(rescanned).toBe(true)
+    expect(why).toBe('marked book unreadable')
+    /* The scan read every folder, so the book with no readable record and no
+     * bytes is simply not on the shelf — and the index it wrote says so. */
+    expect(books.map((one) => one.bookId)).toEqual(['book_b'])
+    expect(fs.store.has(INDEX_DIRTY_FILE)).toBe(false)
+  })
+
+  it('rescans when the marker names a book the cache has no row for', async () => {
+    /* Silently ignored, the unmatched id was still cleared with the marker:
+     * the folder set agreed, so a book that had changed hands under a name
+     * the index already listed would have stayed missing indefinitely. */
+    const fs = fakeFs(twoBooks)
+    await writeIndex(fs, await scanBooks(fs))
+    await writeDirtyMarker(fs, { version: 1, generation: 1, books: ['book_c'] })
+
+    const { rescanned, why } = await loadShelf(fs)
+    expect(rescanned).toBe(true)
+    expect(why).toBe('marked book unreadable')
+  })
+
   it('keeps the marker when the refreshed index cannot be written', async () => {
     /* Cleared unconditionally, a refused write left the OLD index on disk
      * with nothing saying its rows were behind — the next launch trusted a

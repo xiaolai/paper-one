@@ -118,6 +118,21 @@ export function useImportRun({ shelve, batch, notice }: ImportRunOptions): Impor
      makes it stop WORKING — the walk takes the signal and checks it between
      books. */
   const abort = useRef<AbortController | null>(null)
+  /**
+   * Which generation the progress bar belongs to.
+   *
+   * ⚠️ **A BARE `supersede()` LEFT THE BAR UP FOR THE REST OF THE SESSION.**
+   * A retiring run returns before `setProgress(null)` — it must, or it would
+   * pull down the bar its REPLACEMENT has already raised — and that reasoning
+   * silently assumed every supersession comes from another `run`. It does not:
+   * a single-book pick or drop supersedes without running anything, so nobody
+   * owned the bar and nobody took it down. `busy` stayed true, the folder
+   * route refuses to start while busy, and every later import was refused.
+   *
+   * A run claims the bar when it raises it; the retiring run clears it only
+   * while the claim is still its own.
+   */
+  const bar = useRef(0)
 
   /* A NEW INTAKE RETIRES THE OLD ONE'S WORK, not just its reporting: the
      token stops it REPORTING and the signal stops it COPYING. */
@@ -135,6 +150,7 @@ export function useImportRun({ shelve, batch, notice }: ImportRunOptions): Impor
       const mine = generation.current
       const current = (): boolean => generation.current === mine
 
+      bar.current = mine
       setProgress({ done: 0, total: 0 })
       const handed = createHandover<ImportOutcome>(batch, shelve)
       let outcomes: readonly ImportOutcome[] = []
@@ -185,7 +201,15 @@ export function useImportRun({ shelve, batch, notice }: ImportRunOptions): Impor
          the reader could start a second import into a shelf the first had not
          finished writing. The bar is what says "this is still happening". */
       if (abort.current === controller) abort.current = null
-      if (!current()) return
+      if (!current()) {
+        /* Superseded, so this run says nothing — but the bar is not a thing it
+           says, it is a thing it raised. Cleared only while the claim is still
+           this run's: a replacement `run` has already raised its own, and
+           pulling that one down is what the bare return was protecting. See
+           `bar`. */
+        if (bar.current === mine) setProgress(null)
+        return
+      }
       setProgress(null)
       if (failed !== null) say.onFailure(failed.cause)
       else notice(say.summarise(outcomes, unsaved))

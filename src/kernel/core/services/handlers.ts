@@ -113,20 +113,31 @@ export function buildServices(
   env: ServiceEnvironment,
   only?: readonly ServiceDescriptor[],
 ): readonly ServiceContribution[] {
-  if (only) {
+  /* SNAPSHOT FIRST, THEN VALIDATE THE SNAPSHOT, THEN MAP THE SAME ONE.
+   *
+   * `only` is a caller's object. The check walked it with `for…of` and the
+   * build then walked it again through its own `.map()` — two reads of a
+   * value free to answer differently each time. A Proxy, or an array-like
+   * with its own `map`, could hand the table's own descriptors to the check
+   * and forged ones to the build, which is precisely the bypass the check
+   * exists to close: clone `trash.empty`, weaken its grant to `book:read`,
+   * and be handed a contribution that carries the table's authority under
+   * somebody else's permission. `Array.from` reads it once. */
+  const wanted = only === undefined ? SERVICE_TABLE : Array.from(only)
+  if (only !== undefined) {
     /* A FILTER, HELD TO IT. `only` took any descriptors at all, so a caller
      * could clone `trash.empty`, change its grant to `book:read`, and be
      * handed a contribution that bypassed the table's authorization record.
      * Every entry must be the table's own object, once. */
     const table = new Set<ServiceDescriptor>(SERVICE_TABLE)
     const seen = new Set<ServiceDescriptor>()
-    for (const descriptor of only) {
-      if (!table.has(descriptor)) throw new Error(`buildServices: ${descriptor.name} is not a descriptor from the service table`)
+    for (const descriptor of wanted) {
+      if (!table.has(descriptor)) throw new Error(`buildServices: ${String(descriptor?.name)} is not a descriptor from the service table`)
       if (seen.has(descriptor)) throw new Error(`buildServices: ${descriptor.name} is listed twice`)
       seen.add(descriptor)
     }
   }
-  return (only ?? SERVICE_TABLE).map((descriptor) => ({
+  return wanted.map((descriptor) => ({
     name: descriptor.name,
     grant: descriptor.grant,
     handler: handlerFor(descriptor, env),

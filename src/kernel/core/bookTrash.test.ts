@@ -9,6 +9,7 @@ import {
   restoreBook,
   timeLeft,
   trashBook,
+  trashedIdentity,
 } from './bookTrash'
 import { fakeFs } from './fakeFs.testkit'
 
@@ -477,6 +478,64 @@ describe('a removal interrupted half way', () => {
     expect([...fs.store.keys()].some((k) => k.endsWith('.displaced'))).toBe(false)
   })
 
+  it('does not put a displaced copy back over a live one the rollback stranded', async () => {
+    /* `rename` REPLACES. The rollback puts the live entries back first and the
+     * copies they displaced second — so when a live entry could not go back,
+     * the second loop renamed the older trashed copy over the newer live bytes
+     * still sitting there. A rollback that destroys the file it was protecting
+     * is worse than the removal it was undoing. */
+    const fs = fakeFs({
+      [`${folderOf('book_a')}/content.epub`]: 'FRESH',
+      [`${folderOf('book_a')}/marks.json`]: '[]',
+      [`${trashOf('book_a')}/content.epub`]: 'WHALE',
+      [`${trashOf('book_a')}/.removed`]: String(Date.now()),
+    })
+    const rename = fs.rename
+    fs.rename = async (from, to) => {
+      // The second entry refuses, so the removal rolls back …
+      if (from.endsWith('/marks.json')) throw new Error('locked')
+      // … and the content cannot be put back where it came from.
+      if (to === `${folderOf('book_a')}/content.epub`) throw new Error('locked')
+      return rename(from, to)
+    }
+    expect(await trashBook(fs, 'book_a')).toBe(false)
+    fs.rename = rename
+
+    // The newer bytes survive, stranded in the trash rather than overwritten …
+    expect(new TextDecoder().decode(fs.store.get(`${trashOf('book_a')}/content.epub`)!)).toBe('FRESH')
+    // … and the older copy keeps its holding name, which a restore skips.
+    expect(new TextDecoder().decode(fs.store.get(`${trashOf('book_a')}/content.epub.displaced`)!)).toBe('WHALE')
+  })
+
+  it('leaves a displaced copy alone when it cannot tell whether the name is free', async () => {
+    /* Fail closed: the cheap wrong answer here is the one that overwrites. */
+    const fs = fakeFs({
+      [`${folderOf('book_a')}/content.epub`]: 'FRESH',
+      [`${folderOf('book_a')}/marks.json`]: '[]',
+      [`${trashOf('book_a')}/content.epub`]: 'WHALE',
+      [`${trashOf('book_a')}/.removed`]: String(Date.now()),
+    })
+    const rename = fs.rename
+    const exists = fs.exists
+    let rollingBack = false
+    fs.rename = async (from, to) => {
+      if (from.endsWith('/marks.json')) {
+        rollingBack = true
+        throw new Error('locked')
+      }
+      return rename(from, to)
+    }
+    fs.exists = async (path) => {
+      if (rollingBack && path === `${trashOf('book_a')}/content.epub`) throw new Error('EIO')
+      return exists(path)
+    }
+    expect(await trashBook(fs, 'book_a')).toBe(false)
+    fs.rename = rename
+    fs.exists = exists
+
+    expect(new TextDecoder().decode(fs.store.get(`${trashOf('book_a')}/content.epub.displaced`)!)).toBe('WHALE')
+  })
+
   it('puts back everything it had already moved', async () => {
     const fs = fakeFs(shelved())
     await trashBook(fs, 'book_a')
@@ -497,6 +556,59 @@ describe('a removal interrupted half way', () => {
     expect(fs.store.has(`${folderOf('book_a')}/book.json`)).toBe(true)
     expect(fs.store.has(`${folderOf('book_a')}/content.epub`)).toBe(true)
     expect(fs.store.has(`${folderOf('book_a')}/marks.json`)).toBe(true)
+  })
+})
+
+/**
+ * ⚠️ **THE FOLDER IS NOT THE IDENTITY**, and a read that failed is not a
+ * folder with no record in it. `folderOf` is many-to-one, so the folder name
+ * is what a PLAIN id equals — and every read failure used to fall back to it,
+ * which is how a transient error over an aliasing entry made the restore
+ * guard approve and brought somebody else's book back relabelled.
+ */
+describe('trashedIdentity', () => {
+  it('takes the record\'s own id', async () => {
+    const fs = fakeFs({ [`${trashOf('book_a')}/book.json`]: '{"bookId":"book:a","title":"X"}' })
+    expect(await trashedIdentity(fs, 'book_a')).toEqual({ state: 'named', bookId: 'book:a' })
+  })
+
+  /* The name every other trash surface uses for a recordless entry, so the
+     sheet that lists one and the verb that restores it agree. */
+  it('names an entry carrying no record at all by its folder', async () => {
+    const fs = fakeFs({ [`${trashOf('book_a')}/marks.json`]: '[]' })
+    expect(await trashedIdentity(fs, 'book_a')).toEqual({ state: 'named', bookId: 'book_a' })
+  })
+
+  it('is unknown when the record is there and will not read', async () => {
+    const fs = fakeFs({ [`${trashOf('book_a')}/book.json`]: '{"bookId":"book:a"}' })
+    fs.readFile = async () => {
+      throw new Error('EIO')
+    }
+    expect(await trashedIdentity(fs, 'book_a')).toEqual({ state: 'unknown' })
+  })
+
+  it('is unknown for a record that is there and does not parse', async () => {
+    const fs = fakeFs({ [`${trashOf('book_a')}/book.json`]: 'not json' })
+    expect(await trashedIdentity(fs, 'book_a')).toEqual({ state: 'unknown' })
+  })
+
+  /* Fail closed when even the stat will not answer: an entry that cannot be
+     described must not be described as this caller's. */
+  it('is unknown when it cannot tell whether a record is there', async () => {
+    const fs = fakeFs({ [`${trashOf('book_a')}/marks.json`]: '[]' })
+    const exists = fs.exists
+    fs.readFile = async () => {
+      throw new Error('EIO')
+    }
+    fs.exists = async (path) => {
+      if (path.endsWith('/book.json')) throw new Error('EIO')
+      return exists(path)
+    }
+    expect(await trashedIdentity(fs, 'book_a')).toEqual({ state: 'unknown' })
+  })
+
+  it('is absent when the trash holds nothing under that folder', async () => {
+    expect(await trashedIdentity(fakeFs(), 'book_a')).toEqual({ state: 'absent' })
   })
 })
 

@@ -279,6 +279,17 @@ export function SidePane({
 
         {pane === 'companion' && (
           <Companion
+            /* ⚠️ **THE THREAD BELONGS TO A BOOK, AND NOTHING SAID SO.** The
+               pane stays mounted across an open, so switching books kept the
+               previous book's exchange and the half-typed question in the
+               composer — under the new book's heading, and grounded in the new
+               book the moment the reader pressed send. "grounded in this book
+               only" is the panel's own promise and this is where it was broken:
+               amber marks provenance, and provenance carried over is worse than
+               none. Keyed, so the session is rebuilt rather than reset by hand
+               — and the unmount aborts a generation still streaming, which is a
+               subscription turn spent on an answer nobody will read. */
+            key={book.bookId ?? 'no-book'}
             currentChapter={book.position.chapterLabel}
             /* A book that is OPEN and READ, not merely chosen: `source` is set
                the instant a file is handed over, while it is still parsing and

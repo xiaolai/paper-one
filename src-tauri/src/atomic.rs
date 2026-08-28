@@ -201,7 +201,14 @@ pub fn fsync_at(target: &Path, level: Level, syncer: &dyn Syncer) -> io::Result<
     if target.is_dir() {
         return syncer.sync_dir(target);
     }
-    let file = File::open(target)?;
+    /* A WRITE HANDLE, and it has to be one. On Windows `sync_all` is
+     * `FlushFileBuffers`, which Microsoft documents as requiring
+     * `GENERIC_WRITE`: a read-only handle answers `ERROR_ACCESS_DENIED`, so
+     * every sync of the journal would have failed there while both Unix
+     * platforms stayed green — the failure has no symptom anywhere the
+     * suite runs. Every file this syncs is one the kernel just wrote
+     * through the fs plugin, so the access is there. */
+    let file = fs::OpenOptions::new().write(true).open(target)?;
     syncer.sync_file(&file, level)
 }
 
@@ -501,6 +508,32 @@ mod tests {
             fsync_at(&target, level, &Os).unwrap();
         }
         fsync_at(&dir, Level::Full, &Os).unwrap();
+    }
+
+    /// The handle `fsync_at` opens is a WRITE handle — see the comment there.
+    /// Nothing on macOS or Linux can tell the two apart on a file this
+    /// process owns, so the one visible difference is what pins it: a file
+    /// this process may read and not write is refused rather than synced
+    /// through a handle Windows would reject.
+    #[cfg(unix)]
+    #[test]
+    fn fsync_opens_the_file_for_writing() {
+        // SAFETY: `geteuid` reads a constant and takes no argument.
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root opens a 0444 file for writing; the check proves nothing.
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("readonly");
+        let target = dir.join("marks.json");
+        write_atomic_at(&target, b"{}", Level::Full, &Os).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o444)).unwrap();
+        let err = fsync_at(&target, Level::Full, &Os).unwrap_err();
+        assert_eq!(
+            err.kind(),
+            io::ErrorKind::PermissionDenied,
+            "fsync_at must open for writing, not for reading"
+        );
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
     }
 
     #[test]

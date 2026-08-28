@@ -152,6 +152,19 @@ export async function trashBook(fs: TrashFs, bookId: string): Promise<boolean> {
           await fs.rename(one.to, one.from).catch(() => stranded.push(one.to))
         }
         for (const one of displaced.reverse()) {
+          /* ONLY ONTO A NAME NOTHING IS AT. A live entry whose move back
+           * failed is still sitting at `one.original`, and `rename` REPLACES
+           * — so putting the displaced copy back would destroy the newer live
+           * bytes in the name of putting things back, which is the one thing
+           * a rollback must not do. It stays under its `.displaced` name
+           * instead: a restore skips those, the next removal that gets
+           * further sweeps them, and the reader keeps the copy that matters.
+           * A stat that will not answer is read as occupied, because the
+           * cheap wrong answer here is the one that overwrites. */
+          if (await fs.exists(one.original).catch(() => true)) {
+            stranded.push(one.held)
+            continue
+          }
           await fs.rename(one.held, one.original).catch(() => stranded.push(one.held))
         }
         if (stranded.length > 0) {
@@ -251,16 +264,47 @@ export type RestoreOutcome =
  * recordless entry by, so the sheet that lists a trashed book and the verb that
  * refuses to restore it cannot name it differently.
  */
-export async function trashedIdentity(fs: TrashFs, bookId: string): Promise<string | null> {
+export type TrashIdentity =
+  /** Nothing in the trash under this id's folder. */
+  | { readonly state: 'absent' }
+  /**
+   * Whose it is: the record's own `bookId`, or the FOLDER NAME for an entry
+   * carrying no record at all — the name every other trash surface uses for
+   * one.
+   */
+  | { readonly state: 'named'; readonly bookId: string }
+  /**
+   * There IS a `book.json` here and it could not be read. Whose book the
+   * folder holds cannot be established, so a guard must refuse.
+   *
+   * ABSENT AND UNREADABLE ARE NOT THE SAME ANSWER — this file's rule for the
+   * trash listing and for the removal stamp, and the one this function broke.
+   * Every read failure fell back to the folder name, so a transient I/O error
+   * over an ALIASING entry (`folderOf` is many-to-one) made the identity
+   * guard approve, and somebody else's book came back relabelled — the exact
+   * outcome the guard exists to prevent.
+   */
+  | { readonly state: 'unknown' }
+
+export async function trashedIdentity(fs: TrashFs, bookId: string): Promise<TrashIdentity> {
   const at = trashOf(bookId)
-  if (!(await fs.exists(at))) return null
-  let record: BookRecord | null = null
+  if (!(await fs.exists(at))) return { state: 'absent' }
+  const named = (): TrashIdentity => ({ state: 'named', bookId: at.slice(at.lastIndexOf('/') + 1) })
+  let raw: string
   try {
-    record = parseRecord(new TextDecoder().decode(await fs.readFile(`${at}/book.json`)))
+    raw = new TextDecoder().decode(await fs.readFile(`${at}/book.json`))
   } catch {
-    record = null
+    /* A read that failed over a file that is THERE is the unknown case; one
+     * over a file that is not is the recordless entry the folder names. An
+     * `exists` that will not answer decides the same way the failed read did:
+     * closed. */
+    return (await fs.exists(`${at}/book.json`).catch(() => true)) ? { state: 'unknown' } : named()
   }
-  return record?.bookId ?? at.slice(at.lastIndexOf('/') + 1)
+  const record: BookRecord | null = parseRecord(raw)
+  /* A `book.json` that is not a record is NOT a recordless entry: something
+   * wrote a book's identity here and it cannot be read. */
+  if (record === null) return { state: 'unknown' }
+  return record.bookId === undefined ? named() : { state: 'named', bookId: record.bookId }
 }
 
 export async function restoreBook(fs: TrashFs, bookId: string): Promise<RestoreOutcome> {

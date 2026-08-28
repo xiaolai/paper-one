@@ -10,6 +10,30 @@
 //!
 //! `cover.webp` is the legacy cover name: served so an old shelf can still
 //! hand its jackets over, never written, so nothing new is created under it.
+//!
+//! # What the containment checks do NOT close, and why that is a decision
+//!
+//! Every check here is by PATHNAME, and a pathname can mean something else a
+//! moment later: a `books/<folder>` directory swapped for a symlink between
+//! [`BlobTarget::checked`] and the open, unlink or rename that follows would
+//! carry that operation outside the data root. `O_NOFOLLOW` in `blobs.rs`
+//! covers the FINAL component only — it is not a whole-path guarantee, and
+//! nothing here claims it is. The audit finds this every round, so it is
+//! written down once:
+//!
+//! **The actor it needs is one who can already write `<root>/books/`** — the
+//! reader's own account, inside a 0700 directory holding their library. The
+//! same boundary `runtime.rs`'s D8 records for the staged runtime: anything
+//! that can plant that symlink can rewrite the books it would redirect to,
+//! and no path check defends against the owner of the path. A remote peer,
+//! which IS in the threat model, reaches this code only through the closed
+//! grammars above and cannot create a symlink anywhere.
+//!
+//! **And the remedy is not portable.** Anchoring every operation to an open
+//! directory handle means `openat2(RESOLVE_BENEATH)` on Linux 5.6+, a
+//! different `O_NOFOLLOW_ANY` dance on macOS, and nothing at all on Windows —
+//! three implementations of one rule, which is the shape this crate keeps
+//! refusing to write, for an attacker already past the boundary.
 
 use std::path::{Path, PathBuf};
 
@@ -141,8 +165,10 @@ impl BlobTarget {
     /// [`checked`](Self::checked), plus: neither the `.part` a fetch appends
     /// into nor the content file the `.part` is renamed onto may be a
     /// final-component symlink, and neither may be anything other than a
-    /// regular file. Re-run immediately before the rename to close the
-    /// check→rename race.
+    /// regular file. Re-run immediately before the rename, which NARROWS the
+    /// check→rename window to those two statements — it does not close it,
+    /// and an earlier wording here said "close". Nothing path-based can:
+    /// see the module header for what is left and whose it is.
     pub fn checked_part(&self, root: &Path) -> Result<()> {
         self.checked(root)?;
         refuse_planted(&self.part_path(), root)?;

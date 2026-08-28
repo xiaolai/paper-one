@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -84,6 +84,30 @@ export const BUNDLED_LIBRARIES = [
   { name: '@tauri-apps/plugin-dialog', vendored: 'tauri-apps-plugin-dialog-MIT.txt', license: 'MIT' },
   { name: '@tauri-apps/plugin-fs', vendored: 'tauri-apps-plugin-fs-MIT.txt', license: 'MIT' },
 ]
+
+/**
+ * What a bundled library BRINGS WITH IT — the half a partition against
+ * `dependencies` cannot see.
+ *
+ * `react-dom` is ONE ENTRY in `package.json` and TWO LIBRARIES in the bundle:
+ * it requires `scheduler`, whose code is in `dist/` and `dist-web/` alike
+ * (`unstable_scheduleCallback` is in both, measured) and whose MIT terms
+ * condition redistribution on the same notice React's do. The check beside
+ * `BUNDLED_LIBRARIES` compares the tables against `package.json`'s DIRECT
+ * dependencies, so it was green for as long as `scheduler` shipped unnamed —
+ * a partition can only account for the set it partitions.
+ *
+ * The walk in `check-third-party-notices.test.mjs` closes that: it follows
+ * every listed package's own `dependencies` and demands each name it reaches
+ * be listed here or excused in `NOT_BUNDLED`.
+ *
+ * `via` NAMES THE PACKAGE THAT PULLS IT IN, and is not decoration. Under
+ * pnpm's default (isolated) linker a transitive package has no
+ * `node_modules/<name>` at all — `scheduler` lives under `.pnpm/` and is
+ * reachable only from `react-dom` — so `readPackage` has nowhere to look
+ * without it.
+ */
+export const BUNDLED_TRANSITIVE = [{ name: 'scheduler', via: 'react-dom' }]
 
 /**
  * A runtime dependency that ships NOTHING, and why.
@@ -191,6 +215,41 @@ export function readCrates(root, names = BUNDLED_PLUGINS, spawn = spawnSync) {
 export const LICENSES_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'licenses')
 
 /**
+ * Where a package installed FOR ANOTHER PACKAGE lives.
+ *
+ * Node's own `node_modules` walk, hand-rolled, starting from the real
+ * directory of `via`. Two reasons it is not `require.resolve`:
+ * `<name>/package.json` is a subpath, and a package with an `exports` map
+ * that does not list it throws `ERR_PACKAGE_PATH_NOT_EXPORTED` — which is
+ * every `@tauri-apps/plugin-*` and Paper's own `foliate-js` fork. And the
+ * answer must not depend on the linker: under pnpm's default the parent is a
+ * symlink into `.pnpm/` with its dependencies BESIDE it, under a hoisted or
+ * npm tree the child sits at the root or nested, and the same walk finds all
+ * three.
+ */
+export function packageDirFor(root, name, via = undefined) {
+  return via === undefined ? path.join(root, 'node_modules', name) : packageDirThrough(root, via, name)
+}
+
+function packageDirThrough(root, via, name) {
+  let dir
+  try {
+    dir = realpathSync(path.join(root, 'node_modules', via))
+  } catch (cause) {
+    throw new Error(`${name}: its parent ${via} is not installed — the notice cannot describe a package that is not here`, { cause })
+  }
+  for (;;) {
+    const at = path.join(dir, 'node_modules', name)
+    if (existsSync(path.join(at, 'package.json'))) return at
+    const up = path.dirname(dir)
+    if (up === dir) {
+      throw new Error(`${name}: not installed anywhere ${via} can see it — is it still a dependency of ${via}?`)
+    }
+    dir = up
+  }
+}
+
+/**
  * One installed package's name, version, licence id and licence text.
  *
  * `entry` is a bare name (the fonts, all of which publish a plain `LICENSE`)
@@ -199,8 +258,8 @@ export const LICENSES_DIR = path.join(path.dirname(fileURLToPath(import.meta.url
  * notice, because it looks complete.
  */
 export function readPackage(root, entry) {
-  const { name, file = 'LICENSE', license, vendored } = typeof entry === 'string' ? { name: entry } : entry
-  const at = path.join(root, 'node_modules', name)
+  const { name, file = 'LICENSE', license, vendored, via } = typeof entry === 'string' ? { name: entry } : entry
+  const at = packageDirFor(root, name, via)
   let manifest
   try {
     manifest = JSON.parse(readFileSync(path.join(at, 'package.json'), 'utf8'))
@@ -297,11 +356,12 @@ export function renderNotices(packages, libraries = [], crates = []) {
   if (libraries.length > 0) {
     lines.push('## JavaScript libraries')
     lines.push('')
-    lines.push('The application code every build ships. Each licence is reproduced whole')
-    lines.push('below, under the packages it covers; where a package offers a choice of')
-    lines.push('terms, the table names the ones this copy travels under. A dependency that')
-    lines.push('reaches no build is not listed — `scripts/lib/notices.mjs` records which,')
-    lines.push('and the notices test holds this list against `package.json`.')
+    lines.push('The application code every build ships — the packages Paper depends on and')
+    lines.push('the ones those bring with them. Each licence is reproduced whole below,')
+    lines.push('under the packages it covers; where a package offers a choice of terms, the')
+    lines.push('table names the ones this copy travels under. A dependency that reaches no')
+    lines.push('build is not listed — `scripts/lib/notices.mjs` records which, and the')
+    lines.push('notices test walks what is installed to hold this list to it.')
     lines.push('')
     lines.push('| Package | Version | Licence |')
     lines.push('| --- | --- | --- |')

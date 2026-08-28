@@ -116,6 +116,27 @@ function shelf(files: Record<string, string>, initial: readonly IndexedBook[] = 
   return { fs, library }
 }
 
+/**
+ * The same store on a filesystem that FOLDS CASE, which is the macOS default.
+ * `fakeFs` is case-sensitive, like Linux and like a case-sensitive APFS
+ * volume; folding at the seam is what makes `books/Book_A` and `books/book_a`
+ * the one directory they are on most readers' machines.
+ */
+function folding(fs: ReturnType<typeof fakeFs>): ReturnType<typeof fakeFs> {
+  const at = (path: string) => path.toLowerCase()
+  return {
+    ...fs,
+    readDir: (path) => fs.readDir(at(path)),
+    readFile: (path) => fs.readFile(at(path)),
+    writeFile: (path, bytes) => fs.writeFile(at(path), bytes),
+    exists: (path) => fs.exists(at(path)),
+    mkdir: (path) => fs.mkdir(at(path)),
+    remove: (path) => fs.remove(at(path)),
+    removeDir: (path) => fs.removeDir(at(path)),
+    rename: (from, to) => fs.rename(at(from), at(to)),
+  }
+}
+
 describe('a guarded restore', () => {
   const live = { 'books/book_a/book.json': JSON.stringify(record('book_a')) }
 
@@ -166,6 +187,95 @@ describe('a guarded restore', () => {
     expect(await fs.exists('books/book_a/marks.json')).toBe(true)
   })
 
+  /* AND A RECORD THAT WILL NOT READ IS NOT A RECORDLESS ENTRY. The fallback
+     above is for a folder carrying no `book.json` at all; every read FAILURE
+     used to take it too, and the folder name is what a plain id equals — so a
+     transient error over an aliasing entry approved the restore and brought
+     somebody else's book back relabelled. */
+  it('refuses rather than guessing when the trashed record will not read', async () => {
+    const { fs, library } = shelf({ 'trash/book_a/book.json': JSON.stringify(record('book:a')) })
+    const readFile = fs.readFile.bind(fs)
+    fs.readFile = async (path) => {
+      if (path === 'trash/book_a/book.json') throw new Error('I/O')
+      return readFile(path)
+    }
+    expect(await library.restore('book_a', { onlyThisBook: true })).toEqual({
+      state: 'unreadable',
+      at: 'trash',
+    })
+    fs.readFile = readFile
+    expect(await fs.exists('books/book_a/book.json')).toBe(false)
+  })
+
+  it('refuses a trash entry whose record is there and does not parse', async () => {
+    const { library } = shelf({ 'trash/book_a/book.json': 'not json' })
+    expect(await library.restore('book_a', { onlyThisBook: true })).toEqual({
+      state: 'unreadable',
+      at: 'trash',
+    })
+  })
+
+  /* ⚠️ **THE FOLDER IT MOVES INTO IS THE OTHER HALF OF THE QUESTION.** The
+     guard read the trash and not the destination, and `restoreBook` moves file
+     by file into the live folder — so a folder belonging to an ALIASING book
+     took this one's marks and content alongside its own, and the row published
+     afterwards carried the requested id over whichever record survived. */
+  it('refuses when the folder it would restore into holds another book', async () => {
+    const { fs, library } = shelf({
+      'trash/book_a/book.json': JSON.stringify(record('book_a')),
+      'trash/book_a/marks.json': '[]',
+      'books/book_a/book.json': JSON.stringify(record('book:a')),
+    })
+    expect(await library.restore('book_a', { onlyThisBook: true })).toEqual({
+      state: 'mismatch',
+      bookId: 'book:a',
+    })
+    // Nothing was merged in: the trashed marks are still in the trash.
+    expect(await fs.exists('trash/book_a/marks.json')).toBe(true)
+    expect(await fs.exists('books/book_a/marks.json')).toBe(false)
+  })
+
+  it('refuses when the folder it would restore into has a record it cannot read', async () => {
+    const { library } = shelf({
+      'trash/book_a/book.json': JSON.stringify(record('book_a')),
+      'books/book_a/book.json': 'not json',
+    })
+    expect(await library.restore('book_a', { onlyThisBook: true })).toEqual({
+      state: 'unreadable',
+      at: 'shelf',
+    })
+  })
+
+  it('refuses when it cannot tell whether the live folder holds a record', async () => {
+    /* Fail closed. A stat that will not answer says nothing about whose book
+       the folder holds, and a guard that cannot establish identity must not
+       proceed as though it had. */
+    const { fs, library } = shelf({ 'trash/book_a/book.json': JSON.stringify(record('book_a')) })
+    const exists = fs.exists.bind(fs)
+    fs.exists = async (path) => {
+      if (path === 'books/book_a/book.json') throw new Error('EIO')
+      return exists(path)
+    }
+    expect(await library.restore('book_a', { onlyThisBook: true })).toEqual({
+      state: 'unreadable',
+      at: 'shelf',
+    })
+    fs.exists = exists
+    expect(await fs.exists('trash/book_a/book.json')).toBe(true)
+  })
+
+  /* THE ORDINARY CASE THE DESTINATION CHECK MUST NOT REFUSE: an import writes
+     the bytes and then the record, so the folder a restore completes is
+     usually one holding content and no `book.json` at all. */
+  it('still restores into a folder holding bytes and no record', async () => {
+    const { fs, library } = shelf({
+      'trash/book_a/book.json': JSON.stringify(record('book_a')),
+      'books/book_a/content.epub': 'bytes',
+    })
+    expect(await library.restore('book_a', { onlyThisBook: true })).toEqual({ state: 'restored' })
+    expect(await fs.exists('books/book_a/book.json')).toBe(true)
+  })
+
   it('answers absent, not mismatch, when the trash holds nothing at all', async () => {
     const { library } = shelf({})
     expect(await library.restore('book:a', { onlyThisBook: true })).toEqual({ state: 'absent' })
@@ -211,6 +321,29 @@ describe('an add that must create', () => {
     ])
     expect(await library.add('book:a', record('book:a', 'Second'), true, { fresh: true })).toBe('folder-taken')
     expect(library.getSnapshot().map((one) => one.bookId)).toEqual(['book_a'])
+  })
+
+  /* ⚠️ **AND TWO IDS THAT DIFFER ONLY IN CASE ARE ONE FOLDER TOO.** macOS's
+     default APFS volume folds case, so `books/Book_A` and `books/book_a` are
+     one directory — while the lane was keyed case-SENSITIVELY, so the two
+     adds ran side by side: each read the folder inside its own lane, found it
+     empty, and wrote. Both callers were told their book was added and one
+     record replaced the other. `book.add`'s preflight already folds; this is
+     the lane catching up with it. */
+  it('serialises two ids differing only in case, on a filesystem that folds', async () => {
+    const fs = fakeFs({})
+    const library = createLibrary({ fs: folding(fs), queue: writeQueue(), initial: [] })
+
+    const outcomes = await Promise.all([
+      library.add('Book_A', record('Book_A', 'First'), false, { fresh: true }),
+      library.add('book_a', record('book_a', 'Second'), false, { fresh: true }),
+    ])
+
+    expect(outcomes.filter((one) => one === 'folder-taken')).toHaveLength(1)
+    expect(outcomes.filter((one) => one === 'added')).toHaveLength(1)
+    // One folder, one record, and the shelf shows one book rather than two.
+    expect([...fs.store.keys()].filter((key) => key.endsWith('/book.json'))).toEqual(['books/book_a/book.json'])
+    expect(library.getSnapshot()).toHaveLength(1)
   })
 
   /* THE FOLDER FREED IN THE LANE, which is the window a caller's own scan

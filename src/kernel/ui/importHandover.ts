@@ -39,6 +39,11 @@ export interface Handover<T> {
    *
    * Callers await this even when superseded: the writes belong to whoever
    * made the copies, and walking away leaves a chain nothing is holding.
+   *
+   * REJECTS ONCE EVERY BATCH HAS HAD ITS TURN, never before. A batch that
+   * rejects is counted as wholly unsaved and the chain carries on; the first
+   * cause is raised from here, so the caller still hears about the failure
+   * without the failure deciding which later books get a record.
    */
   settled(): Promise<number>
 }
@@ -49,12 +54,35 @@ export function createHandover<T>(
 ): Handover<T> {
   let pending: T[] = []
   let chain = Promise.resolve(0)
+  /* The first batch that would not be shelved, held until every batch behind
+   * it has run — see `flush`. */
+  let failed: { cause: unknown } | null = null
 
   const flush = (): void => {
     if (pending.length === 0) return
     const ready = pending
     pending = []
-    chain = chain.then(async (sofar) => sofar + (await shelve(ready)))
+    chain = chain.then(async (sofar) => {
+      try {
+        return sofar + (await shelve(ready))
+      } catch (cause) {
+        /* ⚠️ ONE BATCH'S FAILURE IS NOT THE CHAIN'S, and letting it become one
+         * produced the exact orphan this file's header says cannot happen, by a
+         * second route. `chain.then` on a REJECTED chain never runs its
+         * callback — so a single rejected shelf write silently skipped every
+         * batch queued behind it, and those books stayed on disk with no record
+         * to see or remove them. The token was kept out of here to stop that;
+         * a rejection walked around it.
+         *
+         * The whole batch is counted unsaved because a rejected `shelve` says
+         * nothing about which of its books landed, and over-reporting what was
+         * lost is the honest direction. The cause is raised by `settled` once
+         * every batch has had its turn. */
+        if (failed === null) failed = { cause }
+        else console.error('Paper: another batch could not be shelved either', cause)
+        return sofar + ready.length
+      }
+    })
   }
 
   return {
@@ -63,13 +91,15 @@ export function createHandover<T>(
       if (pending.length >= size) flush()
     },
     flush,
-    settled: () => {
+    settled: async () => {
       /* FLUSHED FIRST. A caller that adds a last item and awaits without
        * flushing would otherwise settle a chain that does not contain it —
        * the same "reported before it was written" shape this file exists to
        * remove. */
       flush()
-      return chain
+      const total = await chain
+      if (failed !== null) throw failed.cause
+      return total
     },
   }
 }

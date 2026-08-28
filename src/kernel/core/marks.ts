@@ -520,6 +520,20 @@ export function markStamp(mark: Mark): Hlc {
 }
 
 /**
+ * Which of two rows carrying ONE id stands — the rule `mergeMarks` states
+ * below, in one function because two callers apply it. `dedupeById` is the
+ * other, and it kept the first row it met instead: a second merge rule over
+ * the same data.
+ */
+function laterMark(held: Mark, incoming: Mark): Mark {
+  const mine = markStamp(held)
+  const theirs = markStamp(incoming)
+  if (mine < theirs) return incoming
+  if (mine > theirs) return held
+  return JSON.stringify(held) < JSON.stringify(incoming) ? incoming : held
+}
+
+/**
  * Fold two lists of one book's marks — LATEST ACTION WINS, per id.
  *
  * The row with the newer `markStamp` is taken WHOLE: a tombstone newer than
@@ -546,16 +560,7 @@ export function mergeMarks(a: readonly Mark[], b: readonly Mark[]): readonly Mar
       changed = true
       continue
     }
-    const mine = markStamp(held)
-    const theirs = markStamp(incoming)
-    const winner =
-      mine < theirs
-        ? incoming
-        : mine > theirs
-          ? held
-          : JSON.stringify(held) < JSON.stringify(incoming)
-            ? incoming
-            : held
+    const winner = laterMark(held, incoming)
     if (winner !== held && JSON.stringify(winner) !== JSON.stringify(held)) {
       byId.set(incoming.id, winner)
       changed = true
@@ -1018,7 +1023,7 @@ export function validMarks(parsed: unknown): Mark[] {
 }
 
 /**
- * One row per id, keeping the first.
+ * One row per id, reconciled by `mergeMarks`'s rule.
  *
  * Everything downstream addresses a mark BY ID and assumes that is unique:
  * `remove` drops every row matching an id and `setNote` rewrites every one of
@@ -1028,16 +1033,31 @@ export function validMarks(parsed: unknown): Mark[] {
  * door stored data comes through, so a single check makes the assumption true
  * for every caller rather than asking each of them to defend itself.
  *
- * First wins: it is the oldest surviving row, and a later duplicate is the more
- * likely corruption.
+ * ⚠️ **THE FIRST ROW USED TO WIN**, on the reasoning that it is the oldest and
+ * a later duplicate is the likelier corruption. That is a SECOND merge rule
+ * over the same data, and it disagrees with the one every other reader of a
+ * duplicate id applies: a legacy pair whose tombstone happens to be serialised
+ * first kept the tombstone and threw away the replacement written after it —
+ * a mark the reader could see, gone at the next load, with the row that
+ * replaced it discarded by the deduplicator. Latest action wins here too, and
+ * ties fall the same way, so a device that folds a pair and one that merges it
+ * reach the same list.
+ *
+ * The POSITION is the first row's. Order is not state — both stores sort for
+ * display and the digest sorts by id — so keeping it costs nothing and keeps
+ * a list that had no duplicates identical to its input.
  */
 function dedupeById(marks: readonly Mark[]): Mark[] {
-  const seen = new Set<string>()
+  const at = new Map<string, number>()
   const kept: Mark[] = []
   for (const mark of marks) {
-    if (seen.has(mark.id)) continue
-    seen.add(mark.id)
-    kept.push(mark)
+    const where = at.get(mark.id)
+    if (where === undefined) {
+      at.set(mark.id, kept.length)
+      kept.push(mark)
+      continue
+    }
+    kept[where] = laterMark(kept[where]!, mark)
   }
   return kept
 }

@@ -62,10 +62,20 @@ export interface FileSystem {
   /**
    * Move a damaged store aside, so the next write cannot destroy it.
    *
+   * ⚠️ **`to` IS A REQUEST, AND THE ANSWER IS WHERE IT WENT.** `rename`
+   * REPLACES its destination on every filesystem this ships to, so an
+   * implementation that honours `to` literally destroys the quarantine an
+   * earlier corruption left at that name — the one thing moving a damaged
+   * file aside exists to prevent. An implementation must therefore be free to
+   * choose a neighbouring name, and the caller must be told which: `aside` is
+   * reported to the reader as the file their work is in, and a path nothing
+   * wrote is the same lie as no quarantine at all. Answering `void` means the
+   * requested name was used.
+   *
    * Optional: a filesystem that cannot rename is still usable, and the store
    * then behaves as it did before this existed.
    */
-  quarantine?: (path: string, to: string) => Promise<void>
+  quarantine?: (path: string, to: string) => Promise<string | void>
 }
 
 export interface FileStoreOptions {
@@ -106,10 +116,15 @@ export async function openFileStore({
        * their work, destroyed by the recovery path that claimed to preserve it.
        * The store then starts empty, which is what a reader sees either way;
        * the difference is whether the old bytes still exist afterwards. */
-      const aside = `${path}.corrupt`
+      const asked = `${path}.corrupt`
       if (fs.quarantine) {
         try {
-          await fs.quarantine(path, aside)
+          /* WHERE IT ACTUALLY WENT, not where it was asked to go — see the
+           * seam. An implementation that avoids destroying an earlier
+           * quarantine has to choose a different name, and reporting the
+           * requested one then sends the reader to a file nothing wrote. */
+          const landed = await fs.quarantine(path, asked)
+          const aside = typeof landed === 'string' && landed !== '' ? landed : asked
           console.error(`Paper: the store could not be read; moved it to ${aside}`)
           damaged = { aside }
         } catch (cause) {
@@ -155,14 +170,21 @@ export async function openFileStore({
   let queued = false
   /** Writes run one after another, never overlapping. */
   let inFlight: Promise<void> = Promise.resolve()
+  /**
+   * Why the last write did not land, or null when it did — `healthy`'s cause,
+   * kept so `flush` can raise the real failure rather than a summary of it.
+   */
+  let lastFailure: unknown = null
 
   const writeNow = async () => {
     const snapshot = JSON.stringify(contents)
     try {
       await fs.write(path, snapshot)
       healthy = true
+      lastFailure = null
     } catch (cause) {
       healthy = false
+      lastFailure = cause
       console.error('Paper: could not save to disk', cause)
     }
   }
@@ -205,9 +227,25 @@ export async function openFileStore({
       if (!healthy) throw new Error('the previous save to disk failed')
     },
 
+    /**
+     * A FLUSH THAT RESOLVES MEANS THE BYTES ARE DOWN.
+     *
+     * `writeNow` swallows so the QUEUE survives a bad write — chaining onto a
+     * rejected promise would make every write after it reject too, and a
+     * store that failed once would never save again. But the swallow also
+     * made this resolve over a write that never happened, and its callers are
+     * precisely the ones that need the answer: the app's shutdown step, which
+     * reports a failed save, and the CLI's close, which turns one into a
+     * non-zero exit rather than printing success over bytes that are not on
+     * disk. Raised HERE, where there is an `await` to raise into, and nowhere
+     * in the chain.
+     */
     flush: async () => {
       if (dirty) chain()
       await inFlight
+      if (lastFailure !== null) {
+        throw lastFailure instanceof Error ? lastFailure : new Error(String(lastFailure))
+      }
     },
 
     get healthy() {
@@ -228,7 +266,14 @@ export async function openFileStore({
    * nothing at all. */
   if (migrated) {
     dirty = true
-    await store.flush()
+    /* AND ITS FAILURE DOES NOT FAIL THE OPEN. `flush` raises a write that did
+     * not land, which is what its callers need — but the seeded values are in
+     * memory and still in the legacy store they were copied from, so a
+     * refused migration write costs this run's durability (`healthy` says so,
+     * and the next `setItem` throws) and not the reader's application.
+     * Thrown, it would send the caller down its "could not open the store at
+     * all" path and pin the whole session to window storage. */
+    await store.flush().catch(() => {})
   }
 
   return store

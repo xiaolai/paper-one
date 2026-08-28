@@ -227,15 +227,23 @@ export interface Library {
   tag(bookId: string, tag: string): Promise<void>
   untag(bookId: string, tag: string): Promise<void>
   /**
-   * Rename one of the reader's tags on EVERY book that carries it.
+   * Rename one of the reader's tags on EVERY book that carries it, answering
+   * with how many RECORDS actually changed.
    *
    * ONE WRITE PER BOOK: the add and the remove happen in the same record, so
    * a failure cannot leave a book with neither. Renaming onto a name that
    * already exists MERGES — `tag` folds by key, so the books simply end up
    * under one tag. A publisher's subject is untouched: it is not the reader's
    * to rename, and `untag` refuses it anyway.
+   *
+   * THE COUNT IS THE WRITER'S, for `tagBooks`' reason. A number taken from
+   * the snapshot BEFORE the write describes the shelf as it stood when the
+   * request arrived, and `tag.rename` published it as a fact about what was
+   * written. The two agree for as long as `update` decides from the row it is
+   * handed — they are not the same claim, and only one of them is made by the
+   * thing that did the writing.
    */
-  renameTag(from: string, to: string): Promise<void>
+  renameTag(from: string, to: string): Promise<number>
   /** Take one of the reader's tags off every book that carries it. */
   removeTag(tag: string): Promise<void>
   /** How many books a `removeTag` of this tag would touch — see the implementation. */
@@ -454,16 +462,20 @@ export interface RestoreGuard {
 }
 
 /**
- * What the STORE's restore answers: the trash primitive's outcome, plus the one
- * answer only a guarded restore can give.
+ * What the STORE's restore answers: the trash primitive's outcome, plus the two
+ * answers only a guarded restore can give.
  *
  * `mismatch` is kept OUT of `RestoreOutcome` on purpose. That type is
  * `restoreBook`'s contract — what moving files can result in — and this is a
- * refusal made before anything moves, by a caller that asked for it.
+ * refusal made before anything moves, by a caller that asked for it. So is
+ * `unreadable`, which is the same refusal without a name to put on it: a
+ * record that will not read says nothing about whose book a folder holds, and
+ * a guard that cannot establish identity must not proceed as though it had.
  */
 export type RestoreAnswer =
   | RestoreOutcome
   | { readonly state: 'mismatch'; readonly bookId: string }
+  | { readonly state: 'unreadable'; readonly at: 'trash' | 'shelf' }
 
 /** One archived book's tags to apply — what `tagMany` takes. */
 export interface TagEntry {
@@ -726,8 +738,24 @@ export function createLibrary({
 
   /* THE FOLDER IS THE LANE, not the id as spelled: two spellings of one id
    * (`book:abc` and its folder name `book_abc`) name one directory, and a
-   * queue exists to serialise what contends for one directory. */
-  const laneFor = (bookId: string): string => follow(folderOf(bookId), lanes)
+   * queue exists to serialise what contends for one directory.
+   *
+   * AND FOLDED, because the filesystem folds. macOS's default APFS volume is
+   * case-INSENSITIVE, so `books/Case` and `books/case` are ONE directory —
+   * `book.add` already folds for exactly this reason, and `migrateToFolders`
+   * before it. Keyed case-sensitively, two ids differing only in case took
+   * two lanes over one folder: both adds read an empty folder inside their
+   * own lane, both passed the `fresh` guard, and the second record replaced
+   * the first while both callers were told their book was added. The lane
+   * guard's whole claim is that the decision is made where the act is, and a
+   * lane that does not cover the folder does not make that true.
+   *
+   * On a case-SENSITIVE filesystem this over-serialises two genuinely
+   * different folders — the same trade the rekey alias above already takes,
+   * and for the same reason: a moment of latency against a race nobody can
+   * see in a diff. */
+  const laneKey = (bookId: string): string => folderOf(bookId).toLowerCase()
+  const laneFor = (bookId: string): string => follow(laneKey(bookId), lanes)
   /** Where a book's writes land NOW — `rekeyed` followed to the end. */
   const resolveId = (bookId: string): string => follow(bookId, rekeyed)
   const listeners = new Set<() => void>()
@@ -1040,8 +1068,17 @@ export function createLibrary({
              * point the index on disk may hold a phantom this session cannot
              * correct, and `loadShelf` trusts the index whenever the folder
              * listing agrees — so the honest move is to leave no cache to
-             * trust. A rescan is the cost of not knowing. */
-            await invalidateIndex(target).catch(() => {})
+             * trust. A rescan is the cost of not knowing.
+             *
+             * AND ITS OWN FAILURE IS THE LAST THING LEFT TO SAY. Swallowed
+             * whole, a stale index holding a phantom row stayed on disk AND
+             * stayed trusted at the next launch — exactly the corruption this
+             * line exists to prevent — with nothing anywhere recording that
+             * the prevention had not happened. Still best effort: the caller
+             * hears `cause`, which is the failure it asked about. */
+            await invalidateIndex(target).catch((why: unknown) => {
+              console.error('Paper: the stale shelf index could not be thrown away either', why)
+            })
           }
           /* RE-THROWN. The verbs return their promise to the caller — the hook
            * reports a failed save, `eachBook` gathers failures across a shelf —
@@ -1445,7 +1482,9 @@ export function createLibrary({
     /* THE ALIAS FIRST, before the task is enqueued: a write issued under the
      * NEW id while the rename is still queued must already find its way into
      * this lane, or it would run beside the rename rather than behind it. */
-    lanes.set(folderOf(to), laneFor(from))
+    /* KEYED THE WAY `laneFor` READS IT — folded — or the alias is a key
+     * nothing ever looks up and the rekey silently un-serialises the book. */
+    lanes.set(laneKey(to), laneFor(from))
     try {
       await queue.append(laneFor(from), async () => {
         if (await target.exists(folderOf(to))) {
@@ -1604,8 +1643,35 @@ export function createLibrary({
        * flip before opening one. */
       if (guard) {
         const holder = await trashedIdentity(target, bookId)
-        if (holder !== null && holder !== bookId) {
-          outcome = { state: 'mismatch', bookId: holder }
+        if (holder.state === 'unknown') {
+          outcome = { state: 'unreadable', at: 'trash' }
+          return
+        }
+        if (holder.state === 'named' && holder.bookId !== bookId) {
+          outcome = { state: 'mismatch', bookId: holder.bookId }
+          return
+        }
+        /* AND THE FOLDER IT WOULD MOVE INTO, which is the other half of the
+         * same question. The trash entry is only one of the two folders a
+         * restore touches: `restoreBook` moves file by file INTO the live
+         * folder and a name already there wins, so a live folder belonging to
+         * an aliasing book (a partial restore, a legacy library) took this
+         * book's marks and content alongside its own — and the row published
+         * below carries the REQUESTED id over whichever record survived.
+         * Two logical books, one folder, no error anywhere.
+         *
+         * A folder with no record at all is the ordinary case and passes: an
+         * import writes `content.epub` before it writes `book.json`, which is
+         * exactly the state this restore exists to complete. A record with no
+         * stored id predates ids being stored and is addressed by its folder,
+         * the same reading `add` gives it. */
+        const live = await readBook(target, bookId)
+        if (live !== null && live.bookId !== undefined && live.bookId !== bookId) {
+          outcome = { state: 'mismatch', bookId: live.bookId }
+          return
+        }
+        if (live === null && (await target.exists(recordPath(bookId)).catch(() => true))) {
+          outcome = { state: 'unreadable', at: 'shelf' }
           return
         }
       }
@@ -1728,7 +1794,7 @@ export function createLibrary({
 
   const renameTag: Library['renameTag'] = (from, to) => {
     const value = normalizeTag(to)
-    if (!value) return Promise.resolve()
+    if (!value) return Promise.resolve(0)
     const fromKey = tagKey(from)
     const toKey = tagKey(value)
     const at = clock()
@@ -1746,19 +1812,25 @@ export function createLibrary({
      * `update` return the record unchanged when the tag is not there.
      * Merging onto an existing tag falls out: if `toKey` is already present
      * the map just drops the old spelling and the fold keeps one. */
-    return eachBook((record) => {
-      const own = record.tags ?? []
-      const held = own.find((one) => tagKey(one) === fromKey)
-      if (held === undefined) return record
-      // TWO REGISTER WRITES IN ONE RECORD: the old spelling's register goes
-      // off, the new one's on, both at the same stamp — still one `book.json`
-      // write, which is what keeps the original promise (neither-nor cannot
-      // happen). Renaming onto a name already on the book merges: the off
-      // lands and the on is already true.
-      const off = setTag(record, held, false, at)
-      const alreadyThere = [...(off.tags ?? []), ...(record.subjects ?? [])].some((one) => tagKey(one) === toKey)
-      return alreadyThere ? off : setTag(off, value, true, at)
-    })
+    /* `eachOf` OVER THE WHOLE SHELF, not `eachBook`, for the one thing it adds:
+     * it counts the books whose record the change actually moved. Same books,
+     * same writes — the snapshot is read here exactly as `eachBook` reads it. */
+    return eachOf(
+      books.map((one) => one.bookId),
+      (record) => {
+        const own = record.tags ?? []
+        const held = own.find((one) => tagKey(one) === fromKey)
+        if (held === undefined) return record
+        // TWO REGISTER WRITES IN ONE RECORD: the old spelling's register goes
+        // off, the new one's on, both at the same stamp — still one `book.json`
+        // write, which is what keeps the original promise (neither-nor cannot
+        // happen). Renaming onto a name already on the book merges: the off
+        // lands and the on is already true.
+        const off = setTag(record, held, false, at)
+        const alreadyThere = [...(off.tags ?? []), ...(record.subjects ?? [])].some((one) => tagKey(one) === toKey)
+        return alreadyThere ? off : setTag(off, value, true, at)
+      },
+    )
   }
 
   const removeTag: Library['removeTag'] = (raw) => {
@@ -2018,46 +2090,79 @@ export function createLibrary({
          * the obsolete book and the measure read the obsolete folder —
          * `hasContent` then falsely false on the row that stayed. */
         const live = resolveId(bookId)
-        return recorded(recorder, live, 'content', async () => {
-          const folder = folderOf(live)
-          /* THE INDEX IS INVALIDATED FIRST, and durably.
-           *
-           * One queue task is atomic against other WRITERS, not against a
-           * crash. Deleting the bytes and then refreshing the row leaves a
-           * window where the files are gone and `index.json` still says the
-           * book is downloaded — and startup trusts that cache, because the
-           * folder's membership has not changed, so nothing disagrees until a
-           * rescan. The journal cannot repair it either: a content commit
-           * carries no digest to compare against.
-           *
-           * Writing `hasContent: false` before the first unlink inverts which
-           * way a crash can lie. "Says gone, bytes may remain" is recoverable
-           * — the next measure sees them and says so — while "says here,
-           * bytes gone" is the state that makes a book unopenable and looks
-           * fine. */
-          const at = books.findIndex((one) => one.bookId === live)
-          if (at !== -1 && books[at]!.hasContent !== false) {
-            const list = [...books]
-            list[at] = { ...list[at]!, hasContent: false }
-            publish(list)
-            await writeIndexNow(target)
-          }
-          for (const name of candidates) {
-            const path = `${folder}/${name}`
-            /* Existence is checked HERE, inside the task, so nothing can land
-             * between "what is there" and "delete it". */
-            if (await target.exists(path)) {
-              await target.remove(path)
-              gone += 1
-            }
-          }
-          /* Same task, same bracket: the row can never disagree with the
-           * folder across a crash the way it could when this was a separate
-           * append. */
-          await noteContent(target, live)
+        return evictHere(target, live, candidates, () => {
+          gone += 1
         })
       })
       .then(() => gone)
+  }
+
+  /**
+   * The eviction itself, INSIDE the book's lane and already resolved.
+   *
+   * ⚠️ **NOTHING TO DO OPENS NO BRACKET.** The candidates are probed first,
+   * here rather than by the caller: `content.evict` listed the folder outside
+   * the lane and skipped this call entirely when the listing came back empty,
+   * so content that landed between the listing and the lane SURVIVED an
+   * eviction that reported success. The listing cannot decide; only the lane
+   * can. And the reason the caller's short-circuit existed in the first place
+   * is the one `removeBlob` states — a bracket around a change that did not
+   * happen advances the journal, feeds an entry to every peer's verify pass,
+   * and describes a file that was already gone — so the short-circuit moves
+   * in here, where it is made against the folder rather than against a
+   * snapshot of it. A row still claiming `hasContent` IS something to do,
+   * because that claim is what makes an unopenable book look fine.
+   */
+  const evictHere = async (
+    target: IndexFs,
+    live: string,
+    candidates: readonly string[],
+    count: () => void,
+  ): Promise<void> => {
+    const folder = folderOf(live)
+    const present: string[] = []
+    for (const name of candidates) {
+      if (await target.exists(`${folder}/${name}`)) present.push(name)
+    }
+    const at = books.findIndex((one) => one.bookId === live)
+    const claims = at !== -1 && books[at]!.hasContent !== false
+    if (present.length === 0 && !claims) return
+    await recorded(recorder, live, 'content', async () => {
+      /* THE INDEX IS INVALIDATED FIRST, and durably.
+       *
+       * One queue task is atomic against other WRITERS, not against a crash.
+       * Deleting the bytes and then refreshing the row leaves a window where
+       * the files are gone and `index.json` still says the book is
+       * downloaded — and startup trusts that cache, because the folder's
+       * membership has not changed, so nothing disagrees until a rescan. The
+       * journal cannot repair it either: a content commit carries no digest
+       * to compare against.
+       *
+       * Writing `hasContent: false` before the first unlink inverts which way
+       * a crash can lie. "Says gone, bytes may remain" is recoverable — the
+       * next measure sees them and says so — while "says here, bytes gone" is
+       * the state that makes a book unopenable and looks fine. */
+      if (claims) {
+        const list = [...books]
+        list[at] = { ...list[at]!, hasContent: false }
+        publish(list)
+        await writeIndexNow(target)
+      }
+      for (const name of present) {
+        const path = `${folder}/${name}`
+        /* Existence is checked again HERE. The probe above and this delete are
+         * atomic against this QUEUE and not against another process, and an
+         * eviction racing one is an absence rather than a fault — the same
+         * reading `removeBlob` gives it. */
+        if (await target.exists(path)) {
+          await target.remove(path)
+          count()
+        }
+      }
+      /* Same task, same bracket: the row can never disagree with the folder
+       * across a crash the way it could when this was a separate append. */
+      await noteContent(target, live)
+    })
   }
 
   const purgeTrashed: Library['purgeTrashed'] = (bookId, options) => {
@@ -2205,7 +2310,12 @@ export function createLibrary({
        * tells the caller the batch failed. */
       if (failures.length === 0) throw cause
       console.error('Paper: could not save the shelf index after a failed row', cause)
-      await invalidateIndex(target).catch(() => {})
+      /* AND THE INVALIDATION'S OWN FAILURE IS SAID TOO — see `commit`, which
+       * had the same silent `.catch`. `raiseGathered` below tells the caller
+       * the batch failed and says nothing about the cache left behind. */
+      await invalidateIndex(target).catch((why: unknown) => {
+        console.error('Paper: the stale shelf index could not be thrown away either', why)
+      })
     }
     raiseGathered(failures, 'rows could not be applied')
   }

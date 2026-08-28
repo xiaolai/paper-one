@@ -509,8 +509,18 @@ export async function scanBooks(fs: IndexFs): Promise<IndexedBook[]> {
  * repair: no cache is a first run, a folder disagreement is something changing
  * the directory behind the app, and an incomplete row is an index written by a
  * version that did not record whether a book has bytes.
+ *
+ * The two marker answers are the same distinction one level down: the marker
+ * itself would not read, or it named a book whose record would not — and only
+ * the second says a particular book's folder is the thing to look at.
  */
-export type ShelfSource = 'cache' | 'no cache' | 'folders disagree' | 'rows incomplete' | 'marker unreadable'
+export type ShelfSource =
+  | 'cache'
+  | 'no cache'
+  | 'folders disagree'
+  | 'rows incomplete'
+  | 'marker unreadable'
+  | 'marked book unreadable'
 
 export interface LoadShelfOptions {
   /**
@@ -566,18 +576,29 @@ export async function loadShelf(
         if (marker === 'absent' || marker.books.length === 0)
           return { books: [...cached.books], rescanned: false, why: 'cache' }
         const books = await refreshed(fs, cached.books, marker.books)
-        if (persist) {
-          /* THE MARKER OUTLIVES A FAILED WRITE. Cleared unconditionally, a
-           * refused `writeIndex` left the OLD index on disk with nothing
-           * saying its rows were behind — and the next launch trusted it,
-           * which is precisely the lie the marker exists to prevent. */
-          const wrote = await writeIndex(fs, books, cached.folders).then(
-            () => true,
-            () => false,
-          )
-          if (wrote) await clearDirtyMarker(fs)
+        /* EVERY BOOK THE MARKER NAMED, OR NONE OF THEM — see `refreshed`. A
+         * partial refresh used to be written back and the marker cleared with
+         * it: the one row that could not be re-read stayed at its cached
+         * value, and the only record that it was behind went with the marker.
+         * The folder set still agreed, so no later launch would ever look
+         * again. Falling through to the scan below reads every record and
+         * replaces the marker, which is the answer that cannot be wrong. */
+        if (books === null) {
+          why = 'marked book unreadable'
+        } else {
+          if (persist) {
+            /* THE MARKER OUTLIVES A FAILED WRITE. Cleared unconditionally, a
+             * refused `writeIndex` left the OLD index on disk with nothing
+             * saying its rows were behind — and the next launch trusted it,
+             * which is precisely the lie the marker exists to prevent. */
+            const wrote = await writeIndex(fs, books, cached.folders).then(
+              () => true,
+              () => false,
+            )
+            if (wrote) await clearDirtyMarker(fs)
+          }
+          return { books, rescanned: false, why: 'cache' }
         }
-        return { books, rescanned: false, why: 'cache' }
       }
     } else {
       /* Named in the order they are checked, so the answer is the FIRST thing
@@ -607,26 +628,40 @@ export async function loadShelf(
 }
 
 /**
- * The cached rows with the marker's books re-read from their folders. A
- * book the marker names and the folder no longer holds (removed after the
- * tick) keeps its cached row: the folder check above already agreed, so the
- * folder is there and `readBook` answering null is a record that will not
- * read — the row stays until a scan decides.
+ * The cached rows with the marker's books re-read from their folders, or
+ * NULL when any book the marker named could not be re-read.
+ *
+ * ALL OR NOTHING, and the null is the whole of it. A book the marker names
+ * has a `book.json` the index is behind on — that is what the marker MEANS —
+ * so a row that could not be refreshed is a row known to be stale, and the
+ * two ways that happens are a record that will not read and a marked id no
+ * cached row answers to (a folder that changed hands under a name the index
+ * already listed). Keeping the cached row for either used to be paired with
+ * clearing the marker, which threw away the only evidence that the row was
+ * behind; the caller rescans instead, which re-reads every record and cannot
+ * be wrong.
  */
 async function refreshed(
   fs: IndexFs,
   cached: readonly IndexedBook[],
   ids: readonly string[],
-): Promise<IndexedBook[]> {
+): Promise<IndexedBook[] | null> {
   const wanted = new Set(ids)
-  return Promise.all(
+  const held = new Set(cached.map((row) => row.bookId))
+  for (const id of wanted) if (!held.has(id)) return null
+  let refused = false
+  const rows = await Promise.all(
     cached.map(async (row) => {
       if (!wanted.has(row.bookId)) return row
       const record = await readBook(fs, row.bookId).catch(() => null)
-      if (!record) return row
+      if (!record) {
+        refused = true
+        return row
+      }
       return { ...record, bookId: row.bookId, ...(row.hasContent === undefined ? {} : { hasContent: row.hasContent }) }
     }),
   )
+  return refused ? null : rows
 }
 
 async function readIndex(

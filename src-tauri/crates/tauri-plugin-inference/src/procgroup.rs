@@ -76,9 +76,17 @@ pub fn terminate(child: &Child) -> io::Result<()> {
     let Some(pid) = child.id() else {
         return Ok(());
     };
-    // The nearest thing Windows has to SIGTERM for a console process group.
-    // A failure here is not fatal: `kill` below is unconditional, so the
-    // worst case is the ungraceful path the grace period exists to avoid.
+    /* The nearest thing Windows has to SIGTERM for a console process group,
+     * and BE HONEST ABOUT WHEN IT WORKS: `GenerateConsoleCtrlEvent` requires
+     * the caller to share the target's console, so it succeeds from a debug
+     * build started in a terminal and normally fails in a shipped
+     * GUI-subsystem build, which has no console to share. That makes the
+     * forced path below the ordinary one on Windows rather than the
+     * exception — the daemon is killed instead of being asked, and its
+     * models are not unloaded on the way out. Not fatal, and not fixed here:
+     * closing it means either an IPC shutdown route on the daemon or
+     * attaching to the child's console, and Windows is a check-only leg of
+     * the gate today (see `.github/workflows/verify.yml`). */
     let ok = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) };
     if ok == 0 {
         Err(io::Error::last_os_error())

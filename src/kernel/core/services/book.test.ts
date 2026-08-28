@@ -77,6 +77,25 @@ describe('book.restore and a trash that changed hands', () => {
     expect(services.library.getSnapshot()).toEqual([])
   })
 
+  /* A FOLDER WHOSE OWNER CANNOT BE ESTABLISHED IS REFUSED TOO, and says which
+     of the two folders would not read. Answering "there was nothing to
+     restore" over a record that could not be read is the same lie the outcome
+     type was widened to stop. */
+  it('refuses when the record in the folder it would restore into will not read', async () => {
+    const fs = fakeFs({
+      'trash/book_a/book.json': RECORD('book_a', 'First'),
+      'books/book_a/book.json': 'not json',
+    })
+    const services = createKernelServices({ fs: blindScan(fs), storage: null, initialBooks: [] })
+
+    await expect(bookRestore({ services })({ book: 'book_a' })).rejects.toMatchObject({
+      code: 'conflict',
+      message: expect.stringContaining('the record in the shelf folder for book_a could not be read'),
+    })
+    await services.drain()
+    expect(fs.store.has('trash/book_a/book.json')).toBe(true)
+  })
+
   /* AND THE ORDINARY RESTORE STILL GOES THROUGH. This is the check that stops
      the paragraph above from being a way to refuse every restore. */
   it('restores the book the folder actually holds', async () => {

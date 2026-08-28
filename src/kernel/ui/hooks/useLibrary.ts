@@ -120,6 +120,24 @@ export function useLibrary(library: Library): LibraryView {
    * the view up to date once the pairing exists, rather than one render
    * later when something else happens to move. */
   const retries = useRef(new WeakMap<SaveFailure, () => void>())
+  /**
+   * Failures TWO verbs both claimed, which get no retry at all.
+   *
+   * ⚠️ **THE BOOK IS NOT AN IDENTITY.** Pairing by book was written to stop the
+   * button under "Couldn't save A" re-running a write to B, and it does — but
+   * two writes to the SAME book failing close together both match, and the
+   * second to reach its catch quietly replaced the first's verb. The store
+   * publishes one `lastFailure` and a catch can only read whatever is current
+   * when it runs, so which verb the failure actually describes is not
+   * decidable from here; the last one to arrive is a guess, and the guess can
+   * be `remove`.
+   *
+   * The rule this hook already states for a shelf-wide verb — ambiguity shows
+   * no retry, which is honest — is the rule for a book-scoped one too. A
+   * contested failure is marked rather than overwritten, and a marked failure
+   * offers nothing.
+   */
+  const contested = useRef(new WeakSet<SaveFailure>())
   const [paired, setPaired] = useState(0)
   const verbs = useMemo(() => {
     /**
@@ -134,6 +152,9 @@ export function useLibrary(library: Library): LibraryView {
      * the failure is unclaimed. Ambiguity now shows a failure with no retry,
      * which is honest, rather than the wrong one.
      *
+     * AND THE SAME BOOK TWICE IS AMBIGUITY TOO — see `contested`. A second
+     * claim on one failure does not win it, it spoils it.
+     *
      * AND A RETRY RUNS ONCE: it unpairs itself before running, so a second
      * click while the first is in flight is a no-op — a failed retry mints a
      * fresh failure object and pairs anew.
@@ -143,7 +164,21 @@ export function useLibrary(library: Library): LibraryView {
         console.error(SAVE_FAILED, cause)
         const failed = library.lastFailure()
         if (failed === null) return
-        if (bookId !== undefined ? failed.bookId !== bookId : retries.current.has(failed)) return
+        if (bookId !== undefined && failed.bookId !== bookId) return
+        if (contested.current.has(failed)) return
+        if (retries.current.has(failed)) {
+          /* A SHELF-WIDE VERB STILL STANDS ASIDE rather than spoiling the
+             claim, exactly as it did: it cannot tell whether the failure is
+             even its own, so it is the weaker claim and not a rival one. */
+          if (bookId === undefined) return
+          /* Somebody else's verb is already on it and this one matches just as
+             well. Neither is knowably the write that failed, so the failure
+             keeps its sentence and loses its button. */
+          retries.current.delete(failed)
+          contested.current.add(failed)
+          setPaired((n) => n + 1)
+          return
+        }
         retries.current.set(failed, () => {
           retries.current.delete(failed)
           setPaired((n) => n + 1)

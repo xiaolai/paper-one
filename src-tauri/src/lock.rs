@@ -34,9 +34,25 @@
 //! the next one, and a machine that rebooted since the record was written
 //! has handed out every number again. So the record carries the holder's
 //! start time and the host's boot time, and a holder is live only when the
-//! pid runs AND both agree with what the OS says now (`paper-process` is the
-//! one lookup, shared with the daemon's lineage record). `None` from the OS
-//! cannot refute — the check falls back to the pid alone.
+//! pid runs AND the OS's answers can be reconciled with what the record says
+//! (`paper-process` is the one lookup, shared with the daemon's lineage
+//! record; `Liveness::holds` has the rule and why it is not a plain equality).
+//! `None` from the OS cannot refute — the check falls back to the pid alone.
+//!
+//! WHAT THIS PROTOCOL DOES NOT CLOSE, since an audit finds it every round.
+//! Two windows are left, and both are the same shape: a name is read and then
+//! ACTED ON, and POSIX has no ownership-conditional unlink to make the pair
+//! one step. `release` compares the token and then removes the pathname, so a
+//! lock published in that gap would be removed by the previous owner; the
+//! stale-claim dance moves a lock aside and links it back, so a third writer
+//! taking the name in that gap leaves the displaced owner detached from the
+//! canonical lock. NEITHER IS REACHABLE WITHOUT A WRONG "STALE" FIRST — a
+//! live holder has to be judged dead before anybody reclaims underneath it —
+//! which is why the identity rule above is where the work went. Closing them
+//! properly means a different primitive (an `flock`/`fcntl` lease held open),
+//! and the CLI half cannot take one: Node has no lock syscall without a
+//! native module, and SAME FILE, SAME RECORD, SAME PROTOCOL is the property
+//! that makes one lock rather than two.
 //!
 //! WINDOWS IS FAIL-CLOSED ON A CRASH. Liveness is `kill(pid, 0)`, which is
 //! Unix; without it a lock left by a crashed app is treated as held, and the
@@ -102,26 +118,62 @@ impl Liveness {
 
     /// Is the recorded holder still the process that wrote the record?
     ///
-    /// Pid first; then each identity the record carries is compared with
-    /// the OS's answer when there is one. A disagreement is a different
-    /// process (or a different boot) wearing the same number; an absent
-    /// answer on either side cannot refute and is not read as one.
+    /// Pid first; then the START TIME, which is the identity — psutil's rule
+    /// and `paper-process`'s header both say so: a pid whose process started
+    /// when the record says it did IS that process. The boot time is the
+    /// fallback for a record or a platform that cannot answer for the pid.
+    /// An absent answer on either side cannot refute and is not read as one.
+    ///
+    /// ⚠️ EVERY STAMP IN THE RECORD IS WALL CLOCK, AND THE CLOCK MOVES. The
+    /// check used to refuse on either stamp disagreeing, which made an NTP
+    /// correction of more than the tolerance — a laptop whose clock was
+    /// wrong, a VM resumed — read a LIVE holder as stale. That is the
+    /// direction the module note calls expensive: two writers over one
+    /// library, where the other way round costs a file to delete. What
+    /// moves under a correction is not the same on both platforms: macOS
+    /// shifts `kern.boottime` and leaves each process's `p_starttime`
+    /// alone, while Linux derives BOTH from `/proc/stat`'s `btime`, so they
+    /// move together. Hence two ways for a record to still be the holder's —
+    /// the start times agree (macOS), or both readings are off by the SAME
+    /// amount, which is a clock that moved under a process that did not
+    /// (Linux). A pid reused on the same boot moves the start and not the
+    /// boot, so it fails both and is still reclaimed.
+    ///
+    /// ⚠️ THE CLI'S HALF OF THIS IS STILL THE OLD RULE. `lock.ts` refutes on
+    /// either stamp, so a `paper` beside a clock correction can still call a
+    /// running app stale; the rule belongs there too, in the same words.
     fn holds(&self, held: &Owner) -> bool {
         if !(self.alive)(held.pid) {
             return false;
         }
-        if let (Some(recorded), Some(now)) = (held.booted_at, (self.booted_at)()) {
-            if recorded.abs_diff(now) > IDENTITY_TOLERANCE_MS {
-                return false;
-            }
+        let start = shift(held.started_at, (self.started_at)(held.pid));
+        let boot = shift(held.booted_at, (self.booted_at)());
+        match (start, boot) {
+            // The identity, agreeing. Whatever the boot time says, the pid
+            // is running the process that wrote the record.
+            (Some(start), _) if start.unsigned_abs() <= IDENTITY_TOLERANCE_MS => true,
+            // Both readings moved together: the clock, not the process.
+            (Some(start), Some(boot)) => start.abs_diff(boot) <= IDENTITY_TOLERANCE_MS,
+            // A start time that disagrees with nothing to explain it away.
+            (Some(_), None) => false,
+            // No start time to be had — the pre-WI-20.34 record, or Windows.
+            (None, Some(boot)) => boot.unsigned_abs() <= IDENTITY_TOLERANCE_MS,
+            (None, None) => true,
         }
-        if let (Some(recorded), Some(now)) = (held.started_at, (self.started_at)(held.pid)) {
-            if recorded.abs_diff(now) > IDENTITY_TOLERANCE_MS {
-                return false;
-            }
-        }
-        true
     }
+}
+
+/// How far the OS's answer has moved from what the record holds, in
+/// milliseconds, or `None` when either side has nothing to say. Signed: a
+/// clock corrected backwards is as ordinary as one corrected forwards.
+///
+/// A stamp too large to be a millisecond epoch answers `None` — "cannot
+/// refute", which keeps the lock held rather than reclaiming on arithmetic
+/// nobody can trust.
+fn shift(recorded: Option<u64>, now: Option<u64>) -> Option<i64> {
+    let recorded = i64::try_from(recorded?).ok()?;
+    let now = i64::try_from(now?).ok()?;
+    Some(now.saturating_sub(recorded))
 }
 
 /// Why the lock could not be taken.
@@ -560,6 +612,62 @@ mod tests {
             acquire_with(&dir, "Paper", &live()),
             Err(Refused::Held(_))
         ));
+    }
+
+    /// A CLOCK CORRECTION IS NOT A DEAD HOLDER — the case that made a live
+    /// app's lock reclaimable and put two writers over one library. Both
+    /// shapes a correction takes: macOS moves the boot time and leaves the
+    /// process's start alone; Linux moves both together. And the pid that
+    /// really was reused is still reclaimed across the same correction,
+    /// because its start moved by a different amount than the boot did.
+    #[test]
+    fn a_clock_correction_does_not_make_a_live_holder_stale() {
+        const START: u64 = 2_000_000_000_000;
+        const BOOT: u64 = 1_900_000_000_000;
+        const STEP: u64 = 3_600_000; // an hour, far past the tolerance
+        let dir = scratch("clockstep");
+        let mut mine = record(std::process::id(), &hostname(), "old");
+        mine.started_at = Some(START);
+        mine.booted_at = Some(BOOT);
+        let write = |owner: &Owner| {
+            fs::write(dir.join(LOCK_FILE), serde_json::to_vec(owner).unwrap()).unwrap()
+        };
+
+        // macOS: `p_starttime` is untouched by the step, `kern.boottime` is not.
+        write(&mine);
+        let mac: Liveness = Liveness {
+            alive: |_| true,
+            started_at: |_| Some(START),
+            booted_at: || Some(BOOT + STEP),
+        };
+        assert!(
+            matches!(acquire_with(&dir, "Paper", &mac), Err(Refused::Held(_))),
+            "a holder whose start time still matches was reclaimed"
+        );
+
+        // Linux: both readings are derived from `btime`, so both move.
+        write(&mine);
+        let linux: Liveness = Liveness {
+            alive: |_| true,
+            started_at: |_| Some(START + STEP),
+            booted_at: || Some(BOOT + STEP),
+        };
+        assert!(
+            matches!(acquire_with(&dir, "Paper", &linux), Err(Refused::Held(_))),
+            "two readings that moved together are a clock, not a new process"
+        );
+
+        // And the genuinely reused pid, across the same correction: its start
+        // moved by a minute more than the boot did.
+        write(&mine);
+        let reused: Liveness = Liveness {
+            alive: |_| true,
+            started_at: |_| Some(START + STEP + 60_000),
+            booted_at: || Some(BOOT + STEP),
+        };
+        acquire_with(&dir, "Paper", &reused)
+            .expect("a pid reused since the record is still stale")
+            .release();
     }
 
     /// Created with `wx` and killed before the record was written: the old

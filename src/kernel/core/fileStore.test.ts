@@ -124,13 +124,52 @@ describe('when the disk refuses', () => {
 
     fail(true)
     expect(() => store.setItem('paper.marks.v1', MARKS)).not.toThrow()
-    await store.flush()
+    await expect(store.flush()).rejects.toThrow('disk full')
     expect(store.healthy).toBe(false)
     expect(() => store.setItem('paper.marks.v1', CARDS)).toThrow('previous save')
 
     fail(false)
     await store.flush()
     expect(store.healthy).toBe(true)
+    warn.mockRestore()
+  })
+
+  /* A FLUSH THAT RESOLVED OVER A WRITE THAT DID NOT HAPPEN. The queue must
+     survive a bad write, so `writeNow` swallows — and the swallow reached the
+     one caller that exists to confirm durability: the shutdown step and the
+     CLI's close both took a resolved flush as "saved". */
+  it('raises out of flush when the write did not land, and stays usable after', async () => {
+    const warn = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { fs, fail, files } = fakeFs()
+    const store = await openFileStore({ fs })
+
+    fail(true)
+    store.setItem('paper.marks.v1', MARKS)
+    await expect(store.flush()).rejects.toThrow('disk full')
+    /* Nothing on disk, and the store says so on its own account too. */
+    expect(files.has(STORE_FILE)).toBe(false)
+    expect(store.healthy).toBe(false)
+
+    /* AND THE QUEUE IS NOT POISONED. Rejecting the chain itself would make
+       every later write reject with the first failure for ever. */
+    fail(false)
+    // The set still reports the PREVIOUS failure — and still queues its write.
+    expect(() => store.setItem('paper.cards.v1', CARDS)).toThrow('previous save')
+    await expect(store.flush()).resolves.toBeUndefined()
+    expect(JSON.parse(files.get(STORE_FILE) ?? '{}')['paper.cards.v1']).toBe(CARDS)
+    warn.mockRestore()
+  })
+
+  it('still opens when the migration write is refused, rather than losing the store to it', async () => {
+    /* The seeded values are in memory and still in the legacy store, so a
+       refused migration write costs durability, not the application. */
+    const warn = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { fs, fail } = fakeFs()
+    fail(true)
+    const store = await openFileStore({ fs, legacy: legacyStore({ 'paper.marks.v1': MARKS }) })
+    expect(store.migrated).toBe(true)
+    expect(store.getItem('paper.marks.v1')).toBe(MARKS)
+    expect(store.healthy).toBe(false)
     warn.mockRestore()
   })
 })
@@ -199,6 +238,31 @@ describe('what the store has to say about its own file', () => {
     const { fs } = fakeFs({ [STORE_FILE]: '{"paper.marks.v1": [trunca' })
     const store = await openFileStore({ fs })
     expect(store.damaged).toEqual({ aside: `${STORE_FILE}.corrupt` })
+    warn.mockRestore()
+  })
+
+  /* ⚠️ **WHERE IT ACTUALLY WENT.** `rename` replaces its destination, so an
+     implementation that must not destroy an earlier quarantine has to choose a
+     neighbouring name — and the requested one is then a path nothing wrote,
+     reported to the reader as the file holding their work. */
+  it('reports the destination the filesystem answered with, not the one it asked for', async () => {
+    const warn = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { fs, files } = fakeFs({ [STORE_FILE]: 'not json' })
+    const taken = `${STORE_FILE}.corrupt`
+    files.set(taken, 'an earlier corruption')
+    const store = await openFileStore({
+      fs: {
+        ...fs,
+        quarantine: async (from, to) => {
+          const free = files.has(to) ? `${to}.1` : to
+          await fs.quarantine!(from, free)
+          return free
+        },
+      },
+    })
+    expect(store.damaged).toEqual({ aside: `${taken}.1` })
+    // And the earlier quarantine is still where it was.
+    expect(files.get(taken)).toBe('an earlier corruption')
     warn.mockRestore()
   })
 

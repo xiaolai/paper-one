@@ -35,8 +35,62 @@ const tauriFs: FileSystem = {
     invoke('write_atomic', new TextEncoder().encode(text), {
       headers: { path: encodeURIComponent(path), level: 'full' },
     }),
-  quarantine: (path, to) =>
-    rename(path, to, { oldPathBaseDir: DIR.baseDir, newPathBaseDir: DIR.baseDir }),
+  /* ANSWERS THE NAME IT ACTUALLY USED, which is the half of the seam's
+   * contract this adapter has to keep: `to` is what the store ASKED for, and
+   * a second corruption is quarantined beside the first rather than over it,
+   * so the two disagree exactly when it matters. The boot notice reads this
+   * answer, and reporting the asked-for name would tell the reader to look at
+   * a file nothing wrote. */
+  quarantine: async (path, to) => {
+    const landed = await freeQuarantinePath(to, (at) => exists(at, DIR))
+    await rename(path, landed, { oldPathBaseDir: DIR.baseDir, newPathBaseDir: DIR.baseDir })
+    return landed
+  },
+}
+
+/**
+ * A destination for a damaged store that does not destroy the last one.
+ *
+ * ⚠️ **A SECOND CORRUPTION MUST NOT ERASE THE FIRST.** `fileStore` asks for
+ * `<path>.corrupt` every time, and `rename` REPLACES its destination — so a
+ * store that went bad twice quarantined twice to one name and the earlier
+ * copy, the one holding whatever the reader might still have recovered, was
+ * gone. The whole point of moving a damaged file aside is that it is still
+ * there.
+ *
+ * `src/hosts/node/fs.ts` had already been given exactly this and the webview
+ * half was left with the plain rename — the same defect, in the host almost
+ * every reader actually runs.
+ *
+ * The plain name is used when it is free, so the ordinary single-fault case
+ * keeps the name the caller asked for and the notice `damageNotice` writes is
+ * the truth. A collision takes a suffix; the loop is bounded, and running out
+ * REFUSES rather than falling back on the last candidate — a
+ * hundred-and-first copy clarifies nothing, and overwriting the hundredth
+ * clarifies less.
+ *
+ * ONLY A DEFINITE "NOT THERE" MEANS FREE. `exists` rejects for a path it
+ * cannot interrogate, and reading that as absence would hand the rename a
+ * destination it silently replaces — the one outcome this exists to prevent.
+ * An unreadable candidate is skipped like an occupied one.
+ */
+export async function freeQuarantinePath(
+  to: string,
+  taken: (path: string) => Promise<boolean>,
+): Promise<string> {
+  for (let n = 0; n <= 100; n += 1) {
+    const candidate = n === 0 ? to : `${to}.${n}`
+    try {
+      if (!(await taken(candidate))) return candidate
+    } catch {
+      continue
+    }
+  }
+  throw new Error(
+    `cannot quarantine the store: ${to} and .1 through .100 all exist. ` +
+      'Something is producing corrupt files faster than they can be looked at; ' +
+      'move the existing quarantines aside before this can continue.',
+  )
 }
 
 /** The window's storage, or null where it is disabled by policy. */

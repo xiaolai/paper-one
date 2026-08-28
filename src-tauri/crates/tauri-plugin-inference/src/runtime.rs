@@ -100,11 +100,19 @@ pub struct Entry {
 
 /// The manifest, validated. Every path is relative and cannot traverse, the
 /// server is a listed file, and the platform is this one.
+///
+/// ⚠️ **EVERY FIELD IS PRIVATE, AND THAT IS THE INVARIANT.** Three of them
+/// used to be `pub`, which made `parse`'s validation a fact about the past
+/// rather than about the value: a caller could parse a good manifest, set
+/// `llamacpp.server` to `../../anything` or `backend` to a name the closed
+/// alphabet refuses, and `verify` would hand back a [`VerifiedBackend`] for
+/// an executable nothing hashed — the module header's "the proof is a type"
+/// undone by a field assignment. Read them through the accessors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeManifest {
-    pub platform: String,
-    pub lemonade: String,
-    pub llamacpp: LlamaCppPin,
+    platform: String,
+    lemonade: String,
+    llamacpp: LlamaCppPin,
     files: Vec<Entry>,
 }
 
@@ -272,6 +280,23 @@ impl RuntimeManifest {
     /// The validated entries.
     pub fn files(&self) -> &[Entry] {
         &self.files
+    }
+
+    /// The platform key this tree was staged for — already checked against
+    /// [`platform_key`] by [`parse`](Self::parse).
+    pub fn platform(&self) -> &str {
+        &self.platform
+    }
+
+    /// The Lemonade version the staging script recorded.
+    pub fn lemonade(&self) -> &str {
+        &self.lemonade
+    }
+
+    /// The llama.cpp pin: the tag, the backend name and the server's path
+    /// inside the tree, all three validated by [`parse`](Self::parse).
+    pub fn llamacpp(&self) -> &LlamaCppPin {
+        &self.llamacpp
     }
 
     /// Every entry against the tree, then the tree against every entry.
@@ -752,9 +777,9 @@ mod tests {
             hex(b"b")
         );
         let manifest = RuntimeManifest::parse(&text).unwrap();
-        assert_eq!(manifest.llamacpp.backend, "metal");
-        assert_eq!(manifest.llamacpp.tag, "b10375");
-        assert_eq!(manifest.lemonade, "11.7.0");
+        assert_eq!(manifest.llamacpp().backend, "metal");
+        assert_eq!(manifest.llamacpp().tag, "b10375");
+        assert_eq!(manifest.lemonade(), "11.7.0");
         assert_eq!(manifest.files().len(), 3);
     }
 }

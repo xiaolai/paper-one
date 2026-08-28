@@ -25,15 +25,22 @@ Deliberately not written into `public/`. Everything there is bundled into the
 shipped application, and a book whose whole purpose is to attack the reader
 should not be inside the reader.
 
-Usage:  python3 scripts/make-hostile-epub.py [output-path]
+Usage:  python3 scripts/make-hostile-epub.py [output-path] [--origin URL]
 Default output: /tmp/paper-hostile.epub
+
+`--origin` arms the script-free framing probe and must be ABSOLUTE. The book is
+loaded from a `blob:` URL, whose opaque path no relative reference can resolve
+against — see `static_frame`, which is where a `src="/"` that could never load
+sat advertised as a test.
 """
 
 from __future__ import annotations
 
 import argparse
 import zipfile
+from html import escape
 from pathlib import Path
+from urllib.parse import urlparse
 
 CONTAINER_XML = """<?xml version="1.0" encoding="UTF-8"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
@@ -109,7 +116,7 @@ PROBE = """<?xml version="1.0" encoding="UTF-8"?>
          under this page. The harness inspects this frame's browsing context
          independently of any book JavaScript; the script below ALSO reports
          it, for a run where the script is (wrongly) allowed. -->
-    <iframe id="paper-static-frame" src="/" aria-hidden="true" style="width:1px;height:1px"></iframe>
+    __PAPER_STATIC_FRAME__
     <script><![CDATA[
       var reached = [];
       function probe(name, fn) {
@@ -145,6 +152,19 @@ PROBE = """<?xml version="1.0" encoding="UTF-8"?>
       // `paper-webhost`, and the only other place it is written down.
       probe('document.cookie', function () { return /paper_session/.test(document.cookie) });
       probe('parent.document.cookie', function () { return /paper_session/.test(parent.document.cookie) });
+      // ⚠️ THE NAME IS NOT THE SECRET, and keying on it alone was a fixture
+      // that only caught a regression careless enough to keep the name. A
+      // credential "moved to storage just for now" gets called `session`,
+      // `token`, `auth` — never `paper_session` — and this reported REACHED
+      // NOTHING about every one of those. So the shape is checked too: any key
+      // that reads like a credential is a hit, whatever it is called.
+      //
+      // It cries no wolf, and that is checked rather than hoped: every key the
+      // client writes is `paper.*` or `sync:*` (settings, marks, cards, tags,
+      // paint, positions, journal, presence), and not one of them matches.
+      // Values are still matched on the cookie's exact name only — settings
+      // JSON is prose and would false-positive on a word.
+      var CREDENTIAL_KEY = /paper_session|session|token|auth|credential|secret|bearer|cookie/i;
       probe('credential in storage', function () {
         // Each store in its OWN try: one inaccessible store used to abort the
         // whole scan, so a later reachable store went unchecked — a false
@@ -162,7 +182,12 @@ PROBE = """<?xml version="1.0" encoding="UTF-8"?>
             if (!store) continue;
             for (var i = 0; i < store.length; i++) {
               var key = store.key(i);
-              if (/paper_session/.test(key) || /paper_session/.test(store.getItem(key) || '')) hit = true;
+              if (CREDENTIAL_KEY.test(key) || /paper_session/.test(store.getItem(key) || '')) {
+                // NAMED, because "credential in storage" alone sends the
+                // reader hunting through four stores for which entry fired.
+                hit = true;
+                observed.push('credential-shaped: ' + stores[s][0] + '[' + key + ']');
+              }
             }
           } catch (e) { observed.push(stores[s][0] + ' unreadable'); }
         }
@@ -269,7 +294,50 @@ PROBE = """<?xml version="1.0" encoding="UTF-8"?>
 """
 
 
-def build(output: Path) -> None:
+def static_frame(origin: str | None) -> str:
+    """The script-free framing probe, or a stand-in that says it is off.
+
+    ⚠️ ``src="/"`` IS WHAT THIS SHIPPED, AND IT CAN NEVER LOAD. Foliate hands
+    the reader's XHTML to the iframe as a ``blob:`` URL, and a blob URL has an
+    *opaque path*: the URL parser refuses every relative reference against one
+    except a fragment (WHATWG URL, "no scheme state"). So ``/`` failed to
+    parse, the iframe kept its initial ``about:blank``, and nothing was ever
+    requested. The probe advertised in this file's own usage text as "tests the
+    framing vector WITHOUT script" had been testing nothing.
+
+    The script half never had the bug — it sets ``location.origin + '/'``,
+    which is absolute — which is exactly why the static half could stay broken
+    while every run still looked complete.
+
+    So the client's origin has to be supplied. With none given, the frame is
+    emitted WITHOUT a ``src`` and says so, in the document and in the printed
+    guidance: a probe that is off and admits it is worth more than one that
+    looks armed and is not.
+    """
+    if origin is None:
+        return (
+            '<iframe id="paper-static-frame" data-paper-origin="unset" aria-hidden="true"\n'
+            '            style="width:1px;height:1px"></iframe>\n'
+            "    <!-- No origin was given, so the script-free framing probe is OFF. A\n"
+            "         relative `src` would be resolved against this document's `blob:`\n"
+            "         URL, whose opaque path makes every one of them unresolvable, and\n"
+            "         the frame would stay at about:blank having requested nothing.\n"
+            "         (An XML comment may not contain two hyphens, so the argument that\n"
+            "         arms this is spelled out in the script's usage rather than here.) -->"
+        )
+    src = f"{origin.rstrip('/')}/"
+    quoted = escape(src, quote=True)
+    return (
+        f'<iframe id="paper-static-frame" src="{quoted}" data-paper-origin="{quoted}"\n'
+        '            aria-hidden="true" style="width:1px;height:1px"></iframe>'
+    )
+
+
+def probe_document(origin: str | None) -> str:
+    return PROBE.replace("__PAPER_STATIC_FRAME__", static_frame(origin))
+
+
+def build(output: Path, origin: str | None = None) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(output, "w") as zf:
         # STORED and first, or a reader is entitled to reject the whole file.
@@ -281,7 +349,7 @@ def build(output: Path) -> None:
         zf.writestr("META-INF/container.xml", CONTAINER_XML)
         zf.writestr("OEBPS/content.opf", OPF)
         zf.writestr("OEBPS/nav.xhtml", NAV)
-        zf.writestr("OEBPS/probe.xhtml", PROBE)
+        zf.writestr("OEBPS/probe.xhtml", probe_document(origin))
 
 
 def main() -> None:
@@ -295,8 +363,26 @@ def main() -> None:
         type=Path,
         help="where to write the .epub (default: /tmp/paper-hostile.epub)",
     )
-    output = parser.parse_args().output
-    build(output)
+    parser.add_argument(
+        "--origin",
+        default=None,
+        help=(
+            "the client's origin, e.g. https://192.168.1.9:7433 or tauri://localhost. "
+            "ABSOLUTE, because the book is loaded from a blob: URL and nothing "
+            "relative can resolve against one. Without it the script-free framing "
+            "probe is emitted disabled rather than emitted broken."
+        ),
+    )
+    args = parser.parse_args()
+    origin = args.origin
+    if origin is not None:
+        # Refused HERE rather than written into a fixture that would then be
+        # silently inert — which is the whole defect this argument exists for.
+        parsed = urlparse(origin)
+        if not parsed.scheme or not (parsed.netloc or parsed.path):
+            parser.error(f"--origin must be absolute, with a scheme; got {origin!r}")
+    output = args.output
+    build(output, origin)
     print(f"wrote {output}")
     print()
     print("Open it in Paper, then read the verdict paragraph (data-state=final):")
@@ -305,9 +391,17 @@ def main() -> None:
     print("  SCRIPT RAN, REACHED NOTHING -> script ran but found no route out.")
     print("  REACHED: ...                -> it names what it got to. See below.")
     print()
-    print("The static <iframe src=\"/\"> tests the framing vector WITHOUT script:")
-    print("inspect its browsing context directly — a loaded client there is a")
-    print("`frame-src` regression even when SCRIPT DID NOT RUN.")
+    if origin is None:
+        print("THE SCRIPT-FREE FRAMING PROBE IS OFF. Pass --origin <client url> to arm")
+        print("it. It cannot be armed by default: the book is loaded from a blob: URL,")
+        print("whose opaque path makes every relative reference — `/` included —")
+        print("unresolvable, so a frame written without an absolute src requests")
+        print("nothing and reports a pass it never earned.")
+    else:
+        print(f"The static <iframe src=\"{origin.rstrip('/')}/\"> tests the framing vector")
+        print("WITHOUT script: inspect its browsing context directly — a loaded client")
+        print("there is a `frame-src` regression even when SCRIPT DID NOT RUN. Check")
+        print("`iframe.src` resolved to that origin before believing an empty frame.")
     print()
     print("data-observed lists BENIGN facts (parent.localStorage reachable, an")
     print("unreadable store) — not failures. Everything in a REACHED list is,")
@@ -315,6 +409,13 @@ def main() -> None:
     print("credential and speaking to the shelf as the reader:")
     print("  document.cookie / parent.document.cookie -> HttpOnly was dropped")
     print("  credential in storage                    -> it was moved to storage")
+    print("WITH ONE EXCEPTION IN data-observed: an entry that begins")
+    print("`credential-shaped:` is the DETAIL of that second failure — which")
+    print("store and which key — not a benign fact. The key is matched on its")
+    print("shape (session, token, auth, credential, secret, bearer, cookie) and")
+    print("not on the cookie's exact name, because a credential moved to storage")
+    print("`just for now` is never called `paper_session`. No key the client")
+    print("writes matches: they are all `paper.*` or `sync:*`.")
     print("ONE ENTRY IS NOT A FAILURE, and reading it as one would send you")
     print("hunting a hole that is not there. `parent.localStorage` fires when the")
     print("parent has ANY entry at all, and in the browser client it always will:")

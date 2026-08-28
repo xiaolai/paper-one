@@ -573,10 +573,14 @@ impl Daemon {
         if let Err(err) = crate::procgroup::kill(&mut self.child, self.hold.group()).await {
             log::warn!("inference: could not kill the runtime group: {err}");
         }
-        // The group is gone, so the record that named it goes too. The hold's
-        // `Drop`, which runs when `self` goes out of scope here, would do the
-        // same — this is the ordered path saying so in its own words.
-        let _ = std::fs::remove_file(self.hold.record());
+        /* THE RECORD IS THE HOLD'S TO REMOVE, and only after a kill that was
+         * delivered. This used to unlink it here, unconditionally, one line
+         * after logging that the kill had failed — so an EPERM or a member
+         * wedged in the kernel ended with a live group and its only key
+         * thrown away, and the `GroupHold::drop` that runs as `self` falls
+         * out of scope here could no longer preserve what was already gone.
+         * `recover` learned this rule first (`lineage.rs`); the ordered path
+         * saying it differently was the whole defect. */
     }
 }
 
@@ -618,6 +622,59 @@ fn arm_death_signal(cmd: &mut Command) {
 #[cfg(not(target_os = "linux"))]
 fn arm_death_signal(_cmd: &mut Command) {}
 
+/// A spawned child NOBODY HAS TAKEN RESPONSIBILITY FOR YET: dropping one
+/// takes its whole process group down, and only the caller that actually
+/// receives it disarms that.
+///
+/// ⚠️ **`send` RETURNING `Ok` IS NOT DELIVERY.** The keeper below used to
+/// clean up on `Err` alone — the caller cancelled between asking and the
+/// answer — but tokio's `oneshot::Sender::send` returns `Ok` the moment the
+/// value is QUEUED and documents the receiver as free to drop immediately
+/// afterwards. The queued `Child` is then dropped by the channel with
+/// `kill_on_drop` and nothing else, which reaches the LEADER only: a
+/// `lemond` that had already forked a backend leaves it holding the GPU, the
+/// model's several gigabytes and the port, with nothing left that knows its
+/// pid. That is the same failure the whole `procgroup` module exists to
+/// prevent, arriving through the one path that had no owner. So the group
+/// travels ARMED and the handover is what disarms it — the state "spawned,
+/// unowned, unkillable" is no longer a value this code can hold.
+#[cfg(unix)]
+struct ArmedChild {
+    child: Option<Child>,
+    /// Captured at spawn, for the reason `procgroup::group_of` gives.
+    group: Option<u32>,
+}
+
+#[cfg(unix)]
+impl ArmedChild {
+    fn new(child: Child) -> ArmedChild {
+        ArmedChild {
+            group: crate::procgroup::group_of(&child),
+            child: Some(child),
+        }
+    }
+
+    /// The receiver owns the child now; there is nothing left to kill.
+    fn disarm(mut self) -> Child {
+        self.child.take().expect("an armed child is disarmed once")
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ArmedChild {
+    fn drop(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        if let Some(pgid) = self.group {
+            // SAFETY: a plain syscall on two integers. ESRCH — the group is
+            // already gone — is the outcome asked for and needs no branch.
+            unsafe { libc::killpg(pgid as libc::pid_t, libc::SIGKILL) };
+        }
+        let _ = child.start_kill();
+    }
+}
+
 /// Spawn the child from a thread that lives as long as the process.
 ///
 /// On Unix every spawn goes through ONE keeper thread, started on first use
@@ -627,6 +684,9 @@ fn arm_death_signal(_cmd: &mut Command) {}
 /// and the channel are exercised on the platform the tests run on rather
 /// than only on the one that needs them. `tokio::process::Command::spawn`
 /// needs a runtime context for its reaper; the keeper enters the caller's.
+///
+/// The child crosses the channel as an [`ArmedChild`], which is what covers
+/// a caller that goes away — by either half of that race; see the type.
 #[cfg(unix)]
 async fn spawn_child(cmd: Command) -> std::io::Result<Child> {
     use std::sync::OnceLock;
@@ -635,7 +695,7 @@ async fn spawn_child(cmd: Command) -> std::io::Result<Child> {
     struct Job {
         cmd: Command,
         runtime: tokio::runtime::Handle,
-        reply: oneshot::Sender<std::io::Result<Child>>,
+        reply: oneshot::Sender<std::io::Result<ArmedChild>>,
     }
 
     static KEEPER: OnceLock<std::sync::mpsc::Sender<Job>> = OnceLock::new();
@@ -647,18 +707,11 @@ async fn spawn_child(cmd: Command) -> std::io::Result<Child> {
             .spawn(move || {
                 for mut job in rx {
                     let _entered = job.runtime.enter();
-                    /* An `Err` here means the caller was CANCELLED between
-                     * asking and the answer. Nobody will ever hold this
-                     * child: dropping it fires `kill_on_drop`, which kills
-                     * the LEADER only — a backend it had already forked
-                     * would keep the port and the model. Take the group down
-                     * whole, here, before the drop. */
-                    if let Err(Ok(mut child)) = job.reply.send(job.cmd.spawn()) {
-                        if let Some(pgid) = crate::procgroup::group_of(&child) {
-                            unsafe { libc::killpg(pgid as libc::pid_t, libc::SIGKILL) };
-                        }
-                        let _ = child.start_kill();
-                    }
+                    /* Whatever comes back from `send` — the `Err` that hands
+                     * the value straight back, or an `Ok` whose receiver
+                     * never reads it — is a drop of an armed child, and the
+                     * group goes with it. */
+                    let _ = job.reply.send(job.cmd.spawn().map(ArmedChild::new));
                 }
             })
             .expect("the inference keeper thread could not be started");
@@ -675,6 +728,7 @@ async fn spawn_child(cmd: Command) -> std::io::Result<Child> {
     answer
         .await
         .map_err(|_| std::io::Error::other("the inference keeper thread dropped the spawn"))?
+        .map(ArmedChild::disarm)
 }
 
 #[cfg(windows)]
@@ -902,6 +956,65 @@ mod tests {
         again.arg("-c").arg("exit 4");
         let mut child = spawn_child(again).await.expect("the keeper is still there");
         assert_eq!(child.wait().await.unwrap().code(), Some(4));
+    }
+
+    /// AN ARMED CHILD NOBODY TOOK TAKES ITS GROUP WITH IT — the half of the
+    /// keeper's race that `send` returning `Ok` hides. `kill_on_drop` alone
+    /// would leave the grandchild running, which is exactly what this asserts
+    /// against: a `sleep` in the leader's group stands in for the backend
+    /// `lemond` forks. Disarming is the other half: the caller that receives
+    /// the child gets one nothing has signalled.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_armed_child_nobody_disarms_takes_its_group_down() {
+        let dir = crate::testutil::ScratchDir::new("armed");
+        let pidfile = dir.path().join("grandchild.pid");
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg(format!("sleep 30 & echo $! > {}; wait", pidfile.display()));
+        crate::procgroup::configure(&mut cmd);
+        cmd.kill_on_drop(true);
+        let armed = ArmedChild::new(cmd.spawn().expect("spawn"));
+
+        let mut grandchild = 0;
+        for _ in 0..250 {
+            if let Ok(text) = tokio::fs::read_to_string(&pidfile).await {
+                if let Ok(pid) = text.trim().parse::<i32>() {
+                    grandchild = pid;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(grandchild > 0, "the helper shell never wrote its pidfile");
+        // SAFETY: signal 0 delivers nothing; it only asks.
+        assert_eq!(
+            unsafe { libc::kill(grandchild, 0) },
+            0,
+            "the grandchild should be running before the drop"
+        );
+
+        drop(armed);
+
+        let mut gone = false;
+        for _ in 0..250 {
+            if unsafe { libc::kill(grandchild, 0) } != 0 {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            gone,
+            "the grandchild survived: the drop signalled the leader, not the group"
+        );
+
+        // And a child that WAS handed over is untouched by the guard.
+        let mut plain = Command::new("/bin/sh");
+        plain.arg("-c").arg("exit 7");
+        crate::procgroup::configure(&mut plain);
+        let mut child = ArmedChild::new(plain.spawn().expect("spawn")).disarm();
+        assert_eq!(child.wait().await.unwrap().code(), Some(7));
     }
 
     #[test]

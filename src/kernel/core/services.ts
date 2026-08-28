@@ -402,12 +402,14 @@ async function removeBlob(
      * found. A snapshot holding both the requested id and a colliding alias
      * (a corrupt index, a caller-supplied initial set) let ordering decide
      * whether the shared blob could be deleted. */
-    const other = library.getSnapshot().find((one) => folderOf(one.bookId) === folder && one.bookId !== bookId)
-    if (other !== undefined) {
-      throw new Error(
-        `removeBlob: ${JSON.stringify(bookId)} does not own ${folder} — ${JSON.stringify(other.bookId)} does`,
-      )
-    }
+    /* AND FOLDED, because the filesystem folds: on macOS's default volume
+     * `books/Book_A` and `books/book_a` are one directory, so a row spelled
+     * the other way round owns these very bytes. Compared exactly, the guard
+     * looked straight past it. `book.add` and the store's lane key fold for
+     * the same reason. */
+    const owner = (id: string) => folderOf(id).toLowerCase()
+    const mine = owner(bookId)
+    const claimant = () => library.getSnapshot().find((one) => owner(one.bookId) === mine && one.bookId !== bookId)
     /* `folderOf` sanitises the id into `books/<safeId>` — a slash, a dot,
      * anything outside [A-Za-z0-9] becomes `_` — so the joined path cannot
      * leave the book's folder whatever the id says. And the delete runs
@@ -438,6 +440,20 @@ async function removeBlob(
      * told every peer the book's bytes had changed. */
     const kind = REMOVABLE_BLOB_KINDS[name]
     await writes.append(library.lane(bookId), async () => {
+      /* ⚠️ **ASKED INSIDE THE LANE, where the answer cannot go stale.** The
+       * shelf was read before the queue was joined — a check-then-act across
+       * a lane boundary — so an add or a rekey already queued for this folder
+       * could claim it while the deletion waited its turn, and the delete
+       * then ran against a snapshot describing a book that no longer owned
+       * these bytes. This is the same repair `AddGuard.fresh` and
+       * `RestoreGuard` are: the scan is the diagnosis, the lane is the
+       * decision. */
+      const other = claimant()
+      if (other !== undefined) {
+        throw new Error(
+          `removeBlob: ${JSON.stringify(bookId)} does not own ${folder} — ${JSON.stringify(other.bookId)} does`,
+        )
+      }
       const path = `${folder}/${name}`
       /* ⚠️ CHECKED BEFORE THE BRACKET IS OPENED, not inside it. An absent
        * blob is the documented no-op, and opening a bracket around it wrote

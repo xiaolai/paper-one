@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process'
+import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isProcessEntry } from './lib/entry.mjs'
 
@@ -154,20 +155,43 @@ export function runSteps(steps, run, log = (line) => process.stdout.write(`${lin
  *  the platforms whose spawn never consults a shell. */
 export const plainToken = (arg) => /^[\w@:./=-]+$/.test(arg)
 
+/**
+ * Whether this command can only be STARTED through cmd.exe.
+ *
+ * `pnpm` on Windows is `pnpm.cmd`, and since Node 20.12 a `.cmd` cannot be
+ * spawned without a shell (EINVAL, by design). A command named by a full path
+ * — `process.execPath`, which the tests spawn — is an executable Node starts
+ * directly, and putting cmd.exe in front of one hands the shell arguments it
+ * was never meant to parse.
+ *
+ * ⚠️ **THE REFUSAL BELOW IS DERIVED FROM THIS, NOT FROM THE PLATFORM.** Keyed
+ * on `win32` alone it refused `node -e "process.exit(0)"` — parentheses,
+ * quotes and a space — so every `spawnStep` assertion in `verify.test.mjs`
+ * returned 126 on the Windows leg, which reaches `test:coverage` through
+ * `pnpm verify --until build:cli`. A guard that reddens the gate on every run
+ * is not a guard; it is the gate's own failure wearing the guard's name.
+ *
+ * `platform` is a parameter so both answers are reachable from one machine:
+ * the Windows arm of a Windows-only rule is otherwise asserted by nobody
+ * until CI runs it. `path.win32.isAbsolute` for the same reason — the
+ * question only ever arises about a Windows path.
+ */
+export const needsShell = (cmd, platform = process.platform) => platform === 'win32' && !path.win32.isAbsolute(cmd)
+
 /** Run one step as a child process in `cwd`, inheriting the terminal (or
  *  discarding stdout for a `quiet` step, whose output is a JSON blob). */
 export function spawnStep(step, cwd = REPO_ROOT, extraEnv = undefined) {
-  /* THE SHELL MAKES EVERY ARGUMENT A PROMISE. On Windows the step runs
-   * through cmd.exe (a `.cmd` cannot be spawned without one since Node
-   * 20.12), and cmd.exe interprets metacharacters in arguments — so an
-   * argument that is not a plain token is a command injection waiting for a
-   * caller to pass one. `STEPS` is all plain tokens today, but `spawnStep` is
-   * exported and `verify-without` feeds it a capability id straight from
-   * argv. Refused HERE, at the one place the shell is decided, rather than
-   * trusted to every present and future caller — and only where the shell
-   * exists to misread anything: without one, arguments reach the child
-   * verbatim and the tests' `-e` payloads are legitimate. */
-  if (process.platform === 'win32') {
+  /* THE SHELL MAKES EVERY ARGUMENT A PROMISE. Where the step runs through
+   * cmd.exe, cmd.exe interprets metacharacters in arguments — so an argument
+   * that is not a plain token is a command injection waiting for a caller to
+   * pass one. `STEPS` is all plain tokens today, but `spawnStep` is exported
+   * and `verify-without` feeds it a capability id straight from argv. Refused
+   * HERE, at the one place the shell is decided, rather than trusted to every
+   * present and future caller — and ONLY where a shell exists to misread
+   * anything: without one, arguments reach the child verbatim, which is why
+   * this is keyed on `needsShell` and not on the platform. */
+  const shell = needsShell(step.cmd)
+  if (shell) {
     const unsafe = step.args.find((arg) => !plainToken(arg))
     if (unsafe !== undefined) {
       process.stderr.write(`verify: refusing to run ${step.name}: argument ${JSON.stringify(unsafe)} is not a plain token\n`)
@@ -177,12 +201,10 @@ export function spawnStep(step, cwd = REPO_ROOT, extraEnv = undefined) {
   const result = spawnSync(step.cmd, step.args, {
     cwd,
     stdio: step.quiet ? ['inherit', 'ignore', 'inherit'] : 'inherit',
-    /* WINDOWS ONLY: `pnpm` there is `pnpm.cmd`, and since Node 20.12 a
-     * `.cmd` cannot be spawned without a shell (EINVAL, by design). Every
-     * argument in `STEPS` is a plain token — no spaces, no shell characters —
-     * so the shell has nothing to misread. Off everywhere else: a shell
-     * between this runner and the gate it runs is one more thing to trust. */
-    shell: process.platform === 'win32',
+    /* See `needsShell`: cmd.exe for the `.cmd` shims that cannot start
+     * without it, and nothing else. A shell between this runner and the gate
+     * it runs is one more thing to trust. */
+    shell,
     /* `extraEnv` is how `verify:without` tells the gates inside its copy which
        capability it has just deleted — see `DELETED_ENV`. Nothing sets it on
        the real tree, which is exactly the distinction the gates need. */

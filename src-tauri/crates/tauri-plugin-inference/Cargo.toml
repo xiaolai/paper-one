@@ -118,6 +118,29 @@ log = "0.4"
 # three hand-rolled platform bindings: on macOS it is `security-framework`,
 # which is already in the tree, and hand-rolling Keychain + DPAPI + Secret
 # Service is more liability than the dependency it would save.
+#
+# ⚠️ **THE LINUX SESSION IS UNENCRYPTED, AND THAT IS NOT A CHOICE ANYONE MADE
+# HERE.** `sync-secret-service` without `crypto-rust` (or `crypto-openssl`)
+# leaves keyring passing `EncryptionType::Plain` — its `secret_service.rs`
+# gates on exactly those two features — so a cloud API key crosses the
+# session D-Bus in the clear on Linux, where the whole point of the Secret
+# Service was that it does not.
+#
+# The one-line fix is `"crypto-rust"` on this list, and it is MEASURED AS
+# BLOCKED rather than left out: enabling it resolves keyring's weak feature
+# references and adds 22 packages to `Cargo.lock` — `secret-service`, the
+# `zbus` tree, `num` — none of which are COMPILED (the weak `?/` reference
+# does not activate them; `cargo tree --target x86_64-unknown-linux-gnu -e
+# features` shows only `dbus-secret-service feature "crypto-rust"`). Lockfile
+# entries alone are enough to break the gate: `check-third-party-notices`
+# runs `cargo metadata --offline --locked` inside `test:coverage`, which is
+# BEFORE `verify.mjs`'s own online `cargo metadata --locked`, and offline
+# metadata fails on any lockfile package missing from the local registry —
+# verified by holding `zbus-4.4.0` out of `~/.cargo/registry` and watching it
+# exit 101. A CI runner restoring a rust-cache keyed on the OLD lockfile has
+# exactly that shape, and so does a fresh clone. Fetching first (a `cargo
+# fetch` step, or the notices call dropping `--offline`) is what unblocks
+# this, and neither lives in this directory.
 keyring = { version = "3", features = [
     "apple-native",
     "windows-native",

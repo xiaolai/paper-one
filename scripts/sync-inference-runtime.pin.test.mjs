@@ -12,10 +12,12 @@ import {
   backendDir,
   buildManifest,
   dereferenceLinks,
+  discardStale,
   isStaged,
   promote,
   stampFor,
   sweepStale,
+  takeStagingLock,
 } from './sync-inference-runtime.mjs'
 
 /* WI-20.24: the backend is pinned. `lemond` used to fetch llama.cpp from
@@ -287,6 +289,137 @@ describe('promote', () => {
       expect(readFileSync(path.join(current, 'lemond'), 'utf8')).toBe('displaced')
       expect(existsSync(`${current}.previous`)).toBe(false)
       expect(existsSync(`${current}.staging`)).toBe(false)
+    } finally {
+      done()
+    }
+  })
+})
+
+/**
+ * A TREE THE PIN NO LONGER DESCRIBES MUST NOT SURVIVE A FAILED FETCH.
+ *
+ * The header promises the stamp makes a platform switch or a version bump
+ * re-stage "rather than shipping the wrong binary", and that held only while
+ * the download worked. Offline, with the pin bumped, the stamp said "not
+ * staged", both fetches answered null, and the run returned having touched
+ * nothing — so the bundle took the PREVIOUS pin's executable, and every check
+ * downstream agreed with it, because the old tree's manifest describes the
+ * old tree perfectly.
+ */
+describe('discardStale', () => {
+  const key = 'darwin-arm64'
+
+  it('removes a tree staged for another pin, and says there was one', () => {
+    const { dir, done } = scratch()
+    try {
+      const current = path.join(dir, 'current')
+      mkdirSync(current)
+      writeFileSync(path.join(current, 'lemond'), 'an older pin')
+      writeFileSync(path.join(current, '.version'), 'lemonade-0.0.1 darwin-arm64 llamacpp-b0 cpu\n')
+
+      expect(discardStale(current, key)).toBe(true)
+      expect(existsSync(current)).toBe(false)
+    } finally {
+      done()
+    }
+  })
+
+  it('leaves a tree that matches the pin, and answers false for one that is not there', () => {
+    const { dir, done } = scratch()
+    try {
+      const current = path.join(dir, 'current')
+      mkdirSync(current)
+      writeFileSync(path.join(current, 'lemond'), 'this pin')
+      writeFileSync(path.join(current, '.version'), `${stampFor(key)}\n`)
+
+      expect(isStaged(current, key)).toBe(true)
+      expect(discardStale(current, key)).toBe(false)
+      expect(readFileSync(path.join(current, 'lemond'), 'utf8')).toBe('this pin')
+      expect(discardStale(path.join(dir, 'nothing-here'), key)).toBe(false)
+    } finally {
+      done()
+    }
+  })
+
+  /* A HOST WITH NO PUBLISHED ARTIFACT MAKES EVERY TREE STALE. `VENDOR` cannot
+     name a platform — `tauri.conf.json` has no way to interpolate one — so a
+     tree staged on another machine is one this build would copy into its
+     bundle whatever it holds. `artifactKey` answers null there, and a stamp
+     cannot even be computed for comparison. */
+  it('discards any tree at all when no artifact exists for this host', () => {
+    const { dir, done } = scratch()
+    try {
+      const current = path.join(dir, 'current')
+      mkdirSync(current)
+      writeFileSync(path.join(current, '.version'), `${stampFor(key)}\n`)
+      expect(discardStale(current, null)).toBe(true)
+      expect(existsSync(current)).toBe(false)
+      expect(discardStale(current, null)).toBe(false)
+    } finally {
+      done()
+    }
+  })
+})
+
+/**
+ * ONE SYNC AT A TIME. `.staging` and `.previous` are named for the live tree
+ * and shared by every run, and `sweepStale` deletes both before it begins —
+ * so `predev` in one terminal and `prebuild` in another delete each other's
+ * work, and the loser promotes a tree missing half its files under a manifest
+ * that describes it perfectly.
+ */
+describe('takeStagingLock', () => {
+  it('is taken once, refused while it is held, and free again after release', () => {
+    const { dir, done } = scratch()
+    try {
+      const current = path.join(dir, 'current')
+      const release = takeStagingLock(current)
+      expect(release).not.toBeNull()
+      expect(existsSync(`${current}.lock`)).toBe(true)
+      /* A DIFFERENT live process — this one, seen from another pid's point of
+         view — must be refused. `process.pid` is the pid this test knows is
+         running, which is what makes the refusal a real answer rather than a
+         guess about a number. */
+      expect(takeStagingLock(current, process.pid + 1)).toBeNull()
+      release()
+      expect(existsSync(`${current}.lock`)).toBe(false)
+      const again = takeStagingLock(current)
+      expect(again).not.toBeNull()
+      again()
+    } finally {
+      done()
+    }
+  })
+
+  /* A LOCK NOBODY HOLDS MUST NOT BLOCK EVERY LATER RUN. A hard kill leaves
+     the directory behind; a sync that refused forever after one `ctrl-c`
+     would be worse than the race it prevents. */
+  it('reclaims a lock whose holder is gone, and one that never recorded a holder', () => {
+    const { dir, done } = scratch()
+    try {
+      const current = path.join(dir, 'current')
+      /* Pid 2^22 + 1 is above every system's `pid_max`, so it names no
+         process on any machine this runs on. */
+      mkdirSync(`${current}.lock`, { recursive: true })
+      writeFileSync(path.join(`${current}.lock`, 'pid'), '4194305\n')
+      const release = takeStagingLock(current)
+      expect(release).not.toBeNull()
+      expect(readFileSync(path.join(`${current}.lock`, 'pid'), 'utf8').trim()).toBe(String(process.pid))
+      release()
+
+      /* Killed between the mkdir and the write: a lock with no pid inside. */
+      mkdirSync(`${current}.lock`, { recursive: true })
+      const second = takeStagingLock(current)
+      expect(second).not.toBeNull()
+      second()
+
+      /* And our OWN pid is not somebody else — a run that found its own
+         abandoned lock would otherwise refuse to do anything, forever. */
+      mkdirSync(`${current}.lock`, { recursive: true })
+      writeFileSync(path.join(`${current}.lock`, 'pid'), `${process.pid}\n`)
+      const third = takeStagingLock(current)
+      expect(third).not.toBeNull()
+      third()
     } finally {
       done()
     }

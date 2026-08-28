@@ -14,6 +14,7 @@ import {
   entriesByDir,
   formatFinding,
   manifestSet,
+  maskRustCode,
   maskTemplates,
   parseCompositionImports,
   platformFromTauriEnv,
@@ -145,6 +146,78 @@ describe('stripComments', () => {
     expect(stripComments('a /* open')).toBe('a ')
     expect(stripComments('a // end')).toBe('a ')
     expect(stripComments("'\\")).toBe("'\\")
+  })
+})
+
+/**
+ * RUST IS NOT JAVASCRIPT, and the masker that read it as JavaScript is the
+ * defect this suite is for. `stripComments` treats `'` as a quote, so the
+ * first LIFETIME in a file opened a string that never closed — and every
+ * comment after it stayed visible, which is how a commented-out
+ * `.plugin(…)` could pass for a registration.
+ *
+ * Each case below is a KNOWN POSITIVE for one lexical rule; the last two are
+ * the ones a regex stack got wrong twice before this existed.
+ */
+describe('maskRustCode', () => {
+  /* The property every caller depends on: match the mask, edit the raw text
+     by the match's own indexes. */
+  const preserves = (source) => {
+    const masked = maskRustCode(source)
+    expect(masked.length, 'same length').toBe(source.length)
+    expect(masked.split('\n').length, 'same line count').toBe(source.split('\n').length)
+    return masked
+  }
+
+  /* Written as a run rather than counted by hand: an expectation whose only
+     content is "how many spaces" is one nobody can review. */
+  const gap = (n) => ' '.repeat(n)
+
+  it('leaves a lifetime alone, so the comment after it is still a comment', () => {
+    const source = "fn f<'a>(x: &'a str) {}\n// .plugin(ghost::init())\nlet c = 'x';\n"
+    expect(preserves(source)).toBe(`fn f<'a>(x: &'a str) {}\n${gap(25)}\nlet c = ' ';\n`)
+    /* The finding itself: an unregistered plugin must not pass because a
+       lifetime swallowed the comment that mentions it. */
+    expect(registersPlugin(source, 'ghost')).toBe(false)
+    /* A loop label is the same shape and equally not a literal. */
+    expect(preserves("'outer: loop { break 'outer; } // x")).toBe(`'outer: loop { break 'outer; }${gap(5)}`)
+  })
+
+  it('blanks a char literal, escapes and all, without losing the quotes', () => {
+    expect(preserves("let a = 'x'; let b = '\\n'; let c = '\\''; let d = b'q';")).toBe(
+      "let a = ' '; let b = '  '; let c = '  '; let d = b' ';",
+    )
+  })
+
+  it('nests block comments the way Rust does, and runs an unterminated one to the end', () => {
+    expect(preserves('a /* one /* two */ still */ b')).toBe(`a${gap(27)}b`)
+    expect(preserves('a /* open\nnext')).toBe(`a${gap(8)}\n${gap(4)}`)
+    expect(preserves('a // end')).toBe(`a${gap(7)}`)
+  })
+
+  it('blanks string contents and reads no comment inside one', () => {
+    expect(preserves('let s = "a // b /* c */ d"; // gone')).toBe(`let s = "${gap(16)}";${gap(8)}`)
+    expect(preserves('let s = "he said \\"hi\\""; let t = "x";')).toBe(`let s = "${gap(14)}"; let t = " ";`)
+    /* Unterminated: to the end, and nothing after it read as code. */
+    expect(preserves('let s = "open')).toBe(`let s = "${gap(4)}`)
+  })
+
+  it('reads a raw string, of any hash depth, and the raw identifier that is not one', () => {
+    expect(preserves('let s = r#"a "quoted" .plugin(x::init())"#;')).toBe(`let s = r#"${gap(29)}"#;`)
+    expect(preserves('let s = r##"a "# inside"##;')).toBe(`let s = r##"${gap(11)}"##;`)
+    expect(preserves('let s = br#"bytes"#; let t = cr"c";')).toBe(`let s = br#"${gap(5)}"#; let t = cr" ";`)
+    /* `r#type` is a raw IDENTIFIER. No quote, no string, nothing blanked. */
+    expect(preserves('let r#type = 1; // c')).toBe(`let r#type = 1;${gap(5)}`)
+    /* Unterminated raw string: to the end of the file. */
+    expect(preserves('let s = r#"open')).toBe(`let s = r#"${gap(4)}`)
+  })
+
+  it('does not let an identifier ending in r open a phantom raw string', () => {
+    /* The tray-menu incident: `"Quit Paper"` matched at `…r"` and the mask
+       blanked everything to the next quote, 250 lines of lib.rs included. */
+    const source = 'm(app, ID, "Quit Paper", true)?;\n.plugin(real::init())\n'
+    expect(preserves(source)).toBe('m(app, ID, "          ", true)?;\n.plugin(real::init())\n')
+    expect(registersPlugin(source, 'real')).toBe(true)
   })
 })
 

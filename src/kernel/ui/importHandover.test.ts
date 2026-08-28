@@ -101,6 +101,49 @@ describe('the import handover', () => {
     expect(most).toBe(1)
   })
 
+  /**
+   * ⚠️ **A REJECTED BATCH USED TO TAKE EVERY BATCH BEHIND IT WITH IT.**
+   *
+   * `chain.then` on a rejected chain never runs its callback, so one failed
+   * shelf write skipped the rest — the same orphan the header describes,
+   * reached by a route the token could not guard because there is no token in
+   * here.
+   */
+  describe('when one batch will not be shelved', () => {
+    const failing = (at: number) => {
+      const batches: string[][] = []
+      return {
+        batches,
+        shelve: async (items: readonly string[]) => {
+          batches.push([...items])
+          if (batches.length === at) throw new Error('disk full')
+          return 0
+        },
+      }
+    }
+
+    it('goes on shelving the batches behind it', async () => {
+      const { batches, shelve } = failing(1)
+      const held = createHandover<string>(1, shelve)
+      for (const one of ['a', 'b', 'c']) held.add(one)
+      await expect(held.settled()).rejects.toThrow('disk full')
+      expect(batches.flat(), 'a copy was made and never recorded').toEqual(['a', 'b', 'c'])
+    })
+
+    /* The caller still hears about it — `useImportRun` folds this into the
+       failure it reports — and it hears about the FIRST one. */
+    it('raises the first cause once every batch has had its turn', async () => {
+      const seen: string[] = []
+      const held = createHandover<string>(1, async (items) => {
+        seen.push(items[0] as string)
+        throw new Error(`no room for ${items[0]}`)
+      })
+      for (const one of ['a', 'b']) held.add(one)
+      await expect(held.settled()).rejects.toThrow('no room for a')
+      expect(seen).toEqual(['a', 'b'])
+    })
+  })
+
   it('is idempotent when flushed with nothing pending', async () => {
     const { batches, shelve } = recorder()
     const held = createHandover<string>(2, shelve)

@@ -93,7 +93,18 @@ pub trait Processes: Send + Sync {
     /// The executable `pid` is running, when the OS will say.
     fn exe_of(&self, pid: u32) -> Option<PathBuf>;
     /// The LIVE members of process group `pgid`.
-    fn members_of(&self, pgid: u32) -> Vec<u32>;
+    ///
+    /// ⚠️ **`Ok(vec![])` IS "THE GROUP IS EMPTY" AND NOTHING ELSE.** This
+    /// answered a bare `Vec`, so an enumeration that FAILED — `proc_listpids`
+    /// refusing, `/proc` unreadable because the process is out of descriptors
+    /// — was the same value as a group that had exited. Both answers feed
+    /// [`is_ours`] and the wind-down loop, where "empty" means throw the
+    /// record away and confirm the shutdown: one transient failure would
+    /// have made a live orphan undiscoverable for ever, holding the GPU and
+    /// the port with nothing left that knew its pid. That is the exact
+    /// failure this module exists to prevent, reached through its own
+    /// bookkeeping.
+    fn members_of(&self, pgid: u32) -> io::Result<Vec<u32>>;
     /// Signal the whole group. A group that is already gone is success.
     fn signal_group(&self, pgid: u32, signal: Signal) -> io::Result<()>;
 }
@@ -132,10 +143,13 @@ pub fn read_record(path: &Path) -> io::Result<Option<GroupRecord>> {
 /// different one. Once the leader has gone, a member running something from
 /// the runtime tree (`lemond` itself, or a backend beside it) is ours; a
 /// wholly dead group whose number a stranger inherited has no such member.
-pub fn is_ours(record: &GroupRecord, procs: &dyn Processes) -> bool {
-    let members = procs.members_of(record.pgid);
+///
+/// `Err` is "the OS would not say", which is neither yes nor no: a caller
+/// must keep the record and signal nothing — see [`Processes::members_of`].
+pub fn is_ours(record: &GroupRecord, procs: &dyn Processes) -> io::Result<bool> {
+    let members = procs.members_of(record.pgid)?;
     if members.is_empty() {
-        return false;
+        return Ok(false);
     }
     if members.contains(&record.leader_pid) {
         /* The recorded time can be UNKNOWN — `started_at` can fail at spawn,
@@ -148,16 +162,16 @@ pub fn is_ours(record: &GroupRecord, procs: &dyn Processes) -> bool {
          * unrecoverable forever — the recovery rejected the honest record. */
         if record.leader_started_at != 0 {
             if let Some(live) = procs.started_at(record.leader_pid) {
-                return live == record.leader_started_at;
+                return Ok(live == record.leader_started_at);
             }
         }
     }
     let tree = record.exe.parent();
-    members.iter().any(|&pid| {
+    Ok(members.iter().any(|&pid| {
         procs
             .exe_of(pid)
             .is_some_and(|exe| exe == record.exe || tree.is_some_and(|tree| exe.starts_with(tree)))
-    })
+    }))
 }
 
 /// What a recovery found.
@@ -170,6 +184,11 @@ pub enum Recovery {
     /// Our group, still running. Signalled, and `forced` when it needed the
     /// second signal.
     Collected { pgid: u32, port: u16, forced: bool },
+    /// The OS would not say what is in the group, so nothing was signalled
+    /// and the record was KEPT — the next launch asks again. Neither
+    /// "collected" nor "stale": claiming either would be a guess, and one of
+    /// the guesses throws away the only key to a live daemon.
+    Unknown { pgid: u32 },
 }
 
 /// Collect a daemon a previous Paper left running, if there is one.
@@ -191,30 +210,43 @@ pub async fn recover(path: &Path, procs: &dyn Processes, grace: Duration) -> Rec
             return Recovery::Stale;
         }
     };
-    let outcome = if is_ours(&record, procs) {
-        let (forced, gone) = wind_down(&record, procs, grace).await;
-        if !gone {
-            /* The record is the ONLY key to this group. A kill that did not
-             * take — an EPERM, a member wedged in the kernel — must not end
-             * with the key thrown away and the group immortal; the next
-             * launch tries again with the same record. */
+    let outcome = match is_ours(&record, procs) {
+        /* The OS refusing to enumerate is not evidence of anything. Keep the
+         * record, signal nothing, and say so: the alternative reads the
+         * failure as "empty" and deletes the only key to a live group. */
+        Err(err) => {
             log::warn!(
-                "inference: the orphaned runtime group {} did not exit; keeping its record for the next launch",
+                "inference: could not tell whether runtime group {} is still ours ({err}); keeping its record for the next launch",
                 record.pgid
             );
-            return Recovery::Collected {
+            return Recovery::Unknown { pgid: record.pgid };
+        }
+        Ok(false) => Recovery::Stale,
+        Ok(true) => match wind_down(&record, procs, grace).await {
+            WoundDown::Gone { forced } => Recovery::Collected {
                 pgid: record.pgid,
                 port: record.port,
                 forced,
-            };
-        }
-        Recovery::Collected {
-            pgid: record.pgid,
-            port: record.port,
-            forced,
-        }
-    } else {
-        Recovery::Stale
+            },
+            // The number moved on between the check and the kill; nothing of
+            // ours is there, and the record describes nobody.
+            WoundDown::NotOurs => Recovery::Stale,
+            WoundDown::Left { forced } => {
+                /* The record is the ONLY key to this group. A kill that did
+                 * not take — an EPERM, a member wedged in the kernel — must
+                 * not end with the key thrown away and the group immortal;
+                 * the next launch tries again with the same record. */
+                log::warn!(
+                    "inference: the orphaned runtime group {} did not exit; keeping its record for the next launch",
+                    record.pgid
+                );
+                return Recovery::Collected {
+                    pgid: record.pgid,
+                    port: record.port,
+                    forced,
+                };
+            }
+        },
     };
     if let Err(err) = std::fs::remove_file(path) {
         if err.kind() != io::ErrorKind::NotFound {
@@ -230,13 +262,23 @@ pub async fn recover(path: &Path, procs: &dyn Processes, grace: Duration) -> Rec
     outcome
 }
 
-/// Ask the group to stop, wait, then insist.
+/// What a wind-down did. `forced` is whether it took the second signal.
 ///
-/// Answers `(forced, gone)` — whether it needed the second signal, and
-/// whether the group actually EMPTIED. The second answer is what `recover`
-/// keeps the record on: reporting a collection that did not happen was how
-/// a kill that failed threw away the only key to a live group.
-async fn wind_down(record: &GroupRecord, procs: &dyn Processes, grace: Duration) -> (bool, bool) {
+/// The distinction `recover` acts on is Gone versus everything else: only an
+/// EMPTIED group frees the record. Reporting a collection that did not happen
+/// was how a kill that failed threw away the only key to a live group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WoundDown {
+    /// The group emptied.
+    Gone { forced: bool },
+    /// The record no longer names our group — nothing of ours was signalled.
+    NotOurs,
+    /// It would not go, or the OS stopped answering. The record stays.
+    Left { forced: bool },
+}
+
+/// Ask the group to stop, wait, then insist.
+async fn wind_down(record: &GroupRecord, procs: &dyn Processes, grace: Duration) -> WoundDown {
     if let Err(err) = procs.signal_group(record.pgid, Signal::Terminate) {
         log::warn!(
             "inference: could not terminate the orphaned runtime group {}: {err}",
@@ -244,28 +286,73 @@ async fn wind_down(record: &GroupRecord, procs: &dyn Processes, grace: Duration)
         );
     }
     let deadline = tokio::time::Instant::now() + grace;
-    while !procs.members_of(record.pgid).is_empty() {
-        if tokio::time::Instant::now() >= deadline {
-            if let Err(err) = procs.signal_group(record.pgid, Signal::Kill) {
+    loop {
+        match procs.members_of(record.pgid) {
+            Ok(members) if members.is_empty() => return WoundDown::Gone { forced: false },
+            Ok(_) => {}
+            Err(err) => {
                 log::warn!(
-                    "inference: could not kill the orphaned runtime group {}: {err}",
+                    "inference: could not read the members of the orphaned runtime group {} ({err}); keeping its record",
                     record.pgid
                 );
+                return WoundDown::Left { forced: false };
             }
-            // SIGKILL is not synchronous: give the kernel a moment, then
-            // read the group back rather than assuming.
-            let confirm = tokio::time::Instant::now() + Duration::from_millis(250);
-            while tokio::time::Instant::now() < confirm {
-                if procs.members_of(record.pgid).is_empty() {
-                    return (true, true);
-                }
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-            return (true, procs.members_of(record.pgid).is_empty());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return force(record, procs).await;
         }
         tokio::time::sleep(POLL_EVERY).await;
     }
-    (false, true)
+}
+
+/// The second signal, and the identity check that guards it.
+async fn force(record: &GroupRecord, procs: &dyn Processes) -> WoundDown {
+    /* THE IDENTITY IS CHECKED AGAIN, IMMEDIATELY BEFORE THE KILL. `recover`
+     * checked it once, a whole grace period ago. A pgid cannot be recycled
+     * while any member lives, so what this catches is the group emptying
+     * inside one poll gap and its number coming back to a stranger before
+     * the deadline — after which the SIGKILL below would land on somebody
+     * else's process tree. Signalling a stranger is the one outcome this
+     * module must never produce, so an identity that no longer holds ABORTS
+     * rather than insisting, and an OS that will not answer keeps the record
+     * instead of guessing. */
+    match is_ours(record, procs) {
+        Ok(true) => {}
+        Ok(false) => return WoundDown::NotOurs,
+        Err(err) => {
+            log::warn!(
+                "inference: could not confirm the orphaned runtime group {} before killing it ({err}); leaving it alone",
+                record.pgid
+            );
+            return WoundDown::Left { forced: false };
+        }
+    }
+    if let Err(err) = procs.signal_group(record.pgid, Signal::Kill) {
+        log::warn!(
+            "inference: could not kill the orphaned runtime group {}: {err}",
+            record.pgid
+        );
+    }
+    // SIGKILL is not synchronous: give the kernel a moment, then read the
+    // group back rather than assuming.
+    let confirm = tokio::time::Instant::now() + Duration::from_millis(250);
+    loop {
+        match procs.members_of(record.pgid) {
+            Ok(members) if members.is_empty() => return WoundDown::Gone { forced: true },
+            Ok(_) => {}
+            Err(err) => {
+                log::warn!(
+                    "inference: could not read the members of runtime group {} after the kill ({err}); keeping its record",
+                    record.pgid
+                );
+                return WoundDown::Left { forced: true };
+            }
+        }
+        if tokio::time::Instant::now() >= confirm {
+            return WoundDown::Left { forced: true };
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
 }
 
 /// The `Drop` half: holds the group id and the record's path for exactly as
@@ -290,10 +377,11 @@ impl GroupHold {
         self.group
     }
 
-    /// Where the record is.
-    pub fn record(&self) -> &Path {
-        &self.record
-    }
+    /* NO `record()` ACCESSOR. There was one, and `Daemon::stop` used it to
+     * unlink the record itself — past the condition this type's `Drop`
+     * applies, so a kill that failed still threw the key away. The path is
+     * this type's business alone now, and the accessor is gone so it cannot
+     * become somebody else's again. */
 }
 
 impl Drop for GroupHold {
@@ -344,7 +432,7 @@ impl Processes for OsProcesses {
         Some(PathBuf::from(String::from_utf8_lossy(&buffer).into_owned()))
     }
 
-    fn members_of(&self, pgid: u32) -> Vec<u32> {
+    fn members_of(&self, pgid: u32) -> io::Result<Vec<u32>> {
         /// `<libproc.h>`: `PROC_PGRP_ONLY`, which libc does not bind.
         const PROC_PGRP_ONLY: u32 = 2;
         // Sized first, then filled. The kernel answers the byte count it
@@ -353,8 +441,13 @@ impl Processes for OsProcesses {
         // truth.
         // SAFETY: a null buffer with size 0 is the documented sizing call.
         let needed = unsafe { libc::proc_listpids(PROC_PGRP_ONLY, pgid, std::ptr::null_mut(), 0) };
-        if needed <= 0 {
-            return Vec::new();
+        /* NEGATIVE IS A FAILURE, ZERO IS AN EMPTY GROUP. Both were `<= 0`
+         * and answered the same empty list — see the trait's note. */
+        if needed < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if needed == 0 {
+            return Ok(Vec::new());
         }
         let mut capacity = needed as usize / std::mem::size_of::<libc::pid_t>() + 16;
         loop {
@@ -368,8 +461,12 @@ impl Processes for OsProcesses {
                     (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int,
                 )
             };
-            if bytes <= 0 {
-                return Vec::new();
+            if bytes < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if bytes == 0 {
+                // The group emptied between the two calls.
+                return Ok(Vec::new());
             }
             /* A buffer filled to its LAST slot may have been truncated — the
              * headroom above absorbs ordinary growth between the sizing call
@@ -381,11 +478,11 @@ impl Processes for OsProcesses {
                 continue;
             }
             pids.truncate(bytes as usize / std::mem::size_of::<libc::pid_t>());
-            return pids
+            return Ok(pids
                 .into_iter()
                 .filter(|&pid| pid > 0)
                 .map(|pid| pid as u32)
-                .collect();
+                .collect());
         }
     }
 
@@ -414,11 +511,15 @@ impl Processes for OsProcesses {
         ))
     }
 
-    fn members_of(&self, pgid: u32) -> Vec<u32> {
-        let Ok(entries) = std::fs::read_dir("/proc") else {
-            return Vec::new();
-        };
-        entries
+    fn members_of(&self, pgid: u32) -> io::Result<Vec<u32>> {
+        /* `/proc` UNREADABLE IS A FAILURE, not an empty group — see the
+         * trait's note. It is reachable: a process out of file descriptors
+         * gets `EMFILE` here, and reading that as "nothing is running" is
+         * what deleted the record of a live daemon. A single ENTRY that
+         * cannot be read is different and stays skipped: processes come and
+         * go under `/proc` while it is being walked. */
+        let entries = std::fs::read_dir("/proc")?;
+        Ok(entries
             .flatten()
             .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
             .filter(|&pid| {
@@ -427,7 +528,7 @@ impl Processes for OsProcesses {
                     .and_then(|fields| fields.get(2)?.parse::<u32>().ok())
                     .is_some_and(|group| group == pgid)
             })
-            .collect()
+            .collect())
     }
 
     fn signal_group(&self, pgid: u32, signal: Signal) -> io::Result<()> {
@@ -481,8 +582,8 @@ impl Processes for OsProcesses {
     fn exe_of(&self, _pid: u32) -> Option<PathBuf> {
         None
     }
-    fn members_of(&self, _pgid: u32) -> Vec<u32> {
-        Vec::new()
+    fn members_of(&self, _pgid: u32) -> io::Result<Vec<u32>> {
+        Ok(Vec::new())
     }
     fn signal_group(&self, _pgid: u32, _signal: Signal) -> io::Result<()> {
         Ok(())
@@ -512,6 +613,12 @@ pub(crate) mod fake {
         procs: Mutex<Vec<Proc>>,
         signals: Mutex<Vec<(u32, Signal)>>,
         ignores_terminate: bool,
+        /// The OS refusing to enumerate — `proc_listpids` failing, `/proc`
+        /// unreadable. Distinct from an empty table, which is the whole
+        /// point of `members_of` answering a `Result`.
+        enumeration_fails: bool,
+        /// The pgid changing hands after the first signal.
+        stranger_after_terminate: bool,
     }
 
     impl FakeProcesses {
@@ -528,6 +635,21 @@ pub(crate) mod fake {
 
         pub fn ignoring_terminate(mut self) -> Self {
             self.ignores_terminate = true;
+            self
+        }
+
+        /// An OS that will not say what is in a group.
+        pub fn refusing_to_enumerate(mut self) -> Self {
+            self.enumeration_fails = true;
+            self
+        }
+
+        /// The group's number changing hands DURING the grace period: after
+        /// the terminate, everything in it is somebody else's process. The
+        /// members stay, which is what a test needs — the identity is what
+        /// moves, and the identity is what the second signal is guarded on.
+        pub fn stranger_after_terminate(mut self) -> Self {
+            self.stranger_after_terminate = true;
             self
         }
 
@@ -563,14 +685,18 @@ pub(crate) mod fake {
                 .map(|p| p.exe.clone())
         }
 
-        fn members_of(&self, pgid: u32) -> Vec<u32> {
-            self.procs
+        fn members_of(&self, pgid: u32) -> io::Result<Vec<u32>> {
+            if self.enumeration_fails {
+                return Err(io::Error::other("the process table would not be read"));
+            }
+            Ok(self
+                .procs
                 .lock()
                 .unwrap()
                 .iter()
                 .filter(|p| p.pgid == pgid && p.alive)
                 .map(|p| p.pid)
-                .collect()
+                .collect())
         }
 
         fn signal_group(&self, pgid: u32, signal: Signal) -> io::Result<()> {
@@ -583,6 +709,14 @@ pub(crate) mod fake {
                 for p in self.procs.lock().unwrap().iter_mut() {
                     if p.pgid == pgid {
                         p.alive = false;
+                    }
+                }
+            }
+            if signal == Signal::Terminate && self.stranger_after_terminate {
+                for p in self.procs.lock().unwrap().iter_mut() {
+                    if p.pgid == pgid {
+                        p.started_at += 1;
+                        p.exe = PathBuf::from("/usr/bin/other");
                     }
                 }
             }
@@ -771,6 +905,61 @@ mod tests {
         assert!(!procs.alive(701));
     }
 
+    /// AN OS THAT WILL NOT ANSWER IS NOT AN EMPTY GROUP. `members_of` used to
+    /// fold a failed enumeration into "nobody is there", which reads as a
+    /// stale record — so one `EMFILE` at launch deleted the only key to a
+    /// live daemon and left it holding the GPU for ever. Nothing is
+    /// signalled, and the record is still there for the next launch.
+    #[tokio::test]
+    async fn an_enumeration_the_os_refuses_keeps_the_record_and_signals_nothing() {
+        let dir = ScratchDir::new("lineage");
+        let path = written(&dir, &record(900));
+        let procs = FakeProcesses::default()
+            .with(901, 900, 7, &format!("{RUNTIME}/lemond"))
+            .refusing_to_enumerate();
+
+        let outcome = recover(&path, &procs, Duration::from_millis(30)).await;
+
+        assert_eq!(outcome, Recovery::Unknown { pgid: 900 });
+        assert!(
+            procs.signals().is_empty(),
+            "a group nobody could see was signalled"
+        );
+        assert!(path.exists(), "the only key to the group was thrown away");
+        assert!(procs.alive(901));
+    }
+
+    /// THE IDENTITY IS RE-CHECKED BEFORE THE SECOND SIGNAL. The first check
+    /// is a whole grace period old by then, and a group that empties inside
+    /// one poll gap can have its number back in use before the deadline —
+    /// after which SIGKILL would land on a stranger's tree. The record is
+    /// removed as what it now is: a description of nobody.
+    #[tokio::test]
+    async fn a_group_that_changed_hands_during_the_grace_is_never_killed() {
+        let dir = ScratchDir::new("lineage");
+        let path = written(&dir, &record(910));
+        let procs = FakeProcesses::default()
+            .with(
+                910,
+                910,
+                record(910).leader_started_at,
+                &format!("{RUNTIME}/lemond"),
+            )
+            .ignoring_terminate()
+            .stranger_after_terminate();
+
+        let outcome = recover(&path, &procs, Duration::from_millis(30)).await;
+
+        assert_eq!(outcome, Recovery::Stale);
+        assert_eq!(
+            procs.signals(),
+            [(910, Signal::Terminate)],
+            "the kill went to a group that was no longer ours"
+        );
+        assert!(procs.alive(910), "the stranger was killed");
+        assert!(!path.exists(), "a record that names nobody is removed");
+    }
+
     #[tokio::test]
     async fn no_record_is_nothing_to_collect_and_a_broken_one_is_stale() {
         let dir = ScratchDir::new("lineage");
@@ -800,14 +989,14 @@ mod tests {
             7,
             "/Applications/Paper.app/Contents/Resources/other/llama-server",
         );
-        assert!(!is_ours(&record(800), &procs));
+        assert!(!is_ours(&record(800), &procs).unwrap());
         let inside = FakeProcesses::default().with(
             801,
             800,
             7,
             &format!("{RUNTIME}/backend/llamacpp/metal/llama-server"),
         );
-        assert!(is_ours(&record(800), &inside));
+        assert!(is_ours(&record(800), &inside).unwrap());
     }
 
     /// The OS layer, asked about this very process: it exists, it started,
@@ -831,12 +1020,22 @@ mod tests {
         // SAFETY: a plain syscall with no arguments.
         let group = unsafe { libc::getpgrp() } as u32;
         assert!(
-            procs.members_of(group).contains(&me),
+            procs.members_of(group).unwrap().contains(&me),
             "not a member of our own group"
         );
         assert!(
             procs.started_at(u32::MAX - 1).is_none(),
             "a pid that does not exist has no start time"
+        );
+        /* A GROUP WITH NO MEMBERS IS `Ok(vec![])`, NOT AN ERROR — the whole
+         * `Result` is worthless if the ordinary "it has exited" answer is
+         * indistinguishable from the failure it was added to name. This is
+         * the platform call being asked, not a fake. */
+        assert_eq!(
+            procs
+                .members_of(u32::MAX - 1)
+                .expect("an empty group is not a failure"),
+            Vec::<u32>::new()
         );
     }
 

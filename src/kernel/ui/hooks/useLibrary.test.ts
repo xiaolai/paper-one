@@ -633,4 +633,92 @@ describe('useLibrary and a save that did not land', () => {
     expect(hook.result.current.saveFailure).toBeNull()
     warn.mockRestore()
   })
+
+  /**
+   * ⚠️ **TWO WRITES TO ONE BOOK BOTH MATCH THE BOOK.**
+   *
+   * Pairing by book stops the button under "Couldn't save A" re-running a
+   * write to B. It cannot tell two writes to A apart — the store publishes one
+   * failure, and both catches read whatever is current when they run — so the
+   * later claim quietly replaced the earlier one and the retry shown was
+   * whichever verb happened to arrive second. One of those verbs is `remove`.
+   *
+   * The failure is pinned here rather than raced, because the defect is the
+   * pairing rule and not the timing: a store answering one `SaveFailure` to
+   * both catches is exactly what a race produces, without the race.
+   */
+  describe('when two writes to the same book both fail', () => {
+    /** A store whose every failure is the SAME one, and whose writes reject. */
+    function oneFailure() {
+      const real = createLibrary({
+        fs: null,
+        queue: writeQueue(),
+        initial: [{ bookId: 'book_a', title: 'Moby-Dick', author: '', hasContent: true }],
+      })
+      const failure = {
+        bookId: 'book_a',
+        title: 'Moby-Dick',
+        what: 'record',
+        message: 'disk full',
+      } as const
+      const library = {
+        ...real,
+        lastFailure: () => failure,
+        tag: () => Promise.reject(new Error('disk full')),
+        remove: () => Promise.reject(new Error('disk full')),
+        renameTag: () => Promise.reject(new Error('disk full')),
+      }
+      return renderHook(() => useLibrary(library))
+    }
+
+    /* The failure is here from the first render, so `waitFor` on it resolving
+       would resolve BEFORE the rejection's catch has run. A turn of the event
+       loop is what the pairing actually waits on. */
+    const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
+
+    it('offers the retry when only one verb claims it', async () => {
+      const warn = quiet()
+      const hook = oneFailure()
+      await act(async () => {
+        hook.result.current.tag('book_a', 'Sea')
+        await settle()
+      })
+      expect(hook.result.current.saveFailure?.retry).toBeTypeOf('function')
+      warn.mockRestore()
+    })
+
+    it('offers no retry rather than the wrong one', async () => {
+      const warn = quiet()
+      const hook = oneFailure()
+      await act(async () => {
+        hook.result.current.tag('book_a', 'Sea')
+        hook.result.current.remove('book_a')
+        await settle()
+      })
+      expect(
+        hook.result.current.saveFailure?.retry,
+        'the failure carried a verb nothing proved was the one that failed',
+      ).toBeNull()
+      warn.mockRestore()
+    })
+
+    /* A SHELF-WIDE VERB STILL STANDS ASIDE. It cannot tell whether the failure
+       is its own, so it is the weaker claim rather than a rival one, and it
+       must not spoil a claim that names the book. */
+    it('leaves a book-scoped claim alone when a shelf-wide verb also fails', async () => {
+      const warn = quiet()
+      const hook = oneFailure()
+      await act(async () => {
+        hook.result.current.tag('book_a', 'Sea')
+        await settle()
+      })
+      expect(hook.result.current.saveFailure?.retry).toBeTypeOf('function')
+      await act(async () => {
+        hook.result.current.renameTag('Sea', 'Ocean')
+        await settle()
+      })
+      expect(hook.result.current.saveFailure?.retry).toBeTypeOf('function')
+      warn.mockRestore()
+    })
+  })
 })

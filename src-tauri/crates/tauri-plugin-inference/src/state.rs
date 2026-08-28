@@ -439,6 +439,12 @@ impl InferenceState {
                 "inference: collected a runtime a previous Paper left running — group {pgid}, port {port}{}",
                 if forced { ", killed after the grace" } else { "" }
             ),
+            // The OS would not enumerate the group, so nothing was signalled
+            // and the record stays; the next launch asks again.
+            Recovery::Unknown { pgid } => log::warn!(
+                "inference: could not tell what is in runtime group {pgid}; the record at {} stays for the next launch",
+                record.display()
+            ),
         }
     }
 

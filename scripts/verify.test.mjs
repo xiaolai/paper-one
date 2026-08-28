@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { STEPS, parseArgs, plainToken, runSteps, spawnStep } from './verify.mjs'
+import { STEPS, needsShell, parseArgs, plainToken, runSteps, spawnStep } from './verify.mjs'
 
 /**
  * `pnpm verify` — the runner, not the gates it runs (each has its own
@@ -117,7 +117,39 @@ describe('spawnStep', () => {
     expect(spawnStep({ name: 'seven', cmd: process.execPath, args: ['-e', 'process.exit(7)'] })).toBe(7)
     expect(spawnStep({ name: 'quiet', cmd: process.execPath, args: ['-e', 'console.log("hidden"); process.exit(0)'], quiet: true })).toBe(0)
     expect(spawnStep({ name: 'missing', cmd: '/nonexistent/binary-for-verify-test', args: [] })).toBe(127)
-    expect(spawnStep({ name: 'killed', cmd: process.execPath, args: ['-e', 'process.kill(process.pid, "SIGKILL")'] })).toBe(128)
+    /* WINDOWS HAS NO SIGNALS. `process.kill(pid, 'SIGKILL')` there is
+       `TerminateProcess`, which sets an exit CODE — `status` is never null, so
+       the 128 arm cannot be reached and asserting it would redden the Windows
+       leg for a reason that has nothing to do with this runner. */
+    if (process.platform !== 'win32') {
+      expect(spawnStep({ name: 'killed', cmd: process.execPath, args: ['-e', 'process.kill(process.pid, "SIGKILL")'] })).toBe(128)
+    }
+  })
+
+  /**
+   * THE WINDOWS-ONLY HALF, ASSERTED FROM ANYWHERE.
+   *
+   * `needsShell` decides both the shell and the plain-token refusal, and the
+   * refusal keyed on the platform alone made the whole block above return 126
+   * on the Windows leg — which runs `test:coverage` through
+   * `pnpm verify --until build:cli`. Nothing on a Mac could see that, so the
+   * predicate takes the platform as an argument and both answers are checked
+   * here rather than discovered by CI.
+   */
+  it('takes cmd.exe only for the shims that cannot start without it', () => {
+    /* The `.cmd` shims — this is why a shell is used at all. */
+    expect(needsShell('pnpm', 'win32')).toBe(true)
+    expect(needsShell('cargo', 'win32')).toBe(true)
+    /* A full path is an executable Node starts itself; the tests spawn one. */
+    expect(needsShell('C:\\Program Files\\nodejs\\node.exe', 'win32')).toBe(false)
+    expect(needsShell('/nonexistent/binary-for-verify-test', 'win32')).toBe(false)
+    /* Nowhere else, whatever the command. */
+    expect(needsShell('pnpm', 'darwin')).toBe(false)
+    expect(needsShell('pnpm', 'linux')).toBe(false)
+    /* And the refusal follows it: the arguments the suite above spawns are
+       legitimate precisely because no shell reads them. */
+    for (const step of STEPS) expect(needsShell(step.cmd, 'win32'), step.name).toBe(true)
+    expect(needsShell(process.execPath, process.platform)).toBe(false)
   })
 })
 

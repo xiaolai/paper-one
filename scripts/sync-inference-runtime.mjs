@@ -350,6 +350,110 @@ export function sweepStale(dir) {
 }
 
 /**
+ * Remove a live tree the pin no longer describes. `true` when there was one.
+ *
+ * ⚠️ **A FAILED FETCH USED TO LEAVE THE OLD RUNTIME WHERE IT WAS.** The
+ * header promises that "switching platforms invalidates the stamp and
+ * re-stages rather than shipping the wrong binary", and that held only while
+ * the download succeeded: with the pin bumped and the network down, the stamp
+ * check said "not staged", both fetches answered null, and `main` returned
+ * having touched nothing — so `tauri.conf.json` copied the PREVIOUS pin's
+ * tree into the bundle and the app shipped it. Silently, because the old
+ * tree's manifest describes the old tree perfectly and the plugin's
+ * before-every-spawn check has nothing to object to. A digest table nobody
+ * can bump is worse than no digest table.
+ *
+ * Absent is the documented alternative and it is a safe one: the plugin
+ * reports `Absent`, settings says `Not installed`, and the Codex and Claude
+ * routes go on working. Shipping an executable the build did not choose is
+ * not.
+ *
+ * The stamp is re-checked here rather than assumed, so this is safe to call
+ * from anywhere: a tree that MATCHES the pin is never the stale one.
+ *
+ * `key === null` — no artifact published for this host at all — makes EVERY
+ * tree stale. `VENDOR` is platform-neutral by name, so a directory staged on
+ * another machine is one `tauri.conf.json` would copy into this bundle
+ * regardless of whether anything in it can run here.
+ */
+export function discardStale(dir, key) {
+  if (!existsSync(dir)) return false
+  if (key !== null && isStaged(dir, key)) return false
+  rmSync(dir, { recursive: true, force: true })
+  return true
+}
+
+/**
+ * Whether a process is still running. `signal 0` delivers nothing and only
+ * asks; `EPERM` means it exists and belongs to somebody else, which is still
+ * running.
+ */
+function isRunning(pid) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error.code === 'EPERM'
+  }
+}
+
+/**
+ * ONE SYNC AT A TIME, or `.staging` belongs to nobody.
+ *
+ * `.staging` and `.previous` are named for `dir` and shared by every run, and
+ * `sweepStale` deletes both before it begins. Two overlapping runs — `predev`
+ * in one terminal and `prebuild` in another, which is an ordinary morning —
+ * therefore delete each other's work: the second's sweep removes the first's
+ * half-unpacked tree, and the first goes on to build a manifest over whatever
+ * is left and promote it. The manifest would MATCH that tree, so the plugin's
+ * before-every-spawn check would pass a runtime missing half its libraries.
+ *
+ * So a run takes an exclusive lock or does nothing. `mkdir` is the exclusive
+ * create — it fails atomically on a directory that exists, which
+ * `writeFileSync` with `wx` also does but without somewhere to record who
+ * holds it.
+ *
+ * A LOCK NOBODY HOLDS MUST NOT BLOCK EVERY LATER RUN. A run killed hard
+ * leaves the directory behind, and a sync that refused forever after one
+ * `ctrl-c` would be worse than the race it prevents — so the holder's pid is
+ * written inside and a lock whose holder is gone is reclaimed. Returns the
+ * release, or null when another live run holds it.
+ */
+export function takeStagingLock(dir, pid = process.pid) {
+  const at = `${dir}.lock`
+  mkdirSync(path.dirname(at), { recursive: true })
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      mkdirSync(at)
+      writeFileSync(path.join(at, 'pid'), `${pid}\n`)
+      return () => rmSync(at, { recursive: true, force: true })
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error
+      let holder = Number.NaN
+      try {
+        holder = Number.parseInt(readFileSync(path.join(at, 'pid'), 'utf8').trim(), 10)
+      } catch {
+        /* Killed between the mkdir and the write: no pid, so no holder. */
+      }
+      if (Number.isInteger(holder) && holder !== pid && isRunning(holder)) return null
+      /* RECLAIMED BY RENAME, not by delete-then-create. Two runs finding the
+         same abandoned lock would both delete it and both believe they took
+         it — the race this exists to prevent, reintroduced by its own
+         recovery. A rename can only succeed once; the loser gets ENOENT and
+         meets the winner's fresh lock on the retry. */
+      const aside = `${at}.abandoned.${pid}`
+      try {
+        renameSync(at, aside)
+      } catch {
+        return null
+      }
+      rmSync(aside, { recursive: true, force: true })
+    }
+  }
+  return null
+}
+
+/**
  * Make `staging` the live tree at `dir`, by rename — see the header. The
  * displaced tree is removed only once the new one has the name; a failure
  * between the two renames leaves the old tree under `.previous`, which the
@@ -438,15 +542,38 @@ function unpack(archive, into) {
 
 async function main() {
   const key = artifactKey(process.platform, process.arch)
-  if (key === null) {
-    console.log(
-      `sync-inference-runtime: no runtime published for ${process.platform}-${process.arch} — the companion's local route will report Absent`,
-    )
+  const dir = path.join(REPO_ROOT, VENDOR)
+  /* EXCLUSIVE, before the sweep: `sweepStale` deletes `.staging`, and a
+     second run reaching it while the first is unpacking there is the whole
+     race. See `takeStagingLock`. */
+  const release = takeStagingLock(dir)
+  if (release === null) {
+    console.log('sync-inference-runtime: another sync is staging the runtime; leaving it to that one')
     return
   }
-  const runtime = ARTIFACTS[key]
-  const backend = BACKENDS[key]
-  const dir = path.join(REPO_ROOT, VENDOR)
+  try {
+    if (key === null) {
+      /* AND A TREE STAGED FOR SOMEBODY ELSE'S HOST GOES WITH THAT ANSWER.
+         `VENDOR` is platform-neutral by name (`tauri.conf.json` cannot
+         interpolate a platform), so whatever is in it would be copied into
+         this build's bundle whether or not it can run here. `key === null`
+         means no artifact exists for this host, so nothing in there was
+         staged for it. */
+      if (discardStale(dir, key)) {
+        console.log('sync-inference-runtime: removed a runtime staged for another host')
+      }
+      console.log(
+        `sync-inference-runtime: no runtime published for ${process.platform}-${process.arch} — the companion's local route will report Absent`,
+      )
+      return
+    }
+    await stage(dir, key, ARTIFACTS[key], BACKENDS[key])
+  } finally {
+    release()
+  }
+}
+
+async function stage(dir, key, runtime, backend) {
   /* The sweep runs BEFORE the stamp check, for two reasons an interrupted
      run taught: a kill inside `promote` leaves the only complete tree under
      `.previous` (the sweep restores it, and the stamp check then says
@@ -458,9 +585,19 @@ async function main() {
     return
   }
   const runtimeBytes = await fetchVerified(`${RELEASE}/${runtime.asset}`, runtime.sha256, runtime.asset)
-  if (runtimeBytes === null) return
-  const backendBytes = await fetchVerified(`${LLAMACPP_RELEASE}/${backend.asset}`, backend.sha256, backend.asset)
-  if (backendBytes === null) return
+  /* Short-circuited: no point asking for the backend once the runtime is
+     unreachable, and the two failures want the same answer anyway. */
+  const backendBytes = runtimeBytes === null ? null : await fetchVerified(`${LLAMACPP_RELEASE}/${backend.asset}`, backend.sha256, backend.asset)
+  if (runtimeBytes === null || backendBytes === null) {
+    /* AND THE TREE THE PIN NO LONGER DESCRIBES GOES WITH THE FAILURE. See
+       `discardStale`: leaving it bundled the previous pin's executable. */
+    if (discardStale(dir, key)) {
+      console.log(
+        `sync-inference-runtime: removed the tree staged for an older pin — ${key} ${VERSION} could not be fetched, so the companion's local route will report Absent`,
+      )
+    }
+    return
+  }
 
   const staging = `${dir}.staging`
   mkdirSync(staging, { recursive: true })

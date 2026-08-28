@@ -372,6 +372,33 @@ export interface FootnoteRender {
   readonly at: HostRect | null
 }
 
+/**
+ * One click on a note reference: where its marker was, and which click it is.
+ *
+ * ⚠️ **A SHARED `FootnoteHandler` CANNOT SAY WHICH NOTE A VIEW BELONGS TO.**
+ * It emits `before-render` carrying `{ view }` and nothing else, so a session
+ * holding one handler had to pair views to clicks by ARRIVAL ORDER — a FIFO
+ * queue — and neither `resolveHref` nor the note's own render settles in click
+ * order. Two notes in flight could cross: the older one was shown, at the
+ * newer one's anchor, and the note the reader actually clicked was released.
+ *
+ * The same queue could also come up EMPTY, when the reader closed the note
+ * before it rendered, and the fallback then handed the arriving view the
+ * current sequence — which passed the supersession check and reopened the note
+ * they had just dismissed.
+ *
+ * So a request owns its own handler and its own two listeners (see
+ * `#openFootnote`), and the pairing is an identity rather than a guess. A
+ * handler holds only the `detectFootnotes` switch, left at its default, so a
+ * fresh one per click is equivalent — and it becomes unreachable with its
+ * listeners once its note is done, which is why "one per session, or a
+ * listener leaks per note followed" no longer applies.
+ */
+interface NoteRequest {
+  readonly at: HostRect | null
+  readonly seq: number
+}
+
 export interface SessionCallbacks {
   /**
    * A link inside the book was followed, BEFORE foliate acts on it.
@@ -821,11 +848,6 @@ export class ReaderSession {
   /** A book this session synthesised, which `View.close()` will not release. */
   #prepared: Destroyable | null = null
   /**
-   * Upstream's footnote detection. One per session, because it holds only the
-   * `detectFootnotes` switch and its listeners.
-   */
-  readonly #footnotes = new FootnoteHandler()
-  /**
    * The rendered note's view, so it can be released on dismiss.
    *
    * Typed as `View`, not `HTMLElement`: releasing it means calling `close()`
@@ -834,18 +856,24 @@ export class ReaderSession {
    */
   #footnoteView: View | null = null
   /**
-   * Where each pending note's reference was, captured at the click — a QUEUE,
-   * because `before-render` arrives asynchronously and two rapid clicks used
-   * to share one slot: the slower note was positioned by the faster note's
-   * anchor (audit round 1, #107). Paired to a view at `before-render`, read
-   * back at `render`; the sequence retires every request still in flight when
-   * a newer one starts, or the note closes — a superseded render is released
-   * rather than shown, which also stops a slow note popping up AFTER the
-   * reader closed it.
+   * Which note the reader is waiting for.
+   *
+   * Every click takes the next number and carries it in its own `NoteRequest`;
+   * anything arriving under an older one is released rather than shown. That
+   * retires a note superseded by a newer click, and a note still rendering when
+   * the reader closed the flow — `closeFootnote`, `#noteFailed` and `dispose`
+   * all advance it, which is how "nothing is pending" is expressed.
+   *
+   * ⚠️ **THIS USED TO BE HALF OF A PAIRING SCHEME, and the other half was a
+   * FIFO queue.** The anchor was queued at the click and shifted off at
+   * `before-render`, which pairs by arrival rather than by identity — see
+   * `NoteRequest`. Two consequences, both real: two notes in flight could
+   * cross, and a `before-render` arriving with the queue EMPTY (the reader had
+   * closed the note) fell back to `{ at: null, seq: <current> }`, which then
+   * passed this very check and reopened the note they had just dismissed. A
+   * request that owns its own listeners has neither.
    */
-  #noteRequests: { at: HostRect | null; seq: number }[] = []
   #noteSeq = 0
-  readonly #noteMeta = new WeakMap<View, { at: HostRect | null; seq: number }>()
   /**
    * The box a note is rendered into, owned by the host.
    *
@@ -922,8 +950,8 @@ export class ReaderSession {
     if (!view) return
 
     this.#mount(view)
-    /* HELD, because notes are styled long after this returns. `#watchFootnotes`
-       is wired once here and fires whenever a reader opens a note, by which
+    /* HELD, because notes are styled long after this returns. `#watchOneNote`
+       is wired at each click and fires whenever a reader opens a note, by which
        time `deps` is three call frames gone. */
     this.#styleNote = deps.styleNote ?? null
     this.#applyVars = deps.applyVars
@@ -983,7 +1011,6 @@ export class ReaderSession {
    * document and position of the one that replaced it.
    */
   #bind(view: View): void {
-    this.#watchFootnotes()
     view.addEventListener('load', (event) => {
       if (this.#disposed) return
       const { doc, index } = (event as CustomEvent<LoadDetail>).detail
@@ -1389,21 +1416,18 @@ export class ReaderSession {
   }
 
   /**
-   * Offer a link to the footnote handler; true when it took it.
+   * Listen for what ONE request's handler renders.
    *
-   * SYNCHRONOUS ANSWER, ASYNCHRONOUS NOTE. `handle` returns a promise when it
-   * took the link and `undefined` when it did not, and it has already called
-   * `preventDefault()` by then — so the caller knows immediately whether
-   * foliate will navigate, without waiting for the note to render.
+   * PER CLICK, WITH THE REQUEST IN THE CLOSURE — see `NoteRequest` for the
+   * pairing defect this removes. The handler is built for one `handle` call
+   * and nothing else refers to it, so these two listeners die with it.
    */
-  /**
-   * Listen once for what the handler renders.
-   *
-   * ON THE HANDLER, NOT PER CLICK. `FootnoteHandler` is an `EventTarget` and
-   * one listener serves every note; attaching per click would leak one for
-   * each footnote the reader ever followed.
-   */
-  #watchFootnotes(): void {
+  #watchOneNote(handler: FootnoteHandler, request: NoteRequest): void {
+    /* This request's view has been let go, so `render` has nothing left to do
+       with it. A `render` for a view already closed would otherwise close it
+       twice — tolerated by `releaseNoteView`, and still a teardown running
+       over a torn-down renderer. */
+    let released = false
     /**
      * ATTACH THE VIEW BEFORE IT RENDERS. This is what `before-render` is for,
      * and ignoring it is not a missing nicety — it is a crash.
@@ -1419,17 +1443,25 @@ export class ReaderSession {
      * the paginator needs a real size to column into. It is moved into the
      * popover when `render` says the note is ready.
      */
-    this.#footnotes.addEventListener('before-render', (event) => {
+    handler.addEventListener('before-render', (event) => {
       const { view } = (event as CustomEvent<{ view: View }>).detail
       /* A session disposed between the click and this event still owns the
        * detached view foliate just built — nothing else will ever see it, so
        * bailing bare leaked its renderer and every blob it held (audit round
-       * 1, #106). Released the same way `dispose` releases a rendered one. */
-      if (this.#disposed) {
+       * 1, #106). Released the same way `dispose` releases a rendered one.
+       *
+       * AND A CANCELLED REQUEST IS THE SAME SITUATION. The reader closed the
+       * note, or clicked another one, while this was resolving: nothing will
+       * ever show this view, so it is released here rather than attached,
+       * styled and mounted on the way to being discarded at `render`. This is
+       * the case the FIFO queue could not tell from a fresh one — it handed
+       * the arriving view the CURRENT sequence, which then passed `render`'s
+       * supersession check and reopened the note the reader had dismissed. */
+      if (this.#disposed || request.seq !== this.#noteSeq) {
+        released = true
         releaseNoteView(view)
         return
       }
-      this.#noteMeta.set(view, this.#noteRequests.shift() ?? { at: null, seq: this.#noteSeq })
       this.#watchNoteLinks(view)
       this.#cleanNoteDocument(view)
       /* BEFORE `goTo`, like everything else in here. `setStyles` writes into
@@ -1498,14 +1530,16 @@ export class ReaderSession {
       this.#footnoteView = view
     })
 
-    this.#footnotes.addEventListener('render', (event) => {
-      if (this.#disposed) return
+    handler.addEventListener('render', (event) => {
+      if (this.#disposed || released) return
       const detail = (event as CustomEvent<FootnoteRenderDetail>).detail
-      const meta = this.#noteMeta.get(detail.view)
       /* Superseded — a newer note was asked for, or the reader closed the
        * flow, while this one rendered. Shown, it would replace the newer note
-       * and sit at the wrong anchor; released, the click that mattered wins. */
-      if (meta !== undefined && meta.seq !== this.#noteSeq) {
+       * and sit at the wrong anchor; released, the click that mattered wins.
+       * `before-render` will usually have released it already; this is the
+       * request that was still current then and is not now. */
+      if (request.seq !== this.#noteSeq) {
+        released = true
         releaseNoteView(detail.view)
         return
       }
@@ -1515,7 +1549,10 @@ export class ReaderSession {
         view: detail.view,
         href: detail.href,
         type: detail.type,
-        at: meta?.at ?? null,
+        /* THIS REQUEST'S OWN ANCHOR, not whichever one came off a queue
+           first — the popover is positioned against the reference that was
+           clicked, and pairing by arrival could hand it another note's. */
+        at: request.at,
       })
     })
   }
@@ -1572,6 +1609,14 @@ export class ReaderSession {
     })
   }
 
+  /**
+   * Offer a link to the footnote handler; true when it took it.
+   *
+   * SYNCHRONOUS ANSWER, ASYNCHRONOUS NOTE. `handle` returns a promise when it
+   * took the link and `undefined` when it did not, and it has already called
+   * `preventDefault()` by then — so the caller knows immediately whether
+   * foliate will navigate, without waiting for the note to render.
+   */
   #openFootnote(view: View, detail: LinkDetail, event: Event): boolean {
     const book = view.book
     if (!book) return false
@@ -1593,17 +1638,42 @@ export class ReaderSession {
        — so a backend without that method throws rather than rejecting, and the
        throw escapes into `#handleLinks`. Caught here and treated as a note
        that would not open, which is the same outcome by a different route. */
+    /* THIS CLICK'S OWN HANDLER, AND ITS LISTENERS ARE ON BEFORE IT RUNS —
+       see `NoteRequest`. Registered first rather than after `handle` returns
+       because that ordering is then not something to reason about: a
+       `before-render` emitted anywhere in `handle`'s chain is already covered.
+       A handler that DECLINES the link emits nothing at all, so the listeners
+       simply go with it. */
+    const request: NoteRequest = {
+      at: anchorRectInHost(detail.a, this.#noteSpace()),
+      /* CLAIMED, NOT COMMITTED. A declined link must not supersede a note the
+         reader has open — following an ordinary link is not dismissing one —
+         so `#noteSeq` only advances once the handler has taken it. */
+      seq: this.#noteSeq + 1,
+    }
+    const handler = new FootnoteHandler()
+    this.#watchOneNote(handler, request)
     let pending: Promise<void> | undefined
     try {
-      pending = this.#footnotes.handle(book, event)
+      pending = handler.handle(book, event)
     } catch (cause) {
       this.#noteFailed(view, 'that note could not be resolved', detail, event, cause)
       return true
     }
     if (!pending) return false
-    this.#noteRequests.push({ at: anchorRectInHost(detail.a, this.#noteSpace()), seq: ++this.#noteSeq })
+    this.#noteSeq = request.seq
     void pending.catch((cause: unknown) => {
       if (this.#disposed) return
+      /* ⚠️ **A STALE REJECTION USED TO CLOSE THE NOTE THAT REPLACED IT.**
+         `#noteFailed` dismisses the popover and navigates the reader to ITS
+         href — so an older request failing after a newer note had opened tore
+         down the newer note and sent the reader to the older note's target, a
+         place they had already moved on from. The same supersession the render
+         path applies, on the road that was missing it. */
+      if (request.seq !== this.#noteSeq) {
+        console.warn('Paper: a superseded note could not be shown in place', detail.href, cause)
+        return
+      }
       this.#noteFailed(view, 'that note could not be shown in place', detail, event, cause)
     })
     return true
@@ -1625,7 +1695,6 @@ export class ReaderSession {
    */
   #noteFailed(view: View, what: string, detail: LinkDetail, event: Event, cause: unknown): void {
     console.warn(`Paper: ${what}`, detail.href, cause)
-    this.#noteRequests = []
     this.#noteSeq += 1
     this.#cb.onFootnote(null)
     this.#cb.onLink(detail, event)
@@ -1653,7 +1722,6 @@ export class ReaderSession {
 
   closeFootnote(): void {
     this.#releaseFootnoteView()
-    this.#noteRequests = []
     this.#noteSeq += 1
     if (!this.#disposed) this.#cb.onFootnote(null)
   }
@@ -2619,7 +2687,6 @@ export class ReaderSession {
        * assumption that made this invisible.
        */
       quietly('footnote view', () => this.#releaseFootnoteView())
-      this.#noteRequests = []
       this.#noteSeq += 1
       /* AND THE HOST IS TOLD. `#disposed` is already true, so `closeFootnote`
          would skip this — and a host left holding a `FootnoteRender` for a

@@ -708,6 +708,31 @@ describe('the router', () => {
     expect(JSON.stringify(rude)).not.toContain('secret')
   })
 
+  it('answers a thrown value that raises when it is inspected, rather than leaving the peer waiting', async () => {
+    /* The normalisation read the thrown value four times — an `instanceof`
+     * and three field reads — with the request already settled and its clock
+     * cleared. A getter that raised became an unhandled rejection: no `err`
+     * frame, and no timeout left to end the wait either. */
+    const hostile = new Proxy(
+      {},
+      {
+        get: () => {
+          throw new Error('/Users/someone/books/secret.epub')
+        },
+        getPrototypeOf: () => {
+          throw new Error('no')
+        },
+      },
+    )
+    const h = harness([{ ...ping, handler: async () => Promise.reject(hostile) }])
+    h.send(frame())
+    await settle()
+    expect(h.sent).toHaveLength(1)
+    expect(errBody(h.sent[0])).toEqual({ code: ENVELOPE_ERRORS.internal, retryable: false, message: 'the service failed' })
+    expect(JSON.stringify(h.sent[0])).not.toContain('secret')
+    expect(h.connection.inFlight).toBe(0)
+  })
+
   it('an answer over the cap is refused as frame-too-large, and the request is settled', async () => {
     const h = harness([{ ...ping, handler: async () => 'x'.repeat(MAX_FRAME_BYTES) }])
     h.send(frame())

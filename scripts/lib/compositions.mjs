@@ -464,28 +464,157 @@ export function checkRustSurfaces(manifest, files) {
   return { findings, crates: withCrate.length }
 }
 
+/** Whether `c` can appear inside a Rust identifier. */
+const isIdentChar = (c) => c !== undefined && /[A-Za-z0-9_]/.test(c)
+
+/**
+ * A raw string starting at `i`, or null. `r"…"`, `r#"…"#`, `br#"…"#`, `cr"…"`.
+ *
+ * ⚠️ **The `r` must STAND ALONE** (a `b` or `c` prefix aside). Without the
+ * boundary, ANY identifier ending in `r` before a quote opened a phantom raw
+ * string — `"Quit Paper"` in the tray menu matched at `…r"`, and the mask
+ * blanked everything to the next quote, 250 lines of real registrations
+ * included. A masker that eats the code it was meant to protect is the defect
+ * this whole function exists against, one layer down.
+ */
+function rawStringAt(source, i) {
+  if (source[i] !== 'r') return null
+  const before = source[i - 1]
+  if (isIdentChar(before) && !((before === 'b' || before === 'c') && !isIdentChar(source[i - 2]))) return null
+  let j = i + 1
+  let hashes = 0
+  while (source[j] === '#') {
+    hashes++
+    j++
+  }
+  /* `r#type` is a RAW IDENTIFIER, not a string, and there are several in any
+   * Tauri codebase. No quote, no raw string. */
+  if (source[j] !== '"') return null
+  const close = `"${'#'.repeat(hashes)}`
+  const at = source.indexOf(close, j + 1)
+  return at === -1
+    ? { contentFrom: j + 1, contentTo: source.length, end: source.length }
+    : { contentFrom: j + 1, contentTo: at, end: at + close.length }
+}
+
+/**
+ * Rust with its COMMENTS and its STRING CONTENTS blanked to spaces.
+ *
+ * ⚠️ **`stripComments` IS A JAVASCRIPT LEXER AND RUST IS NOT JAVASCRIPT.** It
+ * treats `'` as a quote, so the first LIFETIME in a file — `'a`, `'static`,
+ * `'outer:` — opened a string that never closed, and from there to the next
+ * apostrophe nothing was recognised as a comment. A commented-out
+ * `.plugin(x::init())` in that span read as a live registration, and a plugin
+ * the app never registers passed the gate below. That is the third masker in
+ * this file to eat what it was written to protect, so this one is a lexer for
+ * the language it is pointed at rather than a stack of regular expressions:
+ *
+ *   - `//` to end of line, and `/* *\/` NESTED, which Rust's are and C's are not.
+ *   - `"…"` with backslash escapes, and `r"…"` / `r#"…"#` / `br#"…"#` without.
+ *   - `'x'`, `'\n'`, `'\''` and `b'x'` are CHAR LITERALS; anything else after
+ *     an apostrophe is a lifetime or a loop label, and changes no state at all.
+ *
+ * LENGTH-PRESERVING — every blanked character becomes a space and every
+ * newline stays — so a caller may match against the mask and edit the raw
+ * text by the match's own indexes, and so line numbers still mean what they
+ * meant.
+ *
+ * The one thing it gets wrong is a char literal holding a NON-BMP character
+ * (`'😀'`): two UTF-16 code units, so the closing quote is not where a char
+ * literal's would be and both quotes read as lifetimes. That leaves the
+ * character visible rather than blanked, which is the harmless direction —
+ * unlike the old behaviour, an unpaired apostrophe can no longer swallow the
+ * rest of the file.
+ */
+export function maskRustCode(source) {
+  const out = [...source]
+  const blank = (from, to) => {
+    for (let k = from; k < to && k < out.length; k++) if (out[k] !== '\n') out[k] = ' '
+  }
+  /* The terminator of a `"…"` or a `'…'`, honouring backslash escapes. */
+  const closingAt = (from, quote) => {
+    let j = from
+    while (j < source.length) {
+      if (source[j] === '\\') {
+        j += 2
+        continue
+      }
+      if (source[j] === quote) return j
+      j++
+    }
+    return source.length
+  }
+  let i = 0
+  while (i < source.length) {
+    const c = source[i]
+    if (c === '/' && source[i + 1] === '/') {
+      const end = source.indexOf('\n', i)
+      const to = end === -1 ? source.length : end
+      blank(i, to)
+      i = to
+      continue
+    }
+    if (c === '/' && source[i + 1] === '*') {
+      /* NESTED, because Rust's block comments nest and C's do not: an inner
+       * opener needs an inner closer, so a scanner that stopped at the first
+       * close would read the rest of the outer comment as code. An
+       * unterminated one runs to the end of the file. */
+      let depth = 1
+      let j = i + 2
+      while (j < source.length && depth > 0) {
+        if (source[j] === '/' && source[j + 1] === '*') {
+          depth++
+          j += 2
+        } else if (source[j] === '*' && source[j + 1] === '/') {
+          depth--
+          j += 2
+        } else j++
+      }
+      blank(i, j)
+      i = j
+      continue
+    }
+    const raw = rawStringAt(source, i)
+    if (raw !== null) {
+      blank(raw.contentFrom, raw.contentTo)
+      i = raw.end
+      continue
+    }
+    if (c === '"') {
+      const at = closingAt(i + 1, '"')
+      blank(i + 1, at)
+      i = at + 1
+      continue
+    }
+    if (c === "'") {
+      /* `'\n'` and `'\''` — an escape can only be a char literal. */
+      if (source[i + 1] === '\\') {
+        const at = closingAt(i + 1, "'")
+        blank(i + 1, at)
+        i = at + 1
+        continue
+      }
+      /* `'x'` — one character then the closing quote. Anything else is a
+       * LIFETIME or a loop label, which is not a literal and opens nothing. */
+      if (source[i + 2] === "'") {
+        blank(i + 1, i + 2)
+        i += 3
+        continue
+      }
+      i++
+      continue
+    }
+    i++
+  }
+  return out.join('')
+}
+
 /** `.plugin(<name>::init())`, whitespace-tolerant, outside comments AND
- *  outside single-line string literals — a log line quoting the call is not
- *  the call. The mask is LINE-BOUNDED on purpose: an unpaired quote (in a
- *  char literal, or prose) must not swallow the lines after it. */
+ *  outside string literals of every shape — a log line quoting the call is
+ *  not the call. See `maskRustCode` for what a JavaScript lexer got wrong
+ *  here. */
 export function registersPlugin(libRs, name) {
-  const code = stripComments(libRs)
-    /* ⚠️ RAW STRINGS FIRST, and they were not masked at all. Rust's
-     * `r#"…"#` spans lines and contains no escapes, so the line-bounded
-     * ordinary-string mask below cannot see inside one: a `.plugin(x::init())`
-     * quoted in a raw string — an error message, a doc example, a test
-     * fixture — read as a real registration, and a plugin that was never
-     * registered passed this gate. Blanked rather than removed so nothing
-     * downstream depends on offsets. */
-    /* ⚠️ The `r` must stand alone (an optional `b` for byte strings aside):
-     * without the boundary, ANY identifier or string ending in `r` before a
-     * quote opened a phantom raw string — `"Quit Paper"` in the tray menu
-     * matched at `…r"`, and the mask blanked everything to the next quote,
-     * 250 lines of real registrations included. A masker that eats code it
-     * was meant to protect is the exact defect the raw-string pass above
-     * this one was written against, one layer down. */
-    .replace(/(?<![A-Za-z0-9_"])b?r(#*)"[\s\S]*?"\1/g, (raw) => raw.replace(/[^\n]/g, ' '))
-    .replace(/"(?:[^"\\\n]|\\.)*"/g, '""')
+  const code = maskRustCode(libRs)
   /* Two registration shapes, both real. `NAME::init()` is what a generated
    * plugin exports and what every crate in this workspace uses;
    * `NAME::Builder::…` is the OFFICIAL plugins' documented form —

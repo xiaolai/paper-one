@@ -127,13 +127,24 @@ export function tagRename(env: ServiceEnvironment) {
     const input = readInput(descriptorOf('tag.rename'), req)
     const from = stored(reqStr(input, 'from'))
     const to = stored(reqStr(input, 'to'))
-    /* Counted before, for the same reason `tag.remove` counts before. And
-     * renaming ONTO an existing name MERGES rather than failing — tags fold
+    /* Renaming ONTO an existing name MERGES rather than failing — tags fold
      * by key, so the books simply end up under one tag, which is what a
      * reader who typed the other spelling meant. */
-    const books = env.services.library.ownTagCount(from)
-    if (books === 0) throw refuse(SERVICE_ERRORS.notFound, `no book carries ${JSON.stringify(from)} as your own tag`)
-    await env.services.library.renameTag(from, to)
-    return { tag: to, books }
+    /* THE SNAPSHOT AUTHORISES; THE WRITER ANSWERS.
+     *
+     * Counted once, BEFORE the write, that number was doing two jobs: it
+     * decided whether to refuse and it was reported as the result — a number
+     * describing the shelf as it stood when the request arrived, published as
+     * a fact about what was written. `tag.add` and `tag.remove` were both
+     * moved off that pattern and say why: the writer decides from the record,
+     * so the writer is the thing that reports.
+     *
+     * The cheap count stays where it is and only refuses. It has to: a rename
+     * of a tag nobody carries must not read two thousand records to say so,
+     * and after the write no book carries the old name to count. */
+    if (env.services.library.ownTagCount(from) === 0) {
+      throw refuse(SERVICE_ERRORS.notFound, `no book carries ${JSON.stringify(from)} as your own tag`)
+    }
+    return { tag: to, books: await env.services.library.renameTag(from, to) }
   }
 }

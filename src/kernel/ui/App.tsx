@@ -9,6 +9,7 @@ import { DEFAULT_STEP_IDX, applyMetrics } from '../core/metrics'
 import { importFs as tauriImportFs, pickBooks, pickFolder, readBookAt } from '../core/bookFiles'
 import { positionRecorder, type PositionRecorder } from '../core/positionRecorder'
 import { createGenerations } from '../core/generations'
+import { createOpenRollback } from './openRollback'
 import { usePlatform, usePrefersDark, usePrefersReducedMotion } from './platform'
 import { useImportRun } from './hooks/useImportRun'
 import { useArchives } from './hooks/useArchives'
@@ -242,22 +243,24 @@ export function App({
 
   /**
    * What to undo if the open now starting never lands — see the arming site
-   * in `goToJump` and the fuller note above `openFailed`.
+   * in `goToJump`, the fuller note above `openFailed`, and `openRollback.ts`,
+   * which holds the three transitions and the reasons each has been wrong.
    *
-   * DECLARED HERE, above `openBook`, because every open OWNS this ref for its
-   * own duration: an open that starts clears or re-arms it. It used to be
-   * armed by the jump and cleared only by the jump's own landing — so a jump
-   * superseded by a direct open left its rollback loaded, and a LATER,
-   * unrelated open failure fired it, clearing a jump hint and an override
-   * that belonged to somebody else.
+   * DECLARED HERE, above `openBook`, because every open OWNS this slot for its
+   * own duration: an open that starts arms it, and doing so retires whatever
+   * the last one left.
    */
-  const undoOpen = useRef<(() => void) | null>(null)
+  const undoOpen = useRef(createOpenRollback())
 
   const openBook = useCallback(
-    (source: File | string, path: string | null = null) => {
+    (source: File | string, path: string | null = null, undo: (() => void) | null = null) => {
       openGenerations.current.claim()
-      /* A direct open supersedes whatever rollback a pending open armed. */
-      undoOpen.current = null
+      /* A direct open RETIRES the rollback a pending open armed — runs it,
+       * rather than dropping it: the state a superseded jump committed is
+       * still committed. `undo` is how `openStored` carries its own rollback
+       * through the origin fallback, which is the one re-entry that is the
+       * same open continuing. See `openRollback.ts`. */
+      undoOpen.current.arm(undo)
       dispatch({ type: 'goScreen', screen: 'reader' })
       /* Handed over WITH its source rather than set directly, so the effect that
        * notices the new source is the single place the path is decided. Set here
@@ -366,29 +369,29 @@ export function App({
    * A ref rather than a dependency because `openStored` is declared eight
    * hundred lines above the state it has to undo. It is armed by the open
    * that starts (`openStored`'s `undo` argument) and consumed by whichever
-   * settles first; the ref itself is declared above `openBook`, which see.
+   * settles first; the slot itself is declared above `openBook`, which see.
    */
-  const openFailed = useCallback(() => {
-    const undo = undoOpen.current
-    undoOpen.current = null
-    undo?.()
-  }, [])
+  const openFailed = useCallback(() => undoOpen.current.fire(), [])
 
   const openStored = useCallback(
     (entry: IndexedBook, undo?: () => void) => {
       if (!fs) return
       const fresh = openGenerations.current.claim()
-      /* THIS open owns the rollback slot now: armed with its own undo, or
-       * cleared — a stale rollback from a superseded open must never fire on
-       * this one's failure. */
-      undoOpen.current = undo ?? null
+      /* THIS open owns the rollback slot now, and taking it RETIRES whatever
+       * the last one left rather than dropping it — see `openRollback.ts`. */
+      undoOpen.current.arm(undo ?? null)
       const name = storedBookName(entry)
       void readOwnedBook(fs, contentPathIn(entry.bookId, name), name)
         .then((file) => {
           if (!fresh()) return
-          /* Landed, so there is nothing left to undo. */
-          undoOpen.current = null
-          openBook(file, entry.origin ?? null)
+          /* ⚠️ NOT RELEASED HERE. The bytes arriving is not the book landing:
+           * it still has to parse and render, and a corrupt or unsupported one
+           * fails after this line. Released this early, a jump into a book the
+           * reader was then shown an error for kept its override and its "←
+           * Back to …" line. The rollback travels with the open — see the
+           * `book.error` effect, which fires it, and the override's own
+           * spending effect, which releases it once a section has rendered. */
+          openBook(file, entry.origin ?? null, undo ?? null)
         })
         .catch((cause: unknown) => {
           if (!fresh()) return
@@ -417,16 +420,21 @@ export function App({
              * The reader takes a string source directly, and a genuinely bad
              * origin still fails — one step later, through the reader's own
              * error path, which is where an unopenable book belongs. */
+            /* THE ROLLBACK TRAVELS WITH THE FALLBACK. This is the same open
+             * continuing by another route, not a new one replacing it — so it
+             * carries `undo` rather than retiring it, which would clear the
+             * jump's own override and land the book at its saved place instead
+             * of the mark that was clicked. */
             if (/^https?:\/\//i.test(original)) {
-              openBook(original)
+              openBook(original, null, undo ?? null)
               return
             }
             void readBookAt(original)
               .then((file) => {
-                if (fresh()) openBook(file, original)
+                if (fresh()) openBook(file, original, undo ?? null)
               })
               .catch(() => {
-                if (fresh()) openBook(original)
+                if (fresh()) openBook(original, null, undo ?? null)
               })
             return
           }
@@ -539,6 +547,9 @@ export function App({
     bookId,
     meta,
     source,
+    /* WHICH OPEN, not which source — see `BookIntakeInput.generation`. The
+       same URL opened twice is two opens and one `source`. */
+    generation: book.generation,
     fs,
     add,
     keepContent,
@@ -1095,10 +1106,32 @@ export function App({
    * the jump would open the right book at the wrong place, which is the failure
    * this whole item is about. A published CFI means a section has rendered,
    * which means the read has happened.
+   *
+   * AND IT IS ALSO WHERE THE OPEN LANDS. A section rendered in the book the
+   * jump asked for is the whole of what "it worked" means, so the rollback is
+   * released in the same breath the override is spent — see `openRollback.ts`
+   * for why releasing it any earlier was wrong.
    */
   useEffect(() => {
-    if (overrideSpent(bookId, openAt, book.position.cfi)) setOpenAt(null)
+    if (!overrideSpent(bookId, openAt, book.position.cfi)) return
+    setOpenAt(null)
+    undoOpen.current.release()
   }, [openAt, bookId, book.position.cfi])
+
+  /**
+   * A book whose bytes arrived and which would not open is a failed open.
+   *
+   * ⚠️ THE ROLLBACK USED TO BE RELEASED WHEN THE BYTES LANDED, which is before
+   * anything has parsed. So a jump into a corrupt, DRM-locked or unsupported
+   * book cleared its own undo, showed the reader an error, and left the place
+   * override armed and the "← Back to …" line offering a jump that never
+   * happened. `book.error` is the reader's terminal open failure — `fail` is
+   * generation-guarded, so this is about the book on screen — and it is the
+   * signal this half was missing.
+   */
+  useEffect(() => {
+    if (book.error !== null) openFailed()
+  }, [book.error, openFailed])
 
   /* HOLD THE WINDOW SHUT UNTIL EVERYTHING HAS LANDED — see `useWindowClose`.
    * A whole errand with its own lifetime failure modes, and both defects it
@@ -1311,11 +1344,17 @@ export function App({
          they never reached. Handed to `openStored` rather than written to the
          ref here, so the open that carries it is the only one that can be
          rolled back by it. */
-      setOpenAt(target)
+      /* ⚠️ THE OPEN STARTS FIRST, AND THE ORDER IS THE POINT. Taking the
+         rollback slot RETIRES the previous open's — it runs it — and that
+         rollback's whole job is `setOpenAt(null)`. Written the other way round
+         React batches the pair and the null wins, so a jump made while an
+         earlier jump was still in flight lost its own override and opened the
+         right book at the wrong place. */
       openStored(row, () => {
         setOpenAt(null)
         setReturnTo(null)
       })
+      setOpenAt(target)
       return true
     },
     [book, library.books, openStored, setReturnTo],

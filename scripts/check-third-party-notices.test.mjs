@@ -7,10 +7,12 @@ import {
   BUNDLED_LIBRARIES,
   BUNDLED_PACKAGES,
   BUNDLED_PLUGINS,
+  BUNDLED_TRANSITIVE,
   NOT_BUNDLED,
   copyrightFrom,
   crateLicenseFor,
   licenseBodyFrom,
+  packageDirFor,
   readCrates,
   readPackage,
   renderNotices,
@@ -176,6 +178,59 @@ describe('every runtime dependency is accounted for', () => {
       for (const { name } of BUNDLED_LIBRARIES) expect(imported(name), `${name} is imported by src/`).toBe(true)
     })
   })
+
+  /**
+   * AND THE PARTITION ABOVE CAN ONLY ACCOUNT FOR WHAT IT PARTITIONS.
+   *
+   * `dependencies` names what Paper asked for; a bundle carries what those
+   * packages asked for too. `react-dom` is one entry in `package.json` and
+   * two libraries in `dist/`: it requires `scheduler`, MIT, Meta's, whose
+   * `unstable_scheduleCallback` is in the desktop bundle and the web bundle
+   * alike — and which the notice named nowhere while three tests about
+   * "every runtime dependency" passed. A check whose input stops one level
+   * too early is green for exactly the omission it was bought to catch.
+   *
+   * So this follows each listed package's OWN `dependencies`, transitively,
+   * and demands every name it reaches be listed or excused.
+   *
+   * `peerDependencies` and `optionalDependencies` are deliberately not
+   * walked, and the reason is the same for both: neither can be relied on to
+   * be there, so an importer has to work without it. `lucide-react`'s peer is
+   * `react`, which is listed anyway. `pdfjs-dist`'s optional
+   * `@napi-rs/canvas` is reached through
+   * `createRequire(import.meta.url)('@napi-rs/canvas')` inside its Node-only
+   * canvas factory — a runtime require Vite cannot and does not bundle. Only
+   * the STRING is in `dist/`; none of the package's code is (measured
+   * 2026-08-28).
+   */
+  it('accounts for every package those packages themselves pull in', () => {
+    const named = new Set([...BUNDLED_PACKAGES, ...BUNDLED_LIBRARIES.map((one) => one.name), ...BUNDLED_TRANSITIVE.map((one) => one.name)])
+    const accounted = new Set([...named, ...Object.keys(NOT_BUNDLED)])
+    /* Breadth-first over an explicit queue with a visited set: a dependency
+       graph has cycles (`react-dom` ↔ its peers do not, but the walk must not
+       depend on that), and a `for…of` over a growing array would follow one
+       forever. */
+    const queue = [...BUNDLED_PACKAGES.map((name) => ({ name })), ...BUNDLED_LIBRARIES, ...BUNDLED_TRANSITIVE]
+    const visited = new Set(queue.map((one) => one.name))
+    const brings = new Map()
+    for (let i = 0; i < queue.length; i++) {
+      const { name, via } = queue[i]
+      const manifest = JSON.parse(readFileSync(path.join(packageDirFor(REPO_ROOT, name, via), 'package.json'), 'utf8'))
+      for (const dep of Object.keys(manifest.dependencies ?? {})) {
+        if (!brings.has(dep)) brings.set(dep, name)
+        if (visited.has(dep)) continue
+        visited.add(dep)
+        queue.push({ name: dep, via: name })
+      }
+    }
+    /* NOT VACUOUS, and this is the assertion that makes the rest mean
+       something: the walk must actually reach one level down. `scheduler` is
+       the package it failed to reach for as long as it did not exist. */
+    expect(brings.get('scheduler'), 'the walk must reach what react-dom brings').toBe('react-dom')
+    for (const [dep, from] of brings) {
+      expect(accounted, `${from} depends on ${dep}, and no table in notices.mjs names or excuses it`).toContain(dep)
+    }
+  })
 })
 
 /**
@@ -298,6 +353,30 @@ describe('readPackage on a package it cannot account for', () => {
       expect(() => readPackage(root, 'silent')).toThrow(/silent: declares no licence/)
       /* Unless the declaration is made here, which is a decision on record. */
       expect(readPackage(root, { name: 'silent', license: 'MIT' }).license).toBe('MIT')
+    })
+  })
+
+  /**
+   * A TRANSITIVE PACKAGE IS NOT AT `node_modules/<name>`.
+   *
+   * Under pnpm's default linker only direct dependencies get a symlink at the
+   * root; `scheduler` is reachable from `react-dom` and from nowhere else. So
+   * `via` sends the lookup up from the parent the way Node itself would —
+   * which also works under a hoisted or npm-shaped tree, and does not go
+   * through `require.resolve`, whose `ERR_PACKAGE_PATH_NOT_EXPORTED` is what
+   * every `@tauri-apps/plugin-*` answers for a `package.json` subpath.
+   */
+  it('finds a package installed for its parent, and names what it could not find', () => {
+    scratch((root) => {
+      install(root, path.join('parent', 'node_modules', 'child'), { version: '2.0.0', license: 'MIT' }, { LICENSE: 'child terms' })
+      install(root, 'parent', { version: '1.0.0', license: 'MIT' }, { LICENSE: 'parent terms' })
+      const found = readPackage(root, { name: 'child', via: 'parent' })
+      expect(found).toMatchObject({ name: 'child', version: '2.0.0', license: 'MIT', text: 'child terms' })
+      /* Both ways it can fail, each naming which half is missing — a resolver
+         that answered "not installed" for an absent PARENT would send the
+         next reader looking for the wrong thing. */
+      expect(() => readPackage(root, { name: 'child', via: 'nowhere' })).toThrow(/its parent nowhere is not installed/)
+      expect(() => readPackage(root, { name: 'orphan', via: 'parent' })).toThrow(/orphan: not installed anywhere parent can see it/)
     })
   })
 })

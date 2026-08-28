@@ -102,12 +102,26 @@ const importTagsNow = useCallback(() => {
      * tags. The books figure is the STORE's answer, what actually changed on
      * disk, and what could not be saved is said in the same breath. */
     const { changed, failed } = await library.tagMany(plan.additions)
-    const lost =
-      failed > 0 ? ` ${failed.toLocaleString()} ${failed === 1 ? 'book' : 'books'} could not be saved.` : ''
+    const books = (n: number) => `${n.toLocaleString()} ${n === 1 ? 'book' : 'books'}`
+    const lost = failed > 0 ? ` ${books(failed)} could not be saved.` : ''
+    /* ⚠️ THE TAG COUNT IS THE PLAN'S, AND THE PLAN IS ONLY TRUE IF EVERY WRITE
+     * LANDED. `tagMany` answers in BOOKS — how many changed, how many failed —
+     * so a partial write leaves no tag figure anybody can stand behind, and
+     * this said "Added 412 tags across 3 books. 97 books could not be saved",
+     * claiming all 412 for the three that landed. With every write refused it
+     * read "Added 412 tags across 0 books", which is the cheerful notice over
+     * an empty disk that the batching above exists to prevent.
+     *
+     * So the number is spent only on a whole import; a partial one counts the
+     * books it actually changed, which is the thing that was measured. */
     notice(
       changed === 0 && failed === 0
         ? `Nothing to add — those tags are already here.${missed}`
-        : `Added ${plan.tagsAdded.toLocaleString()} ${plan.tagsAdded === 1 ? 'tag' : 'tags'} across ${changed.toLocaleString()} ${changed === 1 ? 'book' : 'books'}.${lost}${missed}`,
+        : changed === 0
+          ? `Nothing was added.${lost}${missed}`
+          : failed === 0
+            ? `Added ${plan.tagsAdded.toLocaleString()} ${plan.tagsAdded === 1 ? 'tag' : 'tags'} across ${books(changed)}.${missed}`
+            : `Added tags to ${books(changed)}.${lost}${missed}`,
     )
   })().catch((cause: unknown) => {
     console.error('Paper: could not import those tags', cause)
@@ -236,10 +250,23 @@ const importMarksNow = useCallback(() => {
     for (const outcome of settled) {
       if (outcome.status === 'rejected') console.error('Paper: an import write failed', outcome.reason)
     }
-    const failedBooks = settled
-      .slice(0, plan.additions.length)
-      .filter((outcome) => outcome.status === 'rejected').length
+    const bookOutcomes = settled.slice(0, plan.additions.length)
+    const failedBooks = bookOutcomes.filter((outcome) => outcome.status === 'rejected').length
     const cardsFailed = settled[plan.additions.length]?.status === 'rejected'
+    /* ⚠️ WHAT LANDED, NOT WHAT WAS PLANNED. The sentence took its three
+     * numbers from the plan and appended the failures as a qualifier, so an
+     * import whose every write was refused still read "Added 812 marks and 40
+     * cards across 96 books" with "96 books could not be saved" behind it —
+     * the reader is told the thing happened and then told it did not. Each
+     * book is one write and each settles on its own, so the counts are exactly
+     * derivable: a fulfilled book contributed its marks, a rejected one
+     * contributed none, and the cards are one write for the lot. */
+    const marksAdded = plan.additions.reduce(
+      (sum, one, at) => (bookOutcomes[at]?.status === 'fulfilled' ? sum + one.marks.length : sum),
+      0,
+    )
+    const cardsAdded = cardsFailed ? 0 : plan.cardsAdded
+    const booksTouched = bookOutcomes.filter((outcome) => outcome.status === 'fulfilled').length
     const lostWrites =
       failedBooks > 0 || cardsFailed
         ? ` ${[
@@ -264,7 +291,12 @@ const importMarksNow = useCallback(() => {
     notice(
       plan.marksAdded === 0 && plan.cardsAdded === 0
         ? `Nothing to add.${already}${folded}${missed}`
-        : `Added ${plan.marksAdded} ${plan.marksAdded === 1 ? 'mark' : 'marks'} and ${plan.cardsAdded} ${plan.cardsAdded === 1 ? 'card' : 'cards'} across ${plan.booksTouched} ${plan.booksTouched === 1 ? 'book' : 'books'}.${lostWrites}${already}${folded}${missed}`,
+        : marksAdded === 0 && cardsAdded === 0
+          ? /* Everything the plan had was refused. Saying so first is the
+               whole point: the qualifier used to trail a claim that
+               contradicted it. */
+            `Nothing was saved.${lostWrites}${already}${folded}${missed}`
+          : `Added ${marksAdded} ${marksAdded === 1 ? 'mark' : 'marks'} and ${cardsAdded} ${cardsAdded === 1 ? 'card' : 'cards'} across ${booksTouched} ${booksTouched === 1 ? 'book' : 'books'}.${lostWrites}${already}${folded}${missed}`,
     )
   })().catch((cause: unknown) => {
     /* Everything after the parse settles individually above, so a rejection

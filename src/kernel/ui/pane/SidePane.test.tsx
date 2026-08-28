@@ -102,8 +102,17 @@ function draw(over: Partial<SidePaneProps> & { pane: 'search' | 'companion' | 'l
     contributed: [],
     ...over,
   }
-  render(<SidePane {...props} />)
-  return { onGoTo, companion: props.companion as ReturnType<typeof provider>, book: props.book }
+  const view = render(<SidePane {...props} />)
+  return {
+    onGoTo,
+    companion: props.companion as ReturnType<typeof provider>,
+    book: props.book,
+    /** Re-render the same pane over a different open book. */
+    openAnother: (bookId: string) =>
+      view.rerender(
+        <SidePane {...props} book={{ ...props.book, bookId } as unknown as Book} />,
+      ),
+  }
 }
 
 describe('the search panel', () => {
@@ -126,6 +135,46 @@ describe('the companion panel', () => {
     fireEvent.change(input, { target: { value: 'who is speaking?' } })
     fireEvent.keyDown(input, { key: 'Enter' })
     expect(companion.asked[0]?.selection).toBe('Call me Ishmael.')
+  })
+
+  /**
+   * ⚠️ **THE THREAD OUTLIVED THE BOOK IT WAS ABOUT.**
+   *
+   * The pane stays mounted across an open, and nothing tied the exchange or
+   * the composer's draft to a book — so switching books left the previous
+   * book's questions and answers on screen under the new book's heading, and
+   * a half-typed question ready to be sent grounded in a book it was not
+   * asked about. "grounded in this book only" is the panel's own line.
+   */
+  it('starts a new thread when the reader opens another book', async () => {
+    const { openAnother } = draw({ pane: 'companion' })
+    const input = screen.getByLabelText('Ask the companion about this chapter')
+    fireEvent.change(input, { target: { value: 'who is speaking?' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(await screen.findByText('who is speaking?')).toBeTruthy()
+
+    openAnother('another-book')
+    expect(
+      screen.queryByText('who is speaking?'),
+      'the previous book’s exchange was shown under the new book',
+    ).toBeNull()
+    expect(
+      (screen.getByLabelText('Ask the companion about this chapter') as HTMLInputElement).value,
+      'the draft followed the reader into a book it was not about',
+    ).toBe('')
+  })
+
+  /* The draft too: a question typed and not sent is about the book it was
+     typed in. */
+  it('clears a half-typed question when the book changes', () => {
+    const { openAnother } = draw({ pane: 'companion' })
+    fireEvent.change(screen.getByLabelText('Ask the companion about this chapter'), {
+      target: { value: 'what is a gam?' },
+    })
+    openAnother('another-book')
+    expect(
+      (screen.getByLabelText('Ask the companion about this chapter') as HTMLInputElement).value,
+    ).toBe('')
   })
 })
 

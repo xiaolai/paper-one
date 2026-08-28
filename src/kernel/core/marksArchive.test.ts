@@ -10,6 +10,7 @@ import {
 import type { IndexedBook } from './bookIndex'
 import type { Card } from './cards'
 import type { Mark } from './marks'
+import { ARCHIVE_MAX_ROWS } from './importLimits'
 import { hlcOf } from './hlc'
 
 /**
@@ -282,6 +283,44 @@ describe('planImport', () => {
     /* Order in the file does not decide it; the stamp does. */
     const reversed = planImport(exportMarks(shelf, [late, early], []), shelf, [], [])
     expect(reversed.additions[0]?.marks.map((m) => m.note)).toEqual(['kept'])
+  })
+
+  /* ⚠️ **AN ARCHIVE AT ITS OWN LIMIT USED TO THROW BEFORE IT WAS PLANNED.**
+     The rows were gathered with `push(...row.marks)`, which passes every row
+     as an ARGUMENT — and `ARCHIVE_MAX_ROWS` permits 200 000, well past what
+     the engine accepts: `RangeError: Maximum call stack size exceeded`, from
+     an import of a file the parser had just accepted. The marks here are all
+     one passage so the fold is a constant-time match and this measures the
+     gather, not the matcher. */
+  it('plans an archive holding as many rows as the parser permits', () => {
+    const shelf = [BOOK()]
+    const one = {
+      text: 'Call me Ishmael',
+      prefix: '',
+      suffix: '',
+      note: '',
+      kind: 'highlight' as const,
+      tint: 'yellow' as const,
+      style: 'fill' as const,
+      chapter: '',
+      createdAt: '2026-01-02T03:04:05.000Z',
+      localAnchor: { cfi: '', sectionIndex: 0 },
+    }
+    const archive: MarksArchive = {
+      version: 1,
+      books: [
+        {
+          bookId: 'moby',
+          title: 'Moby-Dick',
+          author: 'Herman Melville',
+          marks: Array.from({ length: ARCHIVE_MAX_ROWS }, () => one),
+          cards: [],
+        },
+      ],
+    }
+    const plan = planImport(archive, shelf, [], [])
+    expect(plan.marksAdded).toBe(1)
+    expect(plan.folded).toBe(ARCHIVE_MAX_ROWS - 1)
   })
 
   it('never removes: a shelf mark absent from the file survives', () => {

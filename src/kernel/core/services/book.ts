@@ -340,6 +340,17 @@ export function bookRestore(env: ServiceEnvironment) {
         `that folder holds ${outcome.bookId}, not ${bookId}; nothing was restored`,
       )
     }
+    /* AND A FOLDER WHOSE OWNER CANNOT BE ESTABLISHED IS REFUSED TOO, with its
+     * own sentence because the reader's move is different: a mismatch names
+     * the book in the way, and this one names the file to look at. Answering
+     * "nothing to restore" over a record that would not read is the shape of
+     * lie the outcome type was widened to stop. */
+    if (outcome.state === 'unreadable') {
+      throw refuse(
+        SERVICE_ERRORS.conflict,
+        `the record in the ${outcome.at} folder for ${bookId} could not be read, so it cannot be told whose book it is; nothing was restored`,
+      )
+    }
     return {
       bookId,
       restored: outcome.state !== 'absent',

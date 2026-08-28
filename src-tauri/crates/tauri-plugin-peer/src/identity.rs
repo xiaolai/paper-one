@@ -2,10 +2,11 @@
 //! generated on the first launch and loaded on every later one, so the
 //! endpoint id a peer paired with is the endpoint id it finds next time.
 //!
-//! The file is written to a temp sibling and renamed into place, so it is
-//! either absent (generate) or complete (load) — never a short file that
-//! would brick every pairing on the next launch. A file of the wrong length
-//! is reported, not overwritten. Mode 0600 on Unix.
+//! The file is written to a private temp sibling and LINKED into place, so
+//! it is either absent (generate) or complete (load) — never a short file
+//! that would brick every pairing on the next launch, and never one writer's
+//! key published over another's. A file of the wrong length is reported, not
+//! overwritten. Mode 0600 on Unix.
 //!
 //! The directory `peer/` is kept out of backups, because a backup that
 //! carries the key restores as THIS peer: a Mac restored or migrated from
@@ -58,9 +59,16 @@ pub fn load_or_create(root: &Path) -> Result<SecretKey> {
     let key = match std::fs::metadata(&path) {
         Ok(meta) => load(&path, meta.len())?,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            let key = SecretKey::generate();
-            write_new(&path, &key)?;
-            key
+            let fresh = SecretKey::generate();
+            match write_new(&path, &fresh)? {
+                Installed::Ours => fresh,
+                /* SOMEBODY ELSE'S KEY IS THE IDENTITY NOW. The generated one
+                 * is discarded unused: this device has exactly one endpoint
+                 * id, and a caller that went on using the key it made would
+                 * be a second peer wearing the same install — the file says
+                 * who this machine is, not whoever wrote last. */
+                Installed::Theirs => load(&path, std::fs::metadata(&path)?.len())?,
+            }
         }
         Err(err) => return Err(err.into()),
     };
@@ -132,15 +140,44 @@ fn load(path: &Path, len: u64) -> Result<SecretKey> {
     Ok(SecretKey::from_bytes(&bytes))
 }
 
-fn write_new(path: &Path, key: &SecretKey) -> Result<()> {
+/// Which key ended up at the path — see [`write_new`].
+enum Installed {
+    /// The one this call generated.
+    Ours,
+    /// Another writer's, published while this one was writing.
+    Theirs,
+}
+
+/// Write `key` to a private temp file and install it WITHOUT CLOBBERING.
+///
+/// ⚠️ **THE TEMP NAME WAS SHARED AND THE INSTALL OVERWROTE.** Every caller
+/// used one `identity.key.tmp` and unconditionally unlinked it first, so two
+/// of them interleaved could unlink each other's open file, publish bytes
+/// under a name the other still held, and — because `rename` replaces on
+/// Unix — overwrite an identity that was already loaded and in use. Two
+/// processes, two keys, and the endpoint id every paired device knows
+/// changing underneath them. So: a temp name private to this writer, and
+/// `hard_link` to install, which is atomic and EXCLUSIVE on POSIX and NTFS
+/// (the library lock publishes the same way, `src/lock.rs`). A loser
+/// discovers it lost instead of overwriting a winner.
+fn write_new(path: &Path, key: &SecretKey) -> Result<Installed> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
     let dir = path.parent().expect("key path has a parent");
     std::fs::create_dir_all(dir)?;
-    let tmp = path.with_extension("key.tmp");
-    /* A crash relic under the temp name is removed and the create is
-     * EXCLUSIVE — a truncating `create(true)` would follow a stale symlink
-     * and would reuse a stale file's looser mode, since `mode(0o600)`
-     * applies only to a file the open itself creates. */
-    let _ = std::fs::remove_file(&tmp);
+    /* PRIVATE TO THIS WRITER: pid and a sequence number. A relic left under
+     * this name can only be a dead process's — a live one with this pid is
+     * this process, and the sequence never repeats within it — so removing
+     * it and retrying is safe, which was not true of the shared name. The
+     * create is EXCLUSIVE either way: a truncating `create(true)` would
+     * follow a stale symlink and would reuse a stale file's looser mode,
+     * since `mode(0o600)` applies only to a file the open itself creates. */
+    let tmp = path.with_extension(format!(
+        "key.{}.{}.tmp",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
     let written = (|| -> Result<()> {
         let mut opts = std::fs::OpenOptions::new();
         opts.write(true).create_new(true);
@@ -149,7 +186,14 @@ fn write_new(path: &Path, key: &SecretKey) -> Result<()> {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
         }
-        let mut file = opts.open(&tmp)?;
+        let mut file = match opts.open(&tmp) {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                std::fs::remove_file(&tmp)?;
+                opts.open(&tmp)?
+            }
+            Err(err) => return Err(err.into()),
+        };
         use std::io::Write;
         file.write_all(&key.to_bytes())?;
         file.sync_all()?;
@@ -160,12 +204,22 @@ fn write_new(path: &Path, key: &SecretKey) -> Result<()> {
         let _ = std::fs::remove_file(&tmp);
         return Err(err);
     }
-    std::fs::rename(&tmp, path)?;
+    let installed = std::fs::hard_link(&tmp, path);
+    // The name is published (or somebody else's is); either way this
+    // writer's temp — key material — goes.
+    let _ = std::fs::remove_file(&tmp);
+    match installed {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Ok(Installed::Theirs)
+        }
+        Err(err) => return Err(err.into()),
+    }
     tighten_permissions(path)?;
-    /* Persist the rename. Best-effort ONLY where the platform cannot do it —
-     * Windows cannot open a directory as a file — but a Unix failure is
-     * LOGGED: the comment used to claim the rename was persisted while
-     * every failure vanished into an `if let`. */
+    /* Persist the new directory entry. Best-effort ONLY where the platform
+     * cannot do it — Windows cannot open a directory as a file — but a Unix
+     * failure is LOGGED: the comment used to claim the link was persisted
+     * while every failure vanished into an `if let`. */
     match std::fs::File::open(dir) {
         Ok(dir_file) => {
             if let Err(err) = dir_file.sync_all() {
@@ -179,7 +233,7 @@ fn write_new(path: &Path, key: &SecretKey) -> Result<()> {
             let _ = err;
         }
     }
-    Ok(())
+    Ok(Installed::Ours)
 }
 
 #[cfg(unix)]
@@ -213,6 +267,48 @@ mod tests {
         assert!(
             !path.with_extension("key.tmp").exists(),
             "temp file cleaned up"
+        );
+    }
+
+    /// THE LOSER OF A RACE TAKES THE WINNER'S KEY. Installing by `hard_link`
+    /// means a second writer that reaches `write_new` with a key already
+    /// published cannot overwrite it — which is what `rename` did, changing
+    /// the endpoint id under a peer that had already loaded and used it.
+    #[test]
+    fn a_key_that_appeared_first_is_taken_rather_than_overwritten() {
+        let dir = ScratchDir::new("identity-race");
+        let path = key_path(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let winner = SecretKey::generate();
+        std::fs::write(&path, winner.to_bytes()).unwrap();
+
+        // The state a second writer is in: it saw no file a moment ago and
+        // has generated a key of its own.
+        let mine = SecretKey::generate();
+        assert!(matches!(
+            write_new(&path, &mine).unwrap(),
+            Installed::Theirs
+        ));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            winner.to_bytes(),
+            "the published identity was replaced"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "the loser left its key material behind: {leftovers:?}"
+        );
+        // And the caller ends up on the key that IS published, so both
+        // processes answer to one endpoint id.
+        assert_eq!(
+            load_or_create(dir.path()).unwrap().to_bytes(),
+            winner.to_bytes()
         );
     }
 

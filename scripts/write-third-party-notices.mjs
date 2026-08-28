@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isProcessEntry } from './lib/entry.mjs'
-import { BUNDLED_LIBRARIES, BUNDLED_PACKAGES, readCrates, readPackage, renderNotices } from './lib/notices.mjs'
+import { BUNDLED_LIBRARIES, BUNDLED_PACKAGES, BUNDLED_TRANSITIVE, readCrates, readPackage, renderNotices } from './lib/notices.mjs'
 
 /**
  * `pnpm docs:notices` — write `THIRD-PARTY-NOTICES.md` from what is installed.
@@ -28,7 +28,10 @@ export const NOTICES = 'THIRD-PARTY-NOTICES.md'
 export function currentNotices(root = REPO_ROOT) {
   return renderNotices(
     BUNDLED_PACKAGES.map((name) => readPackage(root, name)),
-    BUNDLED_LIBRARIES.map((entry) => readPackage(root, entry)),
+    /* The direct dependencies AND what they bring with them — `scheduler`
+       reaches every bundle through `react-dom` and appeared in neither table
+       until the walk in the notices test went looking. */
+    [...BUNDLED_LIBRARIES, ...BUNDLED_TRANSITIVE].map((entry) => readPackage(root, entry)),
     readCrates(root),
   )
 }
