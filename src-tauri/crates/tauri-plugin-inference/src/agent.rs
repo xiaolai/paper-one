@@ -211,12 +211,55 @@ impl AgentProbe {
     }
 }
 
-/// Find an executable by walking `PATH` in Rust.
+/// Find an executable: on `PATH`, then where a CLI lives when the launch
+/// environment has never heard of it.
 ///
 /// Never a shell, never `which`. See the module header.
 pub fn which(exe: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
+    which_in(
+        std::env::var_os("PATH").as_deref(),
+        home_dir().as_deref(),
+        exe,
+    )
+}
+
+/// Where the reader's shell looks and a Finder launch does not (WI-20.22).
+///
+/// ⚠️ A `.app` opened from the Finder or the Dock inherits launchd's `PATH` —
+/// `/usr/bin:/bin:/usr/sbin:/sbin` — not the shell's. Homebrew's prefix and
+/// `~/.local/bin`, where `codex` and `claude` actually live on this machine,
+/// are in the second and not the first, so the probe told a reader who had
+/// just used both in a terminal that neither was installed. Phase 15's live
+/// probe ran under `tauri dev` from a terminal, whose `PATH` hid it. Same
+/// class, same fix, as `tailscale` in the webhost plugin's `address.rs`.
+///
+/// Searched AFTER `PATH`, so a reader who put a different build first still
+/// gets the one they chose. Off macOS these are simply directories that are
+/// not there, and a stat that fails costs nothing.
+const FALLBACK_DIRS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin"];
+
+/// The same, under the reader's home. `claude`'s own installer puts the
+/// binary in `~/.local/bin`.
+const HOME_FALLBACK_DIRS: &[&str] = &[".local/bin"];
+
+/// The reader's home, from the variable every launch — Finder or shell —
+/// sets. `HOME` on Unix, `USERPROFILE` on Windows.
+fn home_dir() -> Option<PathBuf> {
+    let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(var).map(PathBuf::from)
+}
+
+/// [`which`] over an explicit `PATH` and home, so a test can hand it a
+/// `PATH` with nothing on it and a home it planted a CLI under.
+fn which_in(path: Option<&std::ffi::OsStr>, home: Option<&Path>, exe: &str) -> Option<PathBuf> {
+    let on_path = path.into_iter().flat_map(std::env::split_paths);
+    let system = FALLBACK_DIRS.iter().map(PathBuf::from);
+    let under_home = home
+        .into_iter()
+        .flat_map(|home| HOME_FALLBACK_DIRS.iter().map(move |dir| home.join(dir)));
+    on_path
+        .chain(system)
+        .chain(under_home)
         .map(|dir| dir.join(exe))
         .find(|candidate| is_executable_file(candidate))
 }
@@ -595,6 +638,74 @@ mod tests {
         let found = which("sh").expect("sh is on PATH");
         assert!(found.is_absolute());
         assert!(is_executable_file(&found));
+    }
+
+    /// A fake CLI: a file with the executable bit, which is all `which` reads.
+    #[cfg(unix)]
+    fn plant_cli(dir: &Path, name: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(dir).unwrap();
+        let exe = dir.join(name);
+        std::fs::write(&exe, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        exe
+    }
+
+    /// WI-20.22. A `.app` opened from the Finder gets launchd's `PATH`, which
+    /// has never heard of `~/.local/bin` — where `claude`'s own installer puts
+    /// it — so the probe reported a CLI the reader had just used in a terminal
+    /// as "Not installed". Phase 15's live probe ran under `tauri dev` from a
+    /// terminal, whose `PATH` hid this. With no `PATH` at all, the candidate
+    /// directories are still searched.
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_off_path_is_found_in_a_candidate_directory() {
+        let home = crate::testutil::ScratchDir::new("agent-home");
+        let exe = plant_cli(&home.path().join(".local/bin"), "paper-fake-agent");
+
+        let empty_path = std::ffi::OsString::new();
+        assert_eq!(
+            which_in(Some(&empty_path), Some(home.path()), "paper-fake-agent"),
+            Some(exe.clone()),
+            "an empty PATH still reaches ~/.local/bin"
+        );
+        assert_eq!(
+            which_in(None, Some(home.path()), "paper-fake-agent"),
+            Some(exe),
+            "no PATH at all still reaches ~/.local/bin"
+        );
+        /* Nowhere to look: no PATH and no home is honestly nothing. */
+        assert_eq!(which_in(None, None, "paper-fake-agent"), None);
+    }
+
+    /// The reader's own `PATH` outranks the fallbacks: a CLI they put first
+    /// is the one that runs, and the fallbacks only fill a `PATH` that has
+    /// nothing to say.
+    #[cfg(unix)]
+    #[test]
+    fn the_path_wins_over_the_candidate_directories() {
+        let home = crate::testutil::ScratchDir::new("agent-home");
+        let on_path = crate::testutil::ScratchDir::new("agent-path");
+        let chosen = plant_cli(on_path.path(), "paper-fake-agent");
+        let _fallback = plant_cli(&home.path().join(".local/bin"), "paper-fake-agent");
+
+        let path = std::env::join_paths([on_path.path()]).unwrap();
+        assert_eq!(
+            which_in(Some(&path), Some(home.path()), "paper-fake-agent"),
+            Some(chosen)
+        );
+    }
+
+    /// A file in a candidate directory without the executable bit is not a
+    /// CLI — the same rule the `PATH` walk already applies.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_executable_file_in_a_candidate_directory_is_not_found() {
+        let home = crate::testutil::ScratchDir::new("agent-home");
+        let bin = home.path().join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("paper-fake-agent"), "not a program").unwrap();
+        assert_eq!(which_in(None, Some(home.path()), "paper-fake-agent"), None);
     }
 
     #[test]
