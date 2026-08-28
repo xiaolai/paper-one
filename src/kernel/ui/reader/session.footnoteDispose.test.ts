@@ -56,13 +56,19 @@ type SessionCallbacks = import('./session').SessionCallbacks
  * unhandled error beside them. A test that throws and passes is worse than one
  * that fails.
  */
-function noteView() {
+function noteView(order: string[] = []) {
   const calls: string[] = []
   return {
     calls,
     view: {
-      close: () => calls.push('close'),
-      remove: () => calls.push('remove'),
+      close: () => {
+        calls.push('close')
+        order.push('note.close')
+      },
+      remove: () => {
+        calls.push('remove')
+        order.push('note.remove')
+      },
       addEventListener: () => {},
       style: { cssText: '' } as CSSStyleDeclaration,
       renderer: { setAttribute: () => {}, addEventListener: () => {} },
@@ -121,26 +127,48 @@ function callbacks() {
   return { calls, cb }
 }
 
-const view = () =>
-  ({
+/**
+ * The book's own view, recording into `order` beside the note's so the teardown
+ * sequence can be asserted whole.
+ *
+ * `init` REPORTS A LOCATION before it resolves, as both renderers do — the
+ * paginator's `#afterScroll` and the fixed-layout `#reportLocation` both
+ * dispatch `relocate` synchronously on the navigation path. A fake that
+ * resolved silently modelled the defect WI-20.14 fixes, and the session now
+ * treats that silence as a book that displayed nothing.
+ */
+const view = (order: string[] = []) => {
+  const listeners: Record<string, ((e: unknown) => void)[]> = {}
+  return {
     style: {} as CSSStyleDeclaration,
-    book: { toc: [], metadata: {} },
-    addEventListener: () => {},
+    book: {
+      toc: [],
+      metadata: {},
+      /* THE BOOK, NOT THE RENDERER, owns the parse — object URLs, a zip
+         loader, a worker — and `View.close()` never touches it. */
+      destroy: () => order.push('book.destroy'),
+    },
+    addEventListener: (type: string, fn: (e: unknown) => void) => {
+      ;(listeners[type] ??= []).push(fn)
+    },
     open: async () => {},
-    init: async () => {},
-    close: () => {},
-    remove: () => {},
+    init: async () => {
+      for (const fn of listeners['relocate'] ?? []) fn(new CustomEvent('relocate', { detail: { fraction: 0 } }))
+    },
+    close: () => order.push('view.close'),
+    remove: () => order.push('view.remove'),
     renderer: { setAttribute: () => {}, addEventListener: () => {} },
-  }) as unknown as View
+  } as unknown as View
+}
 
 /** A started session, plus the handler its listeners are on. */
-async function started() {
+async function started(order: string[] = []) {
   foliate.handlers.length = 0
   const host = fakeHost()
   const { cb, calls } = callbacks()
   const session = new ReaderSession(host, cb)
   await session.start('book.epub', {
-    createView: async () => view(),
+    createView: async () => view(order),
     loadPainters: () => Promise.resolve({ fill: 'FILL', underline: 'UNDERLINE', wave: 'WAVE' }) as never,
     /* THE PASS-THROUGH — `prepare` is required; see `SessionDeps.prepare`. */
     prepare: (source: unknown) => Promise.resolve(source),
@@ -223,5 +251,33 @@ describe('closing a book with a note open', () => {
     /* Still told: a host that never had a note is unaffected by being told it
        has none, and the alternative is a branch that has to know. */
     expect(calls['onFootnote']?.at(-1)).toEqual([null])
+  })
+})
+
+/**
+ * ⚠️ **`View.close()` CLOSES THE RENDERER AND NEVER THE BOOK.** The fork's
+ * `close` destroys and removes the renderer and nulls its own progress state;
+ * the `Book` object — every backend's parse — is not its to release, and
+ * nothing else released it either. A fixed-layout EPUB keeps every visited
+ * section's blob URLs in `Loader.#cache`; CBZ holds two object URLs per page;
+ * FB2 mints one per section at parse; MOBI holds `#resourceCache`. The
+ * enrichment pass found and fixed this for ITS parse (`parseBook.ts`); the
+ * reader's own path was missed, one book's resources per book opened.
+ *
+ * AFTER the note view and the book's view, because the note view SHARES the
+ * book — which is why `releaseNoteView` correctly leaves it alone — and a book
+ * destroyed under a renderer still tearing down is a renderer reading revoked
+ * URLs.
+ */
+describe('closing a book releases the book', () => {
+  it('destroys the book exactly once, after the note view is released and the view closed', async () => {
+    const order: string[] = []
+    const { session, handler } = await started(order)
+    const note = noteView(order)
+    showNote(handler, note)
+
+    session.dispose()
+    session.dispose()
+    expect(order).toEqual(['note.close', 'note.remove', 'view.close', 'view.remove', 'book.destroy'])
   })
 })

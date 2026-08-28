@@ -170,3 +170,52 @@ export function resolveAccel(
      entry point. */
   return context.pane === digit.pane ? { kind: 'closePane' } : { kind: 'openPane', pane: digit.pane }
 }
+
+/**
+ * §11's reading keys — what a plain key means to an open book, as a value.
+ *
+ * ⚠️ **→ AND THE RIGHT CHEVRON MOVED OPPOSITE WAYS IN A RIGHT-TO-LEFT BOOK.**
+ * The arrows were bound in `App` to `next`/`prev` — an ORDER — while the
+ * chevrons and the trackpad go through `goLeft`/`goRight` — a SIDE — which the
+ * fork resolves from the book's own `dir` (`view.js`: `goRight` is `prev` when
+ * `book.dir === 'rtl'`). So in an RTL book the → key turned to the next page,
+ * which is on the left, and the → chevron beside it turned to the previous one.
+ * An arrow key is a side, exactly as a chevron is. PageUp, PageDown and Space
+ * are an order and stay one: "on by a screen" has no side.
+ *
+ * Pure, for the reason `resolveAccel` is: the map was a chain of `if`s inside
+ * `App`'s effect, and the only test that could reach it was a search of the
+ * source for a key literal. What is returned is the NAVIGATOR'S verb, so the
+ * side-to-direction question is asked of the book rather than answered here.
+ *
+ * `null` leaves the key to the platform. ⇧arrow is a SELECTION in every text
+ * surface there is — without that guard the page turned instead, which also
+ * made the paginator's keyboard-selection branch unreachable — and ⇧Space is
+ * the published binding for the previous page, the one shifted key this map
+ * owns. The caller keeps the guards that are about the MOMENT: a control under
+ * focus, a field being typed in, a key something else already handled.
+ */
+export type PageVerb = 'next' | 'prev' | 'goLeft' | 'goRight'
+
+export function resolvePageKey(event: {
+  readonly key: string
+  readonly code: string
+  readonly shiftKey: boolean
+}): PageVerb | null {
+  /* BY KEY OR BY CODE: `key` is ' ' on every current engine and 'Spacebar' on
+     an older one, and `code` is the physical key either way. */
+  const space = event.key === ' ' || event.code === 'Space'
+  if (event.shiftKey) return space ? 'prev' : null
+  switch (event.key) {
+    case 'ArrowRight':
+      return 'goRight'
+    case 'ArrowLeft':
+      return 'goLeft'
+    case 'PageDown':
+      return 'next'
+    case 'PageUp':
+      return 'prev'
+    default:
+      return space ? 'next' : null
+  }
+}

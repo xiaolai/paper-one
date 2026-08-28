@@ -1602,7 +1602,55 @@ export class ReaderSession {
     }
 
     if (!this.#settle(view)) return
-    if (failed) this.#cb.onError(message(failed.cause, 'This book could not be displayed.'))
+    if (failed) {
+      this.#cb.onError(message(failed.cause, 'This book could not be displayed.'))
+      return
+    }
+
+    /*
+     * ⚠️ **RESOLVED IS NOT DISPLAYED.** The retry above catches a RENDER that
+     * throws, and that is the rarer failure. The fork's `goTo` catches its own
+     * errors and resolves; the paginator no-ops on an index it cannot go to;
+     * a section that fails to load resolves `#display({})`. A stored CFI whose
+     * idref no longer resolves, a fake-CFI index past the section count on
+     * MOBI/FB2/CBZ, a landmark pointing at a missing file — each resolved
+     * `init` having displayed nothing, and the reader got a blank stage with a
+     * populated table of contents and no error anywhere.
+     *
+     * THE SIGNAL IS THE RELOCATION, AND IT NEEDS NO TIMER. Both renderers
+     * report where they landed BEFORE the navigation's promise settles: the
+     * paginator's `#afterScroll` runs synchronously inside `#scrollTo` on the
+     * navigation path, and the fixed-layout renderer's `#reportLocation` is
+     * the last line of `goToSpread`. So an `init` that resolves with no
+     * `relocate` behind it displayed nothing, and `#relocated` — set by that
+     * event and by nothing else — is the whole test.
+     *
+     * AND THE FALLBACK BYPASSES THE LANDMARKS. Retrying `init(null)` is not
+     * enough: `goToTextStart` prefers the bodymatter landmark, so a landmark
+     * whose href is missing fails the same silent way twice. The fallback goes
+     * to the first spine item with `linear !== 'no'` BY INDEX, which the
+     * paginator honours whatever the landmarks say. One navigation, one
+     * notice on the channel a lost position already uses — findable, and not
+     * an error bar over a book that is about to be readable. Only when that
+     * too lands nowhere is the reader told.
+     */
+    if (this.#relocated) return
+    const first = firstLinearSection(view.book)
+    if (first !== -1) {
+      console.warn(
+        saved !== null
+          ? 'Paper: the saved position displayed nothing; opening at the first section instead'
+          : 'Paper: the book opened to nothing; opening at the first section instead',
+      )
+      try {
+        await view.goTo(first)
+      } catch (cause) {
+        failed = { cause }
+      }
+      if (!this.#settle(view)) return
+      if (this.#relocated) return
+    }
+    this.#cb.onError(message(failed?.cause, 'This book could not be displayed.'))
   }
 
   /**
@@ -2026,6 +2074,18 @@ export class ReaderSession {
       ) {
         return
       }
+
+      /* AND A KEY ON A CONTROL STAYS WITH THE CONTROL, for the same reason.
+       *
+       * The host guards its own reading keys against a focused control — Space
+       * on a toolbar button reached by Tab presses the button — and that guard
+       * could never fire for the book, because the forwarded copy's target is
+       * the window. So Space on a `<button>` or an arrow on a `<select>` inside
+       * an interactive EPUB was forwarded, the host turned the page, and the
+       * cancellation carried back below cancelled the control's own default
+       * too: the platform's meaning of the key, taken from under the reader's
+       * focus. Same outcome as typing — not forwarded, hence not cancelled. */
+      if (onBookControl(target)) return
 
       const forwarded = new KeyboardEvent('keydown', {
         key: event.key,
@@ -2465,10 +2525,60 @@ export class ReaderSession {
       if (prepared) destroyQuietly(prepared)
       const built = this.#view
       this.#view = null
-      if (built) closeQuietly(built)
+      if (built) {
+        closeQuietly(built)
+        /**
+         * ⚠️ **`View.close()` CLOSES THE RENDERER AND NEVER THE BOOK.** The
+         * fork's `close` destroys and removes the renderer and nulls its own
+         * progress state; the `Book` — the backend's parse — is not its to
+         * release, and until now nothing else released it either. A
+         * fixed-layout EPUB keeps every visited section's blob URLs in
+         * `Loader.#cache`; CBZ holds two object URLs per page; FB2 mints one
+         * per section at parse; MOBI holds `#resourceCache`. The enrichment
+         * pass found and fixed this for ITS parse (`parseBook.ts`); the
+         * reader's own path was missed — one book's resources per book opened.
+         *
+         * AFTER the note view and after the close, because the note view
+         * SHARES the book (which is why `releaseNoteView` correctly leaves it
+         * alone) and a book destroyed under a renderer still tearing down is a
+         * renderer reading revoked URLs. And NOT AGAIN for a PDF: there the
+         * book IS `#prepared`, destroyed just above, and `makePdf`'s teardown
+         * releases a worker that is not there to release twice.
+         */
+        const book: unknown = built.book
+        if (book !== prepared && destroyable(book)) destroyQuietly(book)
+      }
       quietly('host cleanup', () => this.#host.replaceChildren())
     }
   }
+}
+
+/**
+ * The first spine item a reader can turn to, or -1 for a spine with none.
+ *
+ * `linear === 'no'` marks an item the reading order skips — a cover page's
+ * standalone image, an in-book popup — and the paginator's own `#adjacentIndex`
+ * skips them by exactly this test. The by-index fallback in `#display` lands
+ * where a page turn would.
+ */
+function firstLinearSection(book: { readonly sections?: readonly unknown[] }): number {
+  return (book.sections ?? []).findIndex((section) => (section as { linear?: unknown } | null)?.linear !== 'no')
+}
+
+/**
+ * The controls whose keys are their own — see `#watchKeys`.
+ *
+ * The host's guard (`App.tsx`) also lists `a[href]`, and this one deliberately
+ * does not. Chromium focuses a clicked link and foliate's click handler cancels
+ * the CLICK, not the focus — so on the browser client a footnote the reader had
+ * just tapped would leave its `<a>` focused, and → to read on would be swallowed
+ * until they clicked the prose. Space and the arrows are not a link's own keys
+ * in any case: Enter is, and Enter turns no page.
+ */
+const IN_BOOK_CONTROL = 'button, select, summary, [role="menu"], [role="listbox"], [role="dialog"]'
+
+function onBookControl(target: HTMLElement | null): boolean {
+  return typeof target?.closest === 'function' && target.closest(IN_BOOK_CONTROL) !== null
 }
 
 /**

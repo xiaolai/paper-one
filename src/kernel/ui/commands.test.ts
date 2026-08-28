@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest'
 import { buildCommands, filterCommands, score, type Command } from './commands'
 import { DEFAULT_STEP_IDX, READING_STEPS } from '../core/metrics'
 import { PANE_SHORTCUTS, panesFor } from './panes'
-import { resolveAccel } from './accel'
+import { resolveAccel, resolvePageKey } from './accel'
 import { initialState, paneFits, type AppState } from './state'
 
 function context(over: Partial<AppState> = {}) {
@@ -611,5 +611,63 @@ describe('the way into the removed books', () => {
     for (const word of ['deleted', 'restore', 'undo', 'recover', 'trash']) {
       expect(filterCommands(commands, word).map((c) => c.id), word).toContain('library:trash')
     }
+  })
+})
+
+/**
+ * ⚠️ **→ AND THE RIGHT CHEVRON MOVED OPPOSITE WAYS IN A RIGHT-TO-LEFT BOOK.**
+ * The arrows were bound to `next`/`prev` — an ORDER — while the chevrons and
+ * the trackpad go through `goLeft`/`goRight` — a SIDE — which the fork resolves
+ * from the book's own `dir`. So in an RTL book the → key turned to the next
+ * page, which is on the left, and the → chevron beside it turned to the
+ * previous one. An arrow key is a side, exactly as a chevron is; PageUp,
+ * PageDown and Space are an order and stay one.
+ */
+describe('resolvePageKey', () => {
+  const press = (key: string, over: { code?: string; shiftKey?: boolean } = {}) => ({
+    key,
+    code: over.code ?? key,
+    shiftKey: over.shiftKey ?? false,
+  })
+
+  it('sends the arrows to a side and the paging keys to an order', () => {
+    expect(resolvePageKey(press('ArrowRight'))).toBe('goRight')
+    expect(resolvePageKey(press('ArrowLeft'))).toBe('goLeft')
+    expect(resolvePageKey(press('PageDown'))).toBe('next')
+    expect(resolvePageKey(press('PageUp'))).toBe('prev')
+  })
+
+  it('reads Space by key or by code, and ⇧Space as the previous page', () => {
+    expect(resolvePageKey(press(' '))).toBe('next')
+    expect(resolvePageKey(press('Spacebar', { code: 'Space' }))).toBe('next')
+    expect(resolvePageKey(press(' ', { shiftKey: true }))).toBe('prev')
+  })
+
+  /* ⇧arrow is a SELECTION in every text surface there is, and ⇧PageDown is
+     nothing this app binds — both left to the platform, not swallowed. */
+  it('leaves a shifted arrow to the selection and an unbound key to the platform', () => {
+    expect(resolvePageKey(press('ArrowRight', { shiftKey: true }))).toBeNull()
+    expect(resolvePageKey(press('ArrowLeft', { shiftKey: true }))).toBeNull()
+    expect(resolvePageKey(press('PageDown', { shiftKey: true }))).toBeNull()
+    expect(resolvePageKey(press('ArrowUp'))).toBeNull()
+    expect(resolvePageKey(press('Home'))).toBeNull()
+    expect(resolvePageKey(press('a'))).toBeNull()
+  })
+
+  /**
+   * THE SIDE IS RESOLVED BY THE BOOK, and this pins where. `goRight` is `prev`
+   * in an RTL book because the fork reads `book.dir` — the same fact the
+   * chevrons and the wheel already rely on. Read from the shipped source, the
+   * way `pageTurn.test.ts` pins the paginator: a rebase that dropped it would
+   * put the arrows back to disagreeing with the chevrons, silently, and only
+   * in books written right to left.
+   */
+  it('and the fork resolves that side from the book’s direction', () => {
+    const view = readFileSync(
+      fileURLToPath(new URL('../../../node_modules/foliate-js/view.js', import.meta.url)),
+      'utf8',
+    )
+    expect(view).toMatch(/goRight\(\)\s*\{\s*return this\.book\.dir === 'rtl' \? this\.prev\(\) : this\.next\(\)/)
+    expect(view).toMatch(/goLeft\(\)\s*\{\s*return this\.book\.dir === 'rtl' \? this\.next\(\) : this\.prev\(\)/)
   })
 })

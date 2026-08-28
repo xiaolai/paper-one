@@ -4,7 +4,7 @@ import { coverIn } from '../core/coverArt'
 import { tauriVaultFs } from '../core/vaultFsTauri'
 import { offeredFaces } from '../core/typefaces'
 import { presentFaces } from './fontProbe'
-import { canKeepPlace, resolveAccel } from './accel'
+import { canKeepPlace, resolveAccel, resolvePageKey } from './accel'
 import { DEFAULT_STEP_IDX, applyMetrics } from '../core/metrics'
 import { importFs as tauriImportFs, pickBooks, pickFolder, readBookAt } from '../core/bookFiles'
 import { positionRecorder, type PositionRecorder } from '../core/positionRecorder'
@@ -1427,31 +1427,26 @@ export function App({ services, fs, shelfUnread = false, composition, beforeWind
        * a toolbar control reached by Tab — turned the page instead of pressing
        * the button, and an arrow key a custom control had already consumed
        * (`defaultPrevented`) turned it again. Both are the platform's meaning
-       * of those keys being taken from under the reader's focus. */
+       * of those keys being taken from under the reader's focus.
+       *
+       * THE HOST'S CONTROLS ONLY. A key pressed inside the book arrives here
+       * re-dispatched with the WINDOW as its target, so this can never see a
+       * `<select>` in an interactive EPUB; `ReaderSession.#watchKeys` decides
+       * that half where the real target is visible, and does not forward. */
       const onControl =
         target instanceof HTMLElement &&
         target.closest('button, a[href], select, [role="menu"], [role="listbox"], [role="dialog"]') !== null
       if (!accel && !typing && !onControl && !event.defaultPrevented && reading) {
-        /* Shift+arrow is a SELECTION, not a page turn — the platform meaning of
-         * the combo in every text surface there is. Without this guard the page
-         * turned instead, which also made the paginator's keyboard-selection
-         * branch unreachable: it extends the selection on the same keydown this
-         * handler was consuming first. Space handles its own shift below, where
-         * ⇧Space is the published binding for the previous page. */
-        const selecting = event.shiftKey
-
-        if (!selecting && (event.key === 'ArrowRight' || event.key === 'PageDown')) {
-          event.preventDefault()
-          book.next()
-          return
-        }
-        if (!selecting && (event.key === 'ArrowLeft' || event.key === 'PageUp')) {
-          event.preventDefault()
-          book.prev()
-          return
-        }
-
-        /* §11: Space moves on by one screen, ⇧Space back by one.
+        /* THE MAP IS A PURE FUNCTION — `resolvePageKey`, beside `resolveAccel`
+         * and for the same reason. What it returns is the navigator's VERB:
+         * the arrows ask for a side (`goLeft`/`goRight`, which the book
+         * resolves from its own direction, exactly as the chevrons do), the
+         * paging keys and Space ask for an order (`next`/`prev`). The arrows
+         * were `next`/`prev` here, and in a right-to-left book the → key and
+         * the → chevron beside it moved opposite ways. Shift+arrow is left to
+         * the selection there too; ⇧Space is the one shifted key it owns.
+         *
+         * §11: Space moves on by one screen, ⇧Space back by one.
          *
          * In BOTH flows, which this used to refuse. It returned early unless
          * the book was paginated, on the stated grounds that "with the ruler
@@ -1474,10 +1469,10 @@ export function App({ services, fs, shelfUnread = false, composition, beforeWind
          * listener, which React registers before this one because a child's
          * effects run before its parent's. That is what `defaultPrevented`
          * below is reading, and it is the whole reason this can be flow-blind. */
-        if ((event.key === ' ' || event.code === 'Space') && !event.defaultPrevented) {
+        const verb = resolvePageKey(event)
+        if (verb) {
           event.preventDefault()
-          if (event.shiftKey) book.prev()
-          else book.next()
+          book[verb]()
           return
         }
       }
