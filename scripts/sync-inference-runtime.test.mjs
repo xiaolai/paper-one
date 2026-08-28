@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { readFileSync } from 'node:fs'
-import path from 'node:path'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path, { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { ARTIFACTS, VENDOR, VERSION, artifactKey, sha256 } from './sync-inference-runtime.mjs'
+import { artifactKey, ARTIFACTS, bsdtar, sha256, VENDOR, VERSION } from './sync-inference-runtime.mjs'
 
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url))
 
@@ -94,5 +95,51 @@ describe('the bundle wiring', () => {
     expect(pkg.scripts.prebuild).toContain('sync-inference-runtime')
     expect(pkg.scripts.predev).toContain('sync-inference-runtime')
     expect(pkg.scripts['build:desktop']).toContain('sync-inference-runtime')
+  })
+})
+
+/**
+ * WHICH `tar` — the one question the Windows build step got wrong.
+ *
+ * `unpack` reaches for bsdtar on Windows because it reads zip archives. Plain
+ * `tar` does not necessarily name it: Git for Windows ships a GNU tar in its
+ * `usr\\bin`, and on `windows-latest` that wins the PATH race. GNU tar cannot
+ * read a zip, and it fails without naming either problem — it reads
+ * `host:path` as a REMOTE archive, so an ordinary `D:\\a\\paper-one\\…`
+ * argument came back as `tar: Cannot connect to D: resolve failed`, exit 128,
+ * out of a build step with nothing to do with the network.
+ *
+ * The resolution is platform-independent code, so it is testable from here.
+ */
+describe('the tar that reads a zip', () => {
+  it('is named by absolute path under SystemRoot, never left to PATH', () => {
+    const root = mkdtempSync(join(tmpdir(), 'paper-systemroot-'))
+    mkdirSync(join(root, 'System32'), { recursive: true })
+    writeFileSync(join(root, 'System32', 'tar.exe'), '')
+    const was = process.env['SystemRoot']
+    process.env['SystemRoot'] = root
+    try {
+      expect(bsdtar()).toBe(join(root, 'System32', 'tar.exe'))
+    } finally {
+      if (was === undefined) delete process.env['SystemRoot']
+      else process.env['SystemRoot'] = was
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses by name when it is not there, rather than falling back to whatever PATH holds', () => {
+    /* A silent fallback is how this failed in the first place: something
+       called `tar` ran, did the wrong thing, and blamed the network. */
+    const root = mkdtempSync(join(tmpdir(), 'paper-systemroot-'))
+    const was = process.env['SystemRoot']
+    process.env['SystemRoot'] = root
+    try {
+      expect(() => bsdtar()).toThrow(/System32/)
+      expect(() => bsdtar()).toThrow(/GNU tar/)
+    } finally {
+      if (was === undefined) delete process.env['SystemRoot']
+      else process.env['SystemRoot'] = was
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })

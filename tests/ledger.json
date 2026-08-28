@@ -648,6 +648,8 @@
     "scripts/sync-inference-runtime.test.mjs > the pinned artifacts > gives each platform its own distinct archive and digest",
     "scripts/sync-inference-runtime.test.mjs > the pinned artifacts > names a real digest for every entry",
     "scripts/sync-inference-runtime.test.mjs > the pinned artifacts > names the executable the plugin actually looks for",
+    "scripts/sync-inference-runtime.test.mjs > the tar that reads a zip > is named by absolute path under SystemRoot, never left to PATH",
+    "scripts/sync-inference-runtime.test.mjs > the tar that reads a zip > refuses by name when it is not there, rather than falling back to whatever PATH holds",
     "scripts/sync-scenario.test.mjs > arguments > accepts an ordinary timeout, so the guard is not refusing everything",
     "scripts/sync-scenario.test.mjs > arguments > accepts an ordinary user@host, so the guard is not refusing everything",
     "scripts/sync-scenario.test.mjs > arguments > exits 0 for --help and prints what it does",
