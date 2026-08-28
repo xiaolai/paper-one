@@ -12,7 +12,9 @@ import {
   OWN_DEVICE_GRANTS,
   createDevicesModel,
   describeGrants,
+  describeReach,
   describeRole,
+  shelfNameOf,
   inlineQrSvg,
   pairingFault,
   grantsForWrite,
@@ -492,6 +494,44 @@ describe('an invite that has run out', () => {
       expect(seen).toEqual([])
     } finally {
       vi.useRealTimers()
+    }
+  })
+})
+
+/**
+ * WI-20.25 — the pane said "on your Mac" to every device: to the phone whose
+ * library lives on a Linux desktop, and to the desktop itself. The sentence
+ * now follows the role, and names the shelf by its pairing name.
+ */
+describe('where Paper has to be running', () => {
+  const peer = (role: 'shelf' | 'satchel', name: string) => ({
+    id: `${role}-x`,
+    name,
+    platform: 'macos',
+    role,
+    grants: [] as string[],
+    pairedAt: 1,
+    lastSeenAt: 1,
+    lastAddrs: [] as string[],
+  })
+
+  it('names the shelf by its pairing name for a satchel', () => {
+    const line = describeReach('satchel', shelfNameOf([peer('shelf', 'Study iMac')]))
+    expect(line).toContain('Study iMac')
+    expect(line).not.toMatch(/\bMac\b/)
+  })
+
+  it('says "the device that holds your library" for a satchel that is not paired yet', () => {
+    expect(shelfNameOf([])).toBeNull()
+    expect(shelfNameOf([peer('satchel', 'Phone')])).toBeNull()
+    expect(describeReach('satchel', null)).toContain('the device that holds your library')
+  })
+
+  it('tells a shelf it is itself, and never guesses the hardware', () => {
+    for (const role of ['shelf', null] as const) {
+      const line = describeReach(role, null)
+      expect(line).toContain('this device')
+      expect(line).not.toMatch(/\bMac\b/)
     }
   })
 })

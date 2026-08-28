@@ -27,7 +27,7 @@ import { bindRole, bindScheduler, currentRole, syncNow, syncStatus, unbindRole, 
 import { createDownloads, describeDownload } from './lib/downloads'
 import { describeArrival, dropArrival, readArrivals, recordArrival, type Arrival } from './lib/arrivals'
 import { createSyncScheduler, type SyncScheduler } from './lib/scheduler'
-import { DEGRADED_DETAIL } from './lib/status'
+import { describeRefusal, describeSession, refusalKind, type RefusalNames } from './lib/status'
 import { createStorageModel, dropDownloadSize, recordDownloadSize, type StorageModel } from './ui/storageModel'
 import { StoragePane } from './ui/StoragePane'
 
@@ -83,6 +83,10 @@ let running: {
   readonly port: PeerPort
   readonly ledger: Ledger
   readonly shelfPeer: () => Promise<string | null>
+  /** The shelf's pairing name — what the status line calls it (WI-20.25). */
+  readonly shelfName: () => Promise<string | null>
+  /** A book's title, for a refusal that is about one book. */
+  readonly titleOf: (book: string) => string | null
   readonly coverCache: CoverCache | null
   /** The composition's (scoped) filesystem — carried here so an action that
    *  outlives a teardown cannot write through a NEWER runtime's handle. */
@@ -187,6 +191,33 @@ async function withShelf<T>(task: (channel: SyncChannel) => Promise<T>): Promise
   } finally {
     await channel.close().catch(() => {})
   }
+}
+
+/**
+ * The names a refusal sentence needs, from the runtime that is up: the
+ * shelf's pairing name (IPC, so best-effort — a status line that could not
+ * ask is worded without the name rather than not set), and a book's title.
+ */
+async function refusalNames(): Promise<RefusalNames> {
+  const held = running
+  return {
+    shelf: held ? await held.shelfName().catch(() => null) : null,
+    title: (book) => held?.titleOf(book) ?? null,
+  }
+}
+
+/**
+ * A failure, worded for the reader and set as the status (WI-20.25). Every
+ * failure — a download refused, a session that did not finish — used to
+ * become "Paper on your Mac isn't reachable", which was the wrong sentence
+ * for a revoked device, a version skew and a full disk alike, and named
+ * hardware the reader may not own. The kind decides the sentence; the
+ * shelf's own name and the book's title go where they belong.
+ */
+async function degrade(thrown: unknown, book?: string): Promise<void> {
+  const message = thrown instanceof Error ? thrown.message : String((thrown as { message?: unknown })?.message ?? thrown)
+  const refusal = { kind: refusalKind(thrown), message, ...(book === undefined ? {} : { book }) }
+  syncStatus.set({ state: 'degraded', detail: describeRefusal(refusal, await refusalNames()) })
 }
 
 /* IN FLIGHT, BY BOOK. The corner mark on the card and the Download item in
@@ -491,10 +522,7 @@ export const sync: Capability = {
        * a book with no bytes (`canOpen`); tap-to-open-fetches is C.6 polish
        * — this action is the honest seam today. */
       when: (book) => runningRole() === 'satchel' && book.hasContent !== true,
-      run: (bookId) =>
-        downloadAction(bookId).catch(() => {
-          syncStatus.set({ state: 'degraded', detail: DEGRADED_DETAIL })
-        }),
+      run: (bookId) => downloadAction(bookId).catch((thrown: unknown) => degrade(thrown, bookId)),
     },
     {
       /* EVICT, not "Remove download" (phase 11).
@@ -518,11 +546,11 @@ export const sync: Capability = {
       icon: 'circle-minus',
       when: (book) => runningRole() === 'satchel' && book.hasContent === true,
       run: (bookId) =>
-        removeDownloadAction(bookId).catch(() => {
+        removeDownloadAction(bookId).catch((thrown: unknown) =>
           /* Content that stayed put must not look removed — same signal as a
            * failed download. */
-          syncStatus.set({ state: 'degraded', detail: DEGRADED_DETAIL })
-        }),
+          degrade(thrown, bookId),
+        ),
     },
   ],
 
@@ -793,6 +821,10 @@ export const sync: Capability = {
       handlers = myHandlers
       const shelfPeer = async (): Promise<string | null> =>
         (await port.listPeers()).find((peer) => peer.role === 'shelf')?.id ?? null
+      const shelfName = async (): Promise<string | null> =>
+        (await port.listPeers()).find((peer) => peer.role === 'shelf')?.name ?? null
+      const titleOf = (book: string): string | null =>
+        services.library.getSnapshot().find((one) => one.bookId === book)?.title ?? null
 
       const coverCache = createCoverCache({
         fs,
@@ -823,7 +855,7 @@ export const sync: Capability = {
          * (WI-10.2/10.5); the scoped fs cannot reach a book's folder. */
         removeBlob: (book, name) => services.removeBlob(book, name),
       })
-      myRunning = { port, ledger, shelfPeer, coverCache, fs }
+      myRunning = { port, ledger, shelfPeer, shelfName, titleOf, coverCache, fs }
       running = myRunning
       myStorageModel = createStorageModel({
         services,
@@ -905,17 +937,29 @@ export const sync: Capability = {
           syncStatus.set({ state: 'syncing', detail: null })
           try {
             const summary = await withShelf((channel) => ledger.runSession(channel))
+            /* A session that FINISHED with something refused is `ok` — the
+               rest of the library moved — with the refusal in the detail, so
+               the reader is told which book rather than shown a green line
+               over a book that never arrives (WI-20.25). Each refusal is a
+               diagnostic too, with the raw message the sentence leaves out. */
+            for (const refusal of summary.refused) {
+              api.diagnostics.warn('sync.push-refused', { book: refusal.book ?? '', kind: refusal.kind, message: refusal.message })
+            }
+            if (summary.quarantine.held > 0 || summary.quarantine.repaired > 0) {
+              api.diagnostics.warn('sync.marks-quarantined', { ...summary.quarantine })
+            }
             syncStatus.set({
               state: 'ok',
-              detail: null,
+              detail: describeSession(summary, await refusalNames()),
               lastSyncAt: Date.now(),
               lastSummary: { pushed: summary.pushed, pulledRows: summary.pulledRows },
             })
           } catch (thrown) {
             api.diagnostics.warn('sync.session-failed', {
+              kind: refusalKind(thrown),
               message: thrown instanceof Error ? thrown.message : String(thrown),
             })
-            syncStatus.set({ state: 'degraded', detail: DEGRADED_DETAIL })
+            await degrade(thrown)
           }
         }
         scheduler = createSyncScheduler({

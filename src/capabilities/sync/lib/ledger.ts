@@ -1,5 +1,7 @@
 import {
   BOOKS_DIR,
+  ENVELOPE_ERRORS,
+  ServiceCallError,
   defineSetting,
   folderOf,
   mergeCards,
@@ -20,6 +22,8 @@ import {
 import { isHlc, type Clock, type Hlc } from './clock'
 import type { Journal, JournalKeyRef } from './journal'
 import { canonicalJson, cardsDigest, marksDigest, mergeRecord, toWire } from './merge'
+import { SYNC_QUARANTINE_SETTING, quarantineFor, release, setAside, type Quarantine } from './quarantine'
+import { refusalKind, type QuarantineReport, type SessionRefusal } from './status'
 import {
   PUSHABLE,
   SYNC_JOURNAL_FORMAT,
@@ -132,6 +136,27 @@ export interface SyncSummary {
   readonly pulledRemovals: number
   readonly pulledMarks: number
   readonly pulledCards: boolean
+  /**
+   * Groups the shelf refused ABOUT THE GROUP — a conflict, a malformed
+   * group — and the session went on past (WI-20.25). Their revs stay in the
+   * outbox and are offered again next session; the reader is told which
+   * book, by the status line. Empty when everything was acked.
+   */
+  readonly refused: readonly SessionRefusal[]
+  /** The pull side's quarantine after this session — see `quarantine.ts`. */
+  readonly quarantine: QuarantineReport
+}
+
+/**
+ * What one session accumulates as it goes: the push side's refusals, and the
+ * pull side's quarantine as it stood when the session began, moved by what
+ * the session found. One object, threaded through the steps, so a step never
+ * has to reach for a module-level slot.
+ */
+interface SessionOutcome {
+  readonly refused: SessionRefusal[]
+  quarantine: Quarantine
+  repaired: number
 }
 
 export interface Ledger {
@@ -176,6 +201,47 @@ export const KEEP_NOTES_SETTING: Setting<boolean> = defineSetting('sync.keepNote
 )
 
 const DEFAULT_PAGE_LIMIT = 200
+
+/**
+ * A refusal that is about the SESSION rather than about the group it
+ * answered: continuing to the next group would fail the same way and tell
+ * the reader nothing new. Everything else the shelf refuses is about the one
+ * group — a conflict on this book's bytes, a group it could not parse — and
+ * the next book is not implicated, because every rev is CAS-acked on its
+ * own (WI-20.25).
+ */
+const SESSION_LEVEL_CODES: ReadonlySet<string> = new Set([
+  ENVELOPE_ERRORS.disconnected,
+  ENVELOPE_ERRORS.timeout,
+  ENVELOPE_ERRORS.overloaded,
+  ENVELOPE_ERRORS.cancelled,
+  ENVELOPE_ERRORS.forbidden,
+  ENVELOPE_ERRORS.unsupported,
+  ENVELOPE_ERRORS.unknownService,
+  ENVELOPE_ERRORS.duplicateId,
+  ENVELOPE_ERRORS.protocol,
+  /* The handler threw something it did not classify — "the service failed"
+   * — and whether the fault is this group's or the shelf's is unknown. The
+   * session ends, as it always did, and the reader sees a failure. */
+  ENVELOPE_ERRORS.internal,
+  'not-ready',
+])
+
+/** The shelf's answer about THIS group, crossed the wire; null for anything
+ *  that ends the session — a transport failure, a session-level refusal, a
+ *  local throw. */
+const aboutTheGroup = (thrown: unknown): ServiceCallError | null =>
+  thrown instanceof ServiceCallError && !SESSION_LEVEL_CODES.has(thrown.error.code) ? thrown : null
+
+/** A refusal of this group that will not change by asking again. A RETRYABLE
+ *  one — bytes the shelf cannot verify yet, a file mid-repair — still ends
+ *  the session, so the reader sees a failure rather than a finished sync
+ *  with a book quietly left behind; `a phone import is acked only after the
+ *  bytes land` holds that. */
+const groupRefusal = (thrown: unknown): ServiceCallError | null => {
+  const refused = aboutTheGroup(thrown)
+  return refused !== null && !refused.error.retryable ? refused : null
+}
 
 /** A `ServiceError`-shaped refusal — structurally what the envelope router
  *  forwards as a typed `err` frame. */
@@ -877,11 +943,28 @@ export function createLedger({
     }
   }
 
-  const pushAll = async (channel: SyncChannel): Promise<number> => {
+  const pushAll = async (channel: SyncChannel, outcome: SessionOutcome): Promise<number> => {
     let pushed = 0
     for (const [book, revs] of outboxGroups()) {
       const group = await buildGroup(book, revs)
-      const answer = await channel.call(SYNC_SERVICES.push.name, group)
+      let answer: unknown
+      try {
+        answer = await channel.call(SYNC_SERVICES.push.name, group)
+      } catch (thrown) {
+        /* ONE REFUSED GROUP DOES NOT END THE SESSION (WI-20.25). It used to:
+         * a `conflict` on one book was offered first every session, refused
+         * every session, and every later push and the whole pull sat behind
+         * it. The revs stay in the outbox — nothing was acked — and the
+         * next group is offered, because each rev is acked on its own and
+         * the shelf's answer about this book says nothing about the next.
+         * The refusal is recorded so the reader is told WHICH book. A
+         * refusal about the session, or anything that did not come from the
+         * shelf's handler, still ends it. */
+        const refused = groupRefusal(thrown)
+        if (refused === null) throw thrown
+        outcome.refused.push({ kind: refusalKind(refused), book, message: refused.error.message })
+        continue
+      }
       const ack = parsePushAck(answer)
       if (ack === null) throw new Error('sync.push answered something that is not an ack')
       await applyAck(group, ack)
@@ -895,7 +978,50 @@ export function createLedger({
     return held && held.peerId === peerId ? held : null
   }
 
-  const applyPage = async (channel: SyncChannel, page: PullPage): Promise<{ rows: number; removals: number; marksPulled: number; cardsApplied: boolean }> => {
+  /**
+   * One book's marks off the shelf — CORRELATED, and strictly valid. An
+   * answer for a different book, a non-list, or a list validation would thin
+   * is `invalid`, never a partial merge: a dropped row would otherwise be
+   * skipped forever, because the digest comparison that schedules this fetch
+   * never re-fires for an already-advanced page. Invalid answers go to the
+   * quarantine (below), which is what re-asks.
+   */
+  const fetchMarks = async (
+    channel: SyncChannel,
+    book: string,
+  ): Promise<{ readonly rows: readonly Mark[] } | { readonly invalid: string }> => {
+    const answer = await channel.call(SYNC_SERVICES.marks.name, { book })
+    const parsed = answer && typeof answer === 'object' ? (answer as { book?: unknown; marks?: unknown }) : null
+    if (parsed?.book !== book) return { invalid: `sync.marks answered book ${JSON.stringify(parsed?.book)} for ${book}` }
+    const answered = parsed.marks
+    if (!Array.isArray(answered)) return { invalid: 'sync.marks answered something that is not a marks list' }
+    const rows = validMarks(answered)
+    if (rows.length !== answered.length) {
+      return { invalid: `sync.marks answered ${answered.length} rows of which only ${rows.length} are valid marks` }
+    }
+    return { rows }
+  }
+
+  const mergeFetched = async (book: string, rows: readonly Mark[]): Promise<void> => {
+    if (rows.length === 0) return
+    witnessStamps(rows)
+    await applyRemote([{ keys: [{ book, what: 'marks' }], run: () => marks.mergeRemote(book, rows) }])
+  }
+
+  /* The quarantine is PERSISTED as it changes, before the page's cursor
+   * moves: a kill between the two re-pulls the page (free, every apply is a
+   * merge) rather than leaving a book neither fetched nor held. */
+  const hold = (outcome: SessionOutcome, next: Quarantine): void => {
+    if (next === outcome.quarantine) return
+    outcome.quarantine = next
+    settings.set(SYNC_QUARANTINE_SETTING, next)
+  }
+
+  const applyPage = async (
+    channel: SyncChannel,
+    page: PullPage,
+    outcome: SessionOutcome,
+  ): Promise<{ rows: number; removals: number; marksPulled: number; cardsApplied: boolean }> => {
     witnessStamps(page)
     const known = new Set(library.getSnapshot().map((one) => one.bookId))
     const adds: PullRow[] = []
@@ -943,28 +1069,53 @@ export function createLedger({
       if (!keepNotes && rowOf(row.book)?.hasContent !== true) continue
       const current = await marksDigest(await ownMarks(row.book))
       if (current === row.marksDigest) continue
-      const answer = await channel.call(SYNC_SERVICES.marks.name, { book: row.book })
-      const parsed = answer && typeof answer === 'object' ? (answer as { book?: unknown; marks?: unknown }) : null
-      /* CORRELATED, and strictly valid. An answer for a different book —
-       * or one whose rows validation would thin — must not be merged with
-       * the cursor then advancing past it: a dropped row would be skipped
-       * forever, because the digest comparison above is what schedules
-       * this fetch and it never re-fires for an already-advanced page. */
-      if (parsed?.book !== row.book) {
-        throw new Error(`sync.marks answered book ${JSON.stringify(parsed?.book)} for ${row.book}`)
+      const fetched = await fetchMarks(channel, row.book)
+      if ('invalid' in fetched) {
+        /* SET ASIDE, NOT THROWN (WI-20.25). Throwing failed this page every
+         * session, forever, for one bad row — and every row behind it. The
+         * page advances; the book is held and re-asked every session until
+         * it answers validly, which is the only way a repair the shelf makes
+         * WITHOUT a new seq can ever be seen. */
+        hold(outcome, setAside(outcome.quarantine, row.book))
+        continue
       }
-      const answered = parsed.marks
-      if (!Array.isArray(answered)) throw new Error('sync.marks answered something that is not a marks list')
-      const rows = validMarks(answered)
-      if (rows.length !== answered.length) {
-        throw new Error(`sync.marks answered ${answered.length} rows of which only ${rows.length} are valid marks`)
-      }
-      if (rows.length === 0) continue
-      witnessStamps(rows)
-      await applyRemote([{ keys: [{ book: row.book, what: 'marks' }], run: () => marks.mergeRemote(row.book, rows) }])
+      /* A valid answer for a book that was held releases it: the shelf's
+       * repair, seen on the digest path first. */
+      hold(outcome, release(outcome.quarantine, row.book))
+      if (fetched.rows.length === 0) continue
+      await mergeFetched(row.book, fetched.rows)
       marksPulled += 1
     }
     return { rows: page.rows.length, removals: page.removals.length, marksPulled, cardsApplied }
+  }
+
+  /**
+   * Re-ask for every held book, REGARDLESS OF DIGEST — the whole reason the
+   * quarantine exists. Bounded by the list's cap, so a shelf that answers
+   * badly for ten thousand books costs sixty-four calls a session, not ten
+   * thousand. A book the shelf no longer has is released: there is nothing
+   * left to repair. A refusal about the session ends it, as anywhere.
+   */
+  const refetchQuarantine = async (channel: SyncChannel, outcome: SessionOutcome): Promise<number> => {
+    let repaired = 0
+    for (const book of [...outcome.quarantine.books]) {
+      let fetched: Awaited<ReturnType<typeof fetchMarks>>
+      try {
+        fetched = await fetchMarks(channel, book)
+      } catch (thrown) {
+        /* Refused about this book — retryable or not, it stays held and is
+         * asked again next session; that is what the list is for. */
+        const refused = aboutTheGroup(thrown)
+        if (refused === null) throw thrown
+        if (refused.error.code === 'not-found') hold(outcome, release(outcome.quarantine, book))
+        continue
+      }
+      if ('invalid' in fetched) continue
+      await mergeFetched(book, fetched.rows)
+      hold(outcome, release(outcome.quarantine, book))
+      repaired += 1
+    }
+    return repaired
   }
 
   const pullAll = async (
@@ -972,6 +1123,7 @@ export function createLedger({
     from: number,
     until: number,
     epoch: string,
+    outcome: SessionOutcome,
   ): Promise<{ rows: number; removals: number; marksPulled: number; cardsApplied: boolean }> => {
     let since = from
     const totals = { rows: 0, removals: 0, marksPulled: 0, cardsApplied: false }
@@ -1006,7 +1158,7 @@ export function createLedger({
           prev = one.seq
         }
       }
-      const applied = await applyPage(channel, page)
+      const applied = await applyPage(channel, page, outcome)
       totals.rows += applied.rows
       totals.removals += applied.removals
       totals.marksPulled += applied.marksPulled
@@ -1032,11 +1184,14 @@ export function createLedger({
     })
     const welcome = parseSyncWelcome(welcomeRaw)
     if (welcome === null) throw new Error('sync.hello answered something that is not a welcome')
+    /* TYPED, like the shelf's own refusal of a skewed hello — the status
+     * line reads the code, and a version skew must not be worded as "not
+     * reachable" (WI-20.25). */
     if (welcome.journalFormat !== SYNC_JOURNAL_FORMAT) {
-      throw new Error(`the shelf journals format ${welcome.journalFormat}; this build speaks ${SYNC_JOURNAL_FORMAT}`)
+      throw refuse('unsupported', `the shelf journals format ${welcome.journalFormat}; this build speaks ${SYNC_JOURNAL_FORMAT}`)
     }
     if (!versionsOverlap(welcome.services.sync as [number, number], SYNC_VERSION as [number, number])) {
-      throw new Error(`the shelf speaks sync [${welcome.services.sync.join(', ')}]; this build [${SYNC_VERSION.join(', ')}]`)
+      throw refuse('unsupported', `the shelf speaks sync [${welcome.services.sync.join(', ')}]; this build [${SYNC_VERSION.join(', ')}]`)
     }
     clock.witness(welcome.clock)
 
@@ -1046,14 +1201,24 @@ export function createLedger({
     const cursor = readCursor(channel.peerId)
     const since = cursor !== null && cursor.epoch === welcome.epoch ? cursor.since : 0
 
-    const pushed = await pushAll(channel)
-    const pulled = await pullAll(channel, since, welcome.hubSeq, welcome.epoch)
+    const outcome: SessionOutcome = {
+      refused: [],
+      quarantine: quarantineFor(settings.get(SYNC_QUARANTINE_SETTING), channel.peerId),
+      repaired: 0,
+    }
+    const pushed = await pushAll(channel, outcome)
+    /* The held books first, then the pull: what THIS session sets aside is
+     * not re-asked in the same breath. */
+    outcome.repaired = await refetchQuarantine(channel, outcome)
+    const pulled = await pullAll(channel, since, welcome.hubSeq, welcome.epoch, outcome)
     return {
       pushed,
       pulledRows: pulled.rows,
       pulledRemovals: pulled.removals,
       pulledMarks: pulled.marksPulled,
       pulledCards: pulled.cardsApplied,
+      refused: outcome.refused,
+      quarantine: { held: outcome.quarantine.books.length, dropped: outcome.quarantine.dropped, repaired: outcome.repaired },
     }
   }
 

@@ -82,8 +82,8 @@ describe('formatBytes', () => {
 
 describe('the status line', () => {
   it('shows a degraded detail over everything else', () => {
-    render(<StoragePane model={fakeModel({ status: { state: 'degraded', detail: 'Paper on your Mac is unreachable', lastSyncAt: 1, lastSummary: null } })} />)
-    expect(screen.getByRole('status').textContent).toBe('Paper on your Mac is unreachable')
+    render(<StoragePane model={fakeModel({ status: { state: 'degraded', detail: 'Paper on Study iMac is unreachable', lastSyncAt: 1, lastSummary: null } })} />)
+    expect(screen.getByRole('status').textContent).toBe('Paper on Study iMac is unreachable')
   })
 
   it('falls back to a standard sentence when degraded with no detail', () => {

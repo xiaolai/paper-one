@@ -17,7 +17,9 @@ import { createPeerPort, fakeWire, linkWires, type FakeWire, type PeerPort } fro
 import { createClock, makeHlc, type Clock } from './clock'
 import { JOURNAL_KEY, createJournal, type Journal } from './journal'
 import { crashableFs, fsOver, type CrashableFs } from './journalFs.testkit'
-import { SYNC_CURSOR_SETTING, createLedger, type Ledger, type SyncChannel } from './ledger'
+import { SYNC_CURSOR_SETTING, createLedger, type Ledger, type SyncChannel, type SyncSummary } from './ledger'
+import { SYNC_QUARANTINE_SETTING } from './quarantine'
+import { describeSession } from './status'
 import { SYNC_VERSION } from './protocol'
 import { canonicalJson, toWire } from './merge'
 import { PUSHABLE } from './protocol'
@@ -857,5 +859,135 @@ describe('carried findings — removals, content facts, and covers', () => {
     await satchel.ledger.runSession(channel)
     await channel.close()
     expect(shelf.fs.store.get('books/book_c/cover.jpg')).toEqual(coverBytes)
+  })
+})
+
+/**
+ * WI-20.25 — one refusal does not wedge a satchel. `pushAll` aborted the
+ * session on the first throw, so a `conflict` on one book was re-pushed first
+ * every session and blocked every later push and the whole pull; and one
+ * invalid marks answer failed the pull page forever, because the digest
+ * comparison that schedules the fetch never re-fires for an advanced page.
+ * The push side continues per book (every rev is CAS-acked independently);
+ * the pull side sets the book aside and re-fetches it every session
+ * regardless of digest, bounded.
+ */
+describe('one refusal does not wedge a satchel (WI-20.25)', () => {
+  const enc = (text: string) => new TextEncoder().encode(text)
+
+  it('a conflict on one book does not stop the next book or the pull, and the summary names it', async () => {
+    const { shelf, satchel, session } = await makeWorld()
+    // The shelf holds Z with bytes and no stored hash — #16's shape.
+    await shelf.services.library.add('book:z', { ...rec('Zeta'), ext: 'epub', format: 'epub' })
+    await shelf.fs.writeFile('books/book_z/content.epub', enc('the shelf bytes'))
+    await shelf.services.library.refreshContent('book:z')
+    // A shelf-only row the pull must still bring.
+    await shelf.services.library.add('book:s', rec('Shelf-only'))
+    // The satchel: Z with DIFFERENT bytes (a conflict when pushed), then B, a plain record.
+    await satchel.services.library.add('book:z', { ...rec('Zeta'), ext: 'epub', format: 'epub' })
+    await satchel.fs.writeFile('books/book_z/content.epub', enc('the satchel bytes'))
+    await satchel.services.library.refreshContent('book:z')
+    await satchel.services.library.add('book:b', rec('Bravo'))
+
+    const summary = await session()
+    expect(summary.refused).toEqual([expect.objectContaining({ book: 'book:z', kind: 'conflict' })])
+    // B went through and was acked; Z is still what there is to push.
+    expect(summary.pushed).toBe(1)
+    expect(pushableOutbox(satchel.journal).map((e) => `${e.what} ${e.book}`)).toEqual(['record book:z'])
+    expect(shelf.services.library.getSnapshot().map((b) => b.bookId).sort()).toEqual(['book:b', 'book:s', 'book:z'])
+    // The pull ran after the refusal: the shelf-only row arrived and the cursor moved.
+    expect(satchel.services.library.getSnapshot().map((b) => b.bookId).sort()).toEqual(['book:b', 'book:s', 'book:z'])
+    expect(satchel.services.settings.get(SYNC_CURSOR_SETTING)?.since).toBeGreaterThan(0)
+    // And the reader is told which book, by title.
+    const line = describeSession(summary, { shelf: 'Study iMac', title: (book) => (book === 'book:z' ? 'Zeta' : null) })
+    expect(line).toContain('“Zeta”')
+  })
+
+  /** A session over the real wire, with the shelf's marks answers tampered on the way back. */
+  const tamperedSession = (
+    world: Awaited<ReturnType<typeof makeWorld>>,
+    tamper: (book: string, answer: unknown) => unknown,
+    onMarksCall?: () => void,
+  ): Promise<SyncSummary> =>
+    (async () => {
+      const channel = await world.satchel.port.connect(world.shelf.wire.id)
+      const tampered: SyncChannel = {
+        peerId: channel.peerId,
+        call: async (service, body) => {
+          const answer = await channel.call(service, body)
+          if (service !== 'sync.marks') return answer
+          onMarksCall?.()
+          return tamper((body as { book: string }).book, answer)
+        },
+      }
+      try {
+        return await world.satchel.ledger.runSession(tampered)
+      } finally {
+        await channel.close()
+      }
+    })()
+
+  it('an invalid marks answer is set aside, the page still advances, and a later session brings the repaired rows', async () => {
+    const world = await makeWorld()
+    const { shelf, satchel } = world
+    await shelf.services.library.add('book:a', rec('Alpha'))
+    await shelf.services.marks.add(mark('m1', 'book:a', 'the whale'))
+    await shelf.services.library.add('book:b', rec('Bravo'))
+    await shelf.services.marks.add(mark('m2', 'book:b', 'ahab'))
+
+    // The shelf's answer for B carries a row that is not a mark.
+    let broken = true
+    const tamper = (book: string, answer: unknown) =>
+      broken && book === 'book:b' ? { book, marks: [{ id: 'm2', note: 'not a mark' }] } : answer
+
+    const first = await tamperedSession(world, tamper)
+    expect(first.quarantine).toEqual({ held: 1, dropped: 0, repaired: 0 })
+    // A's marks came; B's did not; the cursor is at the head all the same.
+    expect(validMarks(await readMarks(satchel.fs, 'book:a')).map((m) => m.id)).toEqual(['m1'])
+    expect(await readMarks(satchel.fs, 'book:b')).toEqual([])
+    expect(satchel.services.settings.get(SYNC_QUARANTINE_SETTING)).toEqual({ peerId: shelf.wire.id, books: ['book:b'], dropped: 0 })
+    const cursor = satchel.services.settings.get(SYNC_CURSOR_SETTING)?.since
+    expect(cursor).toBeGreaterThan(0)
+
+    // The shelf "repairs" the row — the same valid rows it always held — with
+    // NO new seq: the digest scheduler will never re-fire for that page.
+    broken = false
+    const before = shelf.journal.entries().length
+    const second = await tamperedSession(world, tamper)
+    expect(shelf.journal.entries().length).toBe(before)
+    expect(second.pulledRows).toBe(0)
+    expect(second.quarantine).toEqual({ held: 0, dropped: 0, repaired: 1 })
+    expect(validMarks(await readMarks(satchel.fs, 'book:b')).map((m) => m.id)).toEqual(['m2'])
+    expect(satchel.services.settings.get(SYNC_QUARANTINE_SETTING).books).toEqual([])
+    expect(satchel.services.settings.get(SYNC_CURSOR_SETTING)?.since).toBe(cursor)
+  })
+
+  it('the quarantine is bounded: seventy broken books leave sixty-four, and the next session asks for exactly those', async () => {
+    const world = await makeWorld()
+    const { shelf, satchel } = world
+    for (let i = 0; i < 70; i += 1) {
+      const book = `book:${String(i).padStart(2, '0')}`
+      await shelf.services.library.add(book, rec(`Title ${i}`))
+      await shelf.services.marks.add(mark(`m${i}`, book, 'note'))
+    }
+    const tamper = (book: string) => ({ book, marks: [{ id: 'nope' }] })
+
+    const first = await tamperedSession(world, tamper)
+    expect(first.quarantine).toEqual({ held: 64, dropped: 6, repaired: 0 })
+    expect(satchel.services.settings.get(SYNC_QUARANTINE_SETTING).books.length).toBe(64)
+    // Every row arrived and the cursor is at the head: the quarantine cost no page.
+    expect(satchel.services.library.getSnapshot().length).toBe(70)
+
+    // Still broken. The next session asks for exactly the held sixty-four —
+    // not seventy, and not the ten thousand a hostile shelf could offer.
+    let marksCalls = 0
+    const second = await tamperedSession(world, tamper, () => void (marksCalls += 1))
+    expect(marksCalls).toBe(64)
+    expect(second.pulledRows).toBe(0)
+    expect(second.quarantine).toEqual({ held: 64, dropped: 6, repaired: 0 })
+    // And the reader is told, with the overflow.
+    const line = describeSession(second, { shelf: 'Study iMac', title: () => null })
+    expect(line).toMatch(/64 books/)
+    expect(line).toMatch(/6 more/)
   })
 })

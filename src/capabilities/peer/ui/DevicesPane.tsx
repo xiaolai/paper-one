@@ -6,12 +6,14 @@ import {
   canJoinWithCode,
   canOfferInvite,
   describeGrants,
+  describeReach,
   describeRole,
   grantsAreEnforceable,
   inlineQrSvg,
   pairingFault,
   peerCanWrite,
   roleIsSettable,
+  shelfNameOf,
 } from './devicesModel'
 
 /**
@@ -102,8 +104,9 @@ export function DevicesPane({ model, syncNow }: DevicesPaneProps) {
         </>
       )}
 
-      {/* The desktop stays reachable only while Paper runs — stated, per the plan. */}
-      <div className={ui.hint}>Syncing needs Paper running on your Mac; the tray keeps it alive with the window closed.</div>
+      {/* The shelf stays reachable only while Paper runs — stated, per the plan,
+          for the role this device has and by the shelf's own name. */}
+      <div className={ui.hint}>{describeReach(snapshot.role, shelfNameOf(snapshot.peers))}</div>
 
       {/* ONE ACTION, AND ONLY WHILE THERE IS NOTHING TO CANCEL.
           Three unrelated buttons used to sit in this row — offer, cancel, and
@@ -188,7 +191,7 @@ export function DevicesPane({ model, syncNow }: DevicesPaneProps) {
             </button>
           </form>
           <div className={ui.hint}>
-            On the Mac that holds your library, choose “Pair a new device” and copy the invite.
+            On the device that holds your library, choose “Pair a new device” and copy the invite.
           </div>
         </>
       )}

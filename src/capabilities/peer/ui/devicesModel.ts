@@ -179,7 +179,9 @@ export function describeRole(role: PeerRole | null): string {
 export const ROLE_CHOICES: readonly { readonly role: PeerRole; readonly label: string; readonly detail: string }[] = [
   {
     role: 'shelf',
-    label: 'On this Mac',
+    /* "This device", not "this Mac": the pane runs on whatever the reader
+       paired, and the row above it already says "This device" (WI-20.25). */
+    label: 'On this device',
     detail: 'It keeps the whole library and other devices read from it.',
   },
   {
@@ -188,6 +190,31 @@ export const ROLE_CHOICES: readonly { readonly role: PeerRole; readonly label: s
     detail: 'This one reads from it and keeps the books you download.',
   },
 ]
+
+/**
+ * The shelf's pairing name, as this device's peer list records it — the name
+ * the other side gave when pairing, which the plugin defaults to its machine
+ * name. Null while unpaired, or on the shelf itself.
+ */
+export function shelfNameOf(peers: readonly WirePeer[]): string | null {
+  return peers.find((peer) => peer.role === 'shelf')?.name ?? null
+}
+
+/**
+ * Where Paper has to be running for a sync to happen, said for THIS device's
+ * role. The pane said "on your Mac" to everyone — to the phone whose library
+ * lives on a Linux desktop, and to the desktop itself, where "your Mac" meant
+ * "here". A satchel is told the shelf by its pairing name; a shelf is told
+ * it is itself (WI-20.25). The plugin does not expose this machine's own
+ * name to the webview, so the shelf's sentence says "this device", which is
+ * also what the row above it calls it.
+ */
+export function describeReach(role: PeerRole | null, shelfName: string | null): string {
+  if (role === 'satchel') {
+    return `Syncing needs Paper running on ${shelfName ?? 'the device that holds your library'}; its tray keeps it alive with the window closed.`
+  }
+  return 'Syncing needs Paper running on this device; the tray keeps it alive with the window closed.'
+}
 
 /**
  * May the reader still answer it?
