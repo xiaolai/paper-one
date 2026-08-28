@@ -278,6 +278,28 @@ function readOrThrow(root, rel) {
 /** Does git, from `root`, track anything under `rel`? False when `root` is
  *  not itself the top of a work tree (a copy under /tmp must never reach a
  *  parent repository's index). */
+/**
+ * Whether two resolved paths name the same place.
+ *
+ * A STRING COMPARISON IS NOT ENOUGH ON WINDOWS, and this was `===`. `git
+ * rev-parse --show-toplevel` answers in FORWARD slashes there, the caller
+ * holds a path in backslashes, and a temporary directory is reached as
+ * `C:\\Users\\RUNNER~1\\…` or `C:\\Users\\runneradmin\\…` depending on who
+ * resolved it — three ways for two identical paths to compare unequal. The
+ * comparison then said "this is not the same repository", `gitTracks` returned
+ * false, and the removal would have deleted a TRACKED directory without the
+ * `git rm --cached` it promises. Nothing on a Mac or a Linux box can see it:
+ * there, the two strings are already identical.
+ *
+ * `path.resolve` settles the separator; the case fold is Windows's own rule
+ * for its filesystem and is applied nowhere else, because on the other two a
+ * differing case IS a different file.
+ */
+function samePath(a, b) {
+  const norm = (one) => (process.platform === 'win32' ? path.resolve(one).toLowerCase() : path.resolve(one))
+  return norm(a) === norm(b)
+}
+
 export function gitTracks(root, rel) {
   const top = spawnSync('git', ['-C', root, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' })
   /* A git that could not RUN is not an answer — treating it as "untracked"
@@ -287,7 +309,7 @@ export function gitTracks(root, rel) {
   if (top.status !== 0) return false
   let same = false
   try {
-    same = realpathSync(top.stdout.trim()) === realpathSync(root)
+    same = samePath(realpathSync(top.stdout.trim()), realpathSync(root))
   } catch {
     return false
   }

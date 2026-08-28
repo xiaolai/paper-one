@@ -1,5 +1,5 @@
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { posix as posixPath, win32 as win32Path } from 'node:path'
 import {
   createKernelServices,
   loadShelf,
@@ -64,13 +64,21 @@ export function defaultDataDir(env: NodeJS.ProcessEnv = process.env, platform: s
    * DIRECTORY — a library opened wherever the shell happened to be. Same
    * rule the `APPDATA` and `XDG_DATA_HOME` branches already apply. */
   const home = env['HOME'] !== undefined && env['HOME'] !== '' ? env['HOME'] : homedir()
-  if (platform === 'darwin') return join(home, 'Library', 'Application Support', APP_IDENTIFIER)
+  /* THE SEPARATOR BELONGS TO THE PLATFORM ASKED ABOUT, not to the one running.
+   * `platform` is a parameter — the tests name all three, and a harness may —
+   * but every branch composed with `node:path`'s `join`, which is the HOST's.
+   * Asked for `darwin` from Windows this answered
+   * `\Users\x\Library\Application Support\one.paper.reader`: the macOS
+   * path, spelled in backslashes, which is not a path on either system. Only
+   * a Windows machine could see it, and none had run this. */
+  const joinFor = platform === 'win32' ? win32Path.join : posixPath.join
+  if (platform === 'darwin') return joinFor(home, 'Library', 'Application Support', APP_IDENTIFIER)
   if (platform === 'win32') {
     const roaming = env['APPDATA']
-    return join(roaming !== undefined && roaming !== '' ? roaming : join(home, 'AppData', 'Roaming'), APP_IDENTIFIER)
+    return joinFor(roaming !== undefined && roaming !== '' ? roaming : joinFor(home, 'AppData', 'Roaming'), APP_IDENTIFIER)
   }
   const xdg = env['XDG_DATA_HOME']
-  return join(xdg !== undefined && xdg !== '' ? xdg : join(home, '.local', 'share'), APP_IDENTIFIER)
+  return joinFor(xdg !== undefined && xdg !== '' ? xdg : joinFor(home, '.local', 'share'), APP_IDENTIFIER)
 }
 
 export interface NodeHostOptions {

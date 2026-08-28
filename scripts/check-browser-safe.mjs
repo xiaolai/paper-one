@@ -76,6 +76,19 @@ export const PLATFORM_PREFIX = '@tauri-apps'
  * Add an entry when a module is deliberately freed, never to record that one
  * happens to be clean today.
  */
+/**
+ * A module path as this repository spells one: forward slashes, always.
+ *
+ * `PINNED` below, every argument a caller passes and every line this prints
+ * are written with `/`. `path.relative` and `path.join` answer in the HOST's
+ * separator, so on Windows a blocked module came back as
+ * `src\\kernel\\core\\vaultFsTauri.ts` and matched nothing in the list it
+ * exists to check — the gate compared two spellings of the same module and
+ * found a difference in the separator. Nothing on a Mac or a Linux box can
+ * see it, because there the two spellings are identical.
+ */
+const toPosix = (p) => p.split(path.sep).join('/')
+
 export const PINNED = Object.freeze([
   /* THE PUBLIC ENTRY. Freed in WI-19.1 by splitting `bookSizesTauri.ts` out of
    * `bookSizes.ts`; one re-export of `tauriSizePort` was the only thing making
@@ -238,7 +251,7 @@ export function blockersOf(root, entry, shared = null) {
     if (edges === null) return // a specifier that resolves to nothing blocks nothing
     for (const { spec, next } of edges) {
       if (spec.startsWith(PLATFORM_PREFIX)) {
-        const rel = path.relative(root, file)
+        const rel = toPosix(path.relative(root, file))
         if (!blockers.has(rel)) blockers.set(rel, new Set())
         blockers.get(rel).add(spec)
       }
@@ -310,7 +323,7 @@ export function sourcesUnder(root, dir) {
       return
     }
     for (const entry of entries) {
-      const child = path.join(rel, entry.name)
+      const child = toPosix(path.join(rel, entry.name))
       if (entry.isDirectory()) walk(child)
       else if (/\.tsx?$/.test(entry.name) && !/\.test\./.test(entry.name)) out.push(child)
     }

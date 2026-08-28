@@ -114,9 +114,16 @@ describe('the built CLI', () => {
     expect(outside).toEqual([])
   })
 
-  it('carries a shebang and is executable', () => {
+  it('carries a shebang and is executable', ({ skip }) => {
     const source = readFileSync(BUNDLE, 'utf8')
     expect(source.startsWith('#!/usr/bin/env node')).toBe(true)
+    /* NTFS HAS NO EXECUTE BIT. Node reports mode 0o666 for every file on
+       Windows, so this read 0 and the case failed for a property the platform
+       does not have — the shebang above is checked everywhere, and it is the
+       half that is portable. Skipped at RUN time, never with `skipIf`: a
+       statically skipped test is not collected, and `tests/ledger.json` is one
+       file for all three platforms. */
+    if (process.platform === 'win32') skip('Windows has no execute bit')
     /* The owner-execute bit, masked out of the mode. */
     expect(statSync(BUNDLE).mode & 0o100).toBe(0o100)
   })

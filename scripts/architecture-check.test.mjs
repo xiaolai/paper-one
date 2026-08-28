@@ -229,14 +229,32 @@ describe('architecture-check', () => {
     let lines = result.out.split('\n')
     expect(lines).toHaveLength(3)
     expect(lines[0].startsWith('MANIFEST_MISSING (root): ')).toBe(true)
-    expect(lines[0]).toContain('ENOTDIR')
+    /* THE CODE IS THE PLATFORM'S, THE CONTRACT IS OURS. Reading a manifest
+       under a path that is a FILE answers `ENOTDIR` on POSIX and `ENOENT` on
+       Windows — both mean "cannot read", and this case is about the shape of
+       the report, not the spelling of the errno. Asserting one of them made
+       the Windows leg red for a difference the header already says is
+       incidental: what it names is "a broken world … never breaks the
+       one-line-per-finding contract", and that is asserted either way. */
+    expect(lines[0]).toMatch(/ENOTDIR|ENOENT/)
     expect(lines[1]).toBe(`architecture-check: 0 capabilities, 1 findings${SUMMARY_SUFFIX}`)
     expect(result.err).toBe('')
     expect(result.out).not.toMatch(/^\s+at /m)
     expect(result.code).toBe(1)
 
     const loop = tmpRoot()
-    symlinkSync(join(loop, MANIFEST), join(loop, MANIFEST))
+    /* A SYMLINK IS A PRIVILEGE ON WINDOWS, not an operation. Without Developer
+       Mode — which no GitHub runner has — `symlinkSync` throws `EPERM` and the
+       loop cannot be built at all, so there is nothing to report on and
+       nothing to assert. The half above already proves the contract this case
+       is named for. */
+    let looped = true
+    try {
+      symlinkSync(join(loop, MANIFEST), join(loop, MANIFEST))
+    } catch {
+      looped = false
+    }
+    if (!looped) return
     result = run(['--root', loop])
     lines = result.out.split('\n')
     expect(lines).toHaveLength(3)
@@ -272,7 +290,17 @@ describe('architecture-check', () => {
 
   it('CLI-15 an ESC in --root never reaches stdout raw', () => {
     const root = join(tmpRoot(), 'esc\u001bdir')
-    mkdirSync(root)
+    /* THE DIRECTORY IS INCIDENTAL; THE ESCAPING IS THE CASE. Windows forbids
+       control characters in a filename outright, so `mkdirSync` answers
+       `EINVAL` and the setup died before reaching a single assertion. A root
+       that does not exist reports through the same `MANIFEST_MISSING` path
+       with the same argument in it, which is the thing under test — that an
+       ESC reaches stdout as `\u001b` and never raw. */
+    try {
+      mkdirSync(root)
+    } catch {
+      /* Left absent — see above. */
+    }
     const { code, out, err } = run(['--root', root])
     expect(err).toBe('')
     const lines = out.split('\n')

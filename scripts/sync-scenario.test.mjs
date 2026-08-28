@@ -142,7 +142,12 @@ describe('the script itself', () => {
    * and a lost bit would have gone unnoticed until somebody followed the
    * documentation.
    */
-  it('is executable', () => {
+  it('is executable', ({ skip }) => {
+    /* Same as the bundle's: NTFS has no execute bit and Node reports 0o666 for
+       every file, so this asked Windows for something it does not have. Run
+       time, not `skipIf` — see `itRuns` above for why the name must still be
+       collected on every platform. */
+    if (process.platform === 'win32') skip('Windows has no execute bit')
     expect(statSync(SCRIPT).mode & 0o111).not.toBe(0)
   })
 

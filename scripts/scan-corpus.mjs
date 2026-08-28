@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spawnSync } from 'node:child_process'
+import { UNREADABLE, readMatching } from './lib/zip.mjs'
 import { existsSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -28,10 +28,14 @@ import { join } from 'node:path'
  *  1. `latin1`, never `utf8`, for CSS. Some books are mis-declared or
  *     truncated and a utf8 decode aborts on them. The first version of this
  *     printed `illegal byte sequence` and silently dropped books.
- *  2. `unzip -p` EXITS NON-ZERO WHEN A PATTERN MATCHES NOTHING. The first full
- *     run reported "129 unreadable"; every one of them was a book with no
- *     stylesheet, dropped before it could be counted. A book with no CSS is a
- *     finding — Paper's sheet is its whole typography — not an error.
+ *  2. THE ARCHIVE READER IS THIS REPOSITORY'S OWN, `lib/zip.mjs`, over
+ *     `node:zlib`. It used to be `unzip -p`, whose exit code does not mean what
+ *     it looks like — 11 is returned when ANY pattern matched nothing, not when
+ *     all of them did, so a book holding only `.xhtml` exits 11 while writing
+ *     every one of them to stdout. That cost a silent under-report once. The
+ *     reader answers with members instead of a status, so nothing has to be
+ *     inferred from an exit code; and it runs on Windows, which `unzip` does
+ *     not.
  *  3. A DETECTOR THAT FINDS NOTHING MUST PROVE IT CAN FIND SOMETHING. Asking
  *     the shelf for CJK returned zero three times: twice because the tool
  *     errored into a suppressed stderr, once because macOS `grep` has no `-P`
@@ -359,60 +363,44 @@ export function cjkDensity(text) {
 }
 
 /**
- * Read the members of an archive, or null when it holds none of them.
- *
- * THE EXIT CODE DOES NOT MEAN WHAT IT LOOKS LIKE. `unzip` returns 11 when ANY
- * pattern matched nothing — not when all of them did. Asked for
- * `*.xhtml *.html *.htm`, a book holding only `.xhtml` files exits 11 while
- * writing every one of them to stdout. So the status is unusable as a test for
- * "did this book have any", and the OUTPUT is the only honest signal.
- *
- * `spawnSync`, therefore, and not `execFileSync`: the latter throws on a
- * non-zero status and takes the stdout with it. Written that way first, and it
- * silently under-reported — the CSS path survived only because it passes a
- * single pattern, where 11 really does mean "none". The test beside this one
- * fails if it goes back.
- */
-/**
- * `unzip -p` exit codes this scan actually distinguishes.
- *
- * 0 is success and 11 is "no matching files" — a book with no stylesheet, which
- * is a FINDING and the trap the header records. Everything else is the tool
- * failing: a corrupt archive (9), a missing binary, a signal, a `maxBuffer`
- * overrun. Folded together, all of those read as "this book has no CSS", and a
- * shelf of corrupt books would report as a shelf of books Paper styles
- * entirely — a silence dressed as a measurement, which is the one failure mode
- * this file exists to refuse.
- */
-const NO_MATCHING_FILES = 11
-
-/**
  * What `readMembers` returns for an archive it could not read at all.
  *
  * A SENTINEL, not `null`, because `null` already means something precise here —
  * "this archive holds no member matching the pattern", which for CSS is a book
  * whose whole typography is Paper's sheet and is one of this file's headline
  * findings. A corrupt EPUB is a different thing and must not be counted as it.
+ *
+ * Re-exported rather than redeclared: the distinction is enforced by the reader
+ * in `lib/zip.mjs`, and two symbols of the same name would compare unequal.
  */
-export const UNREADABLE = Symbol('unreadable')
+export { UNREADABLE }
 
+/**
+ * ⚠️ **THIS NO LONGER SHELLS OUT TO `unzip`, and the trap it recorded is gone
+ * with it.** The note here used to explain that `unzip` returns 11 when ANY
+ * pattern matched nothing rather than when all of them did — so a book holding
+ * only `.xhtml` files exited 11 while writing every one of them to stdout, and
+ * the status was unusable as a test for "did this book have any". That was
+ * true, and it cost a silent under-report before it was understood.
+ *
+ * `readMatching` answers with the members themselves, so there is no status to
+ * misread: an empty list means nothing matched, and `UNREADABLE` means the
+ * archive would not parse. The three outcomes this scan distinguishes are now
+ * three values rather than a value and two exit codes.
+ *
+ * WHY IT CHANGED. `unzip` does not ship with Windows, so every case here died
+ * with `spawnSync ENOENT` the first time that leg ran a test suite, and
+ * `pnpm corpus` could not run there at all. `node:zlib` is built in and speaks
+ * the only compression an EPUB uses. The replacement was checked against the
+ * tool it replaces, byte for byte, on a real book — including the exit-11 case
+ * above, where `unzip` wrote 4 433 bytes across four members and reported
+ * failure.
+ */
 function readMembers(epub, patterns, encoding) {
-  const run = spawnSync('unzip', ['-p', epub, ...patterns], {
-    encoding,
-    maxBuffer: 64 * 1024 * 1024,
-    stdio: ['ignore', 'pipe', 'ignore'],
-  })
-  /* A MISSING BINARY IS NOT A FINDING ABOUT THE SHELF, and it would otherwise
-     make every book on it report as having no CSS — a whole library's worth of
-     silence dressed as a measurement. It stops the run. */
-  if (run.error) throw new Error(`scan-corpus: cannot run unzip on ${epub}: ${run.error.message}`)
-  /* A CORRUPT BOOK IS A THIRD OUTCOME, and this is the correction. It was
-     folded into "no CSS" — indistinguishable from a book Paper styles entirely
-     — and the first run after the guard landed found one on a real shelf of
-     1,960. It does not stop the scan either: one damaged archive must not cost
-     the other 1,959 books their measurement. It is counted and printed. */
-  if (run.status !== 0 && run.status !== NO_MATCHING_FILES) return UNREADABLE
-  const out = run.stdout
+  const members = readMatching(epub, patterns)
+  if (members === UNREADABLE) return UNREADABLE
+  if (members.length === 0) return null
+  const out = Buffer.concat(members).toString(encoding)
   return out ? out : null
 }
 
